@@ -22,6 +22,8 @@ mod launch;
 mod layout;
 mod notify;
 mod prepare;
+mod project_list;
+mod project_menu;
 mod projects;
 mod quit;
 mod switcher;
@@ -600,6 +602,15 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> (Option<String>, Vec<
     (project, folders)
 }
 
+/// What the folder picker is open for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickFor {
+    /// A workspace of this kind, opened in the project shown.
+    Workspace(WorkspaceKind),
+    /// The folder of the project menu's form.
+    MenuFolder,
+}
+
 /// What a workspace opens with: Zed over a terminal, or just a terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceKind {
@@ -689,8 +700,11 @@ pub enum Action {
     Switcher,
     /// Open the run prompt, for an app to launch into a split.
     Run,
-    /// Open the welcome screen, to switch or start projects.
+    /// Open the project menu (the welcome screen without a project), to
+    /// switch, start or manage projects.
     Projects,
+    /// Show the project shown before this one.
+    LastProject,
     /// Whether the focused terminal's command runs again after a restart.
     ToggleRestart,
     /// Ask whether to keep the project running, and quit.
@@ -777,8 +791,8 @@ pub struct Gerdr {
     pub host_focused: bool,
     /// Process groups we started, all terminated when gerdr exits.
     pub process_groups: Vec<i32>,
-    /// The folder picker, while it is open, and the kind of workspace it opens.
-    pub picker: Option<(Child, WorkspaceKind)>,
+    /// The folder picker, while it is open, and what it is open for.
+    pub picker: Option<(Child, PickFor)>,
     /// The menu under the terminal button's chevron is open.
     pub terminal_menu: bool,
     /// The menu item under the pointer.
@@ -804,9 +818,20 @@ pub struct Gerdr {
     pub project: Option<String>,
     /// The welcome screen, while it is shown.
     pub welcome: Option<welcome::Welcome>,
+    /// Whether each project's session runs, by id, as last checked.
+    pub running: HashMap<String, bool>,
     /// Where a check of which projects' sessions run sends its answer (by
     /// project id); `None` until set up.
-    pub welcome_status: Option<channel::Sender<Vec<(String, bool)>>>,
+    pub running_status: Option<channel::Sender<Vec<(String, bool)>>>,
+    /// The project menu, while it is open.
+    pub project_menu: Option<project_menu::ProjectMenu>,
+    /// The pointer is over the sidebar header's project name.
+    pub header_hover: bool,
+    /// The project shown before the one shown now, by id, for
+    /// `Action::LastProject`.
+    pub previous_project: Option<String>,
+    /// The note shown at the top of the app area, and when it goes.
+    pub notice: Option<(String, Instant)>,
     /// The quit dialog, while it is open.
     pub quit: Option<quit::QuitDialog>,
     /// The event loop sources following the project's herdr session, removed
@@ -2209,7 +2234,7 @@ impl Gerdr {
             cmd.arg(format!("--filename={}/", start.display()));
         }
         match cmd.spawn() {
-            Ok(child) => self.picker = Some((child, kind)),
+            Ok(child) => self.picker = Some((child, PickFor::Workspace(kind))),
             Err(err) => tracing::warn!("folder picker (zenity) failed to start: {err}"),
         }
     }
@@ -2236,8 +2261,13 @@ impl Gerdr {
         let path = out.trim_end_matches('\n');
         if status.success() && !path.is_empty() {
             match kind {
-                WorkspaceKind::Project => self.open_project(PathBuf::from(path)),
-                WorkspaceKind::Terminal => self.open_terminal(PathBuf::from(path)),
+                PickFor::Workspace(WorkspaceKind::Project) => {
+                    self.open_project(PathBuf::from(path))
+                }
+                PickFor::Workspace(WorkspaceKind::Terminal) => {
+                    self.open_terminal(PathBuf::from(path))
+                }
+                PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
             }
         }
     }
@@ -2388,6 +2418,7 @@ impl Gerdr {
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(),
             Action::Projects => self.open_welcome(true),
+            Action::LastProject => self.switch_to_last_project(),
             Action::ToggleRestart => self.toggle_restart(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
@@ -3097,6 +3128,48 @@ impl Gerdr {
         id
     }
 
+    /// Start a new project called `name` and show it, opening `folder` in
+    /// it as a workspace of `kind`, if given; without one, it starts empty.
+    pub fn create_project_with(
+        &mut self,
+        name: &str,
+        folder: Option<PathBuf>,
+        kind: WorkspaceKind,
+    ) {
+        let _ = (name, folder, kind);
+        // Contract: wave 1.
+    }
+
+    /// Rename project `id` to `name`; its id and session stay.
+    pub fn rename_project(&mut self, id: &str, name: &str) {
+        let _ = (id, name);
+        // Contract: wave 1.
+    }
+
+    /// Stop project `id`'s herdr session; not the shown one.
+    pub fn stop_project(&mut self, id: &str) {
+        let _ = id;
+        // Contract: wave 1.
+    }
+
+    /// Show the project shown before this one, if any.
+    pub fn switch_to_last_project(&mut self) {
+        // Contract: wave 1.
+    }
+
+    /// Show `text` at the top of the app area for a few seconds.
+    pub fn show_notice(&mut self, text: String) {
+        let _ = text;
+        // Contract: wave 1.
+    }
+
+    /// Ask zenity for a folder for the project menu's form, starting in
+    /// `start` (else the home folder).
+    pub fn pick_folder_for_menu(&mut self, start: Option<PathBuf>) {
+        let _ = start;
+        // Contract: wave 1.
+    }
+
     /// Forget project `id`; its herdr session stays. Not the shown one.
     pub fn forget_project(&mut self, id: &str) {
         if self.project.as_deref() == Some(id) {
@@ -3252,6 +3325,10 @@ impl Gerdr {
             prefix: self.prefix_armed.then(|| self.keymap.help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
+            project: None,
+            header_hover: false,
+            project_menu: self.project_menu_view(),
+            notice: None,
             theme: self.theme,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
@@ -3451,7 +3528,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         projects: projects::Store::default(),
         project: None,
         welcome: None,
-        welcome_status: None,
+        running: HashMap::new(),
+        running_status: None,
+        project_menu: None,
+        header_hover: false,
+        previous_project: None,
+        notice: None,
         quit: None,
         herdr_sources: Vec::new(),
         idle_since: HashMap::new(),

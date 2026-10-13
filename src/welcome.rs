@@ -11,18 +11,19 @@
 //! out one step at a time: the name, the forgetting, the filter, then the
 //! screen itself, if a project is behind it.
 
-use std::{cmp::Reverse, collections::HashMap};
+use std::collections::HashMap;
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
-    reexports::calloop::channel,
     utils::{Logical, Point},
 };
 
 use crate::{
     Gerdr,
     chrome::{self, ProjectRow, WelcomeHit, WelcomeView},
-    fuzzy, herdr, projects,
+    herdr,
+    project_list::{self, scrolled},
+    projects,
 };
 
 /// The welcome screen's state, while it is shown.
@@ -49,8 +50,6 @@ pub struct Welcome {
     naming: Option<String>,
     /// The project Delete was pressed on once, by id.
     confirm_forget: Option<String>,
-    /// Whether each project's session runs, by id, once known.
-    running: HashMap<String, bool>,
     /// herdr wasn't found on `PATH` when the screen opened.
     herdr_missing: bool,
 }
@@ -100,20 +99,7 @@ impl Welcome {
     /// Match the projects against the query again (by name, then detail),
     /// and select the best match, or the button if none.
     fn refilter(&mut self) {
-        let mut found: Vec<(i32, usize)> = self
-            .projects
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, row))| {
-                let (score, _) =
-                    fuzzy::score(&self.query, &format!("{} {}", row.name, row.detail))?;
-                Some((score, i))
-            })
-            .collect();
-        // A stable sort: equal scores (all of them, without a query) keep
-        // the most recently used first.
-        found.sort_by_key(|(score, _)| Reverse(*score));
-        self.matches = found.into_iter().map(|(_, i)| i).collect();
+        self.matches = project_list::matches(&self.query, &self.projects);
         self.selected = (!self.matches.is_empty()).then_some(0);
         self.last_row = 0;
         self.scroll = 0;
@@ -294,8 +280,15 @@ impl Welcome {
         }
     }
 
-    /// What is shown, with the parts gerdr knows filled in.
-    fn view(&self, page: usize, greeting: String, note: Option<String>) -> WelcomeView {
+    /// What is shown, with the parts gerdr knows filled in: `running` says
+    /// whose sessions run, by id.
+    fn view(
+        &self,
+        page: usize,
+        greeting: String,
+        note: Option<String>,
+        running: &HashMap<String, bool>,
+    ) -> WelcomeView {
         let first = self.first_shown(page);
         let shown = self.shown(page);
         let rows = shown
@@ -303,7 +296,7 @@ impl Welcome {
             .map(|&m| {
                 let (id, row) = &self.projects[m];
                 ProjectRow {
-                    running: self.running.get(id).copied().or(row.running),
+                    running: running.get(id).copied().or(row.running),
                     ..row.clone()
                 }
             })
@@ -334,14 +327,6 @@ impl Welcome {
             note,
         }
     }
-}
-
-/// The first row to show so that `selected` is in the `page` rows shown,
-/// moving as little as possible from `scroll` (as in the switcher).
-fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
-    scroll
-        .min(selected)
-        .max((selected + 1).saturating_sub(page))
 }
 
 impl Gerdr {
@@ -447,59 +432,11 @@ impl Gerdr {
         let note = welcome
             .herdr_missing
             .then(|| "herdr isn't installed — projects won't keep running".into());
-        Some(welcome.view(self.welcome_page(), greeting, note))
+        Some(welcome.view(self.welcome_page(), greeting, note, &self.running))
     }
 
     fn welcome_page(&self) -> usize {
         chrome::welcome_page(self.output_size())
-    }
-
-    /// Find out off the event loop which projects' sessions run, for the
-    /// welcome screen; the answer comes through `welcome_status`, set up the
-    /// first time.
-    fn check_running(&mut self) {
-        if self.welcome_status.is_none() {
-            let (tx, rx) = channel::channel::<Vec<(String, bool)>>();
-            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
-                if let channel::Event::Msg(status) = event
-                    && let Some(welcome) = state.welcome.as_mut()
-                {
-                    welcome.running = status.into_iter().collect();
-                }
-            });
-            match inserted {
-                Ok(_) => self.welcome_status = Some(tx),
-                Err(err) => {
-                    tracing::warn!("welcome screen: {err}");
-                    return;
-                }
-            }
-        }
-        let Some(tx) = self.welcome_status.clone() else {
-            return;
-        };
-        let sessions: Vec<(String, String)> = self
-            .projects
-            .projects
-            .iter()
-            .map(|p| (p.id.clone(), p.session.clone()))
-            .collect();
-        std::thread::spawn(move || {
-            // Each check may wait for a server that doesn't answer: all at once.
-            let status = std::thread::scope(|scope| {
-                let checks: Vec<_> = sessions
-                    .iter()
-                    .map(|(id, session)| {
-                        scope.spawn(move || (id.clone(), herdr::is_running(session)))
-                    })
-                    .collect();
-                checks
-                    .into_iter()
-                    .filter_map(|check| check.join().ok())
-                    .collect()
-            });
-            let _ = tx.send(status);
-        });
     }
 }
 
@@ -565,7 +502,7 @@ mod tests {
     }
 
     fn names(w: &Welcome) -> Vec<String> {
-        w.view(3, String::new(), None)
+        w.view(3, String::new(), None, &HashMap::new())
             .rows
             .into_iter()
             .map(|r| r.name)
@@ -598,7 +535,10 @@ mod tests {
             Some(Outcome::Pick("beta".into()))
         );
         type_in(&mut w, "zeta");
-        assert_eq!(w.view(3, String::new(), None).selected, None);
+        assert_eq!(
+            w.view(3, String::new(), None, &HashMap::new()).selected,
+            None
+        );
         assert_eq!(press(&mut w, Keysym::Return), None);
         assert_eq!(w.naming.as_deref(), Some("zeta"));
         type_in(&mut w, " x");
@@ -632,7 +572,11 @@ mod tests {
         let mut w = welcome(&["alpha", "beta"]);
         press(&mut w, Keysym::Down);
         assert_eq!(press(&mut w, Keysym::Delete), None);
-        assert_eq!(w.view(3, String::new(), None).confirm_forget, Some(1));
+        assert_eq!(
+            w.view(3, String::new(), None, &HashMap::new())
+                .confirm_forget,
+            Some(1)
+        );
         assert_eq!(
             press(&mut w, Keysym::Delete),
             Some(Outcome::Forget("beta".into()))
@@ -671,7 +615,11 @@ mod tests {
         );
         for _ in 0..3 {
             assert_eq!(press(&mut w, Keysym::Delete), None);
-            assert_eq!(w.view(3, String::new(), None).confirm_forget, None);
+            assert_eq!(
+                w.view(3, String::new(), None, &HashMap::new())
+                    .confirm_forget,
+                None
+            );
         }
     }
 
@@ -695,12 +643,18 @@ mod tests {
         let mut w = welcome(&["alpha", "beta", "gamma"]);
         press(&mut w, Keysym::Down);
         press(&mut w, Keysym::Tab);
-        assert_eq!(w.view(3, String::new(), None).selected, None);
+        assert_eq!(
+            w.view(3, String::new(), None, &HashMap::new()).selected,
+            None
+        );
         assert_eq!(press(&mut w, Keysym::Return), None);
         assert_eq!(w.naming.as_deref(), Some(""));
         press(&mut w, Keysym::Escape);
         press(&mut w, Keysym::Tab);
-        assert_eq!(w.view(3, String::new(), None).selected, Some(1));
+        assert_eq!(
+            w.view(3, String::new(), None, &HashMap::new()).selected,
+            Some(1)
+        );
         // Down past the last project reaches the button too.
         press(&mut w, Keysym::Down);
         press(&mut w, Keysym::Down);
@@ -714,7 +668,7 @@ mod tests {
     #[test]
     fn without_projects_the_button_is_selected() {
         let mut w = welcome(&[]);
-        let view = w.view(3, String::new(), None);
+        let view = w.view(3, String::new(), None, &HashMap::new());
         assert_eq!(
             (view.selected, view.subtitle.as_str()),
             (None, "Start your first project.")
@@ -733,7 +687,7 @@ mod tests {
         for _ in 0..4 {
             press(&mut w, Keysym::Down);
         }
-        let view = w.view(3, String::new(), None);
+        let view = w.view(3, String::new(), None, &HashMap::new());
         assert_eq!(names(&w), ["p2", "p3", "p4"]);
         assert_eq!(view.selected, Some(2));
         assert_eq!(w.row_id(0, 3), Some("p2"));
@@ -762,12 +716,12 @@ mod tests {
     fn forgetting_keeps_the_place() {
         let mut w = welcome(&["alpha", "beta", "gamma"]);
         press(&mut w, Keysym::Down);
-        w.running.insert("gamma".into(), true);
         w.set_projects(vec![
             ("alpha".into(), row("alpha", "")),
             ("gamma".into(), row("gamma", "")),
         ]);
-        let view = w.view(3, String::new(), None);
+        let running = HashMap::from([("gamma".to_string(), true)]);
+        let view = w.view(3, String::new(), None, &running);
         assert_eq!(view.selected, Some(1));
         assert_eq!(view.rows[1].running, Some(true));
         assert_eq!(view.rows[0].running, None);

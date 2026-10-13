@@ -129,6 +129,12 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("run", Action::Run, "run an app in a split", "r"),
     ("projects", Action::Projects, "projects", "Shift+P"),
     (
+        "last-project",
+        Action::LastProject,
+        "last project",
+        "Shift+L",
+    ),
+    (
         "toggle-restart",
         Action::ToggleRestart,
         "restart after reboot",
@@ -175,6 +181,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("find and switch", &["switcher"]),
     ("run an app in a split", &["run"]),
     ("projects", &["projects"]),
+    ("last project", &["last-project"]),
     ("restart after reboot", &["toggle-restart"]),
     ("quit…", &["quit"]),
 ];
@@ -524,6 +531,7 @@ mod tests {
                 "F: find and switch",
                 "R: run an app in a split",
                 "Shift+P: projects",
+                "Shift+L: last project",
                 "Shift+R: restart after reboot",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",

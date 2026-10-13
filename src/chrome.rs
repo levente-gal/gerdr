@@ -833,6 +833,149 @@ pub struct QuitLayout {
     pub buttons: [Rect; 3],
 }
 
+/// What the project menu shows: in list mode the query, the entries in view
+/// and the selection; in form mode the new project's form.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectMenuView {
+    /// What was typed to filter the projects; empty in form mode.
+    pub query: String,
+    /// The entries in view, scrolled.
+    pub entries: Vec<MenuEntry>,
+    /// The selected entry, by index into `entries`.
+    pub selected: Option<usize>,
+    pub hover: Option<MenuHit>,
+    /// Set in form mode.
+    pub form: Option<FormView>,
+    /// The footer's key hints, as (key, what it does).
+    pub hints: Vec<(String, String)>,
+}
+
+/// An entry of the project menu's list.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuEntry {
+    /// A section label ("Current", "Recent"); not selectable.
+    Section(String),
+    Project {
+        row: ProjectRow,
+        /// The Alt+digit that opens it, 1 to 9.
+        digit: Option<u8>,
+        /// Set while renaming it: the name typed so far.
+        renaming: Option<String>,
+        /// Delete was pressed on it once.
+        confirm_forget: bool,
+    },
+    /// Start a new project: the label, as `New project "blo"…`.
+    New(String),
+    /// Start a new project in this folder ("~/Sites/blog").
+    Folder(String),
+}
+
+/// The project menu's form for a new project.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormView {
+    pub name: String,
+    /// The folder as typed; empty for none.
+    pub folder: String,
+    /// What the folder opens as.
+    pub kind: WorkspaceKind,
+    pub focus: FormField,
+    /// The folders offered for what was typed in the folder field, as
+    /// "~/Sites/blog"; empty when the list is closed.
+    pub suggestions: Vec<String>,
+    pub suggestion: Option<usize>,
+    /// Why the project can't be created as it is.
+    pub error: Option<String>,
+}
+
+/// A part of the project menu's form that takes the keyboard, in Tab order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormField {
+    Name,
+    Folder,
+    Browse,
+    Kind,
+    Cancel,
+    Create,
+}
+
+/// A button shown on a project row of the menu under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowButton {
+    Rename,
+    Stop,
+    Forget,
+}
+
+/// What the pointer is over in the project menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuHit {
+    Query,
+    /// An entry, by index into `ProjectMenuView::entries`.
+    Entry(usize),
+    /// A button on an entry's row.
+    Button(usize, RowButton),
+    Field(FormField),
+    /// One of the form's two "Opens" choices.
+    Kind(WorkspaceKind),
+    Suggestion(usize),
+    /// Inside the panel, on nothing.
+    Panel,
+}
+
+/// Where the project menu's parts go, in output coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMenuLayout {
+    pub panel: Rect,
+    /// The query field (list mode) or the title (form mode).
+    pub query: Rect,
+    /// Per entry, its rect and its row buttons' (none when not hovered).
+    pub entries: Vec<(Rect, Vec<(RowButton, Rect)>)>,
+    pub footer: Rect,
+    /// Set in form mode.
+    pub form: Option<FormLayout>,
+}
+
+/// Where the project menu's form parts go, in output coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormLayout {
+    pub name: Rect,
+    pub folder: Rect,
+    pub browse: Rect,
+    pub kinds: [(WorkspaceKind, Rect); 2],
+    pub suggestions: Vec<Rect>,
+    pub error: Rect,
+    pub cancel: Rect,
+    pub create: Rect,
+}
+
+/// Where the parts of the project menu showing `view` go, on an output of
+/// `size`: below the sidebar header, reaching over the apps.
+#[allow(dead_code)] // contract: wave 1 builds and uses it
+pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> ProjectMenuLayout {
+    let _ = (view, size);
+    todo!("project menu layout")
+}
+
+/// How many entries the project menu's list shows at most on an output of
+/// `size`.
+#[allow(dead_code)] // contract: wave 1 builds and uses it
+pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
+    let _ = size;
+    todo!("project menu page")
+}
+
+/// What `pos` is over in the project menu showing `view` on an output of
+/// `size`; `None` outside its panel.
+#[allow(dead_code)] // contract: wave 1 builds and uses it
+pub fn project_menu_hit(
+    view: &ProjectMenuView,
+    size: Size<i32, Logical>,
+    pos: Point<f64, Logical>,
+) -> Option<MenuHit> {
+    let _ = (view, size, pos);
+    todo!("project menu hit")
+}
+
 /// Where the welcome screen's parts go on an output of `size` with `rows`
 /// projects in view: a column centred on it, its middle at
 /// `WELCOME_MIDDLE` of the height as far as it fits, the hints at the bottom.
@@ -982,6 +1125,10 @@ pub fn theme_toggle(width: i32) -> Rect {
 }
 
 pub struct SidebarLayout {
+    /// The project's name, opening the project menu: the header left of
+    /// its buttons.
+    #[allow(dead_code)] // contract: wave 1 uses it
+    pub header: Rect,
     /// Header button: pick a folder to open as a project workspace.
     pub project: Rect,
     /// Header split button: a terminal workspace in the home folder, and the
@@ -1034,6 +1181,7 @@ pub fn sidebar_layout(
         blocks.push(Rectangle::new(row.loc, (row.size.w, y - row.loc.y).into()));
     }
     SidebarLayout {
+        header: Rectangle::new((0, 0).into(), (project.loc.x.max(0), BAR_HEIGHT).into()),
         project,
         terminal,
         chevron,
@@ -1148,6 +1296,14 @@ pub struct ChromeView {
     pub welcome: Option<WelcomeView>,
     /// Set while the quit dialog is open, over everything.
     pub quit: Option<QuitView>,
+    /// The project shown, by name, for the sidebar header.
+    pub project: Option<String>,
+    /// The pointer is over the sidebar header's project name.
+    pub header_hover: bool,
+    /// Set while the project menu is open.
+    pub project_menu: Option<ProjectMenuView>,
+    /// A short note at the top of the app area, such as "Switched to gerdr".
+    pub notice: Option<String>,
     pub theme: Theme,
     pub sidebar_width: i32,
     pub size: Size<i32, Logical>,
