@@ -1,6 +1,7 @@
 //! The switcher: everything gerdr can switch to (the workspaces, their tabs,
-//! the coding agents, the apps named in the config file, and the folders
-//! zoxide knows), narrowed down by fuzzy search as the user types. Enter
+//! the coding agents, the other projects, the apps named in the config file,
+//! and the folders zoxide knows), narrowed down by fuzzy search as the user
+//! types. Enter
 //! switches to the selected item; a folder no workspace has yet opens as a
 //! project, an app launches into a split. zoxide is optional: without it
 //! there are just no folders.
@@ -30,11 +31,12 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr, REPEAT_DELAY, REPEAT_RATE,
+    Gerdr, REPEAT_DELAY, REPEAT_RATE, WorkspaceKind,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     fuzzy, home_dir,
     icons::AppIcon,
     launch,
+    projects::Project,
 };
 
 /// What an item switches to.
@@ -45,6 +47,10 @@ pub enum Target {
     Tab(usize, usize),
     /// The agent in a herdr pane.
     Agent(String),
+    /// Another project, by id.
+    Project(String),
+    /// The welcome screen, to pick or start a project there.
+    Welcome,
     /// A folder, opened as a project unless a workspace has it already.
     Folder(PathBuf),
     /// The command of an app named in the config file or installed, to
@@ -271,7 +277,7 @@ impl Switcher {
         let hint = if self.run {
             "Command to run in a split…"
         } else {
-            "Workspace, tab, agent, app or folder…"
+            "Workspace, tab, agent, project, app or folder…"
         };
         SwitcherView {
             query: self.query.clone(),
@@ -320,9 +326,39 @@ fn typed_command(command: &str, icons: &HashMap<String, AppIcon>) -> Item {
     }
 }
 
+/// The other projects than `current`, the most recently used first, and the
+/// welcome screen.
+fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
+    let mut others: Vec<&Project> = projects
+        .iter()
+        .filter(|project| Some(project.id.as_str()) != current)
+        .collect();
+    others.sort_by_key(|project| Reverse(project.last_used));
+    let mut items: Vec<Item> = others
+        .into_iter()
+        .map(|project| {
+            let n = project.workspaces.len();
+            let plural = if n == 1 { "" } else { "s" };
+            Item {
+                icon: ItemIcon::Workspace(WorkspaceKind::Project),
+                label: project.name.clone(),
+                detail: format!("project · {n} workspace{plural}"),
+                target: Target::Project(project.id.clone()),
+            }
+        })
+        .collect();
+    items.push(Item {
+        icon: ItemIcon::Folder,
+        label: "Projects…".into(),
+        detail: "welcome screen".into(),
+        target: Target::Welcome,
+    });
+    items
+}
+
 /// The first row to show so that `selected` is in the `page` rows shown,
 /// moving as little as possible from `scroll`.
-fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
+pub(crate) fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
     scroll
         .min(selected)
         .max((selected + 1).saturating_sub(page))
@@ -483,6 +519,8 @@ impl Gerdr {
                 }
             }
             Target::Agent(pane_id) => self.focus_agent(&pane_id),
+            Target::Project(id) => self.switch_project(&id),
+            Target::Welcome => self.open_welcome(true),
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),
@@ -507,8 +545,8 @@ impl Gerdr {
     }
 
     /// Everything to switch to: each workspace followed by its tabs (when it
-    /// has more than one), the agents, the apps, then zoxide's folders not
-    /// open yet.
+    /// has more than one), the agents, the other projects and the welcome
+    /// screen, the apps, then zoxide's folders not open yet.
     fn switcher_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
         for (w, (ws, (view, tabs))) in self
@@ -562,6 +600,10 @@ impl Gerdr {
                 target: Target::Agent(agent.pane_id.clone()),
             });
         }
+        items.extend(project_items(
+            &self.projects.projects,
+            self.project.as_deref(),
+        ));
         items.extend(self.app_items());
         let open: HashSet<&Path> = self.workspaces.iter().map(|ws| ws.dir.as_path()).collect();
         for dir in self
@@ -748,6 +790,48 @@ mod tests {
         switcher.key(&ModifiersState::default(), Keysym::Down, Keysym::Down, 5);
         switcher.set_items(vec![item("c", "", 2), item("a", "", 0), item("b", "", 1)]);
         assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
+    }
+
+    fn project(id: &str, last_used: u64, workspaces: usize) -> Project {
+        let record = crate::projects::WorkspaceRecord {
+            herdr_id: "w1".into(),
+            label: id.into(),
+            kind: crate::projects::Kind::Project,
+            dir: PathBuf::from("/tmp"),
+            venv: Default::default(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+        };
+        Project {
+            id: id.into(),
+            name: id.to_uppercase(),
+            session: format!("gerdr-{id}"),
+            created: 0,
+            last_used,
+            state: Default::default(),
+            workspaces: vec![record; workspaces],
+        }
+    }
+
+    #[test]
+    fn lists_the_other_projects_and_the_welcome_screen() {
+        let projects = [project("a", 3, 1), project("b", 1, 2), project("c", 2, 0)];
+        let items = project_items(&projects, Some("a"));
+        let listed: Vec<_> = items
+            .iter()
+            .map(|item| (item.label.as_str(), item.detail.as_str(), &item.target))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("C", "project · 0 workspaces", &Target::Project("c".into())),
+                ("B", "project · 2 workspaces", &Target::Project("b".into())),
+                ("Projects…", "welcome screen", &Target::Welcome),
+            ]
+        );
+        let items = project_items(&projects, None);
+        assert_eq!(items[0].detail, "project · 1 workspace");
+        assert_eq!(items.len(), 4);
     }
 
     #[test]
