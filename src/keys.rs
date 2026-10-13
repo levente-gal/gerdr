@@ -140,6 +140,13 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "restart after reboot",
         "Shift+R",
     ),
+    (
+        "toggle-venv",
+        Action::ToggleVenv,
+        "python venv on / off",
+        "Shift+V",
+    ),
+    ("pick-venv", Action::PickVenv, "pick python venv", "Alt+V"),
     ("quit", Action::Quit, "quit…", "Shift+Q"),
 ];
 
@@ -183,6 +190,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("projects", &["projects"]),
     ("last project", &["last-project"]),
     ("restart after reboot", &["toggle-restart"]),
+    ("python venv on / off, pick", &["toggle-venv", "pick-venv"]),
     ("quit…", &["quit"]),
 ];
 
@@ -536,6 +544,7 @@ mod tests {
                 "Shift+P: projects",
                 "Shift+L: last project",
                 "Shift+R: restart after reboot",
+                "Shift+V / Alt+V: python venv on / off, pick",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",
                 "Esc: cancel",

@@ -45,7 +45,7 @@ use chrome::{
     TAB_STRIP_HEIGHT, TabView, Theme, WorkspaceView,
 };
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
-use projects::{PaneRecord, RunState, TabRecord, WorkspaceRecord};
+use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
 use serde_json::json;
 use smithay::{
     backend::{
@@ -562,6 +562,15 @@ fn common_dir(dirs: &[&Path]) -> Option<PathBuf> {
     Some(common)
 }
 
+/// What the notice says of a workspace's venv setting, once changed.
+fn venv_notice(setting: &VenvSetting) -> String {
+    match setting {
+        VenvSetting::Auto => "New shells here activate the venv they find".into(),
+        VenvSetting::Off => "New shells here activate no venv".into(),
+        VenvSetting::Path(path) => format!("New shells here activate {}", path.display()),
+    }
+}
+
 /// `path` with the home folder `home` written `~`.
 fn tilde(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
@@ -605,12 +614,14 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> (Option<String>, Vec<
 }
 
 /// What the folder picker is open for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickFor {
     /// A workspace of this kind, opened in the project shown.
     Workspace(WorkspaceKind),
     /// The folder of the project menu's form.
     MenuFolder,
+    /// The venv of a project's herdr workspace.
+    Venv { project: String, workspace: String },
 }
 
 /// What a workspace opens with: Zed over a terminal, or just a terminal.
@@ -709,6 +720,10 @@ pub enum Action {
     LastProject,
     /// Whether the focused terminal's command runs again after a restart.
     ToggleRestart,
+    /// Whether new shells of the active workspace activate a venv.
+    ToggleVenv,
+    /// Pick the venv new shells of the active workspace activate.
+    PickVenv,
     /// Ask whether to keep the project running, and quit.
     Quit,
 }
@@ -2297,6 +2312,9 @@ impl Gerdr {
                     self.open_terminal(PathBuf::from(path))
                 }
                 PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
+                PickFor::Venv { project, workspace } => {
+                    self.set_venv(&project, &workspace, PathBuf::from(path))
+                }
             }
         }
     }
@@ -2450,6 +2468,8 @@ impl Gerdr {
             Action::Projects => self.open_welcome(true),
             Action::LastProject => self.switch_to_last_project(),
             Action::ToggleRestart => self.toggle_restart(),
+            Action::ToggleVenv => self.toggle_venv(),
+            Action::PickVenv => self.pick_venv(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -2501,6 +2521,76 @@ impl Gerdr {
         if let Some(notifier) = self.notifier.as_mut() {
             notifier.send(&key, &summary, &body);
         }
+    }
+
+    /// The shown project and the active workspace's herdr workspace: whose
+    /// shells a venv setting is for.
+    fn venv_target(&self) -> Option<(String, String)> {
+        let project = self.project.clone()?;
+        let workspace = self.workspace()?.herdr_id()?.to_owned();
+        self.projects.project(&project)?;
+        Some((project, workspace))
+    }
+
+    /// Whether new shells of the active workspace activate a venv: flip
+    /// between the one they find and none, and say so.
+    fn toggle_venv(&mut self) {
+        let record = self
+            .venv_target()
+            .and_then(|(project, workspace)| self.projects.record_mut(&project, &workspace));
+        let Some(record) = record else {
+            return self.show_notice("No shells here to set a venv for".into());
+        };
+        record.venv = match record.venv {
+            VenvSetting::Off => VenvSetting::Auto,
+            _ => VenvSetting::Off,
+        };
+        let text = venv_notice(&record.venv);
+        self.projects.save();
+        self.show_notice(text);
+    }
+
+    /// Ask zenity for the venv new shells of the active workspace activate,
+    /// starting in the one set, else the workspace's folder.
+    fn pick_venv(&mut self) {
+        let Some((project, workspace)) = self.venv_target() else {
+            return self.show_notice("No shells here to set a venv for".into());
+        };
+        let start = self
+            .projects
+            .project(&project)
+            .and_then(|p| p.workspaces.iter().find(|r| r.herdr_id == workspace))
+            .map(|r| match &r.venv {
+                VenvSetting::Path(path) => r.dir.join(path),
+                _ => r.dir.clone(),
+            });
+        let purpose = PickFor::Venv { project, workspace };
+        self.pick_folder("Choose the workspace's Python venv", start, purpose);
+    }
+
+    /// zenity gave back `dir` for the venv of `project`'s `workspace`: the
+    /// venv, or the `bin` folder in it.
+    fn set_venv(&mut self, project: &str, workspace: &str, dir: PathBuf) {
+        let venv = if dir.ends_with("bin") && !prepare::is_venv(&dir) {
+            dir.parent().map(Path::to_path_buf)
+        } else {
+            Some(dir.clone())
+        };
+        let Some(venv) = venv.filter(|venv| prepare::is_venv(venv)) else {
+            let dir = tilde(&dir, home_dir().as_deref());
+            return self.show_notice(format!("Not a Python venv: {dir}"));
+        };
+        let Some(record) = self.projects.record_mut(project, workspace) else {
+            return;
+        };
+        // Relative to the workspace's folder when in it, so it moves along.
+        let path = venv
+            .strip_prefix(&record.dir)
+            .map_or_else(|_| venv.clone(), Path::to_path_buf);
+        record.venv = VenvSetting::Path(path);
+        let text = venv_notice(&record.venv);
+        self.projects.save();
+        self.show_notice(text);
     }
 
     /// Flip between light and dark, remembered for the next start.
