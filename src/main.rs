@@ -120,6 +120,18 @@ const FORGET_IDLE: Duration = Duration::from_secs(10);
 /// they are saved again: windows closing as the machine shuts down mustn't
 /// count.
 const TABS_SETTLE: Duration = Duration::from_secs(3);
+/// How long the windows of a project switched away from (or of gerdr
+/// quitting) have to close, say to save their work, before their processes
+/// are ended.
+const CLOSE_GRACE: Duration = Duration::from_millis(1500);
+/// How long a new project's Zed waits, after that, for the old Zed to exit:
+/// a `zed -n` would hand its window to it.
+const ZED_EXIT_WAIT: Duration = Duration::from_secs(3);
+/// How long a restarted server may take to bring back all its workspaces.
+const RESTORE_WAIT: Duration = Duration::from_secs(5);
+/// How long after a server restart the commands saved for its panes are
+/// kept whatever the panes look like: they are still being run again.
+const RESTORE_PROTECT: Duration = Duration::from_secs(30);
 /// How long a key is held before it repeats (ms), and how often it then
 /// repeats (per second), for the apps and for gerdr's own popups.
 pub const REPEAT_DELAY: u32 = 300;
@@ -133,6 +145,9 @@ pub struct Pane {
     pub herdr: Option<herdr::PaneInfo>,
     /// The command it was launched with from the run prompt, for an app.
     pub app_command: Option<String>,
+    /// Neither started by gerdr nor by what it started: opened from a shell
+    /// of the project's. Held for the project when switching away.
+    pub stray: bool,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.
@@ -436,45 +451,109 @@ fn find_pane_record<'a>(
     })
 }
 
+/// What a round of herdr's reports changes in a pane's saved command.
+#[derive(Clone, Debug, PartialEq)]
+enum Note {
+    /// Nothing.
+    Keep,
+    /// This, if it has none.
+    Fill(projects::Captured),
+    /// This instead.
+    Set(projects::Captured),
+    /// It runs nothing worth running again.
+    Clear,
+}
+
+/// What `foreground` (`None`: herdr couldn't tell) changes in a pane's
+/// saved command, given the process `leader` that led its foreground when
+/// it was last noted, and whether its shell has been idle long enough to
+/// forget its command (`idle_long`); and the leader to remember now.
+/// A command is noted once per process: some rewrite their command line
+/// once running (setproctitle). One that can't be read back then keeps
+/// what was noted, as it may be the same program run again; one never run
+/// again (see `projects::DENY`) is another program, and clears it.
+fn leader_note(
+    foreground: Option<projects::Foreground>,
+    leader: Option<i32>,
+    idle_long: bool,
+) -> (Note, Option<i32>) {
+    use projects::Foreground::{Busy, Idle, Untracked};
+    match foreground {
+        None => (Note::Keep, leader),
+        Some(Idle) if idle_long => (Note::Clear, None),
+        Some(Idle) => (Note::Keep, None),
+        Some(Busy { pid, captured }) if leader == Some(pid) => (Note::Fill(captured), leader),
+        Some(Busy { pid, captured }) => (Note::Set(captured), Some(pid)),
+        Some(Untracked { pid, .. }) if leader == Some(pid) => (Note::Keep, leader),
+        Some(Untracked { pid, denied: true }) => (Note::Clear, Some(pid)),
+        Some(Untracked { pid, denied: false }) => (Note::Keep, Some(pid)),
+    }
+}
+
 /// Bring the record of herdr pane `pane_id` (tab `tab`, pane `index` in it)
-/// up to date with what runs in it: `captured`, or nothing, in which case
-/// the command is forgotten only if `forget`. Returns whether it changed.
+/// up to date with what runs in it, as `note` says. Returns whether it
+/// changed.
 fn note_pane(
     records: &mut Vec<PaneRecord>,
     pane_id: &str,
     (tab, index): (usize, usize),
-    captured: Option<projects::Captured>,
-    forget: bool,
+    note: Note,
 ) -> bool {
     let existing = records.iter_mut().find(|r| r.pane_id == pane_id);
-    let record = match (existing, &captured) {
+    let record = match (existing, &note) {
         (Some(record), _) => record,
-        (None, Some(_)) => {
+        (None, Note::Fill(_) | Note::Set(_)) => {
             records.push(PaneRecord {
                 pane_id: pane_id.to_owned(),
                 ..Default::default()
             });
             records.last_mut().unwrap()
         }
-        (None, None) => return false,
+        (None, Note::Keep | Note::Clear) => return false,
     };
     let before = record.clone();
     record.tab = tab;
     record.index = index;
-    match captured {
-        Some(captured) => {
+    match note {
+        Note::Fill(_) if record.command.is_some() => {}
+        Note::Fill(captured) | Note::Set(captured) => {
             record.command = Some(captured.command);
             record.cwd = captured.cwd;
             record.env = captured.env;
         }
-        None if forget => {
+        Note::Clear => {
             record.command = None;
             record.cwd = None;
             record.env.clear();
         }
-        None => {}
+        Note::Keep => {}
     }
     *record != before
+}
+
+/// Whether process group `group` still has processes.
+fn group_alive(group: i32) -> bool {
+    // Safety: signal 0 only checks.
+    let found = unsafe { libc::kill(-group, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// The process group of `pid`.
+fn group_of(pid: u32) -> i32 {
+    // Safety: reads only.
+    unsafe { libc::getpgid(pid as i32) }
+}
+
+/// Whether herdr can be run: an executable `herdr` on the `PATH`.
+fn herdr_installed() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        std::fs::metadata(dir.join("herdr"))
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
 }
 
 /// The deepest folder holding all of `dirs`.
@@ -749,13 +828,34 @@ pub struct Gerdr {
     /// command is forgotten only after a while, so panes dying on shutdown
     /// don't count.
     pub idle_since: HashMap<String, Instant>,
-    /// Process groups of projects switched away from; their late windows are
-    /// closed instead of placed.
+    /// Process groups of projects switched away from, until they are gone;
+    /// their late windows are closed instead of placed.
     pub retired_groups: Vec<i32>,
-    /// Stop the project's session once the event loop ends.
-    pub stop_on_exit: bool,
     /// Since when the tab layouts differ from what was saved of them.
     pub tabs_changed: Option<Instant>,
+    /// The process leading each herdr pane's foreground when its command was
+    /// last noted, by pane id: a command is noted once per process, as
+    /// some rewrite their command line once running.
+    pub pane_leaders: HashMap<String, i32>,
+    /// Since when each workspace herdr said closed has been, by herdr id:
+    /// forgotten only after a while, so a server going down doesn't count.
+    pub closed_workspaces: HashMap<String, Instant>,
+    /// When the shown project's server was restarted and brought its
+    /// workspaces back, if it was.
+    pub restored_at: Option<Instant>,
+    /// The project's workspaces, by herdr id, that the restarted server
+    /// hasn't brought back yet: what ran in them runs again once it does.
+    pub replay_pending: HashSet<String>,
+    /// Windows opened by the shells of projects not shown, by project id
+    /// (`""` for windows of no known project while none is shown): shown
+    /// once their project is.
+    pub held: HashMap<String, Vec<Window>>,
+    /// The process groups of the Zed launches of the shown project.
+    pub zed_groups: Vec<i32>,
+    /// Those of the project switched away from, while they may still take
+    /// the next `zed -n`, and until when they are waited for.
+    pub old_zed: Vec<i32>,
+    pub old_zed_until: Option<Instant>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -1074,19 +1174,40 @@ impl Gerdr {
     /// by itself, as fresh shells: what ran in them is run again. A fresh
     /// one has none.
     fn connect_herdr(&mut self, session: &str) {
+        // Read before a server starting may save over it.
+        let saved = std::fs::read_to_string(herdr::session_dir(session).join("session.json"))
+            .map_or(0, |json| projects::saved_workspace_count(&json));
         let Some((mut herdr, start)) = herdr::Herdr::connect_or_start(session, &self.socket_name)
         else {
             return;
         };
-        let workspaces = herdr.workspace_list().unwrap_or_default();
+        let mut workspaces = herdr.workspace_list().unwrap_or_default();
+        // A restarted server answers before it has brought back all it
+        // saved. Those that come later are shown and run again as they come
+        // (see `capture_commands`).
+        if start == herdr::Start::Restored {
+            let deadline = Instant::now() + RESTORE_WAIT;
+            while workspaces.len() < saved && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+                if let Ok(list) = herdr.workspace_list() {
+                    workspaces = list;
+                }
+            }
+        }
         let subscribed = herdr.subscribe();
         let socket = herdr.socket().to_path_buf();
         self.herdr = Some(herdr);
         // Forget the workspaces closed while gerdr wasn't looking. An empty
         // list may be a server still restoring: keep them then, unless it
         // had nothing saved to restore (its new workspaces would take the
-        // ids of the old ones).
-        if (!workspaces.is_empty() || start == herdr::Start::Fresh)
+        // ids of the old ones). A restarted one must have brought back all
+        // it saved.
+        let complete = match start {
+            herdr::Start::Fresh => true,
+            herdr::Start::Attached => !workspaces.is_empty(),
+            herdr::Start::Restored => workspaces.len() >= saved,
+        };
+        if complete
             && let Some(project) = self
                 .project
                 .clone()
@@ -1104,6 +1225,18 @@ impl Gerdr {
             self.sync_herdr_workspace(&ws.workspace_id);
         }
         if start == herdr::Start::Restored {
+            self.restored_at = Some(Instant::now());
+            self.replay_pending = self
+                .project
+                .as_deref()
+                .and_then(|id| self.projects.project(id))
+                .map_or_else(HashSet::new, |p| {
+                    p.workspaces
+                        .iter()
+                        .map(|r| r.herdr_id.clone())
+                        .filter(|id| workspaces.iter().all(|ws| ws.workspace_id != *id))
+                        .collect()
+                });
             self.replay(&workspaces);
         }
         self.refresh_agents();
@@ -1134,6 +1267,8 @@ impl Gerdr {
                     state.herdr = None;
                     state.agents.clear();
                     state.herdr_tabs.clear();
+                    // Closed as it went down: they come back with it.
+                    state.closed_workspaces.clear();
                     // This source is the last one and removes itself.
                     state.herdr_sources.pop();
                     for token in std::mem::take(&mut state.herdr_sources) {
@@ -1227,7 +1362,12 @@ impl Gerdr {
                 }
                 self.sync_herdr_workspace(&pane.workspace_id);
             }
-            herdr::Event::WorkspaceClosed { workspace_id } => self.forget_workspace(&workspace_id),
+            // Forgotten if it stays closed (see `capture_commands`).
+            herdr::Event::WorkspaceClosed { workspace_id } => {
+                self.closed_workspaces
+                    .entry(workspace_id)
+                    .or_insert_with(Instant::now);
+            }
             herdr::Event::WorkspaceRenamed {
                 workspace_id,
                 label,
@@ -1253,27 +1393,29 @@ impl Gerdr {
         }
     }
 
-    /// Forget workspace `workspace_id` of the shown project, closed in herdr.
-    /// Events replay when the subscription opens: one still there stays.
-    fn forget_workspace(&mut self, workspace_id: &str) {
+    /// Whether the commands saved for the panes are kept whatever the panes
+    /// look like: the server restarted a moment ago, and they are still
+    /// being run again.
+    fn restoring(&self) -> bool {
+        self.restored_at
+            .is_some_and(|at| at.elapsed() < RESTORE_PROTECT)
+    }
+
+    /// Run again what ran in the workspaces `ids` that a restarted server
+    /// brought back late.
+    fn replay_late(&mut self, ids: Vec<String>) {
         let Some(herdr) = self.herdr.as_mut() else {
             return;
         };
-        match herdr.workspace_list() {
-            Ok(list) if list.iter().all(|ws| ws.workspace_id != workspace_id) => {}
-            _ => return,
+        let workspaces: Vec<_> = ids
+            .iter()
+            .filter_map(|id| herdr.workspace_get(id).ok())
+            .collect();
+        for ws in &workspaces {
+            self.replay_pending.remove(&ws.workspace_id);
         }
-        let Some(project) = self
-            .project
-            .clone()
-            .and_then(|id| self.projects.project_mut(&id))
-        else {
-            return;
-        };
-        let before = project.workspaces.len();
-        project.workspaces.retain(|r| r.herdr_id != workspace_id);
-        if project.workspaces.len() != before {
-            self.projects.save();
+        if !workspaces.is_empty() {
+            self.replay(&workspaces);
         }
     }
 
@@ -1306,8 +1448,10 @@ impl Gerdr {
     /// Remember what runs in each pane of the shown project, to run it again
     /// after a server restart, and the layout of its tabs. A command is
     /// forgotten once its shell has been idle (or its pane gone) for
-    /// `FORGET_IDLE`. A round with no tabs at all says nothing: the server
-    /// may be on its way down.
+    /// `FORGET_IDLE`, a workspace once it has been closed that long. A round
+    /// with no tabs at all says nothing: the server may be on its way down.
+    /// Nothing is forgotten while the server is being restored, and the
+    /// workspaces it brings back late have their commands run again.
     fn capture_commands(&mut self) {
         if self.herdr_tabs.is_empty() {
             return;
@@ -1315,6 +1459,10 @@ impl Gerdr {
         let Some(project) = self.project.clone() else {
             return;
         };
+        let restoring = self.restoring();
+        if !restoring {
+            self.replay_pending.clear();
+        }
         let now = Instant::now();
         let mut changed = false;
         let mut live: HashSet<&str> = HashSet::new();
@@ -1323,30 +1471,66 @@ impl Gerdr {
             for (index, pane) in detail.panes.iter().enumerate() {
                 live.insert(&pane.pane_id);
                 seen_workspaces.insert(&pane.workspace_id);
-                let captured = pane
+                // Without an answer about the process, nothing is known.
+                let foreground = pane
                     .process
                     .as_ref()
                     .and_then(|info| projects::foreground_command(info, pane.cwd.as_deref()));
-                let forget = match captured {
-                    Some(_) => {
+                let idle_long = match foreground {
+                    Some(projects::Foreground::Idle) => {
+                        let since = self.idle_since.entry(pane.pane_id.clone()).or_insert(now);
+                        now - *since >= FORGET_IDLE && !restoring
+                    }
+                    _ => {
                         self.idle_since.remove(&pane.pane_id);
                         false
                     }
-                    None => {
-                        let since = self.idle_since.entry(pane.pane_id.clone()).or_insert(now);
-                        now - *since >= FORGET_IDLE
-                    }
                 };
+                let leader = self.pane_leaders.get(&pane.pane_id).copied();
+                let (mut note, leader) = leader_note(foreground, leader, idle_long);
+                match leader {
+                    Some(pid) => self.pane_leaders.insert(pane.pane_id.clone(), pid),
+                    None => self.pane_leaders.remove(&pane.pane_id),
+                };
+                if restoring && note == Note::Clear {
+                    note = Note::Keep;
+                }
                 if let Some(record) = self.projects.record_mut(&project, &pane.workspace_id) {
                     let place = (detail.index, index);
-                    changed |= note_pane(&mut record.panes, &pane.pane_id, place, captured, forget);
+                    changed |= note_pane(&mut record.panes, &pane.pane_id, place, note);
                 }
             }
         }
+        self.pane_leaders.retain(|id, _| live.contains(id.as_str()));
+        let late: Vec<String> = self
+            .replay_pending
+            .iter()
+            .filter(|id| seen_workspaces.contains(id.as_str()))
+            .cloned()
+            .collect();
+        // Closed for a while, and not back.
+        let closed: Vec<String> = self
+            .closed_workspaces
+            .iter()
+            .filter(|(_, since)| now - **since >= FORGET_IDLE && !restoring)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &closed {
+            self.closed_workspaces.remove(id);
+        }
+        let closed: HashSet<&str> = closed
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !seen_workspaces.contains(id))
+            .collect();
         // Panes gone from a workspace still there.
         if let Some(p) = self.projects.project_mut(&project) {
+            let before = p.workspaces.len();
+            p.workspaces
+                .retain(|r| !closed.contains(r.herdr_id.as_str()));
+            changed |= p.workspaces.len() != before;
             for record in &mut p.workspaces {
-                if !seen_workspaces.contains(record.herdr_id.as_str()) {
+                if !seen_workspaces.contains(record.herdr_id.as_str()) || restoring {
                     continue;
                 }
                 let before = record.panes.len();
@@ -1375,6 +1559,9 @@ impl Gerdr {
         }
         if changed {
             self.projects.save();
+        }
+        if !late.is_empty() {
+            self.replay_late(late);
         }
     }
 
@@ -1957,6 +2144,9 @@ impl Gerdr {
     /// apart by app_id. Start them one at a time: the next queued one once the
     /// previous window has shown up (or never will).
     fn launch_next_zed(&mut self) {
+        if self.old_zed_running() {
+            return; // reaping tries again
+        }
         loop {
             let mut queued = None;
             for (w, ws) in self.workspaces.iter().enumerate() {
@@ -1988,6 +2178,7 @@ impl Gerdr {
             match pid {
                 Some(pid) => {
                     tab.expected[i].pid = Some(pid);
+                    self.zed_groups.push(pid as i32);
                     return;
                 }
                 None => {
@@ -1996,6 +2187,17 @@ impl Gerdr {
                 }
             }
         }
+    }
+
+    /// Whether the Zed of a project switched away from is still on its way
+    /// out: a `zed -n` would hand its window to it, to be ended with it.
+    /// Waited for until `old_zed_until`.
+    fn old_zed_running(&mut self) -> bool {
+        self.old_zed.retain(|g| group_alive(*g));
+        if self.old_zed_until.is_some_and(|t| Instant::now() >= t) {
+            self.old_zed.clear();
+        }
+        !self.old_zed.is_empty()
     }
 
     /// Ask the user for a folder (on the host) to open as a new workspace of `kind`.
@@ -2353,7 +2555,11 @@ impl Gerdr {
             self.launch_next_zed();
             self.prune();
             self.arrange();
+        } else if !self.old_zed.is_empty() {
+            // The Zed waiting for the old one to exit.
+            self.launch_next_zed();
         }
+        self.retired_groups.retain(|g| group_alive(*g));
         self.poll_picker();
     }
 
@@ -2382,55 +2588,82 @@ impl Gerdr {
         let ours = lineage
             .iter()
             .find_map(|pid| find(&|e| e.pid == Some(*pid)));
+        // A Zed window the shown project waits for: Zed hands windows from
+        // one process to another, so it may come from an old one.
+        let zed = || find(&|e| e.pid.is_some() && e.app_id == "zed" && app_id.contains(e.app_id));
+        let claimed = ours.or_else(zed);
         // A late window of a project switched away from: its processes are
         // on their way out.
-        let retired = |pid: &u32| {
-            let group = unsafe { libc::getpgid(*pid as i32) };
-            self.retired_groups
-                .iter()
-                .any(|g| *g == *pid as i32 || *g == group)
+        let in_groups = |groups: &[i32]| {
+            lineage.iter().any(|pid| {
+                groups
+                    .iter()
+                    .any(|g| *g == *pid as i32 || *g == group_of(*pid))
+            })
         };
-        if ours.is_none() && lineage.iter().any(retired) {
+        if claimed.is_none() && in_groups(&self.retired_groups) {
             window.toplevel().unwrap().send_close();
             return;
         }
-        let found = ours.or_else(|| {
+        let found = claimed.or_else(|| {
             find(&|e| e.pid.is_some() && !e.app_id.is_empty() && app_id.contains(e.app_id))
         });
-        let (w, t, id, focus, herdr, app_command) = match found {
-            Some((w, t, e)) => {
-                let e = self.workspaces[w].tabs[t].expected.remove(e);
-                self.launch_next_zed();
-                (w, t, e.pane, e.focus, e.herdr, e.app_command)
+        let Some((w, t, e)) = found else {
+            // Not one we started: opened from a shell, maybe of a project
+            // not shown, or by what gerdr started (a second Zed window).
+            let stray = !in_groups(&self.process_groups);
+            if stray && let Some(owner) = self.stray_owner(&lineage) {
+                self.held.entry(owner).or_default().push(window);
+                return;
             }
-            // Not one we started (e.g. a second Zed window): split the
-            // focused pane of the current tab along its longer side.
-            None => {
-                if self.workspaces.is_empty() {
-                    self.workspaces.push(Workspace::new(
-                        home_dir().unwrap_or_default(),
-                        WorkspaceKind::Project,
-                    ));
-                    self.active_workspace = 0;
-                }
-                let (id, area) = (self.new_pane_id(), self.content_rect());
-                let ws = &mut self.workspaces[self.active_workspace];
-                if ws.tabs.is_empty() {
-                    ws.tabs.push(Tab::default());
-                    ws.active_tab = 0;
-                }
-                ws.tabs[ws.active_tab].split(None, id, None, area);
-                (self.active_workspace, ws.active_tab, id, true, None, None)
-            }
+            return self.place_stray(window, stray);
         };
+        let e = self.workspaces[w].tabs[t].expected.remove(e);
+        self.launch_next_zed();
+        let pane = Pane {
+            id: e.pane,
+            window,
+            herdr: e.herdr,
+            app_command: e.app_command,
+            stray: false,
+        };
+        self.add_pane(w, t, pane, e.focus);
+    }
 
-        let tab = &mut self.workspaces[w].tabs[t];
-        tab.panes.push(Pane {
+    /// Show `window`, not one gerdr started, in the shown project: split
+    /// the focused pane of the current tab along its longer side.
+    fn place_stray(&mut self, window: Window, stray: bool) {
+        if self.workspaces.is_empty() {
+            self.workspaces.push(Workspace::new(
+                home_dir().unwrap_or_default(),
+                WorkspaceKind::Project,
+            ));
+            self.active_workspace = 0;
+        }
+        let (id, area) = (self.new_pane_id(), self.content_rect());
+        let w = self.active_workspace;
+        let ws = &mut self.workspaces[w];
+        if ws.tabs.is_empty() {
+            ws.tabs.push(Tab::default());
+            ws.active_tab = 0;
+        }
+        let t = ws.active_tab;
+        ws.tabs[t].split(None, id, None, area);
+        let pane = Pane {
             id,
-            window: window.clone(),
-            herdr,
-            app_command,
-        });
+            window,
+            herdr: None,
+            app_command: None,
+            stray,
+        };
+        self.add_pane(w, t, pane, true);
+    }
+
+    /// Put `pane` in tab `t` of workspace `w`, where its leaf is.
+    fn add_pane(&mut self, w: usize, t: usize, pane: Pane, focus: bool) {
+        let window = pane.window.clone();
+        let tab = &mut self.workspaces[w].tabs[t];
+        tab.panes.push(pane);
         // Zed and new splits get focus; the terminal under Zed only if nothing is focused yet.
         let takes_focus = focus || tab.focused.is_none();
         if takes_focus {
@@ -2439,6 +2672,37 @@ impl Gerdr {
         self.arrange();
         if takes_focus && self.is_visible(w, t) {
             self.focus(Some(window));
+        }
+    }
+
+    /// The project to hold a stray window for, until it is shown, if not
+    /// the one shown: the one whose herdr session the nearest process up
+    /// `lineage` (from the window's own) runs in. A window of no known
+    /// project waits for one to be shown (`""`).
+    fn stray_owner(&self, lineage: &[u32]) -> Option<String> {
+        let me = std::process::id();
+        let owner = lineage
+            .iter()
+            .take_while(|pid| **pid != me)
+            .find_map(|pid| {
+                let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+                self.projects.project_of_environ(&environ)
+            })
+            .flatten();
+        match (owner, self.project.as_deref()) {
+            (Some(owner), shown) if shown != Some(owner) => Some(owner.to_owned()),
+            (None, None) => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    /// Show the windows held for project `id` (and those of no known
+    /// project), now that it is shown.
+    fn place_held(&mut self, id: &str) {
+        let mut windows = self.held.remove(id).unwrap_or_default();
+        windows.extend(self.held.remove("").unwrap_or_default());
+        for window in windows {
+            self.place_stray(window, true);
         }
     }
 
@@ -2514,8 +2778,12 @@ impl Gerdr {
     }
 
     pub fn remove_window(&mut self, surface: &WlSurface) {
-        self.unplaced
-            .retain(|w| w.toplevel().unwrap().wl_surface() != surface);
+        let not_it = |w: &Window| w.toplevel().unwrap().wl_surface() != surface;
+        self.unplaced.retain(not_it);
+        for windows in self.held.values_mut() {
+            windows.retain(not_it);
+        }
+        self.held.retain(|_, windows| !windows.is_empty());
         let is_it = |p: &Pane| p.window.toplevel().unwrap().wl_surface() == surface;
         let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             ws.tabs
@@ -2546,6 +2814,7 @@ impl Gerdr {
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
         self.unplaced
             .iter()
+            .chain(self.held.values().flatten())
             .chain(
                 self.workspaces
                     .iter()
@@ -2667,15 +2936,18 @@ impl Gerdr {
         }
         self.projects.save();
         self.connect_herdr(&session);
+        self.place_held(id);
         self.show_active();
         if pick && self.workspaces.is_empty() {
             self.pick_workspace(WorkspaceKind::Project);
         }
     }
 
-    /// Let go of the project shown: stop following its session, end the
+    /// Let go of the project shown: stop following its session, close the
     /// windows gerdr started for it (its terminals keep running in herdr)
-    /// and forget what was shown. Children are still reaped.
+    /// and end their processes a moment later, hold those its shells opened
+    /// for when it is shown again, and forget what was shown. Children are
+    /// still reaped.
     fn detach_project(&mut self) {
         if self.record_tabs() {
             self.projects.save();
@@ -2683,7 +2955,24 @@ impl Gerdr {
         for token in std::mem::take(&mut self.herdr_sources) {
             self.loop_handle.remove(token);
         }
-        self.kill_children();
+        let project = self.project.clone().unwrap_or_default();
+        let panes: Vec<Pane> = self
+            .workspaces
+            .drain(..)
+            .flat_map(|ws| ws.tabs)
+            .flat_map(|tab| tab.panes)
+            .collect();
+        for pane in panes {
+            if pane.stray {
+                self.held
+                    .entry(project.clone())
+                    .or_default()
+                    .push(pane.window);
+            } else {
+                pane.window.toplevel().unwrap().send_close();
+            }
+        }
+        self.retire_children();
         if let Some((mut picker, _)) = self.picker.take() {
             let _ = picker.kill();
             let _ = picker.wait();
@@ -2692,12 +2981,15 @@ impl Gerdr {
         for window in windows {
             self.space.unmap_elem(&window);
         }
-        self.unplaced.clear();
-        self.workspaces.clear();
         self.agents.clear();
         self.herdr_tabs.clear();
         self.git.clear();
         self.idle_since.clear();
+        self.tabs_changed = None;
+        self.pane_leaders.clear();
+        self.closed_workspaces.clear();
+        self.restored_at = None;
+        self.replay_pending.clear();
         self.herdr = None;
         self.active_workspace = 0;
         self.drag = None;
@@ -2710,13 +3002,72 @@ impl Gerdr {
         self.focus(None);
     }
 
-    /// End the process groups gerdr started: each child led its own, so this
-    /// takes down what it handed off to too (Zed's editor). Their windows
-    /// that still show up are closed (see `place`).
+    /// End the process groups gerdr started for the project shown, once
+    /// their windows had `CLOSE_GRACE` to close: each child led its own, so
+    /// this takes down what it handed off to too (Zed's editor). Their
+    /// windows that still show up are closed (see `place`), and the next
+    /// Zed waits for the old one to exit (see `launch_next_zed`).
+    fn retire_children(&mut self) {
+        let groups = std::mem::take(&mut self.process_groups);
+        self.retired_groups.extend(&groups);
+        self.old_zed.append(&mut self.zed_groups);
+        self.old_zed_until = Some(Instant::now() + CLOSE_GRACE + ZED_EXIT_WAIT);
+        let end = move |_, _: &mut (), _: &mut Gerdr| {
+            for group in &groups {
+                // Safety: signals a process group gerdr started.
+                unsafe { libc::kill(-group, libc::SIGTERM) };
+            }
+            TimeoutAction::Drop
+        };
+        let timer = Timer::from_duration(CLOSE_GRACE);
+        if let Err(err) = self.loop_handle.insert_source(timer, end) {
+            tracing::warn!("ending the old project's processes: {err}");
+            // Its windows had no time to close.
+            self.kill_children();
+        }
+    }
+
+    /// End every process group gerdr started, and those retired still
+    /// waiting to be ended.
     fn kill_children(&mut self) {
-        for group in std::mem::take(&mut self.process_groups) {
+        let groups = std::mem::take(&mut self.process_groups);
+        for group in groups.iter().chain(&self.retired_groups) {
+            // Safety: signals a process group gerdr started.
             unsafe { libc::kill(-group, libc::SIGTERM) };
-            self.retired_groups.push(group);
+        }
+        self.retired_groups.extend(groups);
+    }
+
+    /// Ask the windows of the project shown to close, and give them
+    /// `CLOSE_GRACE` to, say to save their work, running `event_loop`
+    /// meanwhile.
+    fn close_windows(&mut self, event_loop: &mut EventLoop<'static, Gerdr>) {
+        let windows: Vec<Window> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| &ws.tabs)
+            .flat_map(|tab| &tab.panes)
+            .filter(|p| !p.stray)
+            .map(|p| p.window.clone())
+            .collect();
+        for window in &windows {
+            window.toplevel().unwrap().send_close();
+        }
+        let _ = self.display_handle.flush_clients();
+        let deadline = Instant::now() + CLOSE_GRACE;
+        let open = |state: &Gerdr| {
+            windows.iter().any(|w| {
+                state
+                    .workspaces
+                    .iter()
+                    .flat_map(|ws| &ws.tabs)
+                    .any(|tab| tab.panes.iter().any(|p| p.window == *w))
+            })
+        };
+        while open(self) && Instant::now() < deadline {
+            if let Err(err) = event_loop.dispatch(Some(Duration::from_millis(50)), self) {
+                return tracing::warn!("closing windows: {err}");
+            }
         }
     }
 
@@ -2794,16 +3145,17 @@ impl Gerdr {
             .collect()
     }
 
-    /// End gerdr, stopping the project's session if `stop`.
+    /// End gerdr, stopping the project's session if `stop`. It counts as
+    /// stopped only once it is.
     pub fn quit_app(&mut self, stop: bool) {
-        self.stop_on_exit = stop;
         self.record_tabs();
+        let stopped = stop && self.stop_session();
         if let Some(project) = self
             .project
             .clone()
             .and_then(|id| self.projects.project_mut(&id))
         {
-            project.state = if stop {
+            project.state = if stopped {
                 RunState::Stopped
             } else {
                 RunState::Kept
@@ -2813,12 +3165,47 @@ impl Gerdr {
         self.loop_signal.stop();
     }
 
+    /// Stop the shown project's herdr session, which saves its layout
+    /// first, even if gerdr lost touch with it; whether it is stopped now.
+    fn stop_session(&mut self) -> bool {
+        let Some(session) = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+            .map(|p| p.session.clone())
+        else {
+            return false;
+        };
+        let stopped = match self.herdr.as_mut() {
+            Some(herdr) => herdr.stop(),
+            None if herdr::is_running(&session) => {
+                herdr::Herdr::on_socket(herdr::socket_path(&session)).stop()
+            }
+            // Nothing runs.
+            None => return true,
+        };
+        match stopped {
+            Ok(()) => true,
+            // It may go before it answers.
+            Err(_) if !herdr::is_running(&session) => true,
+            Err(err) => {
+                tracing::warn!("stopping the project's herdr session: {err}");
+                false
+            }
+        }
+    }
+
     /// Show what gerdr was started for: project `name` (by id or name,
     /// made if there is none), opening `folders` in it; else, with folders,
     /// the last project shown (or a new one named after the first folder);
     /// else the last project shown if it was left running, or the welcome
-    /// screen.
+    /// screen. Without herdr, projects can't run: the welcome screen says
+    /// so.
     fn start_project(&mut self, name: Option<&str>, folders: Vec<PathBuf>) {
+        if !herdr_installed() {
+            tracing::warn!("herdr isn't installed: projects can't run");
+            return self.open_welcome(false);
+        }
         let last = self
             .projects
             .last_active
@@ -3082,8 +3469,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         herdr_sources: Vec::new(),
         idle_since: HashMap::new(),
         retired_groups: Vec::new(),
-        stop_on_exit: false,
         tabs_changed: None,
+        pane_leaders: HashMap::new(),
+        closed_workspaces: HashMap::new(),
+        restored_at: None,
+        replay_pending: HashSet::new(),
+        held: HashMap::new(),
+        zed_groups: Vec::new(),
+        old_zed: Vec::new(),
+        old_zed_until: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -3202,8 +3596,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     // The first run turns the session gerdr used before projects into one.
-    state.projects = projects::Store::load();
-    state.projects.save();
+    let (store, loaded) = projects::Store::load();
+    state.projects = store;
+    if loaded == projects::Loaded::Migrated {
+        state.projects.save();
+    }
     state.watch_git();
     state.connect_notifier();
     state.watch_zoxide();
@@ -3212,12 +3609,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run(None, &mut state, |_| {})?;
 
-    if state.stop_on_exit
-        && let Some(herdr) = state.herdr.as_mut()
-        && let Err(err) = herdr.stop()
-    {
-        tracing::warn!("stopping the project's herdr session: {err}");
-    }
+    state.close_windows(&mut event_loop);
     state.kill_children();
     if let Some((mut picker, _)) = state.picker.take() {
         let _ = picker.kill();
@@ -3337,39 +3729,103 @@ mod tests {
         assert_eq!(found("w1:p9", 1, 0), None);
     }
 
+    fn captured(command: &str) -> projects::Captured {
+        projects::Captured {
+            command: command.into(),
+            cwd: Some("/src/app".into()),
+            env: vec![("MISE_NODE_VERSION".into(), "20".into())],
+        }
+    }
+
     #[test]
     fn commands_are_kept_until_forgotten() {
         let mut records = Vec::new();
-        assert!(!note_pane(&mut records, "w1:p1", (0, 0), None, true));
+        assert!(!note_pane(&mut records, "w1:p1", (0, 0), Note::Clear));
+        assert!(!note_pane(&mut records, "w1:p1", (0, 0), Note::Keep));
         assert!(records.is_empty());
 
-        let captured = projects::Captured {
-            command: "npm run dev".into(),
-            cwd: Some("/src/app".into()),
-            env: vec![("MISE_NODE_VERSION".into(), "20".into())],
-        };
-        let busy = Some(captured);
-        assert!(note_pane(
-            &mut records,
-            "w1:p1",
-            (1, 2),
-            busy.clone(),
-            false
-        ));
+        let busy = Note::Set(captured("npm run dev"));
+        assert!(note_pane(&mut records, "w1:p1", (1, 2), busy.clone()));
         assert_eq!(records[0].command.as_deref(), Some("npm run dev"));
+        assert_eq!(records[0].cwd, Some("/src/app".into()));
         assert_eq!((records[0].tab, records[0].index), (1, 2));
-        assert!(!note_pane(&mut records, "w1:p1", (1, 2), busy, false));
+        assert!(!note_pane(&mut records, "w1:p1", (1, 2), busy));
+
+        // Filled only if empty.
+        let fill = Note::Fill(captured("gunicorn: master"));
+        assert!(!note_pane(&mut records, "w1:p1", (1, 2), fill.clone()));
+        assert_eq!(records[0].command.as_deref(), Some("npm run dev"));
 
         // Idle for a moment: kept, though its place is followed.
-        assert!(note_pane(&mut records, "w1:p1", (0, 0), None, false));
+        assert!(note_pane(&mut records, "w1:p1", (0, 0), Note::Keep));
         assert_eq!(records[0].command.as_deref(), Some("npm run dev"));
 
         records[0].skip.push("npm run dev".into());
-        assert!(note_pane(&mut records, "w1:p1", (0, 0), None, true));
+        assert!(note_pane(&mut records, "w1:p1", (0, 0), Note::Clear));
         assert_eq!(records[0].command, None);
         assert_eq!(records[0].cwd, None);
         assert!(records[0].env.is_empty());
         assert_eq!(records[0].skip, ["npm run dev"]);
+
+        assert!(note_pane(&mut records, "w1:p1", (0, 0), fill));
+        assert_eq!(records[0].command.as_deref(), Some("gunicorn: master"));
+        assert!(note_pane(
+            &mut records,
+            "w1:p2",
+            (0, 1),
+            Note::Fill(captured("x"))
+        ));
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn a_command_is_noted_once_per_process() {
+        use projects::Foreground::{Busy, Idle, Untracked};
+        let busy = |pid, command: &str| {
+            Some(Busy {
+                pid,
+                captured: captured(command),
+            })
+        };
+        // herdr couldn't tell: nothing changes, the leader is kept.
+        assert_eq!(leader_note(None, Some(7), true), (Note::Keep, Some(7)));
+        // Idle: forgotten only once idle for long.
+        assert_eq!(leader_note(Some(Idle), Some(7), false), (Note::Keep, None));
+        assert_eq!(leader_note(Some(Idle), Some(7), true), (Note::Clear, None));
+        // A new process: noted.
+        assert_eq!(
+            leader_note(busy(8, "gunicorn app.wsgi"), Some(7), false),
+            (Note::Set(captured("gunicorn app.wsgi")), Some(8))
+        );
+        // The same one again: only if nothing was noted.
+        assert_eq!(
+            leader_note(busy(8, "gunicorn app.wsgi"), Some(8), false),
+            (Note::Fill(captured("gunicorn app.wsgi")), Some(8))
+        );
+        // It rewrote its command line: what was noted of it stays.
+        let rewritten = Some(Untracked {
+            pid: 8,
+            denied: false,
+        });
+        assert_eq!(
+            leader_note(rewritten.clone(), Some(8), false),
+            (Note::Keep, Some(8))
+        );
+        // Unreadable from the start: whatever was noted stays.
+        assert_eq!(
+            leader_note(rewritten, Some(7), false),
+            (Note::Keep, Some(8))
+        );
+        // Another program, never run again: what ran before is gone.
+        let editor = Some(Untracked {
+            pid: 9,
+            denied: true,
+        });
+        assert_eq!(
+            leader_note(editor.clone(), Some(8), false),
+            (Note::Clear, Some(9))
+        );
+        assert_eq!(leader_note(editor, Some(9), false), (Note::Keep, Some(9)));
     }
 
     #[test]
