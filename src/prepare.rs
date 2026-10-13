@@ -1,8 +1,10 @@
 //! Getting a herdr pane's shell ready: activate the repository's Python venv,
 //! bring back `mise` version overrides, and (when the pane comes back after
 //! its server restarted) run again what ran in it. Each pane gets one line,
-//! typed in once its shell waits at the prompt, so it runs after the shell's
-//! rc files (and `mise activate`) and the venv's `bin` comes first in PATH.
+//! typed in as soon as its shell exists: the pane is brand new, so nobody
+//! typed in it yet, and the shell keeps the line as type-ahead until its
+//! first prompt. It runs after the shell's rc files (and `mise activate`),
+//! so the venv's `bin` comes first in PATH.
 
 use std::{
     path::{Path, PathBuf},
@@ -11,18 +13,21 @@ use std::{
 
 use crate::{
     desktop::shell_quote,
-    herdr::{Herdr, ProcessInfo},
+    herdr::{Herdr, Process, ProcessInfo},
     projects::VenvSetting,
 };
 
 /// How often the panes are asked about.
 const POLL: Duration = Duration::from_millis(150);
-/// How long a shell must have waited at its prompt before its line is typed:
-/// its rc files are done by then.
-const SETTLE: Duration = Duration::from_millis(500);
-/// How long the panes are waited for, all together. A pane not idle by then
-/// runs something already.
+/// How long the panes are waited for, all together. A pane whose shell
+/// didn't start by then is left alone.
 const DEADLINE: Duration = Duration::from_secs(10);
+/// Shells that can lead a pane's foreground without anything else running
+/// (one started in place of the first, or from its rc files).
+const SHELLS: [&str; 16] = [
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "oksh", "yash", "tcsh", "csh", "nu",
+    "elvish", "xonsh", "ion", "pwsh",
+];
 
 /// What to do in one pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,44 +133,62 @@ pub fn prepare_line(prep: &Prep) -> Option<String> {
 /// What to do next with a pane waiting for its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
+    /// Its shell isn't there yet.
     Wait,
     Send,
+    /// Something other than its shell runs in it already.
+    Busy,
     /// It's gone.
     Drop,
 }
 
-/// What to do with a pane, given what herdr says of it `now`. `idle_since`
-/// is when its shell was first seen waiting at its prompt, kept from one
-/// round to the next.
-fn step(
-    info: &Result<ProcessInfo, String>,
-    idle_since: &mut Option<Instant>,
-    now: Instant,
-) -> Step {
+/// Whether `process` is a shell, by its name (a login shell's starts with
+/// `-`) or else its first argument.
+fn is_shell(process: &Process) -> bool {
+    let argv0 = process
+        .argv
+        .first()
+        .and_then(|arg| Path::new(arg).file_name()?.to_str());
+    [Some(process.name.as_str()), argv0]
+        .into_iter()
+        .flatten()
+        .any(|name| SHELLS.contains(&name.trim_start_matches('-')))
+}
+
+/// What to do with a pane, given what herdr says of it. The line goes in as
+/// soon as the shell exists (it keeps the line until its first prompt),
+/// unless the foreground is led by something other than a shell: then
+/// something runs in the pane already.
+fn step(info: &Result<ProcessInfo, String>) -> Step {
     let Ok(info) = info else {
         return Step::Drop;
     };
-    let idle = info.shell_pid.is_some() && info.foreground_process_group_id == info.shell_pid;
-    if !idle {
-        *idle_since = None;
+    let Some(shell) = info.shell_pid else {
         return Step::Wait;
-    }
-    let since = *idle_since.get_or_insert(now);
-    if now.duration_since(since) >= SETTLE {
-        Step::Send
-    } else {
-        Step::Wait
+    };
+    match info.foreground_process_group_id {
+        // At its prompt or still starting, or a herdr that doesn't say.
+        None => Step::Send,
+        Some(group) if group == shell => Step::Send,
+        Some(group) => {
+            let leader = info.foreground_processes.iter().find(|p| p.pid == group);
+            if leader.is_some_and(is_shell) {
+                Step::Send
+            } else {
+                Step::Busy
+            }
+        }
     }
 }
 
 /// Prepare `preps` on a thread of their own, talking to the server on
-/// `socket`: each pane gets its line once its shell is idle at its prompt.
-/// A pane already running something is left alone.
+/// `socket`: each pane gets its line as soon as its shell exists. A pane
+/// already running something is left alone.
 pub fn spawn_prepare(socket: PathBuf, preps: Vec<Prep>) {
-    // Each pane with its line, and since when its shell is idle.
-    let mut pending: Vec<(String, String, Option<Instant>)> = preps
+    // Each pane with its line.
+    let mut pending: Vec<(String, String)> = preps
         .iter()
-        .filter_map(|prep| Some((prep.pane_id.clone(), prepare_line(prep)?, None)))
+        .filter_map(|prep| Some((prep.pane_id.clone(), prepare_line(prep)?)))
         .collect();
     if pending.is_empty() {
         return;
@@ -176,19 +199,22 @@ pub fn spawn_prepare(socket: PathBuf, preps: Vec<Prep>) {
             let mut herdr = Herdr::on_socket(socket);
             let deadline = Instant::now() + DEADLINE;
             while !pending.is_empty() && Instant::now() < deadline {
-                pending.retain_mut(|(pane, line, idle_since)| {
+                pending.retain(|(pane, line)| {
                     // A slow server mustn't keep it going much longer.
                     if Instant::now() >= deadline {
                         return true;
                     }
-                    let info = herdr.process_info(pane);
-                    match step(&info, idle_since, Instant::now()) {
+                    match step(&herdr.process_info(pane)) {
                         Step::Wait => true,
                         Step::Send => {
                             tracing::debug!("preparing pane {pane}:{line}");
                             if let Err(err) = herdr.send_line(pane, line) {
                                 tracing::warn!("pane {pane} couldn't be prepared: {err}");
                             }
+                            false
+                        }
+                        Step::Busy => {
+                            tracing::debug!("pane {pane} is busy, not preparing it");
                             false
                         }
                         Step::Drop => {
@@ -201,8 +227,8 @@ pub fn spawn_prepare(socket: PathBuf, preps: Vec<Prep>) {
                     std::thread::sleep(POLL);
                 }
             }
-            for (pane, ..) in &pending {
-                tracing::debug!("pane {pane} is busy, not preparing it");
+            for (pane, _) in &pending {
+                tracing::debug!("pane {pane}'s shell didn't start, not preparing it");
             }
         });
     if let Err(err) = spawned {
@@ -416,51 +442,60 @@ mod tests {
         assert_eq!(prepare_line(&prep).unwrap(), expected);
     }
 
-    fn info(shell: Option<i32>, group: Option<i32>) -> Result<ProcessInfo, String> {
+    fn process(pid: i32, name: &str, argv: &[&str]) -> Process {
+        Process {
+            pid,
+            name: name.into(),
+            argv: argv.iter().map(|arg| arg.to_string()).collect(),
+            cmdline: argv.join(" "),
+            cwd: None,
+        }
+    }
+
+    fn info(
+        shell: Option<i32>,
+        group: Option<i32>,
+        leader: Option<Process>,
+    ) -> Result<ProcessInfo, String> {
         Ok(ProcessInfo {
             shell_pid: shell,
             foreground_process_group_id: group,
-            foreground_processes: Vec::new(),
+            foreground_processes: leader.into_iter().collect(),
         })
     }
 
     #[test]
-    fn line_is_sent_once_the_shell_settled_at_its_prompt() {
-        let start = Instant::now();
-        let mut since = None;
-        let idle = info(Some(10), Some(10));
-        assert_eq!(step(&idle, &mut since, start), Step::Wait);
-        assert_eq!(step(&idle, &mut since, start + POLL), Step::Wait);
-        assert_eq!(step(&idle, &mut since, start + SETTLE), Step::Send);
+    fn line_is_sent_as_soon_as_the_shell_exists() {
+        assert_eq!(step(&info(None, None, None)), Step::Wait);
+        let zsh = process(10, "zsh", &["zsh"]);
+        assert_eq!(step(&info(Some(10), Some(10), Some(zsh))), Step::Send);
+        // A herdr that doesn't report the foreground.
+        assert_eq!(step(&info(Some(10), None, None)), Step::Send);
     }
 
     #[test]
-    fn busy_shell_starts_settling_over() {
-        let start = Instant::now();
-        let mut since = None;
-        let idle = info(Some(10), Some(10));
-        let busy = info(Some(10), Some(20));
-        assert_eq!(step(&idle, &mut since, start), Step::Wait);
-        assert_eq!(step(&busy, &mut since, start + POLL), Step::Wait);
-        assert_eq!(since, None);
-        assert_eq!(step(&idle, &mut since, start + SETTLE), Step::Wait);
-        assert_eq!(step(&idle, &mut since, start + SETTLE * 2), Step::Send);
+    fn a_shell_leading_the_foreground_is_not_busy() {
+        let login = process(20, "-zsh", &["-zsh"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(login))), Step::Send);
+        // Known by its first argument when its name isn't a shell's.
+        let bash = process(20, "x", &["/usr/bin/bash", "-l"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(bash))), Step::Send);
     }
 
     #[test]
-    fn shell_not_started_or_unknown_waits() {
-        let start = Instant::now();
-        let mut since = None;
-        assert_eq!(step(&info(None, None), &mut since, start), Step::Wait);
-        let unknown = info(Some(10), None);
-        assert_eq!(step(&unknown, &mut since, start + SETTLE), Step::Wait);
-        assert_eq!(since, None);
+    fn something_else_running_is_busy() {
+        let server = process(20, "cargo", &["cargo", "run"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(server))), Step::Busy);
+        // A shell that doesn't lead the foreground doesn't count.
+        let zsh = process(21, "zsh", &["zsh"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(zsh))), Step::Busy);
+        // Nothing known of the leader.
+        assert_eq!(step(&info(Some(10), Some(20), None)), Step::Busy);
     }
 
     #[test]
     fn gone_pane_is_dropped() {
-        let mut since = None;
         let gone = Err("pane.process_info: no such pane".to_string());
-        assert_eq!(step(&gone, &mut since, Instant::now()), Step::Drop);
+        assert_eq!(step(&gone), Step::Drop);
     }
 }

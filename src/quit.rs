@@ -14,6 +14,7 @@ use smithay::{
 use crate::{
     Gerdr,
     chrome::{self, QuitHit, QuitView},
+    herdr,
     projects::QuitChoice,
 };
 
@@ -95,8 +96,17 @@ impl Gerdr {
     /// The window is closing: quit right away without a project, do what
     /// was remembered, or ask.
     pub fn request_quit(&mut self) {
-        // Without herdr the project can't keep running: nothing to ask.
-        if self.project.is_none() || self.herdr.is_none() {
+        let Some(id) = self.project.as_deref() else {
+            self.quit_app(false);
+            return;
+        };
+        // Not connected to its session: ask only if it runs all the same.
+        if self.herdr.is_none()
+            && !self
+                .projects
+                .project(id)
+                .is_some_and(|p| herdr::is_running(&p.session))
+        {
             self.quit_app(false);
             return;
         }
@@ -113,6 +123,8 @@ impl Gerdr {
             dont_ask: self.projects.quit_choice.is_some(),
             ..QuitDialog::default()
         });
+        // It takes the pointer from the client under it.
+        self.refresh_pointer_focus();
     }
 
     /// A key while the quit dialog has the keyboard; what to do once the
@@ -132,6 +144,8 @@ impl Gerdr {
         let (choice, remember) = match outcome {
             Outcome::Cancel => {
                 self.quit = None;
+                // Gone, what is under the pointer gets it back.
+                self.refresh_pointer_focus();
                 return;
             }
             Outcome::Keep { remember } => (QuitChoice::Keep, remember),

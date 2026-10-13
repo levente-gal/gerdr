@@ -63,14 +63,37 @@ pub fn socket_path(session: &str) -> PathBuf {
     session_dir(session).join("herdr.sock")
 }
 
-/// Whether `session` saved workspaces that its server restores on start.
-/// herdr keeps `session.json` even with no workspaces in it.
-pub fn has_saved_layout(session: &str) -> bool {
+/// How many workspaces `session` saved for its server to restore on start:
+/// 0 without a `session.json` (herdr keeps one even with none in it).
+pub fn saved_workspace_count(session: &str) -> usize {
     std::fs::read(session_dir(session).join("session.json"))
         .ok()
         .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-        .and_then(|saved| saved["workspaces"].as_array().map(|ws| !ws.is_empty()))
-        .unwrap_or(false)
+        .and_then(|saved| saved["workspaces"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+/// Whether `session` saved workspaces that its server restores on start.
+pub fn has_saved_layout(session: &str) -> bool {
+    saved_workspace_count(session) > 0
+}
+
+/// Where the `herdr` executable is, looking through the folders of `path`
+/// (as in `PATH`).
+pub fn find_on_path(path: &OsStr) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join("herdr"))
+        .find(|file| {
+            std::fs::metadata(file)
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// Whether herdr can be found on `PATH`.
+pub fn is_installed() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| find_on_path(&path).is_some())
 }
 
 /// Whether a server answers for `session`. A socket file alone says nothing:
@@ -435,6 +458,12 @@ impl Herdr {
             if herdr.workspace_list().is_ok_and(|list| !list.is_empty()) {
                 return Some((herdr, Start::Restored));
             }
+        }
+        // A server that answers but restored nothing (or not yet) is still
+        // the session's: gerdr mustn't run without it and leave it behind.
+        if saved && let Ok(herdr) = Self::connect(&socket) {
+            tracing::warn!("herdr server didn't restore its workspaces in time");
+            return Some((herdr, Start::Restored));
         }
         tracing::warn!("herdr server didn't come up, terminals won't persist");
         None
@@ -888,6 +917,27 @@ mod tests {
         let old: ProcessInfo =
             serde_json::from_value(json!({"shell_pid": 10, "foreground_processes": []})).unwrap();
         assert_eq!(old.foreground_process_group_id, None);
+    }
+
+    #[test]
+    fn herdr_is_found_only_as_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("gerdr-herdr-path-{}", std::process::id()));
+        let (plain, exec, folder) = (tmp.join("plain"), tmp.join("exec"), tmp.join("folder"));
+        for dir in [&plain, &exec, &folder] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(plain.join("herdr"), "").unwrap();
+        std::fs::write(exec.join("herdr"), "").unwrap();
+        std::fs::set_permissions(exec.join("herdr"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::create_dir_all(folder.join("herdr")).unwrap();
+        let path = std::env::join_paths([&folder, &plain, &tmp.join("missing"), &exec]).unwrap();
+        assert_eq!(find_on_path(&path), Some(exec.join("herdr")));
+        let path = std::env::join_paths([&folder, &plain]).unwrap();
+        assert_eq!(find_on_path(&path), None);
+        assert_eq!(find_on_path(OsStr::new("")), None);
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
