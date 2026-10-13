@@ -42,7 +42,8 @@ use chrome::{
     AgentView, Chrome, ChromeView, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
     TAB_STRIP_HEIGHT, TabView, Theme, WorkspaceView,
 };
-use layout::{Dir, Node, Side};
+use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
+use projects::{PaneRecord, RunState, TabRecord, WorkspaceRecord};
 use serde_json::json;
 use smithay::{
     backend::{
@@ -111,6 +112,14 @@ const GIT_INTERVAL: Duration = Duration::from_secs(3);
 /// How long a window may still show up after the process we started exited
 /// (the `zed` CLI hands the window off to an already running editor and quits).
 const HANDOFF_GRACE: Duration = Duration::from_secs(10);
+/// How long a pane's shell must stay idle (or the pane gone) before the
+/// command it ran is forgotten: panes dying while the machine shuts down
+/// mustn't count.
+const FORGET_IDLE: Duration = Duration::from_secs(10);
+/// How long the tab layouts must differ from what was saved of them before
+/// they are saved again: windows closing as the machine shuts down mustn't
+/// count.
+const TABS_SETTLE: Duration = Duration::from_secs(3);
 /// How long a key is held before it repeats (ms), and how often it then
 /// repeats (per second), for the apps and for gerdr's own popups.
 pub const REPEAT_DELAY: u32 = 300;
@@ -214,6 +223,42 @@ impl Tab {
             .or_else(|| self.herdr_panes().last())
     }
 
+    /// The herdr pane the tab's restart marker and toggle are about: the
+    /// focused one if it is a terminal, else the first.
+    fn restart_target(&self) -> Option<&herdr::PaneInfo> {
+        let focused = self
+            .focused
+            .as_ref()
+            .and_then(|w| self.panes.iter().find(|p| &p.window == w));
+        focused
+            .and_then(|p| p.herdr.as_ref())
+            .or_else(|| self.herdr_panes().next())
+    }
+
+    /// What to remember of the tab: its layout, with each leaf named by what
+    /// fills it. Windows gerdr can't bring back are left out.
+    fn save(&self) -> Option<TabRecord> {
+        let leaf = |id: u32| match self.panes.iter().find(|p| p.id == id) {
+            Some(p) => saved_leaf(
+                p.herdr.as_ref(),
+                p.app_command.as_deref(),
+                is_zed(&p.window),
+            ),
+            None => {
+                let e = self.expected.iter().find(|e| e.pane == id)?;
+                saved_leaf(
+                    e.herdr.as_ref(),
+                    e.app_command.as_deref(),
+                    e.app_id == "zed",
+                )
+            }
+        };
+        Some(TabRecord {
+            herdr_tab: self.herdr_tab_id().map(str::to_owned),
+            layout: self.layout.as_ref()?.save(&leaf)?,
+        })
+    }
+
     fn window(&self, id: u32) -> Option<&Window> {
         self.panes.iter().find(|p| p.id == id).map(|p| &p.window)
     }
@@ -290,11 +335,225 @@ impl Tab {
     }
 }
 
+/// How a leaf is remembered: by the herdr pane it shows, the command an app
+/// was launched with, or as the workspace's Zed. A plain terminal (without
+/// herdr) can't come back.
+fn saved_leaf(
+    herdr: Option<&herdr::PaneInfo>,
+    app_command: Option<&str>,
+    zed: bool,
+) -> Option<SavedLeaf> {
+    if let Some(pane) = herdr {
+        Some(SavedLeaf::Herdr {
+            pane_id: pane.pane_id.clone(),
+        })
+    } else if let Some(command) = app_command {
+        Some(SavedLeaf::App {
+            command: command.to_owned(),
+        })
+    } else {
+        zed.then_some(SavedLeaf::Zed)
+    }
+}
+
+/// Whether `window` is a Zed window.
+fn is_zed(window: &Window) -> bool {
+    with_states(window.toplevel().unwrap().wl_surface(), |states| {
+        let data = states.data_map.get::<XdgToplevelSurfaceData>()?;
+        let app_id = data.lock().unwrap().app_id.clone()?;
+        Some(app_id.to_ascii_lowercase().contains("zed"))
+    })
+    .unwrap_or(false)
+}
+
+/// A tab rebuilt from its saved layout.
+#[derive(Debug, Default, PartialEq)]
+struct RestoredTab {
+    layout: Option<Node>,
+    /// The leaves kept for Zed windows.
+    zed: Vec<u32>,
+    /// The leaves kept for apps, with the command to launch into each.
+    apps: Vec<(u32, String)>,
+}
+
+/// Rebuild a tab from `saved`: each herdr pane in the leaf `ids` gives it,
+/// Zed and apps in new leaves from `next`. Leaves with nothing to fill them
+/// leave their space to their sibling.
+fn restore_tab(saved: &SavedNode, ids: &HashMap<String, u32>, next: &mut u32) -> RestoredTab {
+    let mut restored = RestoredTab::default();
+    let mut new_leaf = || {
+        *next += 1;
+        *next
+    };
+    restored.layout = saved.restore(&mut |leaf| match leaf {
+        SavedLeaf::Herdr { pane_id } => ids.get(pane_id).copied(),
+        SavedLeaf::Zed => {
+            let id = new_leaf();
+            restored.zed.push(id);
+            Some(id)
+        }
+        SavedLeaf::App { command } => {
+            let id = new_leaf();
+            restored.apps.push((id, command.clone()));
+            Some(id)
+        }
+    });
+    restored
+}
+
+/// Whether `saved` holds exactly the herdr panes `live`.
+fn same_panes(saved: &SavedNode, live: &HashSet<&str>) -> bool {
+    let panes = saved.herdr_panes();
+    panes.len() == live.len() && panes.iter().all(|p| live.contains(p))
+}
+
+/// The commands of the apps in `saved`, in layout order.
+fn saved_apps(saved: &SavedNode) -> Vec<&str> {
+    match saved {
+        SavedNode::Leaf(SavedLeaf::App { command }) => vec![command.as_str()],
+        SavedNode::Leaf(_) => Vec::new(),
+        SavedNode::Split { first, second, .. } => {
+            let mut apps = saved_apps(first);
+            apps.extend(saved_apps(second));
+            apps
+        }
+    }
+}
+
+/// The record of herdr pane `pane_id`: by its id, else by its place (tab
+/// `tab`, pane `index` in it) if the record there is of no pane in `live`.
+fn find_pane_record<'a>(
+    records: &'a [PaneRecord],
+    pane_id: &str,
+    tab: usize,
+    index: usize,
+    live: &HashSet<&str>,
+) -> Option<&'a PaneRecord> {
+    records.iter().find(|r| r.pane_id == pane_id).or_else(|| {
+        records
+            .iter()
+            .find(|r| r.tab == tab && r.index == index && !live.contains(r.pane_id.as_str()))
+    })
+}
+
+/// Bring the record of herdr pane `pane_id` (tab `tab`, pane `index` in it)
+/// up to date with what runs in it: `captured`, or nothing, in which case
+/// the command is forgotten only if `forget`. Returns whether it changed.
+fn note_pane(
+    records: &mut Vec<PaneRecord>,
+    pane_id: &str,
+    (tab, index): (usize, usize),
+    captured: Option<projects::Captured>,
+    forget: bool,
+) -> bool {
+    let existing = records.iter_mut().find(|r| r.pane_id == pane_id);
+    let record = match (existing, &captured) {
+        (Some(record), _) => record,
+        (None, Some(_)) => {
+            records.push(PaneRecord {
+                pane_id: pane_id.to_owned(),
+                ..Default::default()
+            });
+            records.last_mut().unwrap()
+        }
+        (None, None) => return false,
+    };
+    let before = record.clone();
+    record.tab = tab;
+    record.index = index;
+    match captured {
+        Some(captured) => {
+            record.command = Some(captured.command);
+            record.cwd = captured.cwd;
+            record.env = captured.env;
+        }
+        None if forget => {
+            record.command = None;
+            record.cwd = None;
+            record.env.clear();
+        }
+        None => {}
+    }
+    *record != before
+}
+
+/// The deepest folder holding all of `dirs`.
+fn common_dir(dirs: &[&Path]) -> Option<PathBuf> {
+    let (first, rest) = dirs.split_first()?;
+    let mut common = first.to_path_buf();
+    for dir in rest {
+        while !dir.starts_with(&common) {
+            if !common.pop() {
+                return None;
+            }
+        }
+    }
+    Some(common)
+}
+
+/// `path` with the home folder `home` written `~`.
+fn tilde(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// What the welcome screen says of a project with workspaces in `dirs`:
+/// "3 repos · ~/Work/aft", or "empty".
+fn project_detail(dirs: &[&Path], home: Option<&Path>) -> String {
+    let count = match dirs.len() {
+        0 => return "empty".into(),
+        1 => "1 repo".to_owned(),
+        n => format!("{n} repos"),
+    };
+    match common_dir(dirs).filter(|d| d.parent().is_some()) {
+        Some(dir) => format!("{count} · {}", tilde(&dir, home)),
+        None => count,
+    }
+}
+
+/// The project named with `--project` (`--project <name>` or
+/// `--project=<name>`), and the folders to open.
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> (Option<String>, Vec<PathBuf>) {
+    let mut project = None;
+    let mut folders = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+        if text == "--project" {
+            project = args.next().map(|a| a.to_string_lossy().into_owned());
+        } else if let Some(name) = text.strip_prefix("--project=") {
+            project = Some(name.to_owned());
+        } else {
+            folders.push(PathBuf::from(arg));
+        }
+    }
+    (project, folders)
+}
+
 /// What a workspace opens with: Zed over a terminal, or just a terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceKind {
     Project,
     Terminal,
+}
+
+impl WorkspaceKind {
+    fn from_record(kind: projects::Kind) -> Self {
+        match kind {
+            projects::Kind::Project => Self::Project,
+            projects::Kind::Terminal => Self::Terminal,
+        }
+    }
+
+    fn to_record(self) -> projects::Kind {
+        match self {
+            Self::Project => projects::Kind::Project,
+            Self::Terminal => projects::Kind::Terminal,
+        }
+    }
 }
 
 /// A folder with its own windows and tabs: a project (Zed and terminals) or
@@ -495,6 +754,8 @@ pub struct Gerdr {
     pub retired_groups: Vec<i32>,
     /// Stop the project's session once the event loop ends.
     pub stop_on_exit: bool,
+    /// Since when the tab layouts differ from what was saved of them.
+    pub tabs_changed: Option<Instant>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -725,19 +986,75 @@ impl Gerdr {
             .and_then(|t| ws.tabs.get(t)?.herdr_split_target())
             .map(|p| p.pane_id.clone());
         let workspace_id = ws.herdr_id().map(str::to_owned);
-        let (dir, name, project) = (
-            ws.dir.clone(),
-            ws.name.clone(),
-            ws.kind == WorkspaceKind::Project,
-        );
+        let (dir, name, kind) = (ws.dir.clone(), ws.name.clone(), ws.kind);
+        let new_workspace = target.is_none() && workspace_id.is_none();
         let herdr = self.herdr.as_mut()?;
         let pane = match (target, workspace_id) {
             (Some(target), _) => herdr.pane_split(&target, split, &dir, &env),
             (None, Some(workspace_id)) => herdr.tab_create(&workspace_id, &dir, &env),
-            (None, None) => herdr.workspace_create(&dir, &name, project, &env),
+            (None, None) => {
+                herdr.workspace_create(&dir, &name, kind == WorkspaceKind::Project, &env)
+            }
         };
-        pane.inspect_err(|err| tracing::warn!("herdr: {err}; starting a plain terminal"))
-            .ok()
+        let pane = pane
+            .inspect_err(|err| tracing::warn!("herdr: {err}; starting a plain terminal"))
+            .ok()?;
+        let socket = herdr.socket().to_path_buf();
+        if new_workspace {
+            self.remember_workspace(&pane.workspace_id, &name, kind, &dir);
+        }
+        // The new shell gets the workspace's venv.
+        let venv = self
+            .workspace_record(&pane.workspace_id)
+            .map(|r| r.venv.clone())
+            .unwrap_or_default();
+        let prep = prepare::Prep {
+            pane_id: pane.pane_id.clone(),
+            pane_cwd: pane.cwd.clone().unwrap_or_else(|| dir.clone()),
+            ws_dir: dir,
+            venv,
+            captured_env: Vec::new(),
+            cd: None,
+            command: None,
+        };
+        prepare::spawn_prepare(socket, vec![prep]);
+        Some(pane)
+    }
+
+    /// The shown project's record of herdr workspace `herdr_id`.
+    fn workspace_record(&self, herdr_id: &str) -> Option<&WorkspaceRecord> {
+        let project = self.projects.project(self.project.as_deref()?)?;
+        project.workspaces.iter().find(|r| r.herdr_id == herdr_id)
+    }
+
+    /// The shown project's record of herdr pane `pane`.
+    fn pane_record(&self, pane: &herdr::PaneInfo) -> Option<&PaneRecord> {
+        let record = self.workspace_record(&pane.workspace_id)?;
+        record.panes.iter().find(|r| r.pane_id == pane.pane_id)
+    }
+
+    /// Add herdr workspace `herdr_id` to the shown project, unless it has it.
+    fn remember_workspace(&mut self, herdr_id: &str, label: &str, kind: WorkspaceKind, dir: &Path) {
+        let Some(project) = self
+            .project
+            .clone()
+            .and_then(|id| self.projects.project_mut(&id))
+        else {
+            return;
+        };
+        if project.workspaces.iter().any(|r| r.herdr_id == herdr_id) {
+            return;
+        }
+        project.workspaces.push(WorkspaceRecord {
+            herdr_id: herdr_id.to_owned(),
+            label: label.to_owned(),
+            kind: kind.to_record(),
+            dir: dir.to_path_buf(),
+            venv: Default::default(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+        });
+        self.projects.save();
     }
 
     /// Show herdr pane `pane` in an Alacritty window.
@@ -754,9 +1071,10 @@ impl Gerdr {
     /// Connect to herdr session `session` (starting it if needed), show what
     /// it already holds and follow its changes. Without herdr, terminals are
     /// plain Alacritty windows. A restarted server brings its workspaces back
-    /// by itself; a fresh one has none.
+    /// by itself, as fresh shells: what ran in them is run again. A fresh
+    /// one has none.
     fn connect_herdr(&mut self, session: &str) {
-        let Some((mut herdr, _start)) = herdr::Herdr::connect_or_start(session, &self.socket_name)
+        let Some((mut herdr, start)) = herdr::Herdr::connect_or_start(session, &self.socket_name)
         else {
             return;
         };
@@ -764,11 +1082,34 @@ impl Gerdr {
         let subscribed = herdr.subscribe();
         let socket = herdr.socket().to_path_buf();
         self.herdr = Some(herdr);
-        for ws in workspaces {
+        // Forget the workspaces closed while gerdr wasn't looking. An empty
+        // list may be a server still restoring: keep them then, unless it
+        // had nothing saved to restore (its new workspaces would take the
+        // ids of the old ones).
+        if (!workspaces.is_empty() || start == herdr::Start::Fresh)
+            && let Some(project) = self
+                .project
+                .clone()
+                .and_then(|id| self.projects.project_mut(&id))
+        {
+            let before = project.workspaces.len();
+            project
+                .workspaces
+                .retain(|r| workspaces.iter().any(|ws| ws.workspace_id == r.herdr_id));
+            if project.workspaces.len() != before {
+                self.projects.save();
+            }
+        }
+        for ws in &workspaces {
             self.sync_herdr_workspace(&ws.workspace_id);
         }
+        if start == herdr::Start::Restored {
+            self.replay(&workspaces);
+        }
         self.refresh_agents();
-        self.watch_herdr_tabs(socket);
+        // The events' source goes last: it removes itself when the server goes.
+        let tabs = self.watch_herdr_tabs(socket);
+        self.herdr_sources.extend(tabs);
         let sub = match subscribed {
             Ok(sub) => sub,
             Err(err) => {
@@ -793,14 +1134,68 @@ impl Gerdr {
                     state.herdr = None;
                     state.agents.clear();
                     state.herdr_tabs.clear();
+                    // This source is the last one and removes itself.
+                    state.herdr_sources.pop();
+                    for token in std::mem::take(&mut state.herdr_sources) {
+                        state.loop_handle.remove(token);
+                    }
                     return Ok(PostAction::Remove);
                 }
             }
             Ok(PostAction::Continue)
         });
-        if let Err(err) = inserted {
-            tracing::warn!("herdr events: {err}");
+        match inserted {
+            Ok(token) => self.herdr_sources.push(token),
+            Err(err) => tracing::warn!("herdr events: {err}"),
         }
+    }
+
+    /// Run again what ran in the panes of `workspaces`, just restored by a
+    /// server restart, each in its venv; the panes without a command just
+    /// get their venv. A pane is found in the records by its id, else by its
+    /// place in the workspace.
+    fn replay(&mut self, workspaces: &[herdr::WorkspaceInfo]) {
+        let Some(herdr) = self.herdr.as_mut() else {
+            return;
+        };
+        let socket = herdr.socket().to_path_buf();
+        let project = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id));
+        let mut preps = Vec::new();
+        for ws in workspaces {
+            let order = herdr.tab_list(&ws.workspace_id).unwrap_or_default();
+            let panes = herdr.pane_list(&ws.workspace_id).unwrap_or_default();
+            let live: HashSet<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
+            let record =
+                project.and_then(|p| p.workspaces.iter().find(|r| r.herdr_id == ws.workspace_id));
+            for pane in &panes {
+                let tab = order.iter().position(|t| *t == pane.tab_id).unwrap_or(0);
+                let index = panes
+                    .iter()
+                    .filter(|p| p.tab_id == pane.tab_id)
+                    .position(|p| p.pane_id == pane.pane_id)
+                    .unwrap_or(0);
+                let ws_dir = record
+                    .map(|r| r.dir.clone())
+                    .or_else(|| ws.dir())
+                    .or_else(|| pane.cwd.clone())
+                    .unwrap_or_default();
+                let found = record
+                    .and_then(|r| find_pane_record(&r.panes, &pane.pane_id, tab, index, &live));
+                preps.push(prepare::Prep {
+                    pane_id: pane.pane_id.clone(),
+                    pane_cwd: pane.cwd.clone().unwrap_or_else(|| ws_dir.clone()),
+                    ws_dir,
+                    venv: record.map(|r| r.venv.clone()).unwrap_or_default(),
+                    captured_env: found.map(|r| r.env.clone()).unwrap_or_default(),
+                    cd: found.and_then(|r| r.cwd.clone()),
+                    command: found.and_then(|r| r.restart_command()).map(str::to_owned),
+                });
+            }
+        }
+        prepare::spawn_prepare(socket, preps);
     }
 
     fn on_herdr_event(&mut self, event: herdr::Event) {
@@ -832,11 +1227,18 @@ impl Gerdr {
                 }
                 self.sync_herdr_workspace(&pane.workspace_id);
             }
-            herdr::Event::WorkspaceClosed { .. } => {}
+            herdr::Event::WorkspaceClosed { workspace_id } => self.forget_workspace(&workspace_id),
             herdr::Event::WorkspaceRenamed {
                 workspace_id,
                 label,
             } => {
+                if let Some(project) = self.project.clone()
+                    && let Some(record) = self.projects.record_mut(&project, &workspace_id)
+                    && record.label != label
+                {
+                    record.label = label.clone();
+                    self.projects.save();
+                }
                 if let Some(ws) = self
                     .workspaces
                     .iter_mut()
@@ -851,8 +1253,33 @@ impl Gerdr {
         }
     }
 
-    /// Follow what herdr reports about the tabs, polled off the event loop.
-    fn watch_herdr_tabs(&mut self, socket: PathBuf) {
+    /// Forget workspace `workspace_id` of the shown project, closed in herdr.
+    /// Events replay when the subscription opens: one still there stays.
+    fn forget_workspace(&mut self, workspace_id: &str) {
+        let Some(herdr) = self.herdr.as_mut() else {
+            return;
+        };
+        match herdr.workspace_list() {
+            Ok(list) if list.iter().all(|ws| ws.workspace_id != workspace_id) => {}
+            _ => return,
+        }
+        let Some(project) = self
+            .project
+            .clone()
+            .and_then(|id| self.projects.project_mut(&id))
+        else {
+            return;
+        };
+        let before = project.workspaces.len();
+        project.workspaces.retain(|r| r.herdr_id != workspace_id);
+        if project.workspaces.len() != before {
+            self.projects.save();
+        }
+    }
+
+    /// Follow what herdr reports about the tabs, polled off the event loop,
+    /// and remember what runs in the panes. Returns the event loop source.
+    fn watch_herdr_tabs(&mut self, socket: PathBuf) -> Option<RegistrationToken> {
         let (tx, rx): (_, Channel<HashMap<String, herdr::TabDetail>>) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             // Rounds are dropped once the server is gone.
@@ -860,12 +1287,128 @@ impl Gerdr {
                 && state.herdr.is_some()
             {
                 state.herdr_tabs = tabs;
+                state.capture_commands();
             }
         });
         match inserted {
-            Ok(_) => herdr::watch_tabs(socket, AGENT_INTERVAL, move |tabs| tx.send(tabs).is_ok()),
-            Err(err) => tracing::warn!("herdr tabs: {err}"),
+            Ok(token) => {
+                // The thread stops once the source is removed.
+                herdr::watch_tabs(socket, AGENT_INTERVAL, move |tabs| tx.send(tabs).is_ok());
+                Some(token)
+            }
+            Err(err) => {
+                tracing::warn!("herdr tabs: {err}");
+                None
+            }
         }
+    }
+
+    /// Remember what runs in each pane of the shown project, to run it again
+    /// after a server restart, and the layout of its tabs. A command is
+    /// forgotten once its shell has been idle (or its pane gone) for
+    /// `FORGET_IDLE`. A round with no tabs at all says nothing: the server
+    /// may be on its way down.
+    fn capture_commands(&mut self) {
+        if self.herdr_tabs.is_empty() {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        let mut changed = false;
+        let mut live: HashSet<&str> = HashSet::new();
+        let mut seen_workspaces: HashSet<&str> = HashSet::new();
+        for detail in self.herdr_tabs.values() {
+            for (index, pane) in detail.panes.iter().enumerate() {
+                live.insert(&pane.pane_id);
+                seen_workspaces.insert(&pane.workspace_id);
+                let captured = pane
+                    .process
+                    .as_ref()
+                    .and_then(|info| projects::foreground_command(info, pane.cwd.as_deref()));
+                let forget = match captured {
+                    Some(_) => {
+                        self.idle_since.remove(&pane.pane_id);
+                        false
+                    }
+                    None => {
+                        let since = self.idle_since.entry(pane.pane_id.clone()).or_insert(now);
+                        now - *since >= FORGET_IDLE
+                    }
+                };
+                if let Some(record) = self.projects.record_mut(&project, &pane.workspace_id) {
+                    let place = (detail.index, index);
+                    changed |= note_pane(&mut record.panes, &pane.pane_id, place, captured, forget);
+                }
+            }
+        }
+        // Panes gone from a workspace still there.
+        if let Some(p) = self.projects.project_mut(&project) {
+            for record in &mut p.workspaces {
+                if !seen_workspaces.contains(record.herdr_id.as_str()) {
+                    continue;
+                }
+                let before = record.panes.len();
+                record.panes.retain(|r| {
+                    if live.contains(r.pane_id.as_str()) {
+                        return true;
+                    }
+                    let since = self.idle_since.entry(r.pane_id.clone()).or_insert(now);
+                    now - *since < FORGET_IDLE
+                });
+                changed |= record.panes.len() != before;
+            }
+            let recorded: HashSet<&str> = p
+                .workspaces
+                .iter()
+                .flat_map(|r| &r.panes)
+                .map(|r| r.pane_id.as_str())
+                .collect();
+            self.idle_since
+                .retain(|id, _| live.contains(id.as_str()) || recorded.contains(id.as_str()));
+        }
+        if self.changed_tabs().is_empty() {
+            self.tabs_changed = None;
+        } else if now - *self.tabs_changed.get_or_insert(now) >= TABS_SETTLE {
+            changed |= self.record_tabs();
+        }
+        if changed {
+            self.projects.save();
+        }
+    }
+
+    /// The tab layouts of the shown project's workspaces that differ from
+    /// what was saved of them, by herdr workspace id.
+    fn changed_tabs(&self) -> Vec<(String, Vec<TabRecord>)> {
+        let mut changed = Vec::new();
+        for ws in &self.workspaces {
+            let Some(record) = ws.herdr_id().and_then(|id| self.workspace_record(id)) else {
+                continue;
+            };
+            let tabs: Vec<TabRecord> = ws.tabs.iter().filter_map(Tab::save).collect();
+            if record.tabs != tabs {
+                changed.push((record.herdr_id.clone(), tabs));
+            }
+        }
+        changed
+    }
+
+    /// Remember the tab layouts of the shown project's workspaces; whether
+    /// anything changed.
+    fn record_tabs(&mut self) -> bool {
+        self.tabs_changed = None;
+        let changed = self.changed_tabs();
+        let Some(project) = self.project.clone() else {
+            return false;
+        };
+        let any = !changed.is_empty();
+        for (herdr_id, tabs) in changed {
+            if let Some(record) = self.projects.record_mut(&project, &herdr_id) {
+                record.tabs = tabs;
+            }
+        }
+        any
     }
 
     /// Read the Git status of the workspace folders now and every
@@ -1089,8 +1632,12 @@ impl Gerdr {
     }
 
     /// Show the panes of herdr workspace `workspace_id` that gerdr doesn't
-    /// show yet: in the tab mirroring theirs, else in a new tab laid out like
-    /// herdr's, in a new workspace if needed.
+    /// show yet: in the tab mirroring theirs, else in a new tab. A new tab
+    /// holding just the panes a saved tab held is rebuilt as saved, with its
+    /// Zed and apps; any other is laid out like herdr's, with the apps saved
+    /// for it to the right. A new workspace takes its kind and folder from
+    /// the project's record, else from what gerdr told herdr, and its active
+    /// tab from herdr.
     fn sync_herdr_workspace(&mut self, workspace_id: &str) {
         let known: HashSet<String> = self
             .workspaces
@@ -1125,9 +1672,10 @@ impl Gerdr {
             },
         };
         // The new panes by tab, in herdr's tab order, with herdr's layout for new tabs.
-        let order = herdr.tab_list(workspace_id).unwrap_or_default();
+        let order = herdr.tabs(workspace_id).unwrap_or_default();
+        let focused_tab = order.iter().find(|t| t.focused).map(|t| t.tab_id.clone());
         let mut tabs: Vec<(String, Vec<herdr::PaneInfo>, Vec<herdr::LayoutPane>)> = Vec::new();
-        for tab_id in order {
+        for tab_id in order.into_iter().map(|t| t.tab_id) {
             let in_tab: Vec<_> = panes
                 .iter()
                 .filter(|p| p.tab_id == tab_id)
@@ -1150,58 +1698,109 @@ impl Gerdr {
             tabs.push((tab_id, in_tab, cells));
         }
 
-        let w = existing.unwrap_or_else(|| {
-            let info = info.unwrap();
-            let dir = info
-                .dir()
-                .or_else(|| panes[0].cwd.clone())
-                .or_else(home_dir)
-                .unwrap_or_default();
-            let kind = if info.is_project() {
-                WorkspaceKind::Project
-            } else {
-                WorkspaceKind::Terminal
-            };
-            let mut ws = Workspace::new(dir, kind);
-            ws.name = info.label;
-            self.workspaces.push(ws);
-            self.workspaces.len() - 1
-        });
+        let record = self.workspace_record(workspace_id).cloned();
+        let saved = record.as_ref().map_or(Vec::new(), |r| r.tabs.clone());
+        let w = match existing {
+            Some(w) => w,
+            None => {
+                let info = info.unwrap();
+                let (dir, kind) = match &record {
+                    Some(record) => (record.dir.clone(), WorkspaceKind::from_record(record.kind)),
+                    None => {
+                        let dir = info
+                            .dir()
+                            .or_else(|| panes[0].cwd.clone())
+                            .or_else(home_dir)
+                            .unwrap_or_default();
+                        let kind = if info.is_project() {
+                            WorkspaceKind::Project
+                        } else {
+                            WorkspaceKind::Terminal
+                        };
+                        self.remember_workspace(workspace_id, &info.label, kind, &dir);
+                        (dir, kind)
+                    }
+                };
+                let mut ws = Workspace::new(dir, kind);
+                ws.name = info.label;
+                self.workspaces.push(ws);
+                self.workspaces.len() - 1
+            }
+        };
         let dir = self.workspaces[w].dir.clone();
         let area = self.content_rect();
+        // Whether a tab came back as saved: it brings its own Zed, if any.
+        let mut restored_any = false;
+        let mut zed_expected = false;
         for (tab_id, in_tab, cells) in tabs {
+            let mirrored = self.workspaces[w]
+                .tabs
+                .iter()
+                .position(|t| t.herdr_tab_id() == Some(&tab_id));
+            let live: HashSet<&str> = in_tab.iter().map(|p| p.pane_id.as_str()).collect();
+            let saved_tab = saved
+                .iter()
+                .find(|r| same_panes(&r.layout, &live))
+                .filter(|_| mirrored.is_none());
+            // Saved for this tab, but its panes changed since.
+            let extra_apps: Vec<String> = match (mirrored, saved_tab) {
+                (None, None) => saved
+                    .iter()
+                    .find(|r| r.herdr_tab.as_deref() == Some(tab_id.as_str()))
+                    .map_or(Vec::new(), |r| {
+                        saved_apps(&r.layout)
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect()
+                    }),
+                _ => Vec::new(),
+            };
             let mut started = Vec::new();
             for pane in in_tab {
                 if let Some(pid) = self.attach(&pane, &dir) {
                     started.push((self.new_pane_id(), pid, pane));
                 }
             }
-            let ws = &mut self.workspaces[w];
-            let t = match ws
-                .tabs
-                .iter()
-                .position(|t| t.herdr_tab_id() == Some(&tab_id))
-            {
+            let mut restored = RestoredTab::default();
+            let t = match mirrored {
                 Some(t) => t,
                 None => {
-                    let rects: Vec<_> = started
-                        .iter()
-                        .filter_map(|(id, _, pane)| {
-                            let c = cells.iter().find(|c| c.pane_id == pane.pane_id)?.rect;
-                            Some((
-                                *id,
-                                Rectangle::new((c.x, c.y).into(), (c.width, c.height).into()),
-                            ))
-                        })
-                        .collect();
+                    let layout = match saved_tab {
+                        Some(saved_tab) => {
+                            restored_any = true;
+                            let ids = started
+                                .iter()
+                                .map(|(id, _, pane)| (pane.pane_id.clone(), *id))
+                                .collect();
+                            restored = restore_tab(&saved_tab.layout, &ids, &mut self.next_pane);
+                            restored.layout.take()
+                        }
+                        None => {
+                            let rects: Vec<_> = started
+                                .iter()
+                                .filter_map(|(id, _, pane)| {
+                                    let c = cells.iter().find(|c| c.pane_id == pane.pane_id)?.rect;
+                                    Some((
+                                        *id,
+                                        Rectangle::new(
+                                            (c.x, c.y).into(),
+                                            (c.width, c.height).into(),
+                                        ),
+                                    ))
+                                })
+                                .collect();
+                            Node::from_rects(&rects)
+                        }
+                    };
+                    let ws = &mut self.workspaces[w];
                     ws.tabs.push(Tab {
-                        layout: Node::from_rects(&rects),
+                        layout,
                         ..Default::default()
                     });
                     ws.tabs.len() - 1
                 }
             };
-            let tab = &mut ws.tabs[t];
+            let tab = &mut self.workspaces[w].tabs[t];
             for (id, pid, pane) in started {
                 if !tab
                     .layout
@@ -1213,11 +1812,53 @@ impl Gerdr {
                 tab.expected
                     .push(Expected::terminal(pid, id, false, Some(pane)));
             }
+            for command in extra_apps {
+                let id = self.new_pane_id();
+                self.workspaces[w].tabs[t].split(None, id, Some(Dir::Right), area);
+                restored.apps.push((id, command));
+            }
+            zed_expected |= self.fill_restored(w, t, restored);
         }
 
-        // A project gerdr opened gets its Zed back over the first tab.
+        if existing.is_none() {
+            // Tabs without terminals (Zed alone, apps) come back where they were.
+            for (i, saved_tab) in saved.iter().enumerate() {
+                if !saved_tab.layout.herdr_panes().is_empty() {
+                    continue;
+                }
+                let mut restored =
+                    restore_tab(&saved_tab.layout, &HashMap::new(), &mut self.next_pane);
+                let Some(layout) = restored.layout.take() else {
+                    continue;
+                };
+                restored_any = true;
+                let ws = &mut self.workspaces[w];
+                let t = i.min(ws.tabs.len());
+                ws.tabs.insert(
+                    t,
+                    Tab {
+                        layout: Some(layout),
+                        ..Default::default()
+                    },
+                );
+                zed_expected |= self.fill_restored(w, t, restored);
+            }
+            let ws = &mut self.workspaces[w];
+            if let Some(t) = focused_tab
+                .and_then(|id| ws.tabs.iter().position(|t| t.herdr_tab_id() == Some(&id)))
+            {
+                ws.active_tab = t;
+            }
+        }
+
+        // A project gerdr opened gets its Zed back over the first tab,
+        // unless its tabs came back as saved.
         let ws = &self.workspaces[w];
-        if existing.is_none() && ws.kind == WorkspaceKind::Project && !ws.tabs.is_empty() {
+        if existing.is_none()
+            && !restored_any
+            && ws.kind == WorkspaceKind::Project
+            && !ws.tabs.is_empty()
+        {
             let zed = self.new_pane_id();
             let tab = &mut self.workspaces[w].tabs[0];
             let below = tab.layout.take().map(Box::new);
@@ -1231,10 +1872,28 @@ impl Gerdr {
                 None => Node::Leaf(zed),
             });
             tab.expected.push(Expected::new(None, "zed", zed, true));
+            zed_expected = true;
+        }
+        if zed_expected {
             self.launch_next_zed();
         }
+        // Once the whole workspace is back: an app that didn't start left
+        // its leaf, and maybe its tab, empty.
         self.prune();
         self.arrange();
+    }
+
+    /// Fill the leaves `restored` kept in tab `t` of workspace `w`: queue
+    /// its Zed windows and launch its apps. Whether a Zed window was queued.
+    fn fill_restored(&mut self, w: usize, t: usize, restored: RestoredTab) -> bool {
+        let tab = &mut self.workspaces[w].tabs[t];
+        for &zed in &restored.zed {
+            tab.expected.push(Expected::new(None, "zed", zed, true));
+        }
+        for (id, command) in restored.apps {
+            self.launch_into(w, t, Some(id), &command);
+        }
+        !restored.zed.is_empty()
     }
 
     /// Open `dir` as a project workspace (Zed on top, a terminal below) and
@@ -1509,6 +2168,14 @@ impl Gerdr {
         let tabs = self.workspace().map_or(0, |ws| ws.tabs.len());
         let tab = self.workspace().map_or(0, |ws| ws.active_tab);
         let (wss, ws) = (self.workspaces.len(), self.active_workspace);
+        // Without a project, there is nothing to act on yet.
+        let anywhere = matches!(
+            action,
+            Action::Projects | Action::ToggleTheme | Action::Quit
+        );
+        if self.project.is_none() && !anywhere {
+            return;
+        }
         match action {
             Action::NewTab => self.new_tab(),
             Action::CloseTab => self.close_tab(tab),
@@ -1531,14 +2198,58 @@ impl Gerdr {
             Action::ToggleTheme => self.toggle_theme(),
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(),
-            // Contract: wired up by the lifecycle work.
-            Action::Projects | Action::ToggleRestart | Action::Quit => {}
+            Action::Projects => self.open_welcome(true),
+            Action::ToggleRestart => self.toggle_restart(),
+            // Nothing to keep running without a project.
+            Action::Quit if self.project.is_none() => self.quit_app(false),
+            Action::Quit => self.open_quit(),
             Action::CyclePane(step) => self.focus_pane(|tab| {
                 let shown = tab.shown();
                 let current = shown.iter().position(|id| Some(*id) == tab.focused_id())? as isize;
                 Some(shown[(current + step).rem_euclid(shown.len() as isize) as usize])
             }),
             _ => {}
+        }
+    }
+
+    /// Whether the command of the active tab's terminal (see
+    /// `Tab::restart_target`) runs again after a restart: flip it, and say
+    /// so.
+    fn toggle_restart(&mut self) {
+        let pane = self.tab().and_then(Tab::restart_target).cloned();
+        let project = self.project.clone();
+        let record = pane
+            .as_ref()
+            .zip(project)
+            .and_then(|(pane, project)| {
+                self.projects
+                    .record_mut(&project, &pane.workspace_id)?
+                    .panes
+                    .iter_mut()
+                    .find(|r| r.pane_id == pane.pane_id)
+            })
+            .filter(|r| r.command.is_some());
+        let summary = match record {
+            None => "Nothing running in this pane".to_owned(),
+            Some(record) => {
+                let command = record.command.clone().unwrap_or_default();
+                if let Some(i) = record.skip.iter().position(|c| *c == command) {
+                    record.skip.remove(i);
+                    format!("Will restart `{command}` after reboot")
+                } else {
+                    record.skip.push(command.clone());
+                    format!("Won't restart `{command}` after reboot")
+                }
+            }
+        };
+        self.projects.save();
+        let key = pane.map_or_else(String::new, |p| p.pane_id);
+        let body = self
+            .workspace()
+            .map_or("", |ws| ws.name.as_str())
+            .to_owned();
+        if let Some(notifier) = self.notifier.as_mut() {
+            notifier.send(&key, &summary, &body);
         }
     }
 
@@ -1568,9 +2279,19 @@ impl Gerdr {
         });
         self.focus(target);
         self.refresh_pointer_focus();
+        let project = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+            .map(|p| p.name.as_str());
         let title = self
             .workspace()
-            .map_or("gerdr".into(), |ws| format!("{} — gerdr", ws.name));
+            .map(|ws| ws.name.as_str())
+            .into_iter()
+            .chain(project)
+            .chain(["gerdr"])
+            .collect::<Vec<_>>()
+            .join(" — ");
         self.backend.window().set_title(&title);
     }
 
@@ -1658,12 +2379,24 @@ impl Gerdr {
         };
         // The process we started nearest up the window's own, else its app_id.
         let lineage = pid.map(launch::lineage).unwrap_or_default();
-        let found = lineage
+        let ours = lineage
             .iter()
-            .find_map(|pid| find(&|e| e.pid == Some(*pid)))
-            .or_else(|| {
-                find(&|e| e.pid.is_some() && !e.app_id.is_empty() && app_id.contains(e.app_id))
-            });
+            .find_map(|pid| find(&|e| e.pid == Some(*pid)));
+        // A late window of a project switched away from: its processes are
+        // on their way out.
+        let retired = |pid: &u32| {
+            let group = unsafe { libc::getpgid(*pid as i32) };
+            self.retired_groups
+                .iter()
+                .any(|g| *g == *pid as i32 || *g == group)
+        };
+        if ours.is_none() && lineage.iter().any(retired) {
+            window.toplevel().unwrap().send_close();
+            return;
+        }
+        let found = ours.or_else(|| {
+            find(&|e| e.pid.is_some() && !e.app_id.is_empty() && app_id.contains(e.app_id))
+        });
         let (w, t, id, focus, herdr, app_command) = match found {
             Some((w, t, e)) => {
                 let e = self.workspaces[w].tabs[t].expected.remove(e);
@@ -1835,6 +2568,9 @@ impl Gerdr {
                 .to_f64()
                 .contains(pos);
         let reordering = self.reorder.is_some_and(|r| r.moving);
+        if self.quit.is_some() || self.welcome.is_some() {
+            return None;
+        }
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
             return None;
         }
@@ -1874,7 +2610,13 @@ impl Gerdr {
                     })
                     .unwrap_or_else(|| "…".into());
                 let detail = tab.herdr_tab_id().and_then(|id| self.herdr_tabs.get(id));
-                TabView::new(title, detail, &self.agents)
+                let mut view = TabView::new(title, detail, &self.agents);
+                let record = tab.restart_target().and_then(|p| self.pane_record(p));
+                view.restart = record.and_then(|r| {
+                    let command = r.command.as_ref()?;
+                    Some(!r.skip.contains(command))
+                });
+                view
             })
             .collect()
     }
@@ -1899,39 +2641,224 @@ impl Gerdr {
     }
 
     /// Show project `id`: the project shown now keeps running in the
-    /// background.
-    #[allow(dead_code)] // contract: implemented by the lifecycle work
+    /// background. A project without workspaces asks for a folder.
     pub fn switch_project(&mut self, id: &str) {
-        let _ = id;
-        todo!("lifecycle")
+        self.enter_project(id, true);
+    }
+
+    /// Show project `id`; if it has no workspaces and `pick`, ask for a
+    /// folder to open in it.
+    fn enter_project(&mut self, id: &str, pick: bool) {
+        if self.project.as_deref() == Some(id) {
+            self.welcome = None;
+            return;
+        }
+        let Some(session) = self.projects.project(id).map(|p| p.session.clone()) else {
+            return tracing::warn!("no project {id}");
+        };
+        self.detach_project();
+        self.welcome = None;
+        self.quit = None;
+        self.project = Some(id.to_owned());
+        self.projects.last_active = Some(id.to_owned());
+        if let Some(project) = self.projects.project_mut(id) {
+            project.last_used = projects::now();
+            project.state = RunState::Kept;
+        }
+        self.projects.save();
+        self.connect_herdr(&session);
+        self.show_active();
+        if pick && self.workspaces.is_empty() {
+            self.pick_workspace(WorkspaceKind::Project);
+        }
+    }
+
+    /// Let go of the project shown: stop following its session, end the
+    /// windows gerdr started for it (its terminals keep running in herdr)
+    /// and forget what was shown. Children are still reaped.
+    fn detach_project(&mut self) {
+        if self.record_tabs() {
+            self.projects.save();
+        }
+        for token in std::mem::take(&mut self.herdr_sources) {
+            self.loop_handle.remove(token);
+        }
+        self.kill_children();
+        if let Some((mut picker, _)) = self.picker.take() {
+            let _ = picker.kill();
+            let _ = picker.wait();
+        }
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        for window in windows {
+            self.space.unmap_elem(&window);
+        }
+        self.unplaced.clear();
+        self.workspaces.clear();
+        self.agents.clear();
+        self.herdr_tabs.clear();
+        self.git.clear();
+        self.idle_since.clear();
+        self.herdr = None;
+        self.active_workspace = 0;
+        self.drag = None;
+        self.reorder = None;
+        self.terminal_menu = false;
+        self.menu_hover = None;
+        self.stop_switcher_repeat();
+        self.switcher = None;
+        self.project = None;
+        self.focus(None);
+    }
+
+    /// End the process groups gerdr started: each child led its own, so this
+    /// takes down what it handed off to too (Zed's editor). Their windows
+    /// that still show up are closed (see `place`).
+    fn kill_children(&mut self) {
+        for group in std::mem::take(&mut self.process_groups) {
+            unsafe { libc::kill(-group, libc::SIGTERM) };
+            self.retired_groups.push(group);
+        }
     }
 
     /// Start a new, empty project called `name` and show it.
-    #[allow(dead_code)] // contract: implemented by the lifecycle work
     pub fn create_project(&mut self, name: &str) {
-        let _ = name;
-        todo!("lifecycle")
+        let id = self.add_project(name);
+        self.switch_project(&id);
+    }
+
+    /// A new, empty project called `name`; returns its id. A herdr session
+    /// left behind by a forgotten project isn't reused.
+    fn add_project(&mut self, name: &str) -> String {
+        let name = name.trim();
+        let mut taken: Vec<String> = self
+            .projects
+            .projects
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        let id = loop {
+            let refs: Vec<&str> = taken.iter().map(String::as_str).collect();
+            let id = projects::slugify(name, &refs);
+            let left_behind = herdr::session_dir(&projects::session_name(&id)).exists();
+            if !left_behind || taken.len() > 1000 {
+                break id;
+            }
+            taken.push(id);
+        };
+        let now = projects::now();
+        self.projects.projects.push(projects::Project {
+            id: id.clone(),
+            name: name.to_owned(),
+            session: projects::session_name(&id),
+            created: now,
+            last_used: now,
+            state: RunState::Kept,
+            workspaces: Vec::new(),
+        });
+        self.projects.save();
+        id
     }
 
     /// Forget project `id`; its herdr session stays. Not the shown one.
-    #[allow(dead_code)] // contract: implemented by the lifecycle work
     pub fn forget_project(&mut self, id: &str) {
-        let _ = id;
-        todo!("lifecycle")
+        if self.project.as_deref() == Some(id) {
+            return tracing::warn!("not forgetting project {id}: it is the one shown");
+        }
+        self.projects.projects.retain(|p| p.id != id);
+        if self.projects.last_active.as_deref() == Some(id) {
+            self.projects.last_active = None;
+        }
+        self.projects.save();
     }
 
     /// The projects for the welcome screen, most recently used first, by id;
     /// `running` is left `None`.
-    #[allow(dead_code)] // contract: implemented by the lifecycle work
     pub fn project_rows(&self) -> Vec<(String, chrome::ProjectRow)> {
-        todo!("lifecycle")
+        let now = projects::now();
+        let home = home_dir();
+        let mut projects: Vec<_> = self.projects.projects.iter().collect();
+        projects.sort_by_key(|p| std::cmp::Reverse(p.last_used));
+        projects
+            .into_iter()
+            .map(|p| {
+                let dirs: Vec<&Path> = p.workspaces.iter().map(|w| w.dir.as_path()).collect();
+                let row = chrome::ProjectRow {
+                    name: p.name.clone(),
+                    detail: project_detail(&dirs, home.as_deref()),
+                    ago: projects::ago(now, p.last_used),
+                    running: None,
+                    current: self.project.as_deref() == Some(p.id.as_str()),
+                };
+                (p.id.clone(), row)
+            })
+            .collect()
     }
 
     /// End gerdr, stopping the project's session if `stop`.
-    #[allow(dead_code)] // contract: implemented by the lifecycle work
     pub fn quit_app(&mut self, stop: bool) {
-        let _ = stop;
-        todo!("lifecycle")
+        self.stop_on_exit = stop;
+        self.record_tabs();
+        if let Some(project) = self
+            .project
+            .clone()
+            .and_then(|id| self.projects.project_mut(&id))
+        {
+            project.state = if stop {
+                RunState::Stopped
+            } else {
+                RunState::Kept
+            };
+        }
+        self.projects.save();
+        self.loop_signal.stop();
+    }
+
+    /// Show what gerdr was started for: project `name` (by id or name,
+    /// made if there is none), opening `folders` in it; else, with folders,
+    /// the last project shown (or a new one named after the first folder);
+    /// else the last project shown if it was left running, or the welcome
+    /// screen.
+    fn start_project(&mut self, name: Option<&str>, folders: Vec<PathBuf>) {
+        let last = self
+            .projects
+            .last_active
+            .clone()
+            .filter(|id| self.projects.project(id).is_some());
+        let id = match name {
+            Some(name) => {
+                let found = self
+                    .projects
+                    .projects
+                    .iter()
+                    .find(|p| p.id == name || p.name == name);
+                match found {
+                    Some(project) => project.id.clone(),
+                    None => self.add_project(name),
+                }
+            }
+            None if !folders.is_empty() => last.unwrap_or_else(|| {
+                let dir = folders[0].canonicalize().unwrap_or(folders[0].clone());
+                let name = dir
+                    .file_name()
+                    .map_or("project".into(), |n| n.to_string_lossy().into_owned());
+                self.add_project(&name)
+            }),
+            None => match last {
+                Some(id)
+                    if self
+                        .projects
+                        .project(&id)
+                        .is_some_and(|p| p.state == RunState::Kept) =>
+                {
+                    id
+                }
+                _ => return self.open_welcome(false),
+            },
+        };
+        self.enter_project(&id, folders.is_empty());
+        for folder in folders {
+            self.open_project(folder);
+        }
     }
 
     /// What the sidebar and tab strip should show right now.
@@ -1949,8 +2876,8 @@ impl Gerdr {
             menu: self.terminal_menu.then_some(self.menu_hover),
             switcher: self.switcher_view(),
             prefix: self.prefix_armed.then(|| self.keymap.help()),
-            welcome: None,
-            quit: None,
+            welcome: self.welcome_view(),
+            quit: self.quit_view(),
             theme: self.theme,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
@@ -2024,11 +2951,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // Every argument is a folder to open as a workspace; default: the current dir.
-    let mut folders: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    if folders.is_empty() {
-        folders.push(std::env::current_dir()?);
-    }
+    // `--project <name>` picks the project; every other argument is a
+    // folder to open as a workspace in it.
+    let (project_arg, folders) = parse_args(std::env::args_os().skip(1));
     // Own data dir so Zed runs its own instance here instead of handing the
     // windows to a Zed already running on the host.
     let zed_data = home_dir()
@@ -2158,6 +3083,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         idle_since: HashMap::new(),
         retired_groups: Vec::new(),
         stop_on_exit: false,
+        tabs_changed: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -2258,7 +3184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.stop_switcher_repeat();
                 }
             }
-            WinitEvent::CloseRequested => state.loop_signal.stop(),
+            WinitEvent::CloseRequested => state.request_quit(),
         })?;
 
     // Notice children that exit before showing a window, and the folder picker closing.
@@ -2275,24 +3201,211 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TimeoutAction::ToDuration(AGENT_INTERVAL)
         })?;
 
-    state.connect_herdr("gerdr");
+    // The first run turns the session gerdr used before projects into one.
+    state.projects = projects::Store::load();
+    state.projects.save();
     state.watch_git();
     state.connect_notifier();
     state.watch_zoxide();
     state.watch_installed_apps();
-    for folder in folders {
-        state.open_project(folder);
-    }
+    state.start_project(project_arg.as_deref(), folders);
 
     event_loop.run(None, &mut state, |_| {})?;
 
-    for group in &state.process_groups {
-        // Each child led its own process group; take down the whole group,
-        // including processes it handed off to (Zed's editor).
-        unsafe { libc::kill(-group, libc::SIGTERM) };
+    if state.stop_on_exit
+        && let Some(herdr) = state.herdr.as_mut()
+        && let Err(err) = herdr.stop()
+    {
+        tracing::warn!("stopping the project's herdr session: {err}");
     }
+    state.kill_children();
     if let Some((mut picker, _)) = state.picker.take() {
         let _ = picker.kill();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn herdr_leaf(id: &str) -> SavedNode {
+        SavedNode::Leaf(SavedLeaf::Herdr { pane_id: id.into() })
+    }
+
+    fn split(first: SavedNode, second: SavedNode) -> SavedNode {
+        SavedNode::Split {
+            dir: Dir::Down,
+            ratio: 0.7,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    fn app(command: &str) -> SavedNode {
+        SavedNode::Leaf(SavedLeaf::App {
+            command: command.into(),
+        })
+    }
+
+    fn record(pane_id: &str, tab: usize, index: usize, command: Option<&str>) -> PaneRecord {
+        PaneRecord {
+            pane_id: pane_id.into(),
+            tab,
+            index,
+            command: command.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restores_terminals_zed_and_apps_in_place() {
+        let saved = split(
+            SavedNode::Leaf(SavedLeaf::Zed),
+            split(herdr_leaf("w1:p1"), app("firefox")),
+        );
+        let ids = HashMap::from([("w1:p1".to_owned(), 7)]);
+        let mut next = 10;
+        let restored = restore_tab(&saved, &ids, &mut next);
+        assert_eq!(restored.zed, [11]);
+        assert_eq!(restored.apps, [(12, "firefox".to_owned())]);
+        assert_eq!(next, 12);
+        assert_eq!(restored.layout.unwrap().leaves(), [11, 7, 12]);
+    }
+
+    #[test]
+    fn a_terminal_that_is_gone_leaves_its_space_to_its_sibling() {
+        let saved = split(herdr_leaf("w1:p1"), herdr_leaf("w1:p2"));
+        let ids = HashMap::from([("w1:p2".to_owned(), 3)]);
+        let mut next = 0;
+        let restored = restore_tab(&saved, &ids, &mut next);
+        assert_eq!(restored.layout.unwrap().leaves(), [3]);
+        assert_eq!(next, 0);
+    }
+
+    #[test]
+    fn a_saved_tab_matches_only_the_same_panes() {
+        let saved = split(herdr_leaf("w1:p1"), split(herdr_leaf("w1:p2"), app("x")));
+        assert!(same_panes(&saved, &HashSet::from(["w1:p2", "w1:p1"])));
+        assert!(!same_panes(&saved, &HashSet::from(["w1:p1"])));
+        assert!(!same_panes(
+            &saved,
+            &HashSet::from(["w1:p1", "w1:p2", "w1:p3"])
+        ));
+        assert_eq!(saved_apps(&saved), ["x"]);
+    }
+
+    #[test]
+    fn leaves_are_named_by_what_fills_them() {
+        let pane = herdr::PaneInfo {
+            pane_id: "w1:p4".into(),
+            terminal_id: "t".into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            cwd: None,
+        };
+        assert_eq!(
+            saved_leaf(Some(&pane), None, false),
+            Some(SavedLeaf::Herdr {
+                pane_id: "w1:p4".into()
+            })
+        );
+        assert_eq!(
+            saved_leaf(None, Some("zathura"), false),
+            Some(SavedLeaf::App {
+                command: "zathura".into()
+            })
+        );
+        assert_eq!(saved_leaf(None, None, true), Some(SavedLeaf::Zed));
+        assert_eq!(saved_leaf(None, None, false), None);
+    }
+
+    #[test]
+    fn pane_records_are_found_by_id_then_by_place() {
+        let records = [
+            record("w1:p1", 0, 0, Some("make run")),
+            record("w1:p2", 0, 1, Some("celery worker")),
+        ];
+        let live = HashSet::from(["w1:p9", "w1:p2"]);
+        let found = |id, tab, index| {
+            find_pane_record(&records, id, tab, index, &live).map(|r| r.pane_id.as_str())
+        };
+        assert_eq!(found("w1:p2", 5, 5), Some("w1:p2"));
+        // Its id is gone: the record at its place, unless a live pane owns it.
+        assert_eq!(found("w1:p9", 0, 0), Some("w1:p1"));
+        assert_eq!(found("w1:p9", 0, 1), None);
+        assert_eq!(found("w1:p9", 1, 0), None);
+    }
+
+    #[test]
+    fn commands_are_kept_until_forgotten() {
+        let mut records = Vec::new();
+        assert!(!note_pane(&mut records, "w1:p1", (0, 0), None, true));
+        assert!(records.is_empty());
+
+        let captured = projects::Captured {
+            command: "npm run dev".into(),
+            cwd: Some("/src/app".into()),
+            env: vec![("MISE_NODE_VERSION".into(), "20".into())],
+        };
+        let busy = Some(captured);
+        assert!(note_pane(
+            &mut records,
+            "w1:p1",
+            (1, 2),
+            busy.clone(),
+            false
+        ));
+        assert_eq!(records[0].command.as_deref(), Some("npm run dev"));
+        assert_eq!((records[0].tab, records[0].index), (1, 2));
+        assert!(!note_pane(&mut records, "w1:p1", (1, 2), busy, false));
+
+        // Idle for a moment: kept, though its place is followed.
+        assert!(note_pane(&mut records, "w1:p1", (0, 0), None, false));
+        assert_eq!(records[0].command.as_deref(), Some("npm run dev"));
+
+        records[0].skip.push("npm run dev".into());
+        assert!(note_pane(&mut records, "w1:p1", (0, 0), None, true));
+        assert_eq!(records[0].command, None);
+        assert_eq!(records[0].cwd, None);
+        assert!(records[0].env.is_empty());
+        assert_eq!(records[0].skip, ["npm run dev"]);
+    }
+
+    #[test]
+    fn project_detail_names_the_common_folder() {
+        let home = Path::new("/home/me");
+        let detail = |dirs: &[&str]| {
+            let dirs: Vec<&Path> = dirs.iter().map(Path::new).collect();
+            project_detail(&dirs, Some(home))
+        };
+        assert_eq!(detail(&[]), "empty");
+        assert_eq!(detail(&["/home/me/Work/aft"]), "1 repo · ~/Work/aft");
+        let aft = [
+            "/home/me/Work/aft/api",
+            "/home/me/Work/aft/app",
+            "/home/me/Work/aft/api/sub",
+        ];
+        assert_eq!(detail(&aft), "3 repos · ~/Work/aft");
+        assert_eq!(detail(&["/home/me/a", "/home/me/b"]), "2 repos · ~");
+        assert_eq!(detail(&["/srv/a", "/opt/b"]), "2 repos");
+        assert_eq!(detail(&["/srv/a", "/srv/b"]), "2 repos · /srv");
+    }
+
+    #[test]
+    fn args_name_a_project_and_folders() {
+        let args = |list: &[&str]| parse_args(list.iter().map(OsString::from));
+        assert_eq!(args(&[]), (None, vec![]));
+        assert_eq!(
+            args(&["--project", "aft", "/a", "b"]),
+            (
+                Some("aft".into()),
+                vec![PathBuf::from("/a"), PathBuf::from("b")]
+            )
+        );
+        assert_eq!(
+            args(&["/a", "--project=My work"]),
+            (Some("My work".into()), vec![PathBuf::from("/a")])
+        );
+    }
 }
