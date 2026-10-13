@@ -51,6 +51,8 @@ pub struct Welcome {
     confirm_forget: Option<String>,
     /// Whether each project's session runs, by id, once known.
     running: HashMap<String, bool>,
+    /// herdr wasn't found on `PATH` when the screen opened.
+    herdr_missing: bool,
 }
 
 /// What the welcome screen asks gerdr to do.
@@ -345,8 +347,13 @@ fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
 impl Gerdr {
     /// Show the welcome screen, and find out which projects' sessions run.
     pub fn open_welcome(&mut self, in_app: bool) {
-        self.welcome = Some(Welcome::new(self.project_rows(), in_app));
+        self.welcome = Some(Welcome {
+            herdr_missing: !herdr::is_installed(),
+            ..Welcome::new(self.project_rows(), in_app)
+        });
         self.check_running();
+        // It takes the pointer from the client under it.
+        self.refresh_pointer_focus();
     }
 
     /// A key while the welcome screen has the keyboard; what to do once the
@@ -384,6 +391,8 @@ impl Gerdr {
             }
             Outcome::Closed => self.welcome = None,
         }
+        // Gone, the client under the pointer gets it back.
+        self.refresh_pointer_focus();
     }
 
     /// A left click while the welcome screen is shown; `false` if it isn't.
@@ -434,9 +443,10 @@ impl Gerdr {
             Some(user) => format!("{hello}, {user}"),
             None => hello.into(),
         };
-        // Without herdr, the project shown lives only as long as gerdr.
-        let note = (self.herdr.is_none() && self.project.is_some())
-            .then(|| "herdr isn't installed: projects won't keep running".into());
+        // Without herdr, projects live only as long as gerdr.
+        let note = welcome
+            .herdr_missing
+            .then(|| "herdr isn't installed — projects won't keep running".into());
         Some(welcome.view(self.welcome_page(), greeting, note))
     }
 

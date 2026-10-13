@@ -7,7 +7,8 @@
 //! (see `keys` for the defaults, and how to change them). The prefix twice
 //! sends it to the app; Esc or any other key cancels. While the prefix is
 //! armed, a help panel lists the keys. While the quit dialog, the welcome
-//! screen or the switcher is open, every key and click goes to it.
+//! screen or the switcher is open, every key, click and scroll goes to it;
+//! over the welcome screen, the prefix still switches light/dark and quits.
 
 use smithay::{
     backend::input::{
@@ -43,6 +44,13 @@ enum Intercepted {
     Welcome(welcome::Outcome),
     /// The quit dialog asked for this.
     Quit(quit::Outcome),
+}
+
+/// Whether `action`, picked with the prefix, works over the welcome screen:
+/// only what acts on gerdr itself rather than on the project behind (the
+/// welcome screen is already open).
+fn over_welcome(action: &Action) -> bool {
+    matches!(action, Action::ToggleTheme | Action::Quit)
 }
 
 fn drag_cursor(drag: &Drag) -> CursorIcon {
@@ -94,6 +102,16 @@ impl Gerdr {
                         }
                         if state.welcome.is_some() {
                             state.suppressed_keys.push(code);
+                            // The prefix works there too, for what needs no project.
+                            if state.prefix_armed {
+                                state.prefix_armed = false;
+                                let action = state.keymap.action(mods, sym).filter(over_welcome);
+                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                            }
+                            if state.keymap.is_prefix(mods, sym) {
+                                state.prefix_armed = true;
+                                return FilterResult::Intercept(None);
+                            }
                             let out = state.welcome_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Welcome));
                         }
@@ -214,6 +232,26 @@ impl Gerdr {
                     self.refresh_pointer_focus();
                     return;
                 }
+                // An overlay takes every release too, but one ending a press a
+                // client got before the overlay opened: that client is still
+                // grabbing the pointer until it sees the release.
+                if state == ButtonState::Released && (self.quit.is_some() || self.welcome.is_some())
+                {
+                    if pointer.is_grabbed() {
+                        pointer.button(
+                            self,
+                            &ButtonEvent {
+                                button: event.button_code(),
+                                state,
+                                serial,
+                                time: event.time_msec(),
+                            },
+                        );
+                        pointer.frame(self);
+                        self.refresh_pointer_focus();
+                    }
+                    return;
+                }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
                     // An overlay takes every press; only the left button does
                     // anything there.
@@ -271,6 +309,10 @@ impl Gerdr {
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
+                // Nothing scrolls behind an overlay.
+                if self.quit.is_some() || self.welcome.is_some() {
+                    return;
+                }
                 let source = event.source();
                 let mut frame = AxisFrame::new(event.time_msec()).source(source);
                 for axis in [Axis::Horizontal, Axis::Vertical] {
@@ -346,7 +388,6 @@ impl Gerdr {
             }
             if y < chrome::BAR_HEIGHT && x < layout.project.loc.x {
                 self.open_welcome(true);
-                self.refresh_pointer_focus();
                 return;
             }
         }
@@ -431,5 +472,20 @@ impl Gerdr {
             },
         );
         pointer.frame(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn over_the_welcome_screen_the_prefix_only_acts_on_gerdr() {
+        assert!(over_welcome(&Action::ToggleTheme));
+        assert!(over_welcome(&Action::Quit));
+        // Already open, and nothing behind it to act on.
+        assert!(!over_welcome(&Action::Projects));
+        assert!(!over_welcome(&Action::NewTab));
+        assert!(!over_welcome(&Action::Switcher));
     }
 }
