@@ -17,6 +17,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -33,6 +34,8 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE: Duration = Duration::from_millis(300);
 /// How long a server gerdr started may take to answer.
 const STARTUP: Duration = Duration::from_secs(5);
+/// A request that takes longer is logged: it may hold up the compositor.
+const SLOW_CALL: Duration = Duration::from_millis(10);
 /// herdr's caller context, inherited when gerdr itself runs inside herdr; it
 /// must not leak into gerdr's children.
 const INHERITED: [&str; 7] = [
@@ -480,6 +483,16 @@ impl Herdr {
 
     /// Send a request and wait for its result.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let start = Instant::now();
+        let result = self.request(method, params);
+        let took = start.elapsed();
+        if took > SLOW_CALL {
+            tracing::debug!("herdr {method} took {took:?}");
+        }
+        result
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.next_id += 1;
         let id = self.next_id.to_string();
         let fail = |e: &dyn std::fmt::Display| format!("{method}: {e}");
@@ -795,28 +808,47 @@ fn insert_index(order: &[String], before: Option<&str>) -> usize {
         .unwrap_or(order.len())
 }
 
-/// Ask the server on `socket` about its tabs every `interval`, on a thread of
-/// its own so a slow answer never holds up the compositor, and hand each
-/// round to `send` (empty while the server is gone). Stops once `send`
-/// returns false.
+/// What the server said about its tabs and agents in one round.
+pub struct Round {
+    pub tabs: HashMap<String, TabDetail>,
+    /// `None` if the server didn't answer.
+    pub agents: Option<Vec<AgentInfo>>,
+}
+
+/// Ask the server on `socket` about its tabs and agents every `interval`, on
+/// a thread of its own so a slow answer never holds up the compositor, and
+/// hand each round to `send` (no tabs while the server is gone). A message
+/// on the returned sender asks for a round now. Stops once `send` returns
+/// false or the sender is dropped.
 pub fn watch_tabs(
     socket: PathBuf,
     interval: Duration,
-    mut send: impl FnMut(HashMap<String, TabDetail>) -> bool + Send + 'static,
-) {
+    mut send: impl FnMut(Round) -> bool + Send + 'static,
+) -> mpsc::Sender<()> {
+    let (poke, poked) = mpsc::channel();
     std::thread::spawn(move || {
         let mut herdr = Herdr::on_socket(socket);
         loop {
-            let details = herdr
+            let tabs = herdr
                 .tab_details()
                 .inspect_err(|err| tracing::debug!("herdr: {err}"))
                 .unwrap_or_default();
-            if !send(details) {
+            let agents = herdr
+                .agent_list()
+                .inspect_err(|err| tracing::debug!("herdr: {err}"))
+                .ok();
+            if !send(Round { tabs, agents }) {
                 return;
             }
-            std::thread::sleep(interval);
+            match poked.recv_timeout(interval) {
+                // Pokes that came in the meantime ask for the same round.
+                Ok(()) => while poked.try_recv().is_ok() {},
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
         }
     });
+    poke
 }
 
 /// The command that shows herdr terminal `terminal_id` in an Alacritty

@@ -394,17 +394,9 @@ const PACKAGE_CHANGES: &[&str] = &[
     "lock",
 ];
 
-/// Programs never run again after a restart, by name: they edit, page,
-/// reach other machines, change files or the system, take over the
-/// terminal, or are better started by hand.
+/// Programs never run again after a restart, by name: they page, reach
+/// other machines, or change files or the system.
 const DENY: &[(&[&str], Deny)] = &[
-    // Editors.
-    (
-        &[
-            "vim", "nvim", "vi", "nano", "emacs", "hx", "helix", "micro", "kak",
-        ],
-        Deny::Always,
-    ),
     // Pagers.
     (&["less", "more", "man", "most", "bat"], Deny::Always),
     // Other machines.
@@ -418,28 +410,6 @@ const DENY: &[(&[&str], Deny)] = &[
     (&["rm", "mv", "cp", "dd", "shred"], Deny::Always),
     // Privileges.
     (&["sudo", "doas", "su"], Deny::Always),
-    // Full-screen tools and multiplexers.
-    (
-        &[
-            "top", "htop", "btop", "yazi", "ranger", "nnn", "lf", "tmux", "zellij", "herdr",
-            "screen",
-        ],
-        Deny::Always,
-    ),
-    // Coding agents.
-    (
-        &[
-            "claude",
-            "codex",
-            "opencode",
-            "aider",
-            "gemini",
-            "goose",
-            "cursor-agent",
-            "amp",
-        ],
-        Deny::Always,
-    ),
     (
         &["npm", "pnpm", "yarn", "bun"],
         Deny::FirstArg(NODE_CHANGES),
@@ -454,7 +424,7 @@ const DENY: &[(&[&str], Deny)] = &[
     (&["python", "python3", "node", "ipython"], Deny::NoScript),
 ];
 
-/// Interpreters whose script names the program (`python3 ~/.local/bin/aider`).
+/// Interpreters whose script names the program (`python3 ~/.local/bin/pip`).
 const INTERPRETERS: [&str; 5] = ["python", "python3", "node", "bun", "deno"];
 
 /// The last part of a path.
@@ -524,6 +494,31 @@ fn usable_argv0(argv0: &str) -> bool {
         && !argv0.contains(char::is_whitespace)
 }
 
+/// What npm was run with, from the title it gives its process in place of
+/// its command line (`npm exec nx run app:serve` for `npx nx run
+/// app:serve`). The title holds only npm's positional arguments, unquoted,
+/// so it is read back only where little is lost: `npm exec` (or `npm x`)
+/// comes back as `npx`, which hands the rest to the command as it is;
+/// another npm command only if no word is an option, which the title would
+/// have taken out from behind its `--`. Never with secrets npm blanked out.
+fn npm_title_argv(title: &str) -> Option<Vec<&str>> {
+    let words: Vec<&str> = title.split_whitespace().collect();
+    let ["npm", command, args @ ..] = words.as_slice() else {
+        return None;
+    };
+    if words.iter().any(|word| word.contains("***")) {
+        return None;
+    }
+    match (*command, args) {
+        ("exec" | "x", [program, ..]) if !program.starts_with('-') => {
+            Some(std::iter::once("npx").chain(args.iter().copied()).collect())
+        }
+        ("exec" | "x", _) => None,
+        _ if args.iter().any(|arg| arg.starts_with('-')) => None,
+        _ => Some(words),
+    }
+}
+
 /// The words of `command`, as `shell_quote` quoted them: single quotes and
 /// backslashes undone.
 fn split_command(command: &str) -> Vec<String> {
@@ -582,7 +577,14 @@ pub fn foreground_command(
     // Without argv, the command line is trusted only as a single word: its
     // spaces can't be told from those inside an argument.
     let cmdline = leader.cmdline.trim();
-    let argv: Vec<&str> = if leader.argv.is_empty() {
+    let title = match leader.argv.as_slice() {
+        [title] => title.as_str(),
+        [] => cmdline,
+        _ => "",
+    };
+    let argv: Vec<&str> = if let Some(argv) = npm_title_argv(title) {
+        argv
+    } else if leader.argv.is_empty() {
         if cmdline.contains(char::is_whitespace) {
             let rough: Vec<&str> = cmdline.split_whitespace().collect();
             return untracked(denied(&leader.name, &rough));
@@ -972,7 +974,7 @@ mod tests {
         pane.command = None;
         assert_eq!(pane.restart_command(), None);
         // Saved before such commands were left out.
-        pane.command = Some("'/usr/bin/nvim' main.rs".into());
+        pane.command = Some("'/usr/bin/less' app.log".into());
         assert_eq!(pane.restart_command(), None);
         pane.command = Some("sudo dnf upgrade".into());
         assert_eq!(pane.restart_command(), None);
@@ -1146,7 +1148,7 @@ mod tests {
         assert_eq!(one(""), untracked);
         assert_eq!(one("gunicorn:"), untracked);
         assert_eq!(
-            one("vim notes.md"),
+            one("less notes.md"),
             Some(Foreground::Untracked {
                 pid: NO_PID + 1,
                 denied: true,
@@ -1189,12 +1191,46 @@ mod tests {
     }
 
     #[test]
+    fn npm_titles_are_read_back() {
+        let titled = |argv: &[&str], cmdline: &str| {
+            let fg = info(
+                NO_PID,
+                NO_PID + 1,
+                vec![process(NO_PID + 1, "npm exec nx run", argv, cmdline, "/w")],
+            );
+            match foreground_command(&fg, None) {
+                Some(Foreground::Busy { captured, .. }) => Some(captured.command),
+                _ => None,
+            }
+        };
+        let title = "npm exec nx run ao-app:serve:local";
+        assert_eq!(
+            titled(&[title], title).as_deref(),
+            Some("npx nx run ao-app:serve:local")
+        );
+        // Known by the command line alone too.
+        assert_eq!(
+            titled(&[], title).as_deref(),
+            Some("npx nx run ao-app:serve:local")
+        );
+        assert_eq!(
+            titled(&["npm exec vite --port 3000"], "").as_deref(),
+            Some("npx vite --port 3000")
+        );
+        assert_eq!(titled(&["npm run dev"], "").as_deref(), Some("npm run dev"));
+        // `npm run dev -- --port 3000`: without its `--`, npm takes the flag.
+        assert_eq!(titled(&["npm run dev --port 3000"], ""), None);
+        assert_eq!(titled(&["npm exec"], ""), None);
+        assert_eq!(titled(&["npm install"], ""), None);
+        assert_eq!(titled(&["npm exec x https://***@host"], ""), None);
+    }
+
+    #[test]
     fn denies_what_must_not_run_again() {
         let no = |argv: &[&str]| denied(argv[0], argv);
         for argv in [
-            &["nvim", "src/main.rs"][..],
-            &["/usr/bin/vim"],
-            &["less", "+F", "log"],
+            &["less", "+F", "log"][..],
+            &["/usr/bin/less", "log"],
             &["bat", "README.md"],
             &["ssh", "host"],
             &["git", "rebase", "-i"],
@@ -1209,17 +1245,13 @@ mod tests {
             &["pip3", "install", "-r", "requirements.txt"],
             &["apt-get", "upgrade"],
             &["mise", "install"],
-            &["htop"],
-            &["tmux", "attach"],
-            &["claude", "--resume"],
-            &["cursor-agent"],
             &["python3"],
             &["python3.12", "-q"],
             &["node", "--inspect"],
             &["ipython"],
             // Scripts and modules run by an interpreter.
-            &["python3", "/home/me/.local/bin/aider", "--model", "x"],
-            &["node", "/usr/lib/node_modules/.bin/codex"],
+            &["python3", "/home/me/.local/bin/pip", "install", "x"],
+            &["node", "/usr/lib/node_modules/.bin/npm", "install"],
             &["python", "-m", "pip", "install", "x"],
         ] {
             assert!(no(argv), "{argv:?}");
@@ -1240,18 +1272,26 @@ mod tests {
             &["tail", "-f", "log"],
             &["gitk"],
             &["npm"],
+            // Editors, full-screen tools and coding agents come back.
+            &["nvim", "src/main.rs"],
+            &["htop"],
+            &["tmux", "attach"],
+            &["claude", "--resume"],
+            &["cursor-agent"],
+            &["python3", "/home/me/.local/bin/aider", "--model", "x"],
+            &["node", "/usr/lib/node_modules/.bin/codex"],
         ] {
             assert!(!no(argv), "{argv:?}");
         }
         // By the process name alone, too.
-        assert!(denied("nvim", &["/opt/editor-wrapper"]));
+        assert!(denied("less", &["/opt/pager-wrapper"]));
         // But a name can't tell a script from a prompt.
         assert!(!denied("python3", &["[celeryd: x]"]));
 
         let denied_fg = info(
             NO_PID,
             NO_PID + 1,
-            vec![process(NO_PID + 1, "nvim", &["nvim", "x.rs"], "", "/w")],
+            vec![process(NO_PID + 1, "less", &["less", "x.log"], "", "/w")],
         );
         assert_eq!(
             foreground_command(&denied_fg, None),
@@ -1270,7 +1310,7 @@ mod tests {
         );
         assert!(split_command("  ").is_empty());
         assert_eq!(split_command("''"), [""]);
-        assert!(denied_command("'nvim' x"));
+        assert!(denied_command("'less' x"));
         assert!(!denied_command("'npm' run dev"));
         assert!(!denied_command(""));
     }

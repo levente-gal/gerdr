@@ -7,9 +7,10 @@ use smithay::{
         allocator::dmabuf::Dmabuf,
         renderer::{ImportDma, utils::on_commit_buffer_handler},
     },
-    delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_dmabuf,
-    delegate_fractional_scale, delegate_output, delegate_primary_selection, delegate_seat,
-    delegate_shm, delegate_viewporter, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
+    delegate_dmabuf, delegate_ext_data_control, delegate_fractional_scale, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{PopupKind, Window, find_popup_root_surface, get_popup_toplevel_coords},
     input::{
         Seat, SeatHandler, SeatState,
@@ -38,9 +39,14 @@ use smithay::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
                 set_data_device_focus,
             },
+            ext_data_control::{
+                DataControlHandler as ExtDataControlHandler,
+                DataControlState as ExtDataControlState,
+            },
             primary_selection::{
                 PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
             },
+            wlr_data_control::{DataControlHandler, DataControlState},
         },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -293,6 +299,18 @@ impl DataDeviceHandler for Gerdr {
     }
 }
 
+impl DataControlHandler for Gerdr {
+    fn data_control_state(&self) -> &DataControlState {
+        &self.data_control_state
+    }
+}
+
+impl ExtDataControlHandler for Gerdr {
+    fn data_control_state(&self) -> &ExtDataControlState {
+        &self.ext_data_control_state
+    }
+}
+
 impl ClientDndGrabHandler for Gerdr {}
 impl ServerDndGrabHandler for Gerdr {}
 impl OutputHandler for Gerdr {}
@@ -306,6 +324,8 @@ delegate_xdg_decoration!(Gerdr);
 delegate_seat!(Gerdr);
 delegate_data_device!(Gerdr);
 delegate_primary_selection!(Gerdr);
+delegate_data_control!(Gerdr);
+delegate_ext_data_control!(Gerdr);
 delegate_output!(Gerdr);
 delegate_viewporter!(Gerdr);
 delegate_fractional_scale!(Gerdr);

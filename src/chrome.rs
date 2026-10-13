@@ -4318,17 +4318,24 @@ impl Painter {
             .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
         let baseline = (top as f32 + (height as f32 + cap_height) / 2.0).round();
 
-        let mut shown = text.to_string();
-        if x + self.text_width(&shown, size, scale) > max_x {
+        let (mut shown, mut cut) = (text, false);
+        if x + self.text_width(text, size, scale) > max_x {
+            // The longest start of `text` that fits with an ellipsis after it.
             let ellipsis = self.text_width("…", size, scale);
-            while !shown.is_empty() && x + self.text_width(&shown, size, scale) + ellipsis > max_x {
-                shown.pop();
+            let mut width = 0.0;
+            let mut end = 0;
+            for (i, ch) in text.char_indices() {
+                width += scaled.h_advance(scaled.glyph_id(ch));
+                if x + width + ellipsis > max_x {
+                    break;
+                }
+                end = i + ch.len_utf8();
             }
-            shown.push('…');
+            (shown, cut) = (&text[..end], true);
         }
 
         let mut pen = x;
-        for ch in shown.chars() {
+        for ch in shown.chars().chain(cut.then_some('…')) {
             let id = scaled.glyph_id(ch);
             let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
             pen += scaled.h_advance(id);
@@ -4686,10 +4693,14 @@ impl Canvas {
     }
 
     fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, [r, g, b]: Rgb) {
+        let (x0, x1) = (x.max(0), (x + w).min(self.w));
+        if x0 >= x1 {
+            return;
+        }
         for py in y.max(0)..(y + h).min(self.h) {
-            for px in x.max(0)..(x + w).min(self.w) {
-                let i = ((py * self.w + px) * 4) as usize;
-                self.px[i..i + 4].copy_from_slice(&[b, g, r, 0xff]);
+            let row = ((py * self.w + x0) * 4) as usize..((py * self.w + x1) * 4) as usize;
+            for pixel in self.px[row].as_chunks_mut::<4>().0 {
+                pixel.copy_from_slice(&[b, g, r, 0xff]);
             }
         }
     }
@@ -4699,8 +4710,15 @@ impl Canvas {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {
             return;
         }
-        let i = ((y * self.w + x) * 4) as usize;
         let a = coverage.clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return;
+        }
+        let i = ((y * self.w + x) * 4) as usize;
+        if a >= 1.0 {
+            self.px[i..i + 4].copy_from_slice(&[b, g, r, 0xff]);
+            return;
+        }
         for (dst, src) in self.px[i..i + 4].iter_mut().zip([b, g, r, 0xff]) {
             *dst = (*dst as f32 * (1.0 - a) + src as f32 * a).round() as u8;
         }
@@ -4760,21 +4778,47 @@ impl Canvas {
     /// A filled, anti-aliased rounded rectangle (physical pixels).
     fn rounded(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, color: Rgb) {
         let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+        let at = |px: i32, py: i32| {
+            coverage(rounded_rect(
+                px as f32 + 0.5,
+                py as f32 + 0.5,
+                x,
+                y,
+                w,
+                h,
+                r,
+            ))
+        };
+        let (x0, x1) = (
+            (x.floor() as i32).max(0),
+            ((x + w).ceil() as i32).min(self.w),
+        );
         for py in (y.floor() as i32).max(0)..((y + h).ceil() as i32).min(self.h) {
-            for px in (x.floor() as i32).max(0)..((x + w).ceil() as i32).min(self.w) {
-                let a = coverage(rounded_rect(
-                    px as f32 + 0.5,
-                    py as f32 + 0.5,
-                    x,
-                    y,
-                    w,
-                    h,
-                    r,
-                ));
-                if a > 0.0 {
-                    self.blend(px, py, color, a);
+            // The shape is convex: blend the edges in from both ends of the
+            // row up to the first fully covered pixel, and fill between.
+            let mut left = x0;
+            while left < x1 {
+                let a = at(left, py);
+                if a >= 1.0 {
+                    break;
                 }
+                if a > 0.0 {
+                    self.blend(left, py, color, a);
+                }
+                left += 1;
             }
+            let mut right = x1;
+            while right > left {
+                let a = at(right - 1, py);
+                if a >= 1.0 {
+                    break;
+                }
+                if a > 0.0 {
+                    self.blend(right - 1, py, color, a);
+                }
+                right -= 1;
+            }
+            self.fill(left, py, right - left, 1, color);
         }
     }
 

@@ -85,7 +85,11 @@ use smithay::{
         dmabuf::{DmabufFeedbackBuilder, DmabufState},
         fractional_scale::{FractionalScaleManagerState, with_fractional_scale},
         output::OutputManagerState,
-        selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
+        selection::{
+            data_device::DataDeviceState,
+            ext_data_control::DataControlState as ExtDataControlState,
+            primary_selection::PrimarySelectionState, wlr_data_control::DataControlState,
+        },
         shell::xdg::{XdgShellState, XdgToplevelSurfaceData, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -110,6 +114,8 @@ const REAP_INTERVAL: Duration = Duration::from_millis(500);
 /// How often the agent cards are refreshed from herdr, for what changes
 /// without an event (terminal titles).
 const AGENT_INTERVAL: Duration = Duration::from_secs(1);
+/// A frame that takes longer to draw is logged.
+const SLOW_FRAME: Duration = Duration::from_millis(20);
 /// How often the Git status of the workspace folders is read again.
 const GIT_INTERVAL: Duration = Duration::from_secs(3);
 /// How long a window may still show up after the process we started exited
@@ -878,6 +884,8 @@ pub struct Gerdr {
     /// The event loop sources following the project's herdr session, removed
     /// when switching to another project.
     pub herdr_sources: Vec<RegistrationToken>,
+    /// Asks the thread polling the project's herdr session for a round now.
+    herdr_poke: Option<std::sync::mpsc::Sender<()>>,
     /// Since when each herdr pane's shell has been idle, by pane id: its
     /// command is forgotten only after a while, so panes dying on shutdown
     /// don't count.
@@ -929,6 +937,8 @@ pub struct Gerdr {
     pub seat_state: SeatState<Gerdr>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
+    pub data_control_state: DataControlState,
+    pub ext_data_control_state: ExtDataControlState,
     /// Clipboard bridge to the host; `None` if the host doesn't support it.
     pub host_clipboard: Option<clipboard::HostClipboard>,
     pub viewporter_state: ViewporterState,
@@ -1327,6 +1337,7 @@ impl Gerdr {
                 Err(()) => {
                     tracing::warn!("herdr server went away; new terminals won't persist");
                     state.herdr = None;
+                    state.herdr_poke = None;
                     state.agents.clear();
                     state.herdr_tabs.clear();
                     // Closed as it went down: they come back with it.
@@ -1451,7 +1462,7 @@ impl Gerdr {
             }
         }
         if agents_changed {
-            self.refresh_agents();
+            self.poke_herdr();
         }
     }
 
@@ -1481,23 +1492,30 @@ impl Gerdr {
         }
     }
 
-    /// Follow what herdr reports about the tabs, polled off the event loop,
-    /// and remember what runs in the panes. Returns the event loop source.
+    /// Follow what herdr reports about the tabs and agents, polled off the
+    /// event loop, and remember what runs in the panes. Returns the event
+    /// loop source.
     fn watch_herdr_tabs(&mut self, socket: PathBuf) -> Option<RegistrationToken> {
-        let (tx, rx): (_, Channel<HashMap<String, herdr::TabDetail>>) = channel::channel();
+        let (tx, rx): (_, Channel<herdr::Round>) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             // Rounds are dropped once the server is gone.
-            if let channel::Event::Msg(tabs) = event
+            if let channel::Event::Msg(round) = event
                 && state.herdr.is_some()
             {
-                state.herdr_tabs = tabs;
+                state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                if let Some(agents) = round.agents {
+                    state.notify_agents(&agents);
+                    state.agents = agents;
+                }
             }
         });
         match inserted {
             Ok(token) => {
                 // The thread stops once the source is removed.
-                herdr::watch_tabs(socket, AGENT_INTERVAL, move |tabs| tx.send(tabs).is_ok());
+                let poke =
+                    herdr::watch_tabs(socket, AGENT_INTERVAL, move |round| tx.send(round).is_ok());
+                self.herdr_poke = Some(poke);
                 Some(token)
             }
             Err(err) => {
@@ -1717,6 +1735,13 @@ impl Gerdr {
         }
     }
 
+    /// Have the agents and tabs read again soon, off the event loop.
+    fn poke_herdr(&self) {
+        if let Some(poke) = &self.herdr_poke {
+            let _ = poke.send(());
+        }
+    }
+
     /// Notify of each of `agents` that just came to need input or finished
     /// where the user can't see it: in a hidden tab, or anywhere while
     /// gerdr's window is in the background. herdr's own idea of what the
@@ -1831,7 +1856,7 @@ impl Gerdr {
         {
             tracing::debug!("herdr: {err}");
         }
-        self.refresh_agents();
+        self.poke_herdr();
     }
 
     /// The agent cards of each workspace, in sidebar order.
@@ -3156,6 +3181,7 @@ impl Gerdr {
         for token in std::mem::take(&mut self.herdr_sources) {
             self.loop_handle.remove(token);
         }
+        self.herdr_poke = None;
         let project = self.project.clone().unwrap_or_default();
         let panes: Vec<Pane> = self
             .workspaces
@@ -3767,6 +3793,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut space = Space::default();
     space.map_output(&output, (0, 0));
 
+    // Data control lets clipboard tools such as wl-copy set the selection
+    // without a window of their own; without it they open one to get the
+    // keyboard focus, and gerdr would tile it as a pane.
+    let primary_selection_state = PrimarySelectionState::new::<Gerdr>(&dh);
+    let data_control_state =
+        DataControlState::new::<Gerdr, _>(&dh, Some(&primary_selection_state), |_| true);
+    let ext_data_control_state =
+        ExtDataControlState::new::<Gerdr, _>(&dh, Some(&primary_selection_state), |_| true);
+
     // Wayland socket for the children. A fixed name, so shells that outlive
     // gerdr in herdr still reach the next one.
     let socket = ListeningSocketSource::with_name("gerdr-0")
@@ -3833,6 +3868,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         notice: None,
         quit: None,
         herdr_sources: Vec::new(),
+        herdr_poke: None,
         idle_since: HashMap::new(),
         retired_groups: Vec::new(),
         tabs_changed: None,
@@ -3856,7 +3892,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_manager_state: OutputManagerState::new_with_xdg_output::<Gerdr>(&dh),
         seat_state,
         data_device_state: DataDeviceState::new::<Gerdr>(&dh),
-        primary_selection_state: PrimarySelectionState::new::<Gerdr>(&dh),
+        primary_selection_state,
+        data_control_state,
+        ext_data_control_state,
         host_clipboard: clipboard::HostClipboard::init(&event_loop.handle()),
         viewporter_state: ViewporterState::new::<Gerdr>(&dh),
         fractional_scale_state: FractionalScaleManagerState::new::<Gerdr>(&dh),
@@ -3905,6 +3943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             WinitEvent::Input(event) => state.process_input_event(event),
             WinitEvent::Redraw => {
+                let start = Instant::now();
                 let size = state.backend.window_size();
                 let view = state.chrome_view();
                 let clear_color = state.theme.clear_color();
@@ -3929,6 +3968,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 let _ = state.backend.submit(Some(&[Rectangle::from_size(size)]));
+                let took = start.elapsed();
+                if took > SLOW_FRAME {
+                    tracing::debug!("frame took {took:?}");
+                }
 
                 let elapsed = state.start_time.elapsed();
                 for window in state.space.elements() {
@@ -3957,12 +4000,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_source(Timer::from_duration(REAP_INTERVAL), |_, _, state| {
             state.reap_children();
             TimeoutAction::ToDuration(REAP_INTERVAL)
-        })?;
-    event_loop
-        .handle()
-        .insert_source(Timer::from_duration(AGENT_INTERVAL), |_, _, state| {
-            state.refresh_agents();
-            TimeoutAction::ToDuration(AGENT_INTERVAL)
         })?;
 
     // The first run turns the session gerdr used before projects into one.
