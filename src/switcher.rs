@@ -633,6 +633,7 @@ impl Gerdr {
             if let channel::Event::Msg(dirs) = event {
                 state.recent_dirs = dirs;
                 state.refresh_switcher();
+                state.refresh_project_menu();
             }
         });
         match inserted {
@@ -644,7 +645,8 @@ impl Gerdr {
         }
     }
 
-    fn query_zoxide(&self) {
+    /// Read zoxide's folders again, off the event loop, into `recent_dirs`.
+    pub fn query_zoxide(&self) {
         let Some(tx) = self.zoxide.clone() else {
             return;
         };
