@@ -497,9 +497,10 @@ pub(crate) enum Step {
     Drop,
 }
 
-/// Whether `process` is a shell, by its name (a login shell's starts with
-/// `-`) or else its first argument.
-pub(crate) fn is_shell(process: &Process) -> bool {
+/// Whether `process` is a shell waiting for what's typed in, by its name (a
+/// login shell's starts with `-`) or else its first argument: not one
+/// running a script or a `-c` command (see `runs_script`).
+pub(crate) fn is_interactive_shell(process: &Process) -> bool {
     let argv0 = process
         .argv
         .first()
@@ -508,9 +509,44 @@ pub(crate) fn is_shell(process: &Process) -> bool {
         .into_iter()
         .flatten()
         .any(|name| SHELLS.contains(&name.trim_start_matches('-')))
+        && !runs_script(&process.argv)
 }
 
-/// The kind of shell `process` is, if it's one, known as `is_shell` knows.
+/// Options of shells that take the next argument as their value.
+const SHELL_VALUE_OPTIONS: [&str; 8] = [
+    "-o",
+    "+o",
+    "-O",
+    "+O",
+    "--rcfile",
+    "--init-file",
+    "--config",
+    "--env-config",
+];
+
+/// Whether a shell run as `argv` runs a script (`sh runlocal.sh`, or
+/// `./runlocal.sh` with its `#!`) or a command (`bash -lc …`) rather than
+/// waiting at its prompt: it has an argument that isn't an option.
+pub(crate) fn runs_script(argv: &[String]) -> bool {
+    let mut args = argv.iter().skip(1).map(String::as_str);
+    while let Some(arg) = args.next() {
+        if SHELL_VALUE_OPTIONS.contains(&arg) {
+            args.next();
+            continue;
+        }
+        let short = arg.strip_prefix('-').filter(|o| !o.starts_with('-'));
+        match arg {
+            "--" => return args.next().is_some(),
+            _ if short.is_some_and(|o| o.contains('c')) => return true,
+            _ if arg.starts_with('-') || arg.starts_with('+') => {}
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// The kind of shell `process` is, if it's one, known as
+/// `is_interactive_shell` knows.
 fn shell_name(process: &Process) -> Option<Shell> {
     let argv0 = process
         .argv
@@ -539,7 +575,7 @@ pub(crate) fn step(info: &Result<ProcessInfo, String>) -> Step {
         Some(group) if group == shell => Step::Send,
         Some(group) => {
             let leader = info.foreground_processes.iter().find(|p| p.pid == group);
-            if leader.is_some_and(is_shell) {
+            if leader.is_some_and(is_interactive_shell) {
                 Step::Send
             } else {
                 Step::Busy
@@ -871,6 +907,24 @@ mod tests {
         // Known by its first argument when its name isn't a shell's.
         let bash = process(20, "x", &["/usr/bin/bash", "-l"]);
         assert_eq!(step(&info(Some(10), Some(20), Some(bash))), Step::Send);
+        let options = process(20, "bash", &["bash", "-o", "vi", "--rcfile", "rc"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(options))), Step::Send);
+    }
+
+    #[test]
+    fn a_shell_running_a_script_is_busy() {
+        // `./runlocal.sh`, run by its `#!`.
+        let script = process(20, "runlocal.sh", &["/bin/bash", "./runlocal.sh"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(script))), Step::Busy);
+        let script = process(20, "sh", &["sh", "-e", "runlocal.sh"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(script))), Step::Busy);
+        let command = process(20, "bash", &["bash", "-lc", "make serve"]);
+        assert_eq!(step(&info(Some(10), Some(20), Some(command))), Step::Busy);
+        let after_dashes = process(20, "zsh", &["zsh", "--", "serve.zsh"]);
+        assert_eq!(
+            step(&info(Some(10), Some(20), Some(after_dashes))),
+            Step::Busy
+        );
     }
 
     #[test]

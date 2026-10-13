@@ -572,8 +572,9 @@ pub fn foreground_command(
         .iter()
         .find(|p| p.pid == group)
         .or(info.foreground_processes.first())?;
-    // Login shells show up as `-zsh`.
-    if SHELLS.contains(&leader.name.trim_start_matches('-')) {
+    // Login shells show up as `-zsh`; one running a script isn't idle.
+    let name = leader.name.trim_start_matches('-');
+    if SHELLS.contains(&name) && (name == "herdr" || !crate::prepare::runs_script(&leader.argv)) {
         return Some(Foreground::Idle);
     }
     let pid = leader.pid;
@@ -1026,6 +1027,25 @@ mod tests {
             vec![process(NO_PID + 1, "herdr", &["herdr"], "herdr", "/w")],
         );
         assert_eq!(foreground_command(&herdr, None), Some(Foreground::Idle));
+    }
+
+    #[test]
+    fn shell_running_a_script_is_busy() {
+        let script = info(
+            NO_PID,
+            NO_PID + 1,
+            vec![process(
+                NO_PID + 1,
+                "sh",
+                &["sh", "runlocal.sh"],
+                "sh runlocal.sh",
+                "/w",
+            )],
+        );
+        assert!(matches!(
+            foreground_command(&script, None),
+            Some(Foreground::Busy { captured, .. }) if captured.command == "sh runlocal.sh"
+        ));
     }
 
     #[test]

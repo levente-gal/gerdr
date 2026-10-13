@@ -243,7 +243,7 @@ fn running_leader(info: &ProcessInfo) -> Option<&Process> {
         .iter()
         .find(|p| p.pid == group)
         .or(info.foreground_processes.first())?;
-    (!prepare::is_shell(leader)).then_some(leader)
+    (!prepare::is_interactive_shell(leader)).then_some(leader)
 }
 
 /// What a job's bar says it is doing.
@@ -872,6 +872,13 @@ mod tests {
         let content = bar_content(Some(&running(9, "vim notes")), Some(&remembered), None);
         assert_eq!(content.label, "vim notes");
         assert!(!content.can_restart && content.can_stop);
+    }
+
+    #[test]
+    fn bar_content_of_a_script_running() {
+        let content = bar_content(Some(&running(9, "/bin/bash ./runlocal.sh")), None, None);
+        assert_eq!(content.status, BarStatus::Running);
+        assert!(content.can_stop);
     }
 
     #[test]
