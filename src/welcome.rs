@@ -1,6 +1,7 @@
 //! The welcome screen: shown when no project is open (first run, or the last
-//! project was stopped), and on demand to switch projects. A greeting, the
-//! recent projects to filter and pick from, and a button to start a new one.
+//! project was stopped). While one is open, the project menu switches
+//! projects instead. A greeting, the recent projects to filter and pick
+//! from, and a button to start a new one.
 //!
 //! Typing filters the projects; Up/Down (and Page Up/Down) move the
 //! selection, down past the last project onto the button, and Tab jumps
@@ -332,6 +333,7 @@ impl Welcome {
 impl Gerdr {
     /// Show the welcome screen, and find out which projects' sessions run.
     pub fn open_welcome(&mut self, in_app: bool) {
+        self.project_menu = None;
         self.welcome = Some(Welcome {
             herdr_missing: !herdr::is_installed(),
             ..Welcome::new(self.project_rows(), in_app)

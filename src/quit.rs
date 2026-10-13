@@ -119,6 +119,7 @@ impl Gerdr {
 
     /// Ask, even if a choice was remembered.
     pub fn open_quit(&mut self) {
+        self.project_menu = None;
         self.quit = Some(QuitDialog {
             dont_ask: self.projects.quit_choice.is_some(),
             ..QuitDialog::default()
