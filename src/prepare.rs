@@ -4,8 +4,6 @@
 //! typed in once its shell waits at the prompt, so it runs after the shell's
 //! rc files (and `mise activate`) and the venv's `bin` comes first in PATH.
 
-#![allow(dead_code)] // contract: implemented by the pane preparation work
-
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},

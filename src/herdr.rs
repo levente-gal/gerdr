@@ -30,7 +30,6 @@ const SOURCE: &str = "gerdr";
 /// How long a request may take before gerdr gives up on it.
 const TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a ping may take when only checking whether a server runs.
-#[allow(dead_code)] // used by the welcome screen
 const PROBE: Duration = Duration::from_millis(300);
 /// How long a server gerdr started may take to answer.
 const STARTUP: Duration = Duration::from_secs(5);
@@ -76,7 +75,6 @@ pub fn has_saved_layout(session: &str) -> bool {
 
 /// Whether a server answers for `session`. A socket file alone says nothing:
 /// stopped sessions leave theirs behind.
-#[allow(dead_code)] // used by the welcome screen
 pub fn is_running(session: &str) -> bool {
     let mut herdr = Herdr::on_socket(socket_path(session));
     herdr.timeout = PROBE;

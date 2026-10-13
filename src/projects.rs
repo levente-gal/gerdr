@@ -5,8 +5,6 @@
 //! launched outside herdr are remembered here, in
 //! `~/.local/share/gerdr/projects.json`.
 
-#![allow(dead_code)] // contract: implemented by the project store work
-
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},

@@ -893,7 +893,6 @@ const WELCOME_FIXED: i32 = GREETING_HEIGHT
     + NOTE_HEIGHT;
 
 /// How many project rows fit on the welcome screen of an output of `size`.
-#[allow(dead_code)] // contract: used by the overlay state work
 pub fn welcome_page(size: Size<i32, Logical>) -> usize {
     let room = size.h - WELCOME_FIXED - 3 * HELP_MARGIN - HINTS_HEIGHT;
     (room / WELCOME_ROW).clamp(1, WELCOME_ROWS) as usize

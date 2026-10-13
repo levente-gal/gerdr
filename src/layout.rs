@@ -66,7 +66,6 @@ pub enum SavedLeaf {
     App { command: String },
 }
 
-#[allow(dead_code)] // used by project persistence
 impl Node {
     /// The layout to save: `leaf` names what each leaf shows; leaves it has
     /// no name for are left out (their sibling takes the space). `None` if
@@ -92,7 +91,6 @@ impl Node {
     }
 }
 
-#[allow(dead_code)] // used by project persistence
 impl SavedNode {
     /// The layout to show again: `leaf` hands out the pane id for each saved
     /// leaf, or `None` for one that can't come back (its sibling takes the
