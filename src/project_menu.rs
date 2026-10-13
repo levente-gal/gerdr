@@ -9,9 +9,6 @@
 //! optional folder (typed, picked from zoxide's, or browsed for) and what
 //! the folder opens as. Esc backs out one step at a time.
 
-// Contract: wave 1 fills it in and wires it up.
-#![allow(dead_code)]
-
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
@@ -761,6 +758,10 @@ impl ProjectMenu {
                                 .as_ref()
                                 .filter(|r| r.id == *id)
                                 .map(|r| r.name.clone()),
+                            name_selected: self
+                                .renaming
+                                .as_ref()
+                                .is_some_and(|r| r.id == *id && r.whole),
                             confirm_forget: self.confirm_forget.as_ref() == Some(id),
                         }
                     }

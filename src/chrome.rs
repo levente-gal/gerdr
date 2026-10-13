@@ -926,6 +926,8 @@ pub enum MenuEntry {
         digit: Option<u8>,
         /// Set while renaming it: the name typed so far.
         renaming: Option<String>,
+        /// While renaming, the name is all selected: typing replaces it.
+        name_selected: bool,
         /// Delete was pressed on it once.
         confirm_forget: bool,
     },
@@ -1184,7 +1186,6 @@ fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormLayout {
 
 /// How many entries the project menu's list shows at most on an output of
 /// `size`: as many full rows as fit above its bottom margin, within bounds.
-#[allow(dead_code)] // contract: wave 1 builds and uses it
 pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
     let room = size.h
         - HELP_MARGIN
@@ -1197,7 +1198,6 @@ pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
 
 /// What `pos` is over in the project menu showing `view` on an output of
 /// `size`; `None` outside its panel.
-#[allow(dead_code)] // contract: wave 1 builds and uses it
 pub fn project_menu_hit(
     view: &ProjectMenuView,
     size: Size<i32, Logical>,
@@ -2965,6 +2965,23 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
+        self.selectable_field(c, text, placeholder, rect, focused, false, scale, p);
+    }
+
+    /// A text field as `field` draws it; while `selected`, its text is
+    /// highlighted as selected.
+    #[allow(clippy::too_many_arguments)]
+    fn selectable_field(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        placeholder: &str,
+        rect: Rect,
+        focused: bool,
+        selected: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let (x, y, w, h) = rect_px(rect, scale);
@@ -2974,6 +2991,19 @@ impl Painter {
         let field_band = band(rect, scale);
         let text_x = x + PADDING * s;
         let max_x = x + w - PADDING * s - px(CARET_WIDTH + 1) as f32;
+        if selected && !text.is_empty() {
+            let width = self.text_width(text, FONT_SIZE, scale).min(max_x - text_x);
+            let (top, height) = field_band;
+            let inset = px(3) as f32;
+            c.rounded(
+                text_x - 2.0 * s,
+                top as f32 + inset,
+                width + 4.0 * s,
+                height as f32 - 2.0 * inset,
+                2.0 * s,
+                p.selected,
+            );
+        }
         let caret_x = if text.is_empty() {
             self.text(
                 c,
@@ -3389,6 +3419,7 @@ impl Painter {
                 row,
                 digit,
                 renaming,
+                name_selected,
                 ..
             } => {
                 let dot = move |x: f32, y: f32| x.hypot(y) - 4.2 * s;
@@ -3437,7 +3468,16 @@ impl Painter {
                         (field_x, rect.loc.y + (rect.size.h - RENAME_FIELD) / 2).into(),
                         (((end / s) as i32 - field_x).max(0), RENAME_FIELD).into(),
                     );
-                    self.field(c, name, "Project name", field, true, scale, p);
+                    self.selectable_field(
+                        c,
+                        name,
+                        "Project name",
+                        field,
+                        true,
+                        *name_selected,
+                        scale,
+                        p,
+                    );
                 } else {
                     let after = self.text(
                         c, &row.name, FONT_SIZE, label_x, end, row_band, scale, p.text,
@@ -4797,6 +4837,7 @@ mod tests {
             row,
             digit,
             renaming: None,
+            name_selected: false,
             confirm_forget: false,
         }
     }
