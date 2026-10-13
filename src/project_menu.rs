@@ -40,6 +40,8 @@ const SUGGESTIONS: usize = 5;
 pub struct ProjectMenu {
     /// What the pointer is over.
     pub hover: Option<MenuHit>,
+    /// The wheel's turn not yet a whole row, in rows.
+    wheel: f64,
     /// What was typed to filter the projects.
     query: String,
     /// The projects, by id, most recently used first.
@@ -134,6 +136,8 @@ pub enum Outcome {
     Forget(String),
     /// Ask zenity for the form's folder, starting in this one.
     Browse(Option<PathBuf>),
+    /// Say this, keeping the menu as it is.
+    Notice(String),
     /// Close the menu.
     Closed,
 }
@@ -329,6 +333,14 @@ impl ProjectMenu {
         match sym {
             Keysym::Escape => self.renaming = None,
             Keysym::Return | Keysym::KP_Enter => {
+                let name = renaming.name.trim();
+                let taken = self.projects.iter().any(|(p, row)| {
+                    *p != renaming.id && row.name.to_lowercase() == name.to_lowercase()
+                });
+                // The field stays open to pick another.
+                if taken {
+                    return Some(Outcome::Notice(format!("A project named {name} exists.")));
+                }
                 let Renaming { id, name, .. } = self.renaming.take()?;
                 let name = name.trim();
                 let old = self.projects.iter().find(|(p, _)| *p == id)?;
@@ -853,6 +865,10 @@ impl Form {
     /// Offer zoxide's folders (`recent`) that match what was typed in the
     /// folder field.
     fn suggest(&mut self, recent: &[PathBuf], home: Option<&Path>) {
+        let chosen = self
+            .suggestion
+            .and_then(|s| self.suggestions.get(s))
+            .cloned();
         let typed = self.folder.trim();
         self.suggestions = if typed.is_empty() {
             Vec::new()
@@ -864,7 +880,8 @@ impl Form {
                 .map(|dir| tilde(dir, home))
                 .collect()
         };
-        self.suggestion = None;
+        // The one moved to stays chosen if it is still offered.
+        self.suggestion = chosen.and_then(|c| self.suggestions.iter().position(|s| *s == c));
     }
 
     /// Close the list of suggested folders.
@@ -993,6 +1010,8 @@ impl Gerdr {
     pub fn open_project_menu(&mut self) {
         self.switcher = None;
         self.stop_switcher_repeat();
+        self.terminal_menu = false;
+        self.menu_hover = None;
         self.project_menu = Some(ProjectMenu::new(home_dir()));
         self.refresh_project_menu();
         self.check_running();
@@ -1049,6 +1068,7 @@ impl Gerdr {
                 self.refresh_project_menu();
             }
             Outcome::Browse(start) => self.pick_folder_for_menu(start),
+            Outcome::Notice(text) => self.show_notice(text),
             Outcome::Closed => self.project_menu = None,
         }
         // Gone, the client under the pointer gets it back.
@@ -1084,11 +1104,17 @@ impl Gerdr {
         }
     }
 
-    /// The wheel turned `rows` rows (down positive) over the project menu.
-    pub fn project_menu_scroll(&mut self, rows: i32) {
+    /// The wheel turned `rows` rows (down positive, parts of a row adding
+    /// up) over the project menu.
+    pub fn project_menu_scroll(&mut self, rows: f64) {
         let page = self.project_menu_page();
         if let Some(menu) = self.project_menu.as_mut() {
-            menu.scroll_by(rows, page);
+            menu.wheel += rows;
+            let whole = menu.wheel.trunc();
+            menu.wheel -= whole;
+            if whole != 0.0 {
+                menu.scroll_by(whole as i32, page);
+            }
         }
     }
 
@@ -1758,5 +1784,36 @@ mod tests {
         assert_eq!(expand("src", Some(&home)), Some(home.join("src")));
         assert_eq!(expand("/tmp", Some(&home)), Some(PathBuf::from("/tmp")));
         assert_eq!(basename("~/Sites/blog/", Some(&home)), "blog");
+    }
+
+    #[test]
+    fn renaming_to_a_name_in_use_keeps_the_field_open() {
+        let mut m = menu(&["gerdr", "blog"]);
+        chord(&mut m, ctrl(), Keysym::r);
+        type_text(&mut m, "BLOG");
+        assert_eq!(
+            press(&mut m, Keysym::Return),
+            Some(Outcome::Notice("A project named BLOG exists.".into()))
+        );
+        let renaming = view(&m, 10).entries.iter().find_map(|e| match e {
+            MenuEntry::Project { renaming, .. } => renaming.clone(),
+            _ => None,
+        });
+        assert_eq!(renaming.as_deref(), Some("BLOG"));
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_suggestion_moved_to() {
+        let mut m = menu(&[]);
+        chord(&mut m, ctrl(), Keysym::n);
+        press(&mut m, Keysym::Tab);
+        type_text(&mut m, "~/b");
+        press(&mut m, Keysym::Down);
+        press(&mut m, Keysym::Down);
+        let chosen = form(&m).suggestions[1].clone();
+        let (projects, recent, taken) = (m.projects.clone(), m.recent.clone(), m.taken.clone());
+        m.set_lists(projects, recent, taken);
+        let f = form(&m);
+        assert_eq!(f.suggestion.map(|s| f.suggestions[s].clone()), Some(chosen));
     }
 }

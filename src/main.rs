@@ -828,6 +828,9 @@ pub struct Gerdr {
     /// Where stopping a project's session in the background sends whether
     /// it stopped (by project id); `None` until set up.
     pub stop_status: Option<channel::Sender<(String, bool)>>,
+    /// The projects whose sessions are being stopped, by id: not shown
+    /// until they have.
+    pub stopping: HashSet<String>,
     /// The project menu, while it is open.
     pub project_menu: Option<project_menu::ProjectMenu>,
     /// The pointer is over the sidebar header's project name.
@@ -2239,11 +2242,17 @@ impl Gerdr {
     }
 
     /// Ask zenity for a folder (on the host) under `title`, starting in
-    /// `start`; `poll_picker` hands the answer on as `purpose` says. Not
-    /// while a picker is open already.
+    /// `start`; `poll_picker` hands the answer on as `purpose` says. One
+    /// open for the same purpose already stays; one open for another gives
+    /// way, so the folder picked goes where it was last asked for.
     fn pick_folder(&mut self, title: &str, start: Option<PathBuf>, purpose: PickFor) {
-        if self.picker.is_some() {
-            return;
+        match self.picker.take() {
+            Some(open) if open.1 == purpose => return self.picker = Some(open),
+            Some((mut other, _)) => {
+                let _ = other.kill();
+                let _ = other.wait();
+            }
+            None => {}
         }
         let mut cmd = Command::new("zenity");
         cmd.args(["--file-selection", "--directory"])
@@ -2963,9 +2972,17 @@ impl Gerdr {
             self.welcome = None;
             return;
         }
-        let Some(session) = self.projects.project(id).map(|p| p.session.clone()) else {
+        let Some((session, name)) = self
+            .projects
+            .project(id)
+            .map(|p| (p.session.clone(), p.name.clone()))
+        else {
             return tracing::warn!("no project {id}");
         };
+        // Its server is going down: attaching now would lose it.
+        if self.stopping.contains(id) {
+            return self.show_notice(format!("{name} is still stopping"));
+        }
         let left = self.project.clone();
         self.detach_project();
         self.welcome = None;
@@ -2978,6 +2995,7 @@ impl Gerdr {
         }
         self.projects.save();
         self.connect_herdr(&session);
+        self.running.insert(id.to_owned(), true);
         self.place_held(id);
         self.show_active();
         if let Some(left) = left {
@@ -3204,6 +3222,11 @@ impl Gerdr {
         let Some(session) = self.projects.project(id).map(|p| p.session.clone()) else {
             return tracing::warn!("no project {id} to stop");
         };
+        if !self.stopping.insert(id.to_owned()) {
+            return;
+        }
+        // Neither running nor stopped until it answers.
+        self.running.remove(id);
         if self.stop_status.is_none() {
             let (tx, rx) = channel::channel::<(String, bool)>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
@@ -3213,10 +3236,14 @@ impl Gerdr {
             });
             match inserted {
                 Ok(_) => self.stop_status = Some(tx),
-                Err(err) => return tracing::warn!("stopping project {id}: {err}"),
+                Err(err) => {
+                    self.stopping.remove(id);
+                    return tracing::warn!("stopping project {id}: {err}");
+                }
             }
         }
         let Some(tx) = self.stop_status.clone() else {
+            self.stopping.remove(id);
             return;
         };
         let id = id.to_owned();
@@ -3235,23 +3262,23 @@ impl Gerdr {
     /// Project `id`'s session was asked to stop, and `stopped` says whether
     /// it did: then it counts as stopped, and the windows held for it close.
     fn project_stopped(&mut self, id: &str, stopped: bool) {
+        self.stopping.remove(id);
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
         if !stopped {
+            // Whether it still runs is found out again.
+            self.check_running();
             return self.show_notice(format!("Couldn't stop {name}"));
         }
         self.running.insert(id.to_owned(), false);
-        // Shown again meanwhile: it runs again, or soon will.
-        if self.project.as_deref() != Some(id) {
-            if let Some(project) = self.projects.project_mut(id) {
-                project.state = RunState::Stopped;
-            }
-            self.projects.save();
-            // They go from `held` once closed (see `remove_window`).
-            for window in self.held.get(id).into_iter().flatten() {
-                window.toplevel().unwrap().send_close();
-            }
+        if let Some(project) = self.projects.project_mut(id) {
+            project.state = RunState::Stopped;
+        }
+        self.projects.save();
+        // They go from `held` once closed (see `remove_window`).
+        for window in self.held.get(id).into_iter().flatten() {
+            window.toplevel().unwrap().send_close();
         }
         self.refresh_project_menu();
         self.show_notice(format!("Stopped {name}"));
@@ -3661,6 +3688,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         running: HashMap::new(),
         running_status: None,
         stop_status: None,
+        stopping: HashSet::new(),
         project_menu: None,
         header_hover: false,
         previous_project: None,

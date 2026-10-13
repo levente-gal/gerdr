@@ -53,6 +53,9 @@ enum Intercepted {
     Quit(quit::Outcome),
 }
 
+/// How far a touchpad scrolls the project menu's list by a row, in pixels.
+const MENU_SCROLL_ROW: f64 = 40.0;
+
 /// Whether `action`, picked with the prefix, works over the welcome screen:
 /// only what acts on gerdr itself rather than on the project behind (the
 /// welcome screen is already open).
@@ -366,14 +369,16 @@ impl Gerdr {
             }
             InputEvent::PointerAxis { event, .. } => {
                 // Nothing scrolls behind an overlay; the project menu's list
-                // moves a row per turn of the wheel.
+                // moves a row per notch of the wheel, or per row's height
+                // scrolled on a touchpad.
                 if self.project_menu.is_some() {
-                    let amount = event
+                    let rows = event
                         .amount_v120(Axis::Vertical)
-                        .or_else(|| event.amount(Axis::Vertical))
+                        .map(|v120| v120 / 120.0)
+                        .or_else(|| event.amount(Axis::Vertical).map(|px| px / MENU_SCROLL_ROW))
                         .unwrap_or(0.0);
-                    if amount != 0.0 {
-                        self.project_menu_scroll(amount.signum() as i32);
+                    if rows != 0.0 {
+                        self.project_menu_scroll(rows);
                     }
                     return;
                 }
