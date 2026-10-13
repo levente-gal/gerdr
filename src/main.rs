@@ -544,18 +544,6 @@ fn group_of(pid: u32) -> i32 {
     unsafe { libc::getpgid(pid as i32) }
 }
 
-/// Whether herdr can be run: an executable `herdr` on the `PATH`.
-fn herdr_installed() -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
-        std::fs::metadata(dir.join("herdr"))
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    })
-}
-
 /// The deepest folder holding all of `dirs`.
 fn common_dir(dirs: &[&Path]) -> Option<PathBuf> {
     let (first, rest) = dirs.split_first()?;
@@ -1175,8 +1163,7 @@ impl Gerdr {
     /// one has none.
     fn connect_herdr(&mut self, session: &str) {
         // Read before a server starting may save over it.
-        let saved = std::fs::read_to_string(herdr::session_dir(session).join("session.json"))
-            .map_or(0, |json| projects::saved_workspace_count(&json));
+        let saved = herdr::saved_workspace_count(session);
         let Some((mut herdr, start)) = herdr::Herdr::connect_or_start(session, &self.socket_name)
         else {
             return;
@@ -3202,7 +3189,7 @@ impl Gerdr {
     /// screen. Without herdr, projects can't run: the welcome screen says
     /// so.
     fn start_project(&mut self, name: Option<&str>, folders: Vec<PathBuf>) {
-        if !herdr_installed() {
+        if !herdr::is_installed() {
             tracing::warn!("herdr isn't installed: projects can't run");
             return self.open_welcome(false);
         }

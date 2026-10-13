@@ -615,14 +615,6 @@ pub fn foreground_command(
     })
 }
 
-/// The number of workspaces a herdr session saved in its `session.json`.
-pub fn saved_workspace_count(session_json: &str) -> usize {
-    serde_json::from_str::<Value>(session_json)
-        .ok()
-        .and_then(|saved| saved["workspaces"].as_array().map(Vec::len))
-        .unwrap_or(0)
-}
-
 impl Store {
     /// The project whose herdr session a process runs in, from its raw
     /// `/proc/<pid>/environ`: herdr gives the processes in its panes
@@ -1255,15 +1247,6 @@ mod tests {
         assert!(denied_command("'nvim' x"));
         assert!(!denied_command("'npm' run dev"));
         assert!(!denied_command(""));
-    }
-
-    #[test]
-    fn counts_saved_workspaces() {
-        let saved = r#"{"workspaces":[{"id":"w1"},{"id":"w2"},{"id":"w5"}]}"#;
-        assert_eq!(saved_workspace_count(saved), 3);
-        assert_eq!(saved_workspace_count(r#"{"workspaces":[]}"#), 0);
-        assert_eq!(saved_workspace_count("{}"), 0);
-        assert_eq!(saved_workspace_count("not json"), 0);
     }
 
     #[test]
