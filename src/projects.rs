@@ -687,6 +687,12 @@ pub fn ago(now: u64, then: u64) -> String {
     }
 }
 
+/// The notice on switching to project `new` from project `old`, which keeps
+/// running.
+pub fn switch_notice(new: &str, old: &str) -> String {
+    format!("Switched to {new} · {old} keeps running")
+}
+
 /// The greeting for the local `hour` (0–23).
 pub fn greeting(hour: u32) -> &'static str {
     match hour {
@@ -1407,6 +1413,14 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
         assert_eq!(greeting(0), "Burning the midnight oil");
         assert!(local_hour() < 24);
         assert!(now() > 1_700_000_000);
+    }
+
+    #[test]
+    fn switching_says_the_old_project_keeps_running() {
+        assert_eq!(
+            switch_notice("gerdr", "aft"),
+            "Switched to gerdr · aft keeps running"
+        );
     }
 
     #[test]

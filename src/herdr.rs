@@ -104,6 +104,15 @@ pub fn is_running(session: &str) -> bool {
     herdr.call("ping", json!({})).is_ok()
 }
 
+/// Stop `session`'s server, which saves its layout first. One that goes
+/// before it answers counts as stopped.
+pub fn stop_server(session: &str) -> Result<(), String> {
+    match Herdr::on_socket(socket_path(session)).stop() {
+        Err(_) if !is_running(session) => Ok(()),
+        stopped => stopped,
+    }
+}
+
 /// Drop herdr's caller context from `cmd` and point it at `socket`, the
 /// active project's session, if any.
 pub fn scrub_env(cmd: &mut Command, socket: Option<&Path>) {
