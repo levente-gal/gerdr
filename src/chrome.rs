@@ -2,7 +2,8 @@
 //! what its tabs show put together, and a card per coding agent herdr sees
 //! in it), the tab strip above the apps
 //! (each tab with what runs in it, as herdr reports;
-//! the light/dark switch at its right end), and the key help
+//! the light/dark switch at its right end), a bar over each terminal pane
+//! (what runs in it, and buttons to restart and stop it), and the key help
 //! panel shown while the prefix is armed, the switcher, the project menu
 //! under the sidebar header and a notice over the apps; the welcome
 //! screen covering it all, and the quit dialog over that. All are drawn on the CPU into memory buffers at physical
@@ -64,8 +65,10 @@ const ROW_RADIUS: f32 = 6.0;
 const CLOSE_WIDTH: i32 = 28;
 const TAB_MAX_WIDTH: i32 = 360;
 const BUTTON_WIDTH: i32 = 36;
-/// Side of the rounded square behind the tab strip's "+".
+/// Side of the rounded square behind the tab strip's "+", which reaches on
+/// over its menu chevron, and the room left of it.
 const NEW_TAB_SIZE: i32 = 28;
+const NEW_TAB_INSET: i32 = (BUTTON_WIDTH - NEW_TAB_SIZE) / 2;
 /// The sidebar header's buttons: "add project", and the split "add terminal"
 /// button with its menu chevron.
 const HEADER_BUTTON: i32 = 28;
@@ -248,6 +251,14 @@ const FORM_BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Create & switch", 136)
 const NOTICE_HEIGHT: i32 = 30;
 const NOTICE_PADDING: i32 = 16;
 const NOTICE_TOP: i32 = 8;
+
+/// The bar over each terminal pane: this high, with its restart and stop
+/// buttons this wide at its right end, this far apart and in from the end.
+pub const PANE_BAR_HEIGHT: i32 = 24;
+const BAR_BUTTON: i32 = 24;
+const BAR_BUTTON_GAP: i32 = 2;
+const BAR_INSET: i32 = 4;
+const BAR_NOTE_GAP: i32 = 8;
 
 type Rgb = [u8; 3];
 
@@ -743,7 +754,7 @@ fn pane_activity(p: &PaneState, title: &str, agents: &[AgentInfo]) -> String {
 
 /// A command line with the program's folder left out: "/usr/bin/zsh -l" is
 /// "zsh -l".
-fn command_line(cmdline: &str) -> Option<String> {
+pub fn command_line(cmdline: &str) -> Option<String> {
     let mut words = cmdline.split_whitespace();
     let program = words.next()?;
     let program = program.rsplit('/').next().unwrap_or(program);
@@ -1354,11 +1365,11 @@ pub fn quit_layout(size: Size<i32, Logical>) -> QuitLayout {
 
 type Rect = Rectangle<i32, Logical>;
 
-/// Where the tabs (each with its "×" close button in its title row) and the
-/// "+" button sit in a strip `width` wide (strip coordinates). The theme
-/// switch keeps the right end.
-pub fn tab_layout(count: usize, width: i32) -> (Vec<(Rect, Rect)>, Rect) {
-    let room = (width - 2 * BUTTON_WIDTH).max(0);
+/// Where the tabs (each with its "×" close button in its title row), the
+/// "+" button and its menu chevron sit in a strip `width` wide (strip
+/// coordinates). The theme switch keeps the right end.
+pub fn tab_layout(count: usize, width: i32) -> (Vec<(Rect, Rect)>, Rect, Rect) {
+    let room = (width - 2 * BUTTON_WIDTH - CHEVRON_WIDTH).max(0);
     let tab_w = if count == 0 {
         0
     } else {
@@ -1379,9 +1390,48 @@ pub fn tab_layout(count: usize, width: i32) -> (Vec<(Rect, Rect)>, Rect) {
     // Full height, so the "+" sits in the middle of the strip as in browsers.
     let plus = Rectangle::new(
         (count as i32 * tab_w, 0).into(),
-        (BUTTON_WIDTH, TAB_STRIP_HEIGHT).into(),
+        (NEW_TAB_INSET + NEW_TAB_SIZE, TAB_STRIP_HEIGHT).into(),
     );
-    (tabs, plus)
+    let chevron = Rectangle::new(
+        (plus.loc.x + plus.size.w, 0).into(),
+        (CHEVRON_WIDTH, TAB_STRIP_HEIGHT).into(),
+    );
+    (tabs, plus, chevron)
+}
+
+/// A pane's place split in two: its bar on top, and the rest for its
+/// window, which keeps at least a pixel.
+pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
+    let h = PANE_BAR_HEIGHT.min(pane.size.h - 1).max(0);
+    let bar = Rectangle::new(pane.loc, (pane.size.w, h).into());
+    let client = Rectangle::new(
+        (pane.loc.x, pane.loc.y + h).into(),
+        (pane.size.w, (pane.size.h - h).max(1)).into(),
+    );
+    (bar, client)
+}
+
+/// Where the restart and stop buttons sit in a pane's bar, left to right.
+pub fn pane_bar_buttons(bar: Rect) -> [(BarButton, Rect); 2] {
+    let right = bar.loc.x + bar.size.w - BAR_INSET;
+    let at = |i: i32| {
+        Rectangle::new(
+            (right - (i + 1) * BAR_BUTTON - i * BAR_BUTTON_GAP, bar.loc.y).into(),
+            (BAR_BUTTON, bar.size.h).into(),
+        )
+    };
+    [(BarButton::Restart, at(1)), (BarButton::Stop, at(0))]
+}
+
+/// What of a pane's bar is at `pos`, if the bar is.
+pub fn pane_bar_hit(bar: Rect, pos: Point<f64, Logical>) -> Option<BarHit> {
+    if !bar.to_f64().contains(pos) {
+        return None;
+    }
+    let button = pane_bar_buttons(bar)
+        .into_iter()
+        .find(|(_, rect)| rect.to_f64().contains(pos));
+    Some(button.map_or(BarHit::Label, |(button, _)| BarHit::Button(button)))
 }
 
 /// The light/dark switch at the right end of a strip `width` wide (strip coordinates).
@@ -1482,7 +1532,7 @@ pub fn workspace_slot(blocks: &[Rect], held: usize, y: f64) -> usize {
 /// Where a tab dragged to `x` goes, in a strip `width` wide holding `count`
 /// tabs (strip coordinates): the place under `x`, the first or last beside them all.
 pub fn tab_slot(count: usize, width: i32, x: f64) -> usize {
-    let (tabs, _) = tab_layout(count, width);
+    let (tabs, _, _) = tab_layout(count, width);
     tabs.iter()
         .rposition(|(tab, _)| x >= tab.loc.x as f64)
         .unwrap_or(0)
@@ -1546,6 +1596,49 @@ fn switcher_parts(rows: usize, loc: Point<i32, Logical>, w: i32) -> (Rect, Rect,
 }
 
 /// Everything the chrome shows; a change in any of it triggers a redraw.
+/// A button in a terminal pane's bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarButton {
+    Restart,
+    Stop,
+}
+
+/// What a click on a pane's bar lands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarHit {
+    Label,
+    Button(BarButton),
+}
+
+/// What a pane's bar says of its command, by the mark before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarStatus {
+    /// The shell waits at its prompt, and nothing ran in it to run again.
+    Idle,
+    Running,
+    /// The command ran and is done: it can run again.
+    Exited,
+    /// Being stopped or restarted.
+    Working,
+}
+
+/// The bar over a terminal pane: what runs in it, and its buttons.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneBarView {
+    /// Where the bar goes on the output.
+    pub rect: Rect,
+    pub label: String,
+    /// A word after the label, such as "exited" or "stopping…".
+    pub note: Option<&'static str>,
+    pub status: BarStatus,
+    pub can_restart: bool,
+    pub can_stop: bool,
+    /// The pane has keyboard focus.
+    pub focused: bool,
+    /// The button under the pointer.
+    pub hover: Option<BarButton>,
+}
+
 pub struct ChromeView {
     pub workspaces: Vec<WorkspaceView>,
     /// Per workspace, the agents running in it.
@@ -1571,6 +1664,8 @@ pub struct ChromeView {
     pub project_menu: Option<ProjectMenuView>,
     /// A short note at the top of the app area, such as "Switched to gerdr".
     pub notice: Option<String>,
+    /// The bars over the active tab's terminal panes.
+    pub pane_bars: Vec<PaneBarView>,
     pub theme: Theme,
     pub sidebar_width: i32,
     pub size: Size<i32, Logical>,
@@ -1604,6 +1699,8 @@ pub struct Chrome {
     project_menu: Cached<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
     /// The notice's text and width.
     notice: Cached<(String, i32, Theme, f64)>,
+    /// One per bar over a terminal pane.
+    pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
 }
 
 impl Chrome {
@@ -1619,6 +1716,7 @@ impl Chrome {
             quit: Cached::default(),
             project_menu: Cached::default(),
             notice: Cached::default(),
+            pane_bars: Vec::new(),
         }
     }
 
@@ -1767,6 +1865,19 @@ impl Chrome {
                 .get((notice, w, theme, scale), |(notice, w, ..)| {
                     painter.notice(notice, *w, scale, theme.palette())
                 });
+            parts.push((buffer, loc, size));
+        }
+        // The pane bars sit on the apps, under everything else.
+        self.pane_bars
+            .resize_with(view.pane_bars.len(), Cached::default);
+        for (cached, bar) in self.pane_bars.iter_mut().zip(view.pane_bars) {
+            let (loc, size) = (bar.rect.loc, bar.rect.size);
+            if size.w <= 0 || size.h <= 0 {
+                continue;
+            }
+            let buffer = cached.get((bar, theme, scale), |(bar, ..)| {
+                painter.pane_bar(bar, scale, theme.palette())
+            });
             parts.push((buffer, loc, size));
         }
         parts.push((sidebar, Point::from((0, 0)), sidebar_size));
@@ -2279,7 +2390,7 @@ impl Painter {
         c.fill(0, 0, c.w, c.h, p.tab_bar);
         c.fill(0, c.h - line, c.w, line, p.border);
 
-        let (tabs, plus) = tab_layout(views.len(), size.w);
+        let (tabs, plus, chevron) = tab_layout(views.len(), size.w);
         for (i, ((rect, close), view)) in tabs.iter().zip(views).enumerate() {
             let (x, w) = (
                 px(rect.loc.x),
@@ -2358,14 +2469,31 @@ impl Painter {
             );
         }
         if !views.is_empty() {
-            // A soft rounded square with a large "+", centred in the strip.
+            // A soft rounded square with a large "+", centred in the strip,
+            // stretched over the chevron of the menu of apps to open instead.
             let side = px(NEW_TAB_SIZE) as f32;
-            let (bx, by) = (
-                px(plus.loc.x) as f32 + (px(plus.size.w) as f32 - side) / 2.0,
-                (px(plus.size.h) as f32 - side) / 2.0,
+            let square = Rectangle::new(
+                (plus.loc.x + NEW_TAB_INSET, 0).into(),
+                (NEW_TAB_SIZE, plus.size.h).into(),
             );
-            c.rounded(bx.round(), by.round(), side, side, 6.0 * s, p.element);
-            icon_sdf(&mut c, plus, scale, p.text, |x, y| new_tab(x, y, s));
+            let (bx, by) = (
+                px(square.loc.x) as f32,
+                ((px(plus.size.h) as f32 - side) / 2.0).round(),
+            );
+            let w = (px(chevron.loc.x + chevron.size.w) - px(square.loc.x)) as f32;
+            c.rounded(bx, by, w, side, 6.0 * s, p.element);
+            icon_sdf(&mut c, square, scale, p.text, |x, y| new_tab(x, y, s));
+            icon_sdf(&mut c, chevron, scale, p.muted, |x, y| {
+                chevron_down(x, y, s)
+            });
+            // A thin line splits the "+" from its chevron.
+            c.fill(
+                px(chevron.loc.x),
+                by as i32 + px(6),
+                line,
+                side as i32 - 2 * px(6),
+                p.border,
+            );
         }
 
         let toggle = theme_toggle(size.w);
@@ -3820,6 +3948,104 @@ impl Painter {
         c.into_buffer(false)
     }
 
+    /// A terminal pane's bar: a mark saying how its command is, the command
+    /// and a note after it, then the restart and stop buttons.
+    fn pane_bar(&self, view: &PaneBarView, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let size = view.rect.size;
+        let mut c = Canvas::new(physical(size, scale));
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let line = px(1).max(1);
+        let background = if view.focused {
+            p.tab_active
+        } else {
+            p.tab_bar
+        };
+        c.fill(0, 0, c.w, c.h, background);
+        c.fill(0, c.h - line, c.w, line, p.border_variant);
+
+        let bar = Rectangle::from_size(size);
+        let buttons = pane_bar_buttons(bar);
+        let mark = Rectangle::new((PADDING as i32, 0).into(), (STATUS_WIDTH, size.h).into());
+        match view.status {
+            BarStatus::Idle => {}
+            BarStatus::Running => {
+                icon_sdf(&mut c, mark, scale, p.success, |x, y| x.hypot(y) - 3.4 * s)
+            }
+            BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
+                (x.hypot(y) - 3.4 * s).abs() - STROKE * s
+            }),
+            BarStatus::Working => icon_sdf(&mut c, mark, scale, p.warning, |x, y| {
+                status_mark(AgentStatus::Working, x, y, s)
+            }),
+        }
+
+        // The note keeps its room; the label is cut short before it.
+        let band = (0, px(size.h));
+        let x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
+        let right = px(buttons[0].1.loc.x - BAR_NOTE_GAP) as f32;
+        let note_w = view.note.map_or(0.0, |note| {
+            self.text_width(note, DETAIL_FONT_SIZE, scale) + px(BAR_NOTE_GAP) as f32
+        });
+        let (label_color, note_color) = match view.status {
+            BarStatus::Running => (p.text, p.muted),
+            BarStatus::Working => (p.text, p.warning),
+            BarStatus::Idle | BarStatus::Exited => (p.muted, p.placeholder),
+        };
+        let end = self.text(
+            &mut c,
+            &view.label,
+            DETAIL_FONT_SIZE,
+            x,
+            (right - note_w).max(x),
+            band,
+            scale,
+            label_color,
+        );
+        if let Some(note) = view.note {
+            self.text(
+                &mut c,
+                note,
+                DETAIL_FONT_SIZE,
+                end + px(BAR_NOTE_GAP) as f32,
+                right,
+                band,
+                scale,
+                note_color,
+            );
+        }
+
+        for (button, rect) in buttons {
+            let enabled = match button {
+                BarButton::Restart => view.can_restart,
+                BarButton::Stop => view.can_stop,
+            };
+            let hovered = enabled && view.hover == Some(button);
+            if hovered {
+                let inset = Rectangle::new(
+                    (rect.loc.x + 2, rect.loc.y + 2).into(),
+                    (rect.size.w - 4, (rect.size.h - 4).max(0)).into(),
+                );
+                let (x, y, w, h) = rect_px(inset, scale);
+                c.rounded(x, y, w, h, 4.0 * s, p.selected);
+            }
+            let color = if !enabled {
+                mix(p.placeholder, background, 0.5)
+            } else if hovered {
+                p.text
+            } else {
+                p.muted
+            };
+            match button {
+                BarButton::Restart => {
+                    icon_sdf(&mut c, rect, scale, color, |x, y| restart_arrow(x, y, s))
+                }
+                BarButton::Stop => icon_sdf(&mut c, rect, scale, color, |x, y| stop(x, y, s)),
+            }
+        }
+        c.into_buffer(true)
+    }
+
     /// `text` with the characters at `hits` (char positions) in the second
     /// of `colors`. Draws nothing where not even "…" fits.
     #[allow(clippy::too_many_arguments)]
@@ -4392,6 +4618,24 @@ fn stop(x: f32, y: f32, s: f32) -> f32 {
     rounded_rect(x, y, -3.8 * s, -3.8 * s, 7.6 * s, 7.6 * s, 1.2 * s)
 }
 
+/// Signed distance to a circling arrow centred on the origin: run again. A
+/// ring open at its top right, its top end an arrow head pointing into the
+/// gap.
+fn restart_arrow(x: f32, y: f32, s: f32) -> f32 {
+    let r = 4.2 * s;
+    let ring = ((x.hypot(y) - r).abs() - STROKE * s).max(x.min(-y));
+    let (tip_x, tip_y) = (1.4 * s, -r);
+    let head = segment(x, y, tip_x, tip_y, tip_x - 2.4 * s, tip_y - 2.4 * s).min(segment(
+        x,
+        y,
+        tip_x,
+        tip_y,
+        tip_x - 2.4 * s,
+        tip_y + 2.4 * s,
+    )) - STROKE * s;
+    ring.min(head)
+}
+
 /// Signed distance to a "×" centred on the origin: forget.
 fn cross(x: f32, y: f32, s: f32) -> f32 {
     let arm = 3.8 * s;
@@ -4595,11 +4839,13 @@ fn find_font() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BAR_HEIGHT, FormField, FormView, HELP_MARGIN, MenuEntry, MenuHit, NOTICE_HEIGHT,
-        PROJECT_MENU_WIDTH, Painter, ProjectMenuView, ProjectRow, QuitHit, QuitView, ROW_INSET,
-        Rect, RowButton, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme,
-        WelcomeHit, WelcomeView, WorkspaceView, project_menu_hit, project_menu_layout,
-        project_menu_page, quit_layout, short_path, welcome_layout, welcome_page,
+        BAR_HEIGHT, BAR_INSET, BarButton, BarHit, BarStatus, FormField, FormView, HELP_MARGIN,
+        MenuEntry, MenuHit, NOTICE_HEIGHT, PANE_BAR_HEIGHT, PROJECT_MENU_WIDTH, Painter,
+        PaneBarView, ProjectMenuView, ProjectRow, QuitHit, QuitView, ROW_INSET, Rect, RowButton,
+        SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, WelcomeHit,
+        WelcomeView, WorkspaceView, pane_bar_buttons, pane_bar_hit, pane_bar_rects,
+        project_menu_hit, project_menu_layout, project_menu_page, quit_layout, short_path,
+        welcome_layout, welcome_page,
     };
     use crate::{WorkspaceKind, herdr::AgentStatus};
     use smithay::utils::{Logical, Point, Size};
@@ -4756,6 +5002,85 @@ mod tests {
                 .iter()
                 .all(|b| b.loc.y >= l.checkbox.loc.y + l.checkbox.size.h)
         );
+    }
+
+    #[test]
+    fn pane_bar_takes_the_top_and_leaves_the_rest_to_the_window() {
+        let pane = Rect::new((200, 50).into(), (600, 400).into());
+        let (bar, client) = pane_bar_rects(pane);
+        assert_eq!(
+            bar,
+            Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into())
+        );
+        assert_eq!(
+            client,
+            Rect::new(
+                (200, 50 + PANE_BAR_HEIGHT).into(),
+                (600, 400 - PANE_BAR_HEIGHT).into()
+            )
+        );
+    }
+
+    #[test]
+    fn tiny_pane_keeps_a_window() {
+        for h in [0, 1, 10, PANE_BAR_HEIGHT] {
+            let pane = Rect::new((0, 0).into(), (300, h).into());
+            let (bar, client) = pane_bar_rects(pane);
+            assert!(client.size.h >= 1, "{h}");
+            assert!(bar.size.h >= 0 && bar.size.h < h.max(1), "{h}");
+        }
+    }
+
+    #[test]
+    fn pane_bar_buttons_sit_right_and_do_not_overlap() {
+        let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
+        let [(first, restart), (second, stop)] = pane_bar_buttons(bar);
+        assert_eq!((first, second), (BarButton::Restart, BarButton::Stop));
+        assert_eq!(stop.loc.x + stop.size.w, 200 + 600 - BAR_INSET);
+        assert!(restart.loc.x + restart.size.w <= stop.loc.x);
+        assert!(restart.loc.y == 50 && stop.size.h == PANE_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn pane_bar_hit_agrees_with_the_buttons() {
+        let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
+        for (button, rect) in pane_bar_buttons(bar) {
+            let centre = rect.to_f64().loc + rect.to_f64().size.downscale(2.0).to_point();
+            assert_eq!(pane_bar_hit(bar, centre), Some(BarHit::Button(button)));
+        }
+        assert_eq!(pane_bar_hit(bar, (210.0, 60.0).into()), Some(BarHit::Label));
+        assert_eq!(pane_bar_hit(bar, (210.0, 80.0).into()), None);
+        assert_eq!(pane_bar_hit(bar, (100.0, 60.0).into()), None);
+    }
+
+    #[test]
+    fn pane_bars_paint() {
+        let painter = Painter::new();
+        let statuses = [
+            BarStatus::Idle,
+            BarStatus::Running,
+            BarStatus::Exited,
+            BarStatus::Working,
+        ];
+        for theme in [Theme::Dark, Theme::Light] {
+            for scale in [1.0, 1.25, 2.0] {
+                for w in [600, 60, 1] {
+                    for (i, status) in statuses.into_iter().enumerate() {
+                        let view = PaneBarView {
+                            rect: Rect::new((0, 0).into(), (w, PANE_BAR_HEIGHT).into()),
+                            label: "npm run dev -- --port 3000 --host 0.0.0.0".into(),
+                            note: (i % 2 == 0).then_some("restarting…"),
+                            status,
+                            can_restart: i < 2,
+                            can_stop: i % 2 == 1,
+                            focused: i == 0,
+                            hover: Some(BarButton::Restart),
+                        };
+                        painter.pane_bar(&view, scale, theme.palette());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

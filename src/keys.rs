@@ -89,6 +89,18 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ),
     ("close-pane", Action::ClosePane, "close pane", "x"),
     (
+        "restart-pane",
+        Action::RestartPane,
+        "restart the pane's command",
+        "a",
+    ),
+    (
+        "stop-pane",
+        Action::StopPane,
+        "stop the pane's command",
+        "s",
+    ),
+    (
         "focus-left",
         Action::FocusSide(Side::Left),
         "focus pane left",
@@ -127,6 +139,12 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ),
     ("switcher", Action::Switcher, "find and switch", "f"),
     ("run", Action::Run, "run an app in a split", "r"),
+    (
+        "run-tab",
+        Action::RunTab,
+        "run an app in a new tab",
+        "Shift+R",
+    ),
     ("projects", Action::Projects, "projects", "Shift+P"),
     (
         "last-project",
@@ -138,7 +156,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "toggle-restart",
         Action::ToggleRestart,
         "restart after reboot",
-        "Shift+R",
+        "Shift+S",
     ),
     (
         "toggle-venv",
@@ -180,6 +198,10 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("split pane right / down", &["split-right", "split-down"]),
     ("close pane", &["close-pane"]),
     (
+        "restart / stop the pane's command",
+        &["restart-pane", "stop-pane"],
+    ),
+    (
         "focus pane left / down / up / right",
         &["focus-left", "focus-down", "focus-up", "focus-right"],
     ),
@@ -187,6 +209,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("light / dark theme", &["toggle-theme"]),
     ("find and switch", &["switcher"]),
     ("run an app in a split", &["run"]),
+    ("run an app in a new tab", &["run-tab"]),
     ("projects", &["projects"]),
     ("last project", &["last-project"]),
     ("restart after reboot", &["toggle-restart"]),
@@ -536,14 +559,16 @@ mod tests {
                 "Down / Up: next / previous workspace",
                 "V / -: split pane right / down",
                 "X: close pane",
+                "A / S: restart / stop the pane's command",
                 "H / J / K / L: focus pane left / down / up / right",
                 "Tab / Shift+Tab: next / previous pane",
                 "T: light / dark theme",
                 "F: find and switch",
                 "R: run an app in a split",
+                "Shift+R: run an app in a new tab",
                 "Shift+P: projects",
                 "Shift+L: last project",
-                "Shift+R: restart after reboot",
+                "Shift+S: restart after reboot",
                 "Shift+V / Alt+V: python venv on / off, pick",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",
@@ -581,8 +606,20 @@ mod tests {
             Some(Action::PrevTab)
         );
         assert_eq!(
-            keymap.action(&mods(true, true), Keysym::r),
+            keymap.action(&mods(false, true), Keysym::r),
+            Some(Action::RunTab)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::s),
             Some(Action::ToggleRestart)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::s),
+            Some(Action::StopPane)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::a),
+            Some(Action::RestartPane)
         );
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::r),

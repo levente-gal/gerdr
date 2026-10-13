@@ -1,5 +1,5 @@
 //! Forward host-window input to the focused client, except gerdr's own
-//! shortcuts, clicks on the sidebar and tab strip, drags of the dividers
+//! shortcuts, clicks on the sidebar, the tab strip and the pane bars, drags of the dividers
 //! (the sidebar edge and the gap between split panes), and drags of the
 //! workspace rows and tabs to reorder them.
 //!
@@ -13,7 +13,8 @@
 //! also closes the menu again.
 //!
 //! The sidebar header's project name opens the project menu, or the welcome
-//! screen while no project is shown.
+//! screen while no project is shown. A click on a terminal pane's bar
+//! focuses the pane, and its buttons restart or stop what runs in it.
 
 use smithay::{
     backend::input::{
@@ -31,6 +32,7 @@ use crate::{
     Action, Drag, Gerdr, REORDER_START, Reorder, Reorderable, WorkspaceKind,
     chrome::{self, TAB_STRIP_HEIGHT},
     home_dir,
+    launch::Place,
     layout::Dir,
     project_menu, quit,
     switcher::Target,
@@ -43,8 +45,8 @@ const BTN_MIDDLE: u32 = 0x112;
 /// What a key gerdr kept from the apps does, once the keyboard is free again.
 enum Intercepted {
     Action(Action),
-    /// The switcher picked this.
-    Switch(Target),
+    /// The switcher picked this, to launch in that place if it is an app.
+    Switch(Target, Place),
     /// The welcome screen asked for this.
     Welcome(welcome::Outcome),
     /// The project menu asked for this.
@@ -154,7 +156,9 @@ impl Gerdr {
                             let typed = handle.modified_sym();
                             let picked = state.switcher_key(mods, sym, typed);
                             state.repeat_switcher_key(code, *mods, sym, typed);
-                            return FilterResult::Intercept(picked.map(Intercepted::Switch));
+                            return FilterResult::Intercept(
+                                picked.map(|(target, place)| Intercepted::Switch(target, place)),
+                            );
                         }
                         if state.terminal_menu && sym == Keysym::Escape {
                             state.close_menu();
@@ -182,7 +186,7 @@ impl Gerdr {
                 );
                 match action {
                     Some(Some(Intercepted::Action(action))) => self.run_action(action),
-                    Some(Some(Intercepted::Switch(target))) => self.switch_to(target),
+                    Some(Some(Intercepted::Switch(target, place))) => self.switch_to(target, place),
                     Some(Some(Intercepted::Welcome(outcome))) => self.apply_welcome(outcome),
                     Some(Some(Intercepted::ProjectMenu(outcome))) => {
                         self.apply_project_menu(outcome)
@@ -230,6 +234,13 @@ impl Gerdr {
                         .header
                         .to_f64()
                         .contains(pos);
+                // So do the buttons of a terminal pane's bar.
+                let free = !overlay
+                    && self.switcher.is_none()
+                    && !self.terminal_menu
+                    && self.drag.is_none()
+                    && self.reorder.is_none();
+                self.pane_bar_hover(free.then_some(pos));
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
@@ -347,6 +358,12 @@ impl Gerdr {
                     }
                     if y < TAB_STRIP_HEIGHT {
                         self.tab_strip_click(x - self.sidebar_width, y, event.button_code());
+                        return;
+                    }
+                    if let Some((id, hit)) = self.pane_bar_at(location) {
+                        if event.button_code() == BTN_LEFT {
+                            self.pane_bar_click(id, hit);
+                        }
                         return;
                     }
                     // Click to focus a pane.
@@ -494,7 +511,9 @@ impl Gerdr {
         }
     }
 
-    /// Left click selects a tab or opens one with "+"; "×" or middle click closes a tab.
+    /// Left click selects a tab, opens a terminal in a new one with "+", or
+    /// the run prompt for an app in a new one with the chevron after it;
+    /// "×" or middle click closes a tab.
     /// A tab held with the left button can be dragged to another place.
     /// The button at the right end switches light/dark.
     fn tab_strip_click(&mut self, x: i32, y: i32, button: u32) {
@@ -509,7 +528,7 @@ impl Gerdr {
         if count == 0 {
             return;
         }
-        let (tabs, plus) = chrome::tab_layout(count, width);
+        let (tabs, plus, chevron) = chrome::tab_layout(count, width);
         let hit = tabs.iter().position(|(tab, _)| inside(tab));
         match (button, hit) {
             (BTN_LEFT, Some(idx)) if inside(&tabs[idx].1) => self.close_tab(idx),
@@ -519,6 +538,7 @@ impl Gerdr {
             }
             (BTN_MIDDLE, Some(idx)) => self.close_tab(idx),
             (BTN_LEFT, None) if inside(&plus) => self.new_tab(),
+            (BTN_LEFT, None) if inside(&chevron) => self.open_run_prompt(Place::Tab),
             _ => {}
         }
     }

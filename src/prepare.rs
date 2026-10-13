@@ -399,7 +399,7 @@ impl Shell {
 /// The shell that gets the line typed in a pane: the one leading the
 /// foreground, else the pane's own; known by its name in herdr's report,
 /// else in `/proc`. One that can't be told is taken for a POSIX shell.
-fn shell_of(info: &ProcessInfo) -> Shell {
+pub fn shell_of(info: &ProcessInfo) -> Shell {
     let Some(pid) = info.foreground_process_group_id.or(info.shell_pid) else {
         return Shell::Posix;
     };
@@ -417,7 +417,7 @@ fn shell_of(info: &ProcessInfo) -> Shell {
 
 /// What a pane gets, worked out before its shell is known.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Plan {
+pub struct Plan {
     node: Option<NodeUse>,
     venv: Option<PathBuf>,
     /// `mise` overrides to export, with names `sh` takes.
@@ -427,7 +427,7 @@ struct Plan {
 }
 
 impl Plan {
-    fn new(prep: &Prep, tools: &Tools) -> Self {
+    pub fn new(prep: &Prep, tools: &Tools) -> Self {
         Self {
             node: NodeUse::new(prep, tools),
             venv: venv_of(prep, tools),
@@ -443,7 +443,7 @@ impl Plan {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
 
@@ -451,7 +451,7 @@ impl Plan {
     /// nothing to do. It starts with a space, so shells ignoring such lines
     /// keep it out of their history. Switching Node comes first, apart: a
     /// version that isn't installed mustn't stop the rest.
-    fn line(&self, shell: Shell) -> Option<String> {
+    pub fn line(&self, shell: Shell) -> Option<String> {
         if shell == Shell::Other {
             return None;
         }
@@ -487,7 +487,7 @@ impl Plan {
 
 /// What to do next with a pane waiting for its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
+pub(crate) enum Step {
     /// Its shell isn't there yet.
     Wait,
     Send,
@@ -499,7 +499,7 @@ enum Step {
 
 /// Whether `process` is a shell, by its name (a login shell's starts with
 /// `-`) or else its first argument.
-fn is_shell(process: &Process) -> bool {
+pub(crate) fn is_shell(process: &Process) -> bool {
     let argv0 = process
         .argv
         .first()
@@ -526,7 +526,7 @@ fn shell_name(process: &Process) -> Option<Shell> {
 /// soon as the shell exists (it keeps the line until its first prompt),
 /// unless the foreground is led by something other than a shell: then
 /// something runs in the pane already.
-fn step(info: &Result<ProcessInfo, String>) -> Step {
+pub(crate) fn step(info: &Result<ProcessInfo, String>) -> Step {
     let Ok(info) = info else {
         return Step::Drop;
     };

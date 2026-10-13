@@ -26,6 +26,15 @@ use crate::{
 /// How many typed commands the run prompt remembers.
 const HISTORY_LEN: usize = 100;
 
+/// Where a launched app's window goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A split of the focused pane.
+    Split,
+    /// A tab of its own.
+    Tab,
+}
+
 /// An app named in the config file, or installed on the system.
 #[derive(Clone, Debug)]
 pub struct App {
@@ -37,8 +46,9 @@ pub struct App {
 }
 
 impl Gerdr {
-    /// Run `command` and show its window in a split of the focused pane.
-    pub fn launch(&mut self, command: &str) {
+    /// Run `command` and show its window in a split of the focused pane,
+    /// or in a new tab.
+    pub fn launch(&mut self, command: &str, place: Place) {
         if command.trim().is_empty() {
             return;
         }
@@ -51,13 +61,17 @@ impl Gerdr {
         }
         let w = self.active_workspace;
         let ws = &mut self.workspaces[w];
-        if ws.tabs.is_empty() {
+        let before = ws.active_tab;
+        if ws.tabs.is_empty() || place == Place::Tab {
             ws.tabs.push(Tab::default());
-            ws.active_tab = 0;
+            ws.active_tab = ws.tabs.len() - 1;
         }
         let t = ws.active_tab;
-        if self.launch_into(w, t, None, command).is_some() {
-            self.show_active();
+        match self.launch_into(w, t, None, command) {
+            Some(_) => self.show_active(),
+            // The new tab is gone again: back to the one shown before.
+            None if place == Place::Tab => self.switch_tab(before),
+            None => {}
         }
     }
 

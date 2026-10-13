@@ -683,6 +683,14 @@ impl Herdr {
         .map(drop)
     }
 
+    /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
+    /// interrupts what runs in it. herdr checks every key before sending
+    /// any, and refuses one it doesn't know (`invalid_key`).
+    pub fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), String> {
+        self.call("pane.send_keys", json!({"pane_id": pane_id, "keys": keys}))
+            .map(drop)
+    }
+
     /// Everything herdr reports about the tabs of the session, by tab id.
     pub fn tab_details(&mut self) -> Result<HashMap<String, TabDetail>, String> {
         let mut details = HashMap::new();
