@@ -21,6 +21,7 @@ mod keys;
 mod launch;
 mod layout;
 mod notify;
+mod pane_control;
 mod prepare;
 mod project_list;
 mod project_menu;
@@ -41,7 +42,7 @@ use std::{
 };
 
 use chrome::{
-    AgentView, Chrome, ChromeView, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
+    AgentView, BarButton, Chrome, ChromeView, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
     TAB_STRIP_HEIGHT, TabView, Theme, WorkspaceView,
 };
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
@@ -276,6 +277,17 @@ impl Tab {
             herdr_tab: self.herdr_tab_id().map(str::to_owned),
             layout: self.layout.as_ref()?.save(&leaf)?,
         })
+    }
+
+    /// The herdr pane pane `id` shows, if it is a terminal.
+    fn herdr_pane(&self, id: u32) -> Option<&herdr::PaneInfo> {
+        self.panes.iter().find(|p| p.id == id)?.herdr.as_ref()
+    }
+
+    /// Whether pane `id` has a bar over it: a terminal's, to restart and
+    /// stop what runs in it (see `pane_control`).
+    fn has_bar(&self, id: u32) -> bool {
+        self.herdr_pane(id).is_some()
     }
 
     fn window(&self, id: u32) -> Option<&Window> {
@@ -702,6 +714,8 @@ pub enum Action {
     Switcher,
     /// Open the run prompt, for an app to launch into a split.
     Run,
+    /// Open the run prompt, for an app to launch into a new tab.
+    RunTab,
     /// Open the project menu (the welcome screen without a project), to
     /// switch, start or manage projects.
     Projects,
@@ -709,6 +723,10 @@ pub enum Action {
     LastProject,
     /// Whether the focused terminal's command runs again after a restart.
     ToggleRestart,
+    /// Stop what runs in the focused terminal and run its last command again.
+    RestartPane,
+    /// Stop what runs in the focused terminal.
+    StopPane,
     /// Ask whether to keep the project running, and quit.
     Quit,
 }
@@ -858,6 +876,15 @@ pub struct Gerdr {
     /// last noted, by pane id: a command is noted once per process, as
     /// some rewrite their command line once running.
     pub pane_leaders: HashMap<String, i32>,
+    /// The last command run in each herdr pane, by pane id, to run again
+    /// from its bar.
+    pub last_commands: HashMap<String, pane_control::Remembered>,
+    /// The panes being stopped or restarted, by herdr pane id.
+    pub pane_jobs: HashMap<String, pane_control::Job>,
+    /// Where those jobs report; `None` until set up.
+    pub pane_job_tx: Option<channel::Sender<pane_control::JobEvent>>,
+    /// The pane bar button under the pointer, by pane.
+    pub pane_bar_hover: Option<(u32, BarButton)>,
     /// Since when each workspace herdr said closed has been, by herdr id:
     /// forgotten only after a while, so a server going down doesn't count.
     pub closed_workspaces: HashMap<String, Instant>,
@@ -1496,6 +1523,12 @@ impl Gerdr {
                     .process
                     .as_ref()
                     .and_then(|info| projects::foreground_command(info, pane.cwd.as_deref()));
+                pane_control::remember(
+                    &mut self.last_commands,
+                    &pane.pane_id,
+                    foreground.as_ref(),
+                    pane.cwd.as_deref(),
+                );
                 let idle_long = match foreground {
                     Some(projects::Foreground::Idle) => {
                         let since = self.idle_since.entry(pane.pane_id.clone()).or_insert(now);
@@ -1522,6 +1555,8 @@ impl Gerdr {
             }
         }
         self.pane_leaders.retain(|id, _| live.contains(id.as_str()));
+        self.last_commands
+            .retain(|id, _| live.contains(id.as_str()));
         let late: Vec<String> = self
             .replay_pending
             .iter()
@@ -2445,11 +2480,14 @@ impl Gerdr {
             }
             Action::ToggleTheme => self.toggle_theme(),
             Action::Switcher => self.open_switcher(),
-            Action::Run => self.open_run_prompt(),
+            Action::Run => self.open_run_prompt(launch::Place::Split),
+            Action::RunTab => self.open_run_prompt(launch::Place::Tab),
             Action::Projects if self.project.is_some() => self.toggle_project_menu(),
             Action::Projects => self.open_welcome(true),
             Action::LastProject => self.switch_to_last_project(),
             Action::ToggleRestart => self.toggle_restart(),
+            Action::RestartPane => self.restart_focused_pane(),
+            Action::StopPane => self.stop_focused_pane(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -2774,6 +2812,12 @@ impl Gerdr {
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
                 for (id, rect) in tab.shown_rects(area) {
+                    // A terminal's bar takes the top of its place.
+                    let rect = if tab.has_bar(id) {
+                        chrome::pane_bar_rects(rect).1
+                    } else {
+                        rect
+                    };
                     panes.push((w, t, tab.window(id).unwrap().clone(), rect));
                 }
             }
@@ -3054,6 +3098,9 @@ impl Gerdr {
         self.idle_since.clear();
         self.tabs_changed = None;
         self.pane_leaders.clear();
+        self.last_commands.clear();
+        self.pane_jobs.clear();
+        self.pane_bar_hover = None;
         self.closed_workspaces.clear();
         self.restored_at = None;
         self.replay_pending.clear();
@@ -3486,6 +3533,7 @@ impl Gerdr {
                 .as_ref()
                 .filter(|(_, until)| Instant::now() < *until)
                 .map(|(text, _)| text.clone()),
+            pane_bars: self.pane_bar_views(),
             theme: self.theme,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
@@ -3699,6 +3747,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         retired_groups: Vec::new(),
         tabs_changed: None,
         pane_leaders: HashMap::new(),
+        last_commands: HashMap::new(),
+        pane_jobs: HashMap::new(),
+        pane_job_tx: None,
+        pane_bar_hover: None,
         closed_workspaces: HashMap::new(),
         restored_at: None,
         replay_pending: HashSet::new(),

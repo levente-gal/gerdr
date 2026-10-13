@@ -7,9 +7,12 @@
 //! there are just no folders.
 //!
 //! The same panel is the run prompt: what is typed is a command to launch
-//! into a split, offered first (second, under an app whose name starts with
-//! it), among the apps named in the config file, the commands typed before
-//! and the apps installed on the system.
+//! into a split or a new tab, offered first (second, under an app whose name
+//! starts with it), among the apps named in the config file, the commands
+//! typed before and the apps installed on the system.
+//!
+//! Alt+Enter launches the picked app or command in a new tab, wherever
+//! Enter would launch it.
 
 use std::{
     cmp::Reverse,
@@ -35,7 +38,7 @@ use crate::{
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     fuzzy, home_dir,
     icons::AppIcon,
-    launch,
+    launch::{self, Place},
     projects::Project,
 };
 
@@ -83,12 +86,15 @@ struct Match {
 enum Outcome {
     Open,
     Closed,
-    Picked(Target),
+    /// Enter picked this, to launch (if it is an app or a command) in that place.
+    Picked(Target, Place),
 }
 
 pub struct Switcher {
     /// The run prompt: the first item is the query, as a command.
     run: bool,
+    /// Where Enter launches an app or a command.
+    place: Place,
     query: String,
     items: Vec<Item>,
     /// The items `query` matches, best first.
@@ -102,9 +108,10 @@ pub struct Switcher {
 }
 
 impl Switcher {
-    fn new(items: Vec<Item>, run: bool) -> Self {
+    fn new(items: Vec<Item>, run: bool, place: Place) -> Self {
         let mut switcher = Self {
             run,
+            place,
             query: String::new(),
             items: Vec::new(),
             matches: Vec::new(),
@@ -122,7 +129,7 @@ impl Switcher {
         let picked = self.picked().cloned();
         if self.run {
             // The typed command's place; `refilter` fills it in.
-            items.insert(0, typed_command("", &self.icons));
+            items.insert(0, typed_command("", &self.icons, self.place));
         }
         self.items = items;
         self.refilter();
@@ -142,7 +149,7 @@ impl Switcher {
         let command = self.query.trim().to_owned();
         let typed = self.run.then(|| Target::Command(command.clone()));
         if self.run {
-            self.items[0] = typed_command(&command, &self.icons);
+            self.items[0] = typed_command(&command, &self.icons, self.place);
         }
         let mut found: Vec<(i32, Match)> = self
             .items
@@ -208,7 +215,8 @@ impl Switcher {
             Keysym::Escape => return Outcome::Closed,
             Keysym::Return | Keysym::KP_Enter => {
                 if let Some(target) = self.picked() {
-                    return Outcome::Picked(target.clone());
+                    let place = if mods.alt { Place::Tab } else { self.place };
+                    return Outcome::Picked(target.clone(), place);
                 }
             }
             Keysym::Up | Keysym::KP_Up => self.step(-1, page),
@@ -275,10 +283,10 @@ impl Switcher {
             })
             .collect();
         let selected = (!self.matches.is_empty()).then(|| self.selected - scroll);
-        let hint = if self.run {
-            "Command to run in a split…"
-        } else {
-            "Workspace, tab, agent, project, app or folder…"
+        let hint = match (self.run, self.place) {
+            (true, Place::Split) => "Command to run in a split (Alt+Enter: new tab)…",
+            (true, Place::Tab) => "Command to run in a new tab…",
+            (false, _) => "Workspace, tab, agent, project, app or folder…",
         };
         SwitcherView {
             query: self.query.clone(),
@@ -317,12 +325,16 @@ fn command_icon(command: &str, icons: &HashMap<String, AppIcon>) -> ItemIcon {
         .map_or(ItemIcon::App, ItemIcon::Picture)
 }
 
-/// The run prompt's item for the typed `command`.
-fn typed_command(command: &str, icons: &HashMap<String, AppIcon>) -> Item {
+/// The run prompt's item for the typed `command`, to run in `place`.
+fn typed_command(command: &str, icons: &HashMap<String, AppIcon>, place: Place) -> Item {
+    let detail = match place {
+        Place::Split => "run in a split",
+        Place::Tab => "run in a new tab",
+    };
     Item {
         icon: command_icon(command, icons),
         label: command.into(),
-        detail: "run in a split".into(),
+        detail: detail.into(),
         target: Target::Command(command.into()),
     }
 }
@@ -369,15 +381,15 @@ impl Gerdr {
     /// Open the switcher, and ask zoxide for its folders again meanwhile.
     pub fn open_switcher(&mut self) {
         self.project_menu = None;
-        self.switcher = Some(Switcher::new(self.switcher_items(), false));
+        self.switcher = Some(Switcher::new(self.switcher_items(), false, Place::Split));
         self.query_zoxide();
     }
 
-    /// Open the switcher as the run prompt, for a command to launch, and
-    /// look for installed apps again meanwhile.
-    pub fn open_run_prompt(&mut self) {
+    /// Open the switcher as the run prompt, for a command to launch in
+    /// `place`, and look for installed apps again meanwhile.
+    pub fn open_run_prompt(&mut self, place: Place) {
         self.project_menu = None;
-        let mut switcher = Switcher::new(Vec::new(), true);
+        let mut switcher = Switcher::new(Vec::new(), true, place);
         switcher.icons = self.program_icons();
         switcher.set_items(self.run_items());
         self.switcher = Some(switcher);
@@ -433,13 +445,13 @@ impl Gerdr {
     }
 
     /// A key pressed while the switcher is open (see `Switcher::key`):
-    /// returns what Enter picked.
+    /// returns what Enter picked, and where to launch it.
     pub fn switcher_key(
         &mut self,
         mods: &ModifiersState,
         sym: Keysym,
         typed: Keysym,
-    ) -> Option<Target> {
+    ) -> Option<(Target, Place)> {
         let page = self.switcher_page();
         match self.switcher.as_mut()?.key(mods, sym, typed, page) {
             Outcome::Open => None,
@@ -447,9 +459,9 @@ impl Gerdr {
                 self.switcher = None;
                 None
             }
-            Outcome::Picked(target) => {
+            Outcome::Picked(target, place) => {
                 self.switcher = None;
-                Some(target)
+                Some((target, place))
             }
         }
     }
@@ -502,7 +514,7 @@ impl Gerdr {
         match rows.iter().position(|row| row.to_f64().contains(pos)) {
             Some(row) => {
                 if let Some(target) = switcher.row_target(row, page).cloned() {
-                    self.switch_to(target);
+                    self.switch_to(target, switcher.place);
                 }
             }
             None if panel.to_f64().contains(pos) => self.switcher = Some(switcher),
@@ -510,7 +522,8 @@ impl Gerdr {
         }
     }
 
-    pub fn switch_to(&mut self, target: Target) {
+    /// Switch to `target`; an app or a command launches in `place`.
+    pub fn switch_to(&mut self, target: Target, place: Place) {
         match target {
             Target::Workspace(w) => self.switch_workspace(w),
             Target::Tab(w, t) => {
@@ -533,10 +546,10 @@ impl Gerdr {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),
             },
-            Target::App(command) => self.launch(&command),
+            Target::App(command) => self.launch(&command, place),
             Target::Command(command) => {
                 launch::remember(&command);
-                self.launch(&command);
+                self.launch(&command, place);
             }
         }
     }
@@ -751,6 +764,7 @@ mod tests {
                 item("zsh", "gerdr · tab 2", 2),
             ],
             false,
+            Place::Split,
         );
         assert_eq!(labels(&switcher), ["services-api", "gerdr", "zsh"]);
         type_in(&mut switcher, "gerdr");
@@ -771,6 +785,7 @@ mod tests {
         let mut switcher = Switcher::new(
             (0..8).map(|w| item(&format!("ws{w}"), "", w)).collect(),
             false,
+            Place::Split,
         );
         let none = ModifiersState::default();
         for _ in 0..6 {
@@ -784,7 +799,7 @@ mod tests {
         assert_eq!(switcher.row_target(0, 5), Some(&Target::Workspace(2)));
         assert!(matches!(
             switcher.key(&none, Keysym::Return, Keysym::Return, 5),
-            Outcome::Picked(Target::Workspace(6))
+            Outcome::Picked(Target::Workspace(6), Place::Split)
         ));
         type_in(&mut switcher, "xyz");
         assert_eq!(switcher.view(5).selected, None);
@@ -796,7 +811,11 @@ mod tests {
 
     #[test]
     fn new_items_keep_the_selection() {
-        let mut switcher = Switcher::new(vec![item("a", "", 0), item("b", "", 1)], false);
+        let mut switcher = Switcher::new(
+            vec![item("a", "", 0), item("b", "", 1)],
+            false,
+            Place::Split,
+        );
         switcher.key(&ModifiersState::default(), Keysym::Down, Keysym::Down, 5);
         switcher.set_items(vec![item("c", "", 2), item("a", "", 0), item("b", "", 1)]);
         assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
@@ -858,14 +877,26 @@ mod tests {
             detail: "firefox".into(),
             target: Target::App("firefox".into()),
         };
-        let mut switcher = Switcher::new(vec![app, command("imv a.png"), command("imv")], true);
+        let mut switcher = Switcher::new(
+            vec![app, command("imv a.png"), command("imv")],
+            true,
+            Place::Split,
+        );
         assert_eq!(labels(&switcher), ["browser", "imv a.png", "imv"]);
         type_in(&mut switcher, "imv");
         // "imv" run before shows once, as what's typed.
         assert_eq!(labels(&switcher), ["imv", "imv a.png"]);
         let none = ModifiersState::default();
         assert!(
-            matches!(switcher.key(&none, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c)) if c == "imv")
+            matches!(switcher.key(&none, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c), Place::Split) if c == "imv")
+        );
+        // Alt+Enter runs it in a new tab instead.
+        let alt = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        assert!(
+            matches!(switcher.key(&alt, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c), Place::Tab) if c == "imv")
         );
         type_in(&mut switcher, " a");
         switcher.key(&none, Keysym::Down, Keysym::Down, 5);
@@ -874,6 +905,19 @@ mod tests {
             switcher.picked(),
             Some(&Target::Command("imv a.png".into()))
         );
+    }
+
+    #[test]
+    fn run_prompt_in_a_new_tab() {
+        let mut switcher = Switcher::new(Vec::new(), true, Place::Tab);
+        type_in(&mut switcher, "imv");
+        assert_eq!(switcher.view(5).rows[0].detail, "run in a new tab");
+        assert_eq!(switcher.view(5).hint, "Command to run in a new tab…");
+        let none = ModifiersState::default();
+        assert!(matches!(
+            switcher.key(&none, Keysym::Return, Keysym::Return, 5),
+            Outcome::Picked(Target::Command(_), Place::Tab)
+        ));
     }
 
     #[test]
@@ -890,6 +934,7 @@ mod tests {
                 app("Firefox", "firefox"),
             ],
             true,
+            Place::Split,
         );
         type_in(&mut switcher, "fi");
         assert_eq!(labels(&switcher)[..2], ["Files", "fi"]);

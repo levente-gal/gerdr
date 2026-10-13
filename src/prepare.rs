@@ -132,7 +132,7 @@ pub fn prepare_line(prep: &Prep) -> Option<String> {
 
 /// What to do next with a pane waiting for its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
+pub(crate) enum Step {
     /// Its shell isn't there yet.
     Wait,
     Send,
@@ -144,7 +144,7 @@ enum Step {
 
 /// Whether `process` is a shell, by its name (a login shell's starts with
 /// `-`) or else its first argument.
-fn is_shell(process: &Process) -> bool {
+pub(crate) fn is_shell(process: &Process) -> bool {
     let argv0 = process
         .argv
         .first()
@@ -159,7 +159,7 @@ fn is_shell(process: &Process) -> bool {
 /// soon as the shell exists (it keeps the line until its first prompt),
 /// unless the foreground is led by something other than a shell: then
 /// something runs in the pane already.
-fn step(info: &Result<ProcessInfo, String>) -> Step {
+pub(crate) fn step(info: &Result<ProcessInfo, String>) -> Step {
     let Ok(info) = info else {
         return Step::Drop;
     };
