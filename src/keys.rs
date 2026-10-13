@@ -127,6 +127,14 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ),
     ("switcher", Action::Switcher, "find and switch", "f"),
     ("run", Action::Run, "run an app in a split", "r"),
+    ("projects", Action::Projects, "projects", "Shift+P"),
+    (
+        "toggle-restart",
+        Action::ToggleRestart,
+        "restart after reboot",
+        "Shift+R",
+    ),
+    ("quit", Action::Quit, "quit…", "Shift+Q"),
 ];
 
 /// The help panel's lines, in order: actions that share a line when each
@@ -166,6 +174,9 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("light / dark theme", &["toggle-theme"]),
     ("find and switch", &["switcher"]),
     ("run an app in a split", &["run"]),
+    ("projects", &["projects"]),
+    ("restart after reboot", &["toggle-restart"]),
+    ("quit…", &["quit"]),
 ];
 
 /// The modifiers a key needs.
@@ -512,6 +523,9 @@ mod tests {
                 "T: light / dark theme",
                 "F: find and switch",
                 "R: run an app in a split",
+                "Shift+P: projects",
+                "Shift+R: restart after reboot",
+                "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",
                 "Esc: cancel",
             ]
@@ -537,6 +551,28 @@ mod tests {
             Some(Action::CyclePane(-1))
         );
         assert_eq!(keymap.action(&mods(false, true), Keysym::c), None);
+        // Shift tells the project keys from the tab and run keys.
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::p),
+            Some(Action::Projects)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::p),
+            Some(Action::PrevTab)
+        );
+        assert_eq!(
+            keymap.action(&mods(true, true), Keysym::r),
+            Some(Action::ToggleRestart)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::r),
+            Some(Action::Run)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::q),
+            Some(Action::Quit)
+        );
+        assert_eq!(keymap.action(&mods(false, false), Keysym::q), None);
     }
 
     #[test]

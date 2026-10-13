@@ -6,8 +6,8 @@
 //! Shortcuts follow herdr: press the prefix (Ctrl+B), release it, then one key
 //! (see `keys` for the defaults, and how to change them). The prefix twice
 //! sends it to the app; Esc or any other key cancels. While the prefix is
-//! armed, a help panel lists the keys. While the switcher is open, every key
-//! goes to it.
+//! armed, a help panel lists the keys. While the quit dialog, the welcome
+//! screen or the switcher is open, every key and click goes to it.
 
 use smithay::{
     backend::input::{
@@ -26,7 +26,9 @@ use crate::{
     chrome::{self, TAB_STRIP_HEIGHT},
     home_dir,
     layout::Dir,
+    quit,
     switcher::Target,
+    welcome,
 };
 
 const BTN_LEFT: u32 = 0x110;
@@ -37,6 +39,10 @@ enum Intercepted {
     Action(Action),
     /// The switcher picked this.
     Switch(Target),
+    /// The welcome screen asked for this.
+    Welcome(welcome::Outcome),
+    /// The quit dialog asked for this.
+    Quit(quit::Outcome),
 }
 
 fn drag_cursor(drag: &Drag) -> CursorIcon {
@@ -81,6 +87,16 @@ impl Gerdr {
                         if sym.is_modifier_key() {
                             return FilterResult::Forward;
                         }
+                        if state.quit.is_some() {
+                            state.suppressed_keys.push(code);
+                            let out = state.quit_key(mods, sym, handle.modified_sym());
+                            return FilterResult::Intercept(out.map(Intercepted::Quit));
+                        }
+                        if state.welcome.is_some() {
+                            state.suppressed_keys.push(code);
+                            let out = state.welcome_key(mods, sym, handle.modified_sym());
+                            return FilterResult::Intercept(out.map(Intercepted::Welcome));
+                        }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
@@ -115,6 +131,8 @@ impl Gerdr {
                 match action {
                     Some(Some(Intercepted::Action(action))) => self.run_action(action),
                     Some(Some(Intercepted::Switch(target))) => self.switch_to(target),
+                    Some(Some(Intercepted::Welcome(outcome))) => self.apply_welcome(outcome),
+                    Some(Some(Intercepted::Quit(outcome))) => self.apply_quit(outcome),
                     _ => {}
                 }
             }
@@ -134,14 +152,22 @@ impl Gerdr {
                         self.reorder_to(what, pos);
                     }
                 }
-                if self.terminal_menu {
+                // An overlay takes the hover from everything under it.
+                let overlay = self.quit.is_some() || self.welcome.is_some();
+                if self.quit.is_some() {
+                    self.quit_hover(pos);
+                } else if self.welcome.is_some() {
+                    self.welcome_hover(pos);
+                } else if self.terminal_menu {
                     let (_, items) = chrome::terminal_menu(self.sidebar_width);
                     self.menu_hover = items.iter().position(|item| item.to_f64().contains(pos));
                 }
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
-                    let icon = if self.reorder.is_some_and(|r| r.moving) {
+                    let icon = if overlay {
+                        CursorIcon::Default
+                    } else if self.reorder.is_some_and(|r| r.moving) {
                         CursorIcon::Grabbing
                     } else {
                         self.drag
@@ -189,6 +215,20 @@ impl Gerdr {
                     return;
                 }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
+                    // An overlay takes every press; only the left button does
+                    // anything there.
+                    if self.quit.is_some() {
+                        if event.button_code() == BTN_LEFT {
+                            self.quit_click(location);
+                        }
+                        return;
+                    }
+                    if self.welcome.is_some() {
+                        if event.button_code() == BTN_LEFT {
+                            self.welcome_click(location);
+                        }
+                        return;
+                    }
                     if self.switcher.is_some() {
                         self.switcher_click(location);
                         return;
@@ -278,7 +318,8 @@ impl Gerdr {
     /// Left click selects a workspace, "×" or middle click closes it; a left
     /// click on an agent card shows its pane. A row held with the left button
     /// can be dragged to another place. The header buttons open a
-    /// project, a terminal in home, or the terminal menu.
+    /// project, a terminal in home, or the terminal menu; the header's title
+    /// left of them opens the welcome screen, to switch projects.
     fn sidebar_click(&mut self, x: i32, y: i32, button: u32) {
         let agents = self.agent_views();
         let workspaces: Vec<_> = self
@@ -300,6 +341,11 @@ impl Gerdr {
             }
             if inside(&layout.chevron) {
                 self.terminal_menu = true;
+                self.refresh_pointer_focus();
+                return;
+            }
+            if y < chrome::BAR_HEIGHT && x < layout.project.loc.x {
+                self.open_welcome(true);
                 self.refresh_pointer_focus();
                 return;
             }
