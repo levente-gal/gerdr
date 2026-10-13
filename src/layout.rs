@@ -66,30 +66,78 @@ pub enum SavedLeaf {
     App { command: String },
 }
 
-#[allow(dead_code)] // contract: implemented by the tab persistence work
+#[allow(dead_code)] // used by project persistence
 impl Node {
     /// The layout to save: `leaf` names what each leaf shows; leaves it has
     /// no name for are left out (their sibling takes the space). `None` if
     /// none is named.
     pub fn save(&self, leaf: &impl Fn(u32) -> Option<SavedLeaf>) -> Option<SavedNode> {
-        let _ = leaf;
-        todo!("tab persistence")
+        match self {
+            Node::Leaf(id) => leaf(*id).map(SavedNode::Leaf),
+            Node::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => match (first.save(leaf), second.save(leaf)) {
+                (Some(first), Some(second)) => Some(SavedNode::Split {
+                    dir: *dir,
+                    ratio: *ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (first, second) => first.or(second),
+            },
+        }
     }
 }
 
-#[allow(dead_code)] // contract: implemented by the tab persistence work
+#[allow(dead_code)] // used by project persistence
 impl SavedNode {
     /// The layout to show again: `leaf` hands out the pane id for each saved
     /// leaf, or `None` for one that can't come back (its sibling takes the
-    /// space). `None` if no leaf comes back.
+    /// space). `None` if no leaf comes back. Leaves are handed to `leaf` in
+    /// order.
     pub fn restore(&self, leaf: &mut impl FnMut(&SavedLeaf) -> Option<u32>) -> Option<Node> {
-        let _ = leaf;
-        todo!("tab persistence")
+        match self {
+            SavedNode::Leaf(saved) => leaf(saved).map(Node::Leaf),
+            SavedNode::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => {
+                let first = first.restore(leaf);
+                let second = second.restore(leaf);
+                match (first, second) {
+                    (Some(first), Some(second)) => Some(Node::Split {
+                        dir: *dir,
+                        ratio: *ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (first, second) => first.or(second),
+                }
+            }
+        }
     }
 
     /// The herdr pane ids among its leaves, in order.
     pub fn herdr_panes(&self) -> Vec<&str> {
-        todo!("tab persistence")
+        let mut out = Vec::new();
+        self.collect_herdr_panes(&mut out);
+        out
+    }
+
+    fn collect_herdr_panes<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            SavedNode::Leaf(SavedLeaf::Herdr { pane_id }) => out.push(pane_id),
+            SavedNode::Leaf(_) => {}
+            SavedNode::Split { first, second, .. } => {
+                first.collect_herdr_panes(out);
+                second.collect_herdr_panes(out);
+            }
+        }
     }
 }
 
@@ -468,6 +516,147 @@ mod tests {
         assert!(matches!(**second, Node::Split { dir: Dir::Down, .. }));
         assert_eq!(Node::from_rects(&[(7, r(0, 0, 5, 5))]), Some(Node::Leaf(7)));
         assert_eq!(Node::from_rects(&[]), None);
+    }
+
+    /// What `three()`'s panes show: a herdr terminal, Zed, an app.
+    fn named(id: u32) -> Option<SavedLeaf> {
+        match id {
+            1 => Some(SavedLeaf::Herdr {
+                pane_id: "w1:p1".into(),
+            }),
+            2 => Some(SavedLeaf::Zed),
+            3 => Some(SavedLeaf::App {
+                command: "firefox".into(),
+            }),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn save_and_restore_round_trip() {
+        let mut root = three();
+        root.set_ratio(&[], 0.3);
+        root.set_ratio(&[true], 0.7);
+        let saved = root.save(&named).unwrap();
+        let SavedNode::Split {
+            dir: Dir::Right,
+            ratio,
+            second,
+            ..
+        } = &saved
+        else {
+            panic!("{saved:?}")
+        };
+        assert_eq!(*ratio, 0.3);
+        assert!(matches!(
+            **second,
+            SavedNode::Split {
+                dir: Dir::Down,
+                ratio: 0.7,
+                ..
+            }
+        ));
+        // New ids for the leaves, in order.
+        let mut next = 10;
+        let mut seen = Vec::new();
+        let restored = saved
+            .restore(&mut |leaf| {
+                seen.push(leaf.clone());
+                next += 1;
+                Some(next)
+            })
+            .unwrap();
+        assert_eq!(seen, [1, 2, 3].map(|id| named(id).unwrap()));
+        assert_eq!(restored.leaves(), [11, 12, 13]);
+        assert_eq!(restored.save(&|id| named(id - 10)), Some(saved));
+    }
+
+    #[test]
+    fn save_leaves_out_unnamed() {
+        // 1 | (2 over 3) without 2: 1 | 3, keeping the outer split.
+        let saved = three().save(&|id| named(id).filter(|_| id != 2)).unwrap();
+        let SavedNode::Split {
+            dir: Dir::Right,
+            first,
+            second,
+            ..
+        } = &saved
+        else {
+            panic!("{saved:?}")
+        };
+        assert_eq!(**first, SavedNode::Leaf(named(1).unwrap()));
+        assert_eq!(**second, SavedNode::Leaf(named(3).unwrap()));
+        // Only 3 named: just its leaf.
+        assert_eq!(
+            three().save(&|id| named(id).filter(|_| id == 3)),
+            Some(SavedNode::Leaf(named(3).unwrap()))
+        );
+        assert_eq!(three().save(&|_| None), None);
+    }
+
+    #[test]
+    fn restore_leaves_out_missing() {
+        let saved = three().save(&named).unwrap();
+        // The app can't come back: 1 | 2.
+        let restored = saved.restore(&mut |leaf| match leaf {
+            SavedLeaf::Herdr { .. } => Some(1),
+            SavedLeaf::Zed => Some(2),
+            SavedLeaf::App { .. } => None,
+        });
+        assert_eq!(
+            restored,
+            Some(Node::Split {
+                dir: Dir::Right,
+                ratio: 0.5,
+                first: Box::new(Node::Leaf(1)),
+                second: Box::new(Node::Leaf(2)),
+            })
+        );
+        // Only the herdr pane comes back.
+        assert_eq!(
+            saved.restore(&mut |leaf| matches!(leaf, SavedLeaf::Herdr { .. }).then_some(1)),
+            Some(Node::Leaf(1))
+        );
+        assert_eq!(saved.restore(&mut |_| None), None);
+    }
+
+    #[test]
+    fn herdr_panes_in_order() {
+        // (h2 | Zed) over (h1 over h3)
+        let herdr = |id: &str| SavedNode::Leaf(SavedLeaf::Herdr { pane_id: id.into() });
+        let split = |dir, first, second| SavedNode::Split {
+            dir,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        let saved = split(
+            Dir::Down,
+            split(Dir::Right, herdr("w1:p2"), SavedNode::Leaf(SavedLeaf::Zed)),
+            split(Dir::Down, herdr("w1:p1"), herdr("w1:p3")),
+        );
+        assert_eq!(saved.herdr_panes(), ["w1:p2", "w1:p1", "w1:p3"]);
+        assert!(SavedNode::Leaf(SavedLeaf::Zed).herdr_panes().is_empty());
+    }
+
+    #[test]
+    fn saved_json_shape() {
+        let mut root = three();
+        root.set_ratio(&[], 0.3);
+        let saved = root.save(&named).unwrap();
+        let json = serde_json::to_string(&saved).unwrap();
+        // Saved projects are read back by later versions: keep this shape.
+        assert_eq!(
+            json,
+            concat!(
+                r#"{"split":{"dir":"right","ratio":0.3,"#,
+                r#""first":{"leaf":{"kind":"herdr","pane_id":"w1:p1"}},"#,
+                r#""second":{"split":{"dir":"down","ratio":0.5,"#,
+                r#""first":{"leaf":{"kind":"zed"}},"#,
+                r#""second":{"leaf":{"kind":"app","command":"firefox"}}}}}}"#,
+            )
+        );
+        assert_eq!(serde_json::from_str::<SavedNode>(&json).unwrap(), saved);
     }
 
     #[test]

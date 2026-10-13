@@ -19,7 +19,9 @@ use std::{
 
 use smithay::reexports::calloop::channel;
 
-use crate::{Expected, Gerdr, Tab, Workspace, WorkspaceKind, desktop, home_dir, icons::AppIcon};
+use crate::{
+    Expected, Gerdr, Tab, Workspace, WorkspaceKind, desktop, home_dir, icons::AppIcon, layout,
+};
 
 /// How many typed commands the run prompt remembers.
 const HISTORY_LEN: usize = 100;
@@ -37,8 +39,7 @@ pub struct App {
 impl Gerdr {
     /// Run `command` and show its window in a split of the focused pane.
     pub fn launch(&mut self, command: &str) {
-        let command = command.trim();
-        if command.is_empty() {
+        if command.trim().is_empty() {
             return;
         }
         if self.workspaces.is_empty() {
@@ -48,6 +49,71 @@ impl Gerdr {
             ));
             self.active_workspace = 0;
         }
+        let w = self.active_workspace;
+        let ws = &mut self.workspaces[w];
+        if ws.tabs.is_empty() {
+            ws.tabs.push(Tab::default());
+            ws.active_tab = 0;
+        }
+        let t = ws.active_tab;
+        if self.launch_into(w, t, None, command).is_some() {
+            self.show_active();
+        }
+    }
+
+    /// Run `command` in workspace `w`'s folder and show its window in tab
+    /// `t`: in `leaf`, a leaf already in the tab's layout (as in a restored
+    /// tab), or else in a split of the tab's focused pane. Returns the
+    /// window's leaf, or `None` if the command didn't start.
+    ///
+    /// The pane remembers `command` as typed, so the app comes back with the
+    /// project. A new split takes focus when its window shows up; a given
+    /// leaf doesn't, and nothing is shown: that is up to the caller. When
+    /// the command doesn't start, a given leaf is taken out of the layout
+    /// and the caller prunes, so the workspace and tab indices it holds stay
+    /// put; without one, empty tabs are pruned right away.
+    pub fn launch_into(
+        &mut self,
+        w: usize,
+        t: usize,
+        leaf: Option<u32>,
+        command: &str,
+    ) -> Option<u32> {
+        let original = command.trim();
+        let Some(pid) = self.start_app(w, t, original) else {
+            match leaf {
+                Some(id) => {
+                    let tab = self.workspaces.get_mut(w)?.tabs.get_mut(t)?;
+                    layout::remove(&mut tab.layout, id);
+                }
+                None => self.prune(),
+            }
+            return None;
+        };
+        let id = match leaf {
+            Some(id) => id,
+            None => {
+                let (id, area) = (self.new_pane_id(), self.content_rect());
+                self.workspaces[w].tabs[t].split(None, id, None, area);
+                id
+            }
+        };
+        let mut expected = Expected::new(Some(pid), "", id, leaf.is_none());
+        expected.app_command = Some(original.to_owned());
+        self.workspaces[w].tabs[t].expected.push(expected);
+        Some(id)
+    }
+
+    /// Start `command` (trimmed) for tab `t` of workspace `w`, in the
+    /// workspace's folder. Its pid, or `None` if it is empty, the tab is
+    /// gone, or it didn't start.
+    fn start_app(&mut self, w: usize, t: usize, command: &str) -> Option<u32> {
+        if command.is_empty() {
+            return None;
+        }
+        let ws = self.workspaces.get(w)?;
+        ws.tabs.get(t)?;
+        let dir = ws.dir.clone();
         let command = match own_instance(command) {
             Some((command, profile)) => {
                 if let Err(err) = std::fs::create_dir_all(&profile) {
@@ -57,27 +123,12 @@ impl Gerdr {
             }
             None => command.to_owned(),
         };
-        let w = self.active_workspace;
-        let dir = self.workspaces[w].dir.clone();
         let mut cmd = Command::new("sh");
         // Electron apps would look for an X server, and there is none.
         cmd.arg("-c")
             .arg(&command)
             .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
-        let Some(pid) = self.spawn(cmd, &dir) else {
-            self.prune();
-            return;
-        };
-        let (id, area) = (self.new_pane_id(), self.content_rect());
-        let ws = &mut self.workspaces[w];
-        if ws.tabs.is_empty() {
-            ws.tabs.push(Tab::default());
-            ws.active_tab = 0;
-        }
-        let tab = &mut ws.tabs[ws.active_tab];
-        tab.split(None, id, None, area);
-        tab.expected.push(Expected::new(Some(pid), "", id, true));
-        self.show_active();
+        self.spawn(cmd, &dir)
     }
 
     /// Take in the installed apps, which `scan_installed_apps` reads off the
