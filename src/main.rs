@@ -21,7 +21,11 @@ mod keys;
 mod launch;
 mod layout;
 mod notify;
+mod prepare;
+mod projects;
+mod quit;
 mod switcher;
+mod welcome;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -118,6 +122,8 @@ pub struct Pane {
     pub window: Window,
     /// The herdr pane it shows, for a terminal.
     pub herdr: Option<herdr::PaneInfo>,
+    /// The command it was launched with from the run prompt, for an app.
+    pub app_command: Option<String>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.
@@ -137,6 +143,8 @@ pub struct Expected {
     pub exited: Option<Instant>,
     /// The herdr pane the window will show, for a terminal.
     pub herdr: Option<herdr::PaneInfo>,
+    /// The command it was launched with from the run prompt, for an app.
+    pub app_command: Option<String>,
 }
 
 impl Expected {
@@ -148,6 +156,7 @@ impl Expected {
             focus,
             exited: None,
             herdr: None,
+            app_command: None,
         }
     }
 
@@ -354,6 +363,12 @@ pub enum Action {
     Switcher,
     /// Open the run prompt, for an app to launch into a split.
     Run,
+    /// Open the welcome screen, to switch or start projects.
+    Projects,
+    /// Whether the focused terminal's command runs again after a restart.
+    ToggleRestart,
+    /// Ask whether to keep the project running, and quit.
+    Quit,
 }
 
 /// A divider that can be dragged with the mouse.
@@ -456,6 +471,30 @@ pub struct Gerdr {
     pub installed_apps: Vec<launch::App>,
     /// Where a read of the installed apps sends them; `None` until set up.
     pub installed_apps_tx: Option<channel::Sender<Vec<launch::App>>>,
+
+    /// The projects gerdr knows, and what it remembers of them.
+    pub projects: projects::Store,
+    /// The project shown, by id; `None` before one is open.
+    pub project: Option<String>,
+    /// The welcome screen, while it is shown.
+    pub welcome: Option<welcome::Welcome>,
+    /// Where a check of which projects' sessions run sends its answer (by
+    /// project id); `None` until set up.
+    pub welcome_status: Option<channel::Sender<Vec<(String, bool)>>>,
+    /// The quit dialog, while it is open.
+    pub quit: Option<quit::QuitDialog>,
+    /// The event loop sources following the project's herdr session, removed
+    /// when switching to another project.
+    pub herdr_sources: Vec<RegistrationToken>,
+    /// Since when each herdr pane's shell has been idle, by pane id: its
+    /// command is forgotten only after a while, so panes dying on shutdown
+    /// don't count.
+    pub idle_since: HashMap<String, Instant>,
+    /// Process groups of projects switched away from; their late windows are
+    /// closed instead of placed.
+    pub retired_groups: Vec<i32>,
+    /// Stop the project's session once the event loop ends.
+    pub stop_on_exit: bool,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -626,7 +665,8 @@ impl Gerdr {
 
     /// Start a child on our socket, in its own process group.
     fn spawn(&mut self, mut cmd: Command, dir: &Path) -> Option<u32> {
-        herdr::scrub_env(&mut cmd);
+        let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
+        herdr::scrub_env(&mut cmd, socket.as_deref());
         cmd.env("WAYLAND_DISPLAY", &self.socket_name)
             .env_remove("DISPLAY") // no XWayland escape to the host
             .current_dir(dir)
@@ -711,26 +751,25 @@ impl Gerdr {
         self.spawn(herdr::attach_command(&pane.terminal_id, &dir), &dir)
     }
 
-    /// Connect to gerdr's herdr session (starting it if needed), show what it
-    /// already holds and follow its changes. Without herdr, terminals are
-    /// plain Alacritty windows.
-    fn connect_herdr(&mut self) {
-        let Some((mut herdr, fresh)) = herdr::Herdr::connect_or_start(&self.socket_name) else {
+    /// Connect to herdr session `session` (starting it if needed), show what
+    /// it already holds and follow its changes. Without herdr, terminals are
+    /// plain Alacritty windows. A restarted server brings its workspaces back
+    /// by itself; a fresh one has none.
+    fn connect_herdr(&mut self, session: &str) {
+        let Some((mut herdr, _start)) = herdr::Herdr::connect_or_start(session, &self.socket_name)
+        else {
             return;
         };
-        let mut workspaces = herdr.workspace_list().unwrap_or_default();
-        if fresh {
-            // A new server opens a workspace of its own; gerdr opens its own.
-            workspaces
-                .retain(|ws| ws.is_gerdr() || herdr.workspace_close(&ws.workspace_id).is_err());
-        }
+        let workspaces = herdr.workspace_list().unwrap_or_default();
+        let subscribed = herdr.subscribe();
+        let socket = herdr.socket().to_path_buf();
         self.herdr = Some(herdr);
         for ws in workspaces {
             self.sync_herdr_workspace(&ws.workspace_id);
         }
         self.refresh_agents();
-        self.watch_herdr_tabs();
-        let sub = match herdr::Herdr::subscribe() {
+        self.watch_herdr_tabs(socket);
+        let sub = match subscribed {
             Ok(sub) => sub,
             Err(err) => {
                 return tracing::warn!(
@@ -793,6 +832,7 @@ impl Gerdr {
                 }
                 self.sync_herdr_workspace(&pane.workspace_id);
             }
+            herdr::Event::WorkspaceClosed { .. } => {}
             herdr::Event::WorkspaceRenamed {
                 workspace_id,
                 label,
@@ -812,7 +852,7 @@ impl Gerdr {
     }
 
     /// Follow what herdr reports about the tabs, polled off the event loop.
-    fn watch_herdr_tabs(&mut self) {
+    fn watch_herdr_tabs(&mut self, socket: PathBuf) {
         let (tx, rx): (_, Channel<HashMap<String, herdr::TabDetail>>) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             // Rounds are dropped once the server is gone.
@@ -823,7 +863,7 @@ impl Gerdr {
             }
         });
         match inserted {
-            Ok(_) => herdr::watch_tabs(AGENT_INTERVAL, move |tabs| tx.send(tabs).is_ok()),
+            Ok(_) => herdr::watch_tabs(socket, AGENT_INTERVAL, move |tabs| tx.send(tabs).is_ok()),
             Err(err) => tracing::warn!("herdr tabs: {err}"),
         }
     }
@@ -1491,6 +1531,8 @@ impl Gerdr {
             Action::ToggleTheme => self.toggle_theme(),
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(),
+            // Contract: wired up by the lifecycle work.
+            Action::Projects | Action::ToggleRestart | Action::Quit => {}
             Action::CyclePane(step) => self.focus_pane(|tab| {
                 let shown = tab.shown();
                 let current = shown.iter().position(|id| Some(*id) == tab.focused_id())? as isize;
@@ -1622,11 +1664,11 @@ impl Gerdr {
             .or_else(|| {
                 find(&|e| e.pid.is_some() && !e.app_id.is_empty() && app_id.contains(e.app_id))
             });
-        let (w, t, id, focus, herdr) = match found {
+        let (w, t, id, focus, herdr, app_command) = match found {
             Some((w, t, e)) => {
                 let e = self.workspaces[w].tabs[t].expected.remove(e);
                 self.launch_next_zed();
-                (w, t, e.pane, e.focus, e.herdr)
+                (w, t, e.pane, e.focus, e.herdr, e.app_command)
             }
             // Not one we started (e.g. a second Zed window): split the
             // focused pane of the current tab along its longer side.
@@ -1645,7 +1687,7 @@ impl Gerdr {
                     ws.active_tab = 0;
                 }
                 ws.tabs[ws.active_tab].split(None, id, None, area);
-                (self.active_workspace, ws.active_tab, id, true, None)
+                (self.active_workspace, ws.active_tab, id, true, None, None)
             }
         };
 
@@ -1654,6 +1696,7 @@ impl Gerdr {
             id,
             window: window.clone(),
             herdr,
+            app_command,
         });
         // Zed and new splits get focus; the terminal under Zed only if nothing is focused yet.
         let takes_focus = focus || tab.focused.is_none();
@@ -1855,6 +1898,42 @@ impl Gerdr {
             .collect()
     }
 
+    /// Show project `id`: the project shown now keeps running in the
+    /// background.
+    #[allow(dead_code)] // contract: implemented by the lifecycle work
+    pub fn switch_project(&mut self, id: &str) {
+        let _ = id;
+        todo!("lifecycle")
+    }
+
+    /// Start a new, empty project called `name` and show it.
+    #[allow(dead_code)] // contract: implemented by the lifecycle work
+    pub fn create_project(&mut self, name: &str) {
+        let _ = name;
+        todo!("lifecycle")
+    }
+
+    /// Forget project `id`; its herdr session stays. Not the shown one.
+    #[allow(dead_code)] // contract: implemented by the lifecycle work
+    pub fn forget_project(&mut self, id: &str) {
+        let _ = id;
+        todo!("lifecycle")
+    }
+
+    /// The projects for the welcome screen, most recently used first, by id;
+    /// `running` is left `None`.
+    #[allow(dead_code)] // contract: implemented by the lifecycle work
+    pub fn project_rows(&self) -> Vec<(String, chrome::ProjectRow)> {
+        todo!("lifecycle")
+    }
+
+    /// End gerdr, stopping the project's session if `stop`.
+    #[allow(dead_code)] // contract: implemented by the lifecycle work
+    pub fn quit_app(&mut self, stop: bool) {
+        let _ = stop;
+        todo!("lifecycle")
+    }
+
     /// What the sidebar and tab strip should show right now.
     fn chrome_view(&self) -> ChromeView {
         let ws = self.workspace();
@@ -1870,6 +1949,8 @@ impl Gerdr {
             menu: self.terminal_menu.then_some(self.menu_hover),
             switcher: self.switcher_view(),
             prefix: self.prefix_armed.then(|| self.keymap.help()),
+            welcome: None,
+            quit: None,
             theme: self.theme,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
@@ -2068,6 +2149,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         apps,
         installed_apps: Vec::new(),
         installed_apps_tx: None,
+        projects: projects::Store::default(),
+        project: None,
+        welcome: None,
+        welcome_status: None,
+        quit: None,
+        herdr_sources: Vec::new(),
+        idle_since: HashMap::new(),
+        retired_groups: Vec::new(),
+        stop_on_exit: false,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -2185,7 +2275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TimeoutAction::ToDuration(AGENT_INTERVAL)
         })?;
 
-    state.connect_herdr();
+    state.connect_herdr("gerdr");
     state.watch_git();
     state.connect_notifier();
     state.watch_zoxide();

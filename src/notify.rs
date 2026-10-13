@@ -110,7 +110,10 @@ impl Notifier {
                         .get_reply_serial()
                         .and_then(|serial| self.sent.remove(&serial))
                     {
-                        let name = msg.as_result().err().and_then(|e| e.name().map(str::to_owned));
+                        let name = msg
+                            .as_result()
+                            .err()
+                            .and_then(|e| e.name().map(str::to_owned));
                         tracing::warn!(
                             "notification for {key} refused: {}",
                             name.as_deref().unwrap_or("unknown error")

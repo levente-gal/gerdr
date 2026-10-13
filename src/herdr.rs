@@ -25,10 +25,13 @@ use serde_json::{Value, json};
 
 use crate::{home_dir, layout::Dir};
 
-/// The herdr session gerdr's terminals live in, apart from the user's own.
-const SESSION: &str = "gerdr";
+/// Who gerdr's workspace metadata is reported as.
+const SOURCE: &str = "gerdr";
 /// How long a request may take before gerdr gives up on it.
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a ping may take when only checking whether a server runs.
+#[allow(dead_code)] // used by the welcome screen
+const PROBE: Duration = Duration::from_millis(300);
 /// How long a server gerdr started may take to answer.
 const STARTUP: Duration = Duration::from_secs(5);
 /// herdr's caller context, inherited when gerdr itself runs inside herdr; it
@@ -48,18 +51,45 @@ const KIND_TOKEN: &str = "gerdr_kind";
 const DIR_TOKEN: &str = "gerdr_dir_";
 const TOKEN_MAX: usize = 80;
 
-pub fn socket_path() -> PathBuf {
+/// Where herdr keeps named session `session`: its socket, log and saved
+/// layout.
+pub fn session_dir(session: &str) -> PathBuf {
     home_dir()
         .unwrap_or_default()
         .join(".config/herdr/sessions")
-        .join(SESSION)
-        .join("herdr.sock")
+        .join(session)
 }
 
-/// Drop herdr's caller context from `cmd` and point it at gerdr's session.
-pub fn scrub_env(cmd: &mut Command) {
+pub fn socket_path(session: &str) -> PathBuf {
+    session_dir(session).join("herdr.sock")
+}
+
+/// Whether `session` saved workspaces that its server restores on start.
+/// herdr keeps `session.json` even with no workspaces in it.
+pub fn has_saved_layout(session: &str) -> bool {
+    std::fs::read(session_dir(session).join("session.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|saved| saved["workspaces"].as_array().map(|ws| !ws.is_empty()))
+        .unwrap_or(false)
+}
+
+/// Whether a server answers for `session`. A socket file alone says nothing:
+/// stopped sessions leave theirs behind.
+#[allow(dead_code)] // used by the welcome screen
+pub fn is_running(session: &str) -> bool {
+    let mut herdr = Herdr::on_socket(socket_path(session));
+    herdr.timeout = PROBE;
+    herdr.call("ping", json!({})).is_ok()
+}
+
+/// Drop herdr's caller context from `cmd` and point it at `socket`, the
+/// active project's session, if any.
+pub fn scrub_env(cmd: &mut Command, socket: Option<&Path>) {
     strip_inherited(cmd);
-    cmd.env("HERDR_SOCKET_PATH", socket_path());
+    if let Some(socket) = socket {
+        cmd.env("HERDR_SOCKET_PATH", socket);
+    }
 }
 
 fn strip_inherited(cmd: &mut Command) {
@@ -228,6 +258,8 @@ pub struct Process {
     pub pid: i32,
     pub name: String,
     #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
     pub cmdline: String,
     pub cwd: Option<PathBuf>,
 }
@@ -236,6 +268,9 @@ pub struct Process {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct ProcessInfo {
     pub shell_pid: Option<i32>,
+    /// Equal to `shell_pid` while the shell waits at its prompt.
+    #[serde(default)]
+    pub foreground_process_group_id: Option<i32>,
     #[serde(default)]
     pub foreground_processes: Vec<Process>,
 }
@@ -257,6 +292,8 @@ pub struct Worktree {
 pub struct PaneState {
     pub pane_id: String,
     pub terminal_id: String,
+    #[serde(default)]
+    pub workspace_id: String,
     pub tab_id: String,
     #[serde(default)]
     pub focused: bool,
@@ -283,6 +320,8 @@ pub struct PaneState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabDetail {
     pub tab: TabInfo,
+    /// Its place among its workspace's tabs.
+    pub index: usize,
     pub panes: Vec<PaneState>,
 }
 
@@ -305,33 +344,66 @@ pub enum Event {
         workspace_id: String,
         label: String,
     },
+    WorkspaceClosed {
+        workspace_id: String,
+    },
     /// An agent showed up, left, or changed state or title.
     AgentsChanged,
 }
 
-/// Requests to gerdr's herdr server. The server answers one request per
+/// How a session's server came to answer `connect_or_start`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// It was already running.
+    Attached,
+    /// Just started, and it brought back the workspaces it saved (as fresh
+    /// shells: what ran in them is gone).
+    Restored,
+    /// Just started, with nothing saved: no workspaces.
+    Fresh,
+}
+
+/// Requests to a herdr session's server. The server answers one request per
 /// connection, so each call connects anew.
 pub struct Herdr {
     next_id: u64,
+    socket: PathBuf,
+    timeout: Duration,
 }
 
 impl Herdr {
-    fn connect() -> Result<Self, String> {
-        let mut herdr = Self { next_id: 0 };
+    /// Requests to the server on `socket`, without checking it answers.
+    pub fn on_socket(socket: PathBuf) -> Self {
+        Self {
+            next_id: 0,
+            socket,
+            timeout: TIMEOUT,
+        }
+    }
+
+    fn connect(socket: &Path) -> Result<Self, String> {
+        let mut herdr = Self::on_socket(socket.to_path_buf());
         herdr.call("ping", json!({}))?;
         Ok(herdr)
     }
 
-    /// Connect to gerdr's session, starting its server if none runs. The
-    /// bool says whether it was just started. `None` if herdr isn't there.
-    pub fn connect_or_start(wayland_display: &OsStr) -> Option<(Self, bool)> {
-        if let Ok(herdr) = Self::connect() {
-            return Some((herdr, false));
+    /// The socket of the session it talks to.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// Connect to `session`, starting its server if none runs. `None` if
+    /// herdr isn't there.
+    pub fn connect_or_start(session: &str, wayland_display: &OsStr) -> Option<(Self, Start)> {
+        let socket = socket_path(session);
+        if let Ok(herdr) = Self::connect(&socket) {
+            return Some((herdr, Start::Attached));
         }
+        let saved = has_saved_layout(session);
         // Its own session, out of gerdr's process groups: it outlives gerdr.
         // Shells it starts on its own still open their windows in gerdr.
         let mut server = Command::new("herdr");
-        server.args(["--session", SESSION, "server"]);
+        server.args(["--session", session, "server"]);
         strip_inherited(&mut server);
         server
             .env("WAYLAND_DISPLAY", wayland_display)
@@ -350,15 +422,20 @@ impl Herdr {
             tracing::warn!("herdr server failed to start, terminals won't persist: {err}");
             return None;
         }
-        // The socket answers before the server is done starting; it is
-        // ready once its startup workspace is there.
+        // The socket answers before the server is done restoring; a server
+        // with a saved layout is ready once its workspaces are back. A
+        // server started without one has none.
         let start = Instant::now();
         while start.elapsed() < STARTUP {
             std::thread::sleep(Duration::from_millis(50));
-            if let Ok(mut herdr) = Self::connect()
-                && herdr.workspace_list().is_ok_and(|list| !list.is_empty())
-            {
-                return Some((herdr, true));
+            let Ok(mut herdr) = Self::connect(&socket) else {
+                continue;
+            };
+            if !saved {
+                return Some((herdr, Start::Fresh));
+            }
+            if herdr.workspace_list().is_ok_and(|list| !list.is_empty()) {
+                return Some((herdr, Start::Restored));
             }
         }
         tracing::warn!("herdr server didn't come up, terminals won't persist");
@@ -370,12 +447,12 @@ impl Herdr {
         self.next_id += 1;
         let id = self.next_id.to_string();
         let fail = |e: &dyn std::fmt::Display| format!("{method}: {e}");
-        let mut stream = UnixStream::connect(socket_path()).map_err(|e| fail(&e))?;
+        let mut stream = UnixStream::connect(&self.socket).map_err(|e| fail(&e))?;
         stream
-            .set_read_timeout(Some(TIMEOUT))
+            .set_read_timeout(Some(self.timeout))
             .map_err(|e| fail(&e))?;
         stream
-            .set_write_timeout(Some(TIMEOUT))
+            .set_write_timeout(Some(self.timeout))
             .map_err(|e| fail(&e))?;
         let mut line =
             serde_json::to_vec(&json!({"id": id, "method": method, "params": params})).unwrap();
@@ -427,8 +504,7 @@ impl Herdr {
         for (i, piece) in pieces.into_iter().enumerate() {
             tokens[format!("{DIR_TOKEN}{i}")] = piece.into();
         }
-        let params =
-            json!({"workspace_id": pane.workspace_id, "source": SESSION, "tokens": tokens});
+        let params = json!({"workspace_id": pane.workspace_id, "source": SOURCE, "tokens": tokens});
         if let Err(err) = self.call("workspace.report_metadata", params) {
             tracing::warn!("{err}");
         }
@@ -555,14 +631,26 @@ impl Herdr {
         )
     }
 
-    /// Everything herdr reports about the tabs of gerdr's workspaces, by tab id.
+    /// Stop the session's server, ending everything that runs in it. It
+    /// saves its layout first.
+    pub fn stop(&mut self) -> Result<(), String> {
+        self.call("server.stop", json!({})).map(drop)
+    }
+
+    /// Type `text` into pane `pane_id` and press Enter. A shell still
+    /// starting keeps it and runs it at its first prompt.
+    pub fn send_line(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.call(
+            "pane.send_input",
+            json!({"pane_id": pane_id, "text": text, "keys": ["Enter"]}),
+        )
+        .map(drop)
+    }
+
+    /// Everything herdr reports about the tabs of the session, by tab id.
     pub fn tab_details(&mut self) -> Result<HashMap<String, TabDetail>, String> {
         let mut details = HashMap::new();
-        for ws in self
-            .workspace_list()?
-            .into_iter()
-            .filter(WorkspaceInfo::is_gerdr)
-        {
+        for ws in self.workspace_list()? {
             // It may close while being asked about.
             let id = &ws.workspace_id;
             let panes =
@@ -581,13 +669,20 @@ impl Herdr {
                 });
                 pane.repo = pane.worktree.as_ref().and(repo.clone());
             }
-            for tab in tabs {
+            for (index, tab) in tabs.into_iter().enumerate() {
                 let in_tab = panes
                     .iter()
                     .filter(|p| p.tab_id == tab.tab_id)
                     .cloned()
                     .collect();
-                details.insert(tab.tab_id.clone(), TabDetail { tab, panes: in_tab });
+                details.insert(
+                    tab.tab_id.clone(),
+                    TabDetail {
+                        tab,
+                        index,
+                        panes: in_tab,
+                    },
+                );
             }
         }
         Ok(details)
@@ -619,11 +714,12 @@ impl Herdr {
     }
 
     /// Open the event connection.
-    pub fn subscribe() -> std::io::Result<Subscription> {
-        let mut stream = UnixStream::connect(socket_path())?;
+    pub fn subscribe(&self) -> std::io::Result<Subscription> {
+        let mut stream = UnixStream::connect(&self.socket)?;
         let subscriptions: Vec<Value> = [
             "workspace.created",
             "workspace.renamed",
+            "workspace.closed",
             "tab.created",
             "pane.created",
             "pane.closed",
@@ -647,10 +743,6 @@ impl Herdr {
     }
 }
 
-/// Ask herdr about the tabs of gerdr's workspaces every `interval`, on a
-/// thread of its own so a slow answer never holds up the compositor, and hand
-/// each round to `send` (empty while the server is gone). Stops once `send`
-/// returns false.
 /// herdr's `insert_index` for a move before `before` in `order`: it counts
 /// places in the order before the move.
 fn insert_index(order: &[String], before: Option<&str>) -> usize {
@@ -659,12 +751,17 @@ fn insert_index(order: &[String], before: Option<&str>) -> usize {
         .unwrap_or(order.len())
 }
 
+/// Ask the server on `socket` about its tabs every `interval`, on a thread of
+/// its own so a slow answer never holds up the compositor, and hand each
+/// round to `send` (empty while the server is gone). Stops once `send`
+/// returns false.
 pub fn watch_tabs(
+    socket: PathBuf,
     interval: Duration,
     mut send: impl FnMut(HashMap<String, TabDetail>) -> bool + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let mut herdr = Herdr { next_id: 0 };
+        let mut herdr = Herdr::on_socket(socket);
         loop {
             let details = herdr
                 .tab_details()
@@ -752,6 +849,9 @@ fn parse_event(mut value: Value) -> Option<Event> {
             previous_pane_id: string(&data["previous_pane_id"])?,
             pane: serde_json::from_value(data["pane"].take()).ok()?,
         },
+        "workspace_closed" => Event::WorkspaceClosed {
+            workspace_id: string(&data["workspace_id"])?,
+        },
         "workspace_renamed" => Event::WorkspaceRenamed {
             workspace_id: string(&data["workspace_id"])?,
             label: string(&data["label"])?,
@@ -761,4 +861,41 @@ fn parse_event(mut value: Value) -> Option<Event> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_workspaces_are_reported() {
+        let event = json!({"event": "workspace_closed", "data": {"type": "workspace_closed", "workspace_id": "w3", "workspace": null}});
+        assert!(matches!(
+            parse_event(event),
+            Some(Event::WorkspaceClosed { workspace_id }) if workspace_id == "w3"
+        ));
+    }
+
+    #[test]
+    fn process_info_tells_a_busy_pane_from_an_idle_one() {
+        let busy: ProcessInfo = serde_json::from_value(json!({
+            "pane_id": "w1:p2",
+            "shell_pid": 10,
+            "foreground_process_group_id": 20,
+            "foreground_processes": [{"pid": 20, "name": "sleep", "argv": ["sleep", "999"], "cmdline": "sleep 999", "cwd": "/tmp"}]
+        }))
+        .unwrap();
+        assert_eq!(busy.foreground_process_group_id, Some(20));
+        assert_eq!(busy.foreground_processes[0].argv, ["sleep", "999"]);
+        let old: ProcessInfo =
+            serde_json::from_value(json!({"shell_pid": 10, "foreground_processes": []})).unwrap();
+        assert_eq!(old.foreground_process_group_id, None);
+    }
+
+    #[test]
+    fn insert_index_counts_places_before_the_move() {
+        let order = ["a".to_string(), "b".into(), "c".into()];
+        assert_eq!(insert_index(&order, Some("b")), 1);
+        assert_eq!(insert_index(&order, None), 3);
+    }
 }

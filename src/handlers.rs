@@ -105,10 +105,10 @@ impl CompositorHandler for Gerdr {
         }
 
         self.popups.commit(surface);
-        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
-            if !popup.is_initial_configure_sent() {
-                popup.send_configure().expect("initial configure failed");
-            }
+        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface)
+            && !popup.is_initial_configure_sent()
+        {
+            popup.send_configure().expect("initial configure failed");
         }
     }
 }

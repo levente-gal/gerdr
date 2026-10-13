@@ -425,13 +425,16 @@ pub struct TabView {
     pub place: String,
     /// What runs in its panes: agents, foreground processes, terminal titles.
     pub activity: String,
+    /// Whether its focused terminal's command runs again after a restart:
+    /// `None` when nothing runs in it.
+    pub restart: Option<bool>,
 }
 
 impl TabView {
     /// The view of a tab titled `title`, mirroring herdr tab `detail` (if
     /// any), whose agents are among `agents`.
     pub fn new(title: String, detail: Option<&TabDetail>, agents: &[AgentInfo]) -> Self {
-        let Some(TabDetail { tab, panes }) = detail else {
+        let Some(TabDetail { tab, panes, .. }) = detail else {
             return Self {
                 title,
                 ..Default::default()
@@ -475,6 +478,7 @@ impl TabView {
             branch,
             place,
             activity: activity.join("  |  "),
+            restart: None,
         }
     }
 }
@@ -691,6 +695,117 @@ pub struct Help {
     pub rows: Vec<(String, String)>,
 }
 
+/// What the welcome screen shows: a greeting, the projects, and the button
+/// to start a new one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WelcomeView {
+    /// "Good evening, lgal".
+    pub greeting: String,
+    pub subtitle: String,
+    /// What was typed to filter the projects.
+    pub query: String,
+    /// The projects in view, most recently used first.
+    pub rows: Vec<ProjectRow>,
+    /// The selected row; `None` when nothing matches or the button is.
+    pub selected: Option<usize>,
+    pub hover: Option<WelcomeHit>,
+    /// Set while naming a new project: the name typed so far.
+    pub naming: Option<String>,
+    /// The row asking to be confirmed for forgetting.
+    pub confirm_forget: Option<usize>,
+    /// A line under the button, such as "herdr isn't installed".
+    pub note: Option<String>,
+}
+
+/// A project on the welcome screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRow {
+    pub name: String,
+    /// "3 repos · ~/Work/aft".
+    pub detail: String,
+    /// "2h ago".
+    pub ago: String,
+    /// Whether its session runs; `None` until known.
+    pub running: Option<bool>,
+    /// It is the project shown behind the welcome screen.
+    pub current: bool,
+}
+
+/// What the pointer is over on the welcome screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WelcomeHit {
+    Row(usize),
+    Button,
+}
+
+/// Where the parts of the welcome screen go, in output coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WelcomeLayout {
+    pub greeting: Rect,
+    pub subtitle: Rect,
+    /// The "Recent projects" label over the list.
+    pub label: Rect,
+    pub list: Rect,
+    pub rows: Vec<Rect>,
+    /// The "New project" button, or the name field while naming.
+    pub button: Rect,
+    pub note: Rect,
+    /// The key hints at the bottom.
+    pub hints: Rect,
+}
+
+/// What the quit dialog shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuitView {
+    /// The project's name.
+    pub project: String,
+    /// The selected button: 0 Cancel, 1 Stop project, 2 Keep running.
+    pub selected: usize,
+    pub dont_ask: bool,
+    pub hover: Option<QuitHit>,
+}
+
+/// What the pointer is over in the quit dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuitHit {
+    /// Index as in `QuitView::selected`.
+    Button(usize),
+    Checkbox,
+}
+
+/// Where the parts of the quit dialog go, in output coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuitLayout {
+    pub panel: Rect,
+    pub title: Rect,
+    pub body: Rect,
+    pub checkbox: Rect,
+    /// Cancel, Stop project, Keep running.
+    pub buttons: [Rect; 3],
+}
+
+/// Where the welcome screen's parts go on an output of `size` with `rows`
+/// projects in view.
+#[allow(dead_code)] // contract: implemented by the chrome painters work
+pub fn welcome_layout(size: Size<i32, Logical>, rows: usize, naming: bool) -> WelcomeLayout {
+    let _ = (size, rows, naming);
+    todo!("chrome painters")
+}
+
+/// How many project rows fit on the welcome screen of an output of `size`.
+#[allow(dead_code)] // contract: implemented by the chrome painters work
+pub fn welcome_page(size: Size<i32, Logical>) -> usize {
+    let _ = size;
+    todo!("chrome painters")
+}
+
+/// Where the quit dialog's parts go, centred on an output of `size`.
+#[allow(dead_code)] // contract: implemented by the chrome painters work
+pub fn quit_layout(size: Size<i32, Logical>) -> QuitLayout {
+    let _ = size;
+    todo!("chrome painters")
+}
+
 type Rect = Rectangle<i32, Logical>;
 
 /// Where the tabs (each with its "×" close button in its title row) and the
@@ -894,6 +1009,10 @@ pub struct ChromeView {
     pub switcher: Option<SwitcherView>,
     /// Set while waiting for the key after the prefix: the bindings to list.
     pub prefix: Option<std::sync::Arc<Help>>,
+    /// Set while the welcome screen covers everything.
+    pub welcome: Option<WelcomeView>,
+    /// Set while the quit dialog is open, over everything.
+    pub quit: Option<QuitView>,
     pub theme: Theme,
     pub sidebar_width: i32,
     pub size: Size<i32, Logical>,
@@ -2569,6 +2688,7 @@ mod tests {
             branch: Some(branch.into()),
             place: place.into(),
             activity: activity.into(),
+            restart: None,
         };
         let tabs = [
             tab(

@@ -3,12 +3,14 @@
 //! stacked. Splitting a pane puts the new one right of or below it; closing
 //! one gives its space to its sibling.
 
+use serde::{Deserialize, Serialize};
 use smithay::utils::{Logical, Point, Rectangle};
 
 type Rect = Rectangle<i32, Logical>;
 
 /// Where a split puts its second pane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Dir {
     /// Side by side.
     Right,
@@ -35,6 +37,60 @@ pub enum Node {
         first: Box<Node>,
         second: Box<Node>,
     },
+}
+
+/// A tab's layout as saved with its project, so the tab comes back the way
+/// it was: leaves name what they show instead of runtime pane ids.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SavedNode {
+    Leaf(SavedLeaf),
+    Split {
+        dir: Dir,
+        ratio: f64,
+        first: Box<SavedNode>,
+        second: Box<SavedNode>,
+    },
+}
+
+/// What a saved leaf shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "kind")]
+pub enum SavedLeaf {
+    /// A herdr terminal, by its herdr pane id (stable across a server
+    /// restart).
+    Herdr { pane_id: String },
+    /// The workspace's Zed editor.
+    Zed,
+    /// An app launched from the run prompt, by the command that started it.
+    App { command: String },
+}
+
+#[allow(dead_code)] // contract: implemented by the tab persistence work
+impl Node {
+    /// The layout to save: `leaf` names what each leaf shows; leaves it has
+    /// no name for are left out (their sibling takes the space). `None` if
+    /// none is named.
+    pub fn save(&self, leaf: &impl Fn(u32) -> Option<SavedLeaf>) -> Option<SavedNode> {
+        let _ = leaf;
+        todo!("tab persistence")
+    }
+}
+
+#[allow(dead_code)] // contract: implemented by the tab persistence work
+impl SavedNode {
+    /// The layout to show again: `leaf` hands out the pane id for each saved
+    /// leaf, or `None` for one that can't come back (its sibling takes the
+    /// space). `None` if no leaf comes back.
+    pub fn restore(&self, leaf: &mut impl FnMut(&SavedLeaf) -> Option<u32>) -> Option<Node> {
+        let _ = leaf;
+        todo!("tab persistence")
+    }
+
+    /// The herdr pane ids among its leaves, in order.
+    pub fn herdr_panes(&self) -> Vec<&str> {
+        todo!("tab persistence")
+    }
 }
 
 /// The gap between a split's two children.
