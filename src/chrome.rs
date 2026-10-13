@@ -3,7 +3,8 @@
 //! in it), the tab strip above the apps
 //! (each tab with what runs in it, as herdr reports;
 //! the light/dark switch at its right end), and the key help
-//! panel shown while the prefix is armed, and the switcher; the welcome
+//! panel shown while the prefix is armed, the switcher, the project menu
+//! under the sidebar header and a notice over the apps; the welcome
 //! screen covering it all, and the quit dialog over that. All are drawn on the CPU into memory buffers at physical
 //! resolution (crisp at fractional scales) and only redrawn when they change.
 //!
@@ -183,6 +184,70 @@ const QUIT_BUTTON_GAP: i32 = 8;
 const QUIT_BUTTONS: [(&str, i32); 3] =
     [("Cancel", 84), ("Stop project", 116), ("Keep running", 124)];
 const BUTTON_RADIUS: f32 = 6.0;
+
+/// The sidebar header's project name: the gap between it and its chevron,
+/// and the room after the chevron inside the highlight.
+const HEADER_NAME_GAP: i32 = 2;
+const HEADER_NAME_END: i32 = 4;
+
+/// The project menu: a panel at most this wide, just below the sidebar
+/// header, reaching over the apps.
+const PROJECT_MENU_WIDTH: i32 = 440;
+const PROJECT_MENU_TOP: i32 = BAR_HEIGHT + 2;
+/// The query field (the title in form mode), the space around the list,
+/// and the footer with the key hints.
+const PROJECT_MENU_INPUT: i32 = 44;
+const PROJECT_MENU_PADDING: i32 = 6;
+const PROJECT_MENU_FOOTER: i32 = 36;
+/// A project, "New project" or folder row, and a section label.
+const PROJECT_MENU_ROW: i32 = 40;
+const PROJECT_MENU_SECTION: i32 = 22;
+/// The fewest and most entries the list shows; it scrolls for more.
+const PROJECT_MENU_MIN_ROWS: i32 = 3;
+const PROJECT_MENU_MAX_ROWS: i32 = 12;
+/// Room for the running dot or the icon left of each row's label, and the
+/// gap after it.
+const MENU_MARK_WIDTH: i32 = 14;
+const MENU_MARK_GAP: i32 = 8;
+/// The square buttons on a project row under the pointer: their side, the
+/// gap between them and the room after the last.
+const ROW_BUTTON: i32 = 26;
+const ROW_BUTTON_GAP: i32 = 2;
+const ROW_BUTTON_INSET: i32 = 6;
+/// The field a project row's name turns into while renaming: its height,
+/// and how far it reaches left of the name.
+const RENAME_FIELD: i32 = 28;
+const RENAME_INSET: i32 = 6;
+
+/// The project menu's form: its inner padding, the column of labels, a row
+/// and the field in it, and the gap between parts side by side.
+const FORM_PADDING: i32 = 14;
+const FORM_LABEL_WIDTH: i32 = 64;
+const FORM_ROW: i32 = 40;
+const FORM_FIELD: i32 = 32;
+const FORM_GAP: i32 = 8;
+/// The Browse button right of the folder field.
+const BROWSE_WIDTH: i32 = 84;
+/// A folder offered under the folder field.
+const SUGGESTION_ROW: i32 = 28;
+/// The "Opens" choices: what each opens, its label and its width; their
+/// height, and the side of the round mark before the label.
+const KIND_CHOICES: [(WorkspaceKind, &str, i32); 2] = [
+    (WorkspaceKind::Project, "Zed + terminal", 150),
+    (WorkspaceKind::Terminal, "Terminal only", 130),
+];
+const KIND_HEIGHT: i32 = 28;
+const RADIO_SIZE: i32 = 16;
+/// The line saying why the project can't be created.
+const ERROR_HEIGHT: i32 = 22;
+/// Cancel and Create & switch: labels and widths.
+const FORM_BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Create & switch", 136)];
+
+/// The notice: a pill this high, its text this far in from its ends, this
+/// far below the tab strip.
+const NOTICE_HEIGHT: i32 = 30;
+const NOTICE_PADDING: i32 = 16;
+const NOTICE_TOP: i32 = 8;
 
 type Rgb = [u8; 3];
 
@@ -949,19 +1014,185 @@ pub struct FormLayout {
 }
 
 /// Where the parts of the project menu showing `view` go, on an output of
-/// `size`: below the sidebar header, reaching over the apps.
-#[allow(dead_code)] // contract: wave 1 builds and uses it
+/// `size`: below the sidebar header, reaching over the apps. The query field
+/// (the title in form mode), the entries or the form, then the footer. On an
+/// output too short for it all, the entries that don't fit are cut to nothing.
 pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> ProjectMenuLayout {
-    let _ = (view, size);
-    todo!("project menu layout")
+    let w = PROJECT_MENU_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
+    let (x, top) = (ROW_INSET, PROJECT_MENU_TOP);
+    let query = Rectangle::new((x, top).into(), (w, PROJECT_MENU_INPUT).into());
+    let mut y = top + PROJECT_MENU_INPUT + PROJECT_MENU_PADDING;
+    let (mut entries, form) = match &view.form {
+        None => (menu_entries(view, x, w, &mut y), None),
+        Some(form) => (Vec::new(), Some(form_layout(form, x, w, &mut y))),
+    };
+    let bottom = (y + PROJECT_MENU_PADDING + PROJECT_MENU_FOOTER)
+        .min(size.h - HELP_MARGIN)
+        .max(top + PROJECT_MENU_INPUT + PROJECT_MENU_FOOTER);
+    let footer = Rectangle::new(
+        (x, bottom - PROJECT_MENU_FOOTER).into(),
+        (w, PROJECT_MENU_FOOTER).into(),
+    );
+    let limit = footer.loc.y - PROJECT_MENU_PADDING;
+    for (rect, buttons) in &mut entries {
+        if rect.loc.y + rect.size.h > limit {
+            *rect = Rectangle::new(
+                (rect.loc.x, rect.loc.y.min(limit)).into(),
+                (rect.size.w, 0).into(),
+            );
+            buttons.clear();
+        }
+    }
+    ProjectMenuLayout {
+        panel: Rectangle::new((x, top).into(), (w, bottom - top).into()),
+        query,
+        entries,
+        footer,
+        form,
+    }
+}
+
+/// The list's entries in a panel `w` wide at `x`, from `y` down (moved past
+/// them), with the row buttons of the project row under the pointer. It
+/// keeps room for one row without any.
+fn menu_entries(
+    view: &ProjectMenuView,
+    x: i32,
+    w: i32,
+    y: &mut i32,
+) -> Vec<(Rect, Vec<(RowButton, Rect)>)> {
+    let hovered = match view.hover {
+        Some(MenuHit::Entry(i) | MenuHit::Button(i, _)) => Some(i),
+        _ => None,
+    };
+    let (x, w) = (
+        x + PROJECT_MENU_PADDING,
+        (w - 2 * PROJECT_MENU_PADDING).max(0),
+    );
+    let start = *y;
+    let entries = view
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let h = match entry {
+                MenuEntry::Section(_) => PROJECT_MENU_SECTION,
+                _ => PROJECT_MENU_ROW,
+            };
+            let rect = Rectangle::new((x, *y).into(), (w, h).into());
+            *y += h;
+            let buttons = match entry {
+                MenuEntry::Project { row, .. } if hovered == Some(i) => {
+                    row_button_rects(&row_buttons(row), rect)
+                }
+                _ => Vec::new(),
+            };
+            (rect, buttons)
+        })
+        .collect();
+    *y = (*y).max(start + PROJECT_MENU_ROW);
+    entries
+}
+
+/// The buttons a project row shows under the pointer, left to right:
+/// rename always; stop while its session may run, and forget, unless it is
+/// the current project.
+fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
+    let mut buttons = vec![RowButton::Rename];
+    if !row.current && row.running != Some(false) {
+        buttons.push(RowButton::Stop);
+    }
+    if !row.current {
+        buttons.push(RowButton::Forget);
+    }
+    buttons
+}
+
+/// Square `buttons` at the right end of a row in `rect`, vertically centred.
+fn row_button_rects(buttons: &[RowButton], rect: Rect) -> Vec<(RowButton, Rect)> {
+    let n = buttons.len() as i32;
+    let right = rect.loc.x + rect.size.w - ROW_BUTTON_INSET;
+    let left = right - n * ROW_BUTTON - (n - 1).max(0) * ROW_BUTTON_GAP;
+    let top = rect.loc.y + (rect.size.h - ROW_BUTTON) / 2;
+    buttons
+        .iter()
+        .enumerate()
+        .map(|(i, button)| {
+            let x = left + i as i32 * (ROW_BUTTON + ROW_BUTTON_GAP);
+            (
+                *button,
+                Rectangle::new((x, top).into(), (ROW_BUTTON, ROW_BUTTON).into()),
+            )
+        })
+        .collect()
+}
+
+/// The form's parts in a panel `w` wide at `x`, from `y` down (moved past
+/// them): a row each for the name, the folder (with Browse at its right,
+/// then the suggestions under it) and the "Opens" choices, the error line,
+/// then Cancel and Create at the right.
+fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormLayout {
+    let rect = |x: i32, y: i32, w: i32, h: i32| Rectangle::new((x, y).into(), (w.max(0), h).into());
+    let right = x + w - FORM_PADDING;
+    let field_x = x + FORM_PADDING + FORM_LABEL_WIDTH;
+    let field_w = (right - field_x).max(0);
+    let in_row = |y: i32, h: i32| y + (FORM_ROW - h) / 2;
+
+    let name = rect(field_x, in_row(*y, FORM_FIELD), field_w, FORM_FIELD);
+    *y += FORM_ROW;
+    let browse_w = BROWSE_WIDTH.min(field_w);
+    let folder_w = field_w - browse_w - FORM_GAP;
+    let folder = rect(field_x, in_row(*y, FORM_FIELD), folder_w, FORM_FIELD);
+    let browse = rect(right - browse_w, folder.loc.y, browse_w, FORM_FIELD);
+    *y += FORM_ROW;
+    let suggestions = (0..form.suggestions.len() as i32)
+        .map(|i| rect(field_x, *y + i * SUGGESTION_ROW, folder_w, SUGGESTION_ROW))
+        .collect::<Vec<_>>();
+    if !suggestions.is_empty() {
+        *y += suggestions.len() as i32 * SUGGESTION_ROW + FORM_GAP;
+    }
+    let mut kind_x = field_x;
+    let kinds = KIND_CHOICES.map(|(kind, _, kind_w)| {
+        let kind_w = kind_w.min((right - kind_x).max(0));
+        let r = rect(kind_x, in_row(*y, KIND_HEIGHT), kind_w, KIND_HEIGHT);
+        kind_x += kind_w + FORM_GAP;
+        (kind, r)
+    });
+    *y += FORM_ROW;
+    let error = rect(field_x, *y, field_w, ERROR_HEIGHT);
+    *y += ERROR_HEIGHT;
+    let [(_, cancel_w), (_, create_w)] = FORM_BUTTONS;
+    let create = rect(right - create_w, *y, create_w, QUIT_BUTTON);
+    let cancel = rect(
+        create.loc.x - QUIT_BUTTON_GAP - cancel_w,
+        *y,
+        cancel_w,
+        QUIT_BUTTON,
+    );
+    *y += QUIT_BUTTON + FORM_GAP;
+    FormLayout {
+        name,
+        folder,
+        browse,
+        kinds,
+        suggestions,
+        error,
+        cancel,
+        create,
+    }
 }
 
 /// How many entries the project menu's list shows at most on an output of
-/// `size`.
+/// `size`: as many full rows as fit above its bottom margin, within bounds.
 #[allow(dead_code)] // contract: wave 1 builds and uses it
 pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
-    let _ = size;
-    todo!("project menu page")
+    let room = size.h
+        - HELP_MARGIN
+        - PROJECT_MENU_TOP
+        - PROJECT_MENU_INPUT
+        - 2 * PROJECT_MENU_PADDING
+        - PROJECT_MENU_FOOTER;
+    (room / PROJECT_MENU_ROW).clamp(PROJECT_MENU_MIN_ROWS, PROJECT_MENU_MAX_ROWS) as usize
 }
 
 /// What `pos` is over in the project menu showing `view` on an output of
@@ -972,8 +1203,45 @@ pub fn project_menu_hit(
     size: Size<i32, Logical>,
     pos: Point<f64, Logical>,
 ) -> Option<MenuHit> {
-    let _ = (view, size, pos);
-    todo!("project menu hit")
+    let layout = project_menu_layout(view, size);
+    let over = |rect: Rect| rect.to_f64().contains(pos);
+    if !over(layout.panel) {
+        return None;
+    }
+    if let Some(form) = &layout.form {
+        let fields = [
+            (form.name, FormField::Name),
+            (form.folder, FormField::Folder),
+            (form.browse, FormField::Browse),
+            (form.cancel, FormField::Cancel),
+            (form.create, FormField::Create),
+        ];
+        let hit = fields
+            .iter()
+            .find(|(rect, _)| over(*rect))
+            .map(|(_, field)| MenuHit::Field(*field))
+            .or_else(|| {
+                let i = form.suggestions.iter().position(|rect| over(*rect))?;
+                Some(MenuHit::Suggestion(i))
+            })
+            .or_else(|| {
+                let (kind, _) = form.kinds.iter().find(|(_, rect)| over(*rect))?;
+                Some(MenuHit::Kind(*kind))
+            });
+        return hit.or(Some(MenuHit::Panel));
+    }
+    if over(layout.query) {
+        return Some(MenuHit::Query);
+    }
+    for (i, (rect, buttons)) in layout.entries.iter().enumerate() {
+        if let Some((button, _)) = buttons.iter().find(|(_, rect)| over(*rect)) {
+            return Some(MenuHit::Button(i, *button));
+        }
+        if over(*rect) {
+            return Some(MenuHit::Entry(i));
+        }
+    }
+    Some(MenuHit::Panel)
 }
 
 /// Where the welcome screen's parts go on an output of `size` with `rows`
@@ -1127,7 +1395,6 @@ pub fn theme_toggle(width: i32) -> Rect {
 pub struct SidebarLayout {
     /// The project's name, opening the project menu: the header left of
     /// its buttons.
-    #[allow(dead_code)] // contract: wave 1 uses it
     pub header: Rect,
     /// Header button: pick a folder to open as a project workspace.
     pub project: Rect,
@@ -1311,11 +1578,14 @@ pub struct ChromeView {
 }
 
 /// Sidebar inputs: workspaces, their agents, the active one, whether the
-/// terminal menu is open, theme, size, scale.
+/// terminal menu is open, the project's name and whether it is lit (under
+/// the pointer or its menu open), theme, size, scale.
 type SidebarKey = (
     Vec<WorkspaceView>,
     Vec<Vec<AgentView>>,
     Option<usize>,
+    bool,
+    Option<String>,
     bool,
     Theme,
     Size<i32, Logical>,
@@ -1331,6 +1601,9 @@ pub struct Chrome {
     switcher: Cached<(SwitcherView, i32, Theme, f64)>,
     welcome: Cached<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Cached<(QuitView, Size<i32, Logical>, Theme, f64)>,
+    project_menu: Cached<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
+    /// The notice's text and width.
+    notice: Cached<(String, i32, Theme, f64)>,
 }
 
 impl Chrome {
@@ -1344,6 +1617,8 @@ impl Chrome {
             switcher: Cached::default(),
             welcome: Cached::default(),
             quit: Cached::default(),
+            project_menu: Cached::default(),
+            notice: Cached::default(),
         }
     }
 
@@ -1386,23 +1661,27 @@ impl Chrome {
         let strip_size: Size<i32, Logical> =
             ((view.size.w - sidebar_w).max(1), TAB_STRIP_HEIGHT).into();
         let menu_open = view.menu.is_some();
+        let header_lit = view.header_hover || view.project_menu.is_some();
         let sidebar_key = (
             view.workspaces,
             view.agents,
             view.active_workspace,
             menu_open,
+            view.project,
+            header_lit,
             theme,
             sidebar_size,
             scale,
         );
         let sidebar = self.sidebar.get(
             sidebar_key,
-            |(workspaces, agents, active, menu_open, ..)| {
+            |(workspaces, agents, active, menu_open, project, lit, ..)| {
                 painter.sidebar(
                     workspaces,
                     agents,
                     *active,
                     *menu_open,
+                    (project.as_deref(), *lit),
                     sidebar_size,
                     scale,
                     theme.palette(),
@@ -1423,7 +1702,19 @@ impl Chrome {
             },
         );
 
-        // Then the switcher, the menu and the help panel cover the apps.
+        // Then the project menu, the switcher, the terminal menu and the
+        // help panel cover the apps; the project menu the sidebar too.
+        if let Some(menu) = view.project_menu {
+            let panel = project_menu_layout(&menu, output).panel;
+            let loc = panel.loc - Point::from((SHADOW, SHADOW));
+            let size = (panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW).into();
+            let buffer = self
+                .project_menu
+                .get((menu, output, theme, scale), |(menu, output, ..)| {
+                    painter.project_menu(menu, *output, scale, theme.palette())
+                });
+            parts.push((buffer, loc, size));
+        }
         if let Some(switcher) = view.switcher {
             let area = Rectangle::new(
                 (sidebar_w, TAB_STRIP_HEIGHT).into(),
@@ -1462,6 +1753,21 @@ impl Chrome {
                 painter.help_panel(help, layout, scale, theme.palette())
             });
             parts.push((panel, loc, size));
+        }
+        if let Some(notice) = view.notice {
+            // Centred at the top of the app area, just below the tab strip.
+            let w = painter.notice_width(&notice, strip_size.w - 2 * HELP_MARGIN, scale);
+            let loc = Point::from((
+                sidebar_w + (strip_size.w - w) / 2 - SHADOW,
+                TAB_STRIP_HEIGHT + NOTICE_TOP - SHADOW,
+            ));
+            let size = (w + 2 * SHADOW, NOTICE_HEIGHT + 2 * SHADOW).into();
+            let buffer = self
+                .notice
+                .get((notice, w, theme, scale), |(notice, w, ..)| {
+                    painter.notice(notice, *w, scale, theme.palette())
+                });
+            parts.push((buffer, loc, size));
         }
         parts.push((sidebar, Point::from((0, 0)), sidebar_size));
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size));
@@ -1560,6 +1866,7 @@ impl Painter {
         agents: &[Vec<AgentView>],
         active: Option<usize>,
         menu_open: bool,
+        (project, lit): (Option<&str>, bool),
         size: Size<i32, Logical>,
         scale: f64,
         p: &Palette,
@@ -1573,17 +1880,21 @@ impl Painter {
 
         let layout = sidebar_layout(workspaces, agents, size.w);
         let s = scale as f32;
-        let header_x = px(ROW_INSET) as f32 + PADDING * s;
-        self.text(
-            &mut c,
-            "Workspaces",
-            SMALL_FONT_SIZE,
-            header_x,
-            px(layout.project.loc.x) as f32,
-            (0, px(BAR_HEIGHT)),
-            scale,
-            p.muted,
-        );
+        match project {
+            Some(name) => self.header_name(&mut c, name, lit, layout.header, scale, p),
+            None => {
+                self.text(
+                    &mut c,
+                    "Workspaces",
+                    SMALL_FONT_SIZE,
+                    px(ROW_INSET) as f32 + PADDING * s,
+                    px(layout.project.loc.x) as f32,
+                    (0, px(BAR_HEIGHT)),
+                    scale,
+                    p.muted,
+                );
+            }
+        }
         if menu_open {
             let chevron = layout.chevron;
             let (x, w) = (px(chevron.loc.x), px(chevron.size.w));
@@ -1746,6 +2057,52 @@ impl Painter {
             }
         }
         c.into_buffer(true)
+    }
+
+    /// The project's `name` in the sidebar `header`, cut to fit, and a
+    /// chevron after it; on a rounded highlight when `lit` (under the
+    /// pointer, or its menu open).
+    fn header_name(
+        &self,
+        c: &mut Canvas,
+        name: &str,
+        lit: bool,
+        header: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let header_end = header.loc.x + header.size.w - HEADER_MARGIN;
+        let text_x = px(ROW_INSET) as f32 + PADDING * s;
+        let max_x = px(header_end - HEADER_NAME_END - CHEVRON_WIDTH - HEADER_NAME_GAP) as f32;
+        let text_end = (text_x + self.text_width(name, FONT_SIZE, scale)).min(max_x);
+        // The chevron right after the name, in logical pixels.
+        let chevron_x = (text_end / s).ceil() as i32 + HEADER_NAME_GAP;
+        let chevron = Rectangle::new((chevron_x, 0).into(), (CHEVRON_WIDTH, BAR_HEIGHT).into());
+        if lit {
+            let x = px(ROW_INSET) as f32;
+            let right = px((chevron_x + CHEVRON_WIDTH + HEADER_NAME_END).min(header_end)) as f32;
+            c.rounded(
+                x,
+                px(5) as f32,
+                right - x,
+                px(BAR_HEIGHT - 10) as f32,
+                4.0 * s,
+                p.selected,
+            );
+        }
+        self.text(
+            c,
+            name,
+            FONT_SIZE,
+            text_x,
+            max_x,
+            (0, px(BAR_HEIGHT)),
+            scale,
+            p.text,
+        );
+        icon_sdf(c, chevron, scale, p.muted, |x, y| chevron_down(x, y, s));
     }
 
     /// An agent card: a status mark, the agent's kind and name and a status
@@ -2428,7 +2785,7 @@ impl Painter {
 
         let button = layout.button;
         match &view.naming {
-            Some(name) => self.field(&mut c, name, "Project name", button, scale, p),
+            Some(name) => self.field(&mut c, name, "Project name", button, true, scale, p),
             None => {
                 let (x, y, w, h) = rect_px(button, scale);
                 if view.selected.is_none() {
@@ -2596,13 +2953,15 @@ impl Painter {
     }
 
     /// A text field in `rect`, like the switcher's query: `text` (or
-    /// `placeholder` without any) and a caret after it.
+    /// `placeholder` without any) and, when `focused`, a caret after it.
+    #[allow(clippy::too_many_arguments)]
     fn field(
         &self,
         c: &mut Canvas,
         text: &str,
         placeholder: &str,
         rect: Rect,
+        focused: bool,
         scale: f64,
         p: &Palette,
     ) {
@@ -2630,24 +2989,30 @@ impl Painter {
         } else {
             self.text(c, text, FONT_SIZE, text_x, max_x, field_band, scale, p.text) + px(1) as f32
         };
-        caret(c, caret_x, field_band, scale, p.accent);
+        if focused {
+            caret(c, caret_x, field_band, scale, p.accent);
+        }
     }
 
-    /// Key hints as keycaps, each followed by what it does, centred in `rect`.
+    /// Key hints as keycaps, each followed by what it does, centred in
+    /// `rect`: as many of the first as fit.
     fn hints(&self, c: &mut Canvas, hints: &[(&str, &str)], rect: Rect, scale: f64, p: &Palette) {
         let s = scale as f32;
         let key_gap = (HINT_KEY_GAP as f32 * s).round();
         let gap = (HINT_GAP as f32 * s).round();
-        let width = hints
-            .iter()
-            .map(|(keys, action)| {
-                self.keycaps_width(keys, scale)
-                    + key_gap
-                    + self.text_width(action, SMALL_FONT_SIZE, scale)
-            })
-            .sum::<f32>()
-            + gap * hints.len().saturating_sub(1) as f32;
         let (x, _, w, _) = rect_px(rect, scale);
+        let mut width = -gap;
+        for (n, (keys, action)) in hints.iter().enumerate() {
+            let more = gap
+                + self.keycaps_width(keys, scale)
+                + key_gap
+                + self.text_width(action, SMALL_FONT_SIZE, scale);
+            if width + more > w {
+                return self.hints(c, &hints[..n], rect, scale, p);
+            }
+            width += more;
+        }
+        let width = width.max(0.0);
         let hints_band = band(rect, scale);
         let mut pen = (x + (w - width) / 2.0).round();
         for (keys, action) in hints {
@@ -2784,6 +3149,634 @@ impl Painter {
             };
             self.centered(&mut c, label, FONT_SIZE, rect, scale, color);
         }
+        c.into_buffer(false)
+    }
+
+    /// The project menu for an output of `size`, inside a margin of `SHADOW`
+    /// holding its drop shadow: the query field and the entries, or the
+    /// form under its title; then the key hints.
+    fn project_menu(
+        &self,
+        view: &ProjectMenuView,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let layout = project_menu_layout(view, size);
+        let panel = layout.panel;
+        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
+        let mut c = Canvas::new(physical(outer, scale));
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let border = px(1).max(1);
+        c.popup(panel.size, HELP_RADIUS, scale, p);
+        // Rects relative to the buffer, which starts `SHADOW` before the panel.
+        let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
+        let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
+        // A line across the panel, at `y` physical pixels.
+        let divider = |c: &mut Canvas, y: i32| {
+            c.fill(
+                px(SHADOW) + border,
+                y,
+                px(panel.size.w) - 2 * border,
+                border,
+                p.border_variant,
+            );
+        };
+
+        let query = shift(layout.query);
+        match &layout.form {
+            Some(form) => {
+                let (x, right) = phys(query, scale);
+                self.text(
+                    &mut c,
+                    "New project",
+                    LABEL_FONT_SIZE,
+                    x + (FORM_PADDING as f32 * s).round(),
+                    right,
+                    band(query, scale),
+                    scale,
+                    p.text,
+                );
+                if let Some(form_view) = &view.form {
+                    self.menu_form(&mut c, form_view, view.hover, form, by, scale, p);
+                }
+            }
+            None => {
+                let renaming = view.entries.iter().any(|e| {
+                    matches!(
+                        e,
+                        MenuEntry::Project {
+                            renaming: Some(_),
+                            ..
+                        }
+                    )
+                });
+                self.menu_query(&mut c, &view.query, !renaming, query, scale, p);
+                if view.entries.is_empty() {
+                    let first = Rectangle::new(
+                        (
+                            query.loc.x,
+                            query.loc.y + query.size.h + PROJECT_MENU_PADDING,
+                        )
+                            .into(),
+                        (query.size.w, PROJECT_MENU_ROW).into(),
+                    );
+                    let (x, right) = phys(first, scale);
+                    self.text(
+                        &mut c,
+                        "Nothing matches",
+                        FONT_SIZE,
+                        x + px(PROJECT_MENU_PADDING) as f32 + PADDING * s,
+                        right,
+                        band(first, scale),
+                        scale,
+                        p.placeholder,
+                    );
+                }
+                for (i, ((rect, buttons), entry)) in
+                    layout.entries.iter().zip(&view.entries).enumerate()
+                {
+                    if rect.size.h == 0 {
+                        continue;
+                    }
+                    let rect = shift(*rect);
+                    let buttons: Vec<_> = buttons.iter().map(|(b, r)| (*b, shift(*r))).collect();
+                    // A line between the projects and the rows starting new ones.
+                    let after_project = i
+                        .checked_sub(1)
+                        .is_some_and(|j| matches!(view.entries[j], MenuEntry::Project { .. }));
+                    if matches!(entry, MenuEntry::New(_)) && after_project {
+                        divider(&mut c, px(rect.loc.y));
+                    }
+                    self.menu_entry(&mut c, view, i, entry, rect, &buttons, scale, p);
+                }
+            }
+        }
+        divider(&mut c, px(query.loc.y + query.size.h) - border);
+
+        let footer = shift(layout.footer);
+        divider(&mut c, px(footer.loc.y));
+        let hints: Vec<(&str, &str)> = view
+            .hints
+            .iter()
+            .map(|(keys, action)| (keys.as_str(), action.as_str()))
+            .collect();
+        let inner = Rectangle::new(
+            (footer.loc.x + HELP_PADDING, footer.loc.y).into(),
+            ((footer.size.w - 2 * HELP_PADDING).max(0), footer.size.h).into(),
+        );
+        self.hints(&mut c, &hints, inner, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// The project menu's query field in `rect`: a magnifier, then `query`
+    /// (or what to type) with a caret after it when `focused`.
+    fn menu_query(
+        &self,
+        c: &mut Canvas,
+        query: &str,
+        focused: bool,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        // Lined up with the marks and labels of the rows below.
+        let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
+        let mark = Rectangle::new(
+            (mark_x, rect.loc.y).into(),
+            (MENU_MARK_WIDTH, rect.size.h).into(),
+        );
+        icon_sdf(c, mark, scale, p.placeholder, |x, y| magnifier(x, y, s));
+        let query_band = band(rect, scale);
+        let text_x = px(mark_x + MENU_MARK_WIDTH + MENU_MARK_GAP) as f32;
+        let max_x = px(rect.loc.x + rect.size.w - HELP_PADDING) as f32;
+        let caret_x = if query.is_empty() {
+            self.text(
+                c,
+                "Find or name a project…",
+                FONT_SIZE,
+                text_x + px(CARET_WIDTH + 2) as f32,
+                max_x,
+                query_band,
+                scale,
+                p.placeholder,
+            );
+            text_x
+        } else {
+            self.text(
+                c, query, FONT_SIZE, text_x, max_x, query_band, scale, p.text,
+            ) + px(1) as f32
+        };
+        if focused {
+            caret(c, caret_x, query_band, scale, p.accent);
+        }
+    }
+
+    /// Entry `i` of the project menu in `rect` (buffer coordinates), with
+    /// the row `buttons` it shows under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn menu_entry(
+        &self,
+        c: &mut Canvas,
+        view: &ProjectMenuView,
+        i: usize,
+        entry: &MenuEntry,
+        rect: Rect,
+        buttons: &[(RowButton, Rect)],
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let row_band = band(rect, scale);
+        let mark = Rectangle::new(
+            (rect.loc.x + PADDING as i32, rect.loc.y).into(),
+            (MENU_MARK_WIDTH, rect.size.h).into(),
+        );
+        let label_lx = mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP;
+        let label_x = px(label_lx) as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let right = x + w - PADDING * s;
+        let gap = (FIELD_GAP as f32 * s).round();
+        if let MenuEntry::Section(label) = entry {
+            self.text(
+                c,
+                &label.to_uppercase(),
+                DETAIL_FONT_SIZE,
+                px(mark.loc.x) as f32,
+                right,
+                row_band,
+                scale,
+                p.placeholder,
+            );
+            return;
+        }
+
+        // The highlight stops short of the rows above and below.
+        let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
+        let r = (MENU_RADIUS - 2.0) * s;
+        let hovered = matches!(
+            view.hover,
+            Some(MenuHit::Entry(j) | MenuHit::Button(j, _)) if j == i
+        );
+        let confirm = matches!(
+            entry,
+            MenuEntry::Project {
+                confirm_forget: true,
+                ..
+            }
+        );
+        if confirm {
+            c.rounded(x, y, w, h, r, mix(p.elevated, p.warning, 0.15));
+        } else if view.selected == Some(i) {
+            c.rounded(x, y, w, h, r, p.selected);
+        } else if hovered {
+            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
+        }
+
+        // A keycap at the right end of the row; returns where it starts.
+        let keycap = |c: &mut Canvas, keys: &str| {
+            let cap_x = (right - self.keycaps_width(keys, scale)).round();
+            self.keycaps(c, keys, cap_x, row_band, scale, p);
+            cap_x
+        };
+        match entry {
+            MenuEntry::Section(_) => {}
+            MenuEntry::Project {
+                row,
+                digit,
+                renaming,
+                ..
+            } => {
+                let dot = move |x: f32, y: f32| x.hypot(y) - 4.2 * s;
+                let ring = move |x: f32, y: f32| (x.hypot(y) - 3.6 * s).abs() - 1.1 * s;
+                match (confirm, row.running) {
+                    (true, _) => icon_sdf(c, mark, scale, p.warning, dot),
+                    (false, Some(true)) => icon_sdf(c, mark, scale, p.success, dot),
+                    (false, Some(false)) => icon_sdf(c, mark, scale, p.placeholder, ring),
+                    (false, None) => {}
+                }
+                let mut end = right;
+                if let Some((_, first)) = buttons.first() {
+                    self.row_buttons(c, view, i, buttons, confirm, scale, p);
+                    end = px(first.loc.x) as f32 - gap;
+                } else if !confirm && renaming.is_none() {
+                    if let Some(digit) = digit {
+                        end = keycap(c, &format!("Alt+{digit}")) - gap;
+                    }
+                    let ago_x = (end - self.text_width(&row.ago, SMALL_FONT_SIZE, scale)).round();
+                    self.text(
+                        c,
+                        &row.ago,
+                        SMALL_FONT_SIZE,
+                        ago_x,
+                        f32::MAX,
+                        row_band,
+                        scale,
+                        p.placeholder,
+                    );
+                    end = ago_x - gap;
+                }
+                if confirm {
+                    self.text(
+                        c,
+                        &format!("Press Delete again to forget {}", row.name),
+                        FONT_SIZE,
+                        label_x,
+                        end,
+                        row_band,
+                        scale,
+                        p.warning,
+                    );
+                } else if let Some(name) = renaming {
+                    let field_x = label_lx - RENAME_INSET;
+                    let field = Rectangle::new(
+                        (field_x, rect.loc.y + (rect.size.h - RENAME_FIELD) / 2).into(),
+                        (((end / s) as i32 - field_x).max(0), RENAME_FIELD).into(),
+                    );
+                    self.field(c, name, "Project name", field, true, scale, p);
+                } else {
+                    let after = self.text(
+                        c, &row.name, FONT_SIZE, label_x, end, row_band, scale, p.text,
+                    );
+                    self.text(
+                        c,
+                        &row.detail,
+                        SMALL_FONT_SIZE,
+                        after + (12.0 * s).round(),
+                        end,
+                        row_band,
+                        scale,
+                        p.muted,
+                    );
+                }
+            }
+            MenuEntry::New(label) => {
+                icon_sdf(c, mark, scale, p.muted, |x, y| {
+                    plus(x, y, 0.0, 0.0, 5.0 * s, s)
+                });
+                let end = keycap(c, "Ctrl+N") - gap;
+                self.text(c, label, FONT_SIZE, label_x, end, row_band, scale, p.text);
+            }
+            MenuEntry::Folder(path) => {
+                let small = 0.8 * s;
+                icon_sdf(c, mark, scale, p.placeholder, |x, y| folder(x, y, small));
+                let suffix = "new project";
+                let suffix_w = self.text_width(suffix, SMALL_FONT_SIZE, scale);
+                let after = self.text(
+                    c,
+                    path,
+                    FONT_SIZE,
+                    label_x,
+                    right - suffix_w - gap,
+                    row_band,
+                    scale,
+                    p.text,
+                );
+                self.text(
+                    c,
+                    suffix,
+                    SMALL_FONT_SIZE,
+                    after + gap,
+                    right,
+                    row_band,
+                    scale,
+                    p.placeholder,
+                );
+            }
+        }
+    }
+
+    /// The `buttons` of entry `i`: icons, the one under the pointer on a
+    /// rounded square; forget in the warning colour while it asks to be
+    /// confirmed.
+    #[allow(clippy::too_many_arguments)]
+    fn row_buttons(
+        &self,
+        c: &mut Canvas,
+        view: &ProjectMenuView,
+        i: usize,
+        buttons: &[(RowButton, Rect)],
+        confirm: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        for &(button, rect) in buttons {
+            let hot = view.hover == Some(MenuHit::Button(i, button));
+            if hot {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, CAP_RADIUS * s, mix(p.selected, p.text, 0.12));
+            }
+            let color = match button {
+                RowButton::Forget if confirm => p.warning,
+                _ if hot => p.text,
+                _ => p.muted,
+            };
+            icon_sdf(c, rect, scale, color, |x, y| match button {
+                RowButton::Rename => pencil(x, y, s),
+                RowButton::Stop => stop(x, y, s),
+                RowButton::Forget => cross(x, y, s),
+            });
+        }
+    }
+
+    /// The project menu's form, its parts at `layout` moved `by` into the
+    /// buffer: the labelled name and folder fields, Browse, the folders
+    /// offered, the "Opens" choices, the error line and the buttons.
+    #[allow(clippy::too_many_arguments)]
+    fn menu_form(
+        &self,
+        c: &mut Canvas,
+        form: &FormView,
+        hover: Option<MenuHit>,
+        layout: &FormLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
+        let (name, folder_rect) = (shift(layout.name), shift(layout.folder));
+        let kinds = layout.kinds.map(|(kind, rect)| (kind, shift(rect)));
+        // A label in the column left of the row holding `rect`.
+        let label = |c: &mut Canvas, text: &str, rect: Rect| {
+            let x = px(rect.loc.x - FORM_LABEL_WIDTH) as f32;
+            let end = px(rect.loc.x - FORM_GAP) as f32;
+            self.text(
+                c,
+                text,
+                FONT_SIZE,
+                x,
+                end,
+                band(rect, scale),
+                scale,
+                p.muted,
+            );
+        };
+        let focused = |field: FormField| form.focus == field;
+        let hovered = |hit: MenuHit| hover == Some(hit);
+
+        label(c, "Name", name);
+        if focused(FormField::Name) {
+            focus_ring(c, name, BUTTON_RADIUS, p.elevated, scale, p.accent);
+        }
+        let name_focus = focused(FormField::Name);
+        self.field(c, &form.name, "Project name", name, name_focus, scale, p);
+
+        label(c, "Folder", folder_rect);
+        let folder_focus = focused(FormField::Folder);
+        if folder_focus {
+            focus_ring(c, folder_rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
+        }
+        let placeholder = "None — add later";
+        self.field(
+            c,
+            &form.folder,
+            placeholder,
+            folder_rect,
+            folder_focus,
+            scale,
+            p,
+        );
+        self.button(
+            c,
+            "Browse…",
+            shift(layout.browse),
+            (
+                hovered(MenuHit::Field(FormField::Browse)),
+                focused(FormField::Browse),
+            ),
+            false,
+            scale,
+            p,
+        );
+
+        // The folders offered, in a box hanging under the folder field.
+        if let (Some(first), Some(last)) = (layout.suggestions.first(), layout.suggestions.last()) {
+            let (first, last) = (shift(*first), shift(*last));
+            let (x, y, w, _) = rect_px(first, scale);
+            let h = px(last.loc.y + last.size.h) as f32 - y;
+            let (b, r) = (px(1).max(1) as f32, BUTTON_RADIUS * s);
+            c.rounded(x, y, w, h, r, p.border);
+            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+            for (i, (rect, path)) in layout.suggestions.iter().zip(&form.suggestions).enumerate() {
+                let rect = shift(*rect);
+                let (x, y, w, h) = rect_px(rect, scale);
+                let (x, y, w, h) = (x + 2.0 * b, y + 2.0 * b, w - 4.0 * b, h - 4.0 * b);
+                if form.suggestion == Some(i) {
+                    c.rounded(x, y, w, h, r - 2.0 * b, p.selected);
+                } else if hovered(MenuHit::Suggestion(i)) {
+                    c.rounded(x, y, w, h, r - 2.0 * b, mix(p.element, p.selected, 0.5));
+                }
+                let mark = Rectangle::new(
+                    (rect.loc.x + FORM_GAP, rect.loc.y).into(),
+                    (MENU_MARK_WIDTH, rect.size.h).into(),
+                );
+                let small = 0.7 * s;
+                icon_sdf(c, mark, scale, p.placeholder, |x, y| folder(x, y, small));
+                let text_x = px(mark.loc.x + MENU_MARK_WIDTH + FORM_GAP) as f32;
+                let end = phys(rect, scale).1 - PADDING * s;
+                self.text(
+                    c,
+                    path,
+                    SMALL_FONT_SIZE,
+                    text_x,
+                    end,
+                    band(rect, scale),
+                    scale,
+                    p.text,
+                );
+            }
+        }
+
+        // What the folder opens as: a pair of round choices, dimmed without
+        // a folder.
+        label(c, "Opens", kinds[0].1);
+        let enabled = !form.folder.trim().is_empty();
+        for ((kind, rect), (_, text, _)) in kinds.iter().zip(KIND_CHOICES) {
+            let (x, y, w, h) = rect_px(*rect, scale);
+            let chosen = form.kind == *kind;
+            if focused(FormField::Kind) && chosen {
+                focus_ring(c, *rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
+            }
+            if enabled && hovered(MenuHit::Kind(*kind)) {
+                c.rounded(
+                    x,
+                    y,
+                    w,
+                    h,
+                    BUTTON_RADIUS * s,
+                    mix(p.elevated, p.selected, 0.5),
+                );
+            }
+            let side = px(RADIO_SIZE) as f32;
+            let (bx, by) = (x + px(6) as f32, (y + (h - side) / 2.0).round());
+            let b = px(1).max(1) as f32;
+            let accent = if enabled {
+                p.accent
+            } else {
+                mix(p.accent, p.elevated, 0.5)
+            };
+            if chosen {
+                c.rounded(bx, by, side, side, side / 2.0, accent);
+                let dot = (6.0 * s).round();
+                let (dx, dy) = (bx + (side - dot) / 2.0, by + (side - dot) / 2.0);
+                c.rounded(dx, dy, dot, dot, dot / 2.0, p.on_accent);
+            } else {
+                let edge = if enabled { p.border } else { p.border_variant };
+                c.rounded(bx, by, side, side, side / 2.0, edge);
+                let inner = side - 2.0 * b;
+                c.rounded(bx + b, by + b, inner, inner, inner / 2.0, p.element);
+            }
+            self.text(
+                c,
+                text,
+                FONT_SIZE,
+                bx + side + (FORM_GAP as f32 * s).round(),
+                x + w,
+                band(*rect, scale),
+                scale,
+                if enabled { p.text } else { p.placeholder },
+            );
+        }
+
+        if let Some(error) = &form.error {
+            let error_rect = shift(layout.error);
+            let (x, right) = phys(error_rect, scale);
+            self.text(
+                c,
+                error,
+                SMALL_FONT_SIZE,
+                x,
+                right,
+                band(error_rect, scale),
+                scale,
+                p.warning,
+            );
+        }
+
+        let [(cancel_label, _), (create_label, _)] = FORM_BUTTONS;
+        for (label, rect, field, primary) in [
+            (cancel_label, layout.cancel, FormField::Cancel, false),
+            (create_label, layout.create, FormField::Create, true),
+        ] {
+            let state = (hovered(MenuHit::Field(field)), focused(field));
+            self.button(c, label, shift(rect), state, primary, scale, p);
+        }
+    }
+
+    /// A button in `rect` like the quit dialog's, labelled `label`: the
+    /// `primary` one in the accent. `(hovered, focused)` lightens it and
+    /// rings it.
+    #[allow(clippy::too_many_arguments)]
+    fn button(
+        &self,
+        c: &mut Canvas,
+        label: &str,
+        rect: Rect,
+        (hovered, focused): (bool, bool),
+        primary: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
+        if focused {
+            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
+        }
+        let color = if primary {
+            let fill = if hovered {
+                mix(p.accent, p.text, 0.12)
+            } else {
+                p.accent
+            };
+            c.rounded(x, y, w, h, r, fill);
+            p.on_accent
+        } else {
+            let fill = if hovered { p.selected } else { p.element };
+            c.rounded(x, y, w, h, r, p.border);
+            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+            p.text
+        };
+        self.centered(c, label, FONT_SIZE, rect, scale, color);
+    }
+
+    /// How wide the notice showing `text` is, at most `max`.
+    fn notice_width(&self, text: &str, max: i32, scale: f64) -> i32 {
+        let text_w = (self.text_width(text, FONT_SIZE, scale) / scale as f32).ceil() as i32;
+        (text_w + 2 * NOTICE_PADDING).min(max).max(NOTICE_HEIGHT)
+    }
+
+    /// The notice: `text` on a pill `w` wide, inside a margin of `SHADOW`
+    /// holding its drop shadow.
+    fn notice(&self, text: &str, w: i32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let size = Size::from((w, NOTICE_HEIGHT));
+        let outer = Size::from((w + 2 * SHADOW, NOTICE_HEIGHT + 2 * SHADOW));
+        let mut c = Canvas::new(physical(outer, scale));
+        c.popup(size, NOTICE_HEIGHT as f32 / 2.0, scale, p);
+        let rect = Rectangle::new(
+            (SHADOW + NOTICE_PADDING, SHADOW).into(),
+            ((w - 2 * NOTICE_PADDING).max(0), NOTICE_HEIGHT).into(),
+        );
+        let (x, right) = phys(rect, scale);
+        // A pixel of slack for the rounding of the measured width.
+        let right = right + scale.ceil() as f32;
+        self.text(
+            &mut c,
+            text,
+            FONT_SIZE,
+            x,
+            right,
+            band(rect, scale),
+            scale,
+            p.text,
+        );
         c.into_buffer(false)
     }
 
@@ -3325,6 +4318,46 @@ fn chevron_down(x: f32, y: f32, s: f32) -> f32 {
     left.min(right) - 0.75 * s
 }
 
+/// Signed distance to a magnifying glass centred on the origin: a ring and
+/// its handle to the bottom right.
+fn magnifier(x: f32, y: f32, s: f32) -> f32 {
+    let ring = ((x + 1.0 * s).hypot(y + 1.0 * s) - 4.5 * s).abs() - STROKE * s;
+    let handle = segment(x, y, 2.4 * s, 2.4 * s, 5.5 * s, 5.5 * s) - 1.1 * s;
+    ring.min(handle)
+}
+
+/// Signed distance to a pencil centred on the origin, pointing to the
+/// bottom left: an outlined body and its pointed tip.
+fn pencil(x: f32, y: f32, s: f32) -> f32 {
+    // Along the pencil (towards the top right) and across it.
+    let (along, across) = (
+        (x - y) * std::f32::consts::FRAC_1_SQRT_2,
+        (x + y) * std::f32::consts::FRAC_1_SQRT_2,
+    );
+    let body = rounded_rect(along, across, -2.5 * s, -2.2 * s, 8.5 * s, 4.4 * s, 0.6 * s).abs()
+        - STROKE * s;
+    let tip = segment(along, across, -2.5 * s, -2.2 * s, -6.2 * s, 0.0).min(segment(
+        along,
+        across,
+        -2.5 * s,
+        2.2 * s,
+        -6.2 * s,
+        0.0,
+    )) - STROKE * s;
+    body.min(tip)
+}
+
+/// Signed distance to a filled square centred on the origin: stop.
+fn stop(x: f32, y: f32, s: f32) -> f32 {
+    rounded_rect(x, y, -3.8 * s, -3.8 * s, 7.6 * s, 7.6 * s, 1.2 * s)
+}
+
+/// Signed distance to a "×" centred on the origin: forget.
+fn cross(x: f32, y: f32, s: f32) -> f32 {
+    let arm = 3.8 * s;
+    segment(x, y, -arm, -arm, arm, arm).min(segment(x, y, -arm, arm, arm, -arm)) - STROKE * s
+}
+
 /// Paint the signed-distance `shape`, centred on a logical rectangle.
 fn icon_sdf(c: &mut Canvas, rect: Rect, scale: f64, color: Rgb, shape: impl Fn(f32, f32) -> f32) {
     let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -3522,11 +4555,14 @@ fn find_font() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Painter, ProjectRow, QuitHit, QuitView, Rect, TabView, Theme, WelcomeHit, WelcomeView,
-        WorkspaceView, quit_layout, short_path, welcome_layout, welcome_page,
+        BAR_HEIGHT, FormField, FormView, HELP_MARGIN, MenuEntry, MenuHit, NOTICE_HEIGHT,
+        PROJECT_MENU_WIDTH, Painter, ProjectMenuView, ProjectRow, QuitHit, QuitView, ROW_INSET,
+        Rect, RowButton, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme,
+        WelcomeHit, WelcomeView, WorkspaceView, project_menu_hit, project_menu_layout,
+        project_menu_page, quit_layout, short_path, welcome_layout, welcome_page,
     };
     use crate::{WorkspaceKind, herdr::AgentStatus};
-    use smithay::utils::{Logical, Size};
+    use smithay::utils::{Logical, Point, Size};
     use std::path::Path;
 
     fn inside(outer: Rect, inner: Rect) -> bool {
@@ -3744,5 +4780,310 @@ mod tests {
             TabView::default(),
         ];
         painter.tab_strip(&tabs, 0, false, Theme::Dark, (900, 48).into(), 1.25);
+    }
+
+    fn menu_row(name: &str, running: Option<bool>, current: bool) -> ProjectRow {
+        ProjectRow {
+            name: name.into(),
+            detail: "3 repos · ~/Work/aft".into(),
+            ago: "2h ago".into(),
+            running,
+            current,
+        }
+    }
+
+    fn project(row: ProjectRow, digit: Option<u8>) -> MenuEntry {
+        MenuEntry::Project {
+            row,
+            digit,
+            renaming: None,
+            confirm_forget: false,
+        }
+    }
+
+    /// The list: the current project, three recent ones (running, stopped,
+    /// not known yet), then the rows starting new ones.
+    fn list_view() -> ProjectMenuView {
+        ProjectMenuView {
+            query: "blo".into(),
+            entries: vec![
+                MenuEntry::Section("Current".into()),
+                project(menu_row("aft", Some(true), true), None),
+                MenuEntry::Section("Recent".into()),
+                project(menu_row("gerdr", Some(true), false), Some(1)),
+                project(menu_row("blog", Some(false), false), Some(2)),
+                project(menu_row("notes", None, false), Some(3)),
+                MenuEntry::New("New project \"blo\"…".into()),
+                MenuEntry::Folder("~/Sites/blogging".into()),
+            ],
+            selected: Some(3),
+            hover: None,
+            form: None,
+            hints: vec![
+                ("Enter".into(), "open".into()),
+                ("Ctrl+R".into(), "rename".into()),
+                ("Ctrl+S".into(), "stop".into()),
+                ("Del".into(), "forget".into()),
+                ("Esc".into(), "close".into()),
+            ],
+        }
+    }
+
+    fn form_view(suggestions: usize, error: bool) -> ProjectMenuView {
+        ProjectMenuView {
+            query: String::new(),
+            entries: Vec::new(),
+            selected: None,
+            hover: None,
+            form: Some(FormView {
+                name: "blog-v2".into(),
+                folder: "~/Sites/blog".into(),
+                kind: WorkspaceKind::Project,
+                focus: FormField::Folder,
+                suggestions: (0..suggestions)
+                    .map(|i| format!("~/Sites/blog{i}"))
+                    .collect(),
+                suggestion: (suggestions > 0).then_some(0),
+                error: error.then(|| "A project named blog-v2 exists.".into()),
+            }),
+            hints: vec![
+                ("Tab".into(), "next".into()),
+                ("Enter".into(), "create".into()),
+                ("Esc".into(), "back".into()),
+            ],
+        }
+    }
+
+    fn below(upper: Rect, lower: Rect) -> bool {
+        upper.loc.y + upper.size.h <= lower.loc.y
+    }
+
+    fn centre(rect: Rect) -> Point<f64, Logical> {
+        (
+            rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+            rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+        )
+            .into()
+    }
+
+    #[test]
+    fn project_menu_layout_fits_the_output() {
+        for (w, h) in [(800, 600), (1920, 1080)] {
+            let size: Size<i32, Logical> = (w, h).into();
+            let margin = Rect::new((0, 0).into(), (w, h - HELP_MARGIN).into());
+            // A full page of rows, with a section label at the top.
+            let mut full = list_view();
+            full.entries.truncate(1);
+            while full.entries.len() < project_menu_page(size) {
+                full.entries.push(project(menu_row("x", None, false), None));
+            }
+            full.hover = Some(MenuHit::Entry(2));
+            let mut views = vec![list_view(), full];
+            for (suggestions, error) in [(0, false), (5, false), (0, true), (5, true)] {
+                views.push(form_view(suggestions, error));
+            }
+            for view in &views {
+                let l = project_menu_layout(view, size);
+                assert!(inside(margin, l.panel), "{:?} outside {w}x{h}", l.panel);
+                assert!(l.panel.size.w <= PROJECT_MENU_WIDTH);
+                assert_eq!(l.panel.loc, (ROW_INSET, BAR_HEIGHT + 2).into());
+                assert!(inside(l.panel, l.query) && inside(l.panel, l.footer));
+                assert!(below(l.query, l.footer));
+                assert_eq!(
+                    l.footer.loc.y + l.footer.size.h,
+                    l.panel.loc.y + l.panel.size.h
+                );
+                for (rect, buttons) in &l.entries {
+                    assert!(rect.size.h > 0, "{rect:?} cut off at {w}x{h}");
+                    assert!(
+                        inside(l.panel, *rect) && below(l.query, *rect) && below(*rect, l.footer)
+                    );
+                    assert!(buttons.iter().all(|(_, b)| inside(*rect, *b)));
+                }
+                assert!(l.entries.windows(2).all(|e| below(e[0].0, e[1].0)));
+                match (&l.form, &view.form) {
+                    (None, None) => assert_eq!(l.entries.len(), view.entries.len()),
+                    (Some(f), Some(form)) => {
+                        assert!(l.entries.is_empty());
+                        assert_eq!(f.suggestions.len(), form.suggestions.len());
+                        let mut parts =
+                            vec![f.name, f.folder, f.browse, f.error, f.cancel, f.create];
+                        parts.extend(f.kinds.iter().map(|(_, r)| *r));
+                        parts.extend(&f.suggestions);
+                        for part in parts {
+                            assert!(inside(l.panel, part), "{part:?} outside the panel");
+                        }
+                        assert!(below(l.query, f.name) && below(f.name, f.folder));
+                        assert_eq!(f.folder.loc.y, f.browse.loc.y);
+                        assert!(f.folder.loc.x + f.folder.size.w < f.browse.loc.x);
+                        let last = f.suggestions.last().copied().unwrap_or(f.folder);
+                        assert!(below(f.folder, last) || last == f.folder);
+                        assert!(f.suggestions.windows(2).all(|s| below(s[0], s[1])));
+                        let [(_, zed), (_, term)] = f.kinds;
+                        assert!(below(last, zed) && zed.loc.x + zed.size.w < term.loc.x);
+                        assert!(below(zed, f.error) && below(f.error, f.create));
+                        assert_eq!(f.cancel.loc.y, f.create.loc.y);
+                        assert!(f.cancel.loc.x + f.cancel.size.w < f.create.loc.x);
+                        assert!(below(f.create, l.footer));
+                    }
+                    _ => panic!("form layout without a form, or the other way round"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn project_menu_page_stays_in_bounds() {
+        let mut last = 0;
+        for h in (100..2200).step_by(10) {
+            let page = project_menu_page((1000, h).into());
+            assert!((3..=12).contains(&page) && page >= last);
+            last = page;
+        }
+        assert_eq!(project_menu_page((1000, 100).into()), 3);
+        assert_eq!(project_menu_page((1920, 1080).into()), 12);
+        assert!(project_menu_page((800, 600).into()) > 3);
+    }
+
+    #[test]
+    fn project_menu_hit_agrees_with_the_layout() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let mut view = list_view();
+        let l = project_menu_layout(&view, size);
+        let hit = |view: &ProjectMenuView, pos| project_menu_hit(view, size, pos);
+        assert!(l.entries.iter().all(|(_, buttons)| buttons.is_empty()));
+        assert_eq!(hit(&view, centre(l.query)), Some(MenuHit::Query));
+        assert_eq!(hit(&view, centre(l.footer)), Some(MenuHit::Panel));
+        assert_eq!(hit(&view, (1200.0, 700.0).into()), None);
+        assert_eq!(hit(&view, (2.0, 60.0).into()), None);
+        for (i, (rect, _)) in l.entries.iter().enumerate() {
+            assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Entry(i)));
+        }
+
+        // Row buttons: only on the hovered project row, and which depend on
+        // whether it is current and runs.
+        use RowButton::{Forget, Rename, Stop};
+        let expected: [&[RowButton]; 8] = [
+            &[],
+            &[Rename],
+            &[],
+            &[Rename, Stop, Forget],
+            &[Rename, Forget],
+            &[Rename, Stop, Forget],
+            &[],
+            &[],
+        ];
+        for (i, want) in expected.iter().enumerate() {
+            for hover in [MenuHit::Entry(i), MenuHit::Button(i, Rename)] {
+                view.hover = Some(hover);
+                let l = project_menu_layout(&view, size);
+                for (j, (rect, buttons)) in l.entries.iter().enumerate() {
+                    let shown: Vec<_> = buttons.iter().map(|(b, _)| *b).collect();
+                    assert_eq!(shown, if i == j { want.to_vec() } else { vec![] });
+                    for (button, b) in buttons {
+                        assert_eq!(hit(&view, centre(*b)), Some(MenuHit::Button(j, *button)));
+                    }
+                    // Left of the buttons is still the row.
+                    let left = (rect.loc.x as f64 + 20.0, centre(*rect).y).into();
+                    assert_eq!(hit(&view, left), Some(MenuHit::Entry(j)));
+                }
+                // Right-aligned in order, side by side.
+                let buttons = &l.entries[i].1;
+                assert!(
+                    buttons
+                        .windows(2)
+                        .all(|b| b[0].1.loc.x + b[0].1.size.w <= b[1].1.loc.x)
+                );
+            }
+        }
+
+        let view = form_view(3, true);
+        let l = project_menu_layout(&view, size);
+        let f = l.form.as_ref().unwrap();
+        let fields = [
+            (f.name, FormField::Name),
+            (f.folder, FormField::Folder),
+            (f.browse, FormField::Browse),
+            (f.cancel, FormField::Cancel),
+            (f.create, FormField::Create),
+        ];
+        for (rect, field) in fields {
+            assert_eq!(hit(&view, centre(rect)), Some(MenuHit::Field(field)));
+        }
+        for (kind, rect) in f.kinds {
+            assert_eq!(hit(&view, centre(rect)), Some(MenuHit::Kind(kind)));
+        }
+        for (i, rect) in f.suggestions.iter().enumerate() {
+            assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Suggestion(i)));
+        }
+        for nothing in [l.query, f.error, l.footer] {
+            assert_eq!(hit(&view, centre(nothing)), Some(MenuHit::Panel));
+        }
+        let past = l.panel.loc.y as f64 + l.panel.size.h as f64 + 1.0;
+        assert_eq!(hit(&view, (100.0, past).into()), None);
+    }
+
+    #[test]
+    fn project_menu_header_and_notice_paint() {
+        let painter = Painter::new();
+        let mut list = list_view();
+        list.hover = Some(MenuHit::Button(4, RowButton::Forget));
+        if let MenuEntry::Project { confirm_forget, .. } = &mut list.entries[4] {
+            *confirm_forget = true;
+        }
+        let mut renaming = list_view();
+        renaming.hover = Some(MenuHit::Entry(3));
+        if let MenuEntry::Project { renaming: name, .. } = &mut renaming.entries[3] {
+            *name = Some("gerdr renamed".into());
+        }
+        let mut empty = list_view();
+        empty.entries.clear();
+        empty.query.clear();
+        let mut views = vec![
+            list,
+            renaming,
+            empty,
+            form_view(5, true),
+            form_view(0, false),
+        ];
+        let mut no_folder = form_view(0, false);
+        if let Some(form) = &mut no_folder.form {
+            form.folder.clear();
+            form.focus = FormField::Kind;
+        }
+        views.push(no_folder);
+        let long = "a project with a very long name indeed, longer than the header";
+        for theme in [Theme::Dark, Theme::Light] {
+            for scale in [1.0, 1.25, 2.0] {
+                for (w, h) in [(800, 600), (1920, 1080), (120, 90)] {
+                    let size = (w, h).into();
+                    for view in &views {
+                        painter.project_menu(view, size, scale, theme.palette());
+                    }
+                    painter.notice(
+                        "Switched to gerdr · aft keeps running",
+                        w / 2,
+                        scale,
+                        theme.palette(),
+                    );
+                }
+                for (name, lit) in [(Some(long), true), (Some("aft"), false), (None, false)] {
+                    for width in [SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, SIDEBAR_MAX_WIDTH] {
+                        let size = (width, 400).into();
+                        painter.sidebar(
+                            &[],
+                            &[],
+                            None,
+                            false,
+                            (name, lit),
+                            size,
+                            scale,
+                            theme.palette(),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(painter.notice_width("Created blog-v2", 10, 1.0) >= NOTICE_HEIGHT);
     }
 }
