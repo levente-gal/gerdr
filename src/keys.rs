@@ -487,8 +487,11 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
 mod tests {
     use smithay::input::keyboard::{Keysym, ModifiersState};
 
-    use super::{Chord, Keymap};
-    use crate::{Action, config, layout::Dir};
+    use super::{ACTIONS, Chord, Keymap};
+    use crate::{
+        Action, config,
+        layout::{Dir, Side},
+    };
 
     fn from_config(text: &str) -> (Keymap, Vec<String>) {
         let (keymap, _, problems) = config::from_text(text);
@@ -581,6 +584,35 @@ mod tests {
             Some(Action::Quit)
         );
         assert_eq!(keymap.action(&mods(false, false), Keysym::q), None);
+    }
+
+    #[test]
+    fn last_project_is_shift_l() {
+        let keymap = Keymap::default();
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::l),
+            Some(Action::LastProject)
+        );
+        // Plain l still focuses right.
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::l),
+            Some(Action::FocusSide(Side::Right))
+        );
+    }
+
+    #[test]
+    fn default_keys_are_all_different() {
+        let chords: Vec<Chord> = ACTIONS
+            .iter()
+            .map(|(_, _, _, spec)| Chord::parse(spec).expect("default key"))
+            .collect();
+        for (i, chord) in chords.iter().enumerate() {
+            assert!(
+                !chords[..i].contains(chord),
+                "`{}` is the default of two actions",
+                ACTIONS[i].3
+            );
+        }
     }
 
     #[test]

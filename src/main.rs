@@ -129,6 +129,8 @@ const CLOSE_GRACE: Duration = Duration::from_millis(1500);
 /// How long a new project's Zed waits, after that, for the old Zed to exit:
 /// a `zed -n` would hand its window to it.
 const ZED_EXIT_WAIT: Duration = Duration::from_secs(3);
+/// How long a notice stays at the top of the app area.
+const NOTICE_TIME: Duration = Duration::from_secs(3);
 /// How long a restarted server may take to bring back all its workspaces.
 const RESTORE_WAIT: Duration = Duration::from_secs(5);
 /// How long after a server restart the commands saved for its panes are
@@ -823,6 +825,9 @@ pub struct Gerdr {
     /// Where a check of which projects' sessions run sends its answer (by
     /// project id); `None` until set up.
     pub running_status: Option<channel::Sender<Vec<(String, bool)>>>,
+    /// Where stopping a project's session in the background sends whether
+    /// it stopped (by project id); `None` until set up.
+    pub stop_status: Option<channel::Sender<(String, bool)>>,
     /// The project menu, while it is open.
     pub project_menu: Option<project_menu::ProjectMenu>,
     /// The pointer is over the sidebar header's project name.
@@ -2214,27 +2219,42 @@ impl Gerdr {
 
     /// Ask the user for a folder (on the host) to open as a new workspace of `kind`.
     pub fn pick_workspace(&mut self, kind: WorkspaceKind) {
-        if self.picker.is_some() {
-            return;
-        }
         let start = self
             .workspace()
             .and_then(|ws| ws.dir.parent())
             .map(Path::to_path_buf)
             .or_else(home_dir);
-        let mut cmd = Command::new("zenity");
         let title = match kind {
-            WorkspaceKind::Project => "--title=Open project folder",
-            WorkspaceKind::Terminal => "--title=Open terminal folder",
+            WorkspaceKind::Project => "Open project folder",
+            WorkspaceKind::Terminal => "Open terminal folder",
         };
-        cmd.args(["--file-selection", "--directory", title])
+        self.pick_folder(title, start, PickFor::Workspace(kind));
+    }
+
+    /// Ask zenity for a folder for the project menu's form, starting in
+    /// `start` (else the home folder).
+    pub fn pick_folder_for_menu(&mut self, start: Option<PathBuf>) {
+        let start = start.or_else(home_dir);
+        self.pick_folder("Choose the project's folder", start, PickFor::MenuFolder);
+    }
+
+    /// Ask zenity for a folder (on the host) under `title`, starting in
+    /// `start`; `poll_picker` hands the answer on as `purpose` says. Not
+    /// while a picker is open already.
+    fn pick_folder(&mut self, title: &str, start: Option<PathBuf>, purpose: PickFor) {
+        if self.picker.is_some() {
+            return;
+        }
+        let mut cmd = Command::new("zenity");
+        cmd.args(["--file-selection", "--directory"])
+            .arg(format!("--title={title}"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         if let Some(start) = start {
             cmd.arg(format!("--filename={}/", start.display()));
         }
         match cmd.spawn() {
-            Ok(child) => self.picker = Some((child, PickFor::Workspace(kind))),
+            Ok(child) => self.picker = Some((child, purpose)),
             Err(err) => tracing::warn!("folder picker (zenity) failed to start: {err}"),
         }
     }
@@ -2417,6 +2437,7 @@ impl Gerdr {
             Action::ToggleTheme => self.toggle_theme(),
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(),
+            Action::Projects if self.project.is_some() => self.toggle_project_menu(),
             Action::Projects => self.open_welcome(true),
             Action::LastProject => self.switch_to_last_project(),
             Action::ToggleRestart => self.toggle_restart(),
@@ -2855,7 +2876,8 @@ impl Gerdr {
                 .to_f64()
                 .contains(pos);
         let reordering = self.reorder.is_some_and(|r| r.moving);
-        if self.quit.is_some() || self.welcome.is_some() {
+        // These take every click.
+        if self.quit.is_some() || self.welcome.is_some() || self.project_menu.is_some() {
             return None;
         }
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
@@ -2934,7 +2956,8 @@ impl Gerdr {
     }
 
     /// Show project `id`; if it has no workspaces and `pick`, ask for a
-    /// folder to open in it.
+    /// folder to open in it. The project left, if any, is remembered for
+    /// `switch_to_last_project`, and a notice says it keeps running.
     fn enter_project(&mut self, id: &str, pick: bool) {
         if self.project.as_deref() == Some(id) {
             self.welcome = None;
@@ -2943,6 +2966,7 @@ impl Gerdr {
         let Some(session) = self.projects.project(id).map(|p| p.session.clone()) else {
             return tracing::warn!("no project {id}");
         };
+        let left = self.project.clone();
         self.detach_project();
         self.welcome = None;
         self.quit = None;
@@ -2956,6 +2980,13 @@ impl Gerdr {
         self.connect_herdr(&session);
         self.place_held(id);
         self.show_active();
+        if let Some(left) = left {
+            let name = |id: &str| self.projects.project(id).map(|p| p.name.clone());
+            if let (Some(new), Some(old)) = (name(id), name(&left)) {
+                self.show_notice(projects::switch_notice(&new, &old));
+            }
+            self.previous_project = Some(left);
+        }
         if pick && self.workspaces.is_empty() {
             self.pick_workspace(WorkspaceKind::Project);
         }
@@ -3016,6 +3047,8 @@ impl Gerdr {
         self.menu_hover = None;
         self.stop_switcher_repeat();
         self.switcher = None;
+        self.project_menu = None;
+        self.header_hover = false;
         self.project = None;
         self.focus(None);
     }
@@ -3136,38 +3169,123 @@ impl Gerdr {
         folder: Option<PathBuf>,
         kind: WorkspaceKind,
     ) {
-        let _ = (name, folder, kind);
-        // Contract: wave 1.
+        let id = self.add_project(name);
+        self.enter_project(&id, false);
+        match (folder, kind) {
+            (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
+            (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
+            (None, _) => {}
+        }
+        // After the switch's notice, so it wins.
+        self.show_notice(format!("Created {}", name.trim()));
     }
 
-    /// Rename project `id` to `name`; its id and session stay.
+    /// Rename project `id` to `name` (trimmed; not to nothing); its id and
+    /// session stay.
     pub fn rename_project(&mut self, id: &str, name: &str) {
-        let _ = (id, name);
-        // Contract: wave 1.
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Some(project) = self.projects.project_mut(id) else {
+            return tracing::warn!("no project {id} to rename");
+        };
+        project.name = name.to_owned();
+        self.projects.save();
+        self.refresh_project_menu();
     }
 
-    /// Stop project `id`'s herdr session; not the shown one.
+    /// Stop project `id`'s herdr session, off the event loop; not the shown
+    /// one. `project_stopped` takes it from there.
     pub fn stop_project(&mut self, id: &str) {
-        let _ = id;
-        // Contract: wave 1.
+        if self.project.as_deref() == Some(id) {
+            return tracing::warn!("not stopping project {id}: it is the one shown");
+        }
+        let Some(session) = self.projects.project(id).map(|p| p.session.clone()) else {
+            return tracing::warn!("no project {id} to stop");
+        };
+        if self.stop_status.is_none() {
+            let (tx, rx) = channel::channel::<(String, bool)>();
+            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
+                if let channel::Event::Msg((id, stopped)) = event {
+                    state.project_stopped(&id, stopped);
+                }
+            });
+            match inserted {
+                Ok(_) => self.stop_status = Some(tx),
+                Err(err) => return tracing::warn!("stopping project {id}: {err}"),
+            }
+        }
+        let Some(tx) = self.stop_status.clone() else {
+            return;
+        };
+        let id = id.to_owned();
+        std::thread::spawn(move || {
+            let stopped = match herdr::stop_server(&session) {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::warn!("stopping project {id}'s herdr session: {err}");
+                    false
+                }
+            };
+            let _ = tx.send((id, stopped));
+        });
     }
 
-    /// Show the project shown before this one, if any.
+    /// Project `id`'s session was asked to stop, and `stopped` says whether
+    /// it did: then it counts as stopped, and the windows held for it close.
+    fn project_stopped(&mut self, id: &str, stopped: bool) {
+        let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
+            return;
+        };
+        if !stopped {
+            return self.show_notice(format!("Couldn't stop {name}"));
+        }
+        self.running.insert(id.to_owned(), false);
+        // Shown again meanwhile: it runs again, or soon will.
+        if self.project.as_deref() != Some(id) {
+            if let Some(project) = self.projects.project_mut(id) {
+                project.state = RunState::Stopped;
+            }
+            self.projects.save();
+            // They go from `held` once closed (see `remove_window`).
+            for window in self.held.get(id).into_iter().flatten() {
+                window.toplevel().unwrap().send_close();
+            }
+        }
+        self.refresh_project_menu();
+        self.show_notice(format!("Stopped {name}"));
+    }
+
+    /// Show the project shown before this one, if it is still there.
     pub fn switch_to_last_project(&mut self) {
-        // Contract: wave 1.
+        let Some(id) = self.previous_project.clone() else {
+            return;
+        };
+        if self.projects.project(&id).is_some() {
+            self.switch_project(&id);
+        }
     }
 
-    /// Show `text` at the top of the app area for a few seconds.
+    /// Show `text` at the top of the app area for `NOTICE_TIME`, in place
+    /// of the notice shown, if any.
     pub fn show_notice(&mut self, text: String) {
-        let _ = text;
-        // Contract: wave 1.
-    }
-
-    /// Ask zenity for a folder for the project menu's form, starting in
-    /// `start` (else the home folder).
-    pub fn pick_folder_for_menu(&mut self, start: Option<PathBuf>) {
-        let _ = start;
-        // Contract: wave 1.
+        let until = Instant::now() + NOTICE_TIME;
+        self.notice = Some((text, until));
+        // Gone from the next frame, as every frame draws the chrome.
+        let clear = move |_, _: &mut (), state: &mut Gerdr| {
+            if state.notice.as_ref().is_some_and(|(_, at)| *at == until) {
+                state.notice = None;
+            }
+            TimeoutAction::Drop
+        };
+        if let Err(err) = self
+            .loop_handle
+            .insert_source(Timer::from_duration(NOTICE_TIME), clear)
+        {
+            // `chrome_view` leaves it out once it is past anyway.
+            tracing::warn!("timing the notice out: {err}");
+        }
     }
 
     /// Forget project `id`; its herdr session stays. Not the shown one.
@@ -3179,7 +3297,11 @@ impl Gerdr {
         if self.projects.last_active.as_deref() == Some(id) {
             self.projects.last_active = None;
         }
+        if self.previous_project.as_deref() == Some(id) {
+            self.previous_project = None;
+        }
         self.projects.save();
+        self.refresh_project_menu();
     }
 
     /// The projects for the welcome screen, most recently used first, by id;
@@ -3325,10 +3447,18 @@ impl Gerdr {
             prefix: self.prefix_armed.then(|| self.keymap.help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
-            project: None,
-            header_hover: false,
+            project: self
+                .project
+                .as_deref()
+                .and_then(|id| self.projects.project(id))
+                .map(|p| p.name.clone()),
+            header_hover: self.header_hover,
             project_menu: self.project_menu_view(),
-            notice: None,
+            notice: self
+                .notice
+                .as_ref()
+                .filter(|(_, until)| Instant::now() < *until)
+                .map(|(text, _)| text.clone()),
             theme: self.theme,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
@@ -3530,6 +3660,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         welcome: None,
         running: HashMap::new(),
         running_status: None,
+        stop_status: None,
         project_menu: None,
         header_hover: false,
         previous_project: None,
