@@ -3,7 +3,8 @@
 //! in it), the tab strip above the apps
 //! (each tab with what runs in it, as herdr reports;
 //! the light/dark switch at its right end), and the key help
-//! panel shown while the prefix is armed, and the switcher. All are drawn on the CPU into memory buffers at physical
+//! panel shown while the prefix is armed, and the switcher; the welcome
+//! screen covering it all, and the quit dialog over that. All are drawn on the CPU into memory buffers at physical
 //! resolution (crisp at fractional scales) and only redrawn when they change.
 //!
 //! The look follows Zed's default themes, One Dark and One Light.
@@ -134,6 +135,54 @@ const SWITCHER_ROWS: i32 = 12;
 /// The caret after the query.
 const CARET_WIDTH: i32 = 2;
 const CARET_HEIGHT: i32 = 18;
+
+/// The welcome screen: a column at most this wide, centred on the output.
+const WELCOME_WIDTH: i32 = 560;
+const GREETING_FONT_SIZE: f32 = 28.0;
+/// From the top: greeting, subtitle, a gap, the "Recent projects" label,
+/// the rows, a gap, the button and the note under it.
+const GREETING_HEIGHT: i32 = 40;
+const SUBTITLE_HEIGHT: i32 = 24;
+const WELCOME_GAP: i32 = 24;
+const WELCOME_LABEL: i32 = 24;
+/// A project row: its name, detail and age on one line.
+const WELCOME_ROW: i32 = 44;
+/// The most rows it shows; it scrolls for more.
+const WELCOME_ROWS: i32 = 8;
+const WELCOME_BUTTON: i32 = 36;
+const WELCOME_BUTTON_WIDTH: i32 = 200;
+const NOTE_GAP: i32 = 6;
+const NOTE_HEIGHT: i32 = 20;
+/// The key hints, a margin above the output's bottom edge.
+const HINTS_HEIGHT: i32 = 24;
+/// Where the middle of the welcome screen sits, as a share of the output's height.
+const WELCOME_MIDDLE: f64 = 0.42;
+/// Space between the hints' entries, and between each key and its action.
+const HINT_GAP: i32 = 18;
+const HINT_KEY_GAP: i32 = 6;
+/// Width of the focus ring around the selected button, and its gap to it.
+const FOCUS_RING: f32 = 1.5;
+const FOCUS_GAP: f32 = 2.0;
+
+/// The quit dialog, centred on the output: title, question, the "Don't ask
+/// again" checkbox, and the buttons at the bottom right.
+const QUIT_WIDTH: i32 = 420;
+const QUIT_HEIGHT: i32 = 190;
+const QUIT_PADDING: i32 = 20;
+const QUIT_TITLE: i32 = 24;
+const QUIT_BODY: i32 = 22;
+const QUIT_LINE_GAP: i32 = 10;
+/// The checkbox row: the box and its label, all of it clickable.
+const CHECKBOX_ROW: i32 = 24;
+const CHECKBOX_WIDTH: i32 = 150;
+const CHECKBOX_SIZE: i32 = 16;
+const CHECKBOX_GAP: i32 = 8;
+const QUIT_BUTTON: i32 = 32;
+const QUIT_BUTTON_GAP: i32 = 8;
+/// Cancel, Stop project, Keep running: labels and widths.
+const QUIT_BUTTONS: [(&str, i32); 3] =
+    [("Cancel", 84), ("Stop project", 116), ("Keep running", 124)];
+const BUTTON_RADIUS: f32 = 6.0;
 
 type Rgb = [u8; 3];
 
@@ -785,25 +834,112 @@ pub struct QuitLayout {
 }
 
 /// Where the welcome screen's parts go on an output of `size` with `rows`
-/// projects in view.
-#[allow(dead_code)] // contract: implemented by the chrome painters work
+/// projects in view: a column centred on it, its middle at
+/// `WELCOME_MIDDLE` of the height as far as it fits, the hints at the bottom.
+/// While `naming`, the name field takes the button's place, as wide as the column.
 pub fn welcome_layout(size: Size<i32, Logical>, rows: usize, naming: bool) -> WelcomeLayout {
-    let _ = (size, rows, naming);
-    todo!("chrome painters")
+    let w = WELCOME_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
+    let x = (size.w - w) / 2;
+    let rect = |y: i32, h: i32| Rectangle::new((x, y).into(), (w, h).into());
+    let hints = rect((size.h - HELP_MARGIN - HINTS_HEIGHT).max(0), HINTS_HEIGHT);
+    let list_h = rows as i32 * WELCOME_ROW;
+    let block = WELCOME_FIXED + list_h;
+    let middle = (size.h as f64 * WELCOME_MIDDLE).round() as i32;
+    let top = (middle - block / 2)
+        .min(hints.loc.y - HELP_MARGIN - block)
+        .max(HELP_MARGIN.min(size.h / 2));
+
+    let greeting = rect(top, GREETING_HEIGHT);
+    let subtitle = rect(greeting.loc.y + GREETING_HEIGHT, SUBTITLE_HEIGHT);
+    let label = rect(
+        subtitle.loc.y + SUBTITLE_HEIGHT + WELCOME_GAP,
+        WELCOME_LABEL,
+    );
+    let list = rect(label.loc.y + WELCOME_LABEL, list_h);
+    let row_rects = (0..rows as i32)
+        .map(|i| rect(list.loc.y + i * WELCOME_ROW, WELCOME_ROW))
+        .collect();
+    let button_y = list.loc.y + list_h + WELCOME_GAP;
+    let button = if naming {
+        rect(button_y, WELCOME_BUTTON)
+    } else {
+        let bw = WELCOME_BUTTON_WIDTH.min(w);
+        Rectangle::new(
+            ((size.w - bw) / 2, button_y).into(),
+            (bw, WELCOME_BUTTON).into(),
+        )
+    };
+    let note = rect(button_y + WELCOME_BUTTON + NOTE_GAP, NOTE_HEIGHT);
+    WelcomeLayout {
+        greeting,
+        subtitle,
+        label,
+        list,
+        rows: row_rects,
+        button,
+        note,
+        hints,
+    }
 }
 
+/// The welcome screen's height above the hints without its rows.
+const WELCOME_FIXED: i32 = GREETING_HEIGHT
+    + SUBTITLE_HEIGHT
+    + WELCOME_GAP
+    + WELCOME_LABEL
+    + WELCOME_GAP
+    + WELCOME_BUTTON
+    + NOTE_GAP
+    + NOTE_HEIGHT;
+
 /// How many project rows fit on the welcome screen of an output of `size`.
-#[allow(dead_code)] // contract: implemented by the chrome painters work
+#[allow(dead_code)] // contract: used by the overlay state work
 pub fn welcome_page(size: Size<i32, Logical>) -> usize {
-    let _ = size;
-    todo!("chrome painters")
+    let room = size.h - WELCOME_FIXED - 3 * HELP_MARGIN - HINTS_HEIGHT;
+    (room / WELCOME_ROW).clamp(1, WELCOME_ROWS) as usize
 }
 
 /// Where the quit dialog's parts go, centred on an output of `size`.
-#[allow(dead_code)] // contract: implemented by the chrome painters work
 pub fn quit_layout(size: Size<i32, Logical>) -> QuitLayout {
-    let _ = size;
-    todo!("chrome painters")
+    let panel = Rectangle::new(
+        (
+            ((size.w - QUIT_WIDTH) / 2).max(0),
+            ((size.h - QUIT_HEIGHT) / 2).max(0),
+        )
+            .into(),
+        (QUIT_WIDTH, QUIT_HEIGHT).into(),
+    );
+    let (x, y) = (panel.loc.x + QUIT_PADDING, panel.loc.y + QUIT_PADDING);
+    let inner = QUIT_WIDTH - 2 * QUIT_PADDING;
+    let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
+    let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
+    let body = Rectangle::new((x, body_y).into(), (inner, QUIT_BODY).into());
+    let checkbox = Rectangle::new(
+        (x, body_y + QUIT_BODY + QUIT_LINE_GAP).into(),
+        (CHECKBOX_WIDTH, CHECKBOX_ROW).into(),
+    );
+    // Right-aligned, in order.
+    let total = QUIT_BUTTONS.iter().map(|(_, w)| w).sum::<i32>()
+        + (QUIT_BUTTONS.len() as i32 - 1) * QUIT_BUTTON_GAP;
+    let left = panel.loc.x + QUIT_WIDTH - QUIT_PADDING - total;
+    let button_y = panel.loc.y + QUIT_HEIGHT - QUIT_PADDING - QUIT_BUTTON;
+    let buttons = std::array::from_fn(|i| {
+        let before = QUIT_BUTTONS[..i]
+            .iter()
+            .map(|(_, w)| w + QUIT_BUTTON_GAP)
+            .sum::<i32>();
+        Rectangle::new(
+            (left + before, button_y).into(),
+            (QUIT_BUTTONS[i].1, QUIT_BUTTON).into(),
+        )
+    });
+    QuitLayout {
+        panel,
+        title,
+        body,
+        checkbox,
+        buttons,
+    }
 }
 
 type Rect = Rectangle<i32, Logical>;
@@ -1038,6 +1174,8 @@ pub struct Chrome {
     help: Cached<(HelpLayout, Theme, f64)>,
     menu: Cached<(Option<usize>, Theme, f64)>,
     switcher: Cached<(SwitcherView, i32, Theme, f64)>,
+    welcome: Cached<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
+    quit: Cached<(QuitView, Size<i32, Logical>, Theme, f64)>,
 }
 
 impl Chrome {
@@ -1049,6 +1187,8 @@ impl Chrome {
             help: Cached::default(),
             menu: Cached::default(),
             switcher: Cached::default(),
+            welcome: Cached::default(),
+            quit: Cached::default(),
         }
     }
 
@@ -1060,11 +1200,36 @@ impl Chrome {
         let scale = view.scale;
         let theme = view.theme;
         let sidebar_w = view.sidebar_width;
+        let output: Size<i32, Logical> = (view.size.w.max(1), view.size.h.max(1)).into();
+        let painter = &self.painter;
+
+        // Front to back: the quit dialog covers everything, the welcome
+        // screen all the rest.
+        let mut parts = Vec::new();
+        if let Some(quit) = view.quit {
+            let panel = quit_layout(output).panel;
+            let loc = panel.loc - Point::from((SHADOW, SHADOW));
+            let size = (panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW).into();
+            let buffer = self
+                .quit
+                .get((quit, output, theme, scale), |(quit, output, ..)| {
+                    painter.quit_dialog(quit, *output, scale, theme.palette())
+                });
+            parts.push((buffer, loc, size));
+        }
+        if let Some(welcome) = view.welcome {
+            let buffer = self
+                .welcome
+                .get((welcome, output, theme, scale), |(welcome, output, ..)| {
+                    painter.welcome(welcome, *output, scale, theme.palette())
+                });
+            parts.push((buffer, Point::from((0, 0)), output));
+            return render_parts(renderer, parts, scale);
+        }
+
         let sidebar_size: Size<i32, Logical> = (sidebar_w, view.size.h.max(1)).into();
         let strip_size: Size<i32, Logical> =
             ((view.size.w - sidebar_w).max(1), TAB_STRIP_HEIGHT).into();
-
-        let painter = &self.painter;
         let menu_open = view.menu.is_some();
         let sidebar_key = (
             view.workspaces,
@@ -1103,8 +1268,7 @@ impl Chrome {
             },
         );
 
-        // Front to back: the switcher, the menu and the help panel cover the apps.
-        let mut parts = Vec::new();
+        // Then the switcher, the menu and the help panel cover the apps.
         if let Some(switcher) = view.switcher {
             let area = Rectangle::new(
                 (sidebar_w, TAB_STRIP_HEIGHT).into(),
@@ -1146,26 +1310,42 @@ impl Chrome {
         }
         parts.push((sidebar, Point::from((0, 0)), sidebar_size));
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size));
-
-        parts
-            .into_iter()
-            .filter_map(|(buffer, loc, size)| {
-                // The buffer holds physical pixels at buffer scale 1: sample all of it
-                // and squeeze it into the logical size.
-                let src = Rectangle::from_size(physical(size, scale).to_f64());
-                MemoryRenderBufferRenderElement::from_buffer(
-                    renderer,
-                    loc.to_f64().to_physical(scale),
-                    buffer,
-                    None,
-                    Some(src),
-                    Some(size),
-                    Kind::Unspecified,
-                )
-                .ok()
-            })
-            .collect()
+        render_parts(renderer, parts, scale)
     }
+}
+
+/// A drawn buffer, where it goes on the output and the logical size it covers.
+type Part<'a> = (
+    &'a MemoryRenderBuffer,
+    Point<i32, Logical>,
+    Size<i32, Logical>,
+);
+
+/// Render elements for buffers of physical pixels, each covering a logical
+/// size at a logical place on the output.
+fn render_parts(
+    renderer: &mut GlesRenderer,
+    parts: Vec<Part<'_>>,
+    scale: f64,
+) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    parts
+        .into_iter()
+        .filter_map(|(buffer, loc, size)| {
+            // The buffer holds physical pixels at buffer scale 1: sample all of it
+            // and squeeze it into the logical size.
+            let src = Rectangle::from_size(physical(size, scale).to_f64());
+            MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                loc.to_f64().to_physical(scale),
+                buffer,
+                None,
+                Some(src),
+                Some(size),
+                Kind::Unspecified,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 /// Help panel geometry, in logical pixels.
@@ -1636,9 +1816,24 @@ impl Painter {
             );
             self.icon(&mut c, '×', *close, scale, p.placeholder);
 
-            // What runs in the tab, on a line of its own, cut off at the tab's edge.
-            let (text_x, right) = (x as f32 + pad, (x + w) as f32 - pad);
+            // What runs in the tab, on a line of its own, cut off at the tab's
+            // edge, or before the mark saying it won't run again after a restart.
+            let (text_x, mut right) = (x as f32 + pad, (x + w) as f32 - pad);
             let band = (px(TAB_TITLE_HEIGHT), px(TAB_LINE));
+            if view.restart == Some(false) {
+                let mark = Rectangle::new(
+                    (
+                        rect.loc.x + rect.size.w - PADDING as i32 - STATUS_WIDTH,
+                        TAB_TITLE_HEIGHT,
+                    )
+                        .into(),
+                    (STATUS_WIDTH, TAB_LINE).into(),
+                );
+                icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
+                    no_restart(x, y, s)
+                });
+                right = px(mark.loc.x - 4) as f32;
+            }
             self.text(
                 &mut c,
                 &view.activity,
@@ -1989,6 +2184,454 @@ impl Painter {
         c.into_buffer(false)
     }
 
+    /// The welcome screen over the whole output of `size`, opaque in the
+    /// editor's background: the greeting, the projects, the button (or the
+    /// name field while naming), a note and the key hints.
+    fn welcome(
+        &self,
+        view: &WelcomeView,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        c.fill(0, 0, c.w, c.h, p.tab_active);
+        let layout = welcome_layout(size, view.rows.len(), view.naming.is_some());
+
+        self.centered(
+            &mut c,
+            &view.greeting,
+            GREETING_FONT_SIZE,
+            layout.greeting,
+            scale,
+            p.text,
+        );
+        self.centered(
+            &mut c,
+            &view.subtitle,
+            FONT_SIZE,
+            layout.subtitle,
+            scale,
+            p.muted,
+        );
+
+        // The label over the list, or what stands in for the list without
+        // rows; the filter typed so far, with its caret, at its right.
+        let (label_x, right) = phys(layout.label, scale);
+        let (text_x, right) = (label_x + PADDING * s, right - PADDING * s);
+        let label_band = band(layout.label, scale);
+        let label_end = if view.rows.is_empty() {
+            let empty = if view.query.is_empty() {
+                "No projects yet"
+            } else {
+                "Nothing matches"
+            };
+            self.text(
+                &mut c,
+                empty,
+                FONT_SIZE,
+                text_x,
+                right,
+                label_band,
+                scale,
+                p.placeholder,
+            )
+        } else {
+            self.text(
+                &mut c,
+                "RECENT PROJECTS",
+                SMALL_FONT_SIZE,
+                text_x,
+                right,
+                label_band,
+                scale,
+                p.placeholder,
+            )
+        };
+        if !view.query.is_empty() && view.naming.is_none() {
+            let end = right - (px(CARET_WIDTH).max(1) + px(1)) as f32;
+            let width = self.text_width(&view.query, FONT_SIZE, scale);
+            let start = (end - width).max(label_end + px(16) as f32);
+            let after = self.text(
+                &mut c,
+                &view.query,
+                FONT_SIZE,
+                start,
+                end,
+                label_band,
+                scale,
+                p.text,
+            );
+            caret(&mut c, after + px(1) as f32, label_band, scale, p.accent);
+        }
+
+        for (i, (rect, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
+            self.project_row(&mut c, view, i, row, *rect, scale, p);
+        }
+
+        let button = layout.button;
+        match &view.naming {
+            Some(name) => self.field(&mut c, name, "Project name", button, scale, p),
+            None => {
+                let (x, y, w, h) = rect_px(button, scale);
+                if view.selected.is_none() {
+                    focus_ring(&mut c, button, BUTTON_RADIUS, p.tab_active, scale, p.accent);
+                }
+                let fill = if view.hover == Some(WelcomeHit::Button) {
+                    mix(p.accent, p.text, 0.12)
+                } else {
+                    p.accent
+                };
+                c.rounded(x, y, w, h, BUTTON_RADIUS * s, fill);
+                // A "+" and the label, centred together.
+                let label = "New project";
+                let (arm, gap) = ((5.0 * s).round(), (8.0 * s).round());
+                let content = 2.0 * arm + gap + self.text_width(label, FONT_SIZE, scale);
+                let start = (x + (w - content) / 2.0).round();
+                let (cx, cy) = (start + arm, y + h / 2.0);
+                let reach = (arm + 2.0 * s).ceil() as i32;
+                c.paint_in(
+                    cx as i32 - reach,
+                    cy as i32 - reach,
+                    2 * reach + 1,
+                    2 * reach + 1,
+                    p.on_accent,
+                    |x, y| coverage(plus(x, y, cx, cy, arm, s) - 0.2 * s),
+                );
+                self.text(
+                    &mut c,
+                    label,
+                    FONT_SIZE,
+                    start + 2.0 * arm + gap,
+                    x + w,
+                    band(button, scale),
+                    scale,
+                    p.on_accent,
+                );
+            }
+        }
+
+        if let Some(note) = &view.note {
+            self.centered(&mut c, note, SMALL_FONT_SIZE, layout.note, scale, p.warning);
+        }
+
+        let hints: &[(&str, &str)] = if view.naming.is_some() {
+            &[("Enter", "create"), ("Esc", "cancel")]
+        } else {
+            &[
+                ("Up / Down", "select"),
+                ("Enter", "open"),
+                ("Ctrl+N", "new"),
+                ("Del", "forget"),
+                ("Esc", "back"),
+            ]
+        };
+        self.hints(&mut c, hints, layout.hints, scale, p);
+        c.into_buffer(true)
+    }
+
+    /// Row `i` of the welcome screen, in `rect`: a mark for whether its
+    /// session runs, its name, its detail and how long ago it was used; or
+    /// the question whether to forget it.
+    #[allow(clippy::too_many_arguments)]
+    fn project_row(
+        &self,
+        c: &mut Canvas,
+        view: &WelcomeView,
+        i: usize,
+        row: &ProjectRow,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        // The highlight stops short of the rows above and below.
+        let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
+        let r = ROW_RADIUS * s;
+        let row_band = band(rect, scale);
+        let mark = Rectangle::new(
+            (rect.loc.x + PADDING as i32, rect.loc.y).into(),
+            (STATUS_WIDTH, rect.size.h).into(),
+        );
+        let name_x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
+        let right = x + w - PADDING * s;
+        let dot = move |x: f32, y: f32| x.hypot(y) - 4.2 * s;
+        if view.confirm_forget == Some(i) {
+            c.rounded(x, y, w, h, r, mix(p.tab_active, p.warning, 0.15));
+            icon_sdf(c, mark, scale, p.warning, dot);
+            self.text(
+                c,
+                &format!("Press Delete again to forget {}", row.name),
+                FONT_SIZE,
+                name_x,
+                right,
+                row_band,
+                scale,
+                p.warning,
+            );
+            return;
+        }
+        if view.selected == Some(i) {
+            c.rounded(x, y, w, h, r, p.selected);
+        } else if view.hover == Some(WelcomeHit::Row(i)) {
+            c.rounded(x, y, w, h, r, mix(p.tab_active, p.selected, 0.5));
+        }
+
+        // A dot while its session runs, a ring while it doesn't, a fainter
+        // ring until that is known.
+        let ring = move |x: f32, y: f32| (x.hypot(y) - 3.6 * s).abs() - 1.1 * s;
+        match row.running {
+            Some(true) => icon_sdf(c, mark, scale, p.success, dot),
+            Some(false) => icon_sdf(c, mark, scale, p.placeholder, ring),
+            None => icon_sdf(c, mark, scale, p.border, ring),
+        }
+
+        let ago_x = (right - self.text_width(&row.ago, SMALL_FONT_SIZE, scale)).round();
+        self.text(
+            c,
+            &row.ago,
+            SMALL_FONT_SIZE,
+            ago_x,
+            f32::MAX,
+            row_band,
+            scale,
+            p.placeholder,
+        );
+        let gap = (FIELD_GAP as f32 * s).round();
+        let end = ago_x - gap;
+        let mut after = self.marked(
+            c,
+            &row.name,
+            &[],
+            LABEL_FONT_SIZE,
+            name_x,
+            end,
+            row_band,
+            scale,
+            (p.text, p.text),
+        );
+        if row.current {
+            after = self.marked(
+                c,
+                "current",
+                &[],
+                SMALL_FONT_SIZE,
+                after + gap,
+                end,
+                row_band,
+                scale,
+                (p.accent, p.accent),
+            );
+        }
+        self.marked(
+            c,
+            &row.detail,
+            &[],
+            SMALL_FONT_SIZE,
+            after + (12.0 * s).round(),
+            end,
+            row_band,
+            scale,
+            (p.muted, p.muted),
+        );
+    }
+
+    /// A text field in `rect`, like the switcher's query: `text` (or
+    /// `placeholder` without any) and a caret after it.
+    fn field(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        placeholder: &str,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let (b, r) = (px(1).max(1) as f32, BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        let field_band = band(rect, scale);
+        let text_x = x + PADDING * s;
+        let max_x = x + w - PADDING * s - px(CARET_WIDTH + 1) as f32;
+        let caret_x = if text.is_empty() {
+            self.text(
+                c,
+                placeholder,
+                FONT_SIZE,
+                text_x + px(CARET_WIDTH + 2) as f32,
+                max_x,
+                field_band,
+                scale,
+                p.placeholder,
+            );
+            text_x
+        } else {
+            self.text(c, text, FONT_SIZE, text_x, max_x, field_band, scale, p.text) + px(1) as f32
+        };
+        caret(c, caret_x, field_band, scale, p.accent);
+    }
+
+    /// Key hints as keycaps, each followed by what it does, centred in `rect`.
+    fn hints(&self, c: &mut Canvas, hints: &[(&str, &str)], rect: Rect, scale: f64, p: &Palette) {
+        let s = scale as f32;
+        let key_gap = (HINT_KEY_GAP as f32 * s).round();
+        let gap = (HINT_GAP as f32 * s).round();
+        let width = hints
+            .iter()
+            .map(|(keys, action)| {
+                self.keycaps_width(keys, scale)
+                    + key_gap
+                    + self.text_width(action, SMALL_FONT_SIZE, scale)
+            })
+            .sum::<f32>()
+            + gap * hints.len().saturating_sub(1) as f32;
+        let (x, _, w, _) = rect_px(rect, scale);
+        let hints_band = band(rect, scale);
+        let mut pen = (x + (w - width) / 2.0).round();
+        for (keys, action) in hints {
+            let end = self.keycaps(c, keys, pen, hints_band, scale, p);
+            pen = self.text(
+                c,
+                action,
+                SMALL_FONT_SIZE,
+                end + key_gap,
+                f32::MAX,
+                hints_band,
+                scale,
+                p.muted,
+            ) + gap;
+        }
+    }
+
+    /// The quit dialog for an output of `size`, inside a margin of `SHADOW`
+    /// holding its drop shadow: the question, the "Don't ask again"
+    /// checkbox, and Cancel, Stop project and Keep running.
+    fn quit_dialog(
+        &self,
+        view: &QuitView,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let layout = quit_layout(size);
+        let panel = layout.panel;
+        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
+        let mut c = Canvas::new(physical(outer, scale));
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        c.popup(panel.size, HELP_RADIUS, scale, p);
+        // Rects relative to the buffer, which starts `SHADOW` before the panel.
+        let shift = |r: Rect| {
+            Rectangle::new(
+                r.loc + Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y)),
+                r.size,
+            )
+        };
+
+        let title = shift(layout.title);
+        let (title_x, title_end) = phys(title, scale);
+        self.text(
+            &mut c,
+            "Quit gerdr?",
+            LABEL_FONT_SIZE,
+            title_x,
+            title_end,
+            band(title, scale),
+            scale,
+            p.text,
+        );
+        let body = shift(layout.body);
+        let (body_x, body_end) = phys(body, scale);
+        self.text(
+            &mut c,
+            &format!(
+                "Keep \u{201c}{}\u{201d} running in the background?",
+                view.project
+            ),
+            FONT_SIZE,
+            body_x,
+            body_end,
+            band(body, scale),
+            scale,
+            p.muted,
+        );
+
+        // The checkbox: an outlined square, filled with a check mark when checked.
+        let checkbox = shift(layout.checkbox);
+        let side = px(CHECKBOX_SIZE) as f32;
+        let (bx, by) = (
+            px(checkbox.loc.x) as f32,
+            (px(checkbox.loc.y) as f32 + (px(checkbox.size.h) as f32 - side) / 2.0).round(),
+        );
+        let (b, r) = (px(1).max(1) as f32, CAP_RADIUS * s);
+        let hovered = view.hover == Some(QuitHit::Checkbox);
+        if view.dont_ask {
+            let fill = if hovered {
+                mix(p.accent, p.text, 0.12)
+            } else {
+                p.accent
+            };
+            c.rounded(bx, by, side, side, r, fill);
+            let (cx, cy) = (bx + side / 2.0, by + side / 2.0);
+            c.paint_in(
+                bx as i32,
+                by as i32,
+                side as i32,
+                side as i32,
+                p.on_accent,
+                |x, y| coverage(check(x - cx, y - cy, s)),
+            );
+        } else {
+            c.rounded(bx, by, side, side, r, p.border);
+            let inner = if hovered { p.selected } else { p.elevated };
+            c.rounded(bx + b, by + b, side - 2.0 * b, side - 2.0 * b, r - b, inner);
+        }
+        self.text(
+            &mut c,
+            "Don't ask again",
+            FONT_SIZE,
+            bx + side + (CHECKBOX_GAP as f32 * s).round(),
+            phys(checkbox, scale).1,
+            band(checkbox, scale),
+            scale,
+            p.text,
+        );
+
+        // The buttons; the last, the default, in the accent.
+        for (i, (rect, (label, _))) in layout.buttons.iter().zip(QUIT_BUTTONS).enumerate() {
+            let rect = shift(*rect);
+            let (x, y, w, h) = rect_px(rect, scale);
+            let r = BUTTON_RADIUS * s;
+            let hovered = view.hover == Some(QuitHit::Button(i));
+            if view.selected == i {
+                focus_ring(&mut c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
+            }
+            let color = if i == 2 {
+                let fill = if hovered {
+                    mix(p.accent, p.text, 0.12)
+                } else {
+                    p.accent
+                };
+                c.rounded(x, y, w, h, r, fill);
+                p.on_accent
+            } else {
+                let fill = if hovered { p.selected } else { p.element };
+                c.rounded(x, y, w, h, r, p.border);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                if i == 1 { p.warning } else { p.text }
+            };
+            self.centered(&mut c, label, FONT_SIZE, rect, scale, color);
+        }
+        c.into_buffer(false)
+    }
+
     /// `text` with the characters at `hits` (char positions) in the second
     /// of `colors`. Draws nothing where not even "…" fits.
     #[allow(clippy::too_many_arguments)]
@@ -2291,6 +2934,60 @@ impl Painter {
     }
 }
 
+/// A logical rectangle's left and right edges in physical pixels.
+fn phys(rect: Rect, scale: f64) -> (f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    (px(rect.loc.x), px(rect.loc.x + rect.size.w))
+}
+
+/// A logical rectangle in physical pixels (x, y, width, height), its edges
+/// on whole pixels.
+fn rect_px(rect: Rect, scale: f64) -> (f32, f32, f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    let (x, y) = (px(rect.loc.x), px(rect.loc.y));
+    (
+        x,
+        y,
+        px(rect.loc.x + rect.size.w) - x,
+        px(rect.loc.y + rect.size.h) - y,
+    )
+}
+
+/// A logical rectangle's rows as the band `(top, height)` text is centred in.
+fn band(rect: Rect, scale: f64) -> (i32, i32) {
+    let px = |v: i32| (v as f64 * scale).round() as i32;
+    (
+        px(rect.loc.y),
+        px(rect.loc.y + rect.size.h) - px(rect.loc.y),
+    )
+}
+
+/// The text caret at `x`, vertically centred in the band `(top, height)`.
+fn caret(c: &mut Canvas, x: f32, (top, height): (i32, i32), scale: f64, color: Rgb) {
+    let px = |v: i32| (v as f64 * scale).round() as i32;
+    let h = px(CARET_HEIGHT).min(height);
+    c.fill(
+        x.round() as i32,
+        top + (height - h) / 2,
+        px(CARET_WIDTH).max(1),
+        h,
+        color,
+    );
+}
+
+/// A ring in `color` around a button in `rect` with corners of `radius`
+/// (logical pixels), held off it by a gap showing `behind`.
+fn focus_ring(c: &mut Canvas, rect: Rect, radius: f32, behind: Rgb, scale: f64, color: Rgb) {
+    let s = scale as f32;
+    let (x, y, w, h) = rect_px(rect, scale);
+    let (gap, out) = (FOCUS_GAP * s, (FOCUS_GAP + FOCUS_RING) * s);
+    let grown = |by: f32| (x - by, y - by, w + 2.0 * by, h + 2.0 * by, radius * s + by);
+    let (rx, ry, rw, rh, rr) = grown(out);
+    c.rounded(rx, ry, rw, rh, rr, color);
+    let (gx, gy, gw, gh, gr) = grown(gap);
+    c.rounded(gx, gy, gw, gh, gr, behind);
+}
+
 /// Signed distance from (x, y) to a rounded rectangle: negative inside.
 fn rounded_rect(x: f32, y: f32, left: f32, top: f32, w: f32, h: f32, r: f32) -> f32 {
     let (hw, hh) = (w / 2.0, h / 2.0);
@@ -2449,6 +3146,21 @@ fn arrow(up: bool, x: f32, y: f32, s: f32) -> f32 {
     let head =
         segment(x, y, -2.5 * s, -s, 0.0, -3.5 * s).min(segment(x, y, 2.5 * s, -s, 0.0, -3.5 * s));
     shaft.min(head) - STROKE * s
+}
+
+/// Signed distance to a check mark centred on the origin.
+fn check(x: f32, y: f32, s: f32) -> f32 {
+    let short = segment(x, y, -3.5 * s, 0.0, -s, 2.5 * s);
+    let long = segment(x, y, -s, 2.5 * s, 3.8 * s, -3.0 * s);
+    short.min(long) - 1.1 * s
+}
+
+/// Signed distance to a ring struck through, centred on the origin: what
+/// runs in a tab won't run again after a restart.
+fn no_restart(x: f32, y: f32, s: f32) -> f32 {
+    let ring = (x.hypot(y) - 3.6 * s).abs() - STROKE * s;
+    let slash = segment(x, y, -2.6 * s, 2.6 * s, 2.6 * s, -2.6 * s) - STROKE * s;
+    ring.min(slash)
 }
 
 /// Signed distance to a small down-pointing chevron centred on the origin.
@@ -2654,9 +3366,20 @@ fn find_font() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TabView, WorkspaceView, short_path};
+    use super::{
+        Painter, ProjectRow, QuitHit, QuitView, Rect, TabView, Theme, WelcomeHit, WelcomeView,
+        WorkspaceView, quit_layout, short_path, welcome_layout, welcome_page,
+    };
     use crate::{WorkspaceKind, herdr::AgentStatus};
+    use smithay::utils::{Logical, Size};
     use std::path::Path;
+
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.loc.x >= outer.loc.x
+            && inner.loc.y >= outer.loc.y
+            && inner.loc.x + inner.size.w <= outer.loc.x + outer.size.w
+            && inner.loc.y + inner.size.h <= outer.loc.y + outer.size.h
+    }
 
     #[test]
     fn short_path_cuts_folders_between_start_and_last() {
@@ -2712,5 +3435,159 @@ mod tests {
 
         let plain = WorkspaceView::new("~".into(), WorkspaceKind::Terminal, &[TabView::default()]);
         assert_eq!(plain.activity, "");
+    }
+
+    #[test]
+    fn welcome_layout_fits_the_output() {
+        for (w, h) in [(800, 600), (1920, 1080), (1280, 720)] {
+            let size: Size<i32, Logical> = (w, h).into();
+            let output = Rect::from_size(size);
+            let rows = welcome_page(size);
+            for naming in [false, true] {
+                let l = welcome_layout(size, rows, naming);
+                for part in [
+                    l.greeting, l.subtitle, l.label, l.list, l.button, l.note, l.hints,
+                ] {
+                    assert!(inside(output, part), "{part:?} outside {w}x{h}");
+                }
+                assert_eq!(l.rows.len(), rows);
+                assert!(l.rows.iter().all(|r| inside(l.list, *r)));
+                assert!(
+                    l.rows
+                        .windows(2)
+                        .all(|r| r[0].loc.y + r[0].size.h <= r[1].loc.y)
+                );
+                assert!(l.subtitle.loc.y >= l.greeting.loc.y + l.greeting.size.h);
+                assert!(l.label.loc.y + l.label.size.h <= l.list.loc.y);
+                assert!(l.button.loc.y >= l.list.loc.y + l.list.size.h);
+                assert!(l.note.loc.y >= l.button.loc.y + l.button.size.h);
+                assert!(l.hints.loc.y >= l.note.loc.y + l.note.size.h);
+                // The hints sit at the bottom; the column is centred.
+                assert!(h - (l.hints.loc.y + l.hints.size.h) <= 24);
+                assert_eq!(l.list.loc.x, w - (l.list.loc.x + l.list.size.w));
+            }
+        }
+    }
+
+    #[test]
+    fn welcome_layout_without_rows_keeps_the_label() {
+        let size: Size<i32, Logical> = (800, 600).into();
+        let l = welcome_layout(size, 0, false);
+        assert!(l.rows.is_empty());
+        assert_eq!(l.list.size.h, 0);
+        assert!(l.label.size.h > 0);
+        assert!(l.button.loc.y >= l.label.loc.y + l.label.size.h);
+    }
+
+    #[test]
+    fn naming_widens_the_button_to_the_column() {
+        let size: Size<i32, Logical> = (1920, 1080).into();
+        let button = welcome_layout(size, 3, false).button;
+        let field = welcome_layout(size, 3, true).button;
+        let list = welcome_layout(size, 3, true).list;
+        assert!(field.size.w > button.size.w);
+        assert_eq!((field.loc.x, field.size.w), (list.loc.x, list.size.w));
+        assert_eq!(field.loc.y, button.loc.y);
+        // The button is centred on the output.
+        assert_eq!(button.loc.x, 1920 - (button.loc.x + button.size.w));
+    }
+
+    #[test]
+    fn welcome_page_grows_with_the_height() {
+        let mut last = 0;
+        for h in (100..2000).step_by(10) {
+            let rows = welcome_page((1000, h).into());
+            assert!(rows >= 1 && rows >= last);
+            last = rows;
+        }
+        assert_eq!(welcome_page((1000, 100).into()), 1);
+        assert!(last > 1);
+    }
+
+    #[test]
+    fn quit_layout_is_centred_with_buttons_in_order() {
+        let size: Size<i32, Logical> = (1920, 1080).into();
+        let l = quit_layout(size);
+        let p = l.panel;
+        assert_eq!(p.loc.x, 1920 - (p.loc.x + p.size.w));
+        assert_eq!(p.loc.y, 1080 - (p.loc.y + p.size.h));
+        for part in [l.title, l.body, l.checkbox] {
+            assert!(inside(p, part));
+        }
+        assert!(l.buttons.iter().all(|b| inside(p, *b)));
+        assert!(
+            l.buttons
+                .windows(2)
+                .all(|b| b[0].loc.x + b[0].size.w < b[1].loc.x)
+        );
+        assert!(
+            l.buttons
+                .iter()
+                .all(|b| b.loc.y >= l.checkbox.loc.y + l.checkbox.size.h)
+        );
+    }
+
+    #[test]
+    fn welcome_and_quit_paint() {
+        let painter = Painter::new();
+        let row = |name: &str, running, current| ProjectRow {
+            name: name.into(),
+            detail: "3 repos · ~/Work/aft".into(),
+            ago: "2h ago".into(),
+            running,
+            current,
+        };
+        let mut view = WelcomeView {
+            greeting: "Good evening, lgal".into(),
+            subtitle: "Pick up where you left off".into(),
+            query: "af".into(),
+            rows: vec![
+                row("aft", Some(true), true),
+                row(
+                    "a project with a very long name indeed, longer than the row",
+                    Some(false),
+                    false,
+                ),
+                row("gerdr", None, false),
+            ],
+            selected: Some(1),
+            hover: Some(WelcomeHit::Row(2)),
+            naming: None,
+            confirm_forget: Some(2),
+            note: Some("herdr isn't installed".into()),
+        };
+        for theme in [Theme::Dark, Theme::Light] {
+            for scale in [1.0, 1.25, 2.0] {
+                for (w, h) in [(800, 600), (1920, 1080), (60, 40)] {
+                    let size = (w, h).into();
+                    painter.welcome(&view, size, scale, theme.palette());
+                    let quit = QuitView {
+                        project: "aft".into(),
+                        selected: 2,
+                        dont_ask: scale > 1.0,
+                        hover: Some(QuitHit::Button(1)),
+                    };
+                    painter.quit_dialog(&quit, size, scale, theme.palette());
+                }
+            }
+        }
+        view.naming = Some(String::new());
+        view.rows.clear();
+        view.selected = None;
+        painter.welcome(&view, (800, 600).into(), 1.5, Theme::Dark.palette());
+        view.naming = None;
+        view.hover = Some(WelcomeHit::Button);
+        painter.welcome(&view, (800, 600).into(), 1.0, Theme::Light.palette());
+
+        let tabs = [
+            TabView {
+                title: "zsh".into(),
+                activity: "cargo watch".into(),
+                restart: Some(false),
+                ..Default::default()
+            },
+            TabView::default(),
+        ];
+        painter.tab_strip(&tabs, 0, false, Theme::Dark, (900, 48).into(), 1.25);
     }
 }
