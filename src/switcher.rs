@@ -49,7 +49,8 @@ pub enum Target {
     Agent(String),
     /// Another project, by id.
     Project(String),
-    /// The welcome screen, to pick or start a project there.
+    /// The project menu, to find, start or manage projects there (the
+    /// welcome screen while no project is shown).
     Welcome,
     /// A folder, opened as a project unless a workspace has it already.
     Folder(PathBuf),
@@ -326,8 +327,8 @@ fn typed_command(command: &str, icons: &HashMap<String, AppIcon>) -> Item {
     }
 }
 
-/// The other projects than `current`, the most recently used first, and the
-/// welcome screen.
+/// The other projects than `current`, the most recently used first, and a
+/// row for the project menu (the welcome screen while no project is shown).
 fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
     let mut others: Vec<&Project> = projects
         .iter()
@@ -350,7 +351,7 @@ fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
     items.push(Item {
         icon: ItemIcon::Folder,
         label: "Projects…".into(),
-        detail: "welcome screen".into(),
+        detail: "find, create, manage".into(),
         target: Target::Welcome,
     });
     items
@@ -367,6 +368,7 @@ pub(crate) fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
 impl Gerdr {
     /// Open the switcher, and ask zoxide for its folders again meanwhile.
     pub fn open_switcher(&mut self) {
+        self.project_menu = None;
         self.switcher = Some(Switcher::new(self.switcher_items(), false));
         self.query_zoxide();
     }
@@ -374,6 +376,7 @@ impl Gerdr {
     /// Open the switcher as the run prompt, for a command to launch, and
     /// look for installed apps again meanwhile.
     pub fn open_run_prompt(&mut self) {
+        self.project_menu = None;
         let mut switcher = Switcher::new(Vec::new(), true);
         switcher.icons = self.program_icons();
         switcher.set_items(self.run_items());
@@ -520,6 +523,11 @@ impl Gerdr {
             }
             Target::Agent(pane_id) => self.focus_agent(&pane_id),
             Target::Project(id) => self.switch_project(&id),
+            Target::Welcome if self.project.is_some() => {
+                if self.project_menu.is_none() {
+                    self.toggle_project_menu();
+                }
+            }
             Target::Welcome => self.open_welcome(true),
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
@@ -816,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_the_other_projects_and_the_welcome_screen() {
+    fn lists_the_other_projects_and_the_project_menu() {
         let projects = [project("a", 3, 1), project("b", 1, 2), project("c", 2, 0)];
         let items = project_items(&projects, Some("a"));
         let listed: Vec<_> = items
@@ -828,7 +836,7 @@ mod tests {
             [
                 ("C", "project · 0 workspaces", &Target::Project("c".into())),
                 ("B", "project · 2 workspaces", &Target::Project("b".into())),
-                ("Projects…", "welcome screen", &Target::Welcome),
+                ("Projects…", "find, create, manage", &Target::Welcome),
             ]
         );
         let items = project_items(&projects, None);

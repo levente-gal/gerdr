@@ -7,8 +7,13 @@
 //! (see `keys` for the defaults, and how to change them). The prefix twice
 //! sends it to the app; Esc or any other key cancels. While the prefix is
 //! armed, a help panel lists the keys. While the quit dialog, the welcome
-//! screen or the switcher is open, every key, click and scroll goes to it;
-//! over the welcome screen, the prefix still switches light/dark and quits.
+//! screen, the project menu or the switcher is open, every key, click and
+//! scroll goes to it; over the welcome screen and the project menu, the
+//! prefix still switches light/dark and quits, and over the project menu it
+//! also closes the menu again.
+//!
+//! The sidebar header's project name opens the project menu, or the welcome
+//! screen while no project is shown.
 
 use smithay::{
     backend::input::{
@@ -27,7 +32,7 @@ use crate::{
     chrome::{self, TAB_STRIP_HEIGHT},
     home_dir,
     layout::Dir,
-    quit,
+    project_menu, quit,
     switcher::Target,
     welcome,
 };
@@ -42,6 +47,8 @@ enum Intercepted {
     Switch(Target),
     /// The welcome screen asked for this.
     Welcome(welcome::Outcome),
+    /// The project menu asked for this.
+    ProjectMenu(project_menu::Outcome),
     /// The quit dialog asked for this.
     Quit(quit::Outcome),
 }
@@ -51,6 +58,15 @@ enum Intercepted {
 /// welcome screen is already open).
 fn over_welcome(action: &Action) -> bool {
     matches!(action, Action::ToggleTheme | Action::Quit)
+}
+
+/// Whether `action`, picked with the prefix, works over the project menu:
+/// what acts on gerdr itself, and the key that opened the menu, to close it.
+fn over_project_menu(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::ToggleTheme | Action::Quit | Action::Projects
+    )
 }
 
 fn drag_cursor(drag: &Drag) -> CursorIcon {
@@ -115,6 +131,21 @@ impl Gerdr {
                             let out = state.welcome_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Welcome));
                         }
+                        if state.project_menu.is_some() {
+                            state.suppressed_keys.push(code);
+                            if state.prefix_armed {
+                                state.prefix_armed = false;
+                                let action =
+                                    state.keymap.action(mods, sym).filter(over_project_menu);
+                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                            }
+                            if state.keymap.is_prefix(mods, sym) {
+                                state.prefix_armed = true;
+                                return FilterResult::Intercept(None);
+                            }
+                            let out = state.project_menu_key(mods, sym, handle.modified_sym());
+                            return FilterResult::Intercept(out.map(Intercepted::ProjectMenu));
+                        }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
@@ -150,6 +181,9 @@ impl Gerdr {
                     Some(Some(Intercepted::Action(action))) => self.run_action(action),
                     Some(Some(Intercepted::Switch(target))) => self.switch_to(target),
                     Some(Some(Intercepted::Welcome(outcome))) => self.apply_welcome(outcome),
+                    Some(Some(Intercepted::ProjectMenu(outcome))) => {
+                        self.apply_project_menu(outcome)
+                    }
                     Some(Some(Intercepted::Quit(outcome))) => self.apply_quit(outcome),
                     _ => {}
                 }
@@ -171,15 +205,28 @@ impl Gerdr {
                     }
                 }
                 // An overlay takes the hover from everything under it.
-                let overlay = self.quit.is_some() || self.welcome.is_some();
+                let overlay =
+                    self.quit.is_some() || self.welcome.is_some() || self.project_menu.is_some();
                 if self.quit.is_some() {
                     self.quit_hover(pos);
                 } else if self.welcome.is_some() {
                     self.welcome_hover(pos);
+                } else if self.project_menu.is_some() {
+                    self.project_menu_hover(pos);
                 } else if self.terminal_menu {
                     let (_, items) = chrome::terminal_menu(self.sidebar_width);
                     self.menu_hover = items.iter().position(|item| item.to_f64().contains(pos));
                 }
+                // The header's project name lights up under the pointer, with
+                // nothing open over it.
+                self.header_hover = !overlay
+                    && self.switcher.is_none()
+                    && !self.terminal_menu
+                    && self.project.is_some()
+                    && chrome::sidebar_layout(&[], &[], self.sidebar_width)
+                        .header
+                        .to_f64()
+                        .contains(pos);
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
@@ -235,7 +282,10 @@ impl Gerdr {
                 // An overlay takes every release too, but one ending a press a
                 // client got before the overlay opened: that client is still
                 // grabbing the pointer until it sees the release.
-                if state == ButtonState::Released && (self.quit.is_some() || self.welcome.is_some())
+                if state == ButtonState::Released
+                    && (self.quit.is_some()
+                        || self.welcome.is_some()
+                        || self.project_menu.is_some())
                 {
                     if pointer.is_grabbed() {
                         pointer.button(
@@ -264,6 +314,12 @@ impl Gerdr {
                     if self.welcome.is_some() {
                         if event.button_code() == BTN_LEFT {
                             self.welcome_click(location);
+                        }
+                        return;
+                    }
+                    if self.project_menu.is_some() {
+                        if event.button_code() == BTN_LEFT {
+                            self.project_menu_click(location);
                         }
                         return;
                     }
@@ -309,7 +365,18 @@ impl Gerdr {
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
-                // Nothing scrolls behind an overlay.
+                // Nothing scrolls behind an overlay; the project menu's list
+                // moves a row per turn of the wheel.
+                if self.project_menu.is_some() {
+                    let amount = event
+                        .amount_v120(Axis::Vertical)
+                        .or_else(|| event.amount(Axis::Vertical))
+                        .unwrap_or(0.0);
+                    if amount != 0.0 {
+                        self.project_menu_scroll(amount.signum() as i32);
+                    }
+                    return;
+                }
                 if self.quit.is_some() || self.welcome.is_some() {
                     return;
                 }
@@ -360,8 +427,9 @@ impl Gerdr {
     /// Left click selects a workspace, "×" or middle click closes it; a left
     /// click on an agent card shows its pane. A row held with the left button
     /// can be dragged to another place. The header buttons open a
-    /// project, a terminal in home, or the terminal menu; the header's title
-    /// left of them opens the welcome screen, to switch projects.
+    /// project, a terminal in home, or the terminal menu; the project's name
+    /// left of them opens the project menu (the welcome screen while no
+    /// project is shown).
     fn sidebar_click(&mut self, x: i32, y: i32, button: u32) {
         let agents = self.agent_views();
         let workspaces: Vec<_> = self
@@ -386,8 +454,12 @@ impl Gerdr {
                 self.refresh_pointer_focus();
                 return;
             }
-            if y < chrome::BAR_HEIGHT && x < layout.project.loc.x {
-                self.open_welcome(true);
+            if inside(&layout.header) {
+                if self.project.is_some() {
+                    self.toggle_project_menu();
+                } else {
+                    self.open_welcome(true);
+                }
                 return;
             }
         }
@@ -487,5 +559,16 @@ mod tests {
         assert!(!over_welcome(&Action::Projects));
         assert!(!over_welcome(&Action::NewTab));
         assert!(!over_welcome(&Action::Switcher));
+    }
+
+    #[test]
+    fn over_the_project_menu_the_prefix_acts_on_gerdr_and_closes_it() {
+        assert!(over_project_menu(&Action::ToggleTheme));
+        assert!(over_project_menu(&Action::Quit));
+        // The key that opened the menu closes it.
+        assert!(over_project_menu(&Action::Projects));
+        assert!(!over_project_menu(&Action::LastProject));
+        assert!(!over_project_menu(&Action::NewTab));
+        assert!(!over_project_menu(&Action::Switcher));
     }
 }
