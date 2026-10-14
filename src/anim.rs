@@ -2,9 +2,6 @@
 //! and the steps its value is quantized to so a cached buffer is drawn
 //! again only when the step changes.
 
-// Nothing fades yet: the overlays take these up next.
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 /// How long a popup, tooltip or hover fades in or out.
@@ -25,7 +22,19 @@ pub struct Fade {
 }
 
 impl Fade {
+    // The hover pills and the pane bars' slide take this up.
+    #[allow(dead_code)]
     pub fn new(start: Instant, dur: Duration, rising: bool) -> Self {
+        Self { start, dur, rising }
+    }
+
+    /// A fade over `dur` that stands at `value` at `now` and goes on from
+    /// there: what a fade turning around mid-way becomes, so a popup
+    /// closed while still appearing fades out from where it got to.
+    pub fn from_value(now: Instant, dur: Duration, rising: bool, value: f32) -> Self {
+        let value = value.clamp(0.0, 1.0);
+        let done = if rising { value } else { 1.0 - value };
+        let start = now.checked_sub(dur.mul_f32(done)).unwrap_or(now);
         Self { start, dur, rising }
     }
 
@@ -47,13 +56,25 @@ impl Fade {
 }
 
 /// `a` (0 to 1) as one of `STEPS` steps, for a cache key.
+// The hover pills, drawn into their surface's buffer, key on it.
+#[allow(dead_code)]
 pub fn quantize(a: f32) -> u8 {
     (a.clamp(0.0, 1.0) * STEPS).round() as u8
 }
 
+/// Where a loop of `period` stands at `now`, from 0 to 1 and over again:
+/// for a spinner or a pulse.
+pub fn phase(start: Instant, period: Duration, now: Instant) -> f32 {
+    if period.is_zero() {
+        return 0.0;
+    }
+    let t = now.saturating_duration_since(start).as_secs_f32() / period.as_secs_f32();
+    t - t.floor()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FAST, Fade, quantize};
+    use super::{FAST, Fade, phase, quantize};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -76,6 +97,20 @@ mod tests {
     }
 
     #[test]
+    fn a_fade_turned_around_goes_on_from_where_it_stands() {
+        let start = Instant::now();
+        let up = Fade::new(start, FAST, true);
+        let mid = start + FAST / 4;
+        let value = up.value(mid);
+        let down = Fade::from_value(mid, FAST, false, value);
+        assert!((down.value(mid) - value).abs() < 0.01);
+        assert_eq!(down.value(mid + FAST), 0.0);
+        // Already at the end, it is done at once.
+        assert!(Fade::from_value(mid, FAST, true, 1.0).done(mid));
+        assert!(Fade::from_value(mid, FAST, false, 0.0).done(mid));
+    }
+
+    #[test]
     fn quantize_has_sixteen_steps() {
         assert_eq!(quantize(0.0), 0);
         assert_eq!(quantize(1.0), 16);
@@ -83,5 +118,15 @@ mod tests {
         assert_eq!(quantize(0.51), 8);
         assert_eq!(quantize(-1.0), 0);
         assert_eq!(quantize(2.0), 16);
+    }
+
+    #[test]
+    fn a_phase_wraps_around() {
+        let start = Instant::now();
+        let period = Duration::from_secs(1);
+        assert_eq!(phase(start, period, start), 0.0);
+        assert!((phase(start, period, start + Duration::from_millis(250)) - 0.25).abs() < 0.001);
+        assert!((phase(start, period, start + Duration::from_millis(1250)) - 0.25).abs() < 0.001);
+        assert_eq!(phase(start, Duration::ZERO, start + period), 0.0);
     }
 }

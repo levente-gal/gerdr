@@ -3,13 +3,15 @@
 //! the drawing does; a change made on purpose records the new ones (run
 //! the test and copy the table it prints).
 
+use std::time::Instant;
+
 use super::{
     AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, ItemIcon, MenuEntry,
-    MenuHit, MenuRow, MenuView, Painter, PaneBarView, ProjectMenuView, ProjectRow, QuitHit,
-    QuitView, Rect, SwitcherRow, SwitcherView, TabView, Theme, WelcomeHit, WelcomeView,
-    WorkspaceView,
+    MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderView, ProjectMenuView, ProjectRow,
+    QuitHit, QuitView, Rect, SwitcherRow, SwitcherView, TabView, Theme, ToastView, TooltipView,
+    WelcomeHit, WelcomeView, WorkspaceView,
 };
-use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line};
+use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 
 /// FNV-1a over the buffer's bytes.
@@ -112,6 +114,51 @@ fn menu() -> MenuView {
             enabled: true,
         }],
         hover: Some(0),
+    }
+}
+
+/// A right-click menu: key hints, a disabled row, the hover elsewhere.
+fn full_menu() -> MenuView {
+    let row = |label: &str, hint: Option<&str>, enabled| MenuRow {
+        label: label.into(),
+        hint: hint.map(str::to_owned),
+        enabled,
+    };
+    MenuView {
+        anchor: Rect::new((40, 60).into(), (160, 32).into()),
+        rows: vec![
+            row("New tab", Some("Ctrl+B c"), true),
+            row("Rename…", None, true),
+            row("Copy path", None, false),
+            row("Close workspace", Some("Ctrl+B Shift+X"), true),
+        ],
+        hover: Some(3),
+    }
+}
+
+fn toast(action: Option<&str>, level: Level) -> ToastView {
+    ToastView {
+        id: 7,
+        text: "Zed didn't start".into(),
+        level,
+        action: action.map(str::to_owned),
+    }
+}
+
+fn tooltip() -> TooltipView {
+    TooltipView {
+        text: "Restart what runs here".into(),
+        key: Some("Ctrl+B a".into()),
+        anchor: Rect::new((300, 48).into(), (24, 24).into()),
+    }
+}
+
+fn placeholder(timed_out: bool) -> PlaceholderView {
+    PlaceholderView {
+        rect: Rect::new((200, 48).into(), (480, 320).into()),
+        label: "Zed".into(),
+        since: Instant::now(),
+        timed_out,
     }
 }
 
@@ -262,16 +309,15 @@ const SURFACES: [&str; 11] = [
     "quit",
     "project_menu",
     "project_form",
-    "notice",
+    "toast",
 ];
 
 /// Every surface at (theme, scale), in `SURFACES` order.
 fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let p = theme.palette();
     let help = help();
-    let help_layout = painter.help_layout(&help, 800, scale);
-    let notice = "Switched to gerdr · aft keeps running";
-    let notice_w = painter.notice_width(notice, 600, scale);
+    let help_layout = painter.help_layout(&help, 800, false, scale);
+    let notice = toast(None, Level::Info);
     let strip = (900, super::tab_strip_height(super::Density::Comfortable)).into();
     vec![
         hash(painter.sidebar(
@@ -293,7 +339,37 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.quit_dialog(&quit(), (800, 600).into(), scale, p)),
         hash(painter.project_menu(&project_menu(), (800, 600).into(), scale, p)),
         hash(painter.project_menu(&form(), (800, 600).into(), scale, p)),
-        hash(painter.notice(notice, notice_w, scale, p)),
+        hash(painter.toast(&notice, 360, false, scale, p)),
+    ]
+}
+
+/// The surfaces the motion work added, apart so the table above keeps
+/// its shape: a menu with hints, a pinned help panel, a toast with a
+/// button, a tooltip, the placeholder waiting and timed out, the spinner.
+const OVERLAYS: [&str; 7] = [
+    "full_menu",
+    "help_pinned",
+    "toast_action",
+    "tooltip",
+    "placeholder",
+    "placeholder_timed_out",
+    "spinner",
+];
+
+fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let help = help();
+    let pinned = painter.help_layout(&help, 800, true, scale);
+    let tip = tooltip();
+    let tip_w = painter.tooltip_width(&tip, 400, scale);
+    vec![
+        hash(painter.menu(&full_menu(), scale, p)),
+        hash(painter.help_panel(&help, &pinned, scale, p)),
+        hash(painter.toast(&toast(Some("Retry"), Level::Error), 360, true, scale, p)),
+        hash(painter.tooltip(&tip, tip_w, scale, p)),
+        hash(painter.placeholder(&placeholder(false), false, scale, p)),
+        hash(painter.placeholder(&placeholder(true), true, scale, p)),
+        hash(painter.spinner(5, scale, p)),
     ]
 }
 
@@ -318,7 +394,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x59378f4fb455dd74, // quit
         0xdf352140e5a10a7e, // project_menu
         0xb5de34a9d82e1c98, // project_form
-        0x72d2762f8cc49297, // notice
+        0xa135931fecb12b15, // toast
     ],
     // Dark at 2
     [
@@ -332,7 +408,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xca6aac6e936af23a, // quit
         0x2c0d505acdca739a, // project_menu
         0xfebfa0e09839ef5a, // project_form
-        0x11bb51a4e99521d5, // notice
+        0x03fe8c8c1a28bb89, // toast
     ],
     // Light at 1
     [
@@ -346,7 +422,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x9141f1eb6dfa4384, // quit
         0xa02bd03173402f8c, // project_menu
         0x7099ffbd466ef3ad, // project_form
-        0x2e8be3bb240be7f4, // notice
+        0x09527b9387445087, // toast
     ],
     // Light at 2
     [
@@ -360,20 +436,65 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xea36deb588723e15, // quit
         0xc2172f68d48557aa, // project_menu
         0x6667f8cc8b4a1461, // project_form
-        0x81b629b422e8830b, // notice
+        0x3a08c772671fb90b, // toast
     ],
 ];
 
-#[test]
-fn surfaces_paint_the_same_pixels() {
+/// The recorded hashes of `OVERLAYS`, per case in `CASES`.
+const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
+    // Dark at 1
+    [
+        0xa2b92bfd04e8baf2, // full_menu
+        0x833a9487b45a04b1, // help_pinned
+        0x1be09a92a642789d, // toast_action
+        0x08b20795a8acaa71, // tooltip
+        0xd5b2438c44e2d360, // placeholder
+        0x11543d384eae786f, // placeholder_timed_out
+        0x7a426c6be23d66a6, // spinner
+    ],
+    // Dark at 2
+    [
+        0xc4863a27ee827b7f, // full_menu
+        0xa52ac88120332539, // help_pinned
+        0xc1ea1c0802cb326e, // toast_action
+        0x78986509fec8138c, // tooltip
+        0x94bf628b2c8d8e61, // placeholder
+        0xe03b73375f1bb153, // placeholder_timed_out
+        0x2f28c94a7002e520, // spinner
+    ],
+    // Light at 1
+    [
+        0x3bc1ce012f5b7d01, // full_menu
+        0x50daf004ca030b63, // help_pinned
+        0x0482566dca739991, // toast_action
+        0x59892211d7643278, // tooltip
+        0x848913a059883552, // placeholder
+        0x0e2d07d0ca3988e3, // placeholder_timed_out
+        0x4345ed79149d747b, // spinner
+    ],
+    // Light at 2
+    [
+        0x3ab6da8086162a68, // full_menu
+        0x357c8c2ee4c38806, // help_pinned
+        0xc47e8d329efbe42a, // toast_action
+        0xc0b4132b818d96b8, // tooltip
+        0x9bc50d6953da1fd5, // placeholder
+        0x7a29e3abd1973978, // placeholder_timed_out
+        0x883035c0209e314f, // spinner
+    ],
+];
+
+/// Check `paint` of every case against `golden`, printing the table to
+/// record when any surface paints differently.
+fn check(surfaces: &[&str], golden: &[&[u64]], paint: impl Fn(&Painter, Theme, f64) -> Vec<u64>) {
     let painter = Painter::new();
     assert!(painter.font.is_some(), "the golden hashes need a font");
     let mut table = String::new();
     let mut same = true;
-    for ((theme, scale), want) in CASES.into_iter().zip(GOLDEN) {
+    for ((theme, scale), want) in CASES.into_iter().zip(golden) {
         let got = paint(&painter, theme, scale);
-        table += &format!("        // {theme:?} at {scale}\n        [\n");
-        for (i, (surface, hash)) in SURFACES.iter().zip(&got).enumerate() {
+        table += &format!("    // {theme:?} at {scale}\n    [\n");
+        for (i, (surface, hash)) in surfaces.iter().zip(&got).enumerate() {
             if *hash != want[i] {
                 same = false;
                 eprintln!(
@@ -381,12 +502,116 @@ fn surfaces_paint_the_same_pixels() {
                     want[i]
                 );
             }
-            table += &format!("            {hash:#018x}, // {surface}\n");
+            table += &format!("        {hash:#018x}, // {surface}\n");
         }
-        table += "        ],\n";
+        table += "    ],\n";
     }
     assert!(
         same,
         "the chrome paints differently; if on purpose, record:\n{table}"
     );
+}
+
+#[test]
+fn surfaces_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN.iter().map(|row| row.as_slice()).collect();
+    check(&SURFACES, &golden, paint);
+}
+
+#[test]
+fn overlays_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_OVERLAYS.iter().map(|row| row.as_slice()).collect();
+    check(&OVERLAYS, &golden, paint_overlays);
+}
+
+/// Write `buffer` (`w` pixels wide) as `<dir>/<name>.ppm`, laid over a
+/// grey ground where it is clear, to look at it.
+fn dump(dir: &std::path::Path, name: &str, mut buffer: MemoryRenderBuffer, w: usize) {
+    let mut out = Vec::new();
+    let _ = buffer.render().draw(|mem| {
+        let h = mem.len() / 4 / w;
+        out.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
+        for px in mem.chunks_exact(4) {
+            let a = px[3] as u32;
+            // Premultiplied over a grey ground.
+            for c in [px[2], px[1], px[0]] {
+                out.push((c as u32 + 0x80 * (255 - a) / 255) as u8);
+            }
+        }
+        Ok::<_, ()>(Vec::new())
+    });
+    let _ = std::fs::write(dir.join(format!("{name}.ppm")), out);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the motion surfaces there as images
+/// to look at (both themes, scale 1 and 2). Otherwise nothing.
+#[test]
+fn dump_overlays() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        let help = help();
+        let pinned = painter.help_layout(&help, 800, true, scale);
+        let tip = tooltip();
+        let tip_w = painter.tooltip_width(&tip, 400, scale);
+        let menu = full_menu();
+        let (panel, _) = super::menu_layout(menu.anchor, &menu.rows, (2000, 2000).into());
+        let shadow = 2 * super::SHADOW;
+        let waiting = placeholder(false);
+        dump(
+            &dir,
+            &format!("menu_{tag}"),
+            painter.menu(&menu, scale, p),
+            px(panel.size.w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("help_pinned_{tag}"),
+            painter.help_panel(&help, &pinned, scale, p),
+            px(pinned.size.w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("toast_{tag}"),
+            painter.toast(&toast(Some("Retry"), Level::Error), 360, true, scale, p),
+            px(360 + shadow),
+        );
+        dump(
+            &dir,
+            &format!("toast_info_{tag}"),
+            painter.toast(&toast(None, Level::Info), 360, false, scale, p),
+            px(360 + shadow),
+        );
+        dump(
+            &dir,
+            &format!("tooltip_{tag}"),
+            painter.tooltip(&tip, tip_w, scale, p),
+            px(tip_w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("placeholder_{tag}"),
+            painter.placeholder(&waiting, false, scale, p),
+            px(waiting.rect.size.w),
+        );
+        dump(
+            &dir,
+            &format!("placeholder_late_{tag}"),
+            painter.placeholder(&placeholder(true), true, scale, p),
+            px(waiting.rect.size.w),
+        );
+        dump(
+            &dir,
+            &format!("spinner_{tag}"),
+            painter.spinner(5, scale, p),
+            px(super::SPINNER_SIZE),
+        );
+    }
 }

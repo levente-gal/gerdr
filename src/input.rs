@@ -15,6 +15,13 @@
 //! The sidebar header's project name opens the project menu, or the welcome
 //! screen while no project is shown. A click on a terminal pane's bar
 //! focuses the pane, and its buttons restart or stop what runs in it.
+//!
+//! A right press on a region opens its context menu, which then takes
+//! every press and key (the arrows walk it, Enter picks, Esc closes). A
+//! double click on a workspace row or a tab renames it: the keys go to
+//! the name until Enter keeps it or Esc drops it. Esc otherwise closes,
+//! in this order, the rename, the menu, the tooltip and the pinned help.
+//! The pointer is a hand over whatever can be clicked.
 
 use std::time::{Duration, Instant};
 
@@ -32,15 +39,33 @@ use smithay::{
 };
 
 use crate::{
-    Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
-    chrome::{self, FieldSpot},
+    Action, Drag, EXPECT_TIMEOUT, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder,
+    Reorderable,
+    chrome::{self, BarHit, FieldSpot},
     launch::Place,
     layout::Dir,
+    menu::MenuAction,
     project_menu, quit,
+    rename::RenameTarget,
     switcher::Target,
     text_field::{self, TextField},
+    toast::ToastHit,
     welcome,
 };
+
+/// What a press or the pointer lands on in gerdr's own chrome, as far as
+/// the press dispatch here cares: a workspace row or a tab (a double
+/// click renames them), something else to click, or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionHit {
+    Nothing,
+    /// A button, a card, a menu item: the pointer is a hand over it.
+    Control,
+    /// The row of workspace `w`.
+    Workspace(usize),
+    /// The tab `t` of the active workspace.
+    Tab(usize),
+}
 
 pub(crate) const BTN_LEFT: u32 = 0x110;
 pub(crate) const BTN_RIGHT: u32 = 0x111;
@@ -139,6 +164,11 @@ impl Gerdr {
                             let out = state.quit_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Quit));
                         }
+                        // A name being typed takes every key.
+                        if state.rename_key(mods, sym, handle.modified_sym()) {
+                            state.suppressed_keys.push(code);
+                            return FilterResult::Intercept(None);
+                        }
                         // A paste into an overlay's text field: the
                         // clipboard's text comes back as a key for it.
                         if !state.prefix_armed
@@ -196,8 +226,8 @@ impl Gerdr {
                                 picked.map(|(target, place)| Intercepted::Switch(target, place)),
                             );
                         }
-                        if state.context_menu.is_some() && sym == Keysym::Escape {
-                            state.close_menu();
+                        // The menu's keys; any other closes it and goes on.
+                        if state.context_menu.is_some() && state.menu_key(sym) {
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
@@ -217,6 +247,17 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
+                        // Esc takes down the tooltip, then the pinned help.
+                        if sym == Keysym::Escape && state.tooltip.is_up() {
+                            state.tooltip.hide();
+                            state.suppressed_keys.push(code);
+                            return FilterResult::Intercept(None);
+                        }
+                        if sym == Keysym::Escape && state.help_pinned {
+                            state.help_pinned = false;
+                            state.suppressed_keys.push(code);
+                            return FilterResult::Intercept(None);
+                        }
                         FilterResult::Forward
                     },
                 );
@@ -224,11 +265,13 @@ impl Gerdr {
                     self.apply_intercepted(intercepted);
                 }
                 self.copy_from_field();
+                self.sync_chrome();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output_geo = self.space.output_geometry(&self.output).unwrap();
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
                 self.pointer = pos;
+                self.chrome.set_pointer(pos);
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
                 if let Some(drag) = self.drag.clone() {
@@ -273,7 +316,7 @@ impl Gerdr {
                 // So do the buttons of a terminal pane's bar.
                 let free = !covered && self.drag.is_none() && self.reorder.is_none();
                 self.pane_bar_hover(free.then_some(pos));
-                self.tooltip.offer(tip.filter(|_| free), Instant::now());
+                self.offer_tooltip(tip.filter(|_| free), Instant::now());
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
@@ -283,15 +326,14 @@ impl Gerdr {
                             .is_some_and(|field| field.area.to_f64().contains(pos));
                     let icon = if over_field {
                         CursorIcon::Text
-                    } else if overlay {
-                        CursorIcon::Default
                     } else if self.reorder.is_some_and(|r| r.moving) {
                         CursorIcon::Grabbing
+                    } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
+                        drag_cursor(&drag)
+                    } else if self.region_hit(pos) != RegionHit::Nothing {
+                        CursorIcon::Pointer
                     } else {
-                        self.drag
-                            .clone()
-                            .or_else(|| self.divider_at(pos))
-                            .map_or(CursorIcon::Default, |d| drag_cursor(&d))
+                        CursorIcon::Default
                     };
                     if pointer.current_focus().is_some() || icon != self.chrome_cursor {
                         self.backend.window().set_cursor_visible(true);
@@ -362,6 +404,7 @@ impl Gerdr {
                     let button = event.button_code();
                     let taken = self.press(location, button);
                     self.last_press = Some((Instant::now(), location, button));
+                    self.sync_chrome();
                     if taken {
                         return;
                     }
@@ -432,6 +475,11 @@ impl Gerdr {
     /// to the client under it.
     fn press(&mut self, location: Point<f64, Logical>, button: u32) -> bool {
         self.tooltip.hide();
+        self.chrome.drop_tooltip();
+        // A press anywhere keeps the name being typed.
+        if self.rename.is_some() {
+            self.commit_rename();
+        }
         // An overlay takes every press; only the left button does
         // anything there.
         if self.quit.is_some() {
@@ -465,11 +513,34 @@ impl Gerdr {
             self.menu_press(location);
             return true;
         }
+        // The toasts: a click on one dismisses it, on its button does
+        // what the button says.
+        if button == BTN_LEFT
+            && let Some(hit) = self.toast_press(location)
+        {
+            if let ToastHit::Action(action) = hit {
+                self.menu_action(action);
+            }
+            return true;
+        }
         if button == BTN_LEFT
             && let Some(drag) = self.divider_at(location)
         {
             self.drag = Some(drag);
             return true;
+        }
+        // A second click on a workspace row or a tab renames it.
+        if button == BTN_LEFT && self.is_double(location) {
+            let target = match self.region_hit(location) {
+                RegionHit::Workspace(w) => Some(RenameTarget::Workspace(w)),
+                RegionHit::Tab(t) => Some(RenameTarget::Tab(self.active_workspace, t)),
+                RegionHit::Control | RegionHit::Nothing => None,
+            };
+            if let Some(target) = target {
+                self.reorder = None;
+                self.start_rename(target);
+                return true;
+            }
         }
         let (x, y) = (location.x as i32, location.y as i32);
         if x < self.sidebar_width {
@@ -506,12 +577,120 @@ impl Gerdr {
             }
             return true;
         }
+        // The Retry button of a placeholder whose window never came.
+        if button == BTN_LEFT
+            && let Some(pane) = self.retry_at(location)
+        {
+            self.menu_action(MenuAction::RetryExpected(pane));
+            return true;
+        }
         // Click to focus a pane.
         let clicked = self.space.element_under(location).map(|(w, _)| w.clone());
         if clicked.is_some() {
             self.focus(clicked);
         }
         false
+    }
+
+    /// The pane whose placeholder's Retry button is at `pos`, if one is.
+    fn retry_at(&self, pos: Point<f64, Logical>) -> Option<u32> {
+        let tab = self.tab()?;
+        let now = Instant::now();
+        tab.expected_rects(self.content_rect())
+            .into_iter()
+            .find_map(|(expected, rect)| {
+                let timed_out = now.duration_since(expected.started) > EXPECT_TIMEOUT;
+                let retry = chrome::placeholder_layout(rect, timed_out).retry?;
+                retry.to_f64().contains(pos).then_some(expected.pane)
+            })
+    }
+
+    /// What of gerdr's chrome is at `pos`, as the press dispatch and the
+    /// pointer's shape care: a workspace row, a tab, something else to
+    /// click, or nothing. The regions' own layouts say where things are.
+    pub fn region_hit(&self, pos: Point<f64, Logical>) -> RegionHit {
+        let output = self.output_size();
+        // Over an overlay, only its own controls count.
+        if self.quit.is_some() {
+            let quit = chrome::quit_layout(output);
+            let mut controls = quit.buttons.iter().chain(std::iter::once(&quit.checkbox));
+            return if controls.any(|rect| rect.to_f64().contains(pos)) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
+        if self.welcome.is_some() || self.project_menu.is_some() {
+            return RegionHit::Nothing;
+        }
+        if let Some(switcher) = self.switcher_view() {
+            let (_, _, rows) = chrome::switcher_layout(switcher.rows.len(), self.content_rect());
+            return if rows.iter().any(|row| row.to_f64().contains(pos)) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
+        if let Some(menu) = &self.context_menu {
+            return if menu.item_at(pos).is_some() {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
+        let inside = |rect: &chrome::Rect| rect.to_f64().contains(pos);
+        // The sidebar: the header and its buttons, the rows and the cards.
+        if pos.x < self.sidebar_width as f64 {
+            let agents = self.agent_views();
+            let workspaces: Vec<_> = self
+                .workspace_views()
+                .into_iter()
+                .map(|(ws, _)| ws)
+                .collect();
+            let layout = chrome::sidebar_layout(&workspaces, &agents, self.sidebar_width);
+            if let Some(w) = layout.rows.iter().position(|(row, _)| inside(row)) {
+                return RegionHit::Workspace(w);
+            }
+            let header = self.project.is_some() && inside(&layout.header);
+            let buttons = [layout.project, layout.terminal, layout.chevron];
+            if header || buttons.iter().any(inside) || layout.cards.iter().flatten().any(inside) {
+                return RegionHit::Control;
+            }
+            return RegionHit::Nothing;
+        }
+        // The tab strip: the tabs, the "+" and its chevron, the theme switch.
+        if pos.y < self.tab_strip_height() as f64 {
+            let width = output.w - self.sidebar_width;
+            let local = Point::from((pos.x - self.sidebar_width as f64, pos.y));
+            let inside = |rect: &chrome::Rect| rect.to_f64().contains(local);
+            let count = self.workspace().map_or(0, |ws| ws.tabs.len());
+            let (tabs, plus, chevron) = chrome::tab_layout(count, width);
+            if let Some(t) = tabs.iter().position(|(tab, _)| inside(tab)) {
+                return RegionHit::Tab(t);
+            }
+            if inside(&chrome::theme_toggle(width)) || inside(&plus) || inside(&chevron) {
+                return RegionHit::Control;
+            }
+            return RegionHit::Nothing;
+        }
+        // Over the apps: the toasts, the pane bars' buttons, a Retry.
+        let views = self.toast_views();
+        let toasts = chrome::toast_layout(&views, self.content_rect());
+        if toasts.iter().any(|toast| inside(&toast.panel)) {
+            return RegionHit::Control;
+        }
+        if matches!(self.pane_bar_at(pos), Some((_, BarHit::Button(_))))
+            || self.retry_at(pos).is_some()
+        {
+            return RegionHit::Control;
+        }
+        RegionHit::Nothing
+    }
+
+    /// Tell the chrome what it draws from gerdr's state but gets no view
+    /// of: whether the help is pinned.
+    fn sync_chrome(&mut self) {
+        self.chrome.set_help_pinned(self.help_pinned);
     }
 
     /// Whether a press at `pos` now, after the last one, makes a double

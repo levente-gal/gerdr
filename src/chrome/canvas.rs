@@ -35,6 +35,15 @@ impl Canvas {
         }
     }
 
+    /// A rectangle's outline, `b` pixels thick, drawn inside its edges
+    /// (physical pixels).
+    pub(super) fn outline(&mut self, x: i32, y: i32, w: i32, h: i32, b: i32, color: Rgb) {
+        self.fill(x, y, w, b, color);
+        self.fill(x, y + h - b, w, b, color);
+        self.fill(x, y, b, h, color);
+        self.fill(x + w - b, y, b, h, color);
+    }
+
     /// Lay `color` over the pixel at `coverage` opacity.
     pub(super) fn blend(&mut self, x: i32, y: i32, [r, g, b]: Rgb, coverage: f32) {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {

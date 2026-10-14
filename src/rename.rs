@@ -1,5 +1,7 @@
-//! Renaming a workspace or a tab in place: the field being edited, and
-//! writing the new name where it is kept.
+//! Renaming a workspace or a tab in place: the field being edited, the
+//! keys that edit it, and writing the new name where it is kept.
+
+use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use crate::{Gerdr, text_field::TextField};
 
@@ -35,6 +37,24 @@ impl Gerdr {
         let mut field = TextField::from(current);
         field.select_all();
         self.rename = Some(Rename { target, field });
+    }
+
+    /// A key while renaming: Enter keeps the name, Esc drops it, the rest
+    /// edits it. Whether a rename took the key (every key while one runs).
+    pub fn rename_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> bool {
+        if self.rename.is_none() {
+            return false;
+        }
+        match sym {
+            Keysym::Return | Keysym::KP_Enter => self.commit_rename(),
+            Keysym::Escape => self.cancel_rename(),
+            _ => {
+                if let Some(rename) = self.rename.as_mut() {
+                    rename.field.key(mods, sym, typed);
+                }
+            }
+        }
+        true
     }
 
     /// Write the name typed into the rename target, and stop renaming.

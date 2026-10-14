@@ -1,11 +1,17 @@
 //! Tooltips: what a region of the chrome says of the thing under the
 //! pointer, after the pointer rests on it a while. A region's motion
 //! handler offers one (or none); `TooltipState` times it and hides it
-//! on a press or when the pointer leaves.
+//! on a press or when the pointer leaves. A timer on the event loop
+//! shows it once its wait is over.
 
 use std::time::{Duration, Instant};
 
-use crate::chrome::{Rect, TooltipView};
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+
+use crate::{
+    Gerdr,
+    chrome::{Rect, TooltipView},
+};
 
 /// How long the pointer rests on something before its tooltip shows.
 pub const SHOW_DELAY: Duration = Duration::from_millis(500);
@@ -39,6 +45,8 @@ impl Tooltip {
 pub struct TooltipState {
     pending: Option<(Tooltip, Instant)>,
     shown: Option<Tooltip>,
+    /// A timer on the event loop waits for `pending`.
+    timed: bool,
 }
 
 impl TooltipState {
@@ -69,6 +77,11 @@ impl TooltipState {
         self.shown = None;
     }
 
+    /// Whether a tooltip shows or is about to.
+    pub fn is_up(&self) -> bool {
+        self.pending.is_some() || self.shown.is_some()
+    }
+
     /// Show the pending tooltip once it has waited `SHOW_DELAY`; whether
     /// anything changed.
     pub fn tick(&mut self, now: Instant) -> bool {
@@ -97,11 +110,44 @@ impl TooltipState {
     }
 }
 
+impl Gerdr {
+    /// Offer `tip` for what is under the pointer at `now` (see
+    /// `TooltipState::offer`), and have a timer show it when it is due.
+    pub fn offer_tooltip(&mut self, tip: Option<Tooltip>, now: Instant) {
+        self.tooltip.offer(tip, now);
+        let Some(due) = self.tooltip.due() else {
+            return;
+        };
+        if self.tooltip.timed {
+            return;
+        }
+        let show = move |_, _: &mut (), state: &mut Gerdr| {
+            let now = Instant::now();
+            state.tooltip.tick(now);
+            match state.tooltip.due() {
+                // Another tooltip took the wait over: wait for it.
+                Some(due) if due > now => TimeoutAction::ToInstant(due),
+                _ => {
+                    state.tooltip.timed = false;
+                    TimeoutAction::Drop
+                }
+            }
+        };
+        match self
+            .loop_handle
+            .insert_source(Timer::from_deadline(due), show)
+        {
+            Ok(_) => self.tooltip.timed = true,
+            Err(err) => tracing::warn!("timing the tooltip: {err}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SHOW_DELAY, Tooltip, TooltipState};
     use crate::chrome::Rect;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn a_tooltip_shows_after_the_delay_and_hides_on_a_press() {
@@ -111,6 +157,7 @@ mod tests {
         let start = Instant::now();
         state.offer(Some(tip.clone()), start);
         assert!(state.view().is_none());
+        assert!(state.is_up());
         assert!(!state.tick(start + SHOW_DELAY / 2));
         assert!(state.tick(start + SHOW_DELAY));
         assert_eq!(state.view().map(|v| v.text), Some("New tab".into()));
@@ -118,11 +165,30 @@ mod tests {
         state.offer(Some(tip), start + 2 * SHOW_DELAY);
         assert!(state.view().is_some());
         state.hide();
-        assert!(state.view().is_none() && state.due().is_none());
+        assert!(state.view().is_none() && state.due().is_none() && !state.is_up());
         // Another tooltip starts its own wait.
         state.offer(Some(Tooltip::new("Close", anchor)), start);
         assert_eq!(state.due(), Some(start + SHOW_DELAY));
         state.offer(None, start);
         assert!(state.due().is_none());
+    }
+
+    #[test]
+    fn moving_to_another_thing_starts_the_wait_over() {
+        let anchor = Rect::new((0, 0).into(), (10, 10).into());
+        let mut state = TooltipState::default();
+        let start = Instant::now();
+        state.offer(Some(Tooltip::new("Restart", anchor)), start);
+        let later = start + Duration::from_millis(300);
+        state.offer(Some(Tooltip::new("Stop", anchor)), later);
+        assert_eq!(state.due(), Some(later + SHOW_DELAY));
+        // The first one's time does not count for the second.
+        assert!(!state.tick(start + SHOW_DELAY));
+        assert!(state.tick(later + SHOW_DELAY));
+        assert_eq!(state.view().map(|v| v.text), Some("Stop".into()));
+        // Moving on while shown hides it until the next one is due.
+        state.offer(Some(Tooltip::new("Close", anchor)), later + SHOW_DELAY);
+        assert!(state.view().is_none());
+        assert_eq!(state.due(), Some(later + 2 * SHOW_DELAY));
     }
 }
