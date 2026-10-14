@@ -21,25 +21,23 @@ use std::{
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use smithay::{
-    input::keyboard::{Keycode, Keysym, ModifiersState},
-    reexports::calloop::{
-        channel,
-        timer::{TimeoutAction, Timer},
-    },
+    input::keyboard::{Keysym, ModifiersState},
+    reexports::calloop::channel,
     utils::{Logical, Point},
 };
 
 use crate::{
-    Gerdr, REPEAT_DELAY, REPEAT_RATE, WorkspaceKind,
+    Gerdr, WorkspaceKind,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     fuzzy, home_dir,
     icons::AppIcon,
     launch::{self, Place},
     projects::Project,
+    text_field::{Edit, TextField},
 };
 
 /// What an item switches to.
@@ -91,11 +89,14 @@ enum Outcome {
 }
 
 pub struct Switcher {
+    /// Tells it from the switchers opened before and after, for what comes
+    /// back for it later (a paste).
+    pub serial: u64,
     /// The run prompt: the first item is the query, as a command.
     run: bool,
     /// Where Enter launches an app or a command.
     place: Place,
-    query: String,
+    query: TextField,
     items: Vec<Item>,
     /// The items `query` matches, best first.
     matches: Vec<Match>,
@@ -103,20 +104,25 @@ pub struct Switcher {
     selected: usize,
     /// The first match shown.
     scroll: usize,
+    /// The wheel's turn not yet a whole row, in rows.
+    wheel: f64,
     /// The installed apps' icons by program, for the typed command.
     icons: HashMap<String, AppIcon>,
 }
 
 impl Switcher {
     fn new(items: Vec<Item>, run: bool, place: Place) -> Self {
+        static OPENED: AtomicU64 = AtomicU64::new(0);
         let mut switcher = Self {
+            serial: OPENED.fetch_add(1, Ordering::Relaxed),
             run,
             place,
-            query: String::new(),
+            query: TextField::default(),
             items: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             scroll: 0,
+            wheel: 0.0,
             icons: HashMap::new(),
         };
         switcher.set_items(items);
@@ -201,6 +207,11 @@ impl Switcher {
         self.scroll = 0;
     }
 
+    /// Its text field: the query.
+    pub fn field_mut(&mut self) -> &mut TextField {
+        &mut self.query
+    }
+
     fn picked(&self) -> Option<&Target> {
         self.matches
             .get(self.selected)
@@ -210,9 +221,19 @@ impl Switcher {
     /// Handle a key: `sym` is the key's own symbol, `typed` the one with
     /// Shift and the layout applied. `page` is how many rows are shown.
     fn key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, page: usize) -> Outcome {
+        // The query takes the keys that edit it first.
+        match self.query.key(mods, sym, typed) {
+            Edit::Changed => {
+                self.refilter();
+                return Outcome::Open;
+            }
+            Edit::Moved => return Outcome::Open,
+            Edit::Ignored => {}
+        }
         let ctrl = mods.ctrl;
         match sym {
             Keysym::Escape => return Outcome::Closed,
+            Keysym::c if ctrl => return Outcome::Closed,
             Keysym::Return | Keysym::KP_Enter => {
                 if let Some(target) = self.picked() {
                     let place = if mods.alt { Place::Tab } else { self.place };
@@ -226,36 +247,9 @@ impl Switcher {
             Keysym::Page_Down => self.step(page as isize, page),
             Keysym::p if ctrl => self.step(-1, page),
             Keysym::n if ctrl => self.step(1, page),
-            Keysym::BackSpace | Keysym::w if ctrl => {
-                let word = self
-                    .query
-                    .trim_end()
-                    .rfind(char::is_whitespace)
-                    .map_or(0, |i| i + 1);
-                self.edit(|query| query.truncate(word));
-            }
-            Keysym::u if ctrl => self.edit(String::clear),
-            Keysym::BackSpace => self.edit(|query| {
-                query.pop();
-            }),
-            _ => {
-                if let Some(c) = typed
-                    .key_char()
-                    .filter(|c| !c.is_control() && !(ctrl || mods.alt || mods.logo))
-                {
-                    self.edit(|query| query.push(c));
-                }
-            }
+            _ => {}
         }
         Outcome::Open
-    }
-
-    fn edit(&mut self, change: impl FnOnce(&mut String)) {
-        let before = self.query.clone();
-        change(&mut self.query);
-        if self.query != before {
-            self.refilter();
-        }
     }
 
     /// Move the selection `by` matches, scrolling to keep it shown.
@@ -263,6 +257,19 @@ impl Switcher {
         let last = self.matches.len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + by).clamp(0, last) as usize;
         self.scroll = scrolled(self.scroll, self.selected, page);
+    }
+
+    /// Scroll the list `rows` matches (down positive), moving the selection
+    /// only as far as needed to keep it shown.
+    fn scroll_by(&mut self, rows: i32, page: usize) {
+        let page = page.max(1);
+        let last = self.matches.len().saturating_sub(page);
+        let first = scrolled(self.scroll, self.selected, page)
+            .saturating_add_signed(rows as isize)
+            .min(last);
+        let end = (first + page).min(self.matches.len()).max(first + 1);
+        self.scroll = first;
+        self.selected = self.selected.clamp(first, end - 1);
     }
 
     /// The rows shown, `page` at most.
@@ -289,7 +296,7 @@ impl Switcher {
             (false, _) => "Workspace, tab, agent, project, app or folder…",
         };
         SwitcherView {
-            query: self.query.clone(),
+            query: self.query.line(),
             hint,
             rows,
             selected,
@@ -466,39 +473,17 @@ impl Gerdr {
         }
     }
 
-    /// Repeats a key held in the switcher, as long as it is held, the way the
-    /// apps' keyboards do: the host sends gerdr only the press and the release.
-    /// Esc and Enter, which close the switcher, don't repeat.
-    pub fn repeat_switcher_key(
-        &mut self,
-        code: Keycode,
-        mods: ModifiersState,
-        sym: Keysym,
-        typed: Keysym,
-    ) {
-        self.stop_switcher_repeat();
-        if self.switcher.is_none()
-            || matches!(sym, Keysym::Escape | Keysym::Return | Keysym::KP_Enter)
-        {
-            return;
-        }
-        let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
-        let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
-        let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
-            if state.switcher.is_none() {
-                state.switcher_repeat = None;
-                return TimeoutAction::Drop;
+    /// The wheel turned `rows` rows (down positive, parts of a row adding
+    /// up) over the switcher.
+    pub fn switcher_scroll(&mut self, rows: f64) {
+        let page = self.switcher_page();
+        if let Some(switcher) = self.switcher.as_mut() {
+            switcher.wheel += rows;
+            let whole = switcher.wheel.trunc();
+            switcher.wheel -= whole;
+            if whole != 0.0 {
+                switcher.scroll_by(whole as i32, page);
             }
-            state.switcher_key(&mods, sym, typed);
-            TimeoutAction::ToDuration(interval)
-        });
-        self.switcher_repeat = repeat.ok().map(|token| (code, token));
-    }
-
-    /// Stops repeating the key held in the switcher.
-    pub fn stop_switcher_repeat(&mut self) {
-        if let Some((_, token)) = self.switcher_repeat.take() {
-            self.loop_handle.remove(token);
         }
     }
 
@@ -810,6 +795,32 @@ mod tests {
     }
 
     #[test]
+    fn wheel_scrolls_the_list_and_drags_the_selection() {
+        let mut switcher = Switcher::new(
+            (0..8).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        switcher.scroll_by(2, 5);
+        let view = switcher.view(5);
+        assert_eq!(
+            (view.rows[0].label.as_str(), view.selected),
+            ("ws2", Some(0))
+        );
+        switcher.scroll_by(10, 5);
+        assert_eq!(switcher.view(5).rows[0].label, "ws3");
+        switcher.scroll_by(-10, 5);
+        let view = switcher.view(5);
+        assert_eq!(
+            (view.rows[0].label.as_str(), view.selected),
+            ("ws0", Some(3))
+        );
+        type_in(&mut switcher, "xyz");
+        switcher.scroll_by(1, 5);
+        assert_eq!(switcher.view(5).selected, None);
+    }
+
+    #[test]
     fn new_items_keep_the_selection() {
         let mut switcher = Switcher::new(
             vec![item("a", "", 0), item("b", "", 1)],
@@ -839,6 +850,8 @@ mod tests {
             last_used,
             state: Default::default(),
             workspaces: vec![record; workspaces],
+            before_start: String::new(),
+            after_stop: String::new(),
         }
     }
 
@@ -905,6 +918,23 @@ mod tests {
             switcher.picked(),
             Some(&Target::Command("imv a.png".into()))
         );
+    }
+
+    #[test]
+    fn takes_a_paste_and_closes_on_ctrl_c() {
+        let mut switcher = Switcher::new(Vec::new(), true, Place::Split);
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            switcher.key(&ctrl, Keysym::c, Keysym::c, 5),
+            Outcome::Closed
+        ));
+        type_in(&mut switcher, "echo ");
+        let none = ModifiersState::default();
+        crate::text_field::pasting("a\tb\nc\n", |sym| switcher.key(&none, sym, sym, 5));
+        assert_eq!(&*switcher.query, "echo a b c");
     }
 
     #[test]

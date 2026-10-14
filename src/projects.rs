@@ -92,6 +92,13 @@ pub struct Project {
     pub state: RunState,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceRecord>,
+    /// A shell line run before its session starts, when it isn't running:
+    /// `docker compose up -d`, a script. Empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub before_start: String,
+    /// A shell line run after its session stops. Empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_stop: String,
 }
 
 /// What gerdr kept of a workspace of a project.
@@ -752,6 +759,8 @@ pub fn migrate(
         last_used: now,
         state: RunState::Kept,
         workspaces,
+        before_start: String::new(),
+        after_stop: String::new(),
     })
 }
 
@@ -889,6 +898,8 @@ mod tests {
                         skip: vec!["rm -rf build".into()],
                     }],
                 }],
+                before_start: "docker compose up -d".into(),
+                after_stop: "docker compose down".into(),
             }],
         }
     }
@@ -924,6 +935,8 @@ mod tests {
         assert_eq!(store.quit_choice, None);
         let project = store.project("a").unwrap();
         assert_eq!(project.state, RunState::Kept);
+        assert_eq!(project.before_start, "");
+        assert_eq!(project.after_stop, "");
         let ws = &project.workspaces[0];
         assert_eq!(ws.venv, VenvSetting::Auto);
         assert!(ws.tabs.is_empty());

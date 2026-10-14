@@ -25,6 +25,7 @@ use crate::{
     herdr,
     project_list::{self, scrolled},
     projects,
+    text_field::{Edit, TextField},
 };
 
 /// The welcome screen's state, while it is shown.
@@ -34,7 +35,7 @@ pub struct Welcome {
     /// because none is open.
     pub in_app: bool,
     /// What was typed to filter the projects.
-    query: String,
+    query: TextField,
     /// The projects, by id, most recently used first.
     projects: Vec<(String, ProjectRow)>,
     /// The projects `query` matches (indices into `projects`), best first.
@@ -48,7 +49,7 @@ pub struct Welcome {
     /// What the pointer is over, in view rows.
     pub hover: Option<WelcomeHit>,
     /// The new project's name typed so far, while asking for it.
-    naming: Option<String>,
+    naming: Option<TextField>,
     /// The project Delete was pressed on once, by id.
     confirm_forget: Option<String>,
     /// herdr wasn't found on `PATH` when the screen opened.
@@ -127,13 +128,28 @@ impl Welcome {
         let ctrl = mods.ctrl;
         // Any key but Delete again takes back a first Delete.
         let armed = self.confirm_forget.take();
+        // The field typed in takes the keys that edit it first: the new
+        // project's name while asking for it, else the query.
+        let edit = match &mut self.naming {
+            Some(name) => name.key(mods, sym, typed),
+            None => self.query.key(mods, sym, typed),
+        };
+        match edit {
+            Edit::Changed if self.naming.is_none() => {
+                self.refilter();
+                return None;
+            }
+            Edit::Changed | Edit::Moved => return None,
+            Edit::Ignored => {}
+        }
         match sym {
             Keysym::Escape => {
                 if self.naming.is_some() {
                     self.naming = None;
                 } else if armed.is_some() {
                 } else if !self.query.is_empty() {
-                    self.edit(String::clear);
+                    self.query.clear();
+                    self.refilter();
                 } else if self.in_app {
                     return Some(Outcome::Closed);
                 }
@@ -166,58 +182,27 @@ impl Welcome {
                     self.confirm_forget = Some(id.clone());
                 }
             }
-            _ if self.naming.is_some() => self.type_in(mods, sym, typed),
+            // Arrows and Tab don't leave the name.
+            _ if self.naming.is_some() => {}
             Keysym::Up | Keysym::KP_Up => self.step(-1, page),
             Keysym::Down | Keysym::KP_Down => self.step(1, page),
             Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-(page.max(1) as isize), page),
             Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page.max(1) as isize, page),
             Keysym::Tab | Keysym::ISO_Left_Tab => self.toggle_button(page),
-            _ => self.type_in(mods, sym, typed),
+            _ => {}
         }
         None
     }
 
-    /// Edit the text being typed: the new project's name while asking for
-    /// it, else the query.
-    fn type_in(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) {
-        let ctrl = mods.ctrl;
-        let change: Box<dyn FnOnce(&mut String)> = match sym {
-            Keysym::BackSpace | Keysym::w if ctrl => Box::new(|text: &mut String| {
-                let word = text
-                    .trim_end()
-                    .rfind(char::is_whitespace)
-                    .map_or(0, |i| i + 1);
-                text.truncate(word);
-            }),
-            Keysym::u if ctrl => Box::new(String::clear),
-            Keysym::BackSpace => Box::new(|text: &mut String| {
-                text.pop();
-            }),
-            _ => match typed
-                .key_char()
-                .filter(|c| !c.is_control() && !(ctrl || mods.alt || mods.logo))
-            {
-                Some(c) => Box::new(move |text: &mut String| text.push(c)),
-                None => return,
-            },
-        };
-        match &mut self.naming {
-            Some(name) => change(name),
-            None => self.edit(change),
-        }
-    }
-
-    fn edit(&mut self, change: impl FnOnce(&mut String)) {
-        let before = self.query.clone();
-        change(&mut self.query);
-        if self.query != before {
-            self.refilter();
-        }
+    /// The text field a click can go in: the new project's name, while
+    /// asking for it.
+    pub fn field_mut(&mut self) -> Option<&mut TextField> {
+        self.naming.as_mut()
     }
 
     /// Ask for the new project's name, starting from what was typed.
     fn start_naming(&mut self) {
-        self.naming = Some(self.query.trim().to_owned());
+        self.naming = Some(self.query.trim().into());
     }
 
     /// Move the selection `by` places among the matches and then the button,
@@ -319,11 +304,11 @@ impl Welcome {
         WelcomeView {
             greeting,
             subtitle: subtitle.into(),
-            query: self.query.clone(),
+            query: self.query.line(),
             rows,
             selected,
             hover: self.hover,
-            naming: self.naming.clone(),
+            naming: self.naming.as_ref().map(TextField::line),
             confirm_forget,
             note,
         }
@@ -398,9 +383,8 @@ impl Gerdr {
                     .map(|id| Outcome::Pick(id.to_owned()))
             }
             Some(WelcomeHit::Button) => match &welcome.naming {
-                Some(name) => Some(name.trim().to_owned())
-                    .filter(|name| !name.is_empty())
-                    .map(Outcome::Create),
+                // The name's field: a click in it moves its caret.
+                Some(_) => None,
                 None => {
                     welcome.start_naming();
                     None
@@ -566,7 +550,7 @@ mod tests {
             Some(Outcome::Create("new".into()))
         );
         // Typing went to the name, not the filter.
-        assert_eq!(w.query, "");
+        assert_eq!(&*w.query, "");
     }
 
     #[test]
@@ -631,9 +615,9 @@ mod tests {
         type_in(&mut w, "al");
         w.key(&ctrl(), Keysym::n, Keysym::n, 3);
         assert_eq!(press(&mut w, Keysym::Escape), None);
-        assert_eq!((w.naming.as_deref(), w.query.as_str()), (None, "al"));
+        assert_eq!((w.naming.as_deref(), &*w.query), (None, "al"));
         assert_eq!(press(&mut w, Keysym::Escape), None);
-        assert_eq!(w.query, "");
+        assert_eq!(&*w.query, "");
         assert_eq!(press(&mut w, Keysym::Escape), Some(Outcome::Closed));
         // Without a project behind, there's nothing to go back to.
         w.in_app = false;
@@ -734,10 +718,10 @@ mod tests {
         let mut w = welcome(&["alpha"]);
         type_in(&mut w, "foo bar");
         w.key(&ctrl(), Keysym::w, Keysym::w, 3);
-        assert_eq!(w.query, "foo ");
+        assert_eq!(&*w.query, "foo ");
         w.key(&ctrl(), Keysym::x, Keysym::x, 3);
-        assert_eq!(w.query, "foo ");
+        assert_eq!(&*w.query, "foo ");
         press(&mut w, Keysym::BackSpace);
-        assert_eq!(w.query, "foo");
+        assert_eq!(&*w.query, "foo");
     }
 }

@@ -15,6 +15,7 @@ mod fuzzy;
 mod git;
 mod handlers;
 mod herdr;
+mod hooks;
 mod icons;
 mod input;
 mod keys;
@@ -28,6 +29,7 @@ mod project_menu;
 mod projects;
 mod quit;
 mod switcher;
+mod text_field;
 mod welcome;
 
 use std::{
@@ -45,6 +47,7 @@ use chrome::{
     AgentView, BarButton, Chrome, ChromeView, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
     TAB_STRIP_HEIGHT, TabView, Theme, WorkspaceView,
 };
+use hooks::Hook;
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
 use serde_json::json;
@@ -163,13 +166,15 @@ pub struct Pane {
 
 /// A process we started for a tab whose window hasn't shown up yet.
 pub struct Expected {
-    /// `None` while queued: Zed windows are started one at a time.
+    /// `None` while queued: windows told apart by app_id only are started
+    /// one at a time (see `launch_next`).
     pub pid: Option<u32>,
     /// Lowercase substring of the app_id, for windows not opened by `pid`
     /// or a process it started (the `zed` CLI hands off to a separate editor
-    /// process). Empty for an app launched by command: only its own
-    /// processes' windows count.
-    pub app_id: &'static str,
+    /// process, Ghostty and Alacritty to gerdr's own; see `launch`). Empty
+    /// for any other app launched by command: only its own processes'
+    /// windows count. A web app's names its site (see `launch`).
+    pub app_id: String,
     /// The layout leaf kept free for the window.
     pub pane: u32,
     /// Whether the window takes keyboard focus when it shows up.
@@ -183,10 +188,10 @@ pub struct Expected {
 }
 
 impl Expected {
-    fn new(pid: Option<u32>, app_id: &'static str, pane: u32, focus: bool) -> Self {
+    fn new(pid: Option<u32>, app_id: &str, pane: u32, focus: bool) -> Self {
         Self {
             pid,
-            app_id,
+            app_id: app_id.to_owned(),
             pane,
             focus,
             exited: None,
@@ -704,6 +709,15 @@ impl Workspace {
     }
 }
 
+/// A project to show once its start commands are done, and the folders to
+/// open in it (see `enter_project`).
+#[derive(Debug)]
+pub struct PendingEnter {
+    id: String,
+    pick: bool,
+    folders: Vec<PathBuf>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     NewTab,
@@ -744,6 +758,8 @@ pub enum Action {
     ToggleVenv,
     /// Pick the venv new shells of the active workspace activate.
     PickVenv,
+    /// Run the shown project's start commands again.
+    RunStartCommands,
     /// Stop what runs in the focused terminal and run its last command again.
     RestartPane,
     /// Stop what runs in the focused terminal.
@@ -844,8 +860,8 @@ pub struct Gerdr {
     pub recent_dirs: Vec<PathBuf>,
     /// Where a read of zoxide's folders sends them; `None` until set up.
     pub zoxide: Option<channel::Sender<Vec<PathBuf>>>,
-    /// The key held in the switcher, and the timer repeating it.
-    pub switcher_repeat: Option<(Keycode, RegistrationToken)>,
+    /// The key held over an overlay, and the timer repeating it.
+    pub key_repeat: Option<(Keycode, RegistrationToken)>,
     /// The apps named in the config file, to launch into a split.
     pub apps: Vec<launch::App>,
     /// The apps installed on the system, offered in the run prompt.
@@ -867,6 +883,23 @@ pub struct Gerdr {
     /// Where stopping a project's session in the background sends whether
     /// it stopped (by project id); `None` until set up.
     pub stop_status: Option<channel::Sender<(String, bool)>>,
+    /// Where a project's start or stop commands send how they went; `None`
+    /// until set up.
+    pub hook_status: Option<channel::Sender<hooks::Done>>,
+    /// The projects whose start commands run, by id.
+    pub starting: HashSet<String>,
+    /// The project to show once its start commands are done.
+    pub pending_enter: Option<PendingEnter>,
+    /// Brings the clipboard's text read for a paste back (see `clipboard`).
+    pub paste: Option<channel::Sender<(input::Overlay, String)>>,
+    /// The text copied from one of gerdr's own text fields, while gerdr
+    /// owns the clipboard with it (see `clipboard`).
+    pub copied: Option<String>,
+    /// The last presses in an overlay's text field (when, where, how many
+    /// in a row), to tell double and triple clicks.
+    pub field_clicks: Option<(std::time::Instant, Point<f64, Logical>, u32)>,
+    /// A press in an overlay's text field is held: moving selects.
+    pub field_drag: bool,
     /// The projects whose sessions are being stopped, by id: not shown
     /// until they have.
     pub stopping: HashSet<String>,
@@ -893,6 +926,10 @@ pub struct Gerdr {
     /// Process groups of projects switched away from, until they are gone;
     /// their late windows are closed instead of placed.
     pub retired_groups: Vec<i32>,
+    /// Counts the times gerdr's processes were ended, to name the Ghostty
+    /// and Alacritty gerdr starts next apart from those on their way out
+    /// (see `launch`).
+    pub shared_generation: u32,
     /// Since when the tab layouts differ from what was saved of them.
     pub tabs_changed: Option<Instant>,
     /// The process leading each herdr pane's foreground when its command was
@@ -2237,11 +2274,38 @@ impl Gerdr {
 
     /// Zed windows come from a shared editor process, so they can only be told
     /// apart by app_id. Start them one at a time: the next queued one once the
-    /// previous window has shown up (or never will).
-    fn launch_next_zed(&mut self) {
+    /// previous window has shown up (or never will). Whether a window that
+    /// didn't start left its leaf, for the caller to prune.
+    fn launch_next_zed(&mut self) -> bool {
         if self.old_zed_running() {
-            return; // reaping tries again
+            return false; // reaping tries again
         }
+        self.launch_next("zed", |gerdr, w, _, _| {
+            // `-n`: a new Zed window, handed to the running editor if there is one.
+            let dir = gerdr.workspaces[w].dir.clone();
+            let mut zed = Command::new("zed");
+            zed.arg("-n")
+                .arg("--user-data-dir")
+                .arg(&gerdr.zed_data)
+                .arg(&dir);
+            let pid = gerdr.spawn(zed, &dir)?;
+            gerdr.zed_groups.push(pid as i32);
+            Some(pid)
+        })
+    }
+
+    /// Start the first window queued under `app_id` (an expectation without
+    /// a pid) with `start`, given its workspace, tab and place among the
+    /// tab's expected, unless one is already on its way: such windows are
+    /// told apart by app_id only, so they come one at a time. One that
+    /// doesn't start is dropped with its leaf, and the next is tried:
+    /// whether any was, for the caller to prune.
+    fn launch_next(
+        &mut self,
+        app_id: &str,
+        mut start: impl FnMut(&mut Self, usize, usize, usize) -> Option<u32>,
+    ) -> bool {
+        let mut dropped = false;
         loop {
             let mut queued = None;
             for (w, ws) in self.workspaces.iter().enumerate() {
@@ -2250,35 +2314,29 @@ impl Gerdr {
                         .expected
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.app_id == "zed")
+                        .filter(|(_, e)| e.app_id == app_id)
                     {
                         if e.pid.is_some() {
-                            return; // one is already on its way
+                            return dropped; // one is already on its way
                         }
                         queued.get_or_insert((w, t, i));
                     }
                 }
             }
-            let Some((w, t, i)) = queued else { return };
-
-            // `-n`: a new Zed window, handed to the running editor if there is one.
-            let dir = self.workspaces[w].dir.clone();
-            let mut zed = Command::new("zed");
-            zed.arg("-n")
-                .arg("--user-data-dir")
-                .arg(&self.zed_data)
-                .arg(&dir);
-            let pid = self.spawn(zed, &dir);
+            let Some((w, t, i)) = queued else {
+                return dropped;
+            };
+            let pid = start(self, w, t, i);
             let tab = &mut self.workspaces[w].tabs[t];
             match pid {
                 Some(pid) => {
                     tab.expected[i].pid = Some(pid);
-                    self.zed_groups.push(pid as i32);
-                    return;
+                    return dropped;
                 }
                 None => {
                     let gone = tab.expected.remove(i);
                     layout::remove(&mut tab.layout, gone.pane);
+                    dropped = true;
                 }
             }
         }
@@ -2531,6 +2589,11 @@ impl Gerdr {
             Action::ToggleRestart => self.toggle_restart(),
             Action::ToggleVenv => self.toggle_venv(),
             Action::PickVenv => self.pick_venv(),
+            Action::RunStartCommands => {
+                if let Some(id) = self.project.clone() {
+                    self.run_start_commands(&id);
+                }
+            }
             Action::RestartPane => self.restart_focused_pane(),
             Action::StopPane => self.stop_focused_pane(),
             // Nothing to keep running without a project.
@@ -2752,13 +2815,15 @@ impl Gerdr {
                 dropped = true;
             }
         }
+        if dropped || !self.old_zed.is_empty() {
+            // The next queued windows, and the Zed waiting for the old one
+            // to exit.
+            dropped |= self.launch_next_zed();
+        }
         if dropped {
-            self.launch_next_zed();
+            self.launch_next_apps();
             self.prune();
             self.arrange();
-        } else if !self.old_zed.is_empty() {
-            // The Zed waiting for the old one to exit.
-            self.launch_next_zed();
         }
         self.retired_groups.retain(|g| group_alive(*g));
         self.poll_picker();
@@ -2791,7 +2856,7 @@ impl Gerdr {
             .find_map(|pid| find(&|e| e.pid == Some(*pid)));
         // A Zed window the shown project waits for: Zed hands windows from
         // one process to another, so it may come from an old one.
-        let zed = || find(&|e| e.pid.is_some() && e.app_id == "zed" && app_id.contains(e.app_id));
+        let zed = || find(&|e| e.pid.is_some() && e.app_id == "zed" && app_id.contains(&e.app_id));
         let claimed = ours.or_else(zed);
         // A late window of a project switched away from: its processes are
         // on their way out.
@@ -2807,7 +2872,7 @@ impl Gerdr {
             return;
         }
         let found = claimed.or_else(|| {
-            find(&|e| e.pid.is_some() && !e.app_id.is_empty() && app_id.contains(e.app_id))
+            find(&|e| e.pid.is_some() && !e.app_id.is_empty() && app_id.contains(&e.app_id))
         });
         let Some((w, t, e)) = found else {
             // Not one we started: opened from a shell, maybe of a project
@@ -2820,7 +2885,8 @@ impl Gerdr {
             return self.place_stray(window, stray);
         };
         let e = self.workspaces[w].tabs[t].expected.remove(e);
-        self.launch_next_zed();
+        let mut dropped = self.launch_next_zed();
+        dropped |= self.launch_next_apps();
         let pane = Pane {
             id: e.pane,
             window,
@@ -2829,6 +2895,12 @@ impl Gerdr {
             stray: false,
         };
         self.add_pane(w, t, pane, e.focus);
+        if dropped {
+            // A queued window that didn't start left its leaf, maybe its
+            // tab, empty.
+            self.prune();
+            self.arrange();
+        }
     }
 
     /// Show `window`, not one gerdr started, in the shown project: split
@@ -2841,7 +2913,6 @@ impl Gerdr {
             ));
             self.active_workspace = 0;
         }
-        let (id, area) = (self.new_pane_id(), self.content_rect());
         let w = self.active_workspace;
         let ws = &mut self.workspaces[w];
         if ws.tabs.is_empty() {
@@ -2849,7 +2920,7 @@ impl Gerdr {
             ws.active_tab = 0;
         }
         let t = ws.active_tab;
-        ws.tabs[t].split(None, id, None, area);
+        let id = self.new_split(w, t);
         let pane = Pane {
             id,
             window,
@@ -2858,6 +2929,14 @@ impl Gerdr {
             stray,
         };
         self.add_pane(w, t, pane, true);
+    }
+
+    /// A new leaf in tab `t` of workspace `w` for a window to come: split
+    /// off the tab's focused pane along its longer side.
+    fn new_split(&mut self, w: usize, t: usize) -> u32 {
+        let (id, area) = (self.new_pane_id(), self.content_rect());
+        self.workspaces[w].tabs[t].split(None, id, None, area);
+        id
     }
 
     /// Put `pane` in tab `t` of workspace `w`, where its leaf is.
@@ -3120,13 +3199,62 @@ impl Gerdr {
     /// Show project `id`: the project shown now keeps running in the
     /// background. A project without workspaces asks for a folder.
     pub fn switch_project(&mut self, id: &str) {
-        self.enter_project(id, true);
+        self.enter_project(id, true, Vec::new());
+    }
+
+    /// Show project `id` as `enter_project_now` does, opening `folders` in
+    /// it; when its session doesn't run and it has start commands, once
+    /// they are done (see `hook_done`). The project shown stays meanwhile.
+    fn enter_project(&mut self, id: &str, pick: bool, folders: Vec<PathBuf>) {
+        if self.project.as_deref() != Some(id)
+            && !self.stopping.contains(id)
+            && let Some(project) = self.projects.project(id)
+        {
+            let name = project.name.clone();
+            let cold = || {
+                !Hook::BeforeStart.line(project).is_empty() && !herdr::is_running(&project.session)
+            };
+            let still_starting = self.starting.contains(id);
+            if still_starting || cold() {
+                self.pending_enter = Some(PendingEnter {
+                    id: id.to_owned(),
+                    pick,
+                    folders,
+                });
+                if still_starting {
+                    return self.show_notice(format!("{name} is still starting"));
+                }
+                if self.run_hook(id, Hook::BeforeStart) {
+                    return self.show_notice(format!("Starting {name}…"));
+                }
+                // They couldn't run: start it anyway.
+                let pending = self.pending_enter.take();
+                return self.enter_project_now(
+                    id,
+                    pick,
+                    pending.map(|p| p.folders).unwrap_or_default(),
+                );
+            }
+        }
+        self.enter_project_now(id, pick, folders);
+    }
+
+    /// Show project `id`, opening `folders` in it; if it has no workspaces
+    /// and `pick`, ask for a folder to open in it. The project left, if any,
+    /// is remembered for `switch_to_last_project`, and a notice says it
+    /// keeps running.
+    fn enter_project_now(&mut self, id: &str, pick: bool, folders: Vec<PathBuf>) {
+        // Another project was asked for since.
+        self.pending_enter = None;
+        self.show_project(id, pick);
+        for folder in folders {
+            self.open_project(folder);
+        }
     }
 
     /// Show project `id`; if it has no workspaces and `pick`, ask for a
-    /// folder to open in it. The project left, if any, is remembered for
-    /// `switch_to_last_project`, and a notice says it keeps running.
-    fn enter_project(&mut self, id: &str, pick: bool) {
+    /// folder to open in it.
+    fn show_project(&mut self, id: &str, pick: bool) {
         if self.project.as_deref() == Some(id) {
             self.welcome = None;
             return;
@@ -3226,7 +3354,7 @@ impl Gerdr {
         self.reorder = None;
         self.terminal_menu = false;
         self.menu_hover = None;
-        self.stop_switcher_repeat();
+        self.stop_key_repeat();
         self.switcher = None;
         self.project_menu = None;
         self.header_hover = false;
@@ -3242,6 +3370,7 @@ impl Gerdr {
     fn retire_children(&mut self) {
         let groups = std::mem::take(&mut self.process_groups);
         self.retired_groups.extend(&groups);
+        self.retire_shared();
         self.old_zed.append(&mut self.zed_groups);
         self.old_zed_until = Some(Instant::now() + CLOSE_GRACE + ZED_EXIT_WAIT);
         let end = move |_, _: &mut (), _: &mut Gerdr| {
@@ -3263,6 +3392,7 @@ impl Gerdr {
     /// waiting to be ended.
     fn kill_children(&mut self) {
         let groups = std::mem::take(&mut self.process_groups);
+        self.retire_shared();
         for group in groups.iter().chain(&self.retired_groups) {
             // Safety: signals a process group gerdr started.
             unsafe { libc::kill(-group, libc::SIGTERM) };
@@ -3337,6 +3467,8 @@ impl Gerdr {
             last_used: now,
             state: RunState::Kept,
             workspaces: Vec::new(),
+            before_start: String::new(),
+            after_stop: String::new(),
         });
         self.projects.save();
         id
@@ -3351,7 +3483,7 @@ impl Gerdr {
         kind: WorkspaceKind,
     ) {
         let id = self.add_project(name);
-        self.enter_project(&id, false);
+        self.enter_project(&id, false, Vec::new());
         match (folder, kind) {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
             (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
@@ -3374,6 +3506,21 @@ impl Gerdr {
         project.name = name.to_owned();
         self.projects.save();
         self.refresh_project_menu();
+    }
+
+    /// Keep project `id`'s start and stop commands, `before` and `after`.
+    pub fn set_project_commands(&mut self, id: &str, before: String, after: String) {
+        let Some(project) = self.projects.project_mut(id) else {
+            return tracing::warn!("no project {id} to keep commands for");
+        };
+        if project.before_start == before && project.after_stop == after {
+            return;
+        }
+        project.before_start = before;
+        project.after_stop = after;
+        let name = project.name.clone();
+        self.projects.save();
+        self.show_notice(format!("Saved {name}'s start and stop commands"));
     }
 
     /// Stop project `id`'s herdr session, off the event loop; not the shown
@@ -3439,6 +3586,7 @@ impl Gerdr {
             project.state = RunState::Stopped;
         }
         self.projects.save();
+        self.run_hook(id, Hook::AfterStop);
         // They go from `held` once closed (see `remove_window`).
         for window in self.held.get(id).into_iter().flatten() {
             window.toplevel().unwrap().send_close();
@@ -3522,6 +3670,18 @@ impl Gerdr {
     pub fn quit_app(&mut self, stop: bool) {
         self.record_tabs();
         let stopped = stop && self.stop_session();
+        if stopped
+            && let Some(project) = self
+                .project
+                .as_deref()
+                .and_then(|id| self.projects.project(id))
+        {
+            let line = Hook::AfterStop.line(project);
+            if !line.is_empty() {
+                let dir = hooks::project_dir(project);
+                hooks::spawn_detached(&project.id, Hook::AfterStop, line, &dir);
+            }
+        }
         if let Some(project) = self
             .project
             .clone()
@@ -3614,9 +3774,85 @@ impl Gerdr {
                 _ => return self.open_welcome(false),
             },
         };
-        self.enter_project(&id, folders.is_empty());
-        for folder in folders {
-            self.open_project(folder);
+        self.enter_project(&id, folders.is_empty(), folders);
+    }
+
+    /// Run project `id`'s `hook` commands off the event loop, if it has
+    /// any (start commands not twice at once); `hook_done` takes it from
+    /// there. Whether they started.
+    fn run_hook(&mut self, id: &str, hook: Hook) -> bool {
+        let Some(project) = self.projects.project(id) else {
+            return false;
+        };
+        let line = hook.line(project).to_owned();
+        if line.is_empty() || (hook == Hook::BeforeStart && self.starting.contains(id)) {
+            return false;
+        }
+        let dir = hooks::project_dir(project);
+        if self.hook_status.is_none() {
+            let (tx, rx) = channel::channel::<hooks::Done>();
+            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
+                if let channel::Event::Msg((id, hook, result)) = event {
+                    state.hook_done(&id, hook, result);
+                }
+            });
+            match inserted {
+                Ok(_) => self.hook_status = Some(tx),
+                Err(err) => {
+                    tracing::warn!("running project {id}'s {}: {err}", hook.label());
+                    return false;
+                }
+            }
+        }
+        let Some(tx) = self.hook_status.clone() else {
+            return false;
+        };
+        if hook == Hook::BeforeStart {
+            self.starting.insert(id.to_owned());
+        }
+        hooks::spawn(id.to_owned(), hook, line, dir, tx);
+        true
+    }
+
+    /// Run project `id`'s start commands again, whether its session runs or
+    /// not.
+    pub fn run_start_commands(&mut self, id: &str) {
+        let Some(project) = self.projects.project(id) else {
+            return;
+        };
+        let name = project.name.clone();
+        if Hook::BeforeStart.line(project).is_empty() {
+            self.show_notice(format!("{name} has no start commands"));
+        } else if self.starting.contains(id) {
+            self.show_notice(format!("{name}'s start commands are running"));
+        } else if self.run_hook(id, Hook::BeforeStart) {
+            self.show_notice(format!("Running {name}'s start commands…"));
+        }
+    }
+
+    /// Project `id`'s `hook` commands ended as `result` says. Once its start
+    /// commands are done, the project waiting for them is shown.
+    fn hook_done(&mut self, id: &str, hook: Hook, result: Result<(), String>) {
+        let mut entered = false;
+        if hook == Hook::BeforeStart {
+            self.starting.remove(id);
+            if self.pending_enter.as_ref().is_some_and(|p| p.id == id)
+                && let Some(PendingEnter { id, pick, folders }) = self.pending_enter.take()
+            {
+                self.enter_project_now(&id, pick, folders);
+                entered = true;
+            }
+        }
+        let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
+            return;
+        };
+        // After the switch's notice, so it wins.
+        match result {
+            Err(err) => self.show_notice(format!("{name}'s {} failed: {err}", hook.label())),
+            Ok(()) if hook == Hook::BeforeStart && !entered => {
+                self.show_notice(format!("{name}'s start commands are done"));
+            }
+            Ok(()) => {}
         }
     }
 
@@ -3851,7 +4087,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         switcher: None,
         recent_dirs: Vec::new(),
         zoxide: None,
-        switcher_repeat: None,
+        key_repeat: None,
         apps,
         installed_apps: Vec::new(),
         installed_apps_tx: None,
@@ -3861,6 +4097,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         running: HashMap::new(),
         running_status: None,
         stop_status: None,
+        hook_status: None,
+        starting: HashSet::new(),
+        pending_enter: None,
+        paste: None,
+        copied: None,
+        field_clicks: None,
+        field_drag: false,
         stopping: HashSet::new(),
         project_menu: None,
         header_hover: false,
@@ -3871,6 +4114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         herdr_poke: None,
         idle_since: HashMap::new(),
         retired_groups: Vec::new(),
+        shared_generation: 0,
         tabs_changed: None,
         pane_leaders: HashMap::new(),
         last_commands: HashMap::new(),
@@ -3988,7 +4232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.host_focused = focused;
                 // The key's release goes elsewhere now.
                 if !focused {
-                    state.stop_switcher_repeat();
+                    state.stop_key_repeat();
+                    state.release_held_keys();
                 }
             }
             WinitEvent::CloseRequested => state.request_quit(),
@@ -4014,7 +4259,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_installed_apps();
     state.start_project(project_arg.as_deref(), folders);
 
-    event_loop.run(None, &mut state, |_| {})?;
+    // Send what the loop queued for the clients (a paste's request to the
+    // app that copied, say) right away: drawing, which flushes too, stops
+    // while the host doesn't show gerdr.
+    event_loop.run(None, &mut state, |state| {
+        let _ = state.display_handle.flush_clients();
+    })?;
 
     state.close_windows(&mut event_loop);
     state.kill_children();

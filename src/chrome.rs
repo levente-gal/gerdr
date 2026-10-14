@@ -32,6 +32,7 @@ use crate::{
     herdr::{AgentInfo, AgentStatus, PaneState, TabDetail},
     home_dir,
     icons::AppIcon,
+    text_field::Line,
 };
 
 /// Height of the sidebar header, in logical pixels.
@@ -245,6 +246,8 @@ const RADIO_SIZE: i32 = 16;
 const ERROR_HEIGHT: i32 = 22;
 /// Cancel and Create & switch: labels and widths.
 const FORM_BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Create & switch", 136)];
+/// Cancel, Run now and Save in the project settings form: labels and widths.
+const SETTINGS_BUTTONS: [(&str, i32); 3] = [("Cancel", 84), ("Run now", 96), ("Save", 84)];
 
 /// The notice: a pill this high, its text this far in from its ends, this
 /// far below the tab strip.
@@ -806,7 +809,7 @@ pub struct SwitcherRow {
 /// view, and which of them is selected (none when nothing matches).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitcherView {
-    pub query: String,
+    pub query: Line,
     pub hint: &'static str,
     pub rows: Vec<SwitcherRow>,
     pub selected: Option<usize>,
@@ -828,14 +831,14 @@ pub struct WelcomeView {
     pub greeting: String,
     pub subtitle: String,
     /// What was typed to filter the projects.
-    pub query: String,
+    pub query: Line,
     /// The projects in view, most recently used first.
     pub rows: Vec<ProjectRow>,
     /// The selected row; `None` when nothing matches or the button is.
     pub selected: Option<usize>,
     pub hover: Option<WelcomeHit>,
     /// Set while naming a new project: the name typed so far.
-    pub naming: Option<String>,
+    pub naming: Option<Line>,
     /// The row asking to be confirmed for forgetting.
     pub confirm_forget: Option<usize>,
     /// A line under the button, such as "herdr isn't installed".
@@ -914,7 +917,7 @@ pub struct QuitLayout {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectMenuView {
     /// What was typed to filter the projects; empty in form mode.
-    pub query: String,
+    pub query: Line,
     /// The entries in view, scrolled.
     pub entries: Vec<MenuEntry>,
     /// The selected entry, by index into `entries`.
@@ -922,6 +925,8 @@ pub struct ProjectMenuView {
     pub hover: Option<MenuHit>,
     /// Set in form mode.
     pub form: Option<FormView>,
+    /// Set in settings mode.
+    pub settings: Option<SettingsView>,
     /// The footer's key hints, as (key, what it does).
     pub hints: Vec<(String, String)>,
 }
@@ -936,9 +941,7 @@ pub enum MenuEntry {
         /// The Alt+digit that opens it, 1 to 9.
         digit: Option<u8>,
         /// Set while renaming it: the name typed so far.
-        renaming: Option<String>,
-        /// While renaming, the name is all selected: typing replaces it.
-        name_selected: bool,
+        renaming: Option<Line>,
         /// Delete was pressed on it once.
         confirm_forget: bool,
     },
@@ -951,9 +954,9 @@ pub enum MenuEntry {
 /// The project menu's form for a new project.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormView {
-    pub name: String,
+    pub name: Line,
     /// The folder as typed; empty for none.
-    pub folder: String,
+    pub folder: Line,
     /// What the folder opens as.
     pub kind: WorkspaceKind,
     pub focus: FormField,
@@ -976,9 +979,36 @@ pub enum FormField {
     Create,
 }
 
+/// The project menu's form for a project's start and stop commands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsView {
+    /// The project's name.
+    pub name: String,
+    /// Its start commands, as typed.
+    pub before: Line,
+    /// Its stop commands, as typed.
+    pub after: Line,
+    /// Where they run, as "~/Work/app".
+    pub dir: String,
+    pub focus: SettingsField,
+}
+
+/// A part of the project settings form that takes the keyboard, in Tab
+/// order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsField {
+    Before,
+    After,
+    Cancel,
+    Run,
+    Save,
+}
+
 /// A button shown on a project row of the menu under the pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowButton {
+    /// Its start and stop commands.
+    Settings,
     Rename,
     Stop,
     Forget,
@@ -993,6 +1023,8 @@ pub enum MenuHit {
     /// A button on an entry's row.
     Button(usize, RowButton),
     Field(FormField),
+    /// A part of the settings form.
+    Setting(SettingsField),
     /// One of the form's two "Opens" choices.
     Kind(WorkspaceKind),
     Suggestion(usize),
@@ -1011,6 +1043,8 @@ pub struct ProjectMenuLayout {
     pub footer: Rect,
     /// Set in form mode.
     pub form: Option<FormLayout>,
+    /// Set in settings mode.
+    pub settings: Option<SettingsLayout>,
 }
 
 /// Where the project menu's form parts go, in output coordinates.
@@ -1026,6 +1060,18 @@ pub struct FormLayout {
     pub create: Rect,
 }
 
+/// Where the project menu's settings form parts go, in output coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingsLayout {
+    pub before: Rect,
+    pub after: Rect,
+    /// The line saying where the commands run.
+    pub note: Rect,
+    pub cancel: Rect,
+    pub run: Rect,
+    pub save: Rect,
+}
+
 /// Where the parts of the project menu showing `view` go, on an output of
 /// `size`: below the sidebar header, reaching over the apps. The query field
 /// (the title in form mode), the entries or the form, then the footer. On an
@@ -1035,9 +1081,10 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
     let (x, top) = (ROW_INSET, PROJECT_MENU_TOP);
     let query = Rectangle::new((x, top).into(), (w, PROJECT_MENU_INPUT).into());
     let mut y = top + PROJECT_MENU_INPUT + PROJECT_MENU_PADDING;
-    let (mut entries, form) = match &view.form {
-        None => (menu_entries(view, x, w, &mut y), None),
-        Some(form) => (Vec::new(), Some(form_layout(form, x, w, &mut y))),
+    let (mut entries, form, settings) = match (&view.form, &view.settings) {
+        (Some(form), _) => (Vec::new(), Some(form_layout(form, x, w, &mut y)), None),
+        (None, Some(_)) => (Vec::new(), None, Some(settings_layout(x, w, &mut y))),
+        (None, None) => (menu_entries(view, x, w, &mut y), None, None),
     };
     let bottom = (y + PROJECT_MENU_PADDING + PROJECT_MENU_FOOTER)
         .min(size.h - HELP_MARGIN)
@@ -1062,6 +1109,7 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
         entries,
         footer,
         form,
+        settings,
     }
 }
 
@@ -1108,10 +1156,10 @@ fn menu_entries(
 }
 
 /// The buttons a project row shows under the pointer, left to right:
-/// rename always; stop while its session may run, and forget, unless it is
-/// the current project.
+/// settings and rename always; stop while its session may run, and forget,
+/// unless it is the current project.
 fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
-    let mut buttons = vec![RowButton::Rename];
+    let mut buttons = vec![RowButton::Settings, RowButton::Rename];
     if !row.current && row.running != Some(false) {
         buttons.push(RowButton::Stop);
     }
@@ -1195,6 +1243,42 @@ fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormLayout {
     }
 }
 
+/// The settings form's parts in a panel `w` wide at `x`, from `y` down
+/// (moved past them): a row each for the start and stop commands, the line
+/// saying where they run, then Cancel, Run now and Save at the right.
+fn settings_layout(x: i32, w: i32, y: &mut i32) -> SettingsLayout {
+    let rect = |x: i32, y: i32, w: i32, h: i32| Rectangle::new((x, y).into(), (w.max(0), h).into());
+    let right = x + w - FORM_PADDING;
+    let field_x = x + FORM_PADDING + FORM_LABEL_WIDTH;
+    let field_w = (right - field_x).max(0);
+    let in_row = |y: i32| y + (FORM_ROW - FORM_FIELD) / 2;
+
+    let before = rect(field_x, in_row(*y), field_w, FORM_FIELD);
+    *y += FORM_ROW;
+    let after = rect(field_x, in_row(*y), field_w, FORM_FIELD);
+    *y += FORM_ROW;
+    let note = rect(field_x, *y, field_w, ERROR_HEIGHT);
+    *y += ERROR_HEIGHT + FORM_GAP;
+    let [(_, cancel_w), (_, run_w), (_, save_w)] = SETTINGS_BUTTONS;
+    let save = rect(right - save_w, *y, save_w, QUIT_BUTTON);
+    let run = rect(save.loc.x - QUIT_BUTTON_GAP - run_w, *y, run_w, QUIT_BUTTON);
+    let cancel = rect(
+        run.loc.x - QUIT_BUTTON_GAP - cancel_w,
+        *y,
+        cancel_w,
+        QUIT_BUTTON,
+    );
+    *y += QUIT_BUTTON + FORM_GAP;
+    SettingsLayout {
+        before,
+        after,
+        note,
+        cancel,
+        run,
+        save,
+    }
+}
+
 /// How many entries the project menu's list shows at most on an output of
 /// `size`: as many full rows as fit above its bottom margin, within bounds.
 pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
@@ -1239,6 +1323,20 @@ pub fn project_menu_hit(
                 let (kind, _) = form.kinds.iter().find(|(_, rect)| over(*rect))?;
                 Some(MenuHit::Kind(*kind))
             });
+        return hit.or(Some(MenuHit::Panel));
+    }
+    if let Some(settings) = &layout.settings {
+        let fields = [
+            (settings.before, SettingsField::Before),
+            (settings.after, SettingsField::After),
+            (settings.cancel, SettingsField::Cancel),
+            (settings.run, SettingsField::Run),
+            (settings.save, SettingsField::Save),
+        ];
+        let hit = fields
+            .iter()
+            .find(|(rect, _)| over(*rect))
+            .map(|(_, field)| MenuHit::Setting(*field));
         return hit.or(Some(MenuHit::Panel));
     }
     if over(layout.query) {
@@ -1704,6 +1802,13 @@ pub struct Chrome {
 }
 
 impl Chrome {
+    /// The byte of `field`'s text nearest output x `x`, as it is drawn on
+    /// an output of `scale`: where a click there puts the caret.
+    pub fn caret_at(&self, field: &FieldSpot, x: f64, scale: f64) -> usize {
+        self.painter
+            .caret_at(&field.line, field.text, (x * scale) as f32, scale)
+    }
+
     pub fn new() -> Self {
         Self {
             painter: Painter::new(),
@@ -2686,41 +2791,15 @@ impl Painter {
         c.popup(panel.size, HELP_RADIUS, scale, p);
 
         let band = (px(input.loc.y), px(input.size.h));
-        let (text_x, max_x) = (
-            px(input.loc.x + HELP_PADDING) as f32,
-            px(input.loc.x + input.size.w - HELP_PADDING) as f32,
-        );
-        let caret_x = if view.query.is_empty() {
-            self.text(
-                &mut c,
-                view.hint,
-                FONT_SIZE,
-                text_x + px(CARET_WIDTH + 2) as f32,
-                max_x,
-                band,
-                scale,
-                p.placeholder,
-            );
-            text_x
-        } else {
-            self.text(
-                &mut c,
-                &view.query,
-                FONT_SIZE,
-                text_x,
-                max_x,
-                band,
-                scale,
-                p.text,
-            ) + px(1) as f32
-        };
-        let caret_h = px(CARET_HEIGHT);
-        c.fill(
-            caret_x.round() as i32,
-            band.0 + (band.1 - caret_h) / 2,
-            px(CARET_WIDTH).max(1),
-            caret_h,
-            p.accent,
+        self.edit_line(
+            &mut c,
+            &view.query,
+            view.hint,
+            switcher_text(input, scale),
+            band,
+            true,
+            scale,
+            p,
         );
         let line_y = px(input.loc.y + input.size.h) - border;
         c.fill(
@@ -2739,7 +2818,7 @@ impl Painter {
                 "Nothing matches",
                 FONT_SIZE,
                 px(slots[0].loc.x) as f32 + PADDING * s,
-                max_x,
+                px(input.loc.x + input.size.w - HELP_PADDING) as f32,
                 band,
                 scale,
                 p.placeholder,
@@ -2894,17 +2973,16 @@ impl Painter {
             let end = right - (px(CARET_WIDTH).max(1) + px(1)) as f32;
             let width = self.text_width(&view.query, FONT_SIZE, scale);
             let start = (end - width).max(label_end + px(16) as f32);
-            let after = self.text(
+            self.edit_line(
                 &mut c,
                 &view.query,
-                FONT_SIZE,
-                start,
-                end,
+                "",
+                (start, end),
                 label_band,
+                true,
                 scale,
-                p.text,
+                p,
             );
-            caret(&mut c, after + px(1) as f32, label_band, scale, p.accent);
         }
 
         for (i, (rect, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
@@ -3080,33 +3158,17 @@ impl Painter {
         );
     }
 
-    /// A text field in `rect`, like the switcher's query: `text` (or
-    /// `placeholder` without any) and, when `focused`, a caret after it.
+    /// A text field in `rect`, like the switcher's query: `line` (or
+    /// `placeholder` without any) and, when `focused`, its caret and
+    /// selection.
     #[allow(clippy::too_many_arguments)]
     fn field(
         &self,
         c: &mut Canvas,
-        text: &str,
+        line: &Line,
         placeholder: &str,
         rect: Rect,
         focused: bool,
-        scale: f64,
-        p: &Palette,
-    ) {
-        self.selectable_field(c, text, placeholder, rect, focused, false, scale, p);
-    }
-
-    /// A text field as `field` draws it; while `selected`, its text is
-    /// highlighted as selected.
-    #[allow(clippy::too_many_arguments)]
-    fn selectable_field(
-        &self,
-        c: &mut Canvas,
-        text: &str,
-        placeholder: &str,
-        rect: Rect,
-        focused: bool,
-        selected: bool,
         scale: f64,
         p: &Palette,
     ) {
@@ -3117,38 +3179,82 @@ impl Painter {
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
         let field_band = band(rect, scale);
-        let text_x = x + PADDING * s;
-        let max_x = x + w - PADDING * s - px(CARET_WIDTH + 1) as f32;
-        if selected && !text.is_empty() {
-            let width = self.text_width(text, FONT_SIZE, scale).min(max_x - text_x);
-            let (top, height) = field_band;
-            let inset = px(3) as f32;
-            c.rounded(
-                text_x - 2.0 * s,
-                top as f32 + inset,
-                width + 4.0 * s,
-                height as f32 - 2.0 * inset,
-                2.0 * s,
-                p.selected,
-            );
-        }
-        let caret_x = if text.is_empty() {
+        self.edit_line(
+            c,
+            line,
+            placeholder,
+            field_text(rect, scale),
+            field_band,
+            focused,
+            scale,
+            p,
+        );
+    }
+
+    /// The text of a field being edited, `line`, between `x` and `max_x`
+    /// (physical pixels) in the band `(top, height)`: `placeholder` without
+    /// any text, and when `focused`, the selection behind it and the caret.
+    /// A line too long to fit scrolls to keep the caret in view; otherwise
+    /// it is cut off with "…".
+    #[allow(clippy::too_many_arguments)]
+    fn edit_line(
+        &self,
+        c: &mut Canvas,
+        line: &Line,
+        placeholder: &str,
+        (x, max_x): (f32, f32),
+        field_band: (i32, i32),
+        focused: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        if line.is_empty() {
+            let shown = x + px(CARET_WIDTH + 2) as f32;
             self.text(
                 c,
                 placeholder,
                 FONT_SIZE,
-                text_x + px(CARET_WIDTH + 2) as f32,
+                shown,
                 max_x,
                 field_band,
                 scale,
                 p.placeholder,
             );
-            text_x
+            if focused {
+                caret(c, x, field_band, scale, p.accent);
+            }
+            return;
+        }
+        let width = |text: &str| self.text_width(text, FONT_SIZE, scale);
+        let to_caret = width(&line[..line.caret]);
+        // How far the text moves left for the caret to show.
+        let scrolled = (to_caret - (max_x - x)).max(0.0);
+        let start = x - scrolled;
+        let selection = line.selection();
+        if focused && !selection.is_empty() {
+            let from = (start + width(&line[..selection.start])).max(x);
+            let to = (start + width(&line[..selection.end])).min(max_x);
+            let (top, height) = field_band;
+            let inset = px(3) as f32;
+            c.rounded(
+                from - s,
+                top as f32 + inset,
+                to - from + 2.0 * s,
+                height as f32 - 2.0 * inset,
+                2.0 * s,
+                p.selected,
+            );
+        }
+        if scrolled > 0.0 {
+            self.clipped_text(c, line, start, (x, max_x), field_band, scale, p.text);
         } else {
-            self.text(c, text, FONT_SIZE, text_x, max_x, field_band, scale, p.text) + px(1) as f32
-        };
+            self.text(c, line, FONT_SIZE, x, max_x, field_band, scale, p.text);
+        }
         if focused {
-            caret(c, caret_x, field_band, scale, p.accent);
+            let nudge = if line.caret > 0 { px(1) as f32 } else { 0.0 };
+            caret(c, start + to_caret + nudge, field_band, scale, p.accent);
         }
     }
 
@@ -3343,8 +3449,24 @@ impl Painter {
         };
 
         let query = shift(layout.query);
-        match &layout.form {
-            Some(form) => {
+        match (&layout.form, &layout.settings) {
+            (None, Some(settings)) => {
+                if let Some(settings_view) = &view.settings {
+                    let (x, right) = phys(query, scale);
+                    self.text(
+                        &mut c,
+                        &format!("{} · start and stop", settings_view.name),
+                        LABEL_FONT_SIZE,
+                        x + (FORM_PADDING as f32 * s).round(),
+                        right,
+                        band(query, scale),
+                        scale,
+                        p.text,
+                    );
+                    self.menu_settings(&mut c, settings_view, view.hover, settings, by, scale, p);
+                }
+            }
+            (Some(form), _) => {
                 let (x, right) = phys(query, scale);
                 self.text(
                     &mut c,
@@ -3360,7 +3482,7 @@ impl Painter {
                     self.menu_form(&mut c, form_view, view.hover, form, by, scale, p);
                 }
             }
-            None => {
+            (None, None) => {
                 let renaming = view.entries.iter().any(|e| {
                     matches!(
                         e,
@@ -3433,13 +3555,12 @@ impl Painter {
     fn menu_query(
         &self,
         c: &mut Canvas,
-        query: &str,
+        query: &Line,
         focused: bool,
         rect: Rect,
         scale: f64,
         p: &Palette,
     ) {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         // Lined up with the marks and labels of the rows below.
         let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
@@ -3449,28 +3570,17 @@ impl Painter {
         );
         icon_sdf(c, mark, scale, p.placeholder, |x, y| magnifier(x, y, s));
         let query_band = band(rect, scale);
-        let text_x = px(mark_x + MENU_MARK_WIDTH + MENU_MARK_GAP) as f32;
-        let max_x = px(rect.loc.x + rect.size.w - HELP_PADDING) as f32;
-        let caret_x = if query.is_empty() {
-            self.text(
-                c,
-                "Find or name a project…",
-                FONT_SIZE,
-                text_x + px(CARET_WIDTH + 2) as f32,
-                max_x,
-                query_band,
-                scale,
-                p.placeholder,
-            );
-            text_x
-        } else {
-            self.text(
-                c, query, FONT_SIZE, text_x, max_x, query_band, scale, p.text,
-            ) + px(1) as f32
-        };
-        if focused {
-            caret(c, caret_x, query_band, scale, p.accent);
-        }
+        let placeholder = "Find or name a project…";
+        self.edit_line(
+            c,
+            query,
+            placeholder,
+            menu_query_text(rect, scale),
+            query_band,
+            focused,
+            scale,
+            p,
+        );
     }
 
     /// Entry `i` of the project menu in `rect` (buffer coordinates), with
@@ -3547,7 +3657,6 @@ impl Painter {
                 row,
                 digit,
                 renaming,
-                name_selected,
                 ..
             } => {
                 let dot = move |x: f32, y: f32| x.hypot(y) - 4.2 * s;
@@ -3591,21 +3700,8 @@ impl Painter {
                         p.warning,
                     );
                 } else if let Some(name) = renaming {
-                    let field_x = label_lx - RENAME_INSET;
-                    let field = Rectangle::new(
-                        (field_x, rect.loc.y + (rect.size.h - RENAME_FIELD) / 2).into(),
-                        (((end / s) as i32 - field_x).max(0), RENAME_FIELD).into(),
-                    );
-                    self.selectable_field(
-                        c,
-                        name,
-                        "Project name",
-                        field,
-                        true,
-                        *name_selected,
-                        scale,
-                        p,
-                    );
+                    let field = rename_field(rect, buttons);
+                    self.field(c, name, "Project name", field, true, scale, p);
                 } else {
                     let after = self.text(
                         c, &row.name, FONT_SIZE, label_x, end, row_band, scale, p.text,
@@ -3685,10 +3781,80 @@ impl Painter {
                 _ => p.muted,
             };
             icon_sdf(c, rect, scale, color, |x, y| match button {
+                RowButton::Settings => commands_prompt(x, y, s),
                 RowButton::Rename => pencil(x, y, s),
                 RowButton::Stop => stop(x, y, s),
                 RowButton::Forget => cross(x, y, s),
             });
+        }
+    }
+
+    /// The project menu's settings form, its parts at `layout` moved `by`
+    /// into the buffer: the labelled start and stop command fields, where
+    /// they run, and the buttons.
+    #[allow(clippy::too_many_arguments)]
+    fn menu_settings(
+        &self,
+        c: &mut Canvas,
+        form: &SettingsView,
+        hover: Option<MenuHit>,
+        layout: &SettingsLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
+        let focused = |field: SettingsField| form.focus == field;
+        let hovered = |hit: MenuHit| hover == Some(hit);
+        for (label, text, placeholder, rect, field) in [
+            (
+                "Start",
+                &form.before,
+                "e.g. docker compose up -d",
+                layout.before,
+                SettingsField::Before,
+            ),
+            (
+                "Stop",
+                &form.after,
+                "e.g. docker compose down",
+                layout.after,
+                SettingsField::After,
+            ),
+        ] {
+            let rect = shift(rect);
+            let x = px(rect.loc.x - FORM_LABEL_WIDTH) as f32;
+            let end = px(rect.loc.x - FORM_GAP) as f32;
+            let label_band = band(rect, scale);
+            self.text(c, label, FONT_SIZE, x, end, label_band, scale, p.muted);
+            if focused(field) {
+                focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
+            }
+            self.field(c, text, placeholder, rect, focused(field), scale, p);
+        }
+
+        let note = shift(layout.note);
+        let (x, right) = phys(note, scale);
+        self.text(
+            c,
+            &format!("Run with sh -c in {}", form.dir),
+            SMALL_FONT_SIZE,
+            x,
+            right,
+            band(note, scale),
+            scale,
+            p.muted,
+        );
+
+        let [(cancel, _), (run, _), (save, _)] = SETTINGS_BUTTONS;
+        for (label, rect, field, primary) in [
+            (cancel, layout.cancel, SettingsField::Cancel, false),
+            (run, layout.run, SettingsField::Run, false),
+            (save, layout.save, SettingsField::Save, true),
+        ] {
+            let state = (hovered(MenuHit::Setting(field)), focused(field));
+            self.button(c, label, shift(rect), state, primary, scale, p);
         }
     }
 
@@ -4353,6 +4519,66 @@ impl Painter {
         }
         pen
     }
+
+    /// The byte of `line`, drawn by `edit_line` between `x` and `max_x`,
+    /// nearest `at` (physical pixels).
+    fn caret_at(&self, line: &Line, (x, max_x): (f32, f32), at: f32, scale: f64) -> usize {
+        let width = |text: &str| self.text_width(text, FONT_SIZE, scale);
+        let scrolled = (width(&line[..line.caret]) - (max_x - x)).max(0.0);
+        let mut pen = x - scrolled;
+        for (i, ch) in line.char_indices() {
+            let advance = width(ch.encode_utf8(&mut [0; 4]));
+            if at < pen + advance / 2.0 {
+                return i;
+            }
+            pen += advance;
+        }
+        line.len()
+    }
+
+    /// Draw `text` from `x` as `text` does, but only the characters wholly
+    /// between `min_x` and `max_x`: a line scrolled in a field.
+    #[allow(clippy::too_many_arguments)]
+    fn clipped_text(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        x: f32,
+        (min_x, max_x): (f32, f32),
+        (top, height): (i32, i32),
+        scale: f64,
+        color: Rgb,
+    ) {
+        let Some(font) = &self.font else { return };
+        let scaled = font.as_scaled(PxScale::from(FONT_SIZE * scale as f32));
+        let cap_height = font
+            .outline_glyph(scaled.scaled_glyph('H'))
+            .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
+        let baseline = (top as f32 + (height as f32 + cap_height) / 2.0).round();
+        let mut pen = x;
+        for ch in text.chars() {
+            let id = scaled.glyph_id(ch);
+            let advance = scaled.h_advance(id);
+            if pen + advance > max_x {
+                break;
+            }
+            let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
+            if pen >= min_x
+                && let Some(outline) = font.outline_glyph(glyph)
+            {
+                let bounds = outline.px_bounds();
+                outline.draw(|gx, gy, coverage| {
+                    c.blend(
+                        bounds.min.x as i32 + gx as i32,
+                        bounds.min.y as i32 + gy as i32,
+                        color,
+                        coverage,
+                    );
+                });
+            }
+            pen += advance;
+        }
+    }
 }
 
 /// A logical rectangle's left and right edges in physical pixels.
@@ -4381,6 +4607,131 @@ fn band(rect: Rect, scale: f64) -> (i32, i32) {
         px(rect.loc.y),
         px(rect.loc.y + rect.size.h) - px(rect.loc.y),
     )
+}
+
+/// The focused text field of an overlay: the area a click in it lands in,
+/// where its text goes (physical pixels, from and up to), and what it shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldSpot {
+    pub area: Rect,
+    pub text: (f32, f32),
+    pub line: Line,
+}
+
+/// Where the text of a field drawn in `rect` (by `Painter::field`) goes.
+fn field_text(rect: Rect, scale: f64) -> (f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    let (x, _, w, _) = rect_px(rect, scale);
+    let pad = PADDING * scale as f32;
+    (x + pad, x + w - pad - px(CARET_WIDTH + 1))
+}
+
+/// Where the text of the project menu's query field in `rect` goes, after
+/// its magnifier.
+fn menu_query_text(rect: Rect, scale: f64) -> (f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
+    (
+        px(mark_x + MENU_MARK_WIDTH + MENU_MARK_GAP),
+        px(rect.loc.x + rect.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
+    )
+}
+
+/// Where the text of the switcher's query, in its `input` rect, goes.
+fn switcher_text(input: Rect, scale: f64) -> (f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    (
+        px(input.loc.x + HELP_PADDING),
+        px(input.loc.x + input.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
+    )
+}
+
+/// The field a project menu entry in `rect` turns into while its project is
+/// renamed: over the name, up to the row's `buttons` if it shows them.
+fn rename_field(rect: Rect, buttons: &[(RowButton, Rect)]) -> Rect {
+    let x = rect.loc.x + PADDING as i32 + MENU_MARK_WIDTH + MENU_MARK_GAP - RENAME_INSET;
+    let end = buttons
+        .first()
+        .map_or(rect.loc.x + rect.size.w - PADDING as i32, |(_, b)| {
+            b.loc.x - FIELD_GAP
+        });
+    Rectangle::new(
+        (x, rect.loc.y + (rect.size.h - RENAME_FIELD) / 2).into(),
+        ((end - x).max(0), RENAME_FIELD).into(),
+    )
+}
+
+/// The switcher's query field, in the app `area`.
+pub fn switcher_field(view: &SwitcherView, area: Rect, scale: f64) -> FieldSpot {
+    let (_, input, _) = switcher_layout(view.rows.len(), area);
+    FieldSpot {
+        area: input,
+        text: switcher_text(input, scale),
+        line: view.query.clone(),
+    }
+}
+
+/// The welcome screen's text field with the keyboard, on an output of
+/// `size`: the new project's name, while asked for. (The filter, typed
+/// over the list, is no field to click in.)
+pub fn welcome_field(
+    view: &WelcomeView,
+    size: Size<i32, Logical>,
+    scale: f64,
+) -> Option<FieldSpot> {
+    let line = view.naming.clone()?;
+    let area = welcome_layout(size, view.rows.len(), true).button;
+    Some(FieldSpot {
+        area,
+        text: field_text(area, scale),
+        line,
+    })
+}
+
+/// The project menu's text field with the keyboard, on an output of `size`.
+pub fn project_menu_field(
+    view: &ProjectMenuView,
+    size: Size<i32, Logical>,
+    scale: f64,
+) -> Option<FieldSpot> {
+    let layout = project_menu_layout(view, size);
+    let boxed = |area: Rect, line: &Line| FieldSpot {
+        area,
+        text: field_text(area, scale),
+        line: line.clone(),
+    };
+    if let (Some(form), Some(rects)) = (&view.form, &layout.form) {
+        return match form.focus {
+            FormField::Name => Some(boxed(rects.name, &form.name)),
+            FormField::Folder => Some(boxed(rects.folder, &form.folder)),
+            _ => None,
+        };
+    }
+    if let (Some(settings), Some(rects)) = (&view.settings, &layout.settings) {
+        return match settings.focus {
+            SettingsField::Before => Some(boxed(rects.before, &settings.before)),
+            SettingsField::After => Some(boxed(rects.after, &settings.after)),
+            _ => None,
+        };
+    }
+    let renamed = view
+        .entries
+        .iter()
+        .zip(&layout.entries)
+        .find_map(|(entry, (rect, buttons))| match entry {
+            MenuEntry::Project {
+                renaming: Some(name),
+                ..
+            } => Some(boxed(rename_field(*rect, buttons), name)),
+            _ => None,
+        });
+    renamed.or_else(|| {
+        Some(FieldSpot {
+            area: layout.query,
+            text: menu_query_text(layout.query, scale),
+            line: view.query.clone(),
+        })
+    })
 }
 
 /// The text caret at `x`, vertically centred in the band `(top, height)`.
@@ -4618,6 +4969,21 @@ fn pencil(x: f32, y: f32, s: f32) -> f32 {
         0.0,
     )) - STROKE * s;
     body.min(tip)
+}
+
+/// Signed distance to a prompt, ">_", centred on the origin: a project's
+/// commands.
+fn commands_prompt(x: f32, y: f32, s: f32) -> f32 {
+    let chevron = segment(x, y, -4.2 * s, -3.6 * s, -0.6 * s, 0.0).min(segment(
+        x,
+        y,
+        -0.6 * s,
+        0.0,
+        -4.2 * s,
+        3.6 * s,
+    ));
+    let line = segment(x, y, 1.0 * s, 3.6 * s, 4.6 * s, 3.6 * s);
+    chevron.min(line) - STROKE * s
 }
 
 /// Signed distance to a filled square centred on the origin: stop.
@@ -4884,12 +5250,12 @@ fn find_font() -> Option<String> {
 mod tests {
     use super::{
         BAR_HEIGHT, BAR_INSET, BarButton, BarHit, BarStatus, FormField, FormView, HELP_MARGIN,
-        MenuEntry, MenuHit, NOTICE_HEIGHT, PANE_BAR_HEIGHT, PROJECT_MENU_WIDTH, Painter,
+        Line, MenuEntry, MenuHit, NOTICE_HEIGHT, PANE_BAR_HEIGHT, PROJECT_MENU_WIDTH, Painter,
         PaneBarView, ProjectMenuView, ProjectRow, QuitHit, QuitView, ROW_INSET, Rect, RowButton,
-        SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, WelcomeHit,
-        WelcomeView, WorkspaceView, pane_bar_buttons, pane_bar_hit, pane_bar_rects,
-        project_menu_hit, project_menu_layout, project_menu_page, quit_layout, short_path,
-        welcome_layout, welcome_page,
+        SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, SettingsField, SettingsView, TabView,
+        Theme, WelcomeHit, WelcomeView, WorkspaceView, pane_bar_buttons, pane_bar_hit,
+        pane_bar_rects, project_menu_field, project_menu_hit, project_menu_layout,
+        project_menu_page, quit_layout, short_path, welcome_layout, welcome_page,
     };
     use crate::{WorkspaceKind, herdr::AgentStatus};
     use smithay::utils::{Logical, Point, Size};
@@ -5171,7 +5537,7 @@ mod tests {
                 }
             }
         }
-        view.naming = Some(String::new());
+        view.naming = Some(Line::default());
         view.rows.clear();
         view.selected = None;
         painter.welcome(&view, (800, 600).into(), 1.5, Theme::Dark.palette());
@@ -5206,7 +5572,6 @@ mod tests {
             row,
             digit,
             renaming: None,
-            name_selected: false,
             confirm_forget: false,
         }
     }
@@ -5229,6 +5594,7 @@ mod tests {
             selected: Some(3),
             hover: None,
             form: None,
+            settings: None,
             hints: vec![
                 ("Enter".into(), "open".into()),
                 ("Ctrl+R".into(), "rename".into()),
@@ -5241,7 +5607,7 @@ mod tests {
 
     fn form_view(suggestions: usize, error: bool) -> ProjectMenuView {
         ProjectMenuView {
-            query: String::new(),
+            query: Line::default(),
             entries: Vec::new(),
             selected: None,
             hover: None,
@@ -5256,11 +5622,30 @@ mod tests {
                 suggestion: (suggestions > 0).then_some(0),
                 error: error.then(|| "A project named blog-v2 exists.".into()),
             }),
+            settings: None,
             hints: vec![
                 ("Tab".into(), "next".into()),
                 ("Enter".into(), "create".into()),
                 ("Esc".into(), "back".into()),
             ],
+        }
+    }
+
+    fn settings_view(before: &str) -> ProjectMenuView {
+        ProjectMenuView {
+            query: Line::default(),
+            entries: Vec::new(),
+            selected: None,
+            hover: None,
+            form: None,
+            settings: Some(SettingsView {
+                name: "blog".into(),
+                before: before.into(),
+                after: Line::default(),
+                dir: "~/Sites/blog".into(),
+                focus: SettingsField::Before,
+            }),
+            hints: vec![("Esc".into(), "back".into())],
         }
     }
 
@@ -5372,14 +5757,14 @@ mod tests {
 
         // Row buttons: only on the hovered project row, and which depend on
         // whether it is current and runs.
-        use RowButton::{Forget, Rename, Stop};
+        use RowButton::{Forget, Rename, Settings, Stop};
         let expected: [&[RowButton]; 8] = [
             &[],
-            &[Rename],
+            &[Settings, Rename],
             &[],
-            &[Rename, Stop, Forget],
-            &[Rename, Forget],
-            &[Rename, Stop, Forget],
+            &[Settings, Rename, Stop, Forget],
+            &[Settings, Rename, Forget],
+            &[Settings, Rename, Stop, Forget],
             &[],
             &[],
         ];
@@ -5431,6 +5816,30 @@ mod tests {
         }
         let past = l.panel.loc.y as f64 + l.panel.size.h as f64 + 1.0;
         assert_eq!(hit(&view, (100.0, past).into()), None);
+
+        let view = settings_view("docker compose up -d");
+        let l = project_menu_layout(&view, size);
+        assert!(l.entries.is_empty() && l.form.is_none());
+        let f = l.settings.as_ref().unwrap();
+        assert!(below(l.query, f.before) && below(f.before, f.after));
+        assert!(below(f.after, f.note) && below(f.note, f.save));
+        assert!(below(f.save, l.footer));
+        assert!(f.cancel.loc.x + f.cancel.size.w < f.run.loc.x);
+        assert!(f.run.loc.x + f.run.size.w < f.save.loc.x);
+        let fields = [
+            (f.before, SettingsField::Before),
+            (f.after, SettingsField::After),
+            (f.cancel, SettingsField::Cancel),
+            (f.run, SettingsField::Run),
+            (f.save, SettingsField::Save),
+        ];
+        for (rect, field) in fields {
+            assert!(inside(l.panel, rect), "{rect:?} outside the panel");
+            assert_eq!(hit(&view, centre(rect)), Some(MenuHit::Setting(field)));
+        }
+        for nothing in [l.query, f.note, l.footer] {
+            assert_eq!(hit(&view, centre(nothing)), Some(MenuHit::Panel));
+        }
     }
 
     #[test]
@@ -5448,7 +5857,7 @@ mod tests {
         }
         let mut empty = list_view();
         empty.entries.clear();
-        empty.query.clear();
+        empty.query = Line::default();
         let mut views = vec![
             list,
             renaming,
@@ -5458,10 +5867,14 @@ mod tests {
         ];
         let mut no_folder = form_view(0, false);
         if let Some(form) = &mut no_folder.form {
-            form.folder.clear();
+            form.folder = Line::default();
             form.focus = FormField::Kind;
         }
         views.push(no_folder);
+        views.push(settings_view(""));
+        let mut long_line = settings_view(&"docker compose up -d && ".repeat(8));
+        long_line.hover = Some(MenuHit::Setting(SettingsField::Run));
+        views.push(long_line);
         let long = "a project with a very long name indeed, longer than the header";
         for theme in [Theme::Dark, Theme::Light] {
             for scale in [1.0, 1.25, 2.0] {
@@ -5495,5 +5908,66 @@ mod tests {
             }
         }
         assert!(painter.notice_width("Created blog-v2", 10, 1.0) >= NOTICE_HEIGHT);
+    }
+
+    #[test]
+    fn the_focused_field_is_found_where_it_is_drawn() {
+        let size = Size::from((1280, 800));
+        let field = |view: &ProjectMenuView| project_menu_field(view, size, 1.0).unwrap();
+        let list = list_view();
+        let l = project_menu_layout(&list, size);
+        assert_eq!(field(&list).area, l.query);
+        assert_eq!(field(&list).line, "blo");
+
+        let mut renaming = list_view();
+        renaming.hover = Some(MenuHit::Entry(3));
+        if let MenuEntry::Project { renaming: name, .. } = &mut renaming.entries[3] {
+            *name = Some("gerdr x".into());
+        }
+        let r = project_menu_layout(&renaming, size);
+        let (row, buttons) = &r.entries[3];
+        let spot = field(&renaming);
+        assert_eq!(spot.line, "gerdr x");
+        assert!(row.contains(spot.area.loc) && spot.area.size.w > 0);
+        // It stops short of the row's buttons.
+        let first = buttons.first().expect("the hovered row shows buttons").1;
+        assert!(spot.area.loc.x + spot.area.size.w < first.loc.x);
+
+        let mut form = form_view(0, false);
+        let f = project_menu_layout(&form, size).form.unwrap();
+        form.form.as_mut().unwrap().focus = FormField::Name;
+        assert_eq!(field(&form).area, f.name);
+        form.form.as_mut().unwrap().focus = FormField::Folder;
+        assert_eq!(field(&form).area, f.folder);
+        form.form.as_mut().unwrap().focus = FormField::Create;
+        assert_eq!(project_menu_field(&form, size, 1.0), None);
+
+        let mut settings = settings_view("make up");
+        let st = project_menu_layout(&settings, size).settings.unwrap();
+        assert_eq!(field(&settings).area, st.before);
+        settings.settings.as_mut().unwrap().focus = SettingsField::After;
+        assert_eq!(field(&settings).area, st.after);
+    }
+
+    #[test]
+    fn a_click_puts_the_caret_by_the_nearest_character() {
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        let width = |text: &str| painter.text_width(text, super::FONT_SIZE, 1.0);
+        let line = Line::from("abc def");
+        let (x, max_x) = (100.0, 1000.0);
+        let at = |px: f32| painter.caret_at(&line, (x, max_x), px, 1.0);
+        assert_eq!(at(0.0), 0);
+        assert_eq!(at(x + width("ab") + 1.0), 2);
+        assert_eq!(at(x + width("abc ") - 1.0), 4);
+        assert_eq!(at(2000.0), 7);
+        // Scrolled to keep the caret in view, the text starts left of `x`.
+        let long = Line::from("a long line typed past the end of a narrow field");
+        let narrow = (x, x + width("a long line"));
+        let end = painter.caret_at(&long, narrow, narrow.1, 1.0);
+        assert_eq!(end, long.len());
+        assert!(painter.caret_at(&long, narrow, x, 1.0) > 0);
     }
 }

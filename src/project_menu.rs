@@ -7,7 +7,8 @@
 //! one, Ctrl+R renames the selected project in place, Ctrl+S stops its
 //! session, Delete twice forgets it. The form asks for the name, an
 //! optional folder (typed, picked from zoxide's, or browsed for) and what
-//! the folder opens as. Esc backs out one step at a time.
+//! the folder opens as. Ctrl+E edits the selected project's start and stop
+//! commands. Esc backs out one step at a time.
 
 use std::{
     cmp::Reverse,
@@ -24,9 +25,11 @@ use crate::{
     Gerdr, WorkspaceKind,
     chrome::{
         self, FormField, FormView, MenuEntry, MenuHit, ProjectMenuView, ProjectRow, RowButton,
+        SettingsField, SettingsView,
     },
-    fuzzy, home_dir,
+    fuzzy, home_dir, hooks,
     project_list::{self, scrolled},
+    text_field::{Edit, Line, TextField},
     tilde,
 };
 
@@ -43,7 +46,7 @@ pub struct ProjectMenu {
     /// The wheel's turn not yet a whole row, in rows.
     wheel: f64,
     /// What was typed to filter the projects.
-    query: String,
+    query: TextField,
     /// The projects, by id, most recently used first.
     projects: Vec<(String, ProjectRow)>,
     /// The folders zoxide knows, the highest ranked first.
@@ -66,6 +69,9 @@ pub struct ProjectMenu {
     confirm_forget: Option<String>,
     /// The form for a new project, while it replaces the list.
     form: Option<Form>,
+    /// The form for a project's start and stop commands, while it replaces
+    /// the list.
+    settings: Option<Settings>,
 }
 
 /// An entry of the list, pointing into the menu's state.
@@ -93,18 +99,17 @@ enum Picked {
 #[derive(Clone, Debug)]
 struct Renaming {
     id: String,
-    /// The name typed so far.
-    name: String,
-    /// The old name is still all selected: what is typed replaces it.
-    whole: bool,
+    /// The name typed so far; at first the old one, all selected, for
+    /// typing to replace.
+    name: TextField,
 }
 
 /// The form for a new project.
 #[derive(Clone, Debug)]
 struct Form {
-    name: String,
+    name: TextField,
     /// The folder as typed; empty for none.
-    folder: String,
+    folder: TextField,
     kind: WorkspaceKind,
     focus: FormField,
     /// The name is the folder's: the user hasn't typed one.
@@ -115,6 +120,19 @@ struct Form {
     /// The suggestion Up/Down moved to.
     suggestion: Option<usize>,
     error: Option<String>,
+}
+
+/// The form for a project's start and stop commands.
+#[derive(Clone, Debug)]
+struct Settings {
+    id: String,
+    /// The project's name.
+    name: String,
+    before: TextField,
+    after: TextField,
+    /// Where they run, as "~/Work/app".
+    dir: String,
+    focus: SettingsField,
 }
 
 /// What the project menu asks gerdr to do.
@@ -132,6 +150,16 @@ pub enum Outcome {
     Rename(String, String),
     /// Stop project `id`'s session; not the shown one.
     Stop(String),
+    /// Open the form for project `id`'s start and stop commands.
+    Settings(String),
+    /// Keep project `id`'s start and stop commands, and run the start ones
+    /// now if `run`.
+    SaveSettings {
+        id: String,
+        before: String,
+        after: String,
+        run: bool,
+    },
     /// Forget project `id`; not the shown one.
     Forget(String),
     /// Ask zenity for the form's folder, starting in this one.
@@ -286,10 +314,22 @@ impl ProjectMenu {
         if self.form.is_some() {
             return self.form_key(mods, sym, typed);
         }
+        if self.settings.is_some() {
+            return self.settings_key(mods, sym, typed);
+        }
         // Any key but Delete again takes back a first Delete.
         let armed = self.confirm_forget.take();
         if self.renaming.is_some() {
             return self.rename_key(mods, sym, typed);
+        }
+        // The query takes the keys that edit it first.
+        match self.query.key(mods, sym, typed) {
+            Edit::Changed => {
+                self.refilter();
+                return None;
+            }
+            Edit::Moved => return None,
+            Edit::Ignored => {}
         }
         let ctrl = mods.ctrl;
         match sym {
@@ -307,6 +347,7 @@ impl ProjectMenu {
             Keysym::n if ctrl => self.open_form(),
             Keysym::r if ctrl => self.start_renaming(self.selected),
             Keysym::s if ctrl => return self.stop(self.selected),
+            Keysym::e if ctrl => return self.edit_settings(self.selected),
             Keysym::Delete | Keysym::KP_Delete => return self.forget(self.selected, armed),
             Keysym::Up | Keysym::KP_Up => self.step(-1, page),
             Keysym::Down | Keysym::KP_Down => self.step(1, page),
@@ -318,11 +359,7 @@ impl ProjectMenu {
                 let digit = sym.key_char().and_then(|c| c.to_digit(10))?;
                 return self.digit_project(digit).map(Outcome::Switch);
             }
-            _ => {
-                if type_in(&mut self.query, mods, sym, typed) {
-                    self.refilter();
-                }
-            }
+            _ => {}
         }
         None
     }
@@ -348,17 +385,8 @@ impl ProjectMenu {
                     return Some(Outcome::Rename(id, name.to_owned()));
                 }
             }
-            // Moving the caret lets go of the old name.
-            Keysym::Left | Keysym::Right | Keysym::Home | Keysym::End => renaming.whole = false,
-            _ if renaming.whole => {
-                let mut name = String::new();
-                if type_in(&mut name, mods, sym, typed) {
-                    renaming.name = name;
-                    renaming.whole = false;
-                }
-            }
             _ => {
-                type_in(&mut renaming.name, mods, sym, typed);
+                renaming.name.key(mods, sym, typed);
             }
         }
         None
@@ -385,13 +413,36 @@ impl ProjectMenu {
                 let name = basename(&folder, self.home.as_deref());
                 self.hover = None;
                 self.form = Some(Form {
-                    name,
-                    folder,
+                    name: name.into(),
+                    folder: folder.into(),
                     name_follows: true,
                     ..Form::new(FormField::Folder)
                 });
                 None
             }
+        }
+    }
+
+    /// The text field with the keyboard: the focused one of a form, the
+    /// name being edited, else the query.
+    pub fn field_mut(&mut self) -> Option<&mut TextField> {
+        if let Some(form) = &mut self.form {
+            return match form.focus {
+                FormField::Name => Some(&mut form.name),
+                FormField::Folder => Some(&mut form.folder),
+                _ => None,
+            };
+        }
+        if let Some(settings) = &mut self.settings {
+            return match settings.focus {
+                SettingsField::Before => Some(&mut settings.before),
+                SettingsField::After => Some(&mut settings.after),
+                _ => None,
+            };
+        }
+        match &mut self.renaming {
+            Some(renaming) => Some(&mut renaming.name),
+            None => Some(&mut self.query),
         }
     }
 
@@ -401,7 +452,7 @@ impl ProjectMenu {
         self.hover = None;
         self.form = Some(Form {
             name_follows: name.is_empty(),
-            name,
+            name: name.into(),
             ..Form::new(FormField::Name)
         });
     }
@@ -410,10 +461,11 @@ impl ProjectMenu {
     fn start_renaming(&mut self, i: usize) {
         if let Some(Item::Project(p)) = self.items.get(i) {
             let (id, row) = &self.projects[*p];
+            let mut name = TextField::from(row.name.as_str());
+            name.select_all();
             self.renaming = Some(Renaming {
                 id: id.clone(),
-                name: row.name.clone(),
-                whole: true,
+                name,
             });
         }
     }
@@ -426,6 +478,115 @@ impl ProjectMenu {
         };
         let (id, row) = &self.projects[p];
         can_stop(row).then(|| Outcome::Stop(id.clone()))
+    }
+
+    /// Ask for the form for entry `i`'s project's commands, if it is one.
+    fn edit_settings(&self, i: usize) -> Option<Outcome> {
+        let Item::Project(p) = *self.items.get(i)? else {
+            return None;
+        };
+        Some(Outcome::Settings(self.projects[p].0.clone()))
+    }
+
+    /// Show the form for project `id`'s start and stop commands: `before`
+    /// and `after`, run in `dir`.
+    pub fn open_settings(&mut self, id: &str, before: &str, after: &str, dir: &Path) {
+        let Some((_, row)) = self.projects.iter().find(|(p, _)| p == id) else {
+            return;
+        };
+        self.hover = None;
+        self.renaming = None;
+        self.settings = Some(Settings {
+            id: id.to_owned(),
+            name: row.name.clone(),
+            before: before.into(),
+            after: after.into(),
+            dir: tilde(dir, self.home.as_deref()),
+            focus: SettingsField::Before,
+        });
+    }
+
+    /// Close the settings form, back to the list.
+    pub fn close_settings(&mut self) {
+        self.settings = None;
+        self.hover = None;
+    }
+
+    /// A key while the settings form is shown.
+    fn settings_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Outcome> {
+        let settings = self.settings.as_mut()?;
+        let form = settings;
+        match sym {
+            Keysym::Escape => self.settings = None,
+            Keysym::Tab | Keysym::ISO_Left_Tab => {
+                const ORDER: [SettingsField; 5] = [
+                    SettingsField::Before,
+                    SettingsField::After,
+                    SettingsField::Cancel,
+                    SettingsField::Run,
+                    SettingsField::Save,
+                ];
+                let back =
+                    sym == Keysym::ISO_Left_Tab || typed == Keysym::ISO_Left_Tab || mods.shift;
+                let at = ORDER.iter().position(|f| *f == form.focus).unwrap_or(0);
+                let step = if back { ORDER.len() - 1 } else { 1 };
+                form.focus = ORDER[(at + step) % ORDER.len()];
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                let field = form.focus;
+                return self.press_setting(field);
+            }
+            _ => match form.focus {
+                SettingsField::Before => {
+                    form.before.key(mods, sym, typed);
+                }
+                SettingsField::After => {
+                    form.after.key(mods, sym, typed);
+                }
+                _ => {}
+            },
+        }
+        None
+    }
+
+    /// A click on `hit` while the settings form is shown.
+    fn settings_click(&mut self, hit: MenuHit) -> Option<Outcome> {
+        let settings = self.settings.as_mut()?;
+        match hit {
+            MenuHit::Setting(field @ (SettingsField::Before | SettingsField::After)) => {
+                settings.focus = field;
+                None
+            }
+            MenuHit::Setting(field) => {
+                settings.focus = field;
+                self.press_setting(field)
+            }
+            _ => None,
+        }
+    }
+
+    /// Enter on, or a click on, `field` of the settings form: Cancel closes
+    /// it, Run now saves and runs the start commands, the rest save.
+    fn press_setting(&mut self, field: SettingsField) -> Option<Outcome> {
+        if field == SettingsField::Cancel {
+            self.settings = None;
+            return None;
+        }
+        let Settings {
+            id, before, after, ..
+        } = self.settings.take()?;
+        self.hover = None;
+        Some(Outcome::SaveSettings {
+            id,
+            before: before.trim().to_owned(),
+            after: after.trim().to_owned(),
+            run: field == SettingsField::Run,
+        })
     }
 
     /// Delete (or the forget button) on entry `i`'s project: the second time
@@ -522,6 +683,9 @@ impl ProjectMenu {
         if self.form.is_some() {
             return self.form_click(hit);
         }
+        if self.settings.is_some() {
+            return self.settings_click(hit);
+        }
         let armed = self.confirm_forget.take();
         let first = self.first_shown(page);
         let entry = |i: usize| (first + i < self.items.len()).then_some(first + i);
@@ -551,6 +715,7 @@ impl ProjectMenu {
                 }
                 self.select(i, page);
                 match button {
+                    RowButton::Settings => self.edit_settings(i),
                     RowButton::Rename => {
                         self.start_renaming(i);
                         None
@@ -562,6 +727,7 @@ impl ProjectMenu {
             MenuHit::Query
             | MenuHit::Panel
             | MenuHit::Field(_)
+            | MenuHit::Setting(_)
             | MenuHit::Kind(_)
             | MenuHit::Suggestion(_) => {
                 self.renaming = None;
@@ -618,11 +784,11 @@ impl ProjectMenu {
                 form.toggle_kind();
             }
             _ => match form.focus {
-                FormField::Name if type_in(&mut form.name, mods, sym, typed) => {
+                FormField::Name if form.name.key(mods, sym, typed).changed() => {
                     form.name_follows = form.name.trim().is_empty();
                     form.error = None;
                 }
-                FormField::Folder if type_in(&mut form.folder, mods, sym, typed) => {
+                FormField::Folder if form.folder.key(mods, sym, typed).changed() => {
                     form.folder_changed(self.home.as_deref());
                     form.suggest(&self.recent, self.home.as_deref());
                 }
@@ -672,7 +838,11 @@ impl ProjectMenu {
                 }
                 None
             }
-            MenuHit::Query | MenuHit::Panel | MenuHit::Entry(_) | MenuHit::Button(..) => None,
+            MenuHit::Query
+            | MenuHit::Panel
+            | MenuHit::Entry(_)
+            | MenuHit::Button(..)
+            | MenuHit::Setting(_) => None,
         }
     }
 
@@ -713,7 +883,7 @@ impl ProjectMenu {
     /// zenity gave back `dir` for the form's folder.
     fn browsed(&mut self, dir: &Path) {
         if let Some(form) = self.form.as_mut() {
-            form.folder = tilde(dir, self.home.as_deref());
+            form.folder.set(&tilde(dir, self.home.as_deref()));
             form.folder_changed(self.home.as_deref());
             form.close_suggestions();
         }
@@ -724,17 +894,29 @@ impl ProjectMenu {
     fn view(&self, page: usize, running: &HashMap<String, bool>) -> ProjectMenuView {
         if let Some(form) = &self.form {
             return ProjectMenuView {
-                query: String::new(),
+                query: Line::default(),
                 entries: Vec::new(),
                 selected: None,
                 hover: self.hover,
                 form: Some(form.view()),
+                settings: None,
                 hints: hints(&[
                     ("Tab", "next"),
                     ("Ctrl+O", "browse"),
                     ("Enter", "create"),
                     ("Esc", "back"),
                 ]),
+            };
+        }
+        if let Some(settings) = &self.settings {
+            return ProjectMenuView {
+                query: Line::default(),
+                entries: Vec::new(),
+                selected: None,
+                hover: self.hover,
+                form: None,
+                settings: Some(settings.view()),
+                hints: hints(&[("Tab", "next"), ("Enter", "save"), ("Esc", "back")]),
             };
         }
         let first = self.first_shown(page);
@@ -769,11 +951,7 @@ impl ProjectMenu {
                                 .renaming
                                 .as_ref()
                                 .filter(|r| r.id == *id)
-                                .map(|r| r.name.clone()),
-                            name_selected: self
-                                .renaming
-                                .as_ref()
-                                .is_some_and(|r| r.id == *id && r.whole),
+                                .map(|r| r.name.line()),
                             confirm_forget: self.confirm_forget.as_ref() == Some(id),
                         }
                     }
@@ -794,18 +972,33 @@ impl ProjectMenu {
                 ("Enter", "open"),
                 ("Ctrl+N", "new"),
                 ("Ctrl+R", "rename"),
+                ("Ctrl+E", "commands"),
                 ("Ctrl+S", "stop"),
                 ("Del", "forget"),
                 ("Esc", "close"),
             ])
         };
         ProjectMenuView {
-            query: self.query.clone(),
+            query: self.query.line(),
             entries,
             selected: self.selected.checked_sub(first).filter(|i| first + i < end),
             hover: self.hover,
             form: None,
+            settings: None,
             hints,
+        }
+    }
+}
+
+impl Settings {
+    /// What the form shows.
+    fn view(&self) -> SettingsView {
+        SettingsView {
+            name: self.name.clone(),
+            before: self.before.line(),
+            after: self.after.line(),
+            dir: self.dir.clone(),
+            focus: self.focus,
         }
     }
 }
@@ -814,8 +1007,8 @@ impl Form {
     /// An empty form, with `focus`.
     fn new(focus: FormField) -> Self {
         Self {
-            name: String::new(),
-            folder: String::new(),
+            name: TextField::default(),
+            folder: TextField::default(),
             kind: WorkspaceKind::Project,
             focus,
             name_follows: true,
@@ -857,7 +1050,7 @@ impl Form {
     /// The folder changed: the name follows it, if it still does.
     fn folder_changed(&mut self, home: Option<&Path>) {
         if self.name_follows {
-            self.name = basename(&self.folder, home);
+            self.name.set(&basename(&self.folder, home));
         }
         self.error = None;
     }
@@ -893,7 +1086,7 @@ impl Form {
     /// Fill the folder field with suggestion `s`.
     fn take_suggestion(&mut self, s: usize, home: Option<&Path>) {
         if let Some(folder) = self.suggestions.get(s) {
-            self.folder = folder.clone();
+            self.folder.set(folder);
             self.folder_changed(home);
         }
         self.close_suggestions();
@@ -907,8 +1100,8 @@ impl Form {
     /// What the form shows.
     fn view(&self) -> FormView {
         FormView {
-            name: self.name.clone(),
-            folder: self.folder.clone(),
+            name: self.name.line(),
+            folder: self.folder.line(),
             kind: self.kind,
             focus: self.focus,
             suggestions: self.suggestions.clone(),
@@ -922,35 +1115,6 @@ impl Form {
 /// one known to be stopped.
 fn can_stop(row: &ProjectRow) -> bool {
     !row.current && row.running != Some(false)
-}
-
-/// Edit `text` as `welcome` does: Backspace deletes a character, Ctrl+W (or
-/// Ctrl+Backspace) a word, Ctrl+U all of it, and a key that types a
-/// character adds it. `false` for any other key, which leaves it alone.
-fn type_in(text: &mut String, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> bool {
-    let ctrl = mods.ctrl;
-    let change: Box<dyn FnOnce(&mut String)> = match sym {
-        Keysym::BackSpace | Keysym::w if ctrl => Box::new(|text: &mut String| {
-            let word = text
-                .trim_end()
-                .rfind(char::is_whitespace)
-                .map_or(0, |i| i + 1);
-            text.truncate(word);
-        }),
-        Keysym::u if ctrl => Box::new(String::clear),
-        Keysym::BackSpace => Box::new(|text: &mut String| {
-            text.pop();
-        }),
-        _ => match typed
-            .key_char()
-            .filter(|c| !c.is_control() && !(ctrl || mods.alt || mods.logo))
-        {
-            Some(c) => Box::new(move |text: &mut String| text.push(c)),
-            None => return false,
-        },
-    };
-    change(text);
-    true
 }
 
 /// The folder `typed` names, `~` being `home`, and a relative one taken from
@@ -1009,7 +1173,7 @@ impl Gerdr {
     /// Open the project menu, and find out which projects' sessions run.
     pub fn open_project_menu(&mut self) {
         self.switcher = None;
-        self.stop_switcher_repeat();
+        self.stop_key_repeat();
         self.terminal_menu = false;
         self.menu_hover = None;
         self.project_menu = Some(ProjectMenu::new(home_dir()));
@@ -1062,6 +1226,28 @@ impl Gerdr {
             Outcome::Stop(id) => {
                 self.stop_project(&id);
                 self.refresh_project_menu();
+            }
+            Outcome::Settings(id) => {
+                let found = self.projects.project(&id).map(|p| {
+                    let dir = hooks::project_dir(p);
+                    (p.before_start.clone(), p.after_stop.clone(), dir)
+                });
+                if let (Some((before, after, dir)), Some(menu)) =
+                    (found, self.project_menu.as_mut())
+                {
+                    menu.open_settings(&id, &before, &after, &dir);
+                }
+            }
+            Outcome::SaveSettings {
+                id,
+                before,
+                after,
+                run,
+            } => {
+                self.set_project_commands(&id, before, after);
+                if run {
+                    self.run_start_commands(&id);
+                }
             }
             Outcome::Forget(id) => {
                 self.forget_project(&id);
@@ -1459,6 +1645,36 @@ mod tests {
     }
 
     #[test]
+    fn the_query_takes_editing_keys_and_leaves_the_rest_to_the_list() {
+        let mut m = menu(&["gerdr", "blog"]);
+        type_text(&mut m, "gx");
+        press(&mut m, Keysym::Left);
+        // With text after the caret, Delete edits the query.
+        assert_eq!(press(&mut m, Keysym::Delete), None);
+        assert_eq!(
+            (view(&m, 10).query.as_str(), view(&m, 10).query.caret),
+            ("g", 1)
+        );
+        assert_eq!(selected(&m, 10), "gerdr");
+        // Without, it is the selected project's.
+        press(&mut m, Keysym::Delete);
+        let confirming = view(&m, 10)
+            .entries
+            .iter()
+            .any(|e| matches!(e, MenuEntry::Project { confirm_forget, .. } if *confirm_forget));
+        assert!(confirming);
+        // So is End with the caret at the end, and Home at the start.
+        press(&mut m, Keysym::End);
+        let last = selected(&m, 10);
+        assert_ne!(last, "gerdr");
+        press(&mut m, Keysym::Home);
+        assert_eq!(view(&m, 10).query.caret, 0);
+        assert_eq!(selected(&m, 10), last);
+        press(&mut m, Keysym::Home);
+        assert_eq!(selected(&m, 10), "gerdr");
+    }
+
+    #[test]
     fn delete_twice_forgets_and_another_key_takes_it_back() {
         let mut m = menu(&["gerdr", "blog"]);
         press(&mut m, Keysym::Down);
@@ -1506,15 +1722,89 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_e_edits_a_projects_commands() {
+        let mut m = menu(&["gerdr", "blog"]);
+        assert_eq!(
+            chord(&mut m, ctrl(), Keysym::e),
+            Some(Outcome::Settings("gerdr".into()))
+        );
+        // The current project's too, and the button does the same.
+        press(&mut m, Keysym::Home);
+        assert_eq!(
+            chord(&mut m, ctrl(), Keysym::e),
+            Some(Outcome::Settings("aft".into()))
+        );
+        assert_eq!(
+            m.click(MenuHit::Button(4, RowButton::Settings), 10),
+            Some(Outcome::Settings("blog".into()))
+        );
+
+        m.open_settings("gerdr", "make up", "", Path::new("/work/gerdr"));
+        let settings = |m: &ProjectMenu| m.view(10, &HashMap::new()).settings.unwrap();
+        let shown = settings(&m);
+        assert_eq!(
+            (
+                shown.name.as_str(),
+                shown.before.as_str(),
+                shown.dir.as_str()
+            ),
+            ("gerdr", "make up", "/work/gerdr")
+        );
+        assert_eq!(shown.focus, SettingsField::Before);
+        type_text(&mut m, " -d");
+        press(&mut m, Keysym::Tab);
+        assert_eq!(settings(&m).focus, SettingsField::After);
+        type_text(&mut m, " make down ");
+        assert_eq!(
+            press(&mut m, Keysym::Return),
+            Some(Outcome::SaveSettings {
+                id: "gerdr".into(),
+                before: "make up -d".into(),
+                after: "make down".into(),
+                run: false,
+            })
+        );
+        // Back to the list.
+        assert!(m.view(10, &HashMap::new()).settings.is_none());
+        assert_eq!(selected(&m, 10), "blog");
+    }
+
+    #[test]
+    fn run_now_saves_and_runs_and_cancel_keeps_nothing() {
+        let mut m = menu(&["gerdr"]);
+        m.open_settings("gerdr", "", "", Path::new("/w"));
+        type_text(&mut m, "./up.sh");
+        assert_eq!(
+            m.click(MenuHit::Setting(SettingsField::Run), 10),
+            Some(Outcome::SaveSettings {
+                id: "gerdr".into(),
+                before: "./up.sh".into(),
+                after: String::new(),
+                run: true,
+            })
+        );
+        m.open_settings("gerdr", "", "", Path::new("/w"));
+        type_text(&mut m, "x");
+        // Back past Save and Run now to Cancel.
+        for _ in 0..3 {
+            press(&mut m, Keysym::ISO_Left_Tab);
+        }
+        assert_eq!(press(&mut m, Keysym::Return), None);
+        assert!(m.view(10, &HashMap::new()).settings.is_none());
+        m.open_settings("gerdr", "", "", Path::new("/w"));
+        assert_eq!(press(&mut m, Keysym::Escape), None);
+        assert!(m.view(10, &HashMap::new()).settings.is_none());
+        // Esc again closes the menu.
+        assert_eq!(press(&mut m, Keysym::Escape), Some(Outcome::Closed));
+    }
+
+    #[test]
     fn escape_backs_out_of_the_list_a_step_at_a_time() {
         let mut m = menu(&["gerdr"]);
         type_text(&mut m, "ge");
         press(&mut m, Keysym::Delete);
         assert_eq!(press(&mut m, Keysym::Escape), None);
-        assert_eq!(
-            (m.confirm_forget.as_deref(), m.query.as_str()),
-            (None, "ge")
-        );
+        assert_eq!((m.confirm_forget.as_deref(), &*m.query), (None, "ge"));
         assert_eq!(press(&mut m, Keysym::Escape), None);
         assert_eq!(m.query, "");
         assert_eq!(press(&mut m, Keysym::Escape), Some(Outcome::Closed));

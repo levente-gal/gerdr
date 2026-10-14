@@ -16,30 +16,39 @@
 //! screen while no project is shown. A click on a terminal pane's bar
 //! focuses the pane, and its buttons restart or stop what runs in it.
 
+use std::time::{Duration, Instant};
+
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
         KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
-        keyboard::{FilterResult, Keysym},
+        keyboard::{FilterResult, Keycode, Keysym, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, CursorIcon, MotionEvent},
     },
-    utils::SERIAL_COUNTER,
+    reexports::calloop::timer::{TimeoutAction, Timer},
+    utils::{Logical, Point, SERIAL_COUNTER},
 };
 
 use crate::{
-    Action, Drag, Gerdr, REORDER_START, Reorder, Reorderable, WorkspaceKind,
-    chrome::{self, TAB_STRIP_HEIGHT},
+    Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
+    WorkspaceKind,
+    chrome::{self, FieldSpot, TAB_STRIP_HEIGHT},
     home_dir,
     launch::Place,
     layout::Dir,
     project_menu, quit,
     switcher::Target,
+    text_field::{self, TextField},
     welcome,
 };
 
 const BTN_LEFT: u32 = 0x110;
+/// Presses closer together than this, in time and place, count as a
+/// double (or triple) click.
+const MULTI_CLICK: Duration = Duration::from_millis(400);
+const MULTI_CLICK_SLOP: f64 = 4.0;
 const BTN_MIDDLE: u32 = 0x112;
 
 /// What a key gerdr kept from the apps does, once the keyboard is free again.
@@ -55,7 +64,17 @@ enum Intercepted {
     Quit(quit::Outcome),
 }
 
-/// How far a touchpad scrolls the project menu's list by a row, in pixels.
+/// An overlay with text fields, which takes pastes (see `text_field`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    Welcome,
+    ProjectMenu,
+    /// The switcher of this serial: not one opened after it.
+    Switcher(u64),
+}
+
+/// How far a touchpad scrolls the project menu's or the switcher's list by
+/// a row, in pixels.
 const MENU_SCROLL_ROW: f64 = 40.0;
 
 /// Whether `action`, picked with the prefix, works over the welcome screen:
@@ -100,8 +119,8 @@ impl Gerdr {
                     time,
                     |state, mods, handle| {
                         if key_state == KeyState::Released {
-                            if state.switcher_repeat.is_some_and(|(held, _)| held == code) {
-                                state.stop_switcher_repeat();
+                            if state.key_repeat.is_some_and(|(held, _)| held == code) {
+                                state.stop_key_repeat();
                             }
                             if let Some(i) = state.suppressed_keys.iter().position(|k| *k == code) {
                                 state.suppressed_keys.remove(i);
@@ -121,6 +140,16 @@ impl Gerdr {
                             let out = state.quit_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Quit));
                         }
+                        // A paste into an overlay's text field: the
+                        // clipboard's text comes back as a key for it.
+                        if !state.prefix_armed
+                            && text_field::is_paste(mods, sym)
+                            && let Some(overlay) = state.text_overlay()
+                        {
+                            state.suppressed_keys.push(code);
+                            state.paste_clipboard(overlay);
+                            return FilterResult::Intercept(None);
+                        }
                         if state.welcome.is_some() {
                             state.suppressed_keys.push(code);
                             // The prefix works there too, for what needs no project.
@@ -133,7 +162,11 @@ impl Gerdr {
                                 state.prefix_armed = true;
                                 return FilterResult::Intercept(None);
                             }
-                            let out = state.welcome_key(mods, sym, handle.modified_sym());
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.welcome_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::Welcome));
                         }
                         if state.project_menu.is_some() {
@@ -148,14 +181,18 @@ impl Gerdr {
                                 state.prefix_armed = true;
                                 return FilterResult::Intercept(None);
                             }
-                            let out = state.project_menu_key(mods, sym, handle.modified_sym());
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.project_menu_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::ProjectMenu));
                         }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
                             let picked = state.switcher_key(mods, sym, typed);
-                            state.repeat_switcher_key(code, *mods, sym, typed);
+                            state.repeat_key(code, *mods, sym, typed, true);
                             return FilterResult::Intercept(
                                 picked.map(|(target, place)| Intercepted::Switch(target, place)),
                             );
@@ -184,16 +221,10 @@ impl Gerdr {
                         FilterResult::Forward
                     },
                 );
-                match action {
-                    Some(Some(Intercepted::Action(action))) => self.run_action(action),
-                    Some(Some(Intercepted::Switch(target, place))) => self.switch_to(target, place),
-                    Some(Some(Intercepted::Welcome(outcome))) => self.apply_welcome(outcome),
-                    Some(Some(Intercepted::ProjectMenu(outcome))) => {
-                        self.apply_project_menu(outcome)
-                    }
-                    Some(Some(Intercepted::Quit(outcome))) => self.apply_quit(outcome),
-                    _ => {}
+                if let Some(Some(intercepted)) = action {
+                    self.apply_intercepted(intercepted);
                 }
+                self.copy_from_field();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output_geo = self.space.output_geometry(&self.output).unwrap();
@@ -210,6 +241,9 @@ impl Gerdr {
                         let what = reorder.what;
                         self.reorder_to(what, pos);
                     }
+                }
+                if self.field_drag {
+                    self.drag_field(pos);
                 }
                 // An overlay takes the hover from everything under it.
                 let overlay =
@@ -244,7 +278,13 @@ impl Gerdr {
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
-                    let icon = if overlay {
+                    let over_field = (overlay || self.switcher.is_some())
+                        && self
+                            .field_spot()
+                            .is_some_and(|field| field.area.to_f64().contains(pos));
+                    let icon = if over_field {
+                        CursorIcon::Text
+                    } else if overlay {
                         CursorIcon::Default
                     } else if self.reorder.is_some_and(|r| r.moving) {
                         CursorIcon::Grabbing
@@ -277,6 +317,9 @@ impl Gerdr {
                 let state = event.state();
                 let location = pointer.current_location();
 
+                if state == ButtonState::Released {
+                    self.field_drag = false;
+                }
                 if state == ButtonState::Released && self.drag.take().is_some() {
                     // The final size, without Resizing, so every client applies it.
                     self.arrange();
@@ -328,17 +371,22 @@ impl Gerdr {
                     if self.welcome.is_some() {
                         if event.button_code() == BTN_LEFT {
                             self.welcome_click(location);
+                            self.press_field(location);
                         }
                         return;
                     }
                     if self.project_menu.is_some() {
                         if event.button_code() == BTN_LEFT {
                             self.project_menu_click(location);
+                            self.press_field(location);
                         }
                         return;
                     }
                     if self.switcher.is_some() {
                         self.switcher_click(location);
+                        if event.button_code() == BTN_LEFT {
+                            self.press_field(location);
+                        }
                         return;
                     }
                     if self.terminal_menu {
@@ -385,17 +433,21 @@ impl Gerdr {
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
-                // Nothing scrolls behind an overlay; the project menu's list
-                // moves a row per notch of the wheel, or per row's height
-                // scrolled on a touchpad.
-                if self.project_menu.is_some() {
+                // Nothing scrolls behind an overlay; the project menu's and
+                // the switcher's lists move a row per notch of the wheel, or
+                // per row's height scrolled on a touchpad.
+                if self.project_menu.is_some() || self.switcher.is_some() {
                     let rows = event
                         .amount_v120(Axis::Vertical)
                         .map(|v120| v120 / 120.0)
                         .or_else(|| event.amount(Axis::Vertical).map(|px| px / MENU_SCROLL_ROW))
                         .unwrap_or(0.0);
                     if rows != 0.0 {
-                        self.project_menu_scroll(rows);
+                        if self.project_menu.is_some() {
+                            self.project_menu_scroll(rows);
+                        } else {
+                            self.switcher_scroll(rows);
+                        }
                     }
                     return;
                 }
@@ -569,6 +621,232 @@ impl Gerdr {
             },
         );
         pointer.frame(self);
+    }
+
+    /// Do what a key gerdr kept from the apps asked for.
+    fn apply_intercepted(&mut self, intercepted: Intercepted) {
+        match intercepted {
+            Intercepted::Action(action) => self.run_action(action),
+            Intercepted::Switch(target, place) => self.switch_to(target, place),
+            Intercepted::Welcome(outcome) => self.apply_welcome(outcome),
+            Intercepted::ProjectMenu(outcome) => self.apply_project_menu(outcome),
+            Intercepted::Quit(outcome) => self.apply_quit(outcome),
+        }
+    }
+
+    /// The overlay with text fields that has the keyboard, if any: the quit
+    /// dialog, on top, has none.
+    fn text_overlay(&self) -> Option<Overlay> {
+        if self.quit.is_some() {
+            None
+        } else if self.welcome.is_some() {
+            Some(Overlay::Welcome)
+        } else if self.project_menu.is_some() {
+            Some(Overlay::ProjectMenu)
+        } else {
+            self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial))
+        }
+    }
+
+    /// The clipboard's text read for a paste into overlay `into`, if it
+    /// still has the keyboard: typed into its focused field as the key
+    /// `text_field::PASTE`, through its own key handling.
+    pub fn paste_text(&mut self, into: Overlay, text: &str) {
+        if self.text_overlay() != Some(into) {
+            return;
+        }
+        let mods = ModifiersState::default();
+        let out = text_field::pasting(text, |key| self.overlay_key(into, &mods, key, key));
+        if let Some(out) = out {
+            self.apply_intercepted(out);
+        }
+    }
+
+    /// A key for overlay `into`, through its own key handling.
+    fn overlay_key(
+        &mut self,
+        into: Overlay,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Intercepted> {
+        match into {
+            Overlay::Welcome => self.welcome_key(mods, sym, typed).map(Intercepted::Welcome),
+            Overlay::ProjectMenu => self
+                .project_menu_key(mods, sym, typed)
+                .map(Intercepted::ProjectMenu),
+            Overlay::Switcher(_) => self
+                .switcher_key(mods, sym, typed)
+                .map(|(target, place)| Intercepted::Switch(target, place)),
+        }
+    }
+
+    /// Where the text field with the keyboard is, in the overlay that has
+    /// it, and what it shows.
+    fn field_spot(&self) -> Option<FieldSpot> {
+        let (size, scale) = (self.output_size(), self.scale());
+        match self.text_overlay()? {
+            Overlay::Welcome => chrome::welcome_field(&self.welcome_view()?, size, scale),
+            Overlay::ProjectMenu => {
+                chrome::project_menu_field(&self.project_menu_view()?, size, scale)
+            }
+            Overlay::Switcher(_) => Some(chrome::switcher_field(
+                &self.switcher_view()?,
+                self.content_rect(),
+                scale,
+            )),
+        }
+    }
+
+    /// The text field with the keyboard, in the overlay that has it.
+    fn field_mut(&mut self) -> Option<&mut TextField> {
+        match self.text_overlay()? {
+            Overlay::Welcome => self.welcome.as_mut()?.field_mut(),
+            Overlay::ProjectMenu => self.project_menu.as_mut()?.field_mut(),
+            Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
+        }
+    }
+
+    /// A left press at `pos` over an overlay, once the overlay took it (a
+    /// click on a field focuses it): in the text field with the keyboard,
+    /// it puts the caret there (Shift: the selection reaches there), and
+    /// holding it drags a selection; a second press in a row selects a
+    /// word, a third all of it.
+    fn press_field(&mut self, pos: Point<f64, Logical>) {
+        let Some(field) = self
+            .field_spot()
+            .filter(|field| field.area.to_f64().contains(pos))
+        else {
+            self.field_clicks = None;
+            return;
+        };
+        let at = self.chrome.caret_at(&field, pos.x, self.scale());
+        let now = Instant::now();
+        let count = match self.field_clicks {
+            Some((when, from, count))
+                if now.duration_since(when) < MULTI_CLICK
+                    && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
+                    && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
+            {
+                count + 1
+            }
+            _ => 1,
+        };
+        self.field_clicks = Some((now, pos, count));
+        let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
+        if let Some(field) = self.field_mut() {
+            field.click(at, extend, count);
+        }
+        self.field_drag = count == 1;
+    }
+
+    /// The pointer moved to `pos` holding a press in a text field: the
+    /// selection reaches the character there.
+    fn drag_field(&mut self, pos: Point<f64, Logical>) {
+        let Some(field) = self.field_spot() else {
+            self.field_drag = false;
+            return;
+        };
+        let at = self.chrome.caret_at(&field, pos.x, self.scale());
+        if let Some(field) = self.field_mut() {
+            field.drag_to(at);
+        }
+    }
+
+    /// Give the clipboard what a text field copied, if one did.
+    fn copy_from_field(&mut self) {
+        if let Some(text) = text_field::take_copied() {
+            self.copy_text(text);
+        }
+    }
+
+    /// Repeat a key held over an overlay, as long as it is held, the way
+    /// the apps' keyboards do: the host sends gerdr only the press and the
+    /// release. `took` is whether a text field took it. In the switcher any
+    /// key but Esc and Enter repeats; over the welcome screen and the
+    /// project menu, where keys act on projects (Delete forgets one), only
+    /// the arrows and what a text field takes, until it takes it no more.
+    pub fn repeat_key(
+        &mut self,
+        code: Keycode,
+        mods: ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        took: bool,
+    ) {
+        self.stop_key_repeat();
+        let Some(overlay) = self.text_overlay() else {
+            return;
+        };
+        let switcher = matches!(overlay, Overlay::Switcher(_));
+        let moves = matches!(
+            sym,
+            Keysym::Up | Keysym::Down | Keysym::KP_Up | Keysym::KP_Down
+        );
+        let repeats = if switcher {
+            !matches!(sym, Keysym::Escape | Keysym::Return | Keysym::KP_Enter)
+        } else {
+            took || moves
+        };
+        if !repeats || text_field::is_paste(&mods, sym) {
+            return;
+        }
+        let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
+        let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
+        let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
+            if state.text_overlay() != Some(overlay) {
+                state.key_repeat = None;
+                return TimeoutAction::Drop;
+            }
+            text_field::took_key();
+            let out = state.overlay_key(overlay, &mods, sym, typed);
+            let took = text_field::took_key();
+            if let Some(out) = out {
+                state.apply_intercepted(out);
+            }
+            state.copy_from_field();
+            if !(switcher || took || moves) {
+                state.key_repeat = None;
+                return TimeoutAction::Drop;
+            }
+            TimeoutAction::ToDuration(interval)
+        });
+        self.key_repeat = repeat.ok().map(|token| (code, token));
+    }
+
+    /// Stop repeating the key held over an overlay.
+    pub fn stop_key_repeat(&mut self) {
+        if let Some((_, token)) = self.key_repeat.take() {
+            self.loop_handle.remove(token);
+        }
+    }
+
+    /// Release every key still down, as the host window loses focus: winit
+    /// drops the releases that follow, so a key held while leaving (Super
+    /// of a host shortcut) would stay down for gerdr and its apps. A held
+    /// Super makes Backspace Super+Backspace, which clears Claude's input,
+    /// and keeps the prefix from matching.
+    pub fn release_held_keys(&mut self) {
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let time = self.start_time.elapsed().as_millis() as u32;
+        for code in keyboard.pressed_keys() {
+            keyboard.input::<(), _>(
+                self,
+                code,
+                KeyState::Released,
+                SERIAL_COUNTER.next_serial(),
+                time,
+                |state, _, _| {
+                    // A key gerdr kept from the apps has no press to undo there.
+                    if let Some(i) = state.suppressed_keys.iter().position(|k| *k == code) {
+                        state.suppressed_keys.remove(i);
+                        return FilterResult::Intercept(());
+                    }
+                    FilterResult::Forward
+                },
+            );
+        }
+        self.suppressed_keys.clear();
     }
 }
 

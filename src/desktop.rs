@@ -197,6 +197,121 @@ fn exec_args(exec: &str, name: &str, path: &Path) -> Option<Vec<String>> {
     Some(args)
 }
 
+/// The command that opens `text` when it is one URL (`scheme://…`): the
+/// desktop's default app for the scheme, as `mimeapps.list` names it, or
+/// `xdg-open` when none is installed. `None` for anything else.
+pub fn url_command(text: &str) -> Option<String> {
+    let url = text.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme_ok = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+    if !scheme_ok || rest.is_empty() || url.contains(char::is_whitespace) {
+        return None;
+    }
+    let mime = format!("x-scheme-handler/{}", scheme.to_ascii_lowercase());
+    let app = default_app(&mime).and_then(|path| {
+        let entry = desktop_entry(&std::fs::read_to_string(&path).ok()?);
+        let name = entry.get("Name").map(|name| unescape(name));
+        let args = exec_args(
+            &unescape(entry.get("Exec")?),
+            &name.unwrap_or_default(),
+            &path,
+        )?;
+        installed(args.first()?).then(|| {
+            args.iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    });
+    let app = app.unwrap_or_else(|| "xdg-open".to_owned());
+    Some(format!("{app} {}", shell_quote(url)))
+}
+
+/// The desktop entry of the default app for `mime`: the first installed
+/// one the `mimeapps.list` files name, the one to look in first first.
+fn default_app(mime: &str) -> Option<PathBuf> {
+    let apps: Vec<PathBuf> = data_dirs()
+        .into_iter()
+        .map(|dir| dir.join("applications"))
+        .collect();
+    let mut names: Vec<String> = current_desktops()
+        .into_iter()
+        .map(|desktop| format!("{desktop}-mimeapps.list"))
+        .collect();
+    names.push("mimeapps.list".to_owned());
+    let lists = config_dirs()
+        .into_iter()
+        .chain(apps.iter().cloned())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)));
+    for list in lists {
+        let Ok(text) = std::fs::read_to_string(&list) else {
+            continue;
+        };
+        let mut in_group = false;
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_group = line == "[Default Applications]";
+                continue;
+            }
+            let Some((key, ids)) = line.split_once('=').filter(|_| in_group) else {
+                continue;
+            };
+            if key.trim() != mime {
+                continue;
+            }
+            let found = ids
+                .split(';')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .flat_map(|id| apps.iter().map(move |dir| dir.join(id)))
+                .find(|path| path.is_file());
+            if found.is_some() {
+                return found;
+            }
+        }
+    }
+    None
+}
+
+/// The XDG config folders, the one to look in first first.
+fn config_dirs() -> Vec<PathBuf> {
+    xdg_dirs("XDG_CONFIG_HOME", ".config", "XDG_CONFIG_DIRS", "/etc/xdg")
+}
+
+/// The XDG data folders, the one to look in first first.
+fn data_dirs() -> Vec<PathBuf> {
+    xdg_dirs(
+        "XDG_DATA_HOME",
+        ".local/share",
+        "XDG_DATA_DIRS",
+        "/usr/local/share:/usr/share",
+    )
+}
+
+/// The folders of an XDG base directory kind, the one to look in first
+/// first: the user's (`home_var`, else `home_suffix` under the home folder),
+/// then the system's (`dirs_var`, colon-separated, else `default_dirs`);
+/// absolute ones only, each once.
+fn xdg_dirs(home_var: &str, home_suffix: &str, dirs_var: &str, default_dirs: &str) -> Vec<PathBuf> {
+    let absolute = |dir: &PathBuf| dir.is_absolute();
+    let home = std::env::var_os(home_var)
+        .map(PathBuf::from)
+        .filter(absolute);
+    let home = home.or_else(|| Some(home_dir()?.join(home_suffix)));
+    let dirs = std::env::var(dirs_var).ok().filter(|dirs| !dirs.is_empty());
+    let dirs = dirs.unwrap_or_else(|| default_dirs.to_owned());
+    let mut all: Vec<PathBuf> = home
+        .into_iter()
+        .chain(dirs.split(':').map(PathBuf::from).filter(absolute))
+        .collect();
+    let mut seen = HashSet::new();
+    all.retain(|dir| seen.insert(dir.clone()));
+    all
+}
+
 /// `arg` as one word for `sh`.
 pub fn shell_quote(arg: &str) -> String {
     let plain = !arg.is_empty()
@@ -211,7 +326,7 @@ pub fn shell_quote(arg: &str) -> String {
 }
 
 /// Whether `program` is an executable file: at that path, or in `$PATH`.
-fn installed(program: &str) -> bool {
+pub fn installed(program: &str) -> bool {
     let executable = |path: &Path| {
         path.metadata()
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -221,26 +336,6 @@ fn installed(program: &str) -> bool {
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path).any(|dir| executable(&dir.join(program)))
-}
-
-/// The XDG data folders, the one to look in first first.
-fn data_dirs() -> Vec<PathBuf> {
-    let absolute = |dir: &PathBuf| dir.is_absolute();
-    let home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(absolute);
-    let home = home.or_else(|| Some(home_dir()?.join(".local/share")));
-    let dirs = std::env::var("XDG_DATA_DIRS")
-        .ok()
-        .filter(|dirs| !dirs.is_empty());
-    let dirs = dirs.unwrap_or_else(|| "/usr/local/share:/usr/share".into());
-    let mut all: Vec<PathBuf> = home
-        .into_iter()
-        .chain(dirs.split(':').map(PathBuf::from).filter(absolute))
-        .collect();
-    let mut seen = HashSet::new();
-    all.retain(|dir| seen.insert(dir.clone()));
-    all
 }
 
 /// The host's desktops, lower case, for `OnlyShowIn` and `NotShowIn`.
@@ -275,7 +370,7 @@ fn locales() -> Vec<String> {
 mod tests {
     use std::path::Path;
 
-    use super::{app, exec_args, shell_quote, unescape};
+    use super::{app, exec_args, shell_quote, unescape, url_command};
     use crate::icons::IconIndex;
 
     fn args(exec: &str) -> Option<Vec<String>> {
@@ -300,6 +395,26 @@ mod tests {
             args(flatpak).unwrap().last().map(String::as_str),
             Some("org.mozilla.firefox")
         );
+    }
+
+    #[test]
+    fn urls() {
+        let url = "https://example.com/a?b=c&d";
+        assert!(
+            url_command(url)
+                .unwrap()
+                .ends_with(" 'https://example.com/a?b=c&d'")
+        );
+        for text in [
+            "ls -la",
+            "echo https://x.y",
+            "https://",
+            "://x",
+            "1x://y",
+            "/a/b",
+        ] {
+            assert_eq!(url_command(text), None, "{text}");
+        }
     }
 
     #[test]
