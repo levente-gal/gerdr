@@ -129,10 +129,17 @@ fn help() -> Help {
 }
 
 fn switcher() -> SwitcherView {
-    let row = |icon, label: &str, detail: &str, hits: &[usize]| SwitcherRow {
+    let row = |icon,
+               label: &str,
+               detail: &str,
+               kind: &'static str,
+               section: Option<&'static str>,
+               hits: &[usize]| SwitcherRow {
         icon,
         label: label.into(),
         detail: detail.into(),
+        kind,
+        section,
         label_hits: hits.to_vec(),
         detail_hits: Vec::new(),
     };
@@ -144,19 +151,38 @@ fn switcher() -> SwitcherView {
                 ItemIcon::Workspace(WorkspaceKind::Project),
                 "gerdr",
                 "~/Personal/gerdr · main",
+                "workspace",
+                Some("Workspaces"),
                 &[0, 1, 2],
             ),
-            row(ItemIcon::Tab, "2 zsh", "gerdr", &[]),
+            row(ItemIcon::Tab, "2 zsh", "gerdr", "tab", Some("Tabs"), &[]),
             row(
                 ItemIcon::Agent(AgentStatus::Working),
                 "claude",
                 "gerdr",
+                "agent",
+                Some("Agents"),
                 &[],
             ),
-            row(ItemIcon::Folder, "~/Personal/herdr", "folder", &[]),
-            row(ItemIcon::App, "firefox", "firefox http://localhost", &[]),
+            row(
+                ItemIcon::Folder,
+                "~/Personal/herdr",
+                "folder",
+                "folder",
+                Some("Recent folders"),
+                &[],
+            ),
+            row(
+                ItemIcon::App,
+                "firefox",
+                "firefox http://localhost",
+                "app",
+                None,
+                &[],
+            ),
         ],
         selected: Some(0),
+        hover: Some(3),
     }
 }
 
@@ -313,7 +339,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xbbe172db050ef7d7, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
-        0x517d325aca9d2875, // switcher
+        0xbecc6c3736626091, // switcher
         0x2339adcf1ef00249, // welcome
         0x59378f4fb455dd74, // quit
         0xdf352140e5a10a7e, // project_menu
@@ -327,7 +353,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x68ae94c90fb4c936, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
-        0x505dae5090ad952a, // switcher
+        0x45784693663a03df, // switcher
         0xe0573455650e0f53, // welcome
         0xca6aac6e936af23a, // quit
         0x2c0d505acdca739a, // project_menu
@@ -341,7 +367,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x6028c8d59ce91601, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
-        0xe323c364f69d5042, // switcher
+        0xe665a2357ee54f13, // switcher
         0x50c5d783b4da69ca, // welcome
         0x9141f1eb6dfa4384, // quit
         0xa02bd03173402f8c, // project_menu
@@ -355,7 +381,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xd1b4f4a4a80352ee, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
-        0x1b96323b30d65bb4, // switcher
+        0x05fad9e0a3cb7d27, // switcher
         0x195335c49651f7c6, // welcome
         0xea36deb588723e15, // quit
         0xc2172f68d48557aa, // project_menu
