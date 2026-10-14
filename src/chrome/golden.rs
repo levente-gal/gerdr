@@ -101,7 +101,11 @@ fn pane_bar() -> PaneBarView {
         can_restart: true,
         can_stop: false,
         focused: true,
+        lit: true,
         hover: Some(BarButton::Restart),
+        visible: true,
+        alpha: 1.0,
+        slide: 0,
     }
 }
 
@@ -412,7 +416,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0x67589784b798d683, // sidebar
         0x13e27886dba77bed, // tab_strip
-        0xbbe172db050ef7d7, // pane_bar
+        0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
         0xbecc6c3736626091, // switcher
@@ -426,7 +430,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0xc564686cbb8d9f53, // sidebar
         0x10cad43cd88fc070, // tab_strip
-        0x68ae94c90fb4c936, // pane_bar
+        0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
         0x45784693663a03df, // switcher
@@ -440,7 +444,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0x05f69fc665a353b7, // sidebar
         0x13d9d07a680d567f, // tab_strip
-        0x6028c8d59ce91601, // pane_bar
+        0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
         0xe665a2357ee54f13, // switcher
@@ -454,7 +458,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0x07d08fe1e4e286dc, // sidebar
         0xaebc10244cf8b919, // tab_strip
-        0xd1b4f4a4a80352ee, // pane_bar
+        0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
         0x05fad9e0a3cb7d27, // switcher
