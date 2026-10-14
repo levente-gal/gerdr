@@ -101,9 +101,45 @@ pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     Some((score, hits))
 }
 
+/// An item `rank` kept: how well the query matched it and where (see
+/// `score`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ranked<T> {
+    pub item: T,
+    pub score: i32,
+    pub hits: Vec<usize>,
+}
+
+/// The `items` that `query` matches (all of them for an empty query), the
+/// best match first; among equal matches the one with the higher `weight`
+/// (its frecency), and among those the earlier one. `text` is what the
+/// query is matched against.
+pub fn rank<T>(
+    query: &str,
+    items: impl IntoIterator<Item = T>,
+    text: impl Fn(&T) -> String,
+    weight: impl Fn(&T) -> f32,
+) -> Vec<Ranked<T>> {
+    let mut ranked: Vec<(f32, Ranked<T>)> = items
+        .into_iter()
+        .filter_map(|item| {
+            let (score, hits) = score(query, &text(&item))?;
+            let weight = weight(&item);
+            Some((weight, Ranked { item, score, hits }))
+        })
+        .collect();
+    // A stable sort: equal scores and weights keep the items' order.
+    ranked.sort_by(|(wa, a), (wb, b)| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| wb.partial_cmp(wa).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    ranked.into_iter().map(|(_, r)| r).collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::score;
+    use super::{rank, score};
 
     fn hits(query: &str, text: &str) -> Option<Vec<usize>> {
         score(query, text).map(|(_, hits)| hits)
@@ -133,5 +169,33 @@ mod tests {
         let s = |query, text| score(query, text).unwrap().0;
         assert!(s("ger", "gerdr") > s("ger", "gxexr"));
         assert!(s("ab", "a_b") > s("ab", "xaxb"));
+    }
+
+    #[test]
+    fn ranks_by_match_then_weight_then_order() {
+        let items = [
+            ("gerdr", 1.0),
+            ("herdr", 5.0),
+            ("gxexr", 0.0),
+            ("gerdr-old", 1.0),
+        ];
+        fn names<'a>(ranked: Vec<super::Ranked<&'a (&'a str, f32)>>) -> Vec<&'a str> {
+            ranked.into_iter().map(|r| r.item.0).collect()
+        }
+        let by = |query| rank(query, items.iter(), |i| i.0.into(), |i| i.1);
+        // Nothing typed: the weight orders, ties keep their order.
+        assert_eq!(names(by("")), ["herdr", "gerdr", "gerdr-old", "gxexr"]);
+        // "ger" matches the two gerdrs equally well: the weight can't split
+        // them, so the earlier stays first; the gapped match comes last.
+        let ranked = by("ger");
+        assert_eq!(
+            ranked.iter().map(|r| r.item.0).collect::<Vec<_>>(),
+            ["gerdr", "gerdr-old", "gxexr"]
+        );
+        assert_eq!(ranked[0].hits, [0, 1, 2]);
+        assert!(ranked[0].score > ranked[2].score);
+        // An equal match with more weight goes first.
+        let ranked = rank("erdr", items.iter(), |i| i.0.into(), |i| i.1);
+        assert_eq!(names(ranked), ["herdr", "gerdr", "gerdr-old"]);
     }
 }

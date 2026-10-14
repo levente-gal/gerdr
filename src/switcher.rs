@@ -1,15 +1,18 @@
 //! The switcher: everything gerdr can switch to (the workspaces, their tabs,
 //! the coding agents, the other projects, the apps named in the config file,
-//! and the folders zoxide knows), narrowed down by fuzzy search as the user
-//! types. Enter
-//! switches to the selected item; a folder no workspace has yet opens as a
-//! project, an app launches into a split. zoxide is optional: without it
-//! there are just no folders.
+//! the folders zoxide knows, and gerdr's own commands), in sections, narrowed
+//! down by fuzzy search as the user types. Enter switches to the selected
+//! item; a folder no workspace has yet opens as a project, an app launches
+//! into a split. zoxide is optional: without it there are just no folders.
+//!
+//! Within a section, what was switched to often and recently comes first
+//! (see `frecency`); with a query, how well it matches comes first and the
+//! frecency breaks ties. The selection starts on the best match overall.
 //!
 //! The same panel is the run prompt: what is typed is a command to launch
-//! into a split or a new tab, offered first (second, under an app whose name
-//! starts with it), among the apps named in the config file, the commands
-//! typed before and the apps installed on the system.
+//! into a split or a new tab, offered first, over the apps named in the
+//! config file, the apps installed on the system and the commands typed
+//! before; an app whose name starts with what is typed is selected instead.
 //!
 //! Alt+Enter launches the picked app or command in a new tab, wherever
 //! Enter would launch it.
@@ -22,6 +25,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::SystemTime,
 };
 
 use smithay::{
@@ -34,12 +38,15 @@ use crate::{
     Gerdr, WorkspaceKind,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
-    fuzzy, home_dir,
+    desktop, fuzzy, home_dir,
     launch::{self, Place},
-    paths::tilde,
+    paths::display,
     projects::Project,
     text_field::{Edit, TextField},
 };
+
+/// How long a path in a row's detail may get.
+const DETAIL_CHARS: usize = 60;
 
 /// What an item switches to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +63,8 @@ pub enum Target {
     Welcome,
     /// The key help, kept open.
     Shortcuts,
+    /// The config file, to edit.
+    Settings,
     /// A folder, opened as a project unless a workspace has it already.
     Folder(PathBuf),
     /// The command of an app named in the config file or installed, to
@@ -66,13 +75,97 @@ pub enum Target {
     Command(String),
 }
 
+impl Target {
+    /// The section it is listed under.
+    fn section(&self) -> Section {
+        match self {
+            Target::Workspace(_) => Section::Workspaces,
+            Target::Tab(..) => Section::Tabs,
+            Target::Agent(_) => Section::Agents,
+            Target::Project(_) => Section::Projects,
+            Target::App(_) => Section::Apps,
+            Target::Folder(_) => Section::Folders,
+            Target::Welcome | Target::Shortcuts | Target::Settings | Target::Command(_) => {
+                Section::Commands
+            }
+        }
+    }
+
+    /// What kind of thing it is, for the pill on its row.
+    fn kind(&self) -> &'static str {
+        match self {
+            Target::Workspace(_) => "workspace",
+            Target::Tab(..) => "tab",
+            Target::Agent(_) => "agent",
+            Target::Project(_) => "project",
+            Target::App(_) => "app",
+            Target::Folder(_) => "folder",
+            Target::Welcome | Target::Shortcuts | Target::Settings | Target::Command(_) => {
+                "command"
+            }
+        }
+    }
+}
+
+/// The sections of the list, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Section {
+    /// The run prompt's typed command.
+    Run,
+    Workspaces,
+    Tabs,
+    Agents,
+    Projects,
+    Apps,
+    Folders,
+    Commands,
+}
+
+impl Section {
+    /// Its heading.
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Run => "Run",
+            Section::Workspaces => "Workspaces",
+            Section::Tabs => "Tabs",
+            Section::Agents => "Agents",
+            Section::Projects => "Projects",
+            Section::Apps => "Apps",
+            Section::Folders => "Recent folders",
+            Section::Commands => "Commands",
+        }
+    }
+}
+
 /// One thing to switch to, as listed.
 pub struct Item {
     pub icon: ItemIcon,
     pub label: String,
-    /// More about it, shown dimmer after the label, and searched too.
+    /// More about it, shown under the label, and searched too.
     pub detail: String,
+    pub section: Section,
+    /// Its frecency: what orders it among the items that match alike.
+    pub weight: f32,
     pub target: Target,
+}
+
+impl Item {
+    /// An item in its target's section, never switched to yet.
+    fn new(
+        icon: ItemIcon,
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        target: Target,
+    ) -> Self {
+        Self {
+            icon,
+            label: label.into(),
+            detail: detail.into(),
+            section: target.section(),
+            weight: 0.0,
+            target,
+        }
+    }
 }
 
 /// An item the query matches, with the positions (in chars) of the matched
@@ -109,6 +202,10 @@ pub struct Switcher {
     scroll: usize,
     /// The wheel's turn not yet a whole row, in rows.
     wheel: f64,
+    /// The shown row the pointer is over.
+    hover: Option<usize>,
+    /// How many sections the items span, for the room the headings take.
+    sections: usize,
     /// The installed apps' icons by program, for the typed command.
     icons: HashMap<String, AppIcon>,
 }
@@ -126,6 +223,8 @@ impl Switcher {
             selected: 0,
             scroll: 0,
             wheel: 0.0,
+            hover: None,
+            sections: 1,
             icons: HashMap::new(),
         };
         switcher.set_items(items);
@@ -140,6 +239,10 @@ impl Switcher {
             // The typed command's place; `refilter` fills it in.
             items.insert(0, typed_command("", &self.icons, self.place));
         }
+        let mut sections: Vec<Section> = items.iter().map(|item| item.section).collect();
+        sections.sort();
+        sections.dedup();
+        self.sections = sections.len().max(1);
         self.items = items;
         self.refilter();
         if let Some(i) = picked.and_then(|target| {
@@ -151,62 +254,76 @@ impl Switcher {
         }
     }
 
-    /// Match the items against the query again, and select the best: in
-    /// the run prompt, the typed command, unless the best is an app whose
-    /// name starts with it.
+    /// Match the items against the query again, in their sections, and
+    /// select the best match. In the run prompt, the typed command goes
+    /// first and is selected, unless the best match is an app whose name
+    /// starts with it.
     fn refilter(&mut self) {
         let command = self.query.trim().to_owned();
         let typed = self.run.then(|| Target::Command(command.clone()));
         if self.run {
             self.items[0] = typed_command(&command, &self.icons, self.place);
         }
-        let mut found: Vec<(i32, Match)> = self
+        let candidates = self
             .items
             .iter()
             .enumerate()
             .skip(usize::from(self.run))
             // The typed command, run before, is listed once: first.
-            .filter(|(_, item)| Some(&item.target) != typed.as_ref())
-            .filter_map(|(i, item)| {
-                let (score, hits) =
-                    fuzzy::score(&self.query, &format!("{} {}", item.label, item.detail))?;
+            .filter(|(_, item)| Some(&item.target) != typed.as_ref());
+        let ranked = fuzzy::rank(
+            &self.query,
+            candidates,
+            |(_, item)| format!("{} {}", item.label, item.detail),
+            |(_, item)| item.weight,
+        );
+        let best = ranked.first().map(|r| r.item.0);
+        let mut found: Vec<Match> = ranked
+            .into_iter()
+            .map(|r| {
+                let (i, item) = r.item;
                 let n = item.label.chars().count();
-                let (label, detail): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| *h < n);
+                let (label, detail): (Vec<_>, Vec<_>) = r.hits.into_iter().partition(|h| *h < n);
                 // The query has no whitespace, so nothing lands on the space between.
                 let detail = detail.into_iter().map(|h| h - n - 1).collect();
-                Some((
-                    score,
-                    Match {
-                        item: i,
-                        label,
-                        detail,
-                    },
-                ))
+                Match {
+                    item: i,
+                    label,
+                    detail,
+                }
             })
             .collect();
-        // A stable sort: equal scores keep the items' order.
-        found.sort_by_key(|(score, _)| Reverse(*score));
-        self.matches = found.into_iter().map(|(_, m)| m).collect();
+        // A stable sort: within a section the ranking stays.
+        found.sort_by_key(|m| self.items[m.item].section);
+        let at = |found: &[Match], item: usize| found.iter().position(|m| m.item == item);
+        let named = |item: usize| {
+            let item = &self.items[item];
+            matches!(item.target, Target::App(_))
+                && item
+                    .label
+                    .to_lowercase()
+                    .starts_with(&command.to_lowercase())
+        };
+        let mut selected = 0;
         if self.run && !command.is_empty() {
-            let named = |m: &Match| {
-                let item = &self.items[m.item];
-                matches!(item.target, Target::App(_))
-                    && item
-                        .label
-                        .to_lowercase()
-                        .starts_with(&command.to_lowercase())
-            };
-            let at = usize::from(self.matches.first().is_some_and(named));
-            self.matches.insert(
-                at,
+            found.insert(
+                0,
                 Match {
                     item: 0,
                     label: Vec::new(),
                     detail: Vec::new(),
                 },
             );
+            if let Some(best) = best.filter(|best| named(*best)) {
+                selected = at(&found, best).unwrap_or(0);
+            }
+        } else if !command.is_empty()
+            && let Some(best) = best
+        {
+            selected = at(&found, best).unwrap_or(0);
         }
-        self.selected = 0;
+        self.matches = found;
+        self.selected = selected;
         self.scroll = 0;
     }
 
@@ -278,31 +395,40 @@ impl Switcher {
     /// The rows shown, `page` at most.
     fn view(&self, page: usize) -> SwitcherView {
         let scroll = scrolled(self.scroll, self.selected, page);
-        let rows = self.matches[scroll.min(self.matches.len())..]
+        let mut last: Option<Section> = None;
+        let rows: Vec<SwitcherRow> = self.matches[scroll.min(self.matches.len())..]
             .iter()
             .take(page)
             .map(|m| {
                 let item = &self.items[m.item];
+                // A heading over the first row shown and wherever the
+                // section changes.
+                let section = (last != Some(item.section)).then(|| item.section.label());
+                last = Some(item.section);
                 SwitcherRow {
                     icon: item.icon.clone(),
                     label: item.label.clone(),
                     detail: item.detail.clone(),
+                    kind: item.target.kind(),
+                    section,
                     label_hits: m.label.clone(),
                     detail_hits: m.detail.clone(),
                 }
             })
             .collect();
         let selected = (!self.matches.is_empty()).then(|| self.selected - scroll);
+        let hover = self.hover.filter(|h| *h < rows.len());
         let hint = match (self.run, self.place) {
             (true, Place::Split) => "Command to run in a split (Alt+Enter: new tab)…",
             (true, Place::Tab) => "Command to run in a new tab…",
-            (false, _) => "Workspace, tab, agent, project, app or folder…",
+            (false, _) => "Workspace, tab, agent, project, app, folder or command…",
         };
         SwitcherView {
             query: self.query.line(),
             hint,
             rows,
             selected,
+            hover,
         }
     }
 
@@ -320,12 +446,12 @@ fn app_item(app: &launch::App, icons: &HashMap<String, AppIcon>) -> Item {
         .icon
         .clone()
         .map_or_else(|| command_icon(&app.command, icons), ItemIcon::Picture);
-    Item {
+    Item::new(
         icon,
-        label: app.name.clone(),
-        detail: app.detail.clone(),
-        target: Target::App(app.command.clone()),
-    }
+        app.name.clone(),
+        app.detail.clone(),
+        Target::App(app.command.clone()),
+    )
 }
 
 /// The icon of the installed app `command` starts, if any.
@@ -341,12 +467,41 @@ fn typed_command(command: &str, icons: &HashMap<String, AppIcon>, place: Place) 
         Place::Split => "run in a split",
         Place::Tab => "run in a new tab",
     };
-    Item {
-        icon: command_icon(command, icons),
-        label: command.into(),
-        detail: detail.into(),
-        target: Target::Command(command.into()),
-    }
+    let mut item = Item::new(
+        command_icon(command, icons),
+        command,
+        detail,
+        Target::Command(command.into()),
+    );
+    item.section = Section::Run;
+    item
+}
+
+/// gerdr's config file: `$XDG_CONFIG_HOME/gerdr/config.toml`, by default
+/// `~/.config/gerdr/config.toml` (as `config` reads it).
+fn settings_file() -> PathBuf {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home_dir().unwrap_or_default().join(".config"));
+    config.join("gerdr/config.toml")
+}
+
+/// The frecency key of `target`, given the folder of the workspace it
+/// names; none for what is always listed last.
+fn frecency_key(
+    target: &Target,
+    workspace_dir: impl Fn(usize) -> Option<PathBuf>,
+) -> Option<String> {
+    Some(match target {
+        Target::Workspace(w) => format!("workspace:{}", workspace_dir(*w)?.display()),
+        Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
+        Target::Agent(pane_id) => format!("agent:{pane_id}"),
+        Target::Project(id) => format!("project:{id}"),
+        Target::Folder(dir) => format!("folder:{}", dir.display()),
+        Target::App(command) | Target::Command(command) => format!("app:{command}"),
+        Target::Welcome | Target::Shortcuts | Target::Settings => return None,
+    })
 }
 
 /// The other projects than `current`, the most recently used first, and a
@@ -362,20 +517,20 @@ fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
         .map(|project| {
             let n = project.workspaces.len();
             let plural = if n == 1 { "" } else { "s" };
-            Item {
-                icon: ItemIcon::Workspace(WorkspaceKind::Project),
-                label: project.name.clone(),
-                detail: format!("project · {n} workspace{plural}"),
-                target: Target::Project(project.id.clone()),
-            }
+            Item::new(
+                ItemIcon::Workspace(WorkspaceKind::Project),
+                project.name.clone(),
+                format!("project · {n} workspace{plural}"),
+                Target::Project(project.id.clone()),
+            )
         })
         .collect();
-    items.push(Item {
-        icon: ItemIcon::Folder,
-        label: "Projects…".into(),
-        detail: "find, create, manage".into(),
-        target: Target::Welcome,
-    });
+    items.push(Item::new(
+        ItemIcon::Folder,
+        "Projects…",
+        "find, create, manage",
+        Target::Welcome,
+    ));
     items
 }
 
@@ -399,6 +554,14 @@ impl Gerdr {
     /// `place`, and look for installed apps again meanwhile.
     pub fn open_run_prompt(&mut self, place: Place) {
         self.project_menu = None;
+        // The commands run before there was frecency start it off, once.
+        let history: Vec<String> = launch::history()
+            .iter()
+            .map(|command| format!("app:{command}"))
+            .collect();
+        if !history.is_empty() {
+            self.frecency.seed(&history, SystemTime::now());
+        }
         let mut switcher = Switcher::new(Vec::new(), true, place);
         switcher.icons = self.program_icons();
         switcher.set_items(self.run_items());
@@ -415,19 +578,53 @@ impl Gerdr {
         }
     }
 
-    /// What the run prompt offers: the apps named in the config file, the
-    /// commands typed before, then the installed apps.
+    /// What the run prompt offers: the apps named in the config file and
+    /// the installed apps, then the commands typed before.
     fn run_items(&self) -> Vec<Item> {
         let icons = self.program_icons();
         let mut items = self.app_items();
-        items.extend(launch::history().into_iter().map(|command| Item {
-            icon: command_icon(&command, &icons),
-            label: command.clone(),
-            detail: "run before".into(),
-            target: Target::Command(command),
-        }));
         items.extend(self.installed_apps.iter().map(|app| app_item(app, &icons)));
+        items.extend(launch::history().into_iter().map(|command| {
+            Item::new(
+                command_icon(&command, &icons),
+                command.clone(),
+                "run before",
+                Target::Command(command),
+            )
+        }));
+        self.weighed(items)
+    }
+
+    /// `items` with their frecency.
+    fn weighed(&self, mut items: Vec<Item>) -> Vec<Item> {
+        let now = SystemTime::now();
+        for item in &mut items {
+            if let Some(key) = self.frecency_key(&item.target) {
+                item.weight = self.frecency.score(&key, now);
+            }
+        }
         items
+    }
+
+    /// The frecency key of `target` (see `frecency`).
+    fn frecency_key(&self, target: &Target) -> Option<String> {
+        frecency_key(target, |w| Some(self.workspaces.get(w)?.dir.clone()))
+    }
+
+    /// The pointer moved to `pos` while the switcher is open: the row under
+    /// it lights up.
+    pub fn switcher_motion(&mut self, pos: Point<f64, Logical>) {
+        let Some(view) = self.switcher_view() else {
+            return;
+        };
+        let layout = chrome::switcher_geometry(&view, self.content_rect());
+        let hover = layout
+            .rows
+            .iter()
+            .position(|row| row.to_f64().contains(pos));
+        if let Some(switcher) = self.switcher.as_mut() {
+            switcher.hover = hover;
+        }
     }
 
     /// The installed apps' icons, by the program each starts.
@@ -449,7 +646,8 @@ impl Gerdr {
     /// Bring the open switcher's items up to date.
     pub fn refresh_switcher(&mut self) {
         if let Some(mut switcher) = self.switcher.take_if(|s| !s.run) {
-            switcher.set_items(self.switcher_items());
+            let items = self.switcher_items();
+            switcher.set_items(items);
             self.switcher = Some(switcher);
         }
     }
@@ -497,21 +695,29 @@ impl Gerdr {
         let Some(switcher) = self.switcher.take() else {
             return;
         };
-        let shown = switcher.view(page).rows.len();
-        let (panel, _, rows) = chrome::switcher_layout(shown, self.content_rect());
-        match rows.iter().position(|row| row.to_f64().contains(pos)) {
+        let layout = chrome::switcher_geometry(&switcher.view(page), self.content_rect());
+        match layout
+            .rows
+            .iter()
+            .position(|row| row.to_f64().contains(pos))
+        {
             Some(row) => {
                 if let Some(target) = switcher.row_target(row, page).cloned() {
                     self.switch_to(target, switcher.place);
                 }
             }
-            None if panel.to_f64().contains(pos) => self.switcher = Some(switcher),
+            None if layout.panel.to_f64().contains(pos) => self.switcher = Some(switcher),
             None => {}
         }
     }
 
-    /// Switch to `target`; an app or a command launches in `place`.
+    /// Switch to `target`; an app or a command launches in `place`. It
+    /// counts for the frecency.
     pub fn switch_to(&mut self, target: Target, place: Place) {
+        if let Some(key) = self.frecency_key(&target) {
+            self.frecency.touch(&key);
+            self.frecency.save();
+        }
         match target {
             Target::Workspace(w) => self.switch_workspace(w),
             Target::Tab(w, t) => {
@@ -531,6 +737,11 @@ impl Gerdr {
             }
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
+            Target::Settings => {
+                let path = settings_file();
+                let open = format!("xdg-open {}", desktop::shell_quote(&path.to_string_lossy()));
+                self.launch(&open, place);
+            }
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),
@@ -544,7 +755,8 @@ impl Gerdr {
     }
 
     fn switcher_page(&self) -> usize {
-        chrome::switcher_page(self.content_rect())
+        let sections = self.switcher.as_ref().map_or(1, |s| s.sections);
+        chrome::switcher_page(self.content_rect(), sections)
     }
 
     /// The apps named in the config file, with the icons of the installed
@@ -554,9 +766,10 @@ impl Gerdr {
         self.apps.iter().map(|app| app_item(app, &icons)).collect()
     }
 
-    /// Everything to switch to: each workspace followed by its tabs (when it
-    /// has more than one), the agents, the other projects and the welcome
-    /// screen, the apps, then zoxide's folders not open yet.
+    /// Everything to switch to: the workspaces, their tabs (of those with
+    /// more than one), the agents, the other projects, the apps, zoxide's
+    /// folders not open yet, then gerdr's own commands: the project menu,
+    /// the shortcuts and the settings file. The sections sort them.
     fn switcher_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
         let home = home_dir();
@@ -566,26 +779,28 @@ impl Gerdr {
             .zip(self.workspace_views())
             .enumerate()
         {
-            let detail: Vec<String> = [Some(tilde(&ws.dir, home.as_deref())), view.branch]
-                .into_iter()
-                .flatten()
-                .collect();
-            let target = Target::Workspace(w);
-            items.push(Item {
-                icon: ItemIcon::Workspace(ws.kind),
-                label: ws.name.clone(),
-                detail: detail.join(" · "),
-                target,
-            });
+            let detail: Vec<String> = [
+                Some(display(&ws.dir, home.as_deref(), DETAIL_CHARS)),
+                view.branch,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            items.push(Item::new(
+                ItemIcon::Workspace(ws.kind),
+                ws.name.clone(),
+                detail.join(" · "),
+                Target::Workspace(w),
+            ));
             if tabs.len() > 1 {
                 for (t, tab) in tabs.into_iter().enumerate() {
                     let detail = format!("{} · tab {}", ws.name, t + 1);
-                    items.push(Item {
-                        icon: ItemIcon::Tab,
-                        label: tab.title,
+                    items.push(Item::new(
+                        ItemIcon::Tab,
+                        tab.title,
                         detail,
-                        target: Target::Tab(w, t),
-                    });
+                        Target::Tab(w, t),
+                    ));
                 }
             }
         }
@@ -604,12 +819,12 @@ impl Gerdr {
                     .map(str::trim)
                     .filter(|t| !t.is_empty()),
             );
-            items.push(Item {
-                icon: ItemIcon::Agent(agent.agent_status),
-                label: agent.label().into(),
-                detail: detail.join(" · "),
-                target: Target::Agent(agent.pane_id.clone()),
-            });
+            items.push(Item::new(
+                ItemIcon::Agent(agent.agent_status),
+                agent.label(),
+                detail.join(" · "),
+                Target::Agent(agent.pane_id.clone()),
+            ));
         }
         items.extend(project_items(
             &self.projects.projects,
@@ -626,14 +841,26 @@ impl Gerdr {
                 || dir.display().to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            items.push(Item {
-                icon: ItemIcon::Folder,
+            items.push(Item::new(
+                ItemIcon::Folder,
                 label,
-                detail: tilde(dir, home.as_deref()),
-                target: Target::Folder(dir.clone()),
-            });
+                display(dir, home.as_deref(), DETAIL_CHARS),
+                Target::Folder(dir.clone()),
+            ));
         }
-        items
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Shortcuts",
+            "every key binding, kept on screen",
+            Target::Shortcuts,
+        ));
+        items.push(Item::new(
+            ItemIcon::Settings,
+            "Settings file",
+            display(&settings_file(), home.as_deref(), DETAIL_CHARS),
+            Target::Settings,
+        ));
+        self.weighed(items)
     }
 
     /// Take in the folders zoxide knows, which `query_zoxide` reads off the
@@ -712,12 +939,7 @@ mod tests {
     use super::*;
 
     fn item(label: &str, detail: &str, w: usize) -> Item {
-        Item {
-            icon: ItemIcon::Tab,
-            label: label.into(),
-            detail: detail.into(),
-            target: Target::Workspace(w),
-        }
+        Item::new(ItemIcon::Tab, label, detail, Target::Workspace(w))
     }
 
     fn type_in(switcher: &mut Switcher, text: &str) {
@@ -759,6 +981,166 @@ mod tests {
         };
         switcher.key(&ctrl, Keysym::u, Keysym::u, 5);
         assert_eq!(labels(&switcher).len(), 3);
+    }
+
+    #[test]
+    fn sections_group_the_rows_under_headings() {
+        let mut switcher = Switcher::new(
+            vec![
+                Item::new(ItemIcon::App, "firefox", "", Target::App("firefox".into())),
+                item("gerdr", "~/Personal/gerdr", 0),
+                Item::new(ItemIcon::Folder, "herdr", "", Target::Folder("/h".into())),
+                Item::new(ItemIcon::Command, "Shortcuts", "", Target::Shortcuts),
+                item("aft", "~/Work/aft", 1),
+                Item::new(ItemIcon::Folder, "Projects…", "", Target::Welcome),
+            ],
+            false,
+            Place::Split,
+        );
+        let headed = |switcher: &Switcher| -> Vec<(String, &'static str, Option<&'static str>)> {
+            switcher
+                .view(10)
+                .rows
+                .into_iter()
+                .map(|row| (row.label, row.kind, row.section))
+                .collect()
+        };
+        assert_eq!(
+            headed(&switcher),
+            [
+                ("gerdr".to_string(), "workspace", Some("Workspaces")),
+                ("aft".to_string(), "workspace", None),
+                ("firefox".to_string(), "app", Some("Apps")),
+                ("herdr".to_string(), "folder", Some("Recent folders")),
+                ("Shortcuts".to_string(), "command", Some("Commands")),
+                ("Projects…".to_string(), "command", None),
+            ]
+        );
+        assert_eq!(switcher.sections, 4);
+        // Scrolled into a section, the first row shown still has its heading.
+        switcher.scroll_by(1, 2);
+        let rows = switcher.view(2).rows;
+        assert_eq!(rows[0].section, Some("Workspaces"));
+        assert_eq!(rows[1].section, Some("Apps"));
+        // A query keeps the sections; the selection goes to the best match.
+        type_in(&mut switcher, "sho");
+        let view = switcher.view(10);
+        assert_eq!(view.rows[0].section, Some("Commands"));
+        assert_eq!(view.selected, Some(0));
+    }
+
+    #[test]
+    fn frecency_orders_a_section_and_breaks_ties() {
+        let weighed = |label: &str, w: usize, weight: f32| {
+            let mut item = item(label, "", w);
+            item.weight = weight;
+            item
+        };
+        let mut switcher = Switcher::new(
+            vec![
+                weighed("alpha", 0, 1.0),
+                weighed("beta", 1, 5.0),
+                weighed("gamma", 2, 2.0),
+                weighed("delta", 3, 2.0),
+                weighed("tablet", 4, 9.0),
+                Item::new(
+                    ItemIcon::App,
+                    "alphabet",
+                    "",
+                    Target::App("alphabet".into()),
+                ),
+            ],
+            false,
+            Place::Split,
+        );
+        let labels = |switcher: &Switcher| -> Vec<String> {
+            switcher
+                .view(6)
+                .rows
+                .into_iter()
+                .map(|row| row.label)
+                .collect()
+        };
+        // Nothing typed: the weight orders, equal weights keep their order.
+        assert_eq!(
+            labels(&switcher),
+            ["tablet", "beta", "gamma", "delta", "alpha", "alphabet"]
+        );
+        // "a" matches every row; the word start ("alpha") wins over the
+        // "a" inside the others, which the weight then orders.
+        type_in(&mut switcher, "a");
+        assert_eq!(
+            labels(&switcher),
+            ["alpha", "tablet", "beta", "gamma", "delta", "alphabet"]
+        );
+        assert_eq!(switcher.view(6).selected, Some(0));
+        // "abet" is whole in "alphabet" and scattered in "tablet": the
+        // better match in the later section is selected, though the
+        // heavier workspace is listed first.
+        type_in(&mut switcher, "bet");
+        assert_eq!(labels(&switcher), ["tablet", "alphabet"]);
+        assert_eq!(switcher.picked(), Some(&Target::App("alphabet".into())));
+        // Equal matches ("et" whole in "tablet", "beta" and "alphabet"):
+        // the weight picks the heaviest.
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        switcher.key(&ctrl, Keysym::u, Keysym::u, 6);
+        type_in(&mut switcher, "et");
+        assert_eq!(labels(&switcher), ["tablet", "beta", "delta", "alphabet"]);
+        assert_eq!(switcher.picked(), Some(&Target::Workspace(4)));
+    }
+
+    #[test]
+    fn hover_names_a_row_shown() {
+        let mut switcher = Switcher::new(
+            (0..3).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        switcher.hover = Some(1);
+        assert_eq!(switcher.view(5).hover, Some(1));
+        switcher.hover = Some(7);
+        assert_eq!(switcher.view(5).hover, None);
+    }
+
+    #[test]
+    fn frecency_keys_name_the_target() {
+        let dir = |w: usize| (w == 0).then(|| PathBuf::from("/home/x/gerdr"));
+        let key = |t: &Target| frecency_key(t, dir);
+        assert_eq!(
+            key(&Target::Workspace(0)).as_deref(),
+            Some("workspace:/home/x/gerdr")
+        );
+        assert_eq!(key(&Target::Workspace(3)), None);
+        assert_eq!(
+            key(&Target::Tab(0, 2)).as_deref(),
+            Some("tab:/home/x/gerdr:2")
+        );
+        assert_eq!(
+            key(&Target::App("imv a".into())).as_deref(),
+            Some("app:imv a")
+        );
+        assert_eq!(
+            key(&Target::Command("imv a".into())).as_deref(),
+            Some("app:imv a")
+        );
+        assert_eq!(
+            key(&Target::Folder("/tmp/x".into())).as_deref(),
+            Some("folder:/tmp/x")
+        );
+        assert_eq!(
+            key(&Target::Project("aft".into())).as_deref(),
+            Some("project:aft")
+        );
+        assert_eq!(
+            key(&Target::Agent("p1".into())).as_deref(),
+            Some("agent:p1")
+        );
+        assert_eq!(key(&Target::Welcome), None);
+        assert_eq!(key(&Target::Shortcuts), None);
+        assert_eq!(key(&Target::Settings), None);
     }
 
     #[test]
@@ -874,18 +1256,14 @@ mod tests {
 
     #[test]
     fn run_prompt_offers_the_typed_command_first() {
-        let command = |c: &str| Item {
-            icon: ItemIcon::App,
-            label: c.into(),
-            detail: "run before".into(),
-            target: Target::Command(c.into()),
-        };
-        let app = Item {
-            icon: ItemIcon::App,
-            label: "browser".into(),
-            detail: "firefox".into(),
-            target: Target::App("firefox".into()),
-        };
+        let command =
+            |c: &str| Item::new(ItemIcon::App, c, "run before", Target::Command(c.into()));
+        let app = Item::new(
+            ItemIcon::App,
+            "browser",
+            "firefox",
+            Target::App("firefox".into()),
+        );
         let mut switcher = Switcher::new(
             vec![app, command("imv a.png"), command("imv")],
             true,
@@ -947,12 +1325,9 @@ mod tests {
     }
 
     #[test]
-    fn run_prompt_puts_a_named_app_first() {
-        let app = |name: &str, command: &str| Item {
-            icon: ItemIcon::App,
-            label: name.into(),
-            detail: String::new(),
-            target: Target::App(command.into()),
+    fn run_prompt_selects_a_named_app() {
+        let app = |name: &str, command: &str| {
+            Item::new(ItemIcon::App, name, "", Target::App(command.into()))
         };
         let mut switcher = Switcher::new(
             vec![
@@ -963,7 +1338,14 @@ mod tests {
             Place::Split,
         );
         type_in(&mut switcher, "fi");
-        assert_eq!(labels(&switcher)[..2], ["Files", "fi"]);
+        // The typed command stays first, under its own heading; the app
+        // named with it is what Enter picks.
+        assert_eq!(labels(&switcher), ["fi", "Files", "Firefox"]);
+        let view = switcher.view(5);
+        assert_eq!(view.rows[0].section, Some("Run"));
+        assert_eq!(view.rows[1].section, Some("Apps"));
+        assert_eq!(view.rows[2].section, None);
+        assert_eq!(view.selected, Some(1));
         type_in(&mut switcher, "l");
         assert_eq!(
             switcher.picked(),
