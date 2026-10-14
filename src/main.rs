@@ -914,6 +914,8 @@ pub struct Gerdr {
     pub rename: Option<Rename>,
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
+    /// Where each pane bar stands between hidden and shown.
+    pub bar_states: pane_control::BarStates,
 
     pub socket_name: OsString,
     /// Zed's data dir, shared by all workspaces so they run in one Zed process.
@@ -3277,7 +3279,7 @@ impl Gerdr {
                 for (id, rect) in tab.shown_rects(area) {
                     // A terminal's bar takes the top of its place.
                     let rect = if tab.has_bar(id) {
-                        chrome::pane_bar_rects(rect).1
+                        chrome::pane_bar_rects_shown(rect, self.pane_bar_shown(tab, id)).1
                     } else {
                         rect
                     };
@@ -4127,7 +4129,7 @@ impl Gerdr {
                 .into_iter()
                 .find(|(id, _)| *id == focused)?;
             Some(if tab.has_bar(id) {
-                chrome::pane_bar_rects(rect).1
+                chrome::pane_bar_rects_shown(rect, self.pane_bar_shown(tab, id)).1
             } else {
                 rect
             })
@@ -4369,6 +4371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_press: None,
         rename: None,
         frecency: Frecency::load(),
+        bar_states: pane_control::BarStates::default(),
         socket_name: socket_name.clone(),
         zed_data,
         children: Vec::new(),

@@ -26,7 +26,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, LazyLock, Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -641,11 +641,9 @@ impl Gerdr {
         )
     }
 
-    /// Where the bars stand between hidden and shown. A static until
-    /// `Gerdr` carries it (see the handoff): there is one `Gerdr`.
-    fn bar_states(&self) -> &'static BarStates {
-        static STATES: LazyLock<BarStates> = LazyLock::new(BarStates::default);
-        &STATES
+    /// Where the bars stand between hidden and shown.
+    fn bar_states(&self) -> &BarStates {
+        &self.bar_states
     }
 
     /// Whether the bar of pane `id` of `tab` takes room over its window:

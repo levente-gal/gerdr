@@ -162,6 +162,8 @@ pub struct Chrome {
     spinner: Cached<(u32, Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
+    /// The strip along the focused pane's top edge.
+    focus_strip: Cached<(Size<i32, Logical>, Theme, f64)>,
     /// The red outlines of every hit rect, while `debug_hits`.
     hits: Cached<(Vec<Rect>, Size<i32, Logical>, f64)>,
 }
@@ -194,6 +196,7 @@ impl Chrome {
             placeholders: Vec::new(),
             spinner: Cached::default(),
             pane_bars: Vec::new(),
+            focus_strip: Cached::default(),
             hits: Cached::default(),
         }
     }
@@ -423,18 +426,30 @@ impl Chrome {
             parts.push((buffer, rect.loc, rect.size, 1.0));
         }
 
-        // The pane bars sit on the apps, under everything else.
+        // The strip marking the focused pane, then the pane bars, both on
+        // the apps and under everything else.
+        if let Some(pane) = view.focused_pane {
+            let strip = focus_strip_rect(pane);
+            if strip.size.w > 0 && strip.size.h > 0 {
+                let buffer = self
+                    .focus_strip
+                    .get((strip.size, theme, scale), |(size, ..)| {
+                        focus_strip(*size, scale, theme.palette())
+                    });
+                parts.push((buffer, strip.loc, strip.size, 1.0));
+            }
+        }
         self.pane_bars
             .resize_with(view.pane_bars.len(), Cached::default);
         for (cached, bar) in self.pane_bars.iter_mut().zip(view.pane_bars) {
-            let (loc, size) = (bar.rect.loc, bar.rect.size);
+            let (loc, size, alpha) = bar.placement();
             if size.w <= 0 || size.h <= 0 {
                 continue;
             }
-            let buffer = cached.get((bar, theme, scale), |(bar, ..)| {
+            let buffer = cached.get((bar.still(), theme, scale), |(bar, ..)| {
                 painter.pane_bar(bar, scale, theme.palette())
             });
-            parts.push((buffer, loc, size, 1.0));
+            parts.push((buffer, loc, size, alpha));
         }
 
         // The sidebar and the tab strip.
@@ -674,7 +689,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend([shift(tab), shift(close)]);
     }
     rects.extend([shift(plus), shift(chevron), shift(theme_toggle(strip_w))]);
-    for bar in &view.pane_bars {
+    for bar in view.pane_bars.iter().filter(|bar| bar.visible) {
         rects.push(bar.rect);
         rects.extend(pane_bar_buttons(bar.rect).map(|(_, rect)| rect));
     }

@@ -18,8 +18,6 @@ pub const BAR_REVEAL: i32 = 8;
 /// and back as it hides: its whole height.
 pub const BAR_SLIDE: i32 = PANE_BAR_HEIGHT;
 /// The strip along the top edge of the focused pane: this high.
-// Drawn once `Chrome::elements` emits it (see the handoff).
-#[allow(dead_code)]
 pub const FOCUS_STRIP: i32 = 2;
 
 /// A pane's place split in two: its bar on top, and the rest for its
@@ -66,7 +64,6 @@ pub fn pointer_reveals(pane: Rect, shown: bool, pos: Point<f64, Logical>) -> boo
 
 /// Where the strip marking the focused pane goes: along the top edge of
 /// `pane` (the pane's client rect), never taller than the pane.
-#[allow(dead_code)]
 pub fn focus_strip_rect(pane: Rect) -> Rect {
     Rectangle::new(
         pane.loc,
@@ -75,7 +72,6 @@ pub fn focus_strip_rect(pane: Rect) -> Rect {
 }
 
 /// The strip marking the focused pane, `size` big: a line in the accent.
-#[allow(dead_code)]
 pub fn focus_strip(size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryRenderBuffer {
     let mut c = Canvas::new(physical(size, scale));
     c.fill(0, 0, c.w, c.h, p.accent);
