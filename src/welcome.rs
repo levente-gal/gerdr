@@ -12,7 +12,7 @@
 //! out one step at a time: the name, the forgetting, the filter, then the
 //! screen itself, if a project is behind it.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -23,7 +23,7 @@ use crate::{
     Gerdr,
     chrome::{self, ProjectRow, WelcomeHit, WelcomeView},
     herdr,
-    project_list::{self, scrolled},
+    project_list::{self, Hover, scrolled, squeeze_detail},
     projects,
     text_field::{Edit, TextField},
 };
@@ -38,16 +38,17 @@ pub struct Welcome {
     query: TextField,
     /// The projects, by id, most recently used first.
     projects: Vec<(String, ProjectRow)>,
-    /// The projects `query` matches (indices into `projects`), best first.
-    matches: Vec<usize>,
+    /// The projects `query` matches (indices into `projects`), best first,
+    /// each with the characters matched in "name detail".
+    matches: Vec<(usize, Vec<usize>)>,
     /// The selected match; `None` when the button is.
     selected: Option<usize>,
     /// The match selected before the button was, for Tab to go back to.
     last_row: usize,
     /// The first match shown.
     scroll: usize,
-    /// What the pointer is over, in view rows.
-    pub hover: Option<WelcomeHit>,
+    /// What the pointer is over, in view rows, and its pill fading in.
+    hover: Option<Hover<WelcomeHit>>,
     /// The new project's name typed so far, while asking for it.
     naming: Option<TextField>,
     /// The project Delete was pressed on once, by id.
@@ -84,11 +85,19 @@ impl Welcome {
     fn set_projects(&mut self, projects: Vec<(String, ProjectRow)>) {
         let picked = self.picked().map(str::to_owned);
         let was = self.selected;
-        self.projects = projects;
+        self.projects = projects
+            .into_iter()
+            .map(|(id, row)| {
+                let detail = squeeze_detail(&row.detail);
+                (id, ProjectRow { detail, ..row })
+            })
+            .collect();
         self.refilter();
-        if let Some(i) =
-            picked.and_then(|id| self.matches.iter().position(|&m| self.projects[m].0 == id))
-        {
+        if let Some(i) = picked.and_then(|id| {
+            self.matches
+                .iter()
+                .position(|(m, _)| self.projects[*m].0 == id)
+        }) {
             self.selected = Some(i);
         } else if let Some(was) = was
             && !self.matches.is_empty()
@@ -101,10 +110,7 @@ impl Welcome {
     /// Match the projects against the query again (by name, then detail),
     /// and select the best match, or the button if none.
     fn refilter(&mut self) {
-        self.matches = project_list::matches(&self.query, &self.projects)
-            .into_iter()
-            .map(|(i, _)| i)
-            .collect();
+        self.matches = project_list::matches(&self.query, &self.projects);
         self.selected = (!self.matches.is_empty()).then_some(0);
         self.last_row = 0;
         self.scroll = 0;
@@ -112,7 +118,7 @@ impl Welcome {
 
     /// The selected project's id.
     fn picked(&self) -> Option<&str> {
-        let m = self.matches.get(self.selected?)?;
+        let (m, _) = self.matches.get(self.selected?)?;
         Some(&self.projects[*m].0)
     }
 
@@ -175,7 +181,7 @@ impl Welcome {
                 }
             }
             Keysym::Delete | Keysym::KP_Delete if self.naming.is_none() => {
-                let &m = self.selected.and_then(|i| self.matches.get(i))?;
+                let &(m, _) = self.selected.and_then(|i| self.matches.get(i))?;
                 let (id, row) = &self.projects[m];
                 if row.current {
                     // The project shown behind can't be forgotten.
@@ -247,8 +253,9 @@ impl Welcome {
         scroll.min(self.matches.len().saturating_sub(page))
     }
 
-    /// The matches shown, `page` at most, by index into `projects`.
-    fn shown(&self, page: usize) -> &[usize] {
+    /// The matches shown, `page` at most, by index into `projects` with
+    /// their hits.
+    fn shown(&self, page: usize) -> &[(usize, Vec<usize>)] {
         let first = self.first_shown(page);
         let end = (first + page).min(self.matches.len());
         &self.matches[first..end]
@@ -256,7 +263,7 @@ impl Welcome {
 
     /// The id of shown row `row`.
     fn row_id(&self, row: usize, page: usize) -> Option<&str> {
-        let m = self.shown(page).get(row)?;
+        let (m, _) = self.shown(page).get(row)?;
         Some(&self.projects[*m].0)
     }
 
@@ -269,27 +276,36 @@ impl Welcome {
         }
     }
 
-    /// What is shown, with the parts gerdr knows filled in: `running` says
-    /// whose sessions run, by id.
+    /// The pointer is over `hit` at `now`.
+    fn set_hover(&mut self, hit: Option<WelcomeHit>, now: Instant) {
+        self.hover = Hover::moved(self.hover, hit, now);
+    }
+
+    /// What is shown at `now`, with the parts gerdr knows filled in:
+    /// `running` says whose sessions run, by id; `quit_keys` is what quits
+    /// gerdr, for the bar at the bottom.
     fn view(
         &self,
         page: usize,
         greeting: String,
         note: Option<String>,
         running: &HashMap<String, bool>,
+        quit_keys: Option<String>,
+        now: Instant,
     ) -> WelcomeView {
         let first = self.first_shown(page);
         let shown = self.shown(page);
         let rows = shown
             .iter()
-            .map(|&m| {
-                let (id, row) = &self.projects[m];
+            .map(|(m, _)| {
+                let (id, row) = &self.projects[*m];
                 ProjectRow {
                     running: running.get(id).copied().or(row.running),
                     ..row.clone()
                 }
             })
             .collect();
+        let hits = shown.iter().map(|(_, hits)| hits.clone()).collect();
         let selected = self
             .selected
             .filter(|_| self.naming.is_none())
@@ -298,7 +314,7 @@ impl Welcome {
         let confirm_forget = self
             .confirm_forget
             .as_ref()
-            .and_then(|id| shown.iter().position(|&m| &self.projects[m].0 == id));
+            .and_then(|id| shown.iter().position(|(m, _)| &self.projects[*m].0 == id));
         let subtitle = if self.projects.is_empty() {
             "Start your first project."
         } else {
@@ -309,11 +325,15 @@ impl Welcome {
             subtitle: subtitle.into(),
             query: self.query.line(),
             rows,
+            hits,
             selected,
-            hover: self.hover,
+            hover: self.hover.map(|h| h.hit),
+            hover_alpha: self.hover.map_or(0, |h| h.alpha(now)),
             naming: self.naming.as_ref().map(TextField::line),
             confirm_forget,
             note,
+            in_app: self.in_app,
+            quit_keys,
         }
     }
 }
@@ -406,7 +426,8 @@ impl Gerdr {
         let page = self.welcome_page();
         let size = self.output_size();
         if let Some(welcome) = self.welcome.as_mut() {
-            welcome.hover = welcome_hit(welcome, size, page, pos);
+            let hit = welcome_hit(welcome, size, page, pos);
+            welcome.set_hover(hit, Instant::now());
         }
     }
 
@@ -421,7 +442,21 @@ impl Gerdr {
         let note = welcome
             .herdr_missing
             .then(|| "herdr isn't installed — projects won't keep running".into());
-        Some(welcome.view(self.welcome_page(), greeting, note, &self.running))
+        // The prefix and the key after it that quit, for the bar at the bottom.
+        let help = self.keymap.help();
+        let quit_keys = help
+            .rows
+            .iter()
+            .find(|(_, label)| label == "quit")
+            .map(|(keys, _)| format!("{} {keys}", help.prefix));
+        Some(welcome.view(
+            self.welcome_page(),
+            greeting,
+            note,
+            &self.running,
+            quit_keys,
+            Instant::now(),
+        ))
     }
 
     fn welcome_page(&self) -> usize {
@@ -437,7 +472,8 @@ fn welcome_hit(
     pos: Point<f64, Logical>,
 ) -> Option<WelcomeHit> {
     let shown = welcome.shown(page).len();
-    let layout = chrome::welcome_layout(size, shown, welcome.naming.is_some());
+    let layout =
+        chrome::welcome_layout(size, shown, welcome.naming.is_some(), welcome.herdr_missing);
     if let Some(row) = layout.rows.iter().position(|r| r.to_f64().contains(pos)) {
         return Some(WelcomeHit::Row(row));
     }
@@ -490,12 +526,19 @@ mod tests {
         }
     }
 
+    fn view(w: &Welcome) -> WelcomeView {
+        w.view(
+            3,
+            String::new(),
+            None,
+            &HashMap::new(),
+            None,
+            Instant::now(),
+        )
+    }
+
     fn names(w: &Welcome) -> Vec<String> {
-        w.view(3, String::new(), None, &HashMap::new())
-            .rows
-            .into_iter()
-            .map(|r| r.name)
-            .collect()
+        view(w).rows.into_iter().map(|r| r.name).collect()
     }
 
     #[test]
@@ -516,6 +559,34 @@ mod tests {
     }
 
     #[test]
+    fn the_view_carries_the_matched_characters_and_the_hover() {
+        let mut w = welcome(&["services-api", "gerdr"]);
+        type_in(&mut w, "ger");
+        let v = view(&w);
+        assert_eq!(names(&w), ["gerdr"]);
+        assert_eq!(v.hits, vec![vec![0, 1, 2]]);
+        assert!(v.in_app && v.quit_keys.is_none());
+        // The hover pill fades in from when the pointer got there.
+        let start = Instant::now();
+        w.set_hover(Some(WelcomeHit::Row(0)), start);
+        let at = |w: &Welcome, now| {
+            let v = w.view(3, String::new(), None, &HashMap::new(), None, now);
+            (v.hover, v.hover_alpha)
+        };
+        assert_eq!(at(&w, start), (Some(WelcomeHit::Row(0)), 0));
+        assert_eq!(
+            at(&w, start + crate::anim::FAST),
+            (Some(WelcomeHit::Row(0)), 16)
+        );
+        w.set_hover(None, start);
+        assert_eq!(at(&w, start), (None, 0));
+        // A long path in the detail is squeezed before it is matched.
+        let long = "/tmp/claude-1000/-home-me-Personal-gerdr/8078/scratch/gh";
+        w.set_projects(vec![("x".into(), row("x", &format!("2 repos · {long}")))]);
+        assert_eq!(w.projects[0].1.detail, "2 repos · /tmp/…/8078/scratch/gh");
+    }
+
+    #[test]
     fn enter_picks_or_names_from_the_query() {
         let mut w = welcome(&["alpha", "beta"]);
         press(&mut w, Keysym::Down);
@@ -524,10 +595,7 @@ mod tests {
             Some(Outcome::Pick("beta".into()))
         );
         type_in(&mut w, "zeta");
-        assert_eq!(
-            w.view(3, String::new(), None, &HashMap::new()).selected,
-            None
-        );
+        assert_eq!(view(&w).selected, None);
         assert_eq!(press(&mut w, Keysym::Return), None);
         assert_eq!(w.naming.as_deref(), Some("zeta"));
         type_in(&mut w, " x");
@@ -561,11 +629,7 @@ mod tests {
         let mut w = welcome(&["alpha", "beta"]);
         press(&mut w, Keysym::Down);
         assert_eq!(press(&mut w, Keysym::Delete), None);
-        assert_eq!(
-            w.view(3, String::new(), None, &HashMap::new())
-                .confirm_forget,
-            Some(1)
-        );
+        assert_eq!(view(&w).confirm_forget, Some(1));
         assert_eq!(
             press(&mut w, Keysym::Delete),
             Some(Outcome::Forget("beta".into()))
@@ -604,11 +668,7 @@ mod tests {
         );
         for _ in 0..3 {
             assert_eq!(press(&mut w, Keysym::Delete), None);
-            assert_eq!(
-                w.view(3, String::new(), None, &HashMap::new())
-                    .confirm_forget,
-                None
-            );
+            assert_eq!(view(&w).confirm_forget, None);
         }
     }
 
@@ -632,18 +692,12 @@ mod tests {
         let mut w = welcome(&["alpha", "beta", "gamma"]);
         press(&mut w, Keysym::Down);
         press(&mut w, Keysym::Tab);
-        assert_eq!(
-            w.view(3, String::new(), None, &HashMap::new()).selected,
-            None
-        );
+        assert_eq!(view(&w).selected, None);
         assert_eq!(press(&mut w, Keysym::Return), None);
         assert_eq!(w.naming.as_deref(), Some(""));
         press(&mut w, Keysym::Escape);
         press(&mut w, Keysym::Tab);
-        assert_eq!(
-            w.view(3, String::new(), None, &HashMap::new()).selected,
-            Some(1)
-        );
+        assert_eq!(view(&w).selected, Some(1));
         // Down past the last project reaches the button too.
         press(&mut w, Keysym::Down);
         press(&mut w, Keysym::Down);
@@ -657,7 +711,7 @@ mod tests {
     #[test]
     fn without_projects_the_button_is_selected() {
         let mut w = welcome(&[]);
-        let view = w.view(3, String::new(), None, &HashMap::new());
+        let view = view(&w);
         assert_eq!(
             (view.selected, view.subtitle.as_str()),
             (None, "Start your first project.")
@@ -676,7 +730,7 @@ mod tests {
         for _ in 0..4 {
             press(&mut w, Keysym::Down);
         }
-        let view = w.view(3, String::new(), None, &HashMap::new());
+        let view = view(&w);
         assert_eq!(names(&w), ["p2", "p3", "p4"]);
         assert_eq!(view.selected, Some(2));
         assert_eq!(w.row_id(0, 3), Some("p2"));
@@ -710,7 +764,7 @@ mod tests {
             ("gamma".into(), row("gamma", "")),
         ]);
         let running = HashMap::from([("gamma".to_string(), true)]);
-        let view = w.view(3, String::new(), None, &running);
+        let view = w.view(3, String::new(), None, &running, None, Instant::now());
         assert_eq!(view.selected, Some(1));
         assert_eq!(view.rows[1].running, Some(true));
         assert_eq!(view.rows[0].running, None);
