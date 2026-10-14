@@ -14,12 +14,19 @@
 //!
 //! The steps run on a thread of their own per pane, asking herdr how the
 //! pane is every `POLL`; they report back over a channel to the event loop.
+//!
+//! The bar keeps out of the way of an idle shell: it shows while a job
+//! runs or settles, while a command other than the shell runs in front,
+//! while the pointer is near the pane's top edge or over the bar, and for
+//! `FOCUS_HOLD` after the pane gains focus (see `bar_wanted`). Hidden, it
+//! gives its room to the window. Each bar fades and slides as it shows
+//! and hides (`BarStates`).
 
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -30,14 +37,16 @@ use smithay::{
         channel,
         timer::{TimeoutAction, Timer},
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Rectangle},
 };
 
 use crate::{
-    Gerdr,
-    chrome::{self, BarButton, BarHit, BarStatus, PaneBarView},
+    Gerdr, Tab,
+    anim::{self, Fade},
+    chrome::{self, BarButton, BarHit, BarStatus, Help, PaneBarView, Rect},
     herdr::{Herdr, PaneState, Process, ProcessInfo},
-    menu::MenuSpec,
+    layout::Dir,
+    menu::{MenuAction, MenuItem, MenuSpec},
     prepare::{self, Plan, Prep, Shell, Step, Tools},
     projects::{Captured, Foreground, VenvSetting},
     tooltip::Tooltip,
@@ -310,6 +319,221 @@ pub fn bar_content(
     }
 }
 
+/// How long a pane's bar stays out after the pane gains focus.
+pub const FOCUS_HOLD: Duration = Duration::from_secs(1);
+
+/// Whether a pane's bar shows: while its command is `status` (a job, or
+/// something other than the shell, running), while the pointer asks for
+/// it (`pointer`, see `chrome::pointer_reveals`), or for `FOCUS_HOLD`
+/// after the pane gained focus (`focused_for` while it has it).
+pub fn bar_wanted(status: BarStatus, pointer: bool, focused_for: Option<Duration>) -> bool {
+    matches!(status, BarStatus::Running | BarStatus::Working)
+        || pointer
+        || focused_for.is_some_and(|since| since < FOCUS_HOLD)
+}
+
+/// Where one pane's bar stands between hidden and shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct BarState {
+    /// The bar takes room over its window.
+    shown: bool,
+    /// The fade it is in, while it still moves.
+    fade: Option<Fade>,
+    /// Since when the pane has had the focus, while it has.
+    focused_since: Option<Instant>,
+}
+
+impl BarState {
+    /// Its opacity at `now`.
+    fn alpha(&self, now: Instant) -> f32 {
+        match self.fade {
+            Some(fade) if !fade.done(now) => fade.value(now),
+            _ if self.shown => 1.0,
+            _ => 0.0,
+        }
+    }
+
+    /// Start showing or hiding at `now`, going on from wherever a fade
+    /// under way had got to.
+    fn flip(&mut self, shown: bool, now: Instant) {
+        let from = self.alpha(now);
+        let done = if shown { from } else { 1.0 - from };
+        let start = now.checked_sub(anim::SLOW.mul_f32(done)).unwrap_or(now);
+        self.shown = shown;
+        self.fade = Some(Fade::new(start, anim::SLOW, shown));
+    }
+}
+
+/// How a pane's bar is to be drawn right now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarLook {
+    /// The bar takes room over its window.
+    pub shown: bool,
+    /// Its opacity, in `anim::quantize` steps; 1 at rest.
+    pub alpha: f32,
+    /// How far it is still under its pane's top edge; 0 at rest.
+    pub slide: i32,
+    /// It just started showing or hiding: the window's room changes.
+    pub flipped: bool,
+}
+
+/// The show/hide state of every pane's bar, by herdr pane id, moved on
+/// each time the bars are looked at.
+#[derive(Debug, Default)]
+pub struct BarStates(Mutex<HashMap<String, BarState>>);
+
+impl BarStates {
+    /// Pane `key`'s bar at `now`: whether the pane is `focused`, and
+    /// whether the bar is wanted given how long the pane has had the
+    /// focus and whether the bar is out already (`want`).
+    pub fn update(
+        &self,
+        key: &str,
+        focused: bool,
+        now: Instant,
+        want: impl FnOnce(Option<Duration>, bool) -> bool,
+    ) -> BarLook {
+        let mut states = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let state = states.entry(key.to_owned()).or_default();
+        state.focused_since = match (focused, state.focused_since) {
+            (false, _) => None,
+            (true, Some(since)) => Some(since),
+            (true, None) => Some(now),
+        };
+        let focused_for = state.focused_since.map(|since| now.duration_since(since));
+        let wanted = want(focused_for, state.shown);
+        let flipped = wanted != state.shown;
+        if flipped {
+            state.flip(wanted, now);
+        }
+        if state.fade.is_some_and(|fade| fade.done(now)) {
+            state.fade = None;
+        }
+        let alpha = anim::quantize(state.alpha(now)) as f32 / 16.0;
+        BarLook {
+            shown: state.shown,
+            alpha,
+            slide: ((1.0 - alpha) * chrome::BAR_SLIDE as f32).round() as i32,
+            flipped,
+        }
+    }
+
+    /// Whether pane `key`'s bar takes room over its window.
+    pub fn shown(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .is_some_and(|state| state.shown)
+    }
+
+    /// Forget every pane but `keep`.
+    pub fn retain(&self, keep: &[String]) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, _| keep.contains(key));
+    }
+}
+
+/// The keys for an action as the help panel lists them, after the prefix:
+/// "Ctrl+B A". The help puts an action on its own line (`own`, its
+/// description) or shares a line with its group (`group`, with the keys
+/// in the same order; the action is the `index`th).
+pub fn key_hint(help: &Help, own: &str, group: &str, index: usize) -> Option<String> {
+    let keys = help
+        .rows
+        .iter()
+        .find(|(_, label)| label == own)
+        .map(|(keys, _)| keys.split(" / ").next().unwrap_or(keys).to_owned())
+        .or_else(|| {
+            let (keys, _) = help.rows.iter().find(|(_, label)| label == group)?;
+            keys.split(" / ").nth(index).map(str::to_owned)
+        })?;
+    Some(format!("{} {keys}", help.prefix))
+}
+
+/// What the help calls each thing a bar offers: its own description, its
+/// group's, and its place in the group (see `keys::HELP_LINES`).
+const SPLIT_RIGHT_HELP: (&str, &str, usize) = ("split pane right", "split pane right / down", 0);
+const SPLIT_DOWN_HELP: (&str, &str, usize) = ("split pane down", "split pane right / down", 1);
+const RESTART_HELP: (&str, &str, usize) = (
+    "restart the pane's command",
+    "restart / stop the pane's command",
+    0,
+);
+const STOP_HELP: (&str, &str, usize) = (
+    "stop the pane's command",
+    "restart / stop the pane's command",
+    1,
+);
+const CLOSE_PANE_HELP: (&str, &str, usize) = ("close pane", "close pane", 0);
+
+/// The key for `what` (one of the `_HELP` triples), if `help` lists one.
+fn hint_for(help: &Help, what: (&str, &str, usize)) -> Option<String> {
+    key_hint(help, what.0, what.1, what.2)
+}
+
+/// What a bar button says when the pointer rests on it at `rect`.
+pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
+    let (text, what) = match button {
+        BarButton::Restart => ("Restart", RESTART_HELP),
+        BarButton::Stop => ("Stop", STOP_HELP),
+    };
+    let tip = Tooltip::new(text, rect);
+    match hint_for(help, what) {
+        Some(key) => tip.key(&key),
+        None => tip,
+    }
+}
+
+/// The menu a right press at `at` on the bar of pane `id` (showing
+/// `content`) opens.
+pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &Help) -> MenuSpec {
+    let item = |label: &str, action, what, enabled| {
+        let item = MenuItem::new(label, action).enabled(enabled);
+        match hint_for(help, what) {
+            Some(key) => item.hint(&key),
+            None => item,
+        }
+    };
+    MenuSpec {
+        anchor: Rectangle::new(at.to_i32_round(), (0, 0).into()),
+        items: vec![
+            item(
+                "Split right",
+                MenuAction::SplitPane(id, Dir::Right),
+                SPLIT_RIGHT_HELP,
+                true,
+            ),
+            item(
+                "Split down",
+                MenuAction::SplitPane(id, Dir::Down),
+                SPLIT_DOWN_HELP,
+                true,
+            ),
+            item(
+                "Restart",
+                MenuAction::RestartPane(id),
+                RESTART_HELP,
+                content.can_restart,
+            ),
+            item(
+                "Stop",
+                MenuAction::StopPane(id),
+                STOP_HELP,
+                content.can_stop,
+            ),
+            item(
+                "Close pane",
+                MenuAction::ClosePane(id),
+                CLOSE_PANE_HELP,
+                true,
+            ),
+        ],
+    }
+}
+
 /// Stop what runs in herdr pane `pane_id`, on a thread of its own talking to
 /// the server on `socket`, then type `line` in, written for the pane's
 /// shell, if `rerun` says so by then.
@@ -417,41 +641,100 @@ impl Gerdr {
         )
     }
 
-    /// The bars over the active tab's terminal panes.
+    /// Where the bars stand between hidden and shown. A static until
+    /// `Gerdr` carries it (see the handoff): there is one `Gerdr`.
+    fn bar_states(&self) -> &'static BarStates {
+        static STATES: LazyLock<BarStates> = LazyLock::new(BarStates::default);
+        &STATES
+    }
+
+    /// Whether the bar of pane `id` of `tab` takes room over its window:
+    /// what `chrome::pane_bar_rects_shown` is given when the panes are
+    /// arranged. A bar not looked at yet (a tab not shown) is hidden.
+    pub fn pane_bar_shown(&self, tab: &Tab, id: u32) -> bool {
+        tab.herdr_pane(id)
+            .is_some_and(|pane| self.bar_states().shown(&pane.pane_id))
+    }
+
+    /// Arrange the panes again once this event is done: a bar started
+    /// showing or hiding, so a window's room changed.
+    fn arrange_soon(&self) {
+        let arrange = |_, _: &mut (), state: &mut Gerdr| {
+            state.arrange();
+            TimeoutAction::Drop
+        };
+        if let Err(err) = self.loop_handle.insert_source(Timer::immediate(), arrange) {
+            tracing::warn!("pane bars: {err}");
+        }
+    }
+
+    /// The bars over the active tab's terminal panes, moved on to now:
+    /// a hidden one at rest has no height.
     pub fn pane_bar_views(&self) -> Vec<PaneBarView> {
+        let states = self.bar_states();
         let Some(tab) = self.tab() else {
+            states.retain(&[]);
             return Vec::new();
         };
+        let now = Instant::now();
+        let pointer = self.pointer;
         let focused = tab.focused_id();
-        tab.shown_rects(self.content_rect())
+        let mut keys = Vec::new();
+        let mut flipped = false;
+        let views = tab
+            .shown_rects(self.content_rect())
             .into_iter()
             .filter_map(|(id, rect)| {
                 let pane = tab.panes.iter().find(|p| p.id == id)?;
-                let herdr = pane.herdr.as_ref()?;
-                let content = self.pane_bar_content(&herdr.pane_id);
+                let key = pane.herdr.as_ref()?.pane_id.as_str();
+                keys.push(key.to_owned());
+                let content = self.pane_bar_content(key);
+                let is_focused = focused == Some(id);
+                let look = states.update(key, is_focused, now, |focused_for, shown| {
+                    let near = chrome::pointer_reveals(rect, shown, pointer);
+                    bar_wanted(content.status, near, focused_for)
+                });
+                flipped |= look.flipped;
+                let full = chrome::pane_bar_rects(rect).0;
+                let drawn = look.shown || look.alpha > 0.0;
+                let bar = if drawn {
+                    full
+                } else {
+                    Rectangle::new(full.loc, (full.size.w, 0).into())
+                };
                 Some(PaneBarView {
-                    rect: chrome::pane_bar_rects(rect).0,
+                    rect: bar,
                     label: content.label,
                     note: content.note,
                     status: content.status,
                     can_restart: content.can_restart,
                     can_stop: content.can_stop,
-                    focused: focused == Some(id),
+                    focused: is_focused,
+                    lit: look.shown && full.to_f64().contains(pointer),
                     hover: self
                         .pane_bar_hover
                         .filter(|(hovered, _)| *hovered == id)
                         .map(|(_, button)| button),
+                    visible: look.shown,
+                    alpha: look.alpha,
+                    slide: look.slide,
                 })
             })
-            .collect()
+            .collect();
+        states.retain(&keys);
+        if flipped {
+            self.arrange_soon();
+        }
+        views
     }
 
     /// The pane of the active tab whose bar is at `pos`, and what of it.
+    /// A hidden bar is not there to hit.
     pub fn pane_bar_at(&self, pos: Point<f64, Logical>) -> Option<(u32, BarHit)> {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
             .into_iter()
-            .filter(|(id, _)| tab.has_bar(*id))
+            .filter(|(id, _)| self.pane_bar_shown(tab, *id))
             .find_map(|(id, rect)| {
                 let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, pos)?;
                 Some((id, hit))
@@ -459,16 +742,29 @@ impl Gerdr {
     }
 
     /// The pointer moved to `pos` over the app area with nothing open
-    /// over it: the tooltip for the pane bar part under it, if it has one.
+    /// over it: the tooltip for the bar button under it, if one is.
     pub(crate) fn pane_bar_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
-        let _ = pos;
-        None
+        let (id, BarHit::Button(button)) = self.pane_bar_at(pos)? else {
+            return None;
+        };
+        let tab = self.tab()?;
+        let (_, rect) = tab
+            .shown_rects(self.content_rect())
+            .into_iter()
+            .find(|(pane, _)| *pane == id)?;
+        let bar = chrome::pane_bar_rects(rect).0;
+        let (_, rect) = chrome::pane_bar_buttons(bar)
+            .into_iter()
+            .find(|(b, _)| *b == button)?;
+        Some(button_tooltip(button, rect, &self.keymap.help()))
     }
 
     /// The menu a right press at `pos` on a pane's bar opens, if any.
     pub(crate) fn pane_bar_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
-        let _ = pos;
-        None
+        let (id, _) = self.pane_bar_at(pos)?;
+        let pane_id = &self.tab()?.herdr_pane(id)?.pane_id;
+        let content = self.pane_bar_content(pane_id);
+        Some(bar_menu(pos, id, &content, &self.keymap.help()))
     }
 
     /// Light up the bar button under the pointer at `pos`, if any.
@@ -945,5 +1241,166 @@ mod tests {
         let content = bar_content(None, None, Some(&restarting));
         assert_eq!(content.note, Some("restarting…"));
         assert!(!content.can_restart && !content.can_stop);
+    }
+
+    #[test]
+    fn a_bar_shows_for_a_command_the_pointer_or_a_new_focus() {
+        let ms = Duration::from_millis;
+        assert!(bar_wanted(BarStatus::Running, false, None));
+        assert!(bar_wanted(BarStatus::Working, false, None));
+        assert!(!bar_wanted(BarStatus::Idle, false, None));
+        assert!(!bar_wanted(BarStatus::Exited, false, None));
+        assert!(bar_wanted(BarStatus::Idle, true, None));
+        assert!(bar_wanted(BarStatus::Exited, false, Some(ms(999))));
+        assert!(!bar_wanted(BarStatus::Idle, false, Some(FOCUS_HOLD)));
+        assert!(!bar_wanted(BarStatus::Idle, false, Some(ms(5000))));
+    }
+
+    #[test]
+    fn a_bar_fades_in_when_wanted_and_out_when_not() {
+        let states = BarStates::default();
+        let t0 = Instant::now();
+        // Not wanted: hidden from the start, nothing to see.
+        let look = states.update("p1", false, t0, |_, shown| {
+            assert!(!shown);
+            false
+        });
+        assert_eq!((look.shown, look.alpha, look.flipped), (false, 0.0, false));
+        assert_eq!(look.slide, chrome::BAR_SLIDE);
+        assert!(!states.shown("p1"));
+        // Wanted: it starts showing, taking its room at once.
+        let look = states.update("p1", false, t0, |_, _| true);
+        assert!(look.shown && look.flipped && look.alpha == 0.0);
+        assert!(states.shown("p1"));
+        let look = states.update("p1", false, t0 + anim::SLOW / 2, |_, shown| shown);
+        assert!(look.alpha > 0.3 && look.alpha < 0.7, "{}", look.alpha);
+        assert!(look.slide > 0 && look.slide < chrome::BAR_SLIDE);
+        assert!(!look.flipped);
+        let look = states.update("p1", false, t0 + anim::SLOW, |_, _| true);
+        assert_eq!((look.alpha, look.slide), (1.0, 0));
+        // Not wanted any more: it gives its room back and fades out.
+        let t1 = t0 + Duration::from_secs(2);
+        let look = states.update("p1", false, t1, |_, _| false);
+        assert!(!look.shown && look.flipped && look.alpha == 1.0);
+        assert!(!states.shown("p1"));
+        let look = states.update("p1", false, t1 + 2 * anim::SLOW, |_, _| false);
+        assert_eq!((look.alpha, look.slide), (0.0, chrome::BAR_SLIDE));
+    }
+
+    #[test]
+    fn a_fade_turned_around_goes_on_from_where_it_was() {
+        let states = BarStates::default();
+        let t0 = Instant::now();
+        states.update("p1", false, t0, |_, _| true);
+        let half = states.update("p1", false, t0 + anim::SLOW / 2, |_, _| true);
+        let back = states.update("p1", false, t0 + anim::SLOW / 2, |_, _| false);
+        assert!(back.flipped && !back.shown);
+        assert!(
+            (back.alpha - half.alpha).abs() < 0.1,
+            "{} {}",
+            back.alpha,
+            half.alpha
+        );
+        let gone = states.update("p1", false, t0 + anim::SLOW, |_, _| false);
+        assert_eq!(gone.alpha, 0.0);
+    }
+
+    #[test]
+    fn focus_is_timed_from_when_it_was_gained() {
+        let states = BarStates::default();
+        let t0 = Instant::now();
+        let seen = |focused, at| {
+            let mut since = None;
+            states.update("p1", focused, at, |focused_for, _| {
+                since = focused_for;
+                false
+            });
+            since
+        };
+        assert_eq!(seen(false, t0), None);
+        assert_eq!(seen(true, t0), Some(Duration::ZERO));
+        let ms = Duration::from_millis;
+        assert_eq!(seen(true, t0 + ms(300)), Some(ms(300)));
+        assert_eq!(seen(false, t0 + ms(400)), None);
+        // Gained again: the clock starts over.
+        assert_eq!(seen(true, t0 + ms(500)), Some(Duration::ZERO));
+        // Forgotten panes start from nothing.
+        states.retain(&[]);
+        assert_eq!(seen(true, t0 + ms(900)), Some(Duration::ZERO));
+        states.retain(&["p1".into()]);
+        assert_eq!(seen(true, t0 + ms(1000)), Some(ms(100)));
+    }
+
+    #[test]
+    fn key_hints_come_from_the_help() {
+        let help = crate::keys::Keymap::default().help();
+        assert_eq!(hint_for(&help, RESTART_HELP).as_deref(), Some("Ctrl+B A"));
+        assert_eq!(hint_for(&help, STOP_HELP).as_deref(), Some("Ctrl+B S"));
+        assert_eq!(
+            hint_for(&help, SPLIT_RIGHT_HELP).as_deref(),
+            Some("Ctrl+B V")
+        );
+        assert_eq!(
+            hint_for(&help, SPLIT_DOWN_HELP).as_deref(),
+            Some("Ctrl+B -")
+        );
+        assert_eq!(
+            hint_for(&help, CLOSE_PANE_HELP).as_deref(),
+            Some("Ctrl+B X")
+        );
+        // An action on a line of its own, with several keys: the first.
+        let own = Help {
+            prefix: "Ctrl+A".into(),
+            rows: vec![("r / Shift+R".into(), "restart the pane's command".into())],
+        };
+        assert_eq!(hint_for(&own, RESTART_HELP).as_deref(), Some("Ctrl+A r"));
+        assert_eq!(hint_for(&own, STOP_HELP), None);
+    }
+
+    #[test]
+    fn bar_buttons_have_tooltips_with_their_keys() {
+        let help = crate::keys::Keymap::default().help();
+        let rect = Rect::new((500, 50).into(), (24, 24).into());
+        let tip = button_tooltip(BarButton::Restart, rect, &help);
+        assert_eq!(
+            (tip.text.as_str(), tip.key.as_deref(), tip.anchor),
+            ("Restart", Some("Ctrl+B A"), rect)
+        );
+        let tip = button_tooltip(BarButton::Stop, rect, &help);
+        assert_eq!(
+            (tip.text.as_str(), tip.key.as_deref()),
+            ("Stop", Some("Ctrl+B S"))
+        );
+    }
+
+    #[test]
+    fn the_bar_menu_offers_what_the_pane_can_do() {
+        let help = crate::keys::Keymap::default().help();
+        let content = bar_content(Some(&at_prompt()), None, None);
+        let menu = bar_menu((300.5, 60.2).into(), 7, &content, &help);
+        assert_eq!(menu.anchor, Rect::new((301, 60).into(), (0, 0).into()));
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Split right", "Split down", "Restart", "Stop", "Close pane"]
+        );
+        let actions: Vec<&MenuAction> = menu.items.iter().map(|i| &i.action).collect();
+        assert_eq!(
+            actions,
+            [
+                &MenuAction::SplitPane(7, Dir::Right),
+                &MenuAction::SplitPane(7, Dir::Down),
+                &MenuAction::RestartPane(7),
+                &MenuAction::StopPane(7),
+                &MenuAction::ClosePane(7),
+            ]
+        );
+        let enabled: Vec<bool> = menu.items.iter().map(|i| i.enabled).collect();
+        assert_eq!(enabled, [true, true, false, false, true]);
+        assert_eq!(menu.items[2].hint.as_deref(), Some("Ctrl+B A"));
+        // With a command running: stop; with one exited: restart.
+        let running = bar_content(Some(&running(9, "npm run dev")), None, None);
+        let menu = bar_menu((0.0, 0.0).into(), 1, &running, &help);
+        assert!(!menu.items[2].enabled && menu.items[3].enabled);
     }
 }
