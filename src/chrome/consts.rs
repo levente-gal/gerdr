@@ -16,11 +16,13 @@ pub const BAR_HEIGHT: i32 = 34;
 /// The tab strip: a title row, then a line for what runs in the tab.
 pub const TAB_STRIP_HEIGHT: i32 = TAB_TITLE_HEIGHT + TAB_LINE + TAB_BOTTOM;
 
-/// How high the tab strip is at `density`. Both the same for now: the
-/// single-line strip that tells them apart is still to come.
+/// How high the tab strip is at `density`: one line of tabs around the
+/// "+" pill, with room above and below it when comfortable (36) and a
+/// pixel each way when compact (30).
 pub fn tab_strip_height(density: Density) -> i32 {
     match density {
-        Density::Comfortable | Density::Compact => TAB_STRIP_HEIGHT,
+        Density::Comfortable => NEW_TAB_SIZE + 2 * NEW_TAB_INSET,
+        Density::Compact => NEW_TAB_SIZE + 2,
     }
 }
 pub(super) const TAB_TITLE_HEIGHT: i32 = 28;
