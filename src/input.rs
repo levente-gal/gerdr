@@ -35,7 +35,6 @@ use crate::{
     Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
     WorkspaceKind,
     chrome::{self, FieldSpot, TAB_STRIP_HEIGHT},
-    home_dir,
     launch::Place,
     layout::Dir,
     project_menu, quit,
@@ -44,12 +43,12 @@ use crate::{
     welcome,
 };
 
-const BTN_LEFT: u32 = 0x110;
+pub(crate) const BTN_LEFT: u32 = 0x110;
 /// Presses closer together than this, in time and place, count as a
 /// double (or triple) click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 const MULTI_CLICK_SLOP: f64 = 4.0;
-const BTN_MIDDLE: u32 = 0x112;
+pub(crate) const BTN_MIDDLE: u32 = 0x112;
 
 /// What a key gerdr kept from the apps does, once the keyboard is free again.
 enum Intercepted {
@@ -258,22 +257,15 @@ impl Gerdr {
                     let (_, items) = chrome::terminal_menu(self.sidebar_width);
                     self.menu_hover = items.iter().position(|item| item.to_f64().contains(pos));
                 }
-                // The header's project name lights up under the pointer, with
-                // nothing open over it.
-                self.header_hover = !overlay
-                    && self.switcher.is_none()
-                    && !self.terminal_menu
-                    && self.project.is_some()
-                    && chrome::sidebar_layout(&[], &[], self.sidebar_width)
-                        .header
-                        .to_f64()
-                        .contains(pos);
+                // The sidebar lights up under the pointer, with nothing open
+                // over it.
+                let covered = overlay || self.switcher.is_some() || self.terminal_menu;
+                self.header_hover = false;
+                if !covered {
+                    self.sidebar_motion(pos);
+                }
                 // So do the buttons of a terminal pane's bar.
-                let free = !overlay
-                    && self.switcher.is_none()
-                    && !self.terminal_menu
-                    && self.drag.is_none()
-                    && self.reorder.is_none();
+                let free = !covered && self.drag.is_none() && self.reorder.is_none();
                 self.pane_bar_hover(free.then_some(pos));
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
@@ -401,11 +393,11 @@ impl Gerdr {
                     }
                     let (x, y) = (location.x as i32, location.y as i32);
                     if x < self.sidebar_width {
-                        self.sidebar_click(x, y, event.button_code());
+                        self.sidebar_press(x, y, event.button_code());
                         return;
                     }
                     if y < TAB_STRIP_HEIGHT {
-                        self.tab_strip_click(x - self.sidebar_width, y, event.button_code());
+                        self.tab_strip_press(x - self.sidebar_width, y, event.button_code());
                         return;
                     }
                     if let Some((id, hit)) = self.pane_bar_at(location) {
@@ -498,105 +490,8 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// Left click selects a workspace, "×" or middle click closes it; a left
-    /// click on an agent card shows its pane. A row held with the left button
-    /// can be dragged to another place. The header buttons open a
-    /// project, a terminal in home, or the terminal menu; the project's name
-    /// left of them opens the project menu (the welcome screen while no
-    /// project is shown).
-    fn sidebar_click(&mut self, x: i32, y: i32, button: u32) {
-        let agents = self.agent_views();
-        let workspaces: Vec<_> = self
-            .workspace_views()
-            .into_iter()
-            .map(|(ws, _)| ws)
-            .collect();
-        let layout = chrome::sidebar_layout(&workspaces, &agents, self.sidebar_width);
-        let inside =
-            |r: &smithay::utils::Rectangle<i32, smithay::utils::Logical>| r.contains((x, y));
-        if button == BTN_LEFT {
-            if inside(&layout.project) {
-                self.pick_workspace(WorkspaceKind::Project);
-                return;
-            }
-            if inside(&layout.terminal) {
-                self.open_terminal(home_dir().unwrap_or_default());
-                return;
-            }
-            if inside(&layout.chevron) {
-                self.terminal_menu = true;
-                self.refresh_pointer_focus();
-                return;
-            }
-            if inside(&layout.header) {
-                if self.project.is_some() {
-                    self.toggle_project_menu();
-                } else {
-                    self.open_welcome(true);
-                }
-                return;
-            }
-        }
-        if button == BTN_LEFT {
-            let cards = layout
-                .cards
-                .iter()
-                .zip(&agents)
-                .flat_map(|(rects, cards)| rects.iter().zip(cards));
-            if let Some((_, card)) = cards.into_iter().find(|(rect, _)| inside(rect)) {
-                let pane_id = card.pane_id.clone();
-                self.focus_agent(&pane_id);
-                return;
-            }
-        }
-        let Some(idx) = layout.rows.iter().position(|(row, _)| inside(row)) else {
-            return;
-        };
-        match button {
-            BTN_LEFT if inside(&layout.rows[idx].1) => self.close_workspace(idx),
-            BTN_LEFT => {
-                self.switch_workspace(idx);
-                self.hold(Reorderable::Workspace);
-            }
-            BTN_MIDDLE => self.close_workspace(idx),
-            _ => {}
-        }
-    }
-
-    /// Left click selects a tab, opens a terminal in a new one with "+", or
-    /// the run prompt for an app in a new one with the chevron after it;
-    /// "×" or middle click closes a tab.
-    /// A tab held with the left button can be dragged to another place.
-    /// The button at the right end switches light/dark.
-    fn tab_strip_click(&mut self, x: i32, y: i32, button: u32) {
-        let width = self.output_size().w - self.sidebar_width;
-        let inside =
-            |r: &smithay::utils::Rectangle<i32, smithay::utils::Logical>| r.contains((x, y));
-        if button == BTN_LEFT && inside(&chrome::theme_toggle(width)) {
-            self.toggle_theme();
-            return;
-        }
-        let count = self.workspace().map_or(0, |ws| ws.tabs.len());
-        if count == 0 {
-            return;
-        }
-        let (tabs, plus, chevron) = chrome::tab_layout(count, width);
-        let hit = tabs.iter().position(|(tab, _)| inside(tab));
-        match (button, hit) {
-            (BTN_LEFT, Some(idx)) if inside(&tabs[idx].1) => self.close_tab(idx),
-            (BTN_LEFT, Some(idx)) => {
-                self.switch_tab(idx);
-                self.hold(Reorderable::Tab);
-            }
-            (BTN_MIDDLE, Some(idx)) => self.close_tab(idx),
-            (BTN_LEFT, None) if inside(&plus) => self.new_tab(),
-            (BTN_LEFT, None) if inside(&chevron) => self.open_run_prompt(Place::Tab),
-            _ => {}
-        }
-    }
-
     /// Start holding the active workspace's row or the active tab, where the pointer is.
-    fn hold(&mut self, what: Reorderable) {
+    pub(crate) fn hold(&mut self, what: Reorderable) {
         let from = self.seat.get_pointer().unwrap().current_location();
         self.reorder = Some(Reorder {
             what,

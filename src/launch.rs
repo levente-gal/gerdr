@@ -34,7 +34,7 @@ use std::{
 use smithay::reexports::calloop::channel;
 
 use crate::{
-    Expected, Gerdr, Tab, Workspace, WorkspaceKind, desktop, home_dir, icons::AppIcon, layout,
+    Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, desktop, home_dir, layout,
 };
 
 /// The start of the class of the Ghostty gerdr keeps (see `Gerdr::shared_name`),

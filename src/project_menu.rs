@@ -28,9 +28,9 @@ use crate::{
         SettingsField, SettingsView,
     },
     fuzzy, home_dir, hooks,
+    paths::tilde,
     project_list::{self, scrolled},
     text_field::{Edit, Line, TextField},
-    tilde,
 };
 
 /// How many of zoxide's folders the list offers as new projects.

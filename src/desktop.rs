@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{home_dir, icons::IconIndex, launch::App};
+use crate::{app_icons::IconIndex, home_dir, launch::App};
 
 /// How deep the `applications` folders are searched.
 const MAX_DEPTH: usize = 4;
@@ -371,7 +371,7 @@ mod tests {
     use std::path::Path;
 
     use super::{app, exec_args, shell_quote, unescape, url_command};
-    use crate::icons::IconIndex;
+    use crate::app_icons::IconIndex;
 
     fn args(exec: &str) -> Option<Vec<String>> {
         exec_args(&unescape(exec), "Files", Path::new("/a/b.desktop"))

@@ -7,6 +7,7 @@
 //! keep running when gerdr quits and come back when it starts again. Any
 //! other Wayland app can be launched into a split too (see `launch`).
 
+mod app_icons;
 mod chrome;
 mod clipboard;
 mod config;
@@ -16,19 +17,21 @@ mod git;
 mod handlers;
 mod herdr;
 mod hooks;
-mod icons;
 mod input;
 mod keys;
 mod launch;
 mod layout;
 mod notify;
 mod pane_control;
+mod paths;
 mod prepare;
 mod project_list;
 mod project_menu;
 mod projects;
 mod quit;
+mod sidebar;
 mod switcher;
+mod tab_strip;
 mod text_field;
 mod welcome;
 
@@ -49,6 +52,7 @@ use chrome::{
 };
 use hooks::Hook;
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
+use paths::tilde;
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
 use serde_json::json;
 use smithay::{
@@ -591,15 +595,6 @@ fn venv_notice(setting: &VenvSetting) -> String {
         VenvSetting::Auto => "New shells here activate the venv they find".into(),
         VenvSetting::Off => "New shells here activate no venv".into(),
         VenvSetting::Path(path) => format!("New shells here activate {}", path.display()),
-    }
-}
-
-/// `path` with the home folder `home` written `~`.
-fn tilde(path: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|home| path.strip_prefix(home).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
     }
 }
 

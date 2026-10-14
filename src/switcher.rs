@@ -32,10 +32,11 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
+    app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     fuzzy, home_dir,
-    icons::AppIcon,
     launch::{self, Place},
+    paths::tilde,
     projects::Project,
     text_field::{Edit, TextField},
 };
@@ -555,13 +556,14 @@ impl Gerdr {
     /// screen, the apps, then zoxide's folders not open yet.
     fn switcher_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
+        let home = home_dir();
         for (w, (ws, (view, tabs))) in self
             .workspaces
             .iter()
             .zip(self.workspace_views())
             .enumerate()
         {
-            let detail: Vec<String> = [Some(tilde(&ws.dir)), view.branch]
+            let detail: Vec<String> = [Some(tilde(&ws.dir, home.as_deref())), view.branch]
                 .into_iter()
                 .flatten()
                 .collect();
@@ -624,7 +626,7 @@ impl Gerdr {
             items.push(Item {
                 icon: ItemIcon::Folder,
                 label,
-                detail: tilde(dir),
+                detail: tilde(dir, home.as_deref()),
                 target: Target::Folder(dir.clone()),
             });
         }
@@ -700,15 +702,6 @@ pub fn remember(dir: &Path) {
     std::thread::spawn(move || {
         let _ = cmd.status();
     });
-}
-
-/// `dir` with the home folder as "~".
-fn tilde(dir: &Path) -> String {
-    match home_dir().and_then(|home| Some(dir.strip_prefix(home).ok()?.to_path_buf())) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => dir.display().to_string(),
-    }
 }
 
 #[cfg(test)]
