@@ -258,6 +258,26 @@ pub(super) fn cross(x: f32, y: f32, s: f32) -> f32 {
     segment(x, y, -arm, -arm, arm, arm).min(segment(x, y, -arm, arm, arm, -arm)) - STROKE * s
 }
 
+/// Signed distance to a monitor centred on the origin: a screen outline
+/// on a stand, for the theme following the system.
+// The tab strip's theme switch takes it up.
+#[allow(dead_code)]
+pub(super) fn monitor(x: f32, y: f32, s: f32) -> f32 {
+    let screen =
+        rounded_rect(x, y, -7.5 * s, -6.5 * s, 15.0 * s, 10.5 * s, 1.5 * s).abs() - STROKE * s;
+    let neck = segment(x, y, 0.0, 4.0 * s, 0.0, 6.0 * s) - STROKE * s;
+    let base = segment(x, y, -3.5 * s, 6.5 * s, 3.5 * s, 6.5 * s) - STROKE * s;
+    screen.min(neck).min(base)
+}
+
+/// Signed distance to a spinner centred on the origin: the working
+/// agent's open ring, turned `turn` of a full circle clockwise.
+pub(super) fn spinner(turn: f32, x: f32, y: f32, s: f32) -> f32 {
+    let (sin, cos) = (turn * std::f32::consts::TAU).sin_cos();
+    let (rx, ry) = (x * cos + y * sin, y * cos - x * sin);
+    status_mark(AgentStatus::Working, rx, ry, s)
+}
+
 /// Paint the signed-distance `shape`, centred on a logical rectangle.
 pub(super) fn icon_sdf(
     c: &mut Canvas,

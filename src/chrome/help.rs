@@ -1,4 +1,5 @@
-//! The key help panel shown while the prefix is armed.
+//! The key help panel shown while the prefix is armed, or pinned open
+//! with the Shortcuts action: then it carries a title and a way out.
 
 use super::{
     Canvas, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_PADDING, HELP_RADIUS, HELP_ROW_HEIGHT,
@@ -6,6 +7,13 @@ use super::{
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Size};
+
+/// The pinned panel's title line, above the prefix line.
+const HELP_PINNED_TITLE: i32 = 30;
+/// The gap between the prefix keycap and the words after it, and between
+/// the Esc keycap and its word.
+const HELP_WORD_GAP: i32 = 10;
+const HELP_ESC_GAP: i32 = 6;
 
 /// What the help panel shows: the prefix, and the keys to press after it
 /// as (keys, action). Alternative keys are split by " / ".
@@ -16,17 +24,31 @@ pub struct Help {
 }
 
 /// Help panel geometry, in logical pixels.
-#[derive(PartialEq)]
-pub(super) struct HelpLayout {
-    pub(super) size: Size<i32, Logical>,
-    pub(super) rows: i32,
-    pub(super) key_width: i32,
-    pub(super) column_width: i32,
+#[derive(Clone, Debug, PartialEq)]
+pub struct HelpLayout {
+    pub size: Size<i32, Logical>,
+    pub rows: i32,
+    pub key_width: i32,
+    pub column_width: i32,
+    /// Pinned open: a title and an Esc hint over the prefix line.
+    pub pinned: bool,
+}
+
+impl HelpLayout {
+    /// How tall the panel's head is: the prefix line, with the title
+    /// above it when pinned.
+    fn head(&self) -> i32 {
+        if self.pinned {
+            HELP_PINNED_TITLE + HELP_TITLE_HEIGHT
+        } else {
+            HELP_TITLE_HEIGHT
+        }
+    }
 }
 
 impl Painter {
     /// Size the help panel: two columns when they fit in `max_width`, else one.
-    pub(super) fn help_layout(&self, help: &Help, max_width: i32, scale: f64) -> HelpLayout {
+    pub fn help_layout(&self, help: &Help, max_width: i32, pinned: bool, scale: f64) -> HelpLayout {
         let widest = |widths: &mut dyn Iterator<Item = f32>| {
             // Measured at the output scale, where glyph advances are rounded differently.
             widths
@@ -56,13 +78,15 @@ impl Painter {
         let w = columns as i32 * column_width
             + (columns as i32 - 1) * HELP_COLUMN_GAP
             + 2 * HELP_PADDING;
-        let h = HELP_TITLE_HEIGHT + rows * HELP_ROW_HEIGHT + HELP_PADDING;
-        HelpLayout {
-            size: (w, h).into(),
+        let mut layout = HelpLayout {
+            size: (w, 0).into(),
             rows,
             key_width,
             column_width,
-        }
+            pinned,
+        };
+        layout.size.h = layout.head() + rows * HELP_ROW_HEIGHT + HELP_PADDING;
+        layout
     }
 
     /// The panel inside a margin of `SHADOW` holding its drop shadow.
@@ -81,24 +105,52 @@ impl Painter {
         c.popup(layout.size, HELP_RADIUS, scale, p);
 
         let (pad, max_x) = (ox + px(HELP_PADDING), ox + px(layout.size.w - HELP_PADDING));
-        let title_band = (
-            oy + px(HELP_PADDING / 2),
-            px(HELP_TITLE_HEIGHT - HELP_PADDING / 2),
-        );
+        let mut line_top = HELP_PADDING / 2;
+        if layout.pinned {
+            // "Shortcuts" with the way out at its right.
+            let title_band = (oy + px(line_top), px(HELP_PINNED_TITLE));
+            self.text(
+                &mut c,
+                "Shortcuts",
+                FONT_SIZE,
+                pad as f32,
+                max_x as f32,
+                title_band,
+                scale,
+                p.text,
+            );
+            let close_w = self.text_width("close", SMALL_FONT_SIZE, scale);
+            let close_x = max_x as f32 - close_w;
+            self.text(
+                &mut c,
+                "close",
+                SMALL_FONT_SIZE,
+                close_x,
+                max_x as f32,
+                title_band,
+                scale,
+                p.muted,
+            );
+            let esc_x = close_x - px(HELP_ESC_GAP) as f32 - self.keycaps_width("Esc", scale);
+            self.keycaps(&mut c, "Esc", esc_x, title_band, scale, p);
+            line_top += HELP_PINNED_TITLE;
+        }
+        let title_band = (oy + px(line_top), px(HELP_TITLE_HEIGHT - HELP_PADDING / 2));
         let after = self.keycaps(&mut c, &help.prefix, pad as f32, title_band, scale, p);
         self.text(
             &mut c,
             "then press a key",
             SMALL_FONT_SIZE,
-            after + px(10) as f32,
+            after + px(HELP_WORD_GAP) as f32,
             max_x as f32,
             title_band,
             scale,
             p.muted,
         );
+        let head = layout.head();
         c.fill(
             ox + border,
-            oy + px(HELP_TITLE_HEIGHT) - border,
+            oy + px(head) - border,
             px(layout.size.w) - 2 * border,
             border,
             p.border_variant,
@@ -107,7 +159,7 @@ impl Painter {
         for (i, (keys, action)) in help.rows.iter().enumerate() {
             let (column, row) = (i as i32 / layout.rows, i as i32 % layout.rows);
             let x = SHADOW + HELP_PADDING + column * (layout.column_width + HELP_COLUMN_GAP);
-            let y = SHADOW + HELP_TITLE_HEIGHT + row * HELP_ROW_HEIGHT;
+            let y = SHADOW + head + row * HELP_ROW_HEIGHT;
             let band = (px(y), px(HELP_ROW_HEIGHT));
             let column_end = px(x + layout.column_width) as f32;
             self.keycaps(&mut c, keys, px(x) as f32, band, scale, p);
@@ -117,5 +169,27 @@ impl Painter {
             );
         }
         c.into_buffer(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HELP_PINNED_TITLE, Help, Painter};
+
+    #[test]
+    fn the_pinned_panel_is_taller_by_its_title() {
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        let help = Help {
+            prefix: "Ctrl+B".into(),
+            rows: vec![("c".into(), "new tab".into()), ("q".into(), "quit".into())],
+        };
+        let armed = painter.help_layout(&help, 800, false, 1.0);
+        let pinned = painter.help_layout(&help, 800, true, 1.0);
+        assert_eq!(pinned.size.w, armed.size.w);
+        assert_eq!(pinned.size.h, armed.size.h + HELP_PINNED_TITLE);
+        assert!(pinned.pinned && !armed.pinned);
     }
 }
