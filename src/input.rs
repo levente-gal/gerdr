@@ -299,6 +299,8 @@ impl Gerdr {
                     self.project_menu_hover(pos);
                 } else if self.context_menu.is_some() {
                     self.menu_motion(pos);
+                } else if self.switcher.is_some() {
+                    self.switcher_motion(pos);
                 }
                 // The region under the pointer lights up, with nothing open
                 // over it, and may offer a tooltip.

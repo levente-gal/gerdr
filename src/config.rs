@@ -110,7 +110,9 @@ pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Vec<String>) {
     (keymap, apps, ui, problems)
 }
 
-fn config_file() -> PathBuf {
+/// gerdr's config file: `$XDG_CONFIG_HOME/gerdr/config.toml`, by default
+/// `~/.config/gerdr/config.toml`.
+pub fn config_file() -> PathBuf {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

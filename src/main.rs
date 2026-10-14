@@ -2392,6 +2392,8 @@ impl Gerdr {
         }
 
         switcher::remember(&dir);
+        self.frecency.touch(&format!("folder:{}", dir.display()));
+        self.frecency.save();
         let zed = self.new_pane_id();
         let mut tab = Tab {
             layout: Some(Node::Leaf(zed)),

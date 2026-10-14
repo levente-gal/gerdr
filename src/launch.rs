@@ -90,7 +90,6 @@ impl Gerdr {
         if command.trim().is_empty() {
             return;
         }
-        self.frecency.touch(&format!("app:{}", command.trim()));
         if self.workspaces.is_empty() {
             self.workspaces.push(Workspace::new(
                 home_dir().unwrap_or_default(),

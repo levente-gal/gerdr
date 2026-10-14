@@ -8,7 +8,7 @@
 use super::{
     CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, MENU_RADIUS,
     PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect,
-    SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROW, SWITCHER_ROWS,
+    SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
     SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder, folder_plus, icon_sdf, mix, pencil,
     physical, prompt, status_mark, tab, terminal,
 };
@@ -21,9 +21,8 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A row: two lines of text.
 const ROW_HEIGHT: i32 = 40;
-/// A section's heading: the gap above it and its text. `SWITCHER_ROW` is
-/// the one-line row height the consts keep; a heading is just that tall.
-const SECTION_HEIGHT: i32 = SWITCHER_ROW;
+/// A section's heading: the gap above it and its text.
+const SECTION_HEIGHT: i32 = SWITCHER_SECTION;
 /// The heading's text sits in the lower part of its band.
 const SECTION_TEXT: i32 = 22;
 /// The gap between the two lines' bands and the row's edges.

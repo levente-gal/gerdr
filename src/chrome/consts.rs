@@ -117,7 +117,9 @@ pub(super) const SWITCHER_WIDTH: i32 = 640;
 pub(super) const SWITCHER_TOP: i32 = 24;
 pub(super) const SWITCHER_INPUT: i32 = 44;
 pub(super) const SWITCHER_PADDING: i32 = 6;
-pub(super) const SWITCHER_ROW: i32 = 34;
+/// A section heading's band in the switcher (its rows are taller, see
+/// chrome/switcher.rs).
+pub(super) const SWITCHER_SECTION: i32 = 34;
 /// The most rows it shows; it scrolls for more.
 pub(super) const SWITCHER_ROWS: i32 = 12;
 /// The caret after the query.

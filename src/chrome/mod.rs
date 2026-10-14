@@ -305,7 +305,7 @@ impl Chrome {
 
         // The switcher at the top of the app area.
         let switcher = view.switcher.map(|switcher| {
-            let (panel, _, _) = switcher_layout(switcher.rows.len(), area);
+            let panel = switcher_geometry(&switcher, area).panel;
             let (loc, size) = shadowed(panel);
             ((switcher, panel.size.w, theme, scale), loc, size)
         });
@@ -689,7 +689,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(placeholder_layout(placeholder.rect, placeholder.timed_out).retry);
     }
     if let Some(switcher) = &view.switcher {
-        rects.extend(switcher_layout(switcher.rows.len(), area).2);
+        rects.extend(switcher_geometry(switcher, area).rows);
     }
     if view.quit.is_some() {
         let quit = quit_layout(output);

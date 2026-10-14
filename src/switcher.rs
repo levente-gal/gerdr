@@ -477,16 +477,6 @@ fn typed_command(command: &str, icons: &HashMap<String, AppIcon>, place: Place) 
     item
 }
 
-/// gerdr's config file: `$XDG_CONFIG_HOME/gerdr/config.toml`, by default
-/// `~/.config/gerdr/config.toml` (as `config` reads it).
-fn settings_file() -> PathBuf {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| home_dir().unwrap_or_default().join(".config"));
-    config.join("gerdr/config.toml")
-}
-
 /// The frecency key of `target`, given the folder of the workspace it
 /// names; none for what is always listed last.
 fn frecency_key(
@@ -738,7 +728,7 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Settings => {
-                let path = settings_file();
+                let path = crate::config::config_file();
                 let open = format!("xdg-open {}", desktop::shell_quote(&path.to_string_lossy()));
                 self.launch(&open, place);
             }
@@ -857,7 +847,7 @@ impl Gerdr {
         items.push(Item::new(
             ItemIcon::Settings,
             "Settings file",
-            display(&settings_file(), home.as_deref(), DETAIL_CHARS),
+            display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
             Target::Settings,
         ));
         self.weighed(items)
