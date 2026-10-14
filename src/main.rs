@@ -35,6 +35,7 @@ mod quit;
 mod rename;
 mod sidebar;
 mod switcher;
+mod system_theme;
 mod tab_strip;
 mod text_field;
 mod toast;
@@ -59,7 +60,7 @@ use chrome::{
 use frecency::Frecency;
 use hooks::Hook;
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
-use menu::ContextMenu;
+use menu::{ContextMenu, MenuAction};
 use paths::tilde;
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
 use rename::Rename;
@@ -112,7 +113,7 @@ use smithay::{
         viewporter::ViewporterState,
     },
 };
-use toast::Toast;
+use toast::{Level, Toast};
 use tooltip::TooltipState;
 
 /// Share of the content height given to Zed in the first tab, at start.
@@ -157,6 +158,9 @@ const ZED_EXIT_WAIT: Duration = Duration::from_secs(3);
 /// How long a window started for a tab may take to show up before the
 /// placeholder kept for it says so.
 pub const EXPECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long an agent stays blocked, out of sight, before its notification
+/// is sent again.
+const BLOCKED_REMINDER: Duration = Duration::from_secs(60);
 /// How long a restarted server may take to bring back all its workspaces.
 const RESTORE_WAIT: Duration = Duration::from_secs(5);
 /// How long after a server restart the commands saved for its panes are
@@ -203,6 +207,9 @@ pub struct Expected {
     pub app_command: Option<String>,
     /// When the process was started (or queued).
     pub started: Instant,
+    /// The process has run for `EXPECT_TIMEOUT` without a window (see
+    /// `reap_children`); the placeholder says so and offers a retry.
+    pub timed_out: bool,
 }
 
 impl Expected {
@@ -216,7 +223,17 @@ impl Expected {
             herdr: None,
             app_command: None,
             started: Instant::now(),
+            timed_out: false,
         }
+    }
+
+    /// Whether, at `now`, the process has run for `EXPECT_TIMEOUT` with
+    /// no window yet: it was started (not queued), still runs, and the
+    /// wait is up.
+    fn is_overdue(&self, now: Instant) -> bool {
+        self.pid.is_some()
+            && self.exited.is_none()
+            && now.duration_since(self.started) > EXPECT_TIMEOUT
     }
 
     /// What the placeholder for its window says is starting.
@@ -916,6 +933,9 @@ pub struct Gerdr {
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
+    /// Since when each blocked agent was last notified of (or seen to be
+    /// blocked), by herdr pane id: a reminder goes after `BLOCKED_REMINDER`.
+    pub blocked_since: HashMap<String, Instant>,
     /// gerdr's own window has the host's keyboard focus.
     pub host_focused: bool,
     /// Process groups we started, all terminated when gerdr exits.
@@ -1216,14 +1236,18 @@ impl Gerdr {
         self.next_pane
     }
 
-    /// Start a child on our socket, in its own process group.
-    fn spawn(&mut self, mut cmd: Command, dir: &Path) -> Option<u32> {
+    /// Start a child on our socket, in its own process group; what it
+    /// writes to its stderr goes to `app`'s log (see `launch::log_file`).
+    fn spawn(&mut self, mut cmd: Command, dir: &Path, app: &str) -> Option<u32> {
         let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
         herdr::scrub_env(&mut cmd, socket.as_deref());
         cmd.env("WAYLAND_DISPLAY", &self.socket_name)
             .env_remove("DISPLAY") // no XWayland escape to the host
             .current_dir(dir)
             .process_group(0);
+        if let Some(log) = launch::log_file(app) {
+            cmd.stderr(Stdio::from(log));
+        }
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
@@ -1254,8 +1278,10 @@ impl Gerdr {
             Some(pane) => self.attach(pane, &dir),
             None => {
                 let mut term = Command::new("alacritty");
-                term.arg("--working-directory").arg(&dir);
-                self.spawn(term, &dir)
+                term.arg("--working-directory")
+                    .arg(&dir)
+                    .args(self.theme().palette().alacritty_options());
+                self.spawn(term, &dir, "alacritty")
             }
         };
         if pid.is_none()
@@ -1357,7 +1383,9 @@ impl Gerdr {
             .filter(|d| d.is_dir())
             .unwrap_or(dir)
             .to_path_buf();
-        self.spawn(herdr::attach_command(&pane.terminal_id, &dir), &dir)
+        let options = self.theme().palette().alacritty_options();
+        let term = herdr::attach_command(&pane.terminal_id, &dir, &options);
+        self.spawn(term, &dir, "alacritty")
     }
 
     /// Connect to herdr session `session` (starting it if needed), show what
@@ -1368,9 +1396,12 @@ impl Gerdr {
     fn connect_herdr(&mut self, session: &str) {
         // Read before a server starting may save over it.
         let saved = herdr::saved_workspace_count(session);
-        let Some((mut herdr, start)) = herdr::Herdr::connect_or_start(session, &self.socket_name)
-        else {
-            return;
+        let (mut herdr, start) = match herdr::Herdr::connect_or_start(session, &self.socket_name) {
+            Ok(connected) => connected,
+            Err(err) => {
+                tracing::warn!("{err}; terminals won't persist");
+                return self.toast(err, Level::Error);
+            }
         };
         let mut workspaces = herdr.workspace_list().unwrap_or_default();
         // A restarted server answers before it has brought back all it
@@ -1455,6 +1486,10 @@ impl Gerdr {
                     .for_each(|event| state.on_herdr_event(event)),
                 Err(()) => {
                     tracing::warn!("herdr server went away; new terminals won't persist");
+                    state.toast(
+                        "herdr server went away; new terminals won't persist".into(),
+                        Level::Error,
+                    );
                     state.herdr = None;
                     state.herdr_poke = None;
                     state.agents.clear();
@@ -1866,25 +1901,47 @@ impl Gerdr {
     /// gerdr's window is in the background. herdr's own idea of what the
     /// user has seen follows its focused pane, not gerdr's, so a finished
     /// agent may come back `idle` rather than `done`: both count.
+    ///
+    /// An agent that stays blocked out of sight is reminded of every
+    /// `BLOCKED_REMINDER`, counted from when it was last notified of or
+    /// last in sight.
     fn notify_agents(&mut self, agents: &[herdr::AgentInfo]) {
         use herdr::AgentStatus::{Blocked, Done, Idle, Working};
+        let now = Instant::now();
         let mut news = Vec::new();
         for agent in agents {
             // Only a change is news; an agent seen for the first time (as all
             // are when gerdr starts) isn't.
-            let Some(before) = self.agents.iter().find(|a| a.pane_id == agent.pane_id) else {
-                continue;
-            };
-            let what = match (before.agent_status, agent.agent_status) {
-                (Blocked, Blocked) => continue,
-                (_, Blocked) => "needs input",
-                (Working, Idle | Done) => "is done",
+            let before = self
+                .agents
+                .iter()
+                .find(|a| a.pane_id == agent.pane_id)
+                .map(|a| a.agent_status);
+            let place = self.herdr_pane_place(&agent.pane_id);
+            let seen = self.host_focused && place.is_some_and(|(w, t)| self.is_visible(w, t));
+            let what = match (before, agent.agent_status) {
+                (_, Blocked) => {
+                    let since = *self
+                        .blocked_since
+                        .entry(agent.pane_id.clone())
+                        .or_insert(now);
+                    if seen {
+                        self.blocked_since.insert(agent.pane_id.clone(), now);
+                        continue;
+                    }
+                    let what = if before.is_some_and(|b| b != Blocked) {
+                        "needs input"
+                    } else if now.duration_since(since) >= BLOCKED_REMINDER {
+                        "still needs input"
+                    } else {
+                        continue;
+                    };
+                    self.blocked_since.insert(agent.pane_id.clone(), now);
+                    what
+                }
+                (Some(Working), Idle | Done) if !seen => "is done",
                 _ => continue,
             };
-            let place = self.herdr_pane_place(&agent.pane_id);
-            if self.host_focused && place.is_some_and(|(w, t)| self.is_visible(w, t)) {
-                continue;
-            }
             let who = agent.label();
             let mut body: Vec<&str> = place
                 .map(|(w, _)| self.workspaces[w].name.as_str())
@@ -1899,10 +1956,32 @@ impl Gerdr {
             );
             news.push((&agent.pane_id, format!("{who} {what}"), body.join(" · ")));
         }
+        self.blocked_since.retain(|id, _| {
+            agents
+                .iter()
+                .any(|a| a.pane_id == *id && a.agent_status == Blocked)
+        });
         if let Some(notifier) = self.notifier.as_mut() {
             for (pane_id, summary, body) in news {
                 notifier.send(pane_id, &summary, &body);
             }
+        }
+    }
+
+    /// Follow what look the system prefers (see `system_theme`), for
+    /// `ThemeMode::System`: it was read once at start.
+    fn watch_system_theme(&mut self) {
+        let (tx, rx) = channel::channel();
+        let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
+            if let channel::Event::Msg(dark) = event {
+                state.system_theme_changed(dark);
+            }
+        });
+        match inserted {
+            Ok(_) => system_theme::watch(move |dark| {
+                let _ = tx.send(dark);
+            }),
+            Err(err) => tracing::warn!("system theme: {err}"),
         }
     }
 
@@ -2372,7 +2451,7 @@ impl Gerdr {
                 .arg("--user-data-dir")
                 .arg(&gerdr.zed_data)
                 .arg(&dir);
-            let pid = gerdr.spawn(zed, &dir)?;
+            let pid = gerdr.spawn(zed, &dir, "zed")?;
             gerdr.zed_groups.push(pid as i32);
             Some(pid)
         })
@@ -2724,14 +2803,7 @@ impl Gerdr {
             }
         };
         self.projects.save();
-        let key = pane.map_or_else(String::new, |p| p.pane_id);
-        let body = self
-            .workspace()
-            .map_or("", |ws| ws.name.as_str())
-            .to_owned();
-        if let Some(notifier) = self.notifier.as_mut() {
-            notifier.send(&key, &summary, &body);
-        }
+        self.toast(summary, Level::Info);
     }
 
     /// The shown project and the active workspace's herdr workspace: whose
@@ -2811,9 +2883,31 @@ impl Gerdr {
 
     /// Use `mode`, remembered for the next start.
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        let before = self.theme();
         self.theme_mode = mode;
         if let Err(err) = std::fs::write(theme_file(), mode.name()) {
             tracing::warn!("saving theme: {err}");
+        }
+        self.theme_changed(before);
+    }
+
+    /// The system's preference came in (see `system_theme`): `dark` or not.
+    pub fn system_theme_changed(&mut self, dark: bool) {
+        let before = self.theme();
+        self.system_dark = dark;
+        self.theme_changed(before);
+    }
+
+    /// The look was `before` and may be another now: the terminals open
+    /// keep their colours (they are passed on their command line), so say
+    /// what new ones get.
+    fn theme_changed(&mut self, before: Theme) {
+        let now = self.theme();
+        if now != before {
+            self.toast(
+                format!("New terminals use the {} theme", now.name()),
+                Level::Info,
+            );
         }
     }
 
@@ -2881,11 +2975,17 @@ impl Gerdr {
         });
         let now = Instant::now();
         let mut dropped = false;
+        // What took too long to show a window: its pane and what it is.
+        let mut overdue = Vec::new();
         for tab in self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs) {
             let mut gone = Vec::new();
             tab.expected.retain_mut(|e| {
                 if e.pid.is_some_and(|pid| exited.contains(&pid)) {
                     e.exited = Some(now);
+                }
+                if !e.timed_out && e.is_overdue(now) {
+                    e.timed_out = true;
+                    overdue.push((e.pane, e.label()));
                 }
                 // A launched app's window can't be told apart once its processes are gone.
                 let grace = if e.app_id.is_empty() {
@@ -2915,8 +3015,85 @@ impl Gerdr {
             self.prune();
             self.arrange();
         }
+        // Once per window that took too long (see `Expected::timed_out`).
+        for (pane, label) in overdue {
+            tracing::warn!("{label} didn't show a window in {EXPECT_TIMEOUT:?}");
+            self.toast_with(
+                format!("{label} didn't start"),
+                Level::Error,
+                Some(("Retry".into(), MenuAction::RetryExpected(pane))),
+            );
+        }
         self.retired_groups.retain(|g| group_alive(*g));
         self.poll_picker();
+    }
+
+    /// Start again what pane `pane` (of any tab) waits for and took too
+    /// long (see `reap_children`): the process started for it is ended (a
+    /// `zed -n` would hand its window to the stuck editor), and a new one
+    /// started the way the first was. One that doesn't start gives up its
+    /// leaf.
+    pub fn retry_expected(&mut self, pane: u32) {
+        let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+                let i = tab.expected.iter().position(|e| e.pane == pane)?;
+                Some((w, t, i))
+            })
+        });
+        let Some((w, t, i)) = found else {
+            return;
+        };
+        let e = &mut self.workspaces[w].tabs[t].expected[i];
+        if let Some(pid) = e.pid.take() {
+            self.zed_groups.retain(|g| *g != pid as i32);
+            // Safety: signals a process group gerdr started (see `spawn`).
+            unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+        }
+        e.exited = None;
+        e.started = Instant::now();
+        e.timed_out = false;
+        let (app_id, command, herdr_pane) =
+            (e.app_id.clone(), e.app_command.clone(), e.herdr.clone());
+        let dir = self.workspaces[w].dir.clone();
+        let mut dropped = false;
+        let started = match (app_id.as_str(), command, herdr_pane) {
+            ("zed", ..) => {
+                dropped = self.launch_next_zed();
+                true
+            }
+            // Queued by app_id: started in its turn.
+            (app_id, Some(_), _) if !app_id.is_empty() => {
+                dropped = self.launch_next_apps();
+                true
+            }
+            (_, Some(command), _) => match self.start_app(w, t, &command) {
+                Some(pid) => {
+                    self.workspaces[w].tabs[t].expected[i].pid = Some(pid);
+                    true
+                }
+                None => false,
+            },
+            (_, None, Some(herdr_pane)) => match self.attach(&herdr_pane, &dir) {
+                Some(pid) => {
+                    self.workspaces[w].tabs[t].expected[i].pid = Some(pid);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if !started {
+            let tab = &mut self.workspaces[w].tabs[t];
+            if let Some(i) = tab.expected.iter().position(|e| e.pane == pane) {
+                let gone = tab.expected.remove(i);
+                layout::remove(&mut tab.layout, gone.pane);
+                dropped = true;
+            }
+        }
+        if dropped {
+            self.prune();
+        }
+        self.arrange();
     }
 
     /// First commit of a toplevel: put it in the workspace, tab and pane it was started for.
@@ -3371,6 +3548,7 @@ impl Gerdr {
             project.state = RunState::Kept;
         }
         self.projects.save();
+        self.frecency.touch(&format!("project:{id}"));
         self.connect_herdr(&session);
         self.running.insert(id.to_owned(), true);
         self.place_held(id);
@@ -3427,6 +3605,7 @@ impl Gerdr {
             self.space.unmap_elem(&window);
         }
         self.agents.clear();
+        self.blocked_since.clear();
         self.herdr_tabs.clear();
         self.git.clear();
         self.idle_since.clear();
@@ -3926,9 +4105,13 @@ impl Gerdr {
         }
     }
 
-    /// What the sidebar and tab strip should show right now.
-    fn chrome_view(&self) -> ChromeView {
+    /// What the sidebar and tab strip should show right now. Taken once
+    /// per frame: what moves with time (the tooltip's wait, the toasts'
+    /// stay) is moved on here first.
+    fn chrome_view(&mut self) -> ChromeView {
         let now = Instant::now();
+        self.tooltip.tick(now);
+        self.expire_toasts(now);
         let ws = self.workspace();
         let active = ws.map(|_| self.active_workspace);
         let (workspaces, mut tabs): (Vec<_>, Vec<_>) = self.workspace_views().into_iter().unzip();
@@ -3954,7 +4137,7 @@ impl Gerdr {
                     rect,
                     label: expected.label(),
                     since: expected.started,
-                    timed_out: now.duration_since(expected.started) > EXPECT_TIMEOUT,
+                    timed_out: expected.timed_out,
                 })
                 .collect()
         });
@@ -4027,6 +4210,16 @@ fn theme_file() -> PathBuf {
 
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// gerdr's state folder, for logs: `$XDG_STATE_HOME/gerdr`, by default
+/// `~/.local/state/gerdr`.
+pub fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home_dir().unwrap_or_default().join(".local/state"))
+        .join("gerdr")
 }
 
 pub fn set_preferred_scale(surface: &WlSurface, scale: f64) {
@@ -4183,6 +4376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         git: HashMap::new(),
         git_pending: false,
         notifier: None,
+        blocked_since: HashMap::new(),
         host_focused: true,
         process_groups: Vec::new(),
         picker: None,
@@ -4357,8 +4551,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
     }
+    // Before the first terminals, which take the look's colours with them.
+    if let Some(dark) = system_theme::current() {
+        state.system_dark = dark;
+    }
     state.watch_git();
     state.connect_notifier();
+    state.watch_system_theme();
     state.watch_zoxide();
     state.watch_installed_apps();
     state.start_project(project_arg.as_deref(), folders);
@@ -4370,6 +4569,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = state.display_handle.flush_clients();
     })?;
 
+    state.frecency.save();
     state.close_windows(&mut event_loop);
     state.kill_children();
     if let Some((mut picker, _)) = state.picker.take() {

@@ -24,7 +24,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{home_dir, layout::Dir};
+use crate::{home_dir, layout::Dir, state_dir};
 
 /// Who gerdr's workspace metadata is reported as.
 const SOURCE: &str = "gerdr";
@@ -53,17 +53,127 @@ const KIND_TOKEN: &str = "gerdr_kind";
 const DIR_TOKEN: &str = "gerdr_dir_";
 const TOKEN_MAX: usize = 80;
 
+/// The most bytes a socket's path may have for gerdr to use it: a Unix
+/// socket path is capped at 108 bytes (`sun_path`, with its NUL), and the
+/// server's session folder holds a `herdr-client.sock` too.
+const SOCKET_PATH_MAX: usize = 100;
+/// The log a server started by gerdr writes to, in gerdr's state folder.
+const SERVER_LOG: &str = "herdr-server.log";
+/// A server log bigger than this is started over.
+const SERVER_LOG_MAX: u64 = 1 << 20;
+
+/// herdr's config folder's parent: `$XDG_CONFIG_HOME`, by default
+/// `~/.config`. herdr keeps its sessions under it.
+fn config_home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home_dir().unwrap_or_default().join(".config"))
+}
+
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// The socket of `session` under the config folder `config`, as the
+/// server puts it (herdr 0.9 takes no socket path: `HERDR_SOCKET_PATH` is
+/// read by its clients only, so the server's can only be moved by giving
+/// it another `XDG_CONFIG_HOME`).
+fn socket_under(config: &Path, session: &str) -> PathBuf {
+    config
+        .join("herdr/sessions")
+        .join(session)
+        .join("herdr.sock")
+}
+
+/// The config folder `session`'s server is told, and gerdr reaches its
+/// socket through: the real one, or when the socket's path under it would
+/// be too long (a deep home folder), `<runtime>/gerdr/config`, a short
+/// symlink to the real one, so herdr still finds the same config and
+/// sessions. With whether it is the short one.
+fn pick_config_home(session: &str, config: &Path, runtime: &Path) -> (PathBuf, bool) {
+    if socket_under(config, session).as_os_str().len() <= SOCKET_PATH_MAX {
+        (config.to_path_buf(), false)
+    } else {
+        (runtime.join("gerdr/config"), true)
+    }
+}
+
+/// The config folder for `session`, as `pick_config_home` picks it, with
+/// the short symlink made (or pointed right) when it is that one.
+fn config_home_for(session: &str) -> (PathBuf, bool) {
+    let config = config_home();
+    let (picked, short) = pick_config_home(session, &config, &runtime_dir());
+    if short && let Err(err) = link_config(&picked, &config) {
+        tracing::warn!(
+            "linking {} to {}: {err}",
+            picked.display(),
+            config.display()
+        );
+    }
+    (picked, short)
+}
+
+/// Make `link` a symlink to `config`, replacing one pointing elsewhere.
+fn link_config(link: &Path, config: &Path) -> std::io::Result<()> {
+    if std::fs::read_link(link).is_ok_and(|target| target == config) {
+        return Ok(());
+    }
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::remove_file(link) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::os::unix::fs::symlink(config, link)
+}
+
 /// Where herdr keeps named session `session`: its socket, log and saved
 /// layout.
 pub fn session_dir(session: &str) -> PathBuf {
-    home_dir()
-        .unwrap_or_default()
-        .join(".config/herdr/sessions")
+    config_home_for(session)
+        .0
+        .join("herdr/sessions")
         .join(session)
 }
 
 pub fn socket_path(session: &str) -> PathBuf {
     session_dir(session).join("herdr.sock")
+}
+
+/// Where a server started by gerdr writes what it has to say.
+pub fn server_log() -> PathBuf {
+    state_dir().join(SERVER_LOG)
+}
+
+/// The last line with anything on it in `log`, if any.
+fn last_line(log: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+/// The server log, open for appending; started over once too big.
+fn open_server_log() -> std::io::Result<std::fs::File> {
+    let path = server_log();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > SERVER_LOG_MAX);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(!big)
+        .write(true)
+        .truncate(big)
+        .open(&path)
 }
 
 /// How many workspaces `session` saved for its server to restore on start:
@@ -425,12 +535,17 @@ impl Herdr {
         &self.socket
     }
 
-    /// Connect to `session`, starting its server if none runs. `None` if
-    /// herdr isn't there.
-    pub fn connect_or_start(session: &str, wayland_display: &OsStr) -> Option<(Self, Start)> {
+    /// Connect to `session`, starting its server if none runs. What the
+    /// server said last (see `server_log`) when it doesn't come up, or
+    /// why it didn't start.
+    pub fn connect_or_start(
+        session: &str,
+        wayland_display: &OsStr,
+    ) -> Result<(Self, Start), String> {
+        let (config, short) = config_home_for(session);
         let socket = socket_path(session);
         if let Ok(herdr) = Self::connect(&socket) {
-            return Some((herdr, Start::Attached));
+            return Ok((herdr, Start::Attached));
         }
         let saved = has_saved_layout(session);
         // Its own session, out of gerdr's process groups: it outlives gerdr.
@@ -442,8 +557,22 @@ impl Herdr {
             .env("WAYLAND_DISPLAY", wayland_display)
             .env_remove("DISPLAY")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::null());
+        // The server puts its socket under its config folder (see
+        // `pick_config_home`); the short name keeps the path short enough.
+        if short {
+            server.env("XDG_CONFIG_HOME", &config);
+        }
+        match open_server_log() {
+            Ok(log) => {
+                server.stdout(log.try_clone().map_or(Stdio::null(), Stdio::from));
+                server.stderr(log);
+            }
+            Err(err) => {
+                tracing::warn!("herdr server log: {err}");
+                server.stderr(Stdio::null());
+            }
+        }
         // Safety: setsid is async-signal-safe.
         unsafe {
             server.pre_exec(|| {
@@ -452,8 +581,7 @@ impl Herdr {
             });
         }
         if let Err(err) = server.spawn() {
-            tracing::warn!("herdr server failed to start, terminals won't persist: {err}");
-            return None;
+            return Err(format!("herdr server failed to start: {err}"));
         }
         // The socket answers before the server is done restoring; a server
         // with a saved layout is ready once its workspaces are back. A
@@ -465,20 +593,22 @@ impl Herdr {
                 continue;
             };
             if !saved {
-                return Some((herdr, Start::Fresh));
+                return Ok((herdr, Start::Fresh));
             }
             if herdr.workspace_list().is_ok_and(|list| !list.is_empty()) {
-                return Some((herdr, Start::Restored));
+                return Ok((herdr, Start::Restored));
             }
         }
         // A server that answers but restored nothing (or not yet) is still
         // the session's: gerdr mustn't run without it and leave it behind.
         if saved && let Ok(herdr) = Self::connect(&socket) {
             tracing::warn!("herdr server didn't restore its workspaces in time");
-            return Some((herdr, Start::Restored));
+            return Ok((herdr, Start::Restored));
         }
-        tracing::warn!("herdr server didn't come up, terminals won't persist");
-        None
+        Err(match last_line(&server_log()) {
+            Some(line) => format!("herdr server didn't come up: {line}"),
+            None => "herdr server didn't come up".to_owned(),
+        })
     }
 
     /// Send a request and wait for its result.
@@ -852,17 +982,21 @@ pub fn watch_tabs(
 }
 
 /// The command that shows herdr terminal `terminal_id` in an Alacritty
-/// window, taking it over from any other client.
-pub fn attach_command(terminal_id: &str, dir: &Path) -> Command {
+/// window, taking it over from any other client, with Alacritty's
+/// `options` (the look's colours, see `Palette::alacritty_options`).
+pub fn attach_command(terminal_id: &str, dir: &Path, options: &[String]) -> Command {
     let mut term = Command::new("alacritty");
-    term.arg("--working-directory").arg(dir).args([
-        "-e",
-        "herdr",
-        "terminal",
-        "attach",
-        terminal_id,
-        "--takeover",
-    ]);
+    term.arg("--working-directory")
+        .arg(dir)
+        .args(options)
+        .args([
+            "-e",
+            "herdr",
+            "terminal",
+            "attach",
+            terminal_id,
+            "--takeover",
+        ]);
     term
 }
 
@@ -987,6 +1121,84 @@ mod tests {
         assert_eq!(find_on_path(&path), None);
         assert_eq!(find_on_path(OsStr::new("")), None);
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn a_long_socket_path_moves_under_the_runtime_dir() {
+        let runtime = Path::new("/run/user/1000");
+        let short = Path::new("/home/me/.config");
+        assert_eq!(
+            pick_config_home("gerdr-x", short, runtime),
+            (short.to_path_buf(), false)
+        );
+        assert_eq!(
+            socket_under(short, "gerdr-x"),
+            PathBuf::from("/home/me/.config/herdr/sessions/gerdr-x/herdr.sock")
+        );
+        let deep = PathBuf::from(format!("/home/{}/.config", "a".repeat(90)));
+        let (picked, moved) = pick_config_home("gerdr-x", &deep, runtime);
+        assert!(moved);
+        assert_eq!(picked, PathBuf::from("/run/user/1000/gerdr/config"));
+        assert!(socket_under(&picked, "gerdr-x").as_os_str().len() <= SOCKET_PATH_MAX);
+        // Right at the limit, the real folder is kept; a byte over, not.
+        let config = |n: usize| PathBuf::from(format!("/{}", "b".repeat(n)));
+        let n = (1..200)
+            .find(|&n| socket_under(&config(n), "s").as_os_str().len() == SOCKET_PATH_MAX)
+            .unwrap();
+        assert!(!pick_config_home("s", &config(n), runtime).1);
+        assert!(pick_config_home("s", &config(n + 1), runtime).1);
+    }
+
+    #[test]
+    fn the_short_config_link_points_at_the_real_folder() {
+        let tmp = std::env::temp_dir().join(format!("gerdr-herdr-link-{}", std::process::id()));
+        let (real, other) = (tmp.join("real"), tmp.join("other"));
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let link = tmp.join("runtime/gerdr/config");
+        link_config(&link, &real).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), real);
+        // Pointed elsewhere, it is pointed right again; already right, kept.
+        link_config(&link, &other).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), other);
+        link_config(&link, &other).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), other);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn the_last_line_of_the_server_log_is_what_it_said() {
+        let tmp = std::env::temp_dir().join(format!("gerdr-herdr-log-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log = tmp.join("herdr-server.log");
+        assert_eq!(last_line(&log), None);
+        std::fs::write(&log, "started\nError: socket in use\n\n  \n").unwrap();
+        assert_eq!(last_line(&log).as_deref(), Some("Error: socket in use"));
+        std::fs::write(&log, "\n").unwrap();
+        assert_eq!(last_line(&log), None);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn attach_passes_the_colours_before_the_command() {
+        let options = ["-o".to_owned(), "colors.normal.red=\"#e06c75\"".to_owned()];
+        let cmd = attach_command("t1", Path::new("/my dir"), &options);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--working-directory",
+                "/my dir",
+                "-o",
+                "colors.normal.red=\"#e06c75\"",
+                "-e",
+                "herdr",
+                "terminal",
+                "attach",
+                "t1",
+                "--takeover"
+            ]
+        );
     }
 
     #[test]

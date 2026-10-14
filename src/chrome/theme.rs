@@ -121,6 +121,12 @@ pub(crate) struct Palette {
     pub(super) success: Rgb,
     pub(super) warning: Rgb,
     pub(super) shadow: f32,
+    /// What Zed's terminal uses with this look: its background and
+    /// foreground, and the 16 ANSI colours (the 8 normal, then the 8
+    /// bright ones, in ANSI order), pushed to Alacritty.
+    pub(super) terminal_background: Rgb,
+    pub(super) terminal_foreground: Rgb,
+    pub(super) ansi: [Rgb; 16],
 }
 
 pub(super) const ONE_DARK: Palette = Palette {
@@ -141,6 +147,26 @@ pub(super) const ONE_DARK: Palette = Palette {
     success: hex(0xa1c181),
     warning: hex(0xdec184),
     shadow: 0.45,
+    terminal_background: hex(0x282c34),
+    terminal_foreground: hex(0xabb2bf),
+    ansi: [
+        hex(0x282c34),
+        hex(0xe06c75),
+        hex(0x98c379),
+        hex(0xe5c07b),
+        hex(0x61afef),
+        hex(0xc678dd),
+        hex(0x56b6c2),
+        hex(0xabb2bf),
+        hex(0x636d83),
+        hex(0xea858b),
+        hex(0xaad581),
+        hex(0xffd885),
+        hex(0x85c1ff),
+        hex(0xd398eb),
+        hex(0x6ed5de),
+        hex(0xfafafa),
+    ],
 };
 
 pub(super) const ONE_LIGHT: Palette = Palette {
@@ -161,6 +187,26 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     success: hex(0x669f59),
     warning: hex(0xa48819),
     shadow: 0.18,
+    terminal_background: hex(0xfafafa),
+    terminal_foreground: hex(0x2a2c33),
+    ansi: [
+        hex(0x000000),
+        hex(0xde3e35),
+        hex(0x3f953a),
+        hex(0xd2b67c),
+        hex(0x2f5af3),
+        hex(0x950095),
+        hex(0x0997b3),
+        hex(0xbbbbbb),
+        hex(0x000000),
+        hex(0xde3e35),
+        hex(0x3f953a),
+        hex(0xd2b67c),
+        hex(0x2f5af3),
+        hex(0xa00095),
+        hex(0x0bbcd6),
+        hex(0xffffff),
+    ],
 };
 
 impl Palette {
@@ -175,12 +221,34 @@ impl Palette {
     }
 }
 
+/// Alacritty's names for the ANSI colours, in ANSI order.
+const ANSI_NAMES: [&str; 8] = [
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+];
+
+/// `#rrggbb` for `rgb`.
+fn css(rgb: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
 impl Palette {
-    /// The `-o` options giving Alacritty this palette, to append to its
-    /// command line: none yet.
-    #[allow(dead_code)]
+    /// The `-o` options giving Alacritty this look's terminal colours, to
+    /// append to its command line: `-o`, then `key="#rrggbb"` (a TOML
+    /// string, as Alacritty reads an option's value), for the background,
+    /// the foreground and the 16 ANSI colours.
     pub fn alacritty_options(&self) -> Vec<String> {
-        Vec::new()
+        let mut options = Vec::with_capacity(36);
+        let mut option = |key: String, rgb: Rgb| {
+            options.push("-o".to_owned());
+            options.push(format!("{key}=\"{}\"", css(rgb)));
+        };
+        option("colors.primary.background".into(), self.terminal_background);
+        option("colors.primary.foreground".into(), self.terminal_foreground);
+        for (i, name) in ANSI_NAMES.iter().enumerate() {
+            option(format!("colors.normal.{name}"), self.ansi[i]);
+            option(format!("colors.bright.{name}"), self.ansi[i + 8]);
+        }
+        options
     }
 }
 
@@ -228,6 +296,31 @@ mod tests {
                 );
             }
             assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent");
+        }
+    }
+
+    #[test]
+    fn alacritty_gets_the_terminal_colours_as_toml_options() {
+        let options = ONE_DARK.alacritty_options();
+        // Background, foreground, 8 normal and 8 bright: 18 options.
+        assert_eq!(options.len(), 36);
+        assert!(options.iter().step_by(2).all(|flag| flag == "-o"));
+        assert_eq!(options[1], "colors.primary.background=\"#282c34\"");
+        assert_eq!(options[3], "colors.primary.foreground=\"#abb2bf\"");
+        assert_eq!(options[5], "colors.normal.black=\"#282c34\"");
+        assert_eq!(options[7], "colors.bright.black=\"#636d83\"");
+        assert!(options.contains(&"colors.normal.red=\"#e06c75\"".to_owned()));
+        assert!(options.contains(&"colors.bright.white=\"#fafafa\"".to_owned()));
+        let light = ONE_LIGHT.alacritty_options();
+        assert_eq!(light[1], "colors.primary.background=\"#fafafa\"");
+        assert!(light.contains(&"colors.normal.blue=\"#2f5af3\"".to_owned()));
+        // A dark terminal reads light on dark, and the other way round.
+        for (p, dark) in [(&ONE_DARK, true), (&ONE_LIGHT, false)] {
+            let p: &Palette = p;
+            let bg = luminance(p.terminal_background);
+            let fg = luminance(p.terminal_foreground);
+            assert_eq!(fg > bg, dark);
+            assert!(contrast(p.terminal_foreground, p.terminal_background) >= 4.5);
         }
     }
 

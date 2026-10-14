@@ -35,6 +35,7 @@ use smithay::reexports::calloop::channel;
 
 use crate::{
     Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, desktop, home_dir, layout,
+    state_dir,
 };
 
 /// The start of the class of the Ghostty gerdr keeps (see `Gerdr::shared_name`),
@@ -89,6 +90,7 @@ impl Gerdr {
         if command.trim().is_empty() {
             return;
         }
+        self.frecency.touch(&format!("app:{}", command.trim()));
         if self.workspaces.is_empty() {
             self.workspaces.push(Workspace::new(
                 home_dir().unwrap_or_default(),
@@ -252,7 +254,12 @@ impl Gerdr {
                     let class = format!("{GHOSTTY_APP_ID}.{}", self.shared_name());
                     ghostty_command(command, &class, dir)
                 }
-                Shared::Alacritty => alacritty_command(command, &self.alacritty_socket(), dir),
+                Shared::Alacritty => alacritty_command(
+                    command,
+                    &self.alacritty_socket(),
+                    dir,
+                    &self.theme().palette().alacritty_options(),
+                ),
             };
             if let Some(command) = changed {
                 return Prepared {
@@ -296,7 +303,7 @@ impl Gerdr {
     /// Start `command` (trimmed) for tab `t` of workspace `w`, in the
     /// workspace's folder (see `prepare`). Its pid, or `None` if it is
     /// empty, the tab is gone, or it didn't start.
-    fn start_app(&mut self, w: usize, t: usize, command: &str) -> Option<u32> {
+    pub(crate) fn start_app(&mut self, w: usize, t: usize, command: &str) -> Option<u32> {
         if command.is_empty() {
             return None;
         }
@@ -315,7 +322,8 @@ impl Gerdr {
         cmd.arg("-c")
             .arg(&prepared.command)
             .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
-        self.spawn(cmd, &dir)
+        let log = program_name(command).unwrap_or_else(|| "app".into());
+        self.spawn(cmd, &dir, &log)
     }
 
     /// Take in the installed apps, which `scan_installed_apps` reads off the
@@ -559,8 +567,10 @@ fn ghostty_command(command: &str, class: &str, dir: &Path) -> Option<String> {
 /// `command`, an Alacritty gerdr's can open, changed to open its window in
 /// the Alacritty listening on `socket`, or to become it when there is none
 /// yet (a socket left by one that was killed goes first); in `dir` unless
-/// it names a folder. `None` for any other command.
-fn alacritty_command(command: &str, socket: &Path, dir: &Path) -> Option<String> {
+/// it names a folder, with Alacritty's `extra` options (the look's
+/// colours, see `Palette::alacritty_options`). `None` for any other
+/// command.
+fn alacritty_command(command: &str, socket: &Path, dir: &Path, extra: &[String]) -> Option<String> {
     if Shared::of(command) != Some(Shared::Alacritty) {
         return None;
     }
@@ -570,6 +580,10 @@ fn alacritty_command(command: &str, socket: &Path, dir: &Path) -> Option<String>
     if !tail.contains("--working-directory") {
         let dir = desktop::shell_quote(&dir.to_string_lossy());
         options.push_str(&format!(" --working-directory {dir}"));
+    }
+    for word in extra {
+        options.push(' ');
+        options.push_str(&desktop::shell_quote(word));
     }
     Some(format!(
         "{head} msg --socket {socket} create-window{options}{tail} 2>/dev/null \
@@ -699,11 +713,55 @@ fn history_file() -> PathBuf {
         .join(".local/share/gerdr/run_history")
 }
 
+/// A log bigger than this is started over.
+const LOG_MAX: u64 = 1 << 20;
+
+/// Where what `app` (a program's name) writes to its stderr goes:
+/// `~/.local/state/gerdr/launch/<app>.log`.
+pub fn log_path(app: &str) -> PathBuf {
+    let name: String = app
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = match name.trim_matches('.') {
+        "" => "app",
+        name => name,
+    };
+    state_dir().join("launch").join(format!("{name}.log"))
+}
+
+/// `app`'s log, open for appending; started over once too big. `None`
+/// (and a warning) when it can't be opened.
+pub fn log_file(app: &str) -> Option<std::fs::File> {
+    let path = log_path(app);
+    let open = || {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(!big)
+            .write(true)
+            .truncate(big)
+            .open(&path)
+    };
+    open()
+        .inspect_err(|err| tracing::warn!("opening {}: {err}", path.display()))
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{alacritty_command, ghostty_command, lineage, own_instance, web_app};
+    use super::{alacritty_command, ghostty_command, lineage, log_path, own_instance, web_app};
     use crate::home_dir;
 
     #[test]
@@ -763,9 +821,49 @@ mod tests {
     }
 
     #[test]
+    fn alacritty_takes_the_colours_in_both_ways_of_opening() {
+        let colours = ["-o".to_owned(), "colors.normal.red=\"#e06c75\"".to_owned()];
+        let run = alacritty_command(
+            "alacritty -e htop",
+            Path::new("/run/a.sock"),
+            Path::new("/d"),
+            &colours,
+        )
+        .unwrap();
+        assert_eq!(
+            run,
+            "alacritty msg --socket /run/a.sock create-window --class dev.gerdr.terminal \
+             --working-directory /d -o 'colors.normal.red=\"#e06c75\"' -e htop 2>/dev/null \
+             || { rm -f /run/a.sock; exec alacritty --socket /run/a.sock \
+             --class dev.gerdr.terminal --working-directory /d \
+             -o 'colors.normal.red=\"#e06c75\"' -e htop; }"
+        );
+    }
+
+    #[test]
+    fn launch_logs_are_named_after_the_program() {
+        let home = home_dir().unwrap();
+        let under = |app: &str| {
+            log_path(app)
+                .strip_prefix(&home)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(under("zed"), ".local/state/gerdr/launch/zed.log");
+        assert_eq!(
+            under("firefox-esr"),
+            ".local/state/gerdr/launch/firefox-esr.log"
+        );
+        assert_eq!(under("a b/c"), ".local/state/gerdr/launch/a_b_c.log");
+        assert_eq!(under(".."), ".local/state/gerdr/launch/app.log");
+        assert_eq!(under(""), ".local/state/gerdr/launch/app.log");
+    }
+
+    #[test]
     fn alacritty_opens_in_gerdrs() {
         let run = |command: &str| {
-            alacritty_command(command, Path::new("/run/a.sock"), Path::new("/my dir"))
+            alacritty_command(command, Path::new("/run/a.sock"), Path::new("/my dir"), &[])
         };
         assert_eq!(
             run("alacritty").unwrap(),

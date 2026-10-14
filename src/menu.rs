@@ -36,6 +36,8 @@ pub enum MenuAction {
     FocusAgent(String),
     CopyPath(PathBuf),
     Theme(ThemeMode),
+    /// Start again what pane `id` waits for and took too long.
+    RetryExpected(u32),
 }
 
 /// One row of a menu.
@@ -187,6 +189,7 @@ impl Gerdr {
             MenuAction::FocusAgent(pane_id) => self.focus_agent(&pane_id),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
+            MenuAction::RetryExpected(pane) => self.retry_expected(pane),
         }
     }
 

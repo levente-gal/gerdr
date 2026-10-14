@@ -140,18 +140,66 @@ mod tests {
         assert_eq!(from_text("[apps]\nbrowser = 1\n").3.len(), 1);
     }
 
+    fn ui(text: &str) -> (Ui, Vec<String>) {
+        let (_, _, ui, problems) = from_text(text);
+        (ui, problems)
+    }
+
     #[test]
-    fn ui() {
-        let (_, _, ui, problems) = from_text("[ui]\ndensity = \"compact\"\ntheme = \"light\"\n");
-        assert_eq!(ui.density, Density::Compact);
-        assert_eq!(ui.theme, Some(ThemeMode::Light));
+    fn density_is_comfortable_unless_the_file_says_compact() {
+        assert_eq!(ui("").0, Ui::default());
+        assert_eq!(Ui::default().density, Density::Comfortable);
+        let (parsed, problems) = ui("[ui]\ndensity = \"compact\"\n");
+        assert_eq!(parsed.density, Density::Compact);
         assert!(problems.is_empty());
-        let (_, _, ui, problems) = from_text("");
-        assert_eq!(ui, Ui::default());
-        assert_eq!(ui.density, Density::Comfortable);
+        let (parsed, problems) = ui("[ui]\ndensity = \" comfortable \"\n");
+        assert_eq!(parsed.density, Density::Comfortable);
         assert!(problems.is_empty());
-        let (_, _, ui, problems) = from_text("[ui]\ndensity = \"cosy\"\ntheme = \"blue\"\n");
-        assert_eq!(ui, Ui::default());
+        // The density alone leaves the theme to the last choice.
+        assert_eq!(parsed.theme, None);
+    }
+
+    #[test]
+    fn the_theme_names_a_mode_or_is_left_to_the_last_choice() {
+        assert_eq!(ui("").0.theme, None);
+        for (name, mode) in [
+            ("system", ThemeMode::System),
+            ("dark", ThemeMode::Dark),
+            ("light", ThemeMode::Light),
+        ] {
+            let (parsed, problems) = ui(&format!("[ui]\ntheme = \"{name}\"\n"));
+            assert_eq!(parsed.theme, Some(mode));
+            assert_eq!(parsed.density, Density::Comfortable);
+            assert!(problems.is_empty());
+        }
+        let (parsed, problems) = ui("[ui]\ndensity = \"compact\"\ntheme = \"light\"\n");
+        assert_eq!(
+            parsed,
+            Ui {
+                density: Density::Compact,
+                theme: Some(ThemeMode::Light)
+            }
+        );
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_ui_value_is_reported_and_the_default_stands() {
+        let (parsed, problems) = ui("[ui]\ndensity = \"cosy\"\n");
+        assert_eq!(parsed, Ui::default());
+        assert_eq!(problems, ["unknown density `cosy`"]);
+        let (parsed, problems) = ui("[ui]\ntheme = \"blue\"\n");
+        assert_eq!(parsed, Ui::default());
+        assert_eq!(problems, ["unknown theme `blue`"]);
+        let (parsed, problems) = ui("[ui]\ndensity = \"cosy\"\ntheme = \"blue\"\n");
+        assert_eq!(parsed, Ui::default());
         assert_eq!(problems.len(), 2);
+        // A wrong type, or a key that isn't there, spoils the whole file.
+        let (parsed, problems) = ui("[ui]\ndensity = 1\n");
+        assert_eq!(parsed, Ui::default());
+        assert_eq!(problems.len(), 1);
+        let (parsed, problems) = ui("[ui]\ncolour = \"red\"\n");
+        assert_eq!(parsed, Ui::default());
+        assert_eq!(problems.len(), 1);
     }
 }
