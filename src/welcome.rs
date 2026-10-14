@@ -101,7 +101,10 @@ impl Welcome {
     /// Match the projects against the query again (by name, then detail),
     /// and select the best match, or the button if none.
     fn refilter(&mut self) {
-        self.matches = project_list::matches(&self.query, &self.projects);
+        self.matches = project_list::matches(&self.query, &self.projects)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
         self.selected = (!self.matches.is_empty()).then_some(0);
         self.last_row = 0;
         self.scroll = 0;

@@ -2,10 +2,27 @@
 
 use crate::WorkspaceKind;
 
+/// How much room the chrome takes: comfortable (the default) or compact,
+/// from the config file's `[ui]` table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
 /// Height of the sidebar header, in logical pixels.
 pub const BAR_HEIGHT: i32 = 34;
 /// The tab strip: a title row, then a line for what runs in the tab.
 pub const TAB_STRIP_HEIGHT: i32 = TAB_TITLE_HEIGHT + TAB_LINE + TAB_BOTTOM;
+
+/// How high the tab strip is at `density`. Both the same for now: the
+/// single-line strip that tells them apart is still to come.
+pub fn tab_strip_height(density: Density) -> i32 {
+    match density {
+        Density::Comfortable | Density::Compact => TAB_STRIP_HEIGHT,
+    }
+}
 pub(super) const TAB_TITLE_HEIGHT: i32 = 28;
 pub(super) const TAB_LINE: i32 = 15;
 pub(super) const TAB_BOTTOM: i32 = 5;
@@ -72,7 +89,7 @@ pub(super) const LABEL_FONT_SIZE: f32 = 17.0;
 pub(super) const SMALL_FONT_SIZE: f32 = 13.0;
 /// Agent card details, and their ids and status pill.
 pub(super) const DETAIL_FONT_SIZE: f32 = 12.0;
-pub(super) const TINY_FONT_SIZE: f32 = 11.0;
+pub(super) const TINY_FONT_SIZE: f32 = 12.0;
 pub(super) const KEY_FONT_SIZE: f32 = 13.0;
 pub(super) const ICON_SIZE: f32 = 20.0;
 pub(super) const PADDING: f32 = 10.0;
@@ -94,7 +111,6 @@ pub(super) const MENU_WIDTH: i32 = 180;
 pub(super) const MENU_PADDING: i32 = 4;
 pub(super) const MENU_ITEM_HEIGHT: i32 = 30;
 pub(super) const MENU_RADIUS: f32 = 6.0;
-pub const MENU_ITEMS: &[&str] = &["Open folder…"];
 
 /// The switcher, at the top of the app area.
 pub(super) const SWITCHER_WIDTH: i32 = 640;

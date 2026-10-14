@@ -227,7 +227,10 @@ impl ProjectMenu {
 
     /// Build the list's entries again, for the query.
     fn rebuild(&mut self) {
-        let matches = project_list::matches(&self.query, &self.projects);
+        let matches: Vec<usize> = project_list::matches(&self.query, &self.projects)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
         self.folders = if self.query.trim().is_empty() {
             Vec::new()
         } else {
@@ -1174,8 +1177,7 @@ impl Gerdr {
     pub fn open_project_menu(&mut self) {
         self.switcher = None;
         self.stop_key_repeat();
-        self.terminal_menu = false;
-        self.menu_hover = None;
+        self.close_menu();
         self.project_menu = Some(ProjectMenu::new(home_dir()));
         self.refresh_project_menu();
         self.check_running();

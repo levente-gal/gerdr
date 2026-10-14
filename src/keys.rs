@@ -137,6 +137,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "light / dark theme",
         "t",
     ),
+    ("shortcuts", Action::Shortcuts, "keep this help open", "?"),
     ("switcher", Action::Switcher, "find and switch", "f"),
     ("run", Action::Run, "run an app in a split", "r"),
     (
@@ -213,6 +214,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ),
     ("next / previous pane", &["next-pane", "previous-pane"]),
     ("light / dark theme", &["toggle-theme"]),
+    ("keep this help open", &["shortcuts"]),
     ("find and switch", &["switcher"]),
     ("run an app in a split", &["run"]),
     ("run an app in a new tab", &["run-tab"]),
@@ -278,7 +280,14 @@ impl Chord {
             };
             *flag = true;
         }
-        let sym = key_sym(key.trim()).ok_or_else(|| format!("unknown key `{key}` in `{spec}`"))?;
+        let key = key.trim();
+        // "?" is Shift and the slash key: the key's own symbol is matched.
+        let (key, shifted) = match SHIFTED.iter().find(|(c, _)| *c == key) {
+            Some((_, base)) => (*base, true),
+            None => (key, false),
+        };
+        mods.shift |= shifted;
+        let sym = key_sym(key).ok_or_else(|| format!("unknown key `{key}` in `{spec}`"))?;
         Ok(Self { mods, sym })
     }
 
@@ -290,6 +299,15 @@ impl Chord {
             shift,
             logo,
         } = self.mods;
+        let key = key_label(self.sym);
+        // Shift and the slash key is "?".
+        let shifted = SHIFTED
+            .iter()
+            .find(|(_, base)| key_sym(base) == Some(self.sym));
+        let (key, shift) = match shifted {
+            Some((c, _)) if shift => ((*c).to_owned(), false),
+            _ => (key, shift),
+        };
         let mods = [
             (ctrl, "Ctrl+"),
             (alt, "Alt+"),
@@ -301,10 +319,14 @@ impl Chord {
             .filter(|(on, _)| *on)
             .map(|(_, name)| *name)
             .collect();
-        label.push_str(&key_label(self.sym));
+        label.push_str(&key);
         label
     }
 }
+
+/// Characters typed with Shift on the key named after them: written
+/// as themselves in the config and the help, matched as Shift and the key.
+const SHIFTED: &[(&str, &str)] = &[("?", "/")];
 
 /// The symbol for a key name: a character, or an xkb name like "Down" or
 /// "F12" in any case.
@@ -532,7 +554,7 @@ mod tests {
     };
 
     fn from_config(text: &str) -> (Keymap, Vec<String>) {
-        let (keymap, _, problems) = config::from_text(text);
+        let (keymap, _, _, problems) = config::from_text(text);
         (keymap, problems)
     }
 
@@ -570,6 +592,7 @@ mod tests {
                 "H / J / K / L: focus pane left / down / up / right",
                 "Tab / Shift+Tab: next / previous pane",
                 "T: light / dark theme",
+                "?: keep this help open",
                 "F: find and switch",
                 "R: run an app in a split",
                 "Shift+R: run an app in a new tab",
@@ -638,6 +661,12 @@ mod tests {
             Some(Action::Quit)
         );
         assert_eq!(keymap.action(&mods(false, false), Keysym::q), None);
+        // "?" is Shift and the slash key.
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::slash),
+            Some(Action::Shortcuts)
+        );
+        assert_eq!(keymap.action(&mods(false, false), Keysym::slash), None);
     }
 
     #[test]

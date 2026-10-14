@@ -5,8 +5,9 @@
 
 use super::{
     AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, ItemIcon, MenuEntry,
-    MenuHit, Painter, PaneBarView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect,
-    SwitcherRow, SwitcherView, TabView, Theme, WelcomeHit, WelcomeView, WorkspaceView,
+    MenuHit, MenuRow, MenuView, Painter, PaneBarView, ProjectMenuView, ProjectRow, QuitHit,
+    QuitView, Rect, SwitcherRow, SwitcherView, TabView, Theme, WelcomeHit, WelcomeView,
+    WorkspaceView,
 };
 use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -99,6 +100,18 @@ fn pane_bar() -> PaneBarView {
         can_stop: false,
         focused: true,
         hover: Some(BarButton::Restart),
+    }
+}
+
+fn menu() -> MenuView {
+    MenuView {
+        anchor: Rect::new((150, 0).into(), (28, 34).into()),
+        rows: vec![MenuRow {
+            label: "Open folder…".into(),
+            hint: None,
+            enabled: true,
+        }],
+        hover: Some(0),
     }
 }
 
@@ -259,7 +272,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let help_layout = painter.help_layout(&help, 800, scale);
     let notice = "Switched to gerdr · aft keeps running";
     let notice_w = painter.notice_width(notice, 600, scale);
-    let strip = (900, super::TAB_STRIP_HEIGHT).into();
+    let strip = (900, super::tab_strip_height(super::Density::Comfortable)).into();
     vec![
         hash(painter.sidebar(
             &workspaces(),
@@ -274,7 +287,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.tab_strip(&tabs(), 1, true, theme, strip, scale)),
         hash(painter.pane_bar(&pane_bar(), scale, p)),
         hash(painter.help_panel(&help, &help_layout, scale, p)),
-        hash(painter.menu(Some(0), scale, p)),
+        hash(painter.menu(&menu(), scale, p)),
         hash(painter.switcher(&switcher(), 640, scale, p)),
         hash(painter.welcome(&welcome(), (800, 600).into(), scale, p)),
         hash(painter.quit_dialog(&quit(), (800, 600).into(), scale, p)),
@@ -295,58 +308,58 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0x43ca054776e2dca6, // sidebar
-        0x9dab172b740847be, // tab_strip
-        0xef4cb65ed4fb8d88, // pane_bar
-        0x22a8ad5e9d782269, // help
+        0x67589784b798d683, // sidebar
+        0x13e27886dba77bed, // tab_strip
+        0xbbe172db050ef7d7, // pane_bar
+        0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
-        0xc89633ad106f2545, // switcher
-        0x875ceb1dfa7a9d4e, // welcome
+        0x517d325aca9d2875, // switcher
+        0x2339adcf1ef00249, // welcome
         0x59378f4fb455dd74, // quit
-        0xbdf19f0d16102844, // project_menu
-        0xf752833083205073, // project_form
+        0xdf352140e5a10a7e, // project_menu
+        0xb5de34a9d82e1c98, // project_form
         0x72d2762f8cc49297, // notice
     ],
     // Dark at 2
     [
-        0x72304d72f707aff2, // sidebar
-        0x661750a229288705, // tab_strip
-        0x281c7b1265db6d9a, // pane_bar
-        0xf98f07251f79c2f7, // help
+        0xc564686cbb8d9f53, // sidebar
+        0x10cad43cd88fc070, // tab_strip
+        0x68ae94c90fb4c936, // pane_bar
+        0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
-        0x3d5ed50b48a63b89, // switcher
-        0x92cc71d8edd24f6e, // welcome
+        0x505dae5090ad952a, // switcher
+        0xe0573455650e0f53, // welcome
         0xca6aac6e936af23a, // quit
-        0x26b986af5a54ece3, // project_menu
-        0x10f6610ed411e0f6, // project_form
+        0x2c0d505acdca739a, // project_menu
+        0xfebfa0e09839ef5a, // project_form
         0x11bb51a4e99521d5, // notice
     ],
     // Light at 1
     [
-        0x94d741996e595b02, // sidebar
-        0xfc4462d17f57d61c, // tab_strip
-        0x99008e3a97bea6eb, // pane_bar
-        0x636e336a63c10923, // help
+        0x05f69fc665a353b7, // sidebar
+        0x13d9d07a680d567f, // tab_strip
+        0x6028c8d59ce91601, // pane_bar
+        0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
-        0x835a78ec2096c7e8, // switcher
-        0x125d806a2bf41bd7, // welcome
+        0xe323c364f69d5042, // switcher
+        0x50c5d783b4da69ca, // welcome
         0x9141f1eb6dfa4384, // quit
-        0xf631d81fb6f3de45, // project_menu
-        0xbd0cf341186b13f3, // project_form
+        0xa02bd03173402f8c, // project_menu
+        0x7099ffbd466ef3ad, // project_form
         0x2e8be3bb240be7f4, // notice
     ],
     // Light at 2
     [
-        0x0e382704f9883d18, // sidebar
-        0x7c5f011dd31a0daf, // tab_strip
-        0xab864158c8d25885, // pane_bar
-        0x8245be479f2e2165, // help
+        0x07d08fe1e4e286dc, // sidebar
+        0xaebc10244cf8b919, // tab_strip
+        0xd1b4f4a4a80352ee, // pane_bar
+        0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
-        0x7b2411445874e6e1, // switcher
-        0xcf5df50d9a47fd2b, // welcome
+        0x1b96323b30d65bb4, // switcher
+        0x195335c49651f7c6, // welcome
         0xea36deb588723e15, // quit
-        0xc05659f1d0615c03, // project_menu
-        0x7a8b78a88a042b46, // project_form
+        0xc2172f68d48557aa, // project_menu
+        0x6667f8cc8b4a1461, // project_form
         0x81b629b422e8830b, // notice
     ],
 ];

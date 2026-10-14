@@ -9,20 +9,21 @@ use smithay::reexports::calloop::channel;
 use crate::{Gerdr, chrome::ProjectRow, fuzzy, herdr};
 
 /// The indices into `rows` of the projects `query` matches (by name, then
-/// detail), best first. Equal scores (all of them, without a query) keep
-/// their order in `rows`.
-pub fn matches(query: &str, rows: &[(String, ProjectRow)]) -> Vec<usize> {
-    let mut found: Vec<(i32, usize)> = rows
+/// detail), best first, each with the positions (in chars) of the
+/// characters matched in "name detail". Equal scores (all of them, without
+/// a query) keep their order in `rows`.
+pub fn matches(query: &str, rows: &[(String, ProjectRow)]) -> Vec<(usize, Vec<usize>)> {
+    let mut found: Vec<(i32, usize, Vec<usize>)> = rows
         .iter()
         .enumerate()
         .filter_map(|(i, (_, row))| {
-            let (score, _) = fuzzy::score(query, &format!("{} {}", row.name, row.detail))?;
-            Some((score, i))
+            let (score, hits) = fuzzy::score(query, &format!("{} {}", row.name, row.detail))?;
+            Some((score, i, hits))
         })
         .collect();
     // A stable sort.
-    found.sort_by_key(|(score, _)| Reverse(*score));
-    found.into_iter().map(|(_, i)| i).collect()
+    found.sort_by_key(|(score, ..)| Reverse(*score));
+    found.into_iter().map(|(_, i, hits)| (i, hits)).collect()
 }
 
 /// The first row to show so that `selected` is in the `page` rows shown,
@@ -99,10 +100,16 @@ mod tests {
     #[test]
     fn matches_best_first_and_keeps_order_without_a_query() {
         let rows = [row("gerdr", "~/Personal/gerdr"), row("aft", "~/Work/aft")];
-        assert_eq!(matches("", &rows), vec![0, 1]);
-        assert_eq!(matches("aft", &rows), vec![1]);
-        assert_eq!(matches("work", &rows), vec![1]);
-        assert!(matches("zzz", &rows).is_empty());
+        let found = |query: &str| -> Vec<usize> {
+            matches(query, &rows).into_iter().map(|(i, _)| i).collect()
+        };
+        assert_eq!(found(""), vec![0, 1]);
+        assert_eq!(found("aft"), vec![1]);
+        assert_eq!(found("work"), vec![1]);
+        assert!(found("zzz").is_empty());
+        // The hits say which characters matched, in "name detail".
+        assert_eq!(matches("aft", &rows), vec![(1, vec![0, 1, 2])]);
+        assert_eq!(matches("", &rows)[0].1, Vec::<usize>::new());
     }
 
     #[test]

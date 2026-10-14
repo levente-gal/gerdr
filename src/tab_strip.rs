@@ -2,10 +2,14 @@
 //! menu chevron, and the theme switch (see `chrome::tabs` for what it
 //! shows).
 
+use smithay::utils::{Logical, Point};
+
 use crate::{
     Gerdr, Reorderable, chrome,
     input::{BTN_LEFT, BTN_MIDDLE},
     launch::Place,
+    menu::MenuSpec,
+    tooltip::Tooltip,
 };
 
 impl Gerdr {
@@ -40,5 +44,20 @@ impl Gerdr {
             (BTN_LEFT, None) if inside(&chevron) => self.open_run_prompt(Place::Tab),
             _ => {}
         }
+    }
+
+    /// The pointer moved to `pos` (window coordinates) over the tab strip
+    /// with nothing open over it: the tooltip for what is under it, if it
+    /// has one.
+    pub(crate) fn tab_strip_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let _ = pos;
+        None
+    }
+
+    /// The menu a right press at `pos` (window coordinates) in the tab
+    /// strip opens, if any.
+    pub(crate) fn tab_strip_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
+        let _ = pos;
+        None
     }
 }

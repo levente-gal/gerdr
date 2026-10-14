@@ -20,6 +20,7 @@ mod menu;
 mod notice;
 mod painter;
 mod pane_bar;
+mod placeholder;
 mod project_menu;
 mod quit;
 mod shapes;
@@ -27,7 +28,10 @@ mod sidebar;
 mod switcher;
 mod tabs;
 mod theme;
+mod tooltip;
 mod welcome;
+
+use std::time::Instant;
 
 use smithay::{
     backend::renderer::{
@@ -46,8 +50,10 @@ use canvas::*;
 pub use consts::*;
 pub use help::*;
 pub use menu::*;
+pub use notice::*;
 pub use painter::*;
 pub use pane_bar::*;
+pub use placeholder::*;
 pub use project_menu::*;
 pub use quit::*;
 use shapes::*;
@@ -55,22 +61,32 @@ pub use sidebar::*;
 pub use switcher::*;
 pub use tabs::*;
 pub use theme::*;
+pub use tooltip::*;
 pub use welcome::*;
 
 pub(crate) type Rect = Rectangle<i32, Logical>;
 
 pub struct ChromeView {
+    /// When the view was taken, for what moves with time.
+    pub now: Instant,
     pub workspaces: Vec<WorkspaceView>,
     /// Per workspace, the agents running in it.
     pub agents: Vec<Vec<AgentView>>,
     pub active_workspace: Option<usize>,
     pub tabs: Vec<TabView>,
     pub active_tab: usize,
-    /// Set while the terminal menu is open: the item under the pointer.
-    pub menu: Option<Option<usize>>,
+    /// The focused pane's client rect in the active tab, whatever it shows.
+    pub focused_pane: Option<Rect>,
+    /// The panes of the active tab whose window is still to come.
+    pub placeholders: Vec<PlaceholderView>,
+    /// Set while a context menu is open.
+    pub context_menu: Option<MenuView>,
+    /// Set while a tooltip shows.
+    pub tooltip: Option<TooltipView>,
     /// Set while the switcher is open.
     pub switcher: Option<SwitcherView>,
-    /// Set while waiting for the key after the prefix: the bindings to list.
+    /// Set while waiting for the key after the prefix, or while the help
+    /// is pinned: the bindings to list.
     pub prefix: Option<std::sync::Arc<Help>>,
     /// Set while the welcome screen covers everything.
     pub welcome: Option<WelcomeView>,
@@ -82,11 +98,12 @@ pub struct ChromeView {
     pub header_hover: bool,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
-    /// A short note at the top of the app area, such as "Switched to gerdr".
-    pub notice: Option<String>,
+    /// The toasts showing, oldest first, such as "Switched to gerdr".
+    pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
     pub pane_bars: Vec<PaneBarView>,
     pub theme: Theme,
+    pub density: Density,
     pub sidebar_width: i32,
     pub size: Size<i32, Logical>,
     pub scale: f64,
@@ -112,7 +129,7 @@ pub struct Chrome {
     sidebar: Cached<SidebarKey>,
     tabs: Cached<(Vec<TabView>, usize, bool, Theme, i32, f64)>,
     help: Cached<(HelpLayout, Theme, f64)>,
-    menu: Cached<(Option<usize>, Theme, f64)>,
+    menu: Cached<(MenuView, Theme, f64)>,
     switcher: Cached<(SwitcherView, i32, Theme, f64)>,
     welcome: Cached<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Cached<(QuitView, Size<i32, Logical>, Theme, f64)>,
@@ -155,8 +172,11 @@ impl Chrome {
         let scale = view.scale;
         let theme = view.theme;
         let sidebar_w = view.sidebar_width;
+        let strip_h = tab_strip_height(view.density);
         let output: Size<i32, Logical> = (view.size.w.max(1), view.size.h.max(1)).into();
         let painter = &self.painter;
+        // Every part is drawn in full for now; fades will set this.
+        let alpha = 1.0;
 
         // Front to back: the quit dialog covers everything, the welcome
         // screen all the rest.
@@ -170,7 +190,7 @@ impl Chrome {
                 .get((quit, output, theme, scale), |(quit, output, ..)| {
                     painter.quit_dialog(quit, *output, scale, theme.palette())
                 });
-            parts.push((buffer, loc, size));
+            parts.push((buffer, loc, size, alpha));
         }
         if let Some(welcome) = view.welcome {
             let buffer = self
@@ -178,14 +198,13 @@ impl Chrome {
                 .get((welcome, output, theme, scale), |(welcome, output, ..)| {
                     painter.welcome(welcome, *output, scale, theme.palette())
                 });
-            parts.push((buffer, Point::from((0, 0)), output));
+            parts.push((buffer, Point::from((0, 0)), output, alpha));
             return render_parts(renderer, parts, scale);
         }
 
         let sidebar_size: Size<i32, Logical> = (sidebar_w, view.size.h.max(1)).into();
-        let strip_size: Size<i32, Logical> =
-            ((view.size.w - sidebar_w).max(1), TAB_STRIP_HEIGHT).into();
-        let menu_open = view.menu.is_some();
+        let strip_size: Size<i32, Logical> = ((view.size.w - sidebar_w).max(1), strip_h).into();
+        let menu_open = view.context_menu.is_some();
         let header_lit = view.header_hover || view.project_menu.is_some();
         let sidebar_key = (
             view.workspaces,
@@ -227,7 +246,7 @@ impl Chrome {
             },
         );
 
-        // Then the project menu, the switcher, the terminal menu and the
+        // Then the project menu, the switcher, the context menu and the
         // help panel cover the apps; the project menu the sidebar too.
         if let Some(menu) = view.project_menu {
             let panel = project_menu_layout(&menu, output).panel;
@@ -238,12 +257,12 @@ impl Chrome {
                 .get((menu, output, theme, scale), |(menu, output, ..)| {
                     painter.project_menu(menu, *output, scale, theme.palette())
                 });
-            parts.push((buffer, loc, size));
+            parts.push((buffer, loc, size, alpha));
         }
         if let Some(switcher) = view.switcher {
             let area = Rectangle::new(
-                (sidebar_w, TAB_STRIP_HEIGHT).into(),
-                (strip_size.w, (view.size.h - TAB_STRIP_HEIGHT).max(1)).into(),
+                (sidebar_w, strip_h).into(),
+                (strip_size.w, (view.size.h - strip_h).max(1)).into(),
             );
             let (panel, _, _) = switcher_layout(switcher.rows.len(), area);
             let loc = panel.loc - Point::from((SHADOW, SHADOW));
@@ -252,39 +271,40 @@ impl Chrome {
                 (switcher, panel.size.w, theme, scale),
                 |(switcher, w, ..)| painter.switcher(switcher, *w, scale, theme.palette()),
             );
-            parts.push((buffer, loc, size));
+            parts.push((buffer, loc, size, alpha));
         }
-        if let Some(hover) = view.menu {
-            let (panel, _) = terminal_menu(sidebar_w);
+        if let Some(menu) = view.context_menu {
+            let (panel, _) = menu_layout(menu.anchor, menu.rows.len());
             let loc = panel.loc - Point::from((SHADOW, SHADOW));
             let size = (panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW).into();
-            let menu = self.menu.get((hover, theme, scale), |(hover, _, _)| {
-                painter.menu(*hover, scale, theme.palette())
+            let menu = self.menu.get((menu, theme, scale), |(menu, _, _)| {
+                painter.menu(menu, scale, theme.palette())
             });
-            parts.push((menu, loc, size));
+            parts.push((menu, loc, size, alpha));
         }
         if let Some(help) = view.prefix.as_deref() {
             // Centred at the bottom of the app area.
-            let (area_w, area_h) = (view.size.w - sidebar_w, view.size.h - TAB_STRIP_HEIGHT);
+            let (area_w, area_h) = (view.size.w - sidebar_w, view.size.h - strip_h);
             let layout = painter.help_layout(help, area_w - 2 * HELP_MARGIN, scale);
             // The buffer reaches past the panel by the shadow on every side.
             let loc = Point::from((
                 sidebar_w + (area_w - layout.size.w) / 2 - SHADOW,
-                (TAB_STRIP_HEIGHT + area_h - layout.size.h - HELP_MARGIN).max(TAB_STRIP_HEIGHT)
-                    - SHADOW,
+                (strip_h + area_h - layout.size.h - HELP_MARGIN).max(strip_h) - SHADOW,
             ));
             let size = (layout.size.w + 2 * SHADOW, layout.size.h + 2 * SHADOW).into();
             let panel = self.help.get((layout, theme, scale), |(layout, _, _)| {
                 painter.help_panel(help, layout, scale, theme.palette())
             });
-            parts.push((panel, loc, size));
+            parts.push((panel, loc, size, alpha));
         }
-        if let Some(notice) = view.notice {
+        // The newest toast as the notice pill, until the toast stack is drawn.
+        if let Some(toast) = view.toasts.into_iter().last() {
+            let notice = toast.text;
             // Centred at the top of the app area, just below the tab strip.
             let w = painter.notice_width(&notice, strip_size.w - 2 * HELP_MARGIN, scale);
             let loc = Point::from((
                 sidebar_w + (strip_size.w - w) / 2 - SHADOW,
-                TAB_STRIP_HEIGHT + NOTICE_TOP - SHADOW,
+                strip_h + NOTICE_TOP - SHADOW,
             ));
             let size = (w + 2 * SHADOW, NOTICE_HEIGHT + 2 * SHADOW).into();
             let buffer = self
@@ -292,7 +312,7 @@ impl Chrome {
                 .get((notice, w, theme, scale), |(notice, w, ..)| {
                     painter.notice(notice, *w, scale, theme.palette())
                 });
-            parts.push((buffer, loc, size));
+            parts.push((buffer, loc, size, alpha));
         }
         // The pane bars sit on the apps, under everything else.
         self.pane_bars
@@ -305,19 +325,21 @@ impl Chrome {
             let buffer = cached.get((bar, theme, scale), |(bar, ..)| {
                 painter.pane_bar(bar, scale, theme.palette())
             });
-            parts.push((buffer, loc, size));
+            parts.push((buffer, loc, size, alpha));
         }
-        parts.push((sidebar, Point::from((0, 0)), sidebar_size));
-        parts.push((strip, Point::from((sidebar_w, 0)), strip_size));
+        parts.push((sidebar, Point::from((0, 0)), sidebar_size, alpha));
+        parts.push((strip, Point::from((sidebar_w, 0)), strip_size, alpha));
         render_parts(renderer, parts, scale)
     }
 }
 
-/// A drawn buffer, where it goes on the output and the logical size it covers.
+/// A drawn buffer, where it goes on the output, the logical size it covers
+/// and its opacity (0 to 1).
 type Part<'a> = (
     &'a MemoryRenderBuffer,
     Point<i32, Logical>,
     Size<i32, Logical>,
+    f32,
 );
 
 /// Render elements for buffers of physical pixels, each covering a logical
@@ -329,7 +351,7 @@ fn render_parts(
 ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
     parts
         .into_iter()
-        .filter_map(|(buffer, loc, size)| {
+        .filter_map(|(buffer, loc, size, alpha)| {
             // The buffer holds physical pixels at buffer scale 1: sample all of it
             // and squeeze it into the logical size.
             let src = Rectangle::from_size(physical(size, scale).to_f64());
@@ -337,7 +359,7 @@ fn render_parts(
                 renderer,
                 loc.to_f64().to_physical(scale),
                 buffer,
-                None,
+                Some(alpha),
                 Some(src),
                 Some(size),
                 Kind::Unspecified,

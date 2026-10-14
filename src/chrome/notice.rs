@@ -1,11 +1,22 @@
-//! The notice at the top of the app area.
+//! The notice at the top of the app area: the toasts, of which the
+//! newest is drawn as the notice pill for now.
 
 use super::{
     Canvas, FONT_SIZE, NOTICE_HEIGHT, NOTICE_PADDING, Painter, Palette, SHADOW, band, phys,
     physical,
 };
+use crate::toast::Level;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Rectangle, Size};
+
+/// What a toast shows: its text, its level (for the colour bar) and the
+/// label of its button, if it has one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToastView {
+    pub text: String,
+    pub level: Level,
+    pub action: Option<String>,
+}
 
 impl Painter {
     /// How wide the notice showing `text` is, at most `max`.

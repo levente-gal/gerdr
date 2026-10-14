@@ -37,8 +37,10 @@ use crate::{
     Gerdr,
     chrome::{self, BarButton, BarHit, BarStatus, PaneBarView},
     herdr::{Herdr, PaneState, Process, ProcessInfo},
+    menu::MenuSpec,
     prepare::{self, Plan, Prep, Shell, Step, Tools},
     projects::{Captured, Foreground, VenvSetting},
+    tooltip::Tooltip,
 };
 
 /// How often a pane is asked about while it is stopped.
@@ -454,6 +456,19 @@ impl Gerdr {
                 let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, pos)?;
                 Some((id, hit))
             })
+    }
+
+    /// The pointer moved to `pos` over the app area with nothing open
+    /// over it: the tooltip for the pane bar part under it, if it has one.
+    pub(crate) fn pane_bar_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let _ = pos;
+        None
+    }
+
+    /// The menu a right press at `pos` on a pane's bar opens, if any.
+    pub(crate) fn pane_bar_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
+        let _ = pos;
+        None
     }
 
     /// Light up the bar button under the pointer at `pos`, if any.

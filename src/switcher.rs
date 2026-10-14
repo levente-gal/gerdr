@@ -54,6 +54,8 @@ pub enum Target {
     /// The project menu, to find, start or manage projects there (the
     /// welcome screen while no project is shown).
     Welcome,
+    /// The key help, kept open.
+    Shortcuts,
     /// A folder, opened as a project unless a workspace has it already.
     Folder(PathBuf),
     /// The command of an app named in the config file or installed, to
@@ -528,6 +530,7 @@ impl Gerdr {
                 }
             }
             Target::Welcome => self.open_welcome(true),
+            Target::Shortcuts => self.help_pinned = true,
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),

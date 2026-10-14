@@ -146,6 +146,9 @@ pub struct TabRecord {
     #[serde(default)]
     pub herdr_tab: Option<String>,
     pub layout: SavedNode,
+    /// The name the tab was given, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// What ran in a herdr pane, to run again when its server restarts.
@@ -887,6 +890,7 @@ mod tests {
                     tabs: vec![TabRecord {
                         herdr_tab: Some("w1:t1".into()),
                         layout,
+                        label: None,
                     }],
                     panes: vec![PaneRecord {
                         pane_id: "w1:p1".into(),

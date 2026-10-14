@@ -8,6 +8,56 @@ pub(super) const fn hex(v: u32) -> Rgb {
     [(v >> 16) as u8, (v >> 8) as u8, v as u8]
 }
 
+/// Which look to use: the system's choice, or one of them, as chosen with
+/// the button at the top right and kept in the theme file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            ThemeMode::System => "system",
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+    }
+
+    /// The mode named `name`; the theme file written by older gerdrs
+    /// holds "dark" or "light".
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim() {
+            "system" => Some(ThemeMode::System),
+            "dark" => Some(ThemeMode::Dark),
+            "light" => Some(ThemeMode::Light),
+            _ => None,
+        }
+    }
+
+    /// The look this mode gives while the system prefers dark or not.
+    pub fn resolve(self, system_dark: bool) -> Theme {
+        match self {
+            ThemeMode::System if system_dark => Theme::Dark,
+            ThemeMode::System => Theme::Light,
+            ThemeMode::Dark => Theme::Dark,
+            ThemeMode::Light => Theme::Light,
+        }
+    }
+}
+
+impl From<Theme> for ThemeMode {
+    fn from(theme: Theme) -> Self {
+        match theme {
+            Theme::Dark => ThemeMode::Dark,
+            Theme::Light => ThemeMode::Light,
+        }
+    }
+}
+
 /// Light or dark look, switched with the button at the top right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -85,7 +135,7 @@ pub(super) const ONE_DARK: Palette = Palette {
     border_variant: hex(0x363c46),
     text: hex(0xdce0e5),
     muted: hex(0xa9afbc),
-    placeholder: hex(0x878a98),
+    placeholder: hex(0x9da3b0),
     accent: hex(0x74ade8),
     on_accent: hex(0x282c33),
     success: hex(0xa1c181),
@@ -105,7 +155,7 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     border_variant: hex(0xdfdfe0),
     text: hex(0x242529),
     muted: hex(0x58585a),
-    placeholder: hex(0x7e8086),
+    placeholder: hex(0x646569),
     accent: hex(0x5c78e2),
     on_accent: hex(0xfafafa),
     success: hex(0x669f59),
@@ -125,7 +175,73 @@ impl Palette {
     }
 }
 
+impl Palette {
+    /// The `-o` options giving Alacritty this palette, to append to its
+    /// command line: none yet.
+    #[allow(dead_code)]
+    pub fn alacritty_options(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// `a` moved `t` of the way to `b`.
 pub(super) fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ONE_DARK, ONE_LIGHT, Palette, Rgb, Theme, ThemeMode};
+
+    /// WCAG relative luminance.
+    fn luminance([r, g, b]: Rgb) -> f64 {
+        let channel = |c: u8| {
+            let c = c as f64 / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    /// WCAG contrast ratio, 1 to 21.
+    fn contrast(a: Rgb, b: Rgb) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn text_colours_read_on_their_backgrounds() {
+        for (name, p) in [("One Dark", &ONE_DARK), ("One Light", &ONE_LIGHT)] {
+            let p: &Palette = p;
+            for (what, colour) in [
+                ("placeholder", p.placeholder),
+                ("muted", p.muted),
+                ("text", p.text),
+            ] {
+                let ratio = contrast(colour, p.panel);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: {what} on panel is {ratio:.2}:1, under 4.5:1"
+                );
+            }
+            assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent");
+        }
+    }
+
+    #[test]
+    fn a_mode_resolves_to_a_theme_and_names_round_trip() {
+        assert_eq!(ThemeMode::System.resolve(true), Theme::Dark);
+        assert_eq!(ThemeMode::System.resolve(false), Theme::Light);
+        assert_eq!(ThemeMode::Dark.resolve(false), Theme::Dark);
+        assert_eq!(ThemeMode::Light.resolve(true), Theme::Light);
+        for mode in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
+            assert_eq!(ThemeMode::from_name(mode.name()), Some(mode));
+        }
+        assert_eq!(ThemeMode::from_name(" light\n"), Some(ThemeMode::Light));
+        assert_eq!(ThemeMode::from_name("blue"), None);
+        assert_eq!(ThemeMode::from(Theme::Light), ThemeMode::Light);
+    }
 }

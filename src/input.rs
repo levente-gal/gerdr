@@ -33,8 +33,7 @@ use smithay::{
 
 use crate::{
     Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
-    WorkspaceKind,
-    chrome::{self, FieldSpot, TAB_STRIP_HEIGHT},
+    chrome::{self, FieldSpot},
     launch::Place,
     layout::Dir,
     project_menu, quit,
@@ -44,11 +43,12 @@ use crate::{
 };
 
 pub(crate) const BTN_LEFT: u32 = 0x110;
+pub(crate) const BTN_RIGHT: u32 = 0x111;
+pub(crate) const BTN_MIDDLE: u32 = 0x112;
 /// Presses closer together than this, in time and place, count as a
 /// double (or triple) click.
 const MULTI_CLICK: Duration = Duration::from_millis(400);
 const MULTI_CLICK_SLOP: f64 = 4.0;
-pub(crate) const BTN_MIDDLE: u32 = 0x112;
 
 /// What a key gerdr kept from the apps does, once the keyboard is free again.
 enum Intercepted {
@@ -196,7 +196,7 @@ impl Gerdr {
                                 picked.map(|(target, place)| Intercepted::Switch(target, place)),
                             );
                         }
-                        if state.terminal_menu && sym == Keysym::Escape {
+                        if state.context_menu.is_some() && sym == Keysym::Escape {
                             state.close_menu();
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
@@ -228,6 +228,7 @@ impl Gerdr {
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output_geo = self.space.output_geometry(&self.output).unwrap();
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                self.pointer = pos;
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
                 if let Some(drag) = self.drag.clone() {
@@ -253,20 +254,26 @@ impl Gerdr {
                     self.welcome_hover(pos);
                 } else if self.project_menu.is_some() {
                     self.project_menu_hover(pos);
-                } else if self.terminal_menu {
-                    let (_, items) = chrome::terminal_menu(self.sidebar_width);
-                    self.menu_hover = items.iter().position(|item| item.to_f64().contains(pos));
+                } else if self.context_menu.is_some() {
+                    self.menu_motion(pos);
                 }
-                // The sidebar lights up under the pointer, with nothing open
-                // over it.
-                let covered = overlay || self.switcher.is_some() || self.terminal_menu;
+                // The region under the pointer lights up, with nothing open
+                // over it, and may offer a tooltip.
+                let covered = overlay || self.switcher.is_some() || self.context_menu.is_some();
                 self.header_hover = false;
-                if !covered {
-                    self.sidebar_motion(pos);
-                }
+                let tip = if covered {
+                    None
+                } else if pos.x < self.sidebar_width as f64 {
+                    self.sidebar_motion(pos)
+                } else if pos.y < self.tab_strip_height() as f64 {
+                    self.tab_strip_motion(pos)
+                } else {
+                    self.pane_bar_motion(pos)
+                };
                 // So do the buttons of a terminal pane's bar.
                 let free = !covered && self.drag.is_none() && self.reorder.is_none();
                 self.pane_bar_hover(free.then_some(pos));
+                self.tooltip.offer(tip.filter(|_| free), Instant::now());
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
@@ -352,64 +359,11 @@ impl Gerdr {
                     return;
                 }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
-                    // An overlay takes every press; only the left button does
-                    // anything there.
-                    if self.quit.is_some() {
-                        if event.button_code() == BTN_LEFT {
-                            self.quit_click(location);
-                        }
+                    let button = event.button_code();
+                    let taken = self.press(location, button);
+                    self.last_press = Some((Instant::now(), location, button));
+                    if taken {
                         return;
-                    }
-                    if self.welcome.is_some() {
-                        if event.button_code() == BTN_LEFT {
-                            self.welcome_click(location);
-                            self.press_field(location);
-                        }
-                        return;
-                    }
-                    if self.project_menu.is_some() {
-                        if event.button_code() == BTN_LEFT {
-                            self.project_menu_click(location);
-                            self.press_field(location);
-                        }
-                        return;
-                    }
-                    if self.switcher.is_some() {
-                        self.switcher_click(location);
-                        if event.button_code() == BTN_LEFT {
-                            self.press_field(location);
-                        }
-                        return;
-                    }
-                    if self.terminal_menu {
-                        self.menu_click(location);
-                        return;
-                    }
-                    if event.button_code() == BTN_LEFT
-                        && let Some(drag) = self.divider_at(location)
-                    {
-                        self.drag = Some(drag);
-                        return;
-                    }
-                    let (x, y) = (location.x as i32, location.y as i32);
-                    if x < self.sidebar_width {
-                        self.sidebar_press(x, y, event.button_code());
-                        return;
-                    }
-                    if y < TAB_STRIP_HEIGHT {
-                        self.tab_strip_press(x - self.sidebar_width, y, event.button_code());
-                        return;
-                    }
-                    if let Some((id, hit)) = self.pane_bar_at(location) {
-                        if event.button_code() == BTN_LEFT {
-                            self.pane_bar_click(id, hit);
-                        }
-                        return;
-                    }
-                    // Click to focus a pane.
-                    let clicked = self.space.element_under(location).map(|(w, _)| w.clone());
-                    if clicked.is_some() {
-                        self.focus(clicked);
                     }
                 }
 
@@ -471,23 +425,104 @@ impl Gerdr {
         }
     }
 
-    /// Any press while the terminal menu is open: an item runs, the chevron
-    /// or anything else closes the menu. The press goes no further.
-    fn menu_click(&mut self, location: smithay::utils::Point<f64, smithay::utils::Logical>) {
-        let (_, items) = chrome::terminal_menu(self.sidebar_width);
-        let item = items
-            .iter()
-            .position(|item| item.to_f64().contains(location));
-        self.close_menu();
-        if item == Some(0) {
-            self.pick_workspace(WorkspaceKind::Terminal);
+    /// `button` went down at `location` with no client grabbing the
+    /// pointer: an overlay or a menu takes it, else the region under it
+    /// (the sidebar, the tab strip, a pane bar: a right press asks the
+    /// region for its menu). Whether gerdr took the press; else it goes on
+    /// to the client under it.
+    fn press(&mut self, location: Point<f64, Logical>, button: u32) -> bool {
+        self.tooltip.hide();
+        // An overlay takes every press; only the left button does
+        // anything there.
+        if self.quit.is_some() {
+            if button == BTN_LEFT {
+                self.quit_click(location);
+            }
+            return true;
         }
+        if self.welcome.is_some() {
+            if button == BTN_LEFT {
+                self.welcome_click(location);
+                self.press_field(location);
+            }
+            return true;
+        }
+        if self.project_menu.is_some() {
+            if button == BTN_LEFT {
+                self.project_menu_click(location);
+                self.press_field(location);
+            }
+            return true;
+        }
+        if self.switcher.is_some() {
+            self.switcher_click(location);
+            if button == BTN_LEFT {
+                self.press_field(location);
+            }
+            return true;
+        }
+        if self.context_menu.is_some() {
+            self.menu_press(location);
+            return true;
+        }
+        if button == BTN_LEFT
+            && let Some(drag) = self.divider_at(location)
+        {
+            self.drag = Some(drag);
+            return true;
+        }
+        let (x, y) = (location.x as i32, location.y as i32);
+        if x < self.sidebar_width {
+            match button {
+                BTN_RIGHT => {
+                    if let Some(spec) = self.sidebar_menu(location) {
+                        self.open_menu(spec);
+                    }
+                }
+                _ => self.sidebar_press(x, y, button),
+            }
+            return true;
+        }
+        if y < self.tab_strip_height() {
+            match button {
+                BTN_RIGHT => {
+                    if let Some(spec) = self.tab_strip_menu(location) {
+                        self.open_menu(spec);
+                    }
+                }
+                _ => self.tab_strip_press(x - self.sidebar_width, y, button),
+            }
+            return true;
+        }
+        if let Some((id, hit)) = self.pane_bar_at(location) {
+            match button {
+                BTN_LEFT => self.pane_bar_click(id, hit),
+                BTN_RIGHT => {
+                    if let Some(spec) = self.pane_bar_menu(location) {
+                        self.open_menu(spec);
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        // Click to focus a pane.
+        let clicked = self.space.element_under(location).map(|(w, _)| w.clone());
+        if clicked.is_some() {
+            self.focus(clicked);
+        }
+        false
     }
 
-    fn close_menu(&mut self) {
-        self.terminal_menu = false;
-        self.menu_hover = None;
-        self.refresh_pointer_focus();
+    /// Whether a press at `pos` now, after the last one, makes a double
+    /// click: soon after it, close to it, and with the left button.
+    pub fn is_double(&self, pos: Point<f64, Logical>) -> bool {
+        self.last_press.is_some_and(|(when, from, button)| {
+            button == BTN_LEFT
+                && when.elapsed() < MULTI_CLICK
+                && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
+                && (from.y - pos.y).abs() < MULTI_CLICK_SLOP
+        })
     }
 
     /// Start holding the active workspace's row or the active tab, where the pointer is.

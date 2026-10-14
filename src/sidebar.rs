@@ -7,6 +7,8 @@ use smithay::utils::{Logical, Point};
 use crate::{
     Gerdr, Reorderable, WorkspaceKind, chrome, home_dir,
     input::{BTN_LEFT, BTN_MIDDLE},
+    menu::MenuSpec,
+    tooltip::Tooltip,
 };
 
 impl Gerdr {
@@ -36,8 +38,7 @@ impl Gerdr {
                 return;
             }
             if inside(&layout.chevron) {
-                self.terminal_menu = true;
-                self.refresh_pointer_focus();
+                self.open_menu(self.terminal_menu_spec());
                 return;
             }
             if inside(&layout.header) {
@@ -76,12 +77,20 @@ impl Gerdr {
     }
 
     /// The pointer moved to `pos` with nothing open over the sidebar: the
-    /// header's project name lights up under it.
-    pub(crate) fn sidebar_motion(&mut self, pos: Point<f64, Logical>) {
+    /// header's project name lights up under it. The tooltip for what is
+    /// under the pointer, if it has one.
+    pub(crate) fn sidebar_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         self.header_hover = self.project.is_some()
             && chrome::sidebar_layout(&[], &[], self.sidebar_width)
                 .header
                 .to_f64()
                 .contains(pos);
+        None
+    }
+
+    /// The menu a right press at `pos` in the sidebar opens, if any.
+    pub(crate) fn sidebar_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
+        let _ = pos;
+        None
     }
 }

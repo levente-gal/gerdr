@@ -7,11 +7,13 @@
 //! keep running when gerdr quits and come back when it starts again. Any
 //! other Wayland app can be launched into a split too (see `launch`).
 
+mod anim;
 mod app_icons;
 mod chrome;
 mod clipboard;
 mod config;
 mod desktop;
+mod frecency;
 mod fuzzy;
 mod git;
 mod handlers;
@@ -21,6 +23,7 @@ mod input;
 mod keys;
 mod launch;
 mod layout;
+mod menu;
 mod notify;
 mod pane_control;
 mod paths;
@@ -29,14 +32,17 @@ mod project_list;
 mod project_menu;
 mod projects;
 mod quit;
+mod rename;
 mod sidebar;
 mod switcher;
 mod tab_strip;
 mod text_field;
+mod toast;
+mod tooltip;
 mod welcome;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     io::Read,
     os::unix::process::CommandExt,
@@ -47,13 +53,16 @@ use std::{
 };
 
 use chrome::{
-    AgentView, BarButton, Chrome, ChromeView, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
-    TAB_STRIP_HEIGHT, TabView, Theme, WorkspaceView,
+    AgentView, BarButton, Chrome, ChromeView, Density, PlaceholderView, SIDEBAR_MAX_WIDTH,
+    SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
 };
+use frecency::Frecency;
 use hooks::Hook;
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
+use menu::ContextMenu;
 use paths::tilde;
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
+use rename::Rename;
 use serde_json::json;
 use smithay::{
     backend::{
@@ -103,6 +112,8 @@ use smithay::{
         viewporter::ViewporterState,
     },
 };
+use toast::Toast;
+use tooltip::TooltipState;
 
 /// Share of the content height given to Zed in the first tab, at start.
 const TOP_RATIO: f64 = 0.7;
@@ -143,8 +154,9 @@ const CLOSE_GRACE: Duration = Duration::from_millis(1500);
 /// How long a new project's Zed waits, after that, for the old Zed to exit:
 /// a `zed -n` would hand its window to it.
 const ZED_EXIT_WAIT: Duration = Duration::from_secs(3);
-/// How long a notice stays at the top of the app area.
-const NOTICE_TIME: Duration = Duration::from_secs(3);
+/// How long a window started for a tab may take to show up before the
+/// placeholder kept for it says so.
+pub const EXPECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a restarted server may take to bring back all its workspaces.
 const RESTORE_WAIT: Duration = Duration::from_secs(5);
 /// How long after a server restart the commands saved for its panes are
@@ -189,6 +201,8 @@ pub struct Expected {
     pub herdr: Option<herdr::PaneInfo>,
     /// The command it was launched with from the run prompt, for an app.
     pub app_command: Option<String>,
+    /// When the process was started (or queued).
+    pub started: Instant,
 }
 
 impl Expected {
@@ -201,6 +215,27 @@ impl Expected {
             exited: None,
             herdr: None,
             app_command: None,
+            started: Instant::now(),
+        }
+    }
+
+    /// What the placeholder for its window says is starting.
+    fn label(&self) -> String {
+        let program = |command: &str| {
+            command
+                .split_whitespace()
+                .next()
+                .map(|p| p.rsplit('/').next().unwrap_or(p).to_owned())
+        };
+        match self.app_id.as_str() {
+            "zed" => "Zed".into(),
+            "alacritty" | "ghostty" => "terminal".into(),
+            "" => self
+                .app_command
+                .as_deref()
+                .and_then(program)
+                .unwrap_or_else(|| "app".into()),
+            other => other.to_owned(),
         }
     }
 
@@ -221,6 +256,9 @@ pub struct Tab {
     pub expected: Vec<Expected>,
     /// Window that gets keyboard focus when the tab is shown.
     pub focused: Option<Window>,
+    /// The name it was given, shown ahead of the title derived from what
+    /// runs in it.
+    pub label: Option<String>,
 }
 
 impl Tab {
@@ -291,6 +329,7 @@ impl Tab {
         Some(TabRecord {
             herdr_tab: self.herdr_tab_id().map(str::to_owned),
             layout: self.layout.as_ref()?.save(&leaf)?,
+            label: self.label.clone(),
         })
     }
 
@@ -336,6 +375,26 @@ impl Tab {
         rects
             .into_iter()
             .filter(|(id, _)| self.window(*id).is_some())
+            .collect()
+    }
+
+    /// Where the panes still waiting for their window go in `area`, with
+    /// what is expected there.
+    fn expected_rects(
+        &self,
+        area: Rectangle<i32, Logical>,
+    ) -> Vec<(&Expected, Rectangle<i32, Logical>)> {
+        let rects = self
+            .layout
+            .as_ref()
+            .map_or(Vec::new(), |l| l.rects(area, DIVIDER));
+        rects
+            .into_iter()
+            .filter(|(id, _)| self.window(*id).is_none())
+            .filter_map(|(id, rect)| {
+                let expected = self.expected.iter().find(|e| e.pane == id)?;
+                Some((expected, rect))
+            })
             .collect()
     }
 
@@ -736,6 +795,8 @@ pub enum Action {
     CyclePane(isize),
     /// Switch the chrome between light and dark.
     ToggleTheme,
+    /// Keep the key help open, or close it again.
+    Shortcuts,
     /// Open the switcher, to search for what to switch to.
     Switcher,
     /// Open the run prompt, for an app to launch into a split.
@@ -804,7 +865,12 @@ pub struct Gerdr {
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
     pub chrome: Chrome,
-    pub theme: Theme,
+    /// The look chosen: the system's, dark or light.
+    pub theme_mode: ThemeMode,
+    /// Whether the system prefers a dark look (see `system_theme`).
+    pub system_dark: bool,
+    /// How much room the chrome takes, from the config file.
+    pub density: Density,
     pub sidebar_width: i32,
     /// The next pane id to hand out.
     pub next_pane: u32,
@@ -818,8 +884,19 @@ pub struct Gerdr {
     pub suppressed_keys: Vec<Keycode>,
     /// The prefix was pressed; the next key is a gerdr command.
     pub prefix_armed: bool,
+    /// The key help stays open until closed again.
+    pub help_pinned: bool,
     /// The prefix and the keys after it, from the config file.
     pub keymap: keys::Keymap,
+    /// Where the pointer is, in window coordinates.
+    pub pointer: Point<f64, Logical>,
+    /// The last press anywhere (when, where, which button), to tell a
+    /// double click.
+    pub last_press: Option<(Instant, Point<f64, Logical>, u32)>,
+    /// A workspace or tab being renamed in place.
+    pub rename: Option<Rename>,
+    /// How often and recently things were switched to, for ordering lists.
+    pub frecency: Frecency,
 
     pub socket_name: OsString,
     /// Zed's data dir, shared by all workspaces so they run in one Zed process.
@@ -845,10 +922,10 @@ pub struct Gerdr {
     pub process_groups: Vec<i32>,
     /// The folder picker, while it is open, and what it is open for.
     pub picker: Option<(Child, PickFor)>,
-    /// The menu under the terminal button's chevron is open.
-    pub terminal_menu: bool,
-    /// The menu item under the pointer.
-    pub menu_hover: Option<usize>,
+    /// The context menu open, if one is.
+    pub context_menu: Option<ContextMenu>,
+    /// The tooltip offered for what is under the pointer, and the one shown.
+    pub tooltip: TooltipState,
     /// The switcher, while it is open.
     pub switcher: Option<switcher::Switcher>,
     /// The folders zoxide knows, the highest ranked first.
@@ -905,8 +982,8 @@ pub struct Gerdr {
     /// The project shown before the one shown now, by id, for
     /// `Action::LastProject`.
     pub previous_project: Option<String>,
-    /// The note shown at the top of the app area, and when it goes.
-    pub notice: Option<(String, Instant)>,
+    /// The notes shown over the apps, oldest first (see `toast`).
+    pub toasts: VecDeque<Toast>,
     /// The quit dialog, while it is open.
     pub quit: Option<quit::QuitDialog>,
     /// The event loop sources following the project's herdr session, removed
@@ -989,10 +1066,20 @@ impl Gerdr {
         self.output.current_scale().fractional_scale()
     }
 
+    /// The look in use: the mode chosen, by what the system prefers.
+    pub fn theme(&self) -> Theme {
+        self.theme_mode.resolve(self.system_dark)
+    }
+
+    /// How high the tab strip is, at the density chosen.
+    pub fn tab_strip_height(&self) -> i32 {
+        chrome::tab_strip_height(self.density)
+    }
+
     /// Where the panes go: right of the sidebar, below the tab strip.
     fn content_rect(&self) -> Rectangle<i32, Logical> {
         let size = self.output_size();
-        let (x, y) = (self.sidebar_width, TAB_STRIP_HEIGHT);
+        let (x, y) = (self.sidebar_width, self.tab_strip_height());
         Rectangle::new(
             (x, y).into(),
             ((size.w - x).max(1), (size.h - y).max(1)).into(),
@@ -2109,6 +2196,7 @@ impl Gerdr {
                     let ws = &mut self.workspaces[w];
                     ws.tabs.push(Tab {
                         layout,
+                        label: saved_tab.and_then(|r| r.label.clone()),
                         ..Default::default()
                     });
                     ws.tabs.len() - 1
@@ -2152,6 +2240,7 @@ impl Gerdr {
                     t,
                     Tab {
                         layout: Some(layout),
+                        label: saved_tab.label.clone(),
                         ..Default::default()
                     },
                 );
@@ -2550,7 +2639,7 @@ impl Gerdr {
         // Without a project, there is nothing to act on yet.
         let anywhere = matches!(
             action,
-            Action::Projects | Action::ToggleTheme | Action::Quit
+            Action::Projects | Action::ToggleTheme | Action::Shortcuts | Action::Quit
         );
         if self.project.is_none() && !anywhere {
             return;
@@ -2575,6 +2664,7 @@ impl Gerdr {
                 });
             }
             Action::ToggleTheme => self.toggle_theme(),
+            Action::Shortcuts => self.help_pinned = !self.help_pinned,
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(launch::Place::Split),
             Action::RunTab => self.open_run_prompt(launch::Place::Tab),
@@ -2716,8 +2806,13 @@ impl Gerdr {
 
     /// Flip between light and dark, remembered for the next start.
     pub fn toggle_theme(&mut self) {
-        self.theme = self.theme.toggled();
-        if let Err(err) = std::fs::write(theme_file(), self.theme.name()) {
+        self.set_theme_mode(self.theme().toggled().into());
+    }
+
+    /// Use `mode`, remembered for the next start.
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        self.theme_mode = mode;
+        if let Err(err) = std::fs::write(theme_file(), mode.name()) {
             tracing::warn!("saving theme: {err}");
         }
     }
@@ -3112,11 +3207,10 @@ impl Gerdr {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let over_menu = self.terminal_menu
-            && chrome::terminal_menu(self.sidebar_width)
-                .0
-                .to_f64()
-                .contains(pos);
+        let over_menu = self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
         let reordering = self.reorder.is_some_and(|r| r.moving);
         // These take every click.
         if self.quit.is_some() || self.welcome.is_some() || self.project_menu.is_some() {
@@ -3160,6 +3254,7 @@ impl Gerdr {
                         })
                     })
                     .unwrap_or_else(|| "…".into());
+                let title = tab.label.clone().unwrap_or(title);
                 let detail = tab.herdr_tab_id().and_then(|id| self.herdr_tabs.get(id));
                 let mut view = TabView::new(title, detail, &self.agents);
                 let record = tab.restart_target().and_then(|p| self.pane_record(p));
@@ -3347,8 +3442,9 @@ impl Gerdr {
         self.active_workspace = 0;
         self.drag = None;
         self.reorder = None;
-        self.terminal_menu = false;
-        self.menu_hover = None;
+        self.context_menu = None;
+        self.tooltip.hide();
+        self.rename = None;
         self.stop_key_repeat();
         self.switcher = None;
         self.project_menu = None;
@@ -3600,27 +3696,6 @@ impl Gerdr {
         }
     }
 
-    /// Show `text` at the top of the app area for `NOTICE_TIME`, in place
-    /// of the notice shown, if any.
-    pub fn show_notice(&mut self, text: String) {
-        let until = Instant::now() + NOTICE_TIME;
-        self.notice = Some((text, until));
-        // Gone from the next frame, as every frame draws the chrome.
-        let clear = move |_, _: &mut (), state: &mut Gerdr| {
-            if state.notice.as_ref().is_some_and(|(_, at)| *at == until) {
-                state.notice = None;
-            }
-            TimeoutAction::Drop
-        };
-        if let Err(err) = self
-            .loop_handle
-            .insert_source(Timer::from_duration(NOTICE_TIME), clear)
-        {
-            // `chrome_view` leaves it out once it is past anyway.
-            tracing::warn!("timing the notice out: {err}");
-        }
-    }
-
     /// Forget project `id`; its herdr session stays. Not the shown one.
     pub fn forget_project(&mut self, id: &str) {
         if self.project.as_deref() == Some(id) {
@@ -3853,19 +3928,49 @@ impl Gerdr {
 
     /// What the sidebar and tab strip should show right now.
     fn chrome_view(&self) -> ChromeView {
+        let now = Instant::now();
         let ws = self.workspace();
         let active = ws.map(|_| self.active_workspace);
         let (workspaces, mut tabs): (Vec<_>, Vec<_>) = self.workspace_views().into_iter().unzip();
         let tabs = active.map_or(Vec::new(), |i| std::mem::take(&mut tabs[i]));
+        let area = self.content_rect();
+        let tab = self.tab();
+        let focused_pane = tab.and_then(|tab| {
+            let focused = tab.focused_id()?;
+            let (id, rect) = tab
+                .shown_rects(area)
+                .into_iter()
+                .find(|(id, _)| *id == focused)?;
+            Some(if tab.has_bar(id) {
+                chrome::pane_bar_rects(rect).1
+            } else {
+                rect
+            })
+        });
+        let placeholders = tab.map_or(Vec::new(), |tab| {
+            tab.expected_rects(area)
+                .into_iter()
+                .map(|(expected, rect)| PlaceholderView {
+                    rect,
+                    label: expected.label(),
+                    since: expected.started,
+                    timed_out: now.duration_since(expected.started) > EXPECT_TIMEOUT,
+                })
+                .collect()
+        });
         ChromeView {
+            now,
             workspaces,
             agents: self.agent_views(),
             active_workspace: active,
             tabs,
             active_tab: ws.map_or(0, |ws| ws.active_tab),
-            menu: self.terminal_menu.then_some(self.menu_hover),
+            focused_pane,
+            placeholders,
+            context_menu: self.context_menu.as_ref().map(ContextMenu::view),
+            tooltip: self.tooltip.view(),
             switcher: self.switcher_view(),
-            prefix: self.prefix_armed.then(|| self.keymap.help()),
+            prefix: (self.prefix_armed || self.help_pinned).then(|| self.keymap.help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             project: self
@@ -3875,13 +3980,10 @@ impl Gerdr {
                 .map(|p| p.name.clone()),
             header_hover: self.header_hover,
             project_menu: self.project_menu_view(),
-            notice: self
-                .notice
-                .as_ref()
-                .filter(|(_, until)| Instant::now() < *until)
-                .map(|(text, _)| text.clone()),
+            toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
-            theme: self.theme,
+            theme: self.theme(),
+            density: self.density,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
             scale: self.scale(),
@@ -3916,7 +4018,7 @@ fn retain_active<T>(items: &mut Vec<T>, active: &mut usize, keep: impl Fn(&T) ->
     items.len() != before
 }
 
-/// Where the light/dark choice is kept between runs.
+/// Where the theme choice (system, dark or light) is kept between runs.
 fn theme_file() -> PathBuf {
     home_dir()
         .unwrap_or_default()
@@ -4039,7 +4141,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| ListeningSocketSource::new_auto())?;
     let socket_name = socket.socket_name().to_os_string();
 
-    let (keymap, apps) = config::load();
+    let (keymap, apps, ui) = config::load();
+    let saved_theme = std::fs::read_to_string(theme_file())
+        .ok()
+        .and_then(|s| ThemeMode::from_name(&s));
     let mut state = Gerdr {
         start_time: Instant::now(),
         display_handle: dh.clone(),
@@ -4053,10 +4158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspaces: Vec::new(),
         active_workspace: 0,
         chrome: Chrome::new(),
-        theme: std::fs::read_to_string(theme_file())
-            .ok()
-            .and_then(|s| Theme::from_name(s.trim()))
-            .unwrap_or(Theme::Dark),
+        theme_mode: ui.theme.or(saved_theme).unwrap_or_default(),
+        system_dark: true,
+        density: ui.density,
         sidebar_width: SIDEBAR_WIDTH,
         next_pane: 0,
         drag: None,
@@ -4064,7 +4168,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chrome_cursor: CursorIcon::Default,
         suppressed_keys: Vec::new(),
         prefix_armed: false,
+        help_pinned: false,
         keymap,
+        pointer: (0.0, 0.0).into(),
+        last_press: None,
+        rename: None,
+        frecency: Frecency::load(),
         socket_name: socket_name.clone(),
         zed_data,
         children: Vec::new(),
@@ -4077,8 +4186,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_focused: true,
         process_groups: Vec::new(),
         picker: None,
-        terminal_menu: false,
-        menu_hover: None,
+        context_menu: None,
+        tooltip: TooltipState::default(),
         switcher: None,
         recent_dirs: Vec::new(),
         zoxide: None,
@@ -4103,7 +4212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         project_menu: None,
         header_hover: false,
         previous_project: None,
-        notice: None,
+        toasts: VecDeque::new(),
         quit: None,
         herdr_sources: Vec::new(),
         herdr_poke: None,
@@ -4185,7 +4294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let start = Instant::now();
                 let size = state.backend.window_size();
                 let view = state.chrome_view();
-                let clear_color = state.theme.clear_color();
+                let clear_color = state.theme().clear_color();
                 {
                     let (renderer, mut framebuffer) = state.backend.bind().unwrap();
                     let chrome = state.chrome.elements(renderer, view);
