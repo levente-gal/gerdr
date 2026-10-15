@@ -917,9 +917,9 @@ pub struct Gerdr {
     pub rename: Option<Rename>,
     /// What the pointer is over in the tab strip, and how far it has lit
     /// up (or faded since the pointer left).
-    pub tab_hover: Option<(chrome::TabHit, anim::Fade)>,
+    pub tab_hover: anim::Hover<chrome::TabHit>,
     /// What the pointer is over in the sidebar, with its fades.
-    pub sidebar_hover: sidebar::Hover,
+    pub sidebar_hover: anim::Hover<chrome::SidebarHit>,
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
@@ -4381,8 +4381,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pointer: (0.0, 0.0).into(),
         last_press: None,
         rename: None,
-        tab_hover: None,
-        sidebar_hover: sidebar::Hover::default(),
+        tab_hover: anim::Hover::default(),
+        sidebar_hover: anim::Hover::default(),
         frecency: Frecency::load(),
         bar_states: pane_control::BarStates::default(),
         socket_name: socket_name.clone(),

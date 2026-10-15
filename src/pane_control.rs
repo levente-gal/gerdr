@@ -467,23 +467,6 @@ impl BarStates {
     }
 }
 
-/// The keys for an action as the help panel lists them, after the prefix:
-/// "Ctrl+B A". The help puts an action on its own line (`own`, its
-/// description) or shares a line with its group (`group`, with the keys
-/// in the same order; the action is the `index`th).
-pub fn key_hint(help: &Help, own: &str, group: &str, index: usize) -> Option<String> {
-    let keys = help
-        .rows
-        .iter()
-        .find(|(_, label)| label == own)
-        .map(|(keys, _)| keys.split(" / ").next().unwrap_or(keys).to_owned())
-        .or_else(|| {
-            let (keys, _) = help.rows.iter().find(|(_, label)| label == group)?;
-            keys.split(" / ").nth(index).map(str::to_owned)
-        })?;
-    Some(format!("{} {keys}", help.prefix))
-}
-
 /// What the help calls each thing a bar offers: its own description, its
 /// group's, and its place in the group (see `keys::HELP_LINES`).
 const SPLIT_RIGHT_HELP: (&str, &str, usize) = ("split pane right", "split pane right / down", 0);
@@ -501,8 +484,10 @@ const STOP_HELP: (&str, &str, usize) = (
 const CLOSE_PANE_HELP: (&str, &str, usize) = ("close pane", "close pane", 0);
 
 /// The key for `what` (one of the `_HELP` triples), if `help` lists one.
-fn hint_for(help: &Help, what: (&str, &str, usize)) -> Option<String> {
-    key_hint(help, what.0, what.1, what.2)
+/// The key for one of the bar's actions, as the help lists it: on its own
+/// line (`own`) or as the `index`th of its group's line (`group`).
+fn hint_for(help: &Help, (own, group, index): (&str, &str, usize)) -> Option<String> {
+    help.key_for(own, 0).or_else(|| help.key_for(group, index))
 }
 
 /// What a bar button says when the pointer rests on it at `rect`.

@@ -21,9 +21,10 @@ use smithay::{
 
 use crate::{
     Gerdr,
+    anim::Hover,
     chrome::{self, ProjectRow, WelcomeHit, WelcomeView},
     herdr,
-    project_list::{self, Hover, scrolled},
+    project_list::{self, scrolled},
     projects,
     text_field::{Edit, TextField},
 };
@@ -48,7 +49,7 @@ pub struct Welcome {
     /// The first match shown.
     scroll: usize,
     /// What the pointer is over, in view rows, and its pill fading in.
-    hover: Option<Hover<WelcomeHit>>,
+    hover: Hover<WelcomeHit>,
     /// The new project's name typed so far, while asking for it.
     naming: Option<TextField>,
     /// The project Delete was pressed on once, by id.
@@ -272,7 +273,7 @@ impl Welcome {
 
     /// The pointer is over `hit` at `now`.
     fn set_hover(&mut self, hit: Option<WelcomeHit>, now: Instant) {
-        self.hover = Hover::moved(self.hover, hit, now);
+        self.hover.track(hit, now);
     }
 
     /// What is shown at `now`, with the parts gerdr knows filled in:
@@ -321,8 +322,8 @@ impl Welcome {
             rows,
             hits,
             selected,
-            hover: self.hover.map(|h| h.hit),
-            hover_alpha: self.hover.map_or(0, |h| h.alpha(now)),
+            hover: self.hover.over(),
+            hover_alpha: self.hover.alpha_over(now),
             naming: self.naming.as_ref().map(TextField::line),
             confirm_forget,
             note,

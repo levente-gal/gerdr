@@ -41,6 +41,7 @@ use crate::{
     desktop, fuzzy, home_dir,
     launch::{self, Place},
     paths::display,
+    project_list::scrolled,
     projects::Project,
     text_field::{Edit, TextField},
 };
@@ -522,14 +523,6 @@ fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
         Target::Welcome,
     ));
     items
-}
-
-/// The first row to show so that `selected` is in the `page` rows shown,
-/// moving as little as possible from `scroll`.
-pub(crate) fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
-    scroll
-        .min(selected)
-        .max((selected + 1).saturating_sub(page))
 }
 
 impl Gerdr {

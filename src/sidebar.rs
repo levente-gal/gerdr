@@ -9,7 +9,7 @@ use smithay::utils::{Logical, Point};
 
 use crate::{
     Gerdr, Reorderable,
-    anim::{FAST, Fade, quantize},
+    anim::quantize,
     chrome::{
         self, AgentView, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState,
         WorkspaceView,
@@ -19,52 +19,6 @@ use crate::{
     rename::RenameTarget,
     tooltip::Tooltip,
 };
-
-/// What the pointer is on in the sidebar and since when, and what it just
-/// left, each with its fade: the hover pills fade in and out.
-#[derive(Debug, Default)]
-pub struct Hover {
-    over: Option<(SidebarHit, Fade)>,
-    leaving: Option<(SidebarHit, Fade)>,
-}
-
-impl Hover {
-    /// The pointer is on `hit` (nothing with a pill when `None`) at `now`.
-    fn track(&mut self, hit: Option<SidebarHit>, now: Instant) {
-        if self.over.map(|(h, _)| h) == hit {
-            return;
-        }
-        if let Some((h, fade)) = self.over.take() {
-            self.leaving = Some((h, reverse(fade, now)));
-        }
-        if let Some(hit) = hit {
-            // Back on what was being left: carry on from where its fade is.
-            let fade = match self.leaving {
-                Some((left, fade)) if left == hit => reverse(fade, now),
-                _ => Fade::new(now, FAST, true),
-            };
-            self.over = Some((hit, fade));
-        }
-    }
-
-    /// How lit `hit`'s pill is at `now`, from 0 to 1.
-    fn alpha(&self, hit: SidebarHit, now: Instant) -> f32 {
-        [self.over, self.leaving]
-            .into_iter()
-            .flatten()
-            .find(|(h, _)| *h == hit)
-            .map_or(0.0, |(_, fade)| fade.value(now))
-    }
-}
-
-/// `fade` turned around at `now`, going the other way from where it stands.
-fn reverse(fade: Fade, now: Instant) -> Fade {
-    let value = fade.value(now);
-    let rising = !fade.rising;
-    // How far along the new fade already is, by its value.
-    let progress = if rising { value } else { 1.0 - value };
-    Fade::new(now - fade.dur.mul_f32(progress), fade.dur, rising)
-}
 
 impl Gerdr {
     /// Where the sidebar's parts sit, at the configured density.
@@ -205,9 +159,10 @@ impl Gerdr {
         match hit? {
             SidebarHit::Plus => {
                 let tip = Tooltip::new("New terminal, folder or project", layout.plus);
+                let help = self.keymap.help();
                 let keys: Vec<_> = ["terminal workspace in home", "open project"]
                     .into_iter()
-                    .filter_map(|label| self.key_hint(label))
+                    .filter_map(|label| help.key_for(label, 0))
                     .collect();
                 Some(if keys.is_empty() {
                     tip
@@ -217,7 +172,7 @@ impl Gerdr {
             }
             SidebarHit::Close(i) => {
                 let tip = Tooltip::new("Close workspace", layout.rows[i].close);
-                Some(match self.key_hint("close workspace") {
+                Some(match self.keymap.help().key_for("close workspace", 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -274,7 +229,8 @@ impl Gerdr {
             hit => {
                 let i = hit.row()?;
                 let dir = self.workspaces.get(i)?.dir.clone();
-                let hinted = |item: MenuItem, label: &str| match self.key_hint(label) {
+                let help = self.keymap.help();
+                let hinted = |item: MenuItem, label: &str| match help.key_for(label, 0) {
                     Some(key) => item.hint(&key),
                     None => item,
                 };
@@ -297,7 +253,8 @@ impl Gerdr {
     /// The menu under the header's "+": what to add, with the keys that
     /// do the same.
     pub(crate) fn sidebar_plus_menu(&self, layout: &SidebarLayout) -> MenuSpec {
-        let hinted = |item: MenuItem, label: &str| match self.key_hint(label) {
+        let help = self.keymap.help();
+        let hinted = |item: MenuItem, label: &str| match help.key_for(label, 0) {
             Some(key) => item.hint(&key),
             None => item,
         };
@@ -315,59 +272,5 @@ impl Gerdr {
                 ),
             ],
         }
-    }
-
-    /// The key for the action the help panel calls `label`, with the
-    /// prefix before it, like "Ctrl+B Shift+T".
-    fn key_hint(&self, label: &str) -> Option<String> {
-        let help = self.keymap.help();
-        help.rows
-            .iter()
-            .find(|(_, l)| l == label)
-            .map(|(keys, _)| format!("{} {keys}", help.prefix))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{FAST, Fade, Hover, reverse};
-    use crate::chrome::SidebarHit;
-    use std::time::Instant;
-
-    #[test]
-    fn a_reversed_fade_keeps_its_value() {
-        let start = Instant::now();
-        let up = Fade::new(start, FAST, true);
-        let at = start + FAST / 4;
-        let down = reverse(up, at);
-        assert!(!down.rising);
-        assert!((down.value(at) - up.value(at)).abs() < 0.01);
-        assert_eq!(down.value(at + FAST), 0.0);
-    }
-
-    #[test]
-    fn hover_fades_in_out_and_back() {
-        let start = Instant::now();
-        let mut hover = Hover::default();
-        hover.track(Some(SidebarHit::Row(0)), start);
-        assert_eq!(hover.alpha(SidebarHit::Row(0), start), 0.0);
-        assert_eq!(hover.alpha(SidebarHit::Row(0), start + FAST), 1.0);
-        assert_eq!(hover.alpha(SidebarHit::Row(1), start + FAST), 0.0);
-        // Leaving: the old pill fades out while the new fades in.
-        let later = start + 2 * FAST;
-        hover.track(Some(SidebarHit::Row(1)), later);
-        assert_eq!(hover.alpha(SidebarHit::Row(0), later), 1.0);
-        assert_eq!(hover.alpha(SidebarHit::Row(0), later + FAST), 0.0);
-        assert_eq!(hover.alpha(SidebarHit::Row(1), later + FAST), 1.0);
-        // Back onto the one half faded out: it comes back from there.
-        let mid = later + 2 * FAST;
-        hover.track(Some(SidebarHit::Row(0)), mid);
-        let half = mid + FAST / 2;
-        hover.track(None, half);
-        let v = hover.alpha(SidebarHit::Row(0), half);
-        assert!(v > 0.4 && v < 0.6, "{v}");
-        hover.track(Some(SidebarHit::Row(0)), half);
-        assert!((hover.alpha(SidebarHit::Row(0), half) - v).abs() < 0.01);
-        assert_eq!(hover.alpha(SidebarHit::Row(0), half + FAST), 1.0);
     }
 }

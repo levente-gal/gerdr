@@ -24,13 +24,14 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
+    anim::Hover,
     chrome::{
         self, FormField, FormView, MenuEntry, MenuHit, ProjectMenuView, ProjectRow, RowButton,
         SettingsField, SettingsView,
     },
     fuzzy, home_dir, hooks,
     paths::{display, tilde},
-    project_list::{self, Hover, PATH_CHARS, scrolled},
+    project_list::{self, PATH_CHARS, scrolled},
     text_field::{Edit, Line, TextField},
     tooltip::Tooltip,
 };
@@ -44,7 +45,7 @@ const SUGGESTIONS: usize = 5;
 #[derive(Debug, Default)]
 pub struct ProjectMenu {
     /// What the pointer is over, and its pill fading in.
-    hover: Option<Hover<MenuHit>>,
+    hover: Hover<MenuHit>,
     /// The wheel's turn not yet a whole row, in rows.
     wheel: f64,
     /// What was typed to filter the projects.
@@ -425,7 +426,7 @@ impl ProjectMenu {
             Item::Folder(f) => {
                 let folder = tilde(&self.folders[f], self.home.as_deref());
                 let name = basename(&folder, self.home.as_deref());
-                self.hover = None;
+                self.hover = Hover::default();
                 self.form = Some(Form {
                     name: name.into(),
                     folder: folder.into(),
@@ -463,7 +464,7 @@ impl ProjectMenu {
     /// Open the form, named as the query.
     fn open_form(&mut self) {
         let name = self.query.trim().to_owned();
-        self.hover = None;
+        self.hover = Hover::default();
         self.form = Some(Form {
             name_follows: name.is_empty(),
             name: name.into(),
@@ -508,7 +509,7 @@ impl ProjectMenu {
         let Some((_, row)) = self.projects.iter().find(|(p, _)| p == id) else {
             return;
         };
-        self.hover = None;
+        self.hover = Hover::default();
         self.renaming = None;
         self.settings = Some(Settings {
             id: id.to_owned(),
@@ -522,18 +523,18 @@ impl ProjectMenu {
 
     /// The pointer is over `hit` at `now`.
     fn set_hover(&mut self, hit: Option<MenuHit>, now: Instant) {
-        self.hover = Hover::moved(self.hover, hit, now);
+        self.hover.track(hit, now);
     }
 
     /// What the pointer is over.
     fn hovered(&self) -> Option<MenuHit> {
-        self.hover.map(|h| h.hit)
+        self.hover.over()
     }
 
     /// Close the settings form, back to the list.
     pub fn close_settings(&mut self) {
         self.settings = None;
-        self.hover = None;
+        self.hover = Hover::default();
     }
 
     /// A key while the settings form is shown.
@@ -604,7 +605,7 @@ impl ProjectMenu {
         let Settings {
             id, before, after, ..
         } = self.settings.take()?;
-        self.hover = None;
+        self.hover = Hover::default();
         Some(Outcome::SaveSettings {
             id,
             before: before.trim().to_owned(),
@@ -918,7 +919,7 @@ impl ProjectMenu {
     /// run, by id.
     fn view(&self, page: usize, running: &HashMap<String, bool>, now: Instant) -> ProjectMenuView {
         let hover = self.hovered();
-        let hover_alpha = self.hover.map_or(0, |h| h.alpha(now));
+        let hover_alpha = self.hover.alpha_over(now);
         if let Some(form) = &self.form {
             return ProjectMenuView {
                 query: Line::default(),

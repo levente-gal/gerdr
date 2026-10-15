@@ -23,6 +23,17 @@ pub struct Help {
     pub rows: Vec<(String, String)>,
 }
 
+impl Help {
+    /// The key for the action the panel calls `label`, the `nth` of its
+    /// alternatives, with the prefix before it: "Ctrl+B Shift+T". None
+    /// for an action the panel does not list, or fewer alternatives.
+    pub fn key_for(&self, label: &str, nth: usize) -> Option<String> {
+        let (keys, _) = self.rows.iter().find(|(_, l)| l == label)?;
+        let key = keys.split(" / ").nth(nth)?;
+        Some(format!("{} {key}", self.prefix))
+    }
+}
+
 /// Help panel geometry, in logical pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HelpLayout {

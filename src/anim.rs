@@ -55,6 +55,66 @@ impl Fade {
     }
 }
 
+/// What the pointer is on and since when, and what it just left, each
+/// with its fade: a hover pill fades in under the pointer and out after
+/// it, and one left half-way comes back from where it stands.
+#[derive(Clone, Copy, Debug)]
+pub struct Hover<T> {
+    over: Option<(T, Fade)>,
+    leaving: Option<(T, Fade)>,
+}
+
+impl<T> Default for Hover<T> {
+    fn default() -> Self {
+        Self {
+            over: None,
+            leaving: None,
+        }
+    }
+}
+
+impl<T: Copy + PartialEq> Hover<T> {
+    /// The pointer is on `hit` (nothing with a pill when `None`) at `now`.
+    pub fn track(&mut self, hit: Option<T>, now: Instant) {
+        if self.over.map(|(h, _)| h) == hit {
+            return;
+        }
+        let turn = |fade: Fade| Fade::from_value(now, fade.dur, !fade.rising, fade.value(now));
+        if let Some((h, fade)) = self.over.take() {
+            self.leaving = Some((h, turn(fade)));
+        }
+        if let Some(hit) = hit {
+            // Back on what was being left: carry on from where its fade is.
+            let fade = match self.leaving {
+                Some((left, fade)) if left == hit => turn(fade),
+                _ => Fade::new(now, FAST, true),
+            };
+            self.over = Some((hit, fade));
+        }
+    }
+
+    /// What the pointer is on, if it is on something with a pill.
+    pub fn over(&self) -> Option<T> {
+        self.over.map(|(h, _)| h)
+    }
+
+    /// How lit `hit`'s pill is at `now`, from 0 to 1.
+    pub fn alpha(&self, hit: T, now: Instant) -> f32 {
+        [self.over, self.leaving]
+            .into_iter()
+            .flatten()
+            .find(|(h, _)| *h == hit)
+            .map_or(0.0, |(_, fade)| fade.value(now))
+    }
+
+    /// How lit the pill under the pointer is at `now`, in `quantize`
+    /// steps; 0 with nothing under it.
+    pub fn alpha_over(&self, now: Instant) -> u8 {
+        self.over
+            .map_or(0, |(hit, _)| quantize(self.alpha(hit, now)))
+    }
+}
+
 /// `a` (0 to 1) as one of `STEPS` steps, for a cache key.
 pub fn quantize(a: f32) -> u8 {
     (a.clamp(0.0, 1.0) * STEPS).round() as u8
@@ -78,7 +138,7 @@ pub fn pulse(epoch: Instant, now: Instant) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAST, Fade, PULSE, phase, pulse, quantize};
+    use super::{FAST, Fade, Hover, PULSE, phase, pulse, quantize};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -112,6 +172,36 @@ mod tests {
         // Already at the end, it is done at once.
         assert!(Fade::from_value(mid, FAST, true, 1.0).done(mid));
         assert!(Fade::from_value(mid, FAST, false, 0.0).done(mid));
+    }
+
+    #[test]
+    fn hover_fades_in_out_and_back() {
+        let start = Instant::now();
+        let mut hover = Hover::default();
+        hover.track(Some(0), start);
+        assert_eq!(hover.over(), Some(0));
+        assert_eq!(hover.alpha(0, start), 0.0);
+        assert_eq!(hover.alpha(0, start + FAST), 1.0);
+        assert_eq!(hover.alpha(1, start + FAST), 0.0);
+        assert_eq!(hover.alpha_over(start + FAST), 16);
+        // Leaving: the old pill fades out while the new fades in.
+        let later = start + 2 * FAST;
+        hover.track(Some(1), later);
+        assert_eq!(hover.alpha(0, later), 1.0);
+        assert_eq!(hover.alpha(0, later + FAST), 0.0);
+        assert_eq!(hover.alpha(1, later + FAST), 1.0);
+        // Back onto the one half faded out: it comes back from there.
+        let mid = later + 2 * FAST;
+        hover.track(Some(0), mid);
+        let half = mid + FAST / 2;
+        hover.track(None, half);
+        assert_eq!(hover.over(), None);
+        assert_eq!(hover.alpha_over(half), 0);
+        let v = hover.alpha(0, half);
+        assert!(v > 0.4 && v < 0.6, "{v}");
+        hover.track(Some(0), half);
+        assert!((hover.alpha(0, half) - v).abs() < 0.01);
+        assert_eq!(hover.alpha(0, half + FAST), 1.0);
     }
 
     #[test]

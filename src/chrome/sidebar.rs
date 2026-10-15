@@ -15,8 +15,9 @@ use super::{
     FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
     LABEL_FONT_SIZE, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_BOTTOM, ROW_HEIGHT,
     ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_RADIUS, ROW_TITLE_HEIGHT, ROWS_TOP, Rect,
-    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, chevron_down,
-    cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical, status_mark, terminal,
+    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, band,
+    chevron_down, cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical, rect_px,
+    status_mark, terminal,
 };
 use crate::WorkspaceKind;
 use crate::git::GitStatus;
@@ -691,7 +692,7 @@ impl Painter {
                 (false, false) => None,
             };
             if let Some(fill) = fill {
-                let (x, y, w, h) = rect_px_in(row.rect, scale);
+                let (x, y, w, h) = rect_px(row.rect, scale);
                 c.rounded(
                     x + px(ROW_INSET) as f32,
                     y + px(2) as f32,
@@ -702,7 +703,7 @@ impl Painter {
                 );
             }
             let color = if is_active { p.text } else { p.muted };
-            let title_band = band_of(row.title, scale);
+            let title_band = band(row.title, scale);
             let icon = Rectangle::new(
                 (ROW_INSET + PADDING as i32, row.title.loc.y).into(),
                 (ROW_ICON_WIDTH, row.title.size.h).into(),
@@ -848,7 +849,7 @@ impl Painter {
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let (x, y, w, h) = rect_px_in(header, scale);
+        let (x, y, w, h) = rect_px(header, scale);
         if lit {
             c.rounded(x, y, w, h, 4.0 * s, p.selected);
         }
@@ -892,7 +893,7 @@ impl Painter {
             None
         };
         if let Some(fill) = fill {
-            let (x, y, w, h) = rect_px_in(rect, scale);
+            let (x, y, w, h) = rect_px(rect, scale);
             c.rounded(x, y, w, h, 6.0 * s, fill);
         }
         let color = if state.plus_open || hover > 0.0 {
@@ -929,7 +930,7 @@ impl Painter {
         let dot = (CHIP_DOT as f32 * s).round();
         let gap = (CHIP_GAP as f32 * s).round();
         let word_w = self.text_width(&word, TINY_FONT_SIZE, scale);
-        let (x0, _, slot_w, _) = rect_px_in(slot, scale);
+        let (x0, _, slot_w, _) = rect_px(slot, scale);
         let right = x0 + slot_w - (2.0 * s).round();
         let full = 2.0 * pad + dot + gap + word_w;
         let with_word = words && full <= slot_w;
@@ -972,7 +973,7 @@ impl Painter {
     /// with its selection and caret.
     fn rename_field(&self, c: &mut Canvas, typed: &Line, rect: Rect, scale: f64, p: &Palette) {
         let s = scale as f32;
-        let (x, y, w, h) = rect_px_in(rect, scale);
+        let (x, y, w, h) = rect_px(rect, scale);
         let b = (scale.round() as f32).max(1.0);
         c.rounded(x, y, w, h, 4.0 * s, p.accent);
         c.rounded(
@@ -989,7 +990,7 @@ impl Painter {
             typed,
             "",
             (x + pad, x + w - pad),
-            band_of(rect, scale),
+            band(rect, scale),
             true,
             scale,
             p,
@@ -1013,7 +1014,7 @@ impl Painter {
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let (x, y, w, h) = rect_px_in(rect, scale);
+        let (x, y, w, h) = rect_px(rect, scale);
         let (b, r) = (px(1).max(1) as f32, CARD_RADIUS * s);
         let status = p.status(card.status);
         let blocked = card.status == AgentStatus::Blocked;
@@ -1162,35 +1163,13 @@ impl Painter {
 /// The field renaming a workspace, drawn in `area` (see
 /// `RowLayout::rename_field`) and showing `line`, for clicks into it.
 pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
-    let (x, _, w, _) = rect_px_in(area, scale);
+    let (x, _, w, _) = rect_px(area, scale);
     let pad = (RENAME_INSET as f32 * scale as f32).round();
     FieldSpot {
         area,
         text: (x + pad, x + w - pad),
         line: line.clone(),
     }
-}
-
-/// A logical rectangle in physical pixels (x, y, width, height), its edges
-/// on whole pixels.
-fn rect_px_in(rect: Rect, scale: f64) -> (f32, f32, f32, f32) {
-    let px = |v: i32| (v as f64 * scale).round() as f32;
-    let (x, y) = (px(rect.loc.x), px(rect.loc.y));
-    (
-        x,
-        y,
-        px(rect.loc.x + rect.size.w) - x,
-        px(rect.loc.y + rect.size.h) - y,
-    )
-}
-
-/// A logical rectangle's rows as the band `(top, height)` text is centred in.
-fn band_of(rect: Rect, scale: f64) -> (i32, i32) {
-    let px = |v: i32| (v as f64 * scale).round() as i32;
-    (
-        px(rect.loc.y),
-        px(rect.loc.y + rect.size.h) - px(rect.loc.y),
-    )
 }
 
 #[cfg(test)]

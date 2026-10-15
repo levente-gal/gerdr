@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use crate::{
     Gerdr, Reorderable,
-    anim::{self, Fade},
     chrome::{self, TabHit, TabLayout, TabStripView, TabView, ThemeMode},
     input::{BTN_LEFT, BTN_MIDDLE},
     layout::Dir,
@@ -186,10 +185,8 @@ impl Gerdr {
             renaming,
             elsewhere,
         };
-        if let Some((hit, fade)) = self.tab_hover {
-            view.hover = Some(hit);
-            view.hover_alpha = anim::quantize(fade.value(Instant::now()));
-        }
+        view.hover = self.tab_hover.over();
+        view.hover_alpha = self.tab_hover.alpha_over(Instant::now());
         view
     }
 
@@ -214,27 +211,9 @@ impl Gerdr {
         } else {
             self.tab_strip_hit_at(&view, self.pointer)
         };
-        self.tab_hover = match (self.tab_hover, hit) {
-            (Some((old, fade)), Some(new)) if old == new => Some((
-                old,
-                if fade.rising {
-                    fade
-                } else {
-                    Fade::from_value(now, anim::FAST, true, fade.value(now))
-                },
-            )),
-            (_, Some(new)) => Some((new, Fade::new(now, anim::FAST, true))),
-            (Some((old, fade)), None) if fade.rising => Some((
-                old,
-                Fade::from_value(now, anim::FAST, false, fade.value(now)),
-            )),
-            (Some((old, fade)), None) if !fade.done(now) => Some((old, fade)),
-            _ => None,
-        };
-        view.hover = self.tab_hover.map(|(hit, _)| hit);
-        view.hover_alpha = self
-            .tab_hover
-            .map_or(0, |(_, fade)| anim::quantize(fade.value(now)));
+        self.tab_hover.track(hit, now);
+        view.hover = self.tab_hover.over();
+        view.hover_alpha = self.tab_hover.alpha_over(now);
         view
     }
 
@@ -270,11 +249,7 @@ impl Gerdr {
     /// The keys the strip's menus and tooltips name, from the help.
     fn tab_key_hints(&self) -> KeyHints {
         let help = self.keymap.help();
-        let key = |label: &str, nth: usize| -> Option<String> {
-            let (keys, _) = help.rows.iter().find(|(_, l)| l == label)?;
-            let key = keys.split(" / ").nth(nth)?;
-            Some(format!("{} {key}", help.prefix))
-        };
+        let key = |label: &str, nth: usize| help.key_for(label, nth);
         KeyHints {
             new_tab: key("new tab", 0),
             close_tab: key("close tab", 0),
