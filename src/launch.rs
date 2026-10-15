@@ -841,22 +841,19 @@ mod tests {
 
     #[test]
     fn launch_logs_are_named_after_the_program() {
-        let home = home_dir().unwrap();
+        let state = crate::state_dir();
         let under = |app: &str| {
             log_path(app)
-                .strip_prefix(&home)
+                .strip_prefix(&state)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned()
         };
-        assert_eq!(under("zed"), ".local/state/gerdr/launch/zed.log");
-        assert_eq!(
-            under("firefox-esr"),
-            ".local/state/gerdr/launch/firefox-esr.log"
-        );
-        assert_eq!(under("a b/c"), ".local/state/gerdr/launch/a_b_c.log");
-        assert_eq!(under(".."), ".local/state/gerdr/launch/app.log");
-        assert_eq!(under(""), ".local/state/gerdr/launch/app.log");
+        assert_eq!(under("zed"), "launch/zed.log");
+        assert_eq!(under("firefox-esr"), "launch/firefox-esr.log");
+        assert_eq!(under("a b/c"), "launch/a_b_c.log");
+        assert_eq!(under(".."), "launch/app.log");
+        assert_eq!(under(""), "launch/app.log");
     }
 
     #[test]

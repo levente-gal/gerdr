@@ -71,11 +71,13 @@ fn config_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().unwrap_or_default().join(".config"))
 }
 
-fn runtime_dir() -> PathBuf {
+/// `$XDG_RUNTIME_DIR`, the user's own private folder for sockets; none
+/// without it (a world-writable temp folder is no place for a config
+/// link another user could plant first).
+fn runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// The socket of `session` under the config folder `config`, as the
@@ -93,12 +95,31 @@ fn socket_under(config: &Path, session: &str) -> PathBuf {
 /// socket through: the real one, or when the socket's path under it would
 /// be too long (a deep home folder), `<runtime>/gerdr/config`, a short
 /// symlink to the real one, so herdr still finds the same config and
-/// sessions. With whether it is the short one.
-fn pick_config_home(session: &str, config: &Path, runtime: &Path) -> (PathBuf, bool) {
-    if socket_under(config, session).as_os_str().len() <= SOCKET_PATH_MAX {
-        (config.to_path_buf(), false)
-    } else {
-        (runtime.join("gerdr/config"), true)
+/// sessions. With whether it is the short one. Without a runtime folder,
+/// or with one too deep itself, the real folder is kept and the server
+/// is left to fail with its own words.
+fn pick_config_home(session: &str, config: &Path, runtime: Option<&Path>) -> (PathBuf, bool) {
+    let fits = |dir: &Path| socket_under(dir, session).as_os_str().len() <= SOCKET_PATH_MAX;
+    if fits(config) {
+        return (config.to_path_buf(), false);
+    }
+    match runtime.map(|runtime| runtime.join("gerdr/config")) {
+        Some(short) if fits(&short) => (short, true),
+        Some(short) => {
+            tracing::warn!(
+                "the herdr socket path is too long under {} and under {}",
+                config.display(),
+                short.display()
+            );
+            (config.to_path_buf(), false)
+        }
+        None => {
+            tracing::warn!(
+                "the herdr socket path is too long under {} and XDG_RUNTIME_DIR is not set",
+                config.display()
+            );
+            (config.to_path_buf(), false)
+        }
     }
 }
 
@@ -106,7 +127,8 @@ fn pick_config_home(session: &str, config: &Path, runtime: &Path) -> (PathBuf, b
 /// the short symlink made (or pointed right) when it is that one.
 fn config_home_for(session: &str) -> (PathBuf, bool) {
     let config = config_home();
-    let (picked, short) = pick_config_home(session, &config, &runtime_dir());
+    let runtime = runtime_dir();
+    let (picked, short) = pick_config_home(session, &config, runtime.as_deref());
     if short && let Err(err) = link_config(&picked, &config) {
         tracing::warn!(
             "linking {} to {}: {err}",
@@ -1125,7 +1147,7 @@ mod tests {
 
     #[test]
     fn a_long_socket_path_moves_under_the_runtime_dir() {
-        let runtime = Path::new("/run/user/1000");
+        let runtime = Some(Path::new("/run/user/1000"));
         let short = Path::new("/home/me/.config");
         assert_eq!(
             pick_config_home("gerdr-x", short, runtime),
@@ -1147,6 +1169,17 @@ mod tests {
             .unwrap();
         assert!(!pick_config_home("s", &config(n), runtime).1);
         assert!(pick_config_home("s", &config(n + 1), runtime).1);
+        // Without a runtime folder, or with one too deep itself, the real
+        // folder stays.
+        assert_eq!(
+            pick_config_home("gerdr-x", &deep, None),
+            (deep.clone(), false)
+        );
+        let deep_runtime = PathBuf::from(format!("/run/{}", "r".repeat(90)));
+        assert_eq!(
+            pick_config_home("gerdr-x", &deep, Some(&deep_runtime)),
+            (deep.clone(), false)
+        );
     }
 
     #[test]

@@ -2026,7 +2026,7 @@ mod tests {
             MenuEntry::Folder(f) => Some(f),
             _ => None,
         });
-        let squeezed = "~/…/into/the/folders/of/this/home/x";
+        let squeezed = "~/…/down/into/the/folders/of/this/home/x";
         assert_eq!(folder.as_deref(), Some(squeezed));
         m.open_settings("aft", "", "", &long);
         assert_eq!(view(&m, 10).settings.unwrap().dir, squeezed);

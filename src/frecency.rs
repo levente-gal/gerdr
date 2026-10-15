@@ -69,13 +69,17 @@ impl Frecency {
         self.to_file(&frecency_file());
     }
 
+    /// Written beside `path` first and moved over it, so a crash midway
+    /// leaves the last file whole rather than a cut one.
     fn to_file(&self, path: &std::path::Path) {
         let write = || -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
             let text = serde_json::to_string_pretty(self)?;
-            std::fs::write(path, text)
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, path)
         };
         if let Err(err) = write() {
             tracing::warn!("saving frecency: {err}");

@@ -81,7 +81,7 @@ fn shorten(start: &str, rest: &Path, max_chars: usize) -> String {
     }
     let len = |s: &str| s.chars().count();
     // The most folders at the end that fit after "start/…/", at least one.
-    let room = max_chars.saturating_sub(len(start) + "/…/".len());
+    let room = max_chars.saturating_sub(len(start) + len("/…/"));
     let mut keep = 1;
     let mut used = len(&names[names.len() - 1]);
     while keep < names.len() - 1 {
@@ -91,6 +91,10 @@ fn shorten(start: &str, rest: &Path, max_chars: usize) -> String {
         }
         used += next;
         keep += 1;
+    }
+    if keep == names.len() {
+        // One folder, too long on its own: nothing to cut from the middle.
+        return whole;
     }
     let tail = &names[names.len() - keep..];
     format!("{}/…/{}", start, tail.join("/"))
@@ -130,6 +134,14 @@ mod tests {
         assert_eq!(display(long, home, 3), "~/…/api");
         // The first folder gives way only after all the others.
         assert_eq!(display(Path::new("/home/x/Work/api"), home, 9), "~/…/api");
+        // The ellipsis counts as one character: 18 fits "~/…/service/api".
+        assert_eq!(display(long, home, 15), "~/…/service/api");
+        assert_eq!(display(long, home, 14), "~/…/api");
+        // A lone folder longer than the room stays whole: nothing to cut.
+        assert_eq!(
+            display(Path::new("/home/x/a-very-long-folder-name"), home, 8),
+            "~/a-very-long-folder-name"
+        );
     }
 
     #[test]
