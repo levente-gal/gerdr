@@ -394,8 +394,12 @@ impl Gerdr {
                 if state == ButtonState::Released
                     && let Some(reorder) = self.reorder.take()
                 {
+                    // A pane let go without moving was a click on its bar.
                     if reorder.moving {
-                        self.reorder_herdr(reorder.what);
+                        match reorder.what {
+                            Reorderable::Pane(id) => self.drop_pane(id),
+                            what => self.reorder_herdr(what),
+                        }
                     }
                     self.refresh_pointer_focus();
                     return;
@@ -571,6 +575,7 @@ impl Gerdr {
             };
             if let Some(target) = target {
                 self.reorder = None;
+                self.pane_drop = None;
                 self.start_rename(target);
                 return true;
             }
@@ -600,7 +605,14 @@ impl Gerdr {
         }
         if let Some((id, hit)) = self.pane_bar_at(location) {
             match button {
-                BTN_LEFT => self.pane_bar_click(id, hit),
+                BTN_LEFT => {
+                    self.pane_bar_click(id, hit);
+                    // Held by its label, the pane can be dragged elsewhere
+                    // (see `pane_drag`); let go where it was, it was a click.
+                    if hit == BarHit::Label {
+                        self.hold(Reorderable::Pane(id));
+                    }
+                }
                 BTN_RIGHT => {
                     if let Some(spec) = self.pane_bar_menu(location) {
                         self.open_menu(spec);
@@ -735,7 +747,8 @@ impl Gerdr {
         })
     }
 
-    /// Start holding the active workspace's row or the active tab, where the pointer is.
+    /// Start holding the active workspace's row, the active tab or a pane,
+    /// where the pointer is.
     pub(crate) fn hold(&mut self, what: Reorderable) {
         let from = self.seat.get_pointer().unwrap().current_location();
         self.reorder = Some(Reorder {
