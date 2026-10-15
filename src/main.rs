@@ -40,6 +40,7 @@ mod tab_strip;
 mod text_field;
 mod toast;
 mod tooltip;
+mod web_pages;
 mod welcome;
 
 use std::{
@@ -87,7 +88,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Display, DisplayHandle, Resource,
-            backend::{ClientData, ClientId, DisconnectReason},
+            backend::{ClientData, ClientId, DisconnectReason, ObjectId},
             protocol::wl_surface::WlSurface,
         },
         winit::{platform::wayland::WindowAttributesExtWayland, window::WindowAttributes},
@@ -137,6 +138,9 @@ const AGENT_INTERVAL: Duration = Duration::from_secs(1);
 const SLOW_FRAME: Duration = Duration::from_millis(20);
 /// How often the Git status of the workspace folders is read again.
 const GIT_INTERVAL: Duration = Duration::from_secs(3);
+/// How often the web pages' windows are asked where they are now (see
+/// `web_pages`).
+const WEB_INTERVAL: Duration = Duration::from_secs(3);
 /// How long a window may still show up after the process we started exited
 /// (the `zed` CLI hands the window off to an already running editor and quits).
 const HANDOFF_GRACE: Duration = Duration::from_secs(10);
@@ -177,7 +181,8 @@ pub struct Pane {
     pub window: Window,
     /// The herdr pane it shows, for a terminal.
     pub herdr: Option<herdr::PaneInfo>,
-    /// The command it was launched with from the run prompt, for an app.
+    /// The command it was launched with from the run prompt, for an app;
+    /// for a web page, the link to where it is now (see `web_pages`).
     pub app_command: Option<String>,
     /// Neither started by gerdr nor by what it started: opened from a shell
     /// of the project's. Held for the project when switching away.
@@ -476,6 +481,31 @@ fn saved_leaf(
     } else {
         zed.then_some(SavedLeaf::Zed)
     }
+}
+
+/// Whether `command` is a web page's link, which opens as a web app (see
+/// `launch::web_app`).
+fn is_web_link(command: &str) -> bool {
+    let command = command.trim();
+    let web =
+        |scheme: &str| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+    !command.contains(char::is_whitespace)
+        && command
+            .split_once("://")
+            .is_some_and(|(scheme, _)| web(scheme))
+}
+
+/// The title `window` goes by.
+fn window_title(window: &Window) -> Option<String> {
+    with_states(window.toplevel()?.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()?
+            .lock()
+            .unwrap()
+            .title
+            .clone()
+    })
 }
 
 /// Whether `window` is a Zed window.
@@ -924,6 +954,12 @@ pub struct Gerdr {
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
     pub bar_states: pane_control::BarStates,
+    /// Where a window goes once it has drawn a new size, by its surface:
+    /// the size it had when asked, and its place then. A window that is
+    /// to move and change size at once (a pane bar taking or giving back
+    /// its room) stays put until then, so its old buffer never shows at
+    /// the new place and jumps again when the new one comes.
+    pub pending_place: HashMap<ObjectId, (Size<i32, Logical>, Point<i32, Logical>)>,
 
     pub socket_name: OsString,
     /// Zed's data dir, shared by all workspaces so they run in one Zed process.
@@ -938,6 +974,8 @@ pub struct Gerdr {
     pub herdr_tabs: HashMap<String, herdr::TabDetail>,
     /// The Git status of the workspace folders in a repository, by folder.
     pub git: HashMap<PathBuf, git::GitStatus>,
+    /// A read of where the web pages are is under way (see `watch_web_pages`).
+    pub web_pending: bool,
     /// A round of reading the Git status is still running.
     pub git_pending: bool,
     /// gerdr's connection to the host's notification daemon; `None` without
@@ -1878,6 +1916,87 @@ impl Gerdr {
         }
     }
 
+    /// Ask the browsers where the web pages' windows are now and every
+    /// `WEB_INTERVAL`, off the event loop (see `web_pages`).
+    fn watch_web_pages(&mut self) {
+        let (tx, rx): (_, Channel<Vec<(web_pages::WebPane, String)>>) = channel::channel();
+        let read = self.loop_handle.insert_source(rx, |event, _, state| {
+            if let channel::Event::Msg(found) = event {
+                state.web_pending = false;
+                state.take_web_urls(found);
+            }
+        });
+        let timer = self
+            .loop_handle
+            .insert_source(Timer::immediate(), move |_, _, state| {
+                if !state.web_pending {
+                    let panes = state.web_panes();
+                    if !panes.is_empty() {
+                        state.web_pending = true;
+                        let tx = tx.clone();
+                        web_pages::read_all(panes, move |found| {
+                            let _ = tx.send(found);
+                        });
+                    }
+                }
+                TimeoutAction::ToDuration(WEB_INTERVAL)
+            });
+        if let Err(err) = read
+            .map_err(|e| e.to_string())
+            .and(timer.map_err(|e| e.to_string()))
+        {
+            tracing::warn!("web pages: {err}");
+        }
+    }
+
+    /// The panes showing a web page launched by its link, with their
+    /// windows' titles.
+    fn web_panes(&self) -> Vec<web_pages::WebPane> {
+        let mut panes = Vec::new();
+        for (w, ws) in self.workspaces.iter().enumerate() {
+            for (t, tab) in ws.tabs.iter().enumerate() {
+                for pane in &tab.panes {
+                    let Some(command) = pane.app_command.as_deref() else {
+                        continue;
+                    };
+                    if !is_web_link(command) {
+                        continue;
+                    }
+                    let Some(title) = window_title(&pane.window) else {
+                        continue;
+                    };
+                    panes.push(web_pages::WebPane {
+                        workspace: w,
+                        tab: t,
+                        pane: pane.id,
+                        command: command.to_owned(),
+                        title,
+                    });
+                }
+            }
+        }
+        panes
+    }
+
+    /// Take in where the web pages are now: each pane still showing the
+    /// link it was asked about now has the page's URL as its command, for
+    /// the tab layouts to save (see `record_tabs`) and a restart to open.
+    fn take_web_urls(&mut self, found: Vec<(web_pages::WebPane, String)>) {
+        for (web, url) in found {
+            let pane = self
+                .workspaces
+                .get_mut(web.workspace)
+                .and_then(|ws| ws.tabs.get_mut(web.tab))
+                .and_then(|tab| tab.panes.iter_mut().find(|p| p.id == web.pane));
+            if let Some(pane) = pane
+                && pane.app_command.as_deref() == Some(web.command.as_str())
+            {
+                tracing::debug!("web page {} now at {url}", web.command);
+                pane.app_command = Some(url);
+            }
+        }
+    }
+
     /// Ask herdr which agents run in the session now.
     fn refresh_agents(&mut self) {
         let Some(herdr) = self.herdr.as_mut() else {
@@ -2442,21 +2561,30 @@ impl Gerdr {
 
     /// Zed windows come from a shared editor process, so they can only be told
     /// apart by app_id. Start them one at a time: the next queued one once the
-    /// previous window has shown up (or never will). Whether a window that
-    /// didn't start left its leaf, for the caller to prune.
+    /// previous window has shown up (or never will). A window restored with
+    /// the project opens the workspace folder; one launched by command runs
+    /// that command (with gerdr's data dir, see `launch::own_instance`).
+    /// Whether a window that didn't start left its leaf, for the caller to
+    /// prune.
     fn launch_next_zed(&mut self) -> bool {
         if self.old_zed_running() {
             return false; // reaping tries again
         }
-        self.launch_next("zed", |gerdr, w, _, _| {
-            // `-n`: a new Zed window, handed to the running editor if there is one.
+        self.launch_next(launch::ZED_APP_ID, |gerdr, w, t, i| {
             let dir = gerdr.workspaces[w].dir.clone();
-            let mut zed = Command::new("zed");
-            zed.arg("-n")
-                .arg("--user-data-dir")
-                .arg(&gerdr.zed_data)
-                .arg(&dir);
-            let pid = gerdr.spawn(zed, &dir, "zed")?;
+            let command = gerdr.workspaces[w].tabs[t].expected[i].app_command.clone();
+            let pid = match command {
+                Some(command) => gerdr.start_app(w, t, &command)?,
+                None => {
+                    // `-n`: a new Zed window, handed to the running editor if there is one.
+                    let mut zed = Command::new("zed");
+                    zed.arg("-n")
+                        .arg("--user-data-dir")
+                        .arg(&gerdr.zed_data)
+                        .arg(&dir);
+                    gerdr.spawn(zed, &dir, "zed")?
+                }
+            };
             gerdr.zed_groups.push(pid as i32);
             Some(pid)
         })
@@ -3310,10 +3438,22 @@ impl Gerdr {
             });
             toplevel.send_pending_configure();
             set_preferred_scale(toplevel.wl_surface(), scale);
-            if self.is_visible(w, t) {
-                self.space.map_element(window, rect.loc, false);
-            } else {
+            let id = toplevel.wl_surface().id();
+            if !self.is_visible(w, t) {
+                self.pending_place.remove(&id);
                 self.space.unmap_elem(&window);
+                continue;
+            }
+            // A window both moving and changing size moves once the client
+            // has drawn the new size (see `pending_place`); while a divider
+            // moves, it follows the divider.
+            let size = window.geometry().size;
+            let moving = self.space.element_location(&window) != Some(rect.loc);
+            if !resizing && moving && size != rect.size && size.w > 0 && size.h > 0 {
+                self.pending_place.insert(id, (size, rect.loc));
+            } else {
+                self.pending_place.remove(&id);
+                self.space.map_element(window, rect.loc, false);
             }
         }
     }
@@ -3336,6 +3476,7 @@ impl Gerdr {
     }
 
     pub fn remove_window(&mut self, surface: &WlSurface) {
+        self.pending_place.remove(&surface.id());
         let not_it = |w: &Window| w.toplevel().unwrap().wl_surface() != surface;
         self.unplaced.retain(not_it);
         for windows in self.held.values_mut() {
@@ -3920,6 +4061,7 @@ impl Gerdr {
     /// End gerdr, stopping the project's session if `stop`. It counts as
     /// stopped only once it is.
     pub fn quit_app(&mut self, stop: bool) {
+        self.take_web_urls(web_pages::read_now(self.web_panes()));
         self.record_tabs();
         let stopped = stop && self.stop_session();
         if stopped
@@ -4269,9 +4411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (project_arg, folders) = parse_args(std::env::args_os().skip(1));
     // Own data dir so Zed runs its own instance here instead of handing the
     // windows to a Zed already running on the host.
-    let zed_data = home_dir()
-        .unwrap_or_default()
-        .join(".local/share/gerdr/zed");
+    let zed_data = launch::zed_data_dir(&home_dir().unwrap_or_default());
     let _ = std::fs::create_dir_all(&zed_data);
 
     let mut event_loop: EventLoop<'static, Gerdr> = EventLoop::try_new()?;
@@ -4385,6 +4525,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sidebar_hover: anim::Hover::default(),
         frecency: Frecency::load(),
         bar_states: pane_control::BarStates::default(),
+        pending_place: HashMap::new(),
         socket_name: socket_name.clone(),
         zed_data,
         children: Vec::new(),
@@ -4393,6 +4534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         herdr_tabs: HashMap::new(),
         git: HashMap::new(),
         git_pending: false,
+        web_pending: false,
         notifier: None,
         blocked_since: HashMap::new(),
         host_focused: true,
@@ -4574,6 +4716,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.system_dark = dark;
     }
     state.watch_git();
+    state.watch_web_pages();
     state.connect_notifier();
     state.watch_system_theme();
     state.watch_zoxide();

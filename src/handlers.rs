@@ -79,6 +79,13 @@ impl CompositorHandler for Gerdr {
             }
             if let Some(window) = self.window_for_surface(&root) {
                 window.on_commit();
+                // Drawn at its new size: now it goes where that size fits.
+                if let Some(&(was, loc)) = self.pending_place.get(&root.id())
+                    && window.geometry().size != was
+                {
+                    self.pending_place.remove(&root.id());
+                    self.space.map_element(window, loc, false);
+                }
             }
         }
 

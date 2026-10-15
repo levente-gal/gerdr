@@ -334,14 +334,15 @@ pub enum BarWant {
 }
 
 /// Whether a pane's bar shows: with room while its command is `status` (a
-/// job, or something other than the shell, running) or while the pointer
-/// asks for it (`pointer`, see `chrome::pointer_reveals`); over the window
-/// for `FOCUS_HOLD` after the pane gained focus (`focused_for` while it
-/// has it), so a focus change moves no window.
+/// job, or something other than the shell, running); over the window
+/// while the pointer asks for it (`pointer`, see `chrome::pointer_reveals`)
+/// and for `FOCUS_HOLD` after the pane gained focus (`focused_for` while
+/// it has it), so neither a look nor a focus change resizes or moves a
+/// window.
 pub fn bar_wanted(status: BarStatus, pointer: bool, focused_for: Option<Duration>) -> BarWant {
-    if matches!(status, BarStatus::Running | BarStatus::Working) || pointer {
+    if matches!(status, BarStatus::Running | BarStatus::Working) {
         BarWant::Room
-    } else if focused_for.is_some_and(|since| since < FOCUS_HOLD) {
+    } else if pointer || focused_for.is_some_and(|since| since < FOCUS_HOLD) {
         BarWant::Over
     } else {
         BarWant::Hidden
@@ -1280,15 +1281,17 @@ mod tests {
         assert_eq!(bar_wanted(BarStatus::Working, false, None), BarWant::Room);
         assert_eq!(bar_wanted(BarStatus::Idle, false, None), BarWant::Hidden);
         assert_eq!(bar_wanted(BarStatus::Exited, false, None), BarWant::Hidden);
-        assert_eq!(bar_wanted(BarStatus::Idle, true, None), BarWant::Room);
-        // A new focus shows the bar over the window, taking no room.
+        // The pointer shows the bar over the window, taking no room.
+        assert_eq!(bar_wanted(BarStatus::Idle, true, None), BarWant::Over);
+        assert_eq!(bar_wanted(BarStatus::Running, true, None), BarWant::Room);
+        // So does a new focus.
         assert_eq!(
             bar_wanted(BarStatus::Exited, false, Some(ms(999))),
             BarWant::Over
         );
         assert_eq!(
             bar_wanted(BarStatus::Idle, true, Some(ms(999))),
-            BarWant::Room
+            BarWant::Over
         );
         assert_eq!(
             bar_wanted(BarStatus::Idle, false, Some(FOCUS_HOLD)),

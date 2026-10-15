@@ -178,9 +178,10 @@ impl Gerdr {
 
     /// Start the first queued window of each app whose windows are told by
     /// app_id (gerdr's Ghostty, Alacritty and Firefox, a web app's site),
-    /// unless one is already on its way (see `launch_next`). One that
-    /// doesn't start leaves its leaf, and the next is tried: whether any
-    /// did, for the caller to prune.
+    /// unless one is already on its way (see `launch_next`). A Zed's waits
+    /// for an old Zed too (see `Gerdr::launch_next_zed`). One that doesn't
+    /// start leaves its leaf, and the next is tried: whether any did, for
+    /// the caller to prune.
     pub fn launch_next_apps(&mut self) -> bool {
         let mut app_ids: Vec<String> = self
             .workspaces
@@ -194,6 +195,10 @@ impl Gerdr {
         app_ids.dedup();
         let mut dropped = false;
         for app_id in app_ids {
+            if app_id == ZED_APP_ID {
+                dropped |= self.launch_next_zed();
+                continue;
+            }
             dropped |= self.launch_next(&app_id, |gerdr, w, t, i| {
                 let command = gerdr.workspaces[w].tabs[t].expected[i]
                     .app_command
@@ -245,7 +250,8 @@ impl Gerdr {
 
     /// `command` (trimmed) as `start_app` runs it in `dir`: in gerdr's
     /// Ghostty or Alacritty, in the app for a URL, as a web app, or with a
-    /// profile of gerdr's (see the module).
+    /// profile of gerdr's (see the module), which for Zed is the data dir
+    /// of gerdr's Zed (see `Gerdr::launch_next_zed`).
     fn prepare(&self, command: &str, dir: &Path) -> Prepared {
         if let Some(shared) = Shared::of(command) {
             let changed = match shared {
@@ -284,6 +290,9 @@ impl Gerdr {
             Some((command, profile)) => {
                 if command.contains(BROWSER_APP_ID) {
                     app_id = BROWSER_APP_ID.to_owned();
+                } else if program_name(&command).is_some_and(|key| ZEDS.contains(&key.as_str())) {
+                    // The CLI hands the window to gerdr's editor and quits.
+                    app_id = ZED_APP_ID.to_owned();
                 }
                 Prepared {
                     command,
@@ -431,7 +440,21 @@ fn web_app(url: &str, opener: &str) -> Option<(String, String)> {
         return None;
     }
     let site = format!("-{}_", host.to_ascii_lowercase());
-    Some((format!("{browser} --app={quoted}"), site))
+    // DevTools on a free port of localhost, to read back where each window
+    // is (see `web_pages`); a browser already running keeps its own.
+    Some((
+        format!("{browser} --remote-debugging-port=0 --app={quoted}"),
+        site,
+    ))
+}
+
+/// The folder of the profile of gerdr's that the browser showing `command`
+/// as a web app runs with (see `web_app` and `own_instance`); `None` when
+/// `command` isn't a web page's link.
+pub fn web_profile(command: &str) -> Option<PathBuf> {
+    let opener = desktop::url_command(command)?;
+    let (web, _) = web_app(command, &opener)?;
+    own_instance(&web)?.1
 }
 
 /// Editors built on VS Code, by program and Flatpak id.
@@ -450,6 +473,30 @@ const VS_CODES: &[&str] = &[
 
 /// Ghostty, by program and Flatpak id.
 const GHOSTTYS: &[&str] = &["ghostty", "com.mitchellh.ghostty"];
+
+/// Zed, by program (the CLI, its desktop file's name, the editor itself)
+/// and Flatpak id.
+const ZEDS: &[&str] = &[
+    "zed",
+    "zeditor",
+    "zed-editor",
+    "zed-preview",
+    "zed-nightly",
+    "dev.zed.Zed",
+    "dev.zed.Zed-Preview",
+    "dev.zed.Zed-Nightly",
+    "dev.zed.Zed-Dev",
+];
+
+/// The app_id a Zed window is expected by (see `Expected`).
+pub const ZED_APP_ID: &str = "zed";
+
+/// Zed's data dir of gerdr's: with it, Zed runs its own instance here
+/// instead of handing the windows to a Zed already running on the host.
+/// One for all workspaces, so they run in one Zed process.
+pub fn zed_data_dir(home: &Path) -> PathBuf {
+    home.join(".local/share/gerdr/zed")
+}
 
 /// Ghostty's option for keeping one copy running.
 const SINGLE_INSTANCE: &str = "--gtk-single-instance";
@@ -598,9 +645,9 @@ pub fn program_name(command: &str) -> Option<String> {
 
 /// `command` changed to start a copy of its own of an app that hands new
 /// windows to a running one: a browser or a VS Code with gerdr's profile
-/// for it, and that profile's folder, or a Ghostty told not to (without a
-/// folder); `None` when `command` doesn't start such an app or already
-/// picks its profile.
+/// for it, a Zed with gerdr's data dir (see `zed_data_dir`), and that
+/// folder, or a Ghostty told not to (without a folder); `None` when
+/// `command` doesn't start such an app or already picks its profile.
 fn own_instance(command: &str) -> Option<(String, Option<PathBuf>)> {
     let (key, end, flatpak) = program(command)?;
     if GHOSTTYS.contains(&key.as_str()) {
@@ -633,6 +680,8 @@ fn own_instance(command: &str) -> Option<(String, Option<PathBuf>)> {
     // A Flatpak app sees only its own folder.
     let profile = if flatpak {
         home.join(".var/app").join(&key).join("gerdr-profile")
+    } else if ZEDS.contains(&key.as_str()) {
+        zed_data_dir(&home)
     } else {
         home.join(".local/share/gerdr/profiles").join(&key)
     };
@@ -645,7 +694,10 @@ fn own_instance(command: &str) -> Option<(String, Option<PathBuf>)> {
             " --new-window"
         };
         format!(" --name {BROWSER_APP_ID}.{key} --profile {quoted}{window}")
-    } else if CHROMIUMS.contains(&key.as_str()) || VS_CODES.contains(&key.as_str()) {
+    } else if CHROMIUMS.contains(&key.as_str())
+        || VS_CODES.contains(&key.as_str())
+        || ZEDS.contains(&key.as_str())
+    {
         format!(" --user-data-dir={quoted}")
     } else {
         return None;
@@ -778,7 +830,7 @@ mod tests {
         assert_eq!(
             web_app(url, &format!("/usr/bin/brave-browser-stable '{url}'")).unwrap(),
             (
-                format!("/usr/bin/brave-browser-stable --app='{url}'"),
+                format!("/usr/bin/brave-browser-stable --remote-debugging-port=0 --app='{url}'"),
                 "-example.com_".to_owned()
             )
         );
@@ -918,6 +970,19 @@ mod tests {
             "ghostty --gtk-single-instance=false -e htop"
         );
         assert_eq!(run("code --user-data-dir=/x ."), None);
+        assert_eq!(
+            run("/home/me/.local/zed.app/bin/zed").unwrap(),
+            "/home/me/.local/zed.app/bin/zed --user-data-dir=~/.local/share/gerdr/zed"
+        );
+        assert_eq!(
+            run("zeditor -n .").unwrap(),
+            "zeditor --user-data-dir=~/.local/share/gerdr/zed -n ."
+        );
+        assert_eq!(
+            run("flatpak run dev.zed.Zed").unwrap(),
+            "flatpak run dev.zed.Zed --user-data-dir=~/.var/app/dev.zed.Zed/gerdr-profile"
+        );
+        assert_eq!(run("zed --user-data-dir /x"), None);
         assert_eq!(
             run("librewolf --private-window").unwrap(),
             "librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/profiles/librewolf --private-window"
