@@ -1706,6 +1706,8 @@ mod tests {
                         text: "Switched to gerdr · aft keeps running".into(),
                         level: Level::Info,
                         action: None,
+                        button_w: 0,
+                        leaving: false,
                     };
                     painter.toast(&toast, (w / 2).max(1), false, scale, theme.palette());
                 }

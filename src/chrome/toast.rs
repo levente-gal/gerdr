@@ -21,18 +21,23 @@ const TOAST_BAR: i32 = 4;
 /// before it.
 const TOAST_BUTTON: i32 = 26;
 const TOAST_BUTTON_PADDING: i32 = 12;
+const TOAST_BUTTON_MIN: i32 = 48;
 const TOAST_BUTTON_GAP: i32 = 12;
 const TOAST_RADIUS: f32 = 8.0;
 
 /// What a toast shows: which one it is (to fade each in and out on its
-/// own), its text, its level (for the colour bar) and the label of its
-/// button, if it has one.
+/// own), its text, its level (for the colour bar), the label of its
+/// button, if it has one, and how wide that is (see
+/// `Painter::toast_button_width`). One `leaving` fades out, but keeps its
+/// place in the stack, and takes no presses.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToastView {
     pub id: u64,
     pub text: String,
     pub level: Level,
     pub action: Option<String>,
+    pub button_w: i32,
+    pub leaving: bool,
 }
 
 /// Where a toast and its button go, in window coordinates.
@@ -59,7 +64,10 @@ pub fn toast_layout(toasts: &[ToastView], area: Rect) -> Vec<ToastLayout> {
             bottom -= TOAST_HEIGHT + TOAST_GAP;
             ToastLayout {
                 panel,
-                button: toast.action.as_ref().map(|label| button_rect(panel, label)),
+                button: toast
+                    .action
+                    .as_ref()
+                    .map(|_| button_rect(panel, toast.button_w)),
             }
         })
         .collect();
@@ -67,10 +75,9 @@ pub fn toast_layout(toasts: &[ToastView], area: Rect) -> Vec<ToastLayout> {
     layouts
 }
 
-/// The button of a toast in `panel` labelled `label`, at its right end.
-fn button_rect(panel: Rect, label: &str) -> Rect {
-    // Sized by the label's length, as the hit test has no font at hand.
-    let w = (label.chars().count() as i32 * 8 + 2 * TOAST_BUTTON_PADDING).max(48);
+/// The button `w` wide of a toast in `panel`, at its right end.
+fn button_rect(panel: Rect, w: i32) -> Rect {
+    let w = w.max(TOAST_BUTTON_MIN);
     Rectangle::new(
         (
             panel.loc.x + panel.size.w - TOAST_PADDING - w,
@@ -92,6 +99,14 @@ fn level_color(level: Level, p: &Palette) -> Rgb {
 }
 
 impl Painter {
+    /// How wide a toast's button labelled `label` is: the label as the font
+    /// sets it, with room at its ends. Logical pixels: the font's advances
+    /// grow with the scale.
+    pub(super) fn toast_button_width(&self, label: &str) -> i32 {
+        let text = self.text_width(label, FONT_SIZE, 1.0).ceil() as i32;
+        (text + 2 * TOAST_BUTTON_PADDING).max(TOAST_BUTTON_MIN)
+    }
+
     /// A toast `w` wide, inside a margin of `SHADOW` holding its drop
     /// shadow: its level's bar at the left, its text, and its button, lit
     /// when `hovered`.
@@ -124,7 +139,7 @@ impl Painter {
         let text_x = x + inset + bar_w + TOAST_PADDING as f32 * s;
         let mut text_end = x + (w as f32 - TOAST_PADDING as f32) * s;
         if let Some(label) = &view.action {
-            let button = button_rect(panel, label);
+            let button = button_rect(panel, view.button_w);
             self.button(&mut c, label, button, (hovered, false), false, scale, p);
             text_end = button.loc.x as f32 * s - TOAST_BUTTON_GAP as f32 * s;
         }
@@ -161,6 +176,8 @@ mod tests {
             text: "Switched to gerdr".into(),
             level: Level::Info,
             action: action.map(str::to_owned),
+            button_w: 64,
+            leaving: false,
         }
     }
 

@@ -40,10 +40,11 @@ use crate::{
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     desktop, fuzzy, home_dir,
     launch::{self, Place},
-    paths::display,
+    paths::{display, tilde},
     project_list::scrolled,
     projects::Project,
     text_field::{Edit, TextField},
+    toast::Level,
 };
 
 /// How long a path in a row's detail may get.
@@ -720,11 +721,7 @@ impl Gerdr {
             }
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
-            Target::Settings => {
-                let path = crate::config::config_file();
-                let open = format!("xdg-open {}", desktop::shell_quote(&path.to_string_lossy()));
-                self.launch(&open, place);
-            }
+            Target::Settings => self.open_settings(place),
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),
@@ -734,6 +731,38 @@ impl Gerdr {
                 launch::remember(&command);
                 self.launch(&command, place);
             }
+        }
+    }
+
+    /// Open the config file, made first when there is none: in the active
+    /// workspace's Zed, shown, when it has one; else with `xdg-open`, in
+    /// `place`.
+    fn open_settings(&mut self, place: Place) {
+        let path = crate::config::config_file();
+        if let Err(err) = crate::config::ensure_file(&path) {
+            let path = tilde(&path, home_dir().as_deref());
+            return self.toast(format!("Can't make {path}: {err}"), Level::Error);
+        }
+        let zed = self.workspace().and_then(|ws| {
+            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+                let pane = tab.panes.iter().find(|p| crate::is_zed(&p.window))?;
+                Some((t, pane.window.clone(), ws.dir.clone()))
+            })
+        });
+        let Some((t, window, dir)) = zed else {
+            let open = format!("xdg-open {}", desktop::shell_quote(&path.to_string_lossy()));
+            return self.launch(&open, place);
+        };
+        self.switch_tab(t);
+        self.focus(Some(window));
+        // `--existing`: in the Zed window used last, the one just focused.
+        let mut zed = Command::new("zed");
+        zed.arg("--user-data-dir")
+            .arg(&self.zed_data)
+            .arg("--existing")
+            .arg(&path);
+        if self.spawn(zed, &dir, "zed").is_none() {
+            self.toast("Zed didn't open the settings file".into(), Level::Error);
         }
     }
 

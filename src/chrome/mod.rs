@@ -197,6 +197,12 @@ impl Chrome {
         }
     }
 
+    /// How wide a toast's button labelled `label` is (see
+    /// `Painter::toast_button_width`).
+    pub fn toast_button_width(&self, label: &str) -> i32 {
+        self.painter.toast_button_width(label)
+    }
+
     /// Hide the tooltip at once, without its fade: a press did.
     pub fn drop_tooltip(&mut self) {
         self.tooltip = Overlay::default();
@@ -343,36 +349,37 @@ impl Chrome {
         }));
 
         // The toasts, stacked at the bottom right of the app area, each
-        // fading on its own.
+        // fading on its own. One leaving fades where the stack has it, which
+        // holds its place until it is gone.
         let layouts = toast_layout(&view.toasts, area);
-        for toast in &view.toasts {
+        for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
             if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
                 self.toasts.push((toast.id, Overlay::default()));
             }
         }
         for (id, overlay) in self.toasts.iter_mut() {
-            let shown = view
-                .toasts
-                .iter()
-                .position(|toast| toast.id == *id)
-                .map(|i| {
-                    let layout = &layouts[i];
-                    let hovered = layout
-                        .button
-                        .is_some_and(|button| button.to_f64().contains(pointer));
-                    let (loc, size) = shadowed(layout.panel);
+            let i = view.toasts.iter().position(|toast| toast.id == *id);
+            if let Some(i) = i.filter(|&i| view.toasts[i].leaving) {
+                overlay.place = Some(shadowed(layouts[i].panel));
+            }
+            let shown = i.filter(|&i| !view.toasts[i].leaving).map(|i| {
+                let layout = &layouts[i];
+                let hovered = layout
+                    .button
+                    .is_some_and(|button| button.to_f64().contains(pointer));
+                let (loc, size) = shadowed(layout.panel);
+                (
                     (
-                        (
-                            view.toasts[i].clone(),
-                            layout.panel.size.w,
-                            hovered,
-                            theme,
-                            scale,
-                        ),
-                        loc,
-                        size,
-                    )
-                });
+                        view.toasts[i].clone(),
+                        layout.panel.size.w,
+                        hovered,
+                        theme,
+                        scale,
+                    ),
+                    loc,
+                    size,
+                )
+            });
             parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
                 painter.toast(toast, *w, *hovered, scale, theme.palette())
             }));
@@ -698,7 +705,8 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);
     }
-    for layout in toast_layout(&view.toasts, area) {
+    let toasts = toast_layout(&view.toasts, area);
+    for (layout, _) in toasts.iter().zip(&view.toasts).filter(|(_, t)| !t.leaving) {
         rects.push(layout.panel);
         rects.extend(layout.button);
     }

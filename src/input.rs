@@ -725,7 +725,11 @@ impl Gerdr {
         // Over the apps: the toasts, the pane bars' buttons, a Retry.
         let views = self.toast_views();
         let toasts = chrome::toast_layout(&views, self.content_rect());
-        if toasts.iter().any(|toast| inside(&toast.panel)) {
+        if toasts
+            .iter()
+            .zip(&views)
+            .any(|(toast, view)| !view.leaving && inside(&toast.panel))
+        {
             return RegionHit::Control;
         }
         if matches!(self.pane_bar_at(pos), Some((_, BarHit::Button(_))))

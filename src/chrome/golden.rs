@@ -146,6 +146,9 @@ fn toast(action: Option<&str>, level: Level) -> ToastView {
         text: "Zed didn't start".into(),
         level,
         action: action.map(str::to_owned),
+        // As the label's length sized "Retry" before it was measured.
+        button_w: 64,
+        leaving: false,
     }
 }
 

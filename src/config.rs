@@ -19,7 +19,10 @@
 //!
 //! Mistakes are logged, and the defaults stand in for what they spoil.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -110,6 +113,41 @@ pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Vec<String>) {
     (keymap, apps, ui, problems)
 }
 
+/// What a config file made for the user to edit starts with: all of it
+/// commented out, so it changes nothing yet.
+const TEMPLATE: &str = "\
+# gerdr's settings, read when gerdr starts.
+#
+# [keys]
+# prefix = \"Ctrl+A\"
+#
+# [apps]
+# # Run by `sh` in the workspace folder.
+# browser = \"firefox http://localhost:3000\"
+# files = \"nautilus .\"
+#
+# [ui]
+# density = \"compact\"   # or \"comfortable\", the default
+# theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
+";
+
+/// Make the config file at `path` from `TEMPLATE`, with its folder, unless
+/// there is one.
+pub fn ensure_file(path: &Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => std::io::Write::write_all(&mut file, TEMPLATE.as_bytes()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// gerdr's config file: `$XDG_CONFIG_HOME/gerdr/config.toml`, by default
 /// `~/.config/gerdr/config.toml`.
 pub fn config_file() -> PathBuf {
@@ -122,7 +160,27 @@ pub fn config_file() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Density, ThemeMode, Ui, from_text};
+    use super::{Density, TEMPLATE, ThemeMode, Ui, from_text};
+
+    #[test]
+    fn the_template_changes_nothing() {
+        let (_, apps, ui, problems) = from_text(TEMPLATE);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(apps.is_empty());
+        assert_eq!(ui, Ui::default());
+        // Each example, uncommented, is understood.
+        let examples: String = TEMPLATE
+            .lines()
+            .filter(|line| !line.starts_with("# ") || line.contains('=') || line.contains('['))
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let (_, apps, ui, problems) = from_text(&examples);
+        assert!(problems.is_empty(), "{problems:?}\n{examples}");
+        assert_eq!(apps.len(), 2);
+        assert_eq!(ui.density, Density::Compact);
+    }
 
     #[test]
     fn apps() {

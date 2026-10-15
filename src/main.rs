@@ -67,7 +67,6 @@ use menu::{ContextMenu, MenuAction};
 use paths::tilde;
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
 use rename::Rename;
-use serde_json::json;
 use smithay::{
     backend::{
         egl::EGLDevice,
@@ -1360,7 +1359,7 @@ impl Gerdr {
         t: Option<usize>,
         split: Dir,
     ) -> Option<herdr::PaneInfo> {
-        let env = json!({"WAYLAND_DISPLAY": self.socket_name.to_string_lossy()});
+        let env = self.herdr.as_ref()?.pane_env(&self.socket_name);
         let ws = &self.workspaces[w];
         let target = t
             .and_then(|t| ws.tabs.get(t)?.herdr_split_target())
@@ -2112,8 +2111,9 @@ impl Gerdr {
     }
 
     /// Follow what look the system prefers (see `system_theme`), for
-    /// `ThemeMode::System`: it was read once at start.
-    fn watch_system_theme(&mut self) {
+    /// `ThemeMode::System`, from `first`, the reading started at start if
+    /// it wasn't waited for.
+    fn watch_system_theme(&mut self, first: Option<system_theme::Reading>) {
         let (tx, rx) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(dark) = event {
@@ -2121,7 +2121,7 @@ impl Gerdr {
             }
         });
         match inserted {
-            Ok(_) => system_theme::watch(move |dark| {
+            Ok(_) => system_theme::watch(first, move |dark| {
                 let _ = tx.send(dark);
             }),
             Err(err) => tracing::warn!("system theme: {err}"),
@@ -3202,6 +3202,25 @@ impl Gerdr {
         self.poll_picker();
     }
 
+    /// Whether a window shown in a tab belongs to a process of `group`.
+    fn group_shows_windows(&self, group: i32) -> bool {
+        self.workspaces
+            .iter()
+            .flat_map(|ws| &ws.tabs)
+            .flat_map(|tab| &tab.panes)
+            .filter_map(|p| self.window_pid(&p.window))
+            .any(|pid| group_of(pid) == group)
+    }
+
+    /// The pid of the client showing `window`.
+    fn window_pid(&self, window: &Window) -> Option<u32> {
+        let dh = &self.display_handle;
+        dh.get_client(window.toplevel()?.wl_surface().id())
+            .ok()
+            .and_then(|client| client.get_credentials(dh).ok())
+            .map(|creds| creds.pid as u32)
+    }
+
     /// Start again what pane `pane` (of any tab) waits for and took too
     /// long (see `reap_children`): the process started for it is ended (a
     /// `zed -n` would hand its window to the stuck editor), and a new one
@@ -3217,12 +3236,21 @@ impl Gerdr {
         let Some((w, t, i)) = found else {
             return;
         };
-        let e = &mut self.workspaces[w].tabs[t].expected[i];
-        if let Some(pid) = e.pid.take() {
+        if let Some(pid) = self.workspaces[w].tabs[t].expected[i].pid.take() {
             self.zed_groups.retain(|g| *g != pid as i32);
-            // Safety: signals a process group gerdr started (see `spawn`).
-            unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+            // A `zed` that started the editor leads its group, and the
+            // editor may show other workspaces' windows by now: then only
+            // the `zed` itself is ended, not the windows with it.
+            let target = if self.group_shows_windows(pid as i32) {
+                pid as i32
+            } else {
+                -(pid as i32)
+            };
+            // Safety: signals a process, or a process group, gerdr started
+            // (see `spawn`).
+            unsafe { libc::kill(target, libc::SIGTERM) };
         }
+        let e = &mut self.workspaces[w].tabs[t].expected[i];
         e.exited = None;
         e.started = Instant::now();
         e.timed_out = false;
@@ -3273,12 +3301,7 @@ impl Gerdr {
     /// First commit of a toplevel: put it in the workspace, tab and pane it was started for.
     pub fn place(&mut self, window: Window, app_id: &str) {
         self.unplaced.retain(|w| w != &window);
-        let dh = &self.display_handle;
-        let pid = dh
-            .get_client(window.toplevel().unwrap().wl_surface().id())
-            .ok()
-            .and_then(|client| client.get_credentials(dh).ok())
-            .map(|creds| creds.pid as u32);
+        let pid = self.window_pid(&window);
         let app_id = app_id.to_ascii_lowercase();
         tracing::debug!("new window app_id={app_id} pid={pid:?}");
 
@@ -4473,6 +4496,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     extend_path();
+    // The portal can be slow to answer: asked now, alongside the setup.
+    let system_theme = system_theme::read();
 
     // `--project <name>` picks the project; every other argument is a
     // folder to open as a workspace in it.
@@ -4780,14 +4805,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
     }
-    // Before the first terminals, which take the look's colours with them.
-    if let Some(dark) = system_theme::current() {
-        state.system_dark = dark;
-    }
+    // Before the first terminals, which take the look's colours with them,
+    // when the look follows the system; any other look can do without it.
+    let system_theme = if state.theme_mode == ThemeMode::System {
+        if let Some(dark) = system_theme.wait() {
+            state.system_dark = dark;
+        }
+        None
+    } else {
+        Some(system_theme)
+    };
     state.watch_git();
     state.watch_web_pages();
     state.connect_notifier();
-    state.watch_system_theme();
+    state.watch_system_theme(system_theme);
     state.watch_zoxide();
     state.watch_installed_apps();
     state.start_project(project_arg.as_deref(), folders);

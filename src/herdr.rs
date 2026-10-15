@@ -534,6 +534,9 @@ pub struct Herdr {
     next_id: u64,
     socket: PathBuf,
     timeout: Duration,
+    /// The config folder the server's shells get back, when the server was
+    /// told the short one (see `pick_config_home`).
+    shell_config_home: Option<PathBuf>,
 }
 
 impl Herdr {
@@ -543,7 +546,21 @@ impl Herdr {
             next_id: 0,
             socket,
             timeout: TIMEOUT,
+            shell_config_home: None,
         }
+    }
+
+    /// The environment of a new pane's shell: gerdr's display, and the
+    /// user's config folder in place of the short one the server runs
+    /// with, which lives in the runtime folder and only stands in for the
+    /// socket's sake. Shells the server starts on its own (restoring its
+    /// layout) still get the short one: a link to the same folder.
+    pub fn pane_env(&self, wayland_display: &OsStr) -> Value {
+        let mut env = json!({"WAYLAND_DISPLAY": wayland_display.to_string_lossy()});
+        if let Some(config) = &self.shell_config_home {
+            env["XDG_CONFIG_HOME"] = config.to_string_lossy().into();
+        }
+        env
     }
 
     fn connect(socket: &Path) -> Result<Self, String> {
@@ -566,7 +583,27 @@ impl Herdr {
     ) -> Result<(Self, Start), String> {
         let (config, short) = config_home_for(session);
         let socket = socket_path(session);
-        if let Ok(herdr) = Self::connect(&socket) {
+        let (herdr, start) =
+            Self::connect_or_start_server(session, wayland_display, &config, short, &socket)?;
+        let shell_config_home = short.then(config_home);
+        Ok((
+            Self {
+                shell_config_home,
+                ..herdr
+            },
+            start,
+        ))
+    }
+
+    /// `connect_or_start` once the config folder and socket are picked.
+    fn connect_or_start_server(
+        session: &str,
+        wayland_display: &OsStr,
+        config: &Path,
+        short: bool,
+        socket: &Path,
+    ) -> Result<(Self, Start), String> {
+        if let Ok(herdr) = Self::connect(socket) {
             return Ok((herdr, Start::Attached));
         }
         let saved = has_saved_layout(session);
@@ -583,7 +620,7 @@ impl Herdr {
         // The server puts its socket under its config folder (see
         // `pick_config_home`); the short name keeps the path short enough.
         if short {
-            server.env("XDG_CONFIG_HOME", &config);
+            server.env("XDG_CONFIG_HOME", config);
         }
         match open_server_log() {
             Ok(log) => {
@@ -611,7 +648,7 @@ impl Herdr {
         let start = Instant::now();
         while start.elapsed() < STARTUP {
             std::thread::sleep(Duration::from_millis(50));
-            let Ok(mut herdr) = Self::connect(&socket) else {
+            let Ok(mut herdr) = Self::connect(socket) else {
                 continue;
             };
             if !saved {
@@ -623,7 +660,7 @@ impl Herdr {
         }
         // A server that answers but restored nothing (or not yet) is still
         // the session's: gerdr mustn't run without it and leave it behind.
-        if saved && let Ok(herdr) = Self::connect(&socket) {
+        if saved && let Ok(herdr) = Self::connect(socket) {
             tracing::warn!("herdr server didn't restore its workspaces in time");
             return Ok((herdr, Start::Restored));
         }

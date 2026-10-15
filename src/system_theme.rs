@@ -7,6 +7,11 @@
 //! GNOME's setting is read once with `gsettings`; such a desktop isn't
 //! followed for changes. With no preference anywhere, the look stays as
 //! it was: dark at start.
+//!
+//! The first read is started at once on a thread (`read`), as the portal
+//! may take up to `TIMEOUT` and `gsettings` is a process: gerdr waits for
+//! it only when the System mode needs it before the first terminals (see
+//! `watch`).
 
 use std::{
     process::{Command, Stdio},
@@ -92,14 +97,34 @@ fn preference(conn: Option<&Connection>) -> Option<bool> {
 }
 
 /// Whether the system prefers dark now; `None` with no preference.
-pub fn current() -> Option<bool> {
+fn current() -> Option<bool> {
     preference(Connection::new_session().ok().as_ref())
 }
 
-/// Follow the system's preference on a thread of its own: `send` gets it
-/// each time the portal says it changed. Nothing without the portal.
-pub fn watch(send: impl Fn(bool) + Send + 'static) {
+/// The system's preference, being read on a thread of its own.
+pub struct Reading(std::thread::JoinHandle<Option<bool>>);
+
+/// Start reading whether the system prefers dark.
+pub fn read() -> Reading {
+    Reading(std::thread::spawn(current))
+}
+
+impl Reading {
+    /// Wait for the reading: whether the system prefers dark, `None` with
+    /// no preference (or a thread that failed).
+    pub fn wait(self) -> Option<bool> {
+        self.0.join().ok().flatten()
+    }
+}
+
+/// Follow the system's preference on a thread of its own: `send` gets
+/// `first` once it is read, if it was not waited for, then the preference
+/// each time the portal says it changed. Nothing more without the portal.
+pub fn watch(first: Option<Reading>, send: impl Fn(bool) + Send + 'static) {
     std::thread::spawn(move || {
+        if let Some(dark) = first.and_then(Reading::wait) {
+            send(dark);
+        }
         let conn = match Connection::new_session() {
             Ok(conn) => conn,
             Err(err) => return tracing::debug!("system theme: {err}"),
