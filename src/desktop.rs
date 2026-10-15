@@ -230,6 +230,63 @@ pub fn url_command(text: &str) -> Option<String> {
     Some(format!("{app} {}", shell_quote(url)))
 }
 
+/// The top-level domains an address typed without `https://` may end in.
+/// Others, many of them file name extensions too (`.sh`, `.rs`, `.py`), need
+/// a path after the host.
+const DOMAINS: &[&str] = &[
+    "com", "org", "net", "io", "dev", "app", "ai", "co", "me", "info", "xyz", "gov", "edu", "eu",
+    "uk", "de", "fr", "nl", "us", "ca", "page", "site", "cloud", "tech",
+];
+
+/// `text` as the address of a web page, if it reads as one: with
+/// `http(s)://`, or a host name (or `localhost`, or an IP address) with a
+/// path or port after it, or ending in a well-known domain. Never the name
+/// of an installed program.
+pub fn as_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = lower.strip_prefix(scheme) {
+            return (!rest.is_empty()).then(|| text.to_owned());
+        }
+    }
+    let (host, rest) = text.split_at(text.find(['/', '?', '#']).unwrap_or(text.len()));
+    let (name, port) = match host.split_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            (name, Some(port))
+        }
+        Some(_) => return None,
+        None => (host, None),
+    };
+    let ip = name.split('.').count() == 4
+        && name
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if name.eq_ignore_ascii_case("localhost") || ip {
+        // A server of one's own: plain http.
+        return (port.is_some() || !rest.is_empty() || ip).then(|| format!("http://{text}"));
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    let label =
+        |l: &&str| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let tld = labels.last()?.to_ascii_lowercase();
+    if labels.len() < 2
+        || !labels.iter().all(label)
+        || tld.len() < 2
+        || !tld.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let likely = !rest.is_empty()
+        || port.is_some()
+        || labels[0].eq_ignore_ascii_case("www")
+        || DOMAINS.contains(&tld.as_str());
+    (likely && !installed(text)).then(|| format!("https://{text}"))
+}
+
 /// The desktop entry of the default app for `mime`: the first installed
 /// one the `mimeapps.list` files name, the one to look in first first.
 fn default_app(mime: &str) -> Option<PathBuf> {
@@ -370,7 +427,7 @@ fn locales() -> Vec<String> {
 mod tests {
     use std::path::Path;
 
-    use super::{app, exec_args, shell_quote, unescape, url_command};
+    use super::{app, as_url, exec_args, shell_quote, unescape, url_command};
     use crate::app_icons::IconIndex;
 
     fn args(exec: &str) -> Option<Vec<String>> {
@@ -455,5 +512,54 @@ mod tests {
         assert!(entry("OnlyShowIn=KDE;GNOME;").is_some());
         assert!(entry("NotShowIn=GNOME;").is_none());
         assert!(entry("TryExec=/nonexistent/app").is_none());
+    }
+
+    #[test]
+    fn addresses() {
+        let url = |text: &str| as_url(text);
+        assert_eq!(
+            url("https://github.com/a/b").as_deref(),
+            Some("https://github.com/a/b")
+        );
+        assert_eq!(url("HTTP://x").as_deref(), Some("HTTP://x"));
+        assert_eq!(url("github.com").as_deref(), Some("https://github.com"));
+        assert_eq!(
+            url("github.com/a/b?tab=x").as_deref(),
+            Some("https://github.com/a/b?tab=x")
+        );
+        assert_eq!(
+            url("example.sh/docs").as_deref(),
+            Some("https://example.sh/docs")
+        );
+        assert_eq!(
+            url("www.example.zz").as_deref(),
+            Some("https://www.example.zz")
+        );
+        assert_eq!(
+            url("localhost:3000").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(url("127.0.0.1").as_deref(), Some("http://127.0.0.1"));
+        assert_eq!(
+            url("192.168.1.2:8080/x").as_deref(),
+            Some("http://192.168.1.2:8080/x")
+        );
+        for not in [
+            "",
+            "https://",
+            "ls",
+            "localhost",
+            "run.sh",
+            "main.rs",
+            "./run.sh",
+            "scripts/run.sh",
+            "firefox github.com",
+            "a..com",
+            "host:port",
+            "1.2.3",
+            "x.c0m",
+        ] {
+            assert_eq!(url(not), None, "{not}");
+        }
     }
 }

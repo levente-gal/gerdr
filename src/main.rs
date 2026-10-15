@@ -1120,6 +1120,9 @@ pub struct Gerdr {
     /// the next `zed -n`, and until when they are waited for.
     pub old_zed: Vec<i32>,
     pub old_zed_until: Option<Instant>,
+    /// The address of each workspace folder's repository page, once read
+    /// (see `git::web_url`).
+    pub repo_pages: HashMap<PathBuf, Option<String>>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -4680,6 +4683,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         zed_groups: Vec::new(),
         old_zed: Vec::new(),
         old_zed_until: None,
+        repo_pages: HashMap::new(),
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),

@@ -38,7 +38,7 @@ use crate::{
     Gerdr, WorkspaceKind,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
-    desktop, fuzzy, home_dir,
+    desktop, fuzzy, git, home_dir,
     launch::{self, Place},
     paths::{display, tilde},
     project_list::scrolled,
@@ -262,10 +262,10 @@ impl Switcher {
     /// starts with it.
     fn refilter(&mut self) {
         let command = self.query.trim().to_owned();
-        let typed = self.run.then(|| Target::Command(command.clone()));
         if self.run {
             self.items[0] = typed_command(&command, &self.icons, self.place);
         }
+        let typed = self.run.then(|| self.items[0].target.clone());
         let candidates = self
             .items
             .iter()
@@ -463,17 +463,22 @@ fn command_icon(command: &str, icons: &HashMap<String, AppIcon>) -> ItemIcon {
         .map_or(ItemIcon::App, ItemIcon::Picture)
 }
 
-/// The run prompt's item for the typed `command`, to run in `place`.
+/// The run prompt's item for the typed `command`, to run in `place`: an
+/// address, even without `https://`, opens as a web page.
 fn typed_command(command: &str, icons: &HashMap<String, AppIcon>, place: Place) -> Item {
-    let detail = match place {
-        Place::Split => "run in a split",
-        Place::Tab => "run in a new tab",
+    let url = desktop::as_url(command);
+    let detail = match (place, url.is_some()) {
+        (Place::Split, false) => "run in a split",
+        (Place::Tab, false) => "run in a new tab",
+        (Place::Split, true) => "open in a split",
+        (Place::Tab, true) => "open in a new tab",
     };
+    let target = url.unwrap_or_else(|| command.to_owned());
     let mut item = Item::new(
         command_icon(command, icons),
         command,
         detail,
-        Target::Command(command.into()),
+        Target::Command(target),
     );
     item.section = Section::Run;
     item
@@ -546,6 +551,11 @@ impl Gerdr {
         if !history.is_empty() {
             self.frecency.seed(&history, SystemTime::now());
         }
+        if let Some(dir) = self.workspace().map(|ws| ws.dir.clone()) {
+            self.repo_pages
+                .entry(dir)
+                .or_insert_with_key(|dir| git::web_url(dir));
+        }
         let mut switcher = Switcher::new(Vec::new(), true, place);
         switcher.icons = self.program_icons();
         switcher.set_items(self.run_items());
@@ -562,13 +572,32 @@ impl Gerdr {
         }
     }
 
-    /// What the run prompt offers: the apps named in the config file and
-    /// the installed apps, then the commands typed before.
+    /// What the run prompt offers: the page of the workspace's repository,
+    /// the apps named in the config file and the installed apps, then the
+    /// commands typed before.
     fn run_items(&self) -> Vec<Item> {
         let icons = self.program_icons();
-        let mut items = self.app_items();
+        let page = self
+            .workspace()
+            .and_then(|ws| self.repo_pages.get(&ws.dir).cloned().flatten());
+        let mut items: Vec<Item> = page
+            .iter()
+            .map(|url| {
+                let shown = url.split_once("://").map_or(&**url, |(_, rest)| rest);
+                Item::new(
+                    ItemIcon::App,
+                    "Repo page",
+                    shown,
+                    Target::Command(url.clone()),
+                )
+            })
+            .collect();
+        items.extend(self.app_items());
         items.extend(self.installed_apps.iter().map(|app| app_item(app, &icons)));
-        items.extend(launch::history().into_iter().map(|command| {
+        let history = launch::history()
+            .into_iter()
+            .filter(|command| page.as_ref() != Some(command));
+        items.extend(history.map(|command| {
             Item::new(
                 command_icon(&command, &icons),
                 command.clone(),
@@ -1264,6 +1293,17 @@ mod tests {
         let items = project_items(&projects, None);
         assert_eq!(items[0].detail, "project · 1 workspace");
         assert_eq!(items.len(), 4);
+    }
+
+    #[test]
+    fn run_prompt_opens_an_address_as_a_web_page() {
+        let mut switcher = Switcher::new(Vec::new(), true, Place::Split);
+        type_in(&mut switcher, "github.com/o/r");
+        assert_eq!(labels(&switcher), ["github.com/o/r"]);
+        let none = ModifiersState::default();
+        assert!(
+            matches!(switcher.key(&none, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c), Place::Split) if c == "https://github.com/o/r")
+        );
     }
 
     #[test]

@@ -60,6 +60,54 @@ pub fn read_all(
     });
 }
 
+/// The web page of the repository `dir` is in: its `origin` remote's, as
+/// an https address; `None` without one or without git.
+pub fn web_url(dir: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["remote", "get-url", "origin"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    remote_to_web(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// The https address of the web page of the repository at `remote`:
+/// `git@host:owner/repo.git`, `ssh://git@host:22/owner/repo` or
+/// `https://user@host/owner/repo.git` all give `https://host/owner/repo`.
+/// `None` for a local path.
+fn remote_to_web(remote: &str) -> Option<String> {
+    let (host, path) = match remote.split_once("://") {
+        Some((scheme, rest)) => {
+            if !matches!(scheme, "https" | "http" | "ssh" | "git" | "git+ssh") {
+                return None;
+            }
+            rest.split_once('/')?
+        }
+        // scp-like: [user@]host:path
+        None => remote.split_once(':')?,
+    };
+    // Without the user, and but for http(s) without the port: ssh's isn't
+    // the web's.
+    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = if remote.starts_with("http") {
+        host
+    } else {
+        host.split(':').next()?
+    };
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
+    if host.is_empty() || path.is_empty() || host.contains('/') || host.starts_with('.') {
+        return None;
+    }
+    Some(format!("https://{host}/{path}"))
+}
+
 /// The status in `git status --porcelain=v2 --branch` output: "# " header
 /// lines about the branch, then a line per changed or untracked file.
 fn parse(out: &str) -> GitStatus {
@@ -86,7 +134,25 @@ fn parse(out: &str) -> GitStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitStatus, parse};
+    use super::{GitStatus, parse, remote_to_web};
+
+    #[test]
+    fn remote_pages() {
+        let page = Some("https://github.com/o/r".to_owned());
+        assert_eq!(remote_to_web("git@github.com:o/r.git"), page);
+        assert_eq!(remote_to_web("github.com:o/r"), page);
+        assert_eq!(remote_to_web("ssh://git@github.com:22/o/r.git"), page);
+        assert_eq!(remote_to_web("ssh://github.com/o/r/"), page);
+        assert_eq!(remote_to_web("https://github.com/o/r.git"), page);
+        assert_eq!(remote_to_web("https://user@github.com/o/r"), page);
+        assert_eq!(
+            remote_to_web("https://git.example.com:8443/group/sub/r.git").as_deref(),
+            Some("https://git.example.com:8443/group/sub/r")
+        );
+        for local in ["/srv/git/r.git", "file:///srv/git/r.git", "../r", "r"] {
+            assert_eq!(remote_to_web(local), None, "{local}");
+        }
+    }
 
     #[test]
     fn clean_branch_with_upstream() {
