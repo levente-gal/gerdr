@@ -553,7 +553,8 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             "Move to new tab",
             MenuAction::PaneToTab(id, None),
             PANE_TO_NEW_TAB_HELP,
-            true,
+            // Alone in its tab, it has a tab of its own already.
+            content.pane_count > 1,
         ),
     ];
     items.extend(content.other_tabs.iter().map(|(t, title)| {
