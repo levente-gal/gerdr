@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=gerdr
+GenericName=Development Environment
+Comment=Workspaces of Zed and herdr terminals in one window
+TryExec=@BIN@
+Exec=@BIN@ %F
+Icon=gerdr
+Terminal=false
+StartupNotify=false
+StartupWMClass=gerdr
+Categories=Development;IDE;
+Keywords=gerdr;herdr;zed;workspace;compositor;
