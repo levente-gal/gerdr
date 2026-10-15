@@ -14,6 +14,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use smithay::{
@@ -28,9 +29,10 @@ use crate::{
         SettingsField, SettingsView,
     },
     fuzzy, home_dir, hooks,
-    paths::tilde,
-    project_list::{self, scrolled},
+    paths::{display, tilde},
+    project_list::{self, Hover, PATH_CHARS, scrolled},
     text_field::{Edit, Line, TextField},
+    tooltip::Tooltip,
 };
 
 /// How many of zoxide's folders the list offers as new projects.
@@ -41,14 +43,17 @@ const SUGGESTIONS: usize = 5;
 /// The project menu's state, while it is open.
 #[derive(Debug, Default)]
 pub struct ProjectMenu {
-    /// What the pointer is over.
-    pub hover: Option<MenuHit>,
+    /// What the pointer is over, and its pill fading in.
+    hover: Option<Hover<MenuHit>>,
     /// The wheel's turn not yet a whole row, in rows.
     wheel: f64,
     /// What was typed to filter the projects.
     query: TextField,
     /// The projects, by id, most recently used first.
     projects: Vec<(String, ProjectRow)>,
+    /// Per project, the characters of "name detail" the query matched;
+    /// empty for one it doesn't.
+    hits: Vec<Vec<usize>>,
     /// The folders zoxide knows, the highest ranked first.
     recent: Vec<PathBuf>,
     /// The folders a project already has a workspace in.
@@ -119,7 +124,8 @@ struct Form {
     suggestions: Vec<String>,
     /// The suggestion Up/Down moved to.
     suggestion: Option<usize>,
-    error: Option<String>,
+    /// Why the project can't be created, under the field at fault.
+    error: Option<(FormField, String)>,
 }
 
 /// The form for a project's start and stop commands.
@@ -227,9 +233,14 @@ impl ProjectMenu {
 
     /// Build the list's entries again, for the query.
     fn rebuild(&mut self) {
-        let matches: Vec<usize> = project_list::matches(&self.query, &self.projects)
+        let found = project_list::matches(&self.query, &self.projects);
+        self.hits = vec![Vec::new(); self.projects.len()];
+        let matches: Vec<usize> = found
             .into_iter()
-            .map(|(i, _)| i)
+            .map(|(i, hits)| {
+                self.hits[i] = hits;
+                i
+            })
             .collect();
         self.folders = if self.query.trim().is_empty() {
             Vec::new()
@@ -504,9 +515,19 @@ impl ProjectMenu {
             name: row.name.clone(),
             before: before.into(),
             after: after.into(),
-            dir: tilde(dir, self.home.as_deref()),
+            dir: display(dir, self.home.as_deref(), PATH_CHARS),
             focus: SettingsField::Before,
         });
+    }
+
+    /// The pointer is over `hit` at `now`.
+    fn set_hover(&mut self, hit: Option<MenuHit>, now: Instant) {
+        self.hover = Hover::moved(self.hover, hit, now);
+    }
+
+    /// What the pointer is over.
+    fn hovered(&self) -> Option<MenuHit> {
+        self.hover.map(|h| h.hit)
     }
 
     /// Close the settings form, back to the list.
@@ -877,7 +898,8 @@ impl ProjectMenu {
                 }
             }
         };
-        form.error = Some(error);
+        // The line shows under the field at fault, which takes the keyboard.
+        form.error = Some((focus, error));
         form.focus = focus;
         form.close_suggestions();
         None
@@ -894,13 +916,15 @@ impl ProjectMenu {
 
     /// What is shown: `page` entries at most; `running` says whose sessions
     /// run, by id.
-    fn view(&self, page: usize, running: &HashMap<String, bool>) -> ProjectMenuView {
+    fn view(&self, page: usize, running: &HashMap<String, bool>, now: Instant) -> ProjectMenuView {
+        let hover = self.hovered();
+        let hover_alpha = self.hover.map_or(0, |h| h.alpha(now));
         if let Some(form) = &self.form {
             return ProjectMenuView {
                 query: Line::default(),
                 entries: Vec::new(),
                 selected: None,
-                hover: self.hover,
+                hover,
                 form: Some(form.view()),
                 settings: None,
                 hints: hints(&[
@@ -909,6 +933,7 @@ impl ProjectMenu {
                     ("Enter", "create"),
                     ("Esc", "back"),
                 ]),
+                hover_alpha,
             };
         }
         if let Some(settings) = &self.settings {
@@ -916,10 +941,11 @@ impl ProjectMenu {
                 query: Line::default(),
                 entries: Vec::new(),
                 selected: None,
-                hover: self.hover,
+                hover,
                 form: None,
                 settings: Some(settings.view()),
                 hints: hints(&[("Tab", "next"), ("Enter", "save"), ("Esc", "back")]),
+                hover_alpha,
             };
         }
         let first = self.first_shown(page);
@@ -956,15 +982,18 @@ impl ProjectMenu {
                                 .filter(|r| r.id == *id)
                                 .map(|r| r.name.line()),
                             confirm_forget: self.confirm_forget.as_ref() == Some(id),
+                            hits: self.hits.get(p).cloned().unwrap_or_default(),
                         }
                     }
                     Item::New => MenuEntry::New(match self.query.trim() {
                         "" => "New project…".into(),
                         query => format!("New project \"{query}\"…"),
                     }),
-                    Item::Folder(f) => {
-                        MenuEntry::Folder(tilde(&self.folders[f], self.home.as_deref()))
-                    }
+                    Item::Folder(f) => MenuEntry::Folder(display(
+                        &self.folders[f],
+                        self.home.as_deref(),
+                        PATH_CHARS,
+                    )),
                 })
             })
             .collect();
@@ -985,10 +1014,11 @@ impl ProjectMenu {
             query: self.query.line(),
             entries,
             selected: self.selected.checked_sub(first).filter(|i| first + i < end),
-            hover: self.hover,
+            hover,
             form: None,
             settings: None,
             hints,
+            hover_alpha,
         }
     }
 }
@@ -1281,15 +1311,29 @@ impl Gerdr {
         }
     }
 
-    /// The pointer moved while the project menu is open.
-    pub fn project_menu_hover(&mut self, pos: Point<f64, Logical>) {
-        let Some(view) = self.project_menu_view() else {
-            return;
+    /// The pointer moved while the project menu is open: what it is over
+    /// lights up, and the Browse button offers its tooltip.
+    ///
+    /// Needs (A6, input.rs): the tooltip is offered here, but the motion
+    /// handler then offers `None` because the menu covers the regions;
+    /// while the project menu is open it should keep this one instead, as
+    /// `let tip = self.project_menu_hover(pos)` feeding `tooltip.offer`.
+    pub fn project_menu_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let view = self.project_menu_view()?;
+        let size = self.output_size();
+        let hit = chrome::project_menu_hit(&view, size, pos);
+        let now = Instant::now();
+        let menu = self.project_menu.as_mut()?;
+        menu.set_hover(hit, now);
+        let tip = match hit {
+            Some(MenuHit::Field(FormField::Browse)) => {
+                let anchor = chrome::project_menu_layout(&view, size).form?.browse;
+                Some(Tooltip::new("Pick a folder", anchor).key("Ctrl+O"))
+            }
+            _ => None,
         };
-        let hit = chrome::project_menu_hit(&view, self.output_size(), pos);
-        if let Some(menu) = self.project_menu.as_mut() {
-            menu.hover = hit;
-        }
+        self.tooltip.offer(tip.clone(), now);
+        tip
     }
 
     /// The wheel turned `rows` rows (down positive, parts of a row adding
@@ -1309,7 +1353,7 @@ impl Gerdr {
     /// What the project menu shows, while it is open.
     pub fn project_menu_view(&self) -> Option<ProjectMenuView> {
         let menu = self.project_menu.as_ref()?;
-        Some(menu.view(self.project_menu_page(), &self.running))
+        Some(menu.view(self.project_menu_page(), &self.running, Instant::now()))
     }
 
     /// zenity gave back `dir` for the form's folder.
@@ -1422,7 +1466,7 @@ mod tests {
     }
 
     fn view(m: &ProjectMenu, page: usize) -> ProjectMenuView {
-        m.view(page, &HashMap::new())
+        m.view(page, &HashMap::new(), Instant::now())
     }
 
     /// The entries in view, as text: "# Current" for a section.
@@ -1742,7 +1786,7 @@ mod tests {
         );
 
         m.open_settings("gerdr", "make up", "", Path::new("/work/gerdr"));
-        let settings = |m: &ProjectMenu| m.view(10, &HashMap::new()).settings.unwrap();
+        let settings = |m: &ProjectMenu| view(m, 10).settings.unwrap();
         let shown = settings(&m);
         assert_eq!(
             (
@@ -1767,7 +1811,7 @@ mod tests {
             })
         );
         // Back to the list.
-        assert!(m.view(10, &HashMap::new()).settings.is_none());
+        assert!(view(&m, 10).settings.is_none());
         assert_eq!(selected(&m, 10), "blog");
     }
 
@@ -1792,10 +1836,10 @@ mod tests {
             press(&mut m, Keysym::ISO_Left_Tab);
         }
         assert_eq!(press(&mut m, Keysym::Return), None);
-        assert!(m.view(10, &HashMap::new()).settings.is_none());
+        assert!(view(&m, 10).settings.is_none());
         m.open_settings("gerdr", "", "", Path::new("/w"));
         assert_eq!(press(&mut m, Keysym::Escape), None);
-        assert!(m.view(10, &HashMap::new()).settings.is_none());
+        assert!(view(&m, 10).settings.is_none());
         // Esc again closes the menu.
         assert_eq!(press(&mut m, Keysym::Escape), Some(Outcome::Closed));
     }
@@ -1924,13 +1968,18 @@ mod tests {
         let mut m = menu(&["gerdr"]);
         chord(&mut m, ctrl(), Keysym::n);
         assert_eq!(press(&mut m, Keysym::Return), None);
-        assert_eq!(form(&m).error.as_deref(), Some("Give the project a name."));
+        // The text goes under the field at fault, which takes the keyboard.
+        let error = |m: &ProjectMenu| form(m).error;
+        assert_eq!(
+            error(&m),
+            Some((FormField::Name, "Give the project a name.".into()))
+        );
         type_text(&mut m, "GERDR ");
-        assert_eq!(form(&m).error, None);
+        assert_eq!(error(&m), None);
         assert_eq!(press(&mut m, Keysym::Return), None);
         assert_eq!(
-            form(&m).error.as_deref(),
-            Some("A project named GERDR exists.")
+            error(&m),
+            Some((FormField::Name, "A project named GERDR exists.".into()))
         );
         chord(&mut m, ctrl(), Keysym::u);
         type_text(&mut m, "new");
@@ -1938,8 +1987,56 @@ mod tests {
         type_text(&mut m, "~/nope");
         assert_eq!(press(&mut m, Keysym::Return), None);
         let f = form(&m);
-        assert_eq!(f.error.as_deref(), Some("No folder at ~/nope."));
+        assert_eq!(
+            f.error,
+            Some((FormField::Folder, "No folder at ~/nope.".into()))
+        );
         assert_eq!(f.focus, FormField::Folder);
+        // Typing in the folder takes the line away; the name stays.
+        type_text(&mut m, "x");
+        assert_eq!(error(&m), None);
+        assert_eq!(form(&m).name, "new");
+    }
+
+    #[test]
+    fn matched_characters_reach_the_entries_and_the_hover_fades_in() {
+        let mut m = menu(&["gerdr", "blog"]);
+        type_text(&mut m, "blo");
+        let hits: Vec<Vec<usize>> = view(&m, 10)
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Project { hits, .. } => Some(hits.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits, vec![vec![0, 1, 2]]);
+        let start = Instant::now();
+        m.set_hover(Some(MenuHit::Entry(1)), start);
+        let at = |m: &ProjectMenu, now| {
+            let v = m.view(10, &HashMap::new(), now);
+            (v.hover, v.hover_alpha)
+        };
+        assert_eq!(at(&m, start), (Some(MenuHit::Entry(1)), 0));
+        assert_eq!(
+            at(&m, start + crate::anim::FAST),
+            (Some(MenuHit::Entry(1)), 16)
+        );
+        m.set_hover(None, start);
+        assert_eq!(at(&m, start), (None, 0));
+        // Folders and the settings' folder show squeezed.
+        let long = home().join("a/very/long/way/down/into/the/folders/of/this/home/x");
+        m.set_lists(vec![row("aft", true)], vec![long.clone()], HashSet::new());
+        chord(&mut m, ctrl(), Keysym::u);
+        type_text(&mut m, "x");
+        let folder = view(&m, 10).entries.into_iter().find_map(|e| match e {
+            MenuEntry::Folder(f) => Some(f),
+            _ => None,
+        });
+        let squeezed = "~/…/into/the/folders/of/this/home/x";
+        assert_eq!(folder.as_deref(), Some(squeezed));
+        m.open_settings("aft", "", "", &long);
+        assert_eq!(view(&m, 10).settings.unwrap().dir, squeezed);
     }
 
     #[test]
@@ -2038,7 +2135,7 @@ mod tests {
         // The running status shows from gerdr's.
         let running = HashMap::from([("gerdr".to_string(), false)]);
         let dots: Vec<Option<bool>> = m
-            .view(10, &running)
+            .view(10, &running, Instant::now())
             .entries
             .into_iter()
             .filter_map(|e| match e {

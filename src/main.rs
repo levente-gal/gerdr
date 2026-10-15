@@ -683,7 +683,10 @@ fn project_detail(dirs: &[&Path], home: Option<&Path>) -> String {
         n => format!("{n} repos"),
     };
     match common_dir(dirs).filter(|d| d.parent().is_some()) {
-        Some(dir) => format!("{count} · {}", tilde(&dir, home)),
+        Some(dir) => format!(
+            "{count} · {}",
+            paths::display(&dir, home, project_list::PATH_CHARS)
+        ),
         None => count,
     }
 }

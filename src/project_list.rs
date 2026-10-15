@@ -3,10 +3,41 @@
 //! which projects' herdr sessions run.
 
 use std::cmp::Reverse;
+use std::time::Instant;
 
 use smithay::reexports::calloop::channel;
 
-use crate::{Gerdr, chrome::ProjectRow, fuzzy, herdr};
+use crate::{Gerdr, anim, chrome::ProjectRow, fuzzy, herdr};
+
+/// The most characters a path shown in a project row or menu entry takes.
+pub const PATH_CHARS: usize = 40;
+
+/// The hover pill of a row fading in: what it is over and since when.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hover<T> {
+    pub hit: T,
+    fade: anim::Fade,
+}
+
+impl<T: Copy + PartialEq> Hover<T> {
+    /// The pointer is over `hit` (or nothing) at `now`: a new thing starts
+    /// its fade, the same keeps its place.
+    pub fn moved(this: Option<Self>, hit: Option<T>, now: Instant) -> Option<Self> {
+        let hit = hit?;
+        match this {
+            Some(h) if h.hit == hit => Some(h),
+            _ => Some(Self {
+                hit,
+                fade: anim::Fade::new(now, anim::FAST, true),
+            }),
+        }
+    }
+
+    /// The pill's opacity at `now`, quantized for the cache key.
+    pub fn alpha(&self, now: Instant) -> u8 {
+        anim::quantize(self.fade.value(now))
+    }
+}
 
 /// The indices into `rows` of the projects `query` matches (by name, then
 /// detail), best first, each with the positions (in chars) of the
@@ -117,5 +148,20 @@ mod tests {
         assert_eq!(scrolled(0, 2, 3), 0);
         assert_eq!(scrolled(0, 5, 3), 3);
         assert_eq!(scrolled(4, 2, 3), 2);
+    }
+
+    #[test]
+    fn a_hover_fades_in_once_per_thing() {
+        let start = Instant::now();
+        let h = Hover::moved(None, Some(1), start);
+        assert_eq!(h.map(|h| h.hit), Some(1));
+        assert_eq!(h.unwrap().alpha(start), 0);
+        assert_eq!(h.unwrap().alpha(start + anim::FAST), 16);
+        // Still over the same thing: the fade keeps its start.
+        let same = Hover::moved(h, Some(1), start + anim::FAST);
+        assert_eq!(same, h);
+        let other = Hover::moved(h, Some(2), start + anim::FAST);
+        assert_eq!(other.unwrap().alpha(start + anim::FAST), 0);
+        assert_eq!(Hover::moved(h, None, start), None);
     }
 }

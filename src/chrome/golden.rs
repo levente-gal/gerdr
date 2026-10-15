@@ -254,11 +254,15 @@ fn welcome() -> WelcomeView {
             row("a project with a very long name indeed", Some(false), false),
             row("gerdr", None, false),
         ],
+        hits: vec![vec![0, 1], vec![], vec![]],
         selected: Some(1),
         hover: Some(WelcomeHit::Row(2)),
+        hover_alpha: 16,
         naming: None,
         confirm_forget: None,
         note: Some("herdr isn't installed".into()),
+        in_app: true,
+        quit_keys: Some("Ctrl+B q".into()),
     }
 }
 
@@ -284,6 +288,7 @@ fn project_menu() -> ProjectMenuView {
         digit,
         renaming: None,
         confirm_forget: false,
+        hits: vec![0, 1, 2],
     };
     ProjectMenuView {
         query: "blo".into(),
@@ -302,9 +307,14 @@ fn project_menu() -> ProjectMenuView {
         settings: None,
         hints: vec![
             ("Enter".into(), "open".into()),
+            ("Ctrl+N".into(), "new".into()),
+            ("Ctrl+R".into(), "rename".into()),
+            ("Ctrl+E".into(), "commands".into()),
+            ("Ctrl+S".into(), "stop".into()),
             ("Del".into(), "forget".into()),
             ("Esc".into(), "close".into()),
         ],
+        hover_alpha: 16,
     }
 }
 
@@ -321,10 +331,11 @@ fn form() -> ProjectMenuView {
             focus: FormField::Folder,
             suggestions: vec!["~/Sites/blog".into(), "~/Sites/blog-old".into()],
             suggestion: Some(0),
-            error: Some("A project named blog-v2 exists.".into()),
+            error: Some((FormField::Name, "A project named blog-v2 exists.".into())),
         }),
         settings: None,
         hints: vec![("Esc".into(), "back".into())],
+        hover_alpha: 16,
     }
 }
 
@@ -428,10 +439,10 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
         0xbecc6c3736626091, // switcher
-        0x2339adcf1ef00249, // welcome
+        0x587634021d6e12a7, // welcome
         0x59378f4fb455dd74, // quit
-        0xdf352140e5a10a7e, // project_menu
-        0xb5de34a9d82e1c98, // project_form
+        0xbef0eb8bfc45b7c0, // project_menu
+        0x8ee98ca10770cddc, // project_form
         0xa135931fecb12b15, // toast
     ],
     // Dark at 2
@@ -442,10 +453,10 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
         0x45784693663a03df, // switcher
-        0xe0573455650e0f53, // welcome
+        0x0509f39369ec1781, // welcome
         0xca6aac6e936af23a, // quit
-        0x2c0d505acdca739a, // project_menu
-        0xfebfa0e09839ef5a, // project_form
+        0x47b12202a46547b2, // project_menu
+        0x4493e298ea9ee362, // project_form
         0x03fe8c8c1a28bb89, // toast
     ],
     // Light at 1
@@ -456,10 +467,10 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
         0xe665a2357ee54f13, // switcher
-        0x50c5d783b4da69ca, // welcome
+        0xf3e329f9a28eb517, // welcome
         0x9141f1eb6dfa4384, // quit
-        0xa02bd03173402f8c, // project_menu
-        0x7099ffbd466ef3ad, // project_form
+        0xdeec3a957d917fcf, // project_menu
+        0x6c3fd3a9752c217d, // project_form
         0x09527b9387445087, // toast
     ],
     // Light at 2
@@ -470,10 +481,10 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
         0x05fad9e0a3cb7d27, // switcher
-        0x195335c49651f7c6, // welcome
+        0x25745fe948c0e47b, // welcome
         0xea36deb588723e15, // quit
-        0xc2172f68d48557aa, // project_menu
-        0x6667f8cc8b4a1461, // project_form
+        0xc782f9b22f729c10, // project_menu
+        0x6643b13592192371, // project_form
         0x3a08c772671fb90b, // toast
     ],
 ];

@@ -4,14 +4,15 @@
 use super::{
     BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, CARET_WIDTH, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
     FIELD_GAP, FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING,
-    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KIND_CHOICES, KIND_HEIGHT,
-    LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER,
-    PROJECT_MENU_INPUT, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING,
-    PROJECT_MENU_ROW, PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette,
-    ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
-    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect, SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE,
-    SUGGESTION_ROW, band, commands_prompt, cross, field_text, focus_ring, folder, icon_sdf,
-    magnifier, mix, pencil, phys, physical, plus, rect_px, stop,
+    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_GAP, HINT_KEY_GAP,
+    KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS,
+    PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS,
+    PROJECT_MENU_PADDING, PROJECT_MENU_ROW, PROJECT_MENU_SECTION, PROJECT_MENU_TOP,
+    PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE,
+    RENAME_FIELD, RENAME_INSET, ROW_BUTTON, ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect,
+    SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross,
+    field_text, focus_ring, folder, icon_sdf, magnifier, mix, pencil, phys, physical, plus,
+    rect_px, stop,
 };
 use crate::WorkspaceKind;
 use crate::text_field::Line;
@@ -35,6 +36,8 @@ pub struct ProjectMenuView {
     pub settings: Option<SettingsView>,
     /// The footer's key hints, as (key, what it does).
     pub hints: Vec<(String, String)>,
+    /// How far the hover pill has faded in, 0 to 16.
+    pub hover_alpha: u8,
 }
 
 /// An entry of the project menu's list.
@@ -50,6 +53,8 @@ pub enum MenuEntry {
         renaming: Option<Line>,
         /// Delete was pressed on it once.
         confirm_forget: bool,
+        /// The characters of "name detail" the query matched.
+        hits: Vec<usize>,
     },
     /// Start a new project: the label, as `New project "blo"…`.
     New(String),
@@ -70,8 +75,9 @@ pub struct FormView {
     /// "~/Sites/blog"; empty when the list is closed.
     pub suggestions: Vec<String>,
     pub suggestion: Option<usize>,
-    /// Why the project can't be created as it is.
-    pub error: Option<String>,
+    /// Why the project can't be created as it is, under the field at fault
+    /// (the name or the folder).
+    pub error: Option<(FormField, String)>,
 }
 
 /// A part of the project menu's form that takes the keyboard, in Tab order.
@@ -161,9 +167,28 @@ pub struct FormLayout {
     pub browse: Rect,
     pub kinds: [(WorkspaceKind, Rect); 2],
     pub suggestions: Vec<Rect>,
+    /// The line saying why the project can't be created, under the field at
+    /// fault; of no height without an error.
     pub error: Rect,
     pub cancel: Rect,
     pub create: Rect,
+}
+
+/// The footer: `PROJECT_MENU_FOOTER` high with one row of key hints, which
+/// has this much room above and below; a row more for every further row,
+/// up to this many.
+pub(super) const FOOTER_PAD: i32 = 4;
+pub(super) const FOOTER_ROW: i32 = PROJECT_MENU_FOOTER - 2 * FOOTER_PAD;
+pub(super) const FOOTER_ROWS: i32 = 2;
+
+/// How many rows the footer's `hints` take: one up to four, two beyond.
+pub fn footer_rows(hints: usize) -> i32 {
+    if hints > 4 { FOOTER_ROWS } else { 1 }
+}
+
+/// How high the footer is with `hints`.
+pub fn footer_height(hints: usize) -> i32 {
+    PROJECT_MENU_FOOTER + (footer_rows(hints) - 1) * FOOTER_ROW
 }
 
 /// Where the project menu's settings form parts go, in output coordinates.
@@ -192,13 +217,11 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
         (None, Some(_)) => (Vec::new(), None, Some(settings_layout(x, w, &mut y))),
         (None, None) => (menu_entries(view, x, w, &mut y), None, None),
     };
-    let bottom = (y + PROJECT_MENU_PADDING + PROJECT_MENU_FOOTER)
+    let footer_h = footer_height(view.hints.len());
+    let bottom = (y + PROJECT_MENU_PADDING + footer_h)
         .min(size.h - HELP_MARGIN)
-        .max(top + PROJECT_MENU_INPUT + PROJECT_MENU_FOOTER);
-    let footer = Rectangle::new(
-        (x, bottom - PROJECT_MENU_FOOTER).into(),
-        (w, PROJECT_MENU_FOOTER).into(),
-    );
+        .max(top + PROJECT_MENU_INPUT + footer_h);
+    let footer = Rectangle::new((x, bottom - footer_h).into(), (w, footer_h).into());
     let limit = footer.loc.y - PROJECT_MENU_PADDING;
     for (rect, buttons) in &mut entries {
         if rect.loc.y + rect.size.h > limit {
@@ -296,17 +319,30 @@ pub(super) fn row_button_rects(buttons: &[RowButton], rect: Rect) -> Vec<(RowBut
 
 /// The form's parts in a panel `w` wide at `x`, from `y` down (moved past
 /// them): a row each for the name, the folder (with Browse at its right,
-/// then the suggestions under it) and the "Opens" choices, the error line,
-/// then Cancel and Create at the right.
+/// then the suggestions under it) and the "Opens" choices, then Cancel and
+/// Create at the right. The error line, if there is one, hangs under the
+/// field at fault.
 pub(super) fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormLayout {
     let rect = |x: i32, y: i32, w: i32, h: i32| Rectangle::new((x, y).into(), (w.max(0), h).into());
     let right = x + w - FORM_PADDING;
     let field_x = x + FORM_PADDING + FORM_LABEL_WIDTH;
     let field_w = (right - field_x).max(0);
     let in_row = |y: i32, h: i32| y + (FORM_ROW - h) / 2;
+    // The error line under the row just laid out, if it is `field`'s.
+    let error_under = |y: &mut i32, field: FormField| {
+        let at = *y - (FORM_ROW - FORM_FIELD) / 2;
+        match &form.error {
+            Some((at_fault, _)) if *at_fault == field => {
+                *y += ERROR_HEIGHT;
+                Some(rect(field_x, at, field_w, ERROR_HEIGHT))
+            }
+            _ => None,
+        }
+    };
 
     let name = rect(field_x, in_row(*y, FORM_FIELD), field_w, FORM_FIELD);
     *y += FORM_ROW;
+    let mut error = error_under(y, FormField::Name);
     let browse_w = BROWSE_WIDTH.min(field_w);
     let folder_w = field_w - browse_w - FORM_GAP;
     let folder = rect(field_x, in_row(*y, FORM_FIELD), folder_w, FORM_FIELD);
@@ -318,6 +354,10 @@ pub(super) fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormL
     if !suggestions.is_empty() {
         *y += suggestions.len() as i32 * SUGGESTION_ROW + FORM_GAP;
     }
+    if let Some(under) = error_under(y, FormField::Folder) {
+        error = Some(under);
+    }
+    let error = error.unwrap_or_else(|| rect(field_x, *y, field_w, 0));
     let mut kind_x = field_x;
     let kinds = KIND_CHOICES.map(|(kind, _, kind_w)| {
         let kind_w = kind_w.min((right - kind_x).max(0));
@@ -325,9 +365,7 @@ pub(super) fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormL
         kind_x += kind_w + FORM_GAP;
         (kind, r)
     });
-    *y += FORM_ROW;
-    let error = rect(field_x, *y, field_w, ERROR_HEIGHT);
-    *y += ERROR_HEIGHT;
+    *y += FORM_ROW + FORM_GAP;
     let [(_, cancel_w), (_, create_w)] = FORM_BUTTONS;
     let create = rect(right - create_w, *y, create_w, QUIT_BUTTON);
     let cancel = rect(
@@ -393,7 +431,7 @@ pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
         - PROJECT_MENU_TOP
         - PROJECT_MENU_INPUT
         - 2 * PROJECT_MENU_PADDING
-        - PROJECT_MENU_FOOTER;
+        - footer_height(usize::MAX);
     (room / PROJECT_MENU_ROW).clamp(PROJECT_MENU_MIN_ROWS, PROJECT_MENU_MAX_ROWS) as usize
 }
 
@@ -658,12 +696,56 @@ impl Painter {
             .iter()
             .map(|(keys, action)| (keys.as_str(), action.as_str()))
             .collect();
-        let inner = Rectangle::new(
-            (footer.loc.x + HELP_PADDING, footer.loc.y).into(),
-            ((footer.size.w - 2 * HELP_PADDING).max(0), footer.size.h).into(),
-        );
-        self.hints(&mut c, &hints, inner, scale, p);
+        let inner_w = (footer.size.w - 2 * HELP_PADDING).max(0);
+        let rows = self.hint_rows(&hints, inner_w, scale, footer_rows(hints.len()) as usize);
+        for (i, row) in rows.into_iter().enumerate() {
+            let inner = Rectangle::new(
+                (
+                    footer.loc.x + HELP_PADDING,
+                    footer.loc.y + FOOTER_PAD + i as i32 * FOOTER_ROW,
+                )
+                    .into(),
+                (inner_w, FOOTER_ROW).into(),
+            );
+            self.hints(&mut c, &hints[row], inner, scale, p);
+        }
         c.into_buffer(false)
+    }
+
+    /// The key `hints` split into at most `max_rows` rows of keycaps that
+    /// fit in `w` logical pixels, in order: a row takes hints until the
+    /// next would run past the end. What the last row can't take is left
+    /// to it all the same (and dropped when drawn).
+    pub(super) fn hint_rows(
+        &self,
+        hints: &[(&str, &str)],
+        w: i32,
+        scale: f64,
+        max_rows: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        let s = scale as f32;
+        let (key_gap, gap) = (
+            (HINT_KEY_GAP as f32 * s).round(),
+            (HINT_GAP as f32 * s).round(),
+        );
+        let w = (w as f64 * scale) as f32;
+        let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
+        let (mut start, mut width) = (0, -gap);
+        for (i, (keys, action)) in hints.iter().enumerate() {
+            let more = gap
+                + self.keycaps_width(keys, scale)
+                + key_gap
+                + self.text_width(action, SMALL_FONT_SIZE, scale);
+            if width + more > w && i > start && rows.len() + 1 < max_rows.max(1) {
+                rows.push(start..i);
+                (start, width) = (i, -gap);
+            }
+            width += more;
+        }
+        if start < hints.len() || rows.is_empty() {
+            rows.push(start..hints.len());
+        }
+        rows
     }
 
     /// The project menu's query field in `rect`: a magnifier, then `query`
@@ -758,7 +840,8 @@ impl Painter {
         } else if view.selected == Some(i) {
             c.rounded(x, y, w, h, r, p.selected);
         } else if hovered {
-            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
+            let t = 0.5 * view.hover_alpha as f32 / 16.0;
+            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, t));
         }
 
         // A keycap at the right end of the row; returns where it starts.
@@ -773,6 +856,7 @@ impl Painter {
                 row,
                 digit,
                 renaming,
+                hits,
                 ..
             } => {
                 let dot = move |x: f32, y: f32| x.hypot(y) - 4.2 * s;
@@ -819,18 +903,35 @@ impl Painter {
                     let field = rename_field(rect, buttons);
                     self.field(c, name, "Project name", field, true, scale, p);
                 } else {
-                    let after = self.text(
-                        c, &row.name, FONT_SIZE, label_x, end, row_band, scale, p.text,
+                    // The hits are over "name detail": split between the two.
+                    let name_len = row.name.chars().count();
+                    let name_hits: Vec<usize> =
+                        hits.iter().copied().filter(|&h| h < name_len).collect();
+                    let detail_hits: Vec<usize> = hits
+                        .iter()
+                        .filter_map(|&h| h.checked_sub(name_len + 1))
+                        .collect();
+                    let after = self.marked(
+                        c,
+                        &row.name,
+                        &name_hits,
+                        FONT_SIZE,
+                        label_x,
+                        end,
+                        row_band,
+                        scale,
+                        (p.text, p.accent),
                     );
-                    self.text(
+                    self.marked(
                         c,
                         &row.detail,
+                        &detail_hits,
                         SMALL_FONT_SIZE,
                         after + (12.0 * s).round(),
                         end,
                         row_band,
                         scale,
-                        p.muted,
+                        (p.muted, p.accent),
                     );
                 }
             }
@@ -1135,7 +1236,7 @@ impl Painter {
             );
         }
 
-        if let Some(error) = &form.error {
+        if let (Some((_, error)), true) = (&form.error, layout.error.size.h > 0) {
             let error_rect = shift(layout.error);
             let (x, right) = phys(error_rect, scale);
             self.text(
@@ -1193,6 +1294,7 @@ mod tests {
             digit,
             renaming: None,
             confirm_forget: false,
+            hits: vec![0, 1, 2],
         }
     }
 
@@ -1217,11 +1319,14 @@ mod tests {
             settings: None,
             hints: vec![
                 ("Enter".into(), "open".into()),
+                ("Ctrl+N".into(), "new".into()),
                 ("Ctrl+R".into(), "rename".into()),
+                ("Ctrl+E".into(), "commands".into()),
                 ("Ctrl+S".into(), "stop".into()),
                 ("Del".into(), "forget".into()),
                 ("Esc".into(), "close".into()),
             ],
+            hover_alpha: 16,
         }
     }
 
@@ -1240,7 +1345,7 @@ mod tests {
                     .map(|i| format!("~/Sites/blog{i}"))
                     .collect(),
                 suggestion: (suggestions > 0).then_some(0),
-                error: error.then(|| "A project named blog-v2 exists.".into()),
+                error: error.then(|| (FormField::Name, "A project named blog-v2 exists.".into())),
             }),
             settings: None,
             hints: vec![
@@ -1248,6 +1353,7 @@ mod tests {
                 ("Enter".into(), "create".into()),
                 ("Esc".into(), "back".into()),
             ],
+            hover_alpha: 0,
         }
     }
 
@@ -1266,6 +1372,7 @@ mod tests {
                 focus: SettingsField::Before,
             }),
             hints: vec![("Esc".into(), "back".into())],
+            hover_alpha: 0,
         }
     }
 
@@ -1336,7 +1443,15 @@ mod tests {
                         assert!(f.suggestions.windows(2).all(|s| below(s[0], s[1])));
                         let [(_, zed), (_, term)] = f.kinds;
                         assert!(below(last, zed) && zed.loc.x + zed.size.w < term.loc.x);
-                        assert!(below(zed, f.error) && below(f.error, f.create));
+                        assert!(below(zed, f.create));
+                        // The error hangs under the field at fault, the name here.
+                        match &form.error {
+                            Some(_) => {
+                                assert_eq!(f.error.size.h, super::ERROR_HEIGHT);
+                                assert!(below(f.name, f.error) && below(f.error, f.folder));
+                            }
+                            None => assert_eq!(f.error.size.h, 0),
+                        }
                         assert_eq!(f.cancel.loc.y, f.create.loc.y);
                         assert!(f.cancel.loc.x + f.cancel.size.w < f.create.loc.x);
                         assert!(below(f.create, l.footer));
@@ -1345,6 +1460,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_error_hangs_under_the_folder_field_too() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let mut view = form_view(0, false);
+        let plain = project_menu_layout(&view, size);
+        view.form.as_mut().unwrap().error = Some((FormField::Folder, "No folder at ~/x.".into()));
+        let l = project_menu_layout(&view, size);
+        let f = l.form.as_ref().unwrap();
+        assert!(below(f.folder, f.error) && below(f.error, f.kinds[0].1));
+        assert_eq!(f.error.loc.x, f.folder.loc.x);
+        // With the folders offered open, it hangs under them.
+        let mut open = view.clone();
+        let suggest = open.form.as_mut().unwrap();
+        suggest.suggestions = vec!["~/x".into(), "~/xy".into()];
+        let o = project_menu_layout(&open, size).form.unwrap();
+        assert!(below(*o.suggestions.last().unwrap(), o.error));
+        assert!(below(o.error, o.kinds[0].1));
+        // The rows under it move down by the line; the name row stays.
+        let p = plain.form.as_ref().unwrap();
+        assert_eq!(f.name, p.name);
+        assert_eq!(f.folder, p.folder);
+        assert_eq!(f.create.loc.y, p.create.loc.y + super::ERROR_HEIGHT);
+        assert_eq!(l.panel.size.h, plain.panel.size.h + super::ERROR_HEIGHT);
+    }
+
+    #[test]
+    fn the_footer_wraps_its_keycap_hints() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let list = list_view();
+        let few = settings_view("");
+        let tall = project_menu_layout(&list, size).footer;
+        let short = project_menu_layout(&few, size).footer;
+        assert_eq!(short.size.h, super::footer_height(1));
+        assert_eq!(tall.size.h, short.size.h + super::FOOTER_ROW);
+        assert_eq!(super::footer_rows(4), 1);
+        assert_eq!(super::footer_rows(5), 2);
+
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        let hints: Vec<(&str, &str)> = list
+            .hints
+            .iter()
+            .map(|(k, a)| (k.as_str(), a.as_str()))
+            .collect();
+        let w = tall.size.w - 2 * crate::chrome::HELP_PADDING;
+        for scale in [1.0, 2.0] {
+            let rows = painter.hint_rows(&hints, w, scale, 2);
+            assert!(!rows.is_empty() && rows.len() <= 2);
+            // In order, every hint in one row, none left out.
+            let mut covered = Vec::new();
+            for row in &rows {
+                assert!(!row.is_empty());
+                covered.extend(row.clone());
+            }
+            assert_eq!(covered, (0..hints.len()).collect::<Vec<_>>());
+            // The first row is as full as it can be.
+            let width = |row: &std::ops::Range<usize>| -> f32 {
+                let s = scale as f32;
+                let gap = (crate::chrome::HINT_GAP as f32 * s).round();
+                let key_gap = (crate::chrome::HINT_KEY_GAP as f32 * s).round();
+                hints[row.clone()]
+                    .iter()
+                    .map(|(k, a)| {
+                        gap + painter.keycaps_width(k, scale)
+                            + key_gap
+                            + painter.text_width(a, crate::chrome::SMALL_FONT_SIZE, scale)
+                    })
+                    .sum::<f32>()
+                    - gap
+            };
+            let limit = (w as f64 * scale) as f32;
+            assert!(width(&rows[0]) <= limit);
+            if rows.len() > 1 {
+                assert!(width(&(rows[0].start..rows[0].end + 1)) > limit);
+            }
+        }
+        // One row at most: everything in it.
+        assert_eq!(painter.hint_rows(&hints, w, 1.0, 1), vec![0..hints.len()]);
+        assert_eq!(painter.hint_rows(&[], w, 1.0, 2), vec![0..0]);
     }
 
     #[test]

@@ -291,12 +291,14 @@ impl Gerdr {
                 // An overlay takes the hover from everything under it.
                 let overlay =
                     self.quit.is_some() || self.welcome.is_some() || self.project_menu.is_some();
+                // The project menu has a tooltip of its own (on Browse).
+                let mut menu_tip = None;
                 if self.quit.is_some() {
                     self.quit_hover(pos);
                 } else if self.welcome.is_some() {
                     self.welcome_hover(pos);
                 } else if self.project_menu.is_some() {
-                    self.project_menu_hover(pos);
+                    menu_tip = self.project_menu_hover(pos);
                 } else if self.context_menu.is_some() {
                     self.menu_motion(pos);
                 } else if self.switcher.is_some() {
@@ -307,7 +309,7 @@ impl Gerdr {
                 let covered = overlay || self.switcher.is_some() || self.context_menu.is_some();
                 self.header_hover = false;
                 let tip = if covered {
-                    None
+                    menu_tip
                 } else if pos.x < self.sidebar_width as f64 {
                     self.sidebar_motion(pos)
                 } else if pos.y < self.tab_strip_height() as f64 {
@@ -318,7 +320,8 @@ impl Gerdr {
                 // So do the buttons of a terminal pane's bar.
                 let free = !covered && self.drag.is_none() && self.reorder.is_none();
                 self.pane_bar_hover(free.then_some(pos));
-                self.offer_tooltip(tip.filter(|_| free), Instant::now());
+                let offered = free || self.project_menu.is_some();
+                self.offer_tooltip(tip.filter(|_| offered), Instant::now());
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
                 if under.is_none() {
