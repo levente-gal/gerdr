@@ -1,9 +1,17 @@
 //! Renaming a workspace or a tab in place: the field being edited, the
 //! keys that edit it, and writing the new name where it is kept.
 
-use smithay::input::keyboard::{Keysym, ModifiersState};
+use smithay::{
+    input::keyboard::{Keysym, ModifiersState},
+    utils::{Logical, Point},
+};
 
-use crate::{Gerdr, text_field::TextField};
+use crate::{
+    Gerdr,
+    chrome::{self, FieldSpot},
+    input::BTN_LEFT,
+    text_field::TextField,
+};
 
 /// What is being renamed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +63,49 @@ impl Gerdr {
             }
         }
         true
+    }
+
+    /// A press at `pos` while renaming: a left press inside the field puts
+    /// the caret there (Shift: the selection reaches there). Whether the
+    /// press landed in the field; any other press commits the name.
+    pub fn rename_press(&mut self, pos: Point<f64, Logical>, button: u32) -> bool {
+        if button != BTN_LEFT {
+            return false;
+        }
+        let Some(field) = self
+            .rename_field_spot()
+            .filter(|field| field.area.to_f64().contains(pos))
+        else {
+            return false;
+        };
+        let scale = self.scale();
+        let at = self.chrome.caret_at(&field, pos.x, scale);
+        let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
+        if let Some(rename) = self.rename.as_mut() {
+            rename.field.click(at, extend, 1);
+        }
+        true
+    }
+
+    /// Where the name being typed is drawn and what it shows, while the
+    /// rename is on screen (a tab's only while its workspace is shown).
+    pub fn rename_field_spot(&self) -> Option<FieldSpot> {
+        let rename = self.rename.as_ref()?;
+        match rename.target {
+            RenameTarget::Tab(w, _) if w == self.active_workspace => {
+                let view = self.tab_strip_view();
+                chrome::tab_rename_field(&view, self.tab_strip_rect(), self.scale())
+            }
+            RenameTarget::Tab(..) => None,
+            RenameTarget::Workspace(w) => {
+                let area = self.sidebar_layout().rows.get(w)?.rename_field();
+                Some(chrome::sidebar_rename_field(
+                    area,
+                    &rename.field.line(),
+                    self.scale(),
+                ))
+            }
+        }
     }
 
     /// Write the name typed into the rename target, and stop renaming.

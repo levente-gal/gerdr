@@ -155,26 +155,16 @@ impl Gerdr {
         }
     }
 
-    /// A press at `(x, y)` in the sidebar. Left click selects a workspace,
-    /// "×" or middle click closes it, a double click on its name renames
-    /// it; a left click on an agent card shows its pane. A row held with
-    /// the left button can be dragged to another place. The "+" opens the
-    /// menu of what to add; the project's name left of it opens the
-    /// project menu (the welcome screen while no project is shown). A
-    /// press anywhere but the name being renamed commits the rename.
+    /// A press at `(x, y)` in the sidebar. Left click selects a workspace
+    /// (a second one right after renames it: see `input`), "×" or middle
+    /// click closes it; a left click on an agent card shows its pane. A
+    /// row held with the left button can be dragged to another place. The
+    /// "+" opens the menu of what to add; the project's name left of it
+    /// opens the project menu (the welcome screen while no project is
+    /// shown).
     pub(crate) fn sidebar_press(&mut self, x: i32, y: i32, button: u32) {
         let pos = Point::from((x as f64 + 0.5, y as f64 + 0.5));
         let layout = self.sidebar_layout();
-        let renaming = match self.rename.as_ref().map(|r| r.target) {
-            Some(RenameTarget::Workspace(w)) => layout.rows.get(w).map(|row| row.rename_field()),
-            _ => None,
-        };
-        if let Some(field) = renaming {
-            if field.to_f64().contains(pos) {
-                return;
-            }
-            self.commit_rename();
-        }
         let Some(hit) = layout.hit(pos) else {
             return;
         };
@@ -194,9 +184,6 @@ impl Gerdr {
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
-            (SidebarHit::Name(i), BTN_LEFT) if self.is_double(pos) => {
-                self.start_rename(RenameTarget::Workspace(i));
-            }
             (SidebarHit::Row(i) | SidebarHit::Name(i) | SidebarHit::Chip(i), BTN_LEFT) => {
                 self.switch_workspace(i);
                 self.hold(Reorderable::Workspace);

@@ -12,7 +12,7 @@
 use super::{
     BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_GAP, CARD_HEADER, CARD_INDENT, CARD_LINE,
     CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, Density,
-    FONT_SIZE, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
+    FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
     LABEL_FONT_SIZE, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_BOTTOM, ROW_HEIGHT,
     ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_RADIUS, ROW_TITLE_HEIGHT, ROWS_TOP, Rect,
     SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, chevron_down,
@@ -1111,6 +1111,18 @@ impl Painter {
                 p.muted,
             );
         }
+    }
+}
+
+/// The field renaming a workspace, drawn in `area` (see
+/// `RowLayout::rename_field`) and showing `line`, for clicks into it.
+pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
+    let (x, _, w, _) = rect_px_in(area, scale);
+    let pad = (RENAME_INSET as f32 * scale as f32).round();
+    FieldSpot {
+        area,
+        text: (x + pad, x + w - pad),
+        line: line.clone(),
     }
 }
 

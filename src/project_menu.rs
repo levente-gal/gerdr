@@ -1312,12 +1312,7 @@ impl Gerdr {
     }
 
     /// The pointer moved while the project menu is open: what it is over
-    /// lights up, and the Browse button offers its tooltip.
-    ///
-    /// Needs (A6, input.rs): the tooltip is offered here, but the motion
-    /// handler then offers `None` because the menu covers the regions;
-    /// while the project menu is open it should keep this one instead, as
-    /// `let tip = self.project_menu_hover(pos)` feeding `tooltip.offer`.
+    /// lights up. The Browse button's tooltip, when the pointer is on it.
     pub fn project_menu_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.project_menu_view()?;
         let size = self.output_size();
@@ -1325,15 +1320,13 @@ impl Gerdr {
         let now = Instant::now();
         let menu = self.project_menu.as_mut()?;
         menu.set_hover(hit, now);
-        let tip = match hit {
+        match hit {
             Some(MenuHit::Field(FormField::Browse)) => {
                 let anchor = chrome::project_menu_layout(&view, size).form?.browse;
                 Some(Tooltip::new("Pick a folder", anchor).key("Ctrl+O"))
             }
             _ => None,
-        };
-        self.tooltip.offer(tip.clone(), now);
-        tip
+        }
     }
 
     /// The wheel turned `rows` rows (down positive, parts of a row adding

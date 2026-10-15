@@ -39,8 +39,7 @@ use smithay::{
 };
 
 use crate::{
-    Action, Drag, EXPECT_TIMEOUT, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder,
-    Reorderable,
+    Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
     chrome::{self, BarHit, FieldSpot},
     launch::Place,
     layout::Dir,
@@ -164,9 +163,15 @@ impl Gerdr {
                             let out = state.quit_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Quit));
                         }
-                        // A name being typed takes every key.
-                        if state.rename_key(mods, sym, handle.modified_sym()) {
+                        // A name being typed takes every key, repeating
+                        // what its field takes while held.
+                        if state.rename.is_some() {
                             state.suppressed_keys.push(code);
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            state.rename_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(None);
                         }
                         // A paste into an overlay's text field: the
@@ -247,11 +252,16 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
-                        // Esc takes down the tooltip, then the pinned help.
+                        // Esc takes down the tooltip (one still waiting
+                        // to show just goes, and the key goes on), then
+                        // the pinned help.
                         if sym == Keysym::Escape && state.tooltip.is_up() {
+                            let shown = state.tooltip.view().is_some();
                             state.tooltip.hide();
-                            state.suppressed_keys.push(code);
-                            return FilterResult::Intercept(None);
+                            if shown {
+                                state.suppressed_keys.push(code);
+                                return FilterResult::Intercept(None);
+                            }
                         }
                         if sym == Keysym::Escape && state.help_pinned {
                             state.help_pinned = false;
@@ -424,6 +434,12 @@ impl Gerdr {
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
+                // The wheel over an open context menu closes it, as a
+                // click outside would, and scrolls nothing.
+                if self.context_menu.is_some() {
+                    self.close_menu();
+                    return;
+                }
                 // Nothing scrolls behind an overlay; the project menu's and
                 // the switcher's lists move a row per notch of the wheel, or
                 // per row's height scrolled on a touchpad.
@@ -478,8 +494,12 @@ impl Gerdr {
     fn press(&mut self, location: Point<f64, Logical>, button: u32) -> bool {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
-        // A press anywhere keeps the name being typed.
+        // A press in the name being typed moves its caret; anywhere else
+        // keeps the name.
         if self.rename.is_some() {
+            if self.rename_press(location, button) {
+                return true;
+            }
             self.commit_rename();
         }
         // An overlay takes every press; only the left button does
@@ -597,12 +617,10 @@ impl Gerdr {
     /// The pane whose placeholder's Retry button is at `pos`, if one is.
     fn retry_at(&self, pos: Point<f64, Logical>) -> Option<u32> {
         let tab = self.tab()?;
-        let now = Instant::now();
         tab.expected_rects(self.content_rect())
             .into_iter()
             .find_map(|(expected, rect)| {
-                let timed_out = now.duration_since(expected.started) > EXPECT_TIMEOUT;
-                let retry = chrome::placeholder_layout(rect, timed_out).retry?;
+                let retry = chrome::placeholder_layout(rect, expected.timed_out).retry?;
                 retry.to_f64().contains(pos).then_some(expected.pane)
             })
     }
@@ -865,6 +883,10 @@ impl Gerdr {
         took: bool,
     ) {
         self.stop_key_repeat();
+        if self.rename.is_some() {
+            self.repeat_rename_key(code, mods, sym, typed, took);
+            return;
+        }
         let Some(overlay) = self.text_overlay() else {
             return;
         };
@@ -896,6 +918,37 @@ impl Gerdr {
             }
             state.copy_from_field();
             if !(switcher || took || moves) {
+                state.key_repeat = None;
+                return TimeoutAction::Drop;
+            }
+            TimeoutAction::ToDuration(interval)
+        });
+        self.key_repeat = repeat.ok().map(|token| (code, token));
+    }
+
+    /// Repeat `code`, held while a name is typed, for as long as the
+    /// name's field takes it (`took`: it did once) and the rename runs.
+    fn repeat_rename_key(
+        &mut self,
+        code: Keycode,
+        mods: ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        took: bool,
+    ) {
+        if !took || text_field::is_paste(&mods, sym) {
+            return;
+        }
+        let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
+        let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
+        let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
+            if state.rename.is_none() {
+                state.key_repeat = None;
+                return TimeoutAction::Drop;
+            }
+            text_field::took_key();
+            state.rename_key(&mods, sym, typed);
+            if !text_field::took_key() {
                 state.key_repeat = None;
                 return TimeoutAction::Drop;
             }

@@ -145,7 +145,7 @@ pub fn overflow_tooltip(others: usize, blocked: &[&str]) -> String {
 
 impl Gerdr {
     /// Where the strip sits in the window.
-    fn tab_strip_rect(&self) -> Rectangle<i32, Logical> {
+    pub(crate) fn tab_strip_rect(&self) -> Rectangle<i32, Logical> {
         let size: Size<i32, Logical> = (
             (self.output_size().w - self.sidebar_width).max(1),
             self.tab_strip_height(),
@@ -160,22 +160,10 @@ impl Gerdr {
     /// covers the strip, and the other workspaces with a blocked agent.
     pub(crate) fn tab_strip_view(&self) -> TabStripView {
         let views = self.workspace_views();
-        let mut tabs: Vec<TabView> = self
+        let tabs: Vec<TabView> = self
             .workspace()
             .map(|ws| self.tab_views(ws))
             .unwrap_or_default();
-        if let Some(ws) = self.workspace() {
-            for (tab, view) in ws.tabs.iter().zip(&mut tabs) {
-                if let Some(label) = tab
-                    .label
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                {
-                    view.title = label.to_owned();
-                }
-            }
-        }
         let others = views
             .iter()
             .enumerate()
@@ -213,7 +201,7 @@ impl Gerdr {
             || self.switcher.is_some()
             || self.context_menu.is_some()
             || self.drag.is_some()
-            || self.reorder.is_some()
+            || self.reorder.is_some_and(|r| r.moving)
     }
 
     /// Move the strip's hover on, once a frame: what the pointer is over
@@ -303,16 +291,13 @@ impl Gerdr {
     }
 
     /// A press at `(x, y)` in the tab strip (strip coordinates). Left
-    /// click selects a tab, a second one right after renames it; "×" or
-    /// middle click closes it. A tab held with the left button can be
-    /// dragged to another place. "+" opens a terminal in a new tab, the
-    /// overflow chip switches to a workspace that needs input, and the
-    /// switch at the right end cycles the theme mode.
+    /// click selects a tab (a second one right after renames it: see
+    /// `input`); "×" or middle click closes it. A tab held with the left
+    /// button can be dragged to another place. "+" opens a terminal in a
+    /// new tab, the overflow chip switches to a workspace that needs
+    /// input, and the switch at the right end cycles the theme mode.
     pub(crate) fn tab_strip_press(&mut self, x: i32, y: i32, button: u32) {
         let view = self.tab_strip_view();
-        if view.renaming.is_some() && self.press_rename_field(&view, button) {
-            return;
-        }
         let hit = self.tab_strip_layout(&view).hit(x, y);
         match (button, hit) {
             (BTN_LEFT, Some(TabHit::Toggle)) => self.set_theme_mode(next_mode(self.theme_mode)),
@@ -325,38 +310,12 @@ impl Gerdr {
             | (BTN_MIDDLE, Some(TabHit::Tab(idx)))
             | (BTN_MIDDLE, Some(TabHit::Close(idx))) => self.close_tab(idx),
             (BTN_LEFT, Some(TabHit::Tab(idx))) => {
-                if self.is_double(self.pointer) && idx == view.active {
-                    self.start_rename(RenameTarget::Tab(self.active_workspace, idx));
-                    return;
-                }
                 self.switch_tab(idx);
                 self.hold(Reorderable::Tab);
             }
             (BTN_LEFT, Some(TabHit::Plus)) => self.new_tab(),
             _ => {}
         }
-    }
-
-    /// A press while a tab is being renamed: a left press in the field
-    /// puts the caret there (Shift: the selection reaches there) and is
-    /// done with; any other press commits the name and goes on.
-    fn press_rename_field(&mut self, view: &TabStripView, button: u32) -> bool {
-        let strip = self.tab_strip_rect();
-        let scale = self.scale();
-        let field = chrome::tab_rename_field(view, strip, scale);
-        let pos = self.pointer;
-        if button == BTN_LEFT
-            && let Some(field) = field.filter(|f| f.area.to_f64().contains(pos))
-        {
-            let at = self.chrome.caret_at(&field, pos.x, scale);
-            let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
-            if let Some(rename) = self.rename.as_mut() {
-                rename.field.click(at, extend, 1);
-            }
-            return true;
-        }
-        self.commit_rename();
-        false
     }
 
     /// The pointer moved to `pos` (window coordinates) over the tab strip
