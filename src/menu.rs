@@ -269,15 +269,6 @@ impl Gerdr {
             MenuAction::RunApp(place) => self.open_run_prompt(place),
         }
     }
-
-    /// The menu under the sidebar's terminal button: where else to open a
-    /// terminal workspace.
-    pub fn terminal_menu_spec(&self) -> MenuSpec {
-        MenuSpec {
-            anchor: chrome::sidebar_layout(&[], &[], self.sidebar_width).terminal,
-            items: vec![MenuItem::new("Open folder…", MenuAction::OpenFolder)],
-        }
-    }
 }
 
 #[cfg(test)]

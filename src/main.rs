@@ -915,6 +915,8 @@ pub struct Gerdr {
     /// What the pointer is over in the tab strip, and how far it has lit
     /// up (or faded since the pointer left).
     pub tab_hover: Option<(chrome::TabHit, anim::Fade)>,
+    /// What the pointer is over in the sidebar, with its fades.
+    pub sidebar_hover: sidebar::Hover,
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
@@ -1171,13 +1173,7 @@ impl Gerdr {
     pub fn reorder_to(&mut self, what: Reorderable, pos: Point<f64, Logical>) {
         match what {
             Reorderable::Workspace => {
-                let agents = self.agent_views();
-                let workspaces: Vec<_> = self
-                    .workspace_views()
-                    .into_iter()
-                    .map(|(ws, _)| ws)
-                    .collect();
-                let layout = chrome::sidebar_layout(&workspaces, &agents, self.sidebar_width);
+                let layout = self.sidebar_layout();
                 let to = chrome::workspace_slot(&layout.blocks, self.active_workspace, pos.y);
                 move_item(&mut self.workspaces, &mut self.active_workspace, to);
             }
@@ -4117,6 +4113,7 @@ impl Gerdr {
         self.tooltip.tick(now);
         self.expire_toasts(now);
         self.tab_hover_tick(now);
+        let sidebar_state = self.sidebar_state(now);
         let ws = self.workspace();
         let active = ws.map(|_| self.active_workspace);
         let workspaces: Vec<_> = self
@@ -4149,11 +4146,21 @@ impl Gerdr {
                 })
                 .collect()
         });
+        let project = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+            .map(|p| p.name.clone());
         ChromeView {
             now,
-            workspaces,
-            agents: self.agent_views(),
-            active_workspace: active,
+            sidebar: chrome::SidebarView {
+                workspaces,
+                agents: self.agent_views(),
+                active,
+                project,
+                header_lit: self.header_hover || self.project_menu.is_some(),
+                state: sidebar_state,
+            },
             tab_strip: self.tab_strip_view(),
             focused_pane,
             placeholders,
@@ -4163,12 +4170,6 @@ impl Gerdr {
             prefix: (self.prefix_armed || self.help_pinned).then(|| self.keymap.help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
-            project: self
-                .project
-                .as_deref()
-                .and_then(|id| self.projects.project(id))
-                .map(|p| p.name.clone()),
-            header_hover: self.header_hover,
             project_menu: self.project_menu_view(),
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
@@ -4374,6 +4375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_press: None,
         rename: None,
         tab_hover: None,
+        sidebar_hover: sidebar::Hover::default(),
         frecency: Frecency::load(),
         bar_states: pane_control::BarStates::default(),
         socket_name: socket_name.clone(),

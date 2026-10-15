@@ -88,7 +88,6 @@ pub(super) const SMALL_FONT_SIZE: f32 = 13.0;
 pub(super) const DETAIL_FONT_SIZE: f32 = 12.0;
 pub(super) const TINY_FONT_SIZE: f32 = 12.0;
 pub(super) const KEY_FONT_SIZE: f32 = 13.0;
-pub(super) const ICON_SIZE: f32 = 20.0;
 pub(super) const PADDING: f32 = 10.0;
 pub(super) const HELP_MARGIN: i32 = 16;
 pub(super) const HELP_PADDING: i32 = 14;
@@ -231,12 +230,6 @@ pub(super) const FORM_BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Create & sw
 /// Cancel, Run now and Save in the project settings form: labels and widths.
 pub(super) const SETTINGS_BUTTONS: [(&str, i32); 3] =
     [("Cancel", 84), ("Run now", 96), ("Save", 84)];
-
-/// The notice: a pill this high, its text this far in from its ends, this
-/// far below the tab strip.
-pub(super) const NOTICE_HEIGHT: i32 = 30;
-pub(super) const NOTICE_PADDING: i32 = 16;
-pub(super) const NOTICE_TOP: i32 = 8;
 
 /// The bar over each terminal pane: this high, with its restart and stop
 /// buttons this wide at its right end, this far apart and in from the end.

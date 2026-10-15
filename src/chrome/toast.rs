@@ -1,10 +1,7 @@
 //! The toasts at the bottom right of the app area: a stack of short
 //! notes, each with a colour bar for its level and, some, a button.
 
-use super::{
-    Canvas, FONT_SIZE, NOTICE_HEIGHT, NOTICE_PADDING, NOTICE_TOP, Painter, Palette, Rect, Rgb,
-    SHADOW, band, hex, physical, rect_px,
-};
+use super::{Canvas, FONT_SIZE, Painter, Palette, Rect, Rgb, SHADOW, band, physical, rect_px};
 use crate::toast::Level;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Rectangle, Size};
@@ -15,9 +12,9 @@ use smithay::utils::{Rectangle, Size};
 pub const TOAST_WIDTH: i32 = 360;
 pub const TOAST_HEIGHT: i32 = 44;
 pub const TOAST_MARGIN: i32 = 16;
-pub const TOAST_GAP: i32 = NOTICE_TOP;
-const TOAST_TEXT_BAND: i32 = NOTICE_HEIGHT;
-const TOAST_PADDING: i32 = NOTICE_PADDING;
+pub const TOAST_GAP: i32 = 8;
+const TOAST_TEXT_BAND: i32 = 30;
+const TOAST_PADDING: i32 = 16;
 /// The level's colour bar at the left.
 const TOAST_BAR: i32 = 4;
 /// The button at the right: its height, the room at its ends and the gap
@@ -84,21 +81,13 @@ fn button_rect(panel: Rect, label: &str) -> Rect {
     )
 }
 
-/// Whether the palette is a dark one: light text on a dark ground.
-fn is_dark(p: &Palette) -> bool {
-    let luma = |[r, g, b]: Rgb| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-    luma(p.text) > luma(p.background)
-}
-
 /// The colour of a toast's bar for `level`.
 fn level_color(level: Level, p: &Palette) -> Rgb {
     match level {
         Level::Info => p.accent,
         Level::Success => p.success,
         Level::Warning => p.warning,
-        // Zed's One Dark and One Light errors; the palette has no red yet.
-        Level::Error if is_dark(p) => hex(0xd07277),
-        Level::Error => hex(0xd36151),
+        Level::Error => p.error,
     }
 }
 
@@ -158,26 +147,6 @@ impl Painter {
             p.text,
         );
         c.into_buffer(false)
-    }
-
-    /// The notice pill the toasts replaced, as the project menu's tests
-    /// still paint it: an Info toast `w` wide saying `text`.
-    #[cfg(test)]
-    pub(super) fn notice(&self, text: &str, w: i32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
-        let view = ToastView {
-            id: 0,
-            text: text.into(),
-            level: Level::Info,
-            action: None,
-        };
-        self.toast(&view, w.max(1), false, scale, p)
-    }
-
-    /// How wide the notice pill showing `text` was, at most `max`.
-    #[cfg(test)]
-    pub(super) fn notice_width(&self, text: &str, max: i32, scale: f64) -> i32 {
-        let text_w = (self.text_width(text, FONT_SIZE, scale) / scale as f32).ceil() as i32;
-        (text_w + 2 * TOAST_PADDING).min(max).max(TOAST_TEXT_BAND)
     }
 }
 

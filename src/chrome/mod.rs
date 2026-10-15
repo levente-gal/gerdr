@@ -80,10 +80,8 @@ pub const DEBUG_HITS: &str = "GERDR_DEBUG_HITS";
 pub struct ChromeView {
     /// When the view was taken, for what moves with time.
     pub now: Instant,
-    pub workspaces: Vec<WorkspaceView>,
-    /// Per workspace, the agents running in it.
-    pub agents: Vec<Vec<AgentView>>,
-    pub active_workspace: Option<usize>,
+    /// The sidebar: its workspaces, their agents and what moves in it.
+    pub sidebar: SidebarView,
     /// The tab strip of the active workspace.
     pub tab_strip: TabStripView,
     /// The focused pane's client rect in the active tab, whatever it shows.
@@ -103,10 +101,6 @@ pub struct ChromeView {
     pub welcome: Option<WelcomeView>,
     /// Set while the quit dialog is open, over everything.
     pub quit: Option<QuitView>,
-    /// The project shown, by name, for the sidebar header.
-    pub project: Option<String>,
-    /// The pointer is over the sidebar header's project name.
-    pub header_hover: bool,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
@@ -120,20 +114,9 @@ pub struct ChromeView {
     pub scale: f64,
 }
 
-/// Sidebar inputs: workspaces, their agents, the active one, whether the
-/// terminal menu is open, the project's name and whether it is lit (under
-/// the pointer or its menu open), theme, size, scale.
-type SidebarKey = (
-    Vec<WorkspaceView>,
-    Vec<Vec<AgentView>>,
-    Option<usize>,
-    bool,
-    Option<String>,
-    bool,
-    Theme,
-    Size<i32, Logical>,
-    f64,
-);
+/// Sidebar inputs: the view (with what moves in it, quantized), theme,
+/// size, scale.
+type SidebarKey = (SidebarView, Theme, Size<i32, Logical>, f64);
 
 pub struct Chrome {
     painter: Painter,
@@ -251,7 +234,6 @@ impl Chrome {
                 Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW)),
             )
         };
-        let project_menu_open = view.project_menu.is_some();
         let spinner_step = self.spinner_step(now);
         // Overlays that faded out for good are let go of.
         self.toasts.retain(|(_, toast)| toast.lingers());
@@ -320,7 +302,6 @@ impl Chrome {
         );
 
         // The context menu, under its anchor.
-        let menu_open = view.context_menu.is_some();
         let menu = view.context_menu.map(|menu| {
             let (panel, _) = menu_layout(menu.anchor, &menu.rows, output);
             let (loc, size) = shadowed(panel);
@@ -453,32 +434,9 @@ impl Chrome {
         }
 
         // The sidebar and the tab strip.
-        let header_lit = view.header_hover || project_menu_open;
-        let sidebar_key = (
-            view.workspaces,
-            view.agents,
-            view.active_workspace,
-            menu_open,
-            view.project,
-            header_lit,
-            theme,
-            sidebar_size,
-            scale,
-        );
         let sidebar = self.sidebar.get(
-            sidebar_key,
-            |(workspaces, agents, active, menu_open, project, lit, ..)| {
-                painter.sidebar(
-                    workspaces,
-                    agents,
-                    *active,
-                    *menu_open,
-                    (project.as_deref(), *lit),
-                    sidebar_size,
-                    scale,
-                    theme.palette(),
-                )
-            },
+            (view.sidebar, theme, sidebar_size, scale),
+            |(sidebar, ..)| painter.sidebar_view(sidebar, sidebar_size, scale, theme.palette()),
         );
         let strip = self.tabs.get(
             (view.tab_strip, theme, strip_size.w, scale),
@@ -657,17 +615,18 @@ impl<K: PartialEq> Overlay<K> {
 /// Every rect the chrome hit-tests, in window coordinates, for `view`.
 fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<Rect> {
     let mut rects = Vec::new();
-    let sidebar = sidebar_layout(&view.workspaces, &view.agents, view.sidebar_width);
-    rects.extend([
-        sidebar.header,
-        sidebar.project,
-        sidebar.terminal,
-        sidebar.chevron,
-    ]);
-    for (row, close) in &sidebar.rows {
-        rects.extend([*row, *close]);
+    let sidebar = sidebar_layout_at(
+        &view.sidebar.workspaces,
+        &view.sidebar.agents,
+        view.sidebar_width,
+        view.density,
+    );
+    rects.extend([sidebar.header, sidebar.plus]);
+    for row in &sidebar.rows {
+        rects.extend([row.rect, row.close]);
+        rects.extend(row.chip);
     }
-    rects.extend(sidebar.cards.iter().flatten().copied());
+    rects.extend(sidebar.cards.iter().flatten().map(|(_, rect)| *rect));
     let strip_w = output.w - view.sidebar_width;
     let shift = |rect: Rect| {
         Rectangle::new(

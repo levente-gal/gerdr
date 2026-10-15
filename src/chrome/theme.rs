@@ -120,6 +120,7 @@ pub(crate) struct Palette {
     pub(super) on_accent: Rgb,
     pub(super) success: Rgb,
     pub(super) warning: Rgb,
+    pub(super) error: Rgb,
     pub(super) shadow: f32,
     /// What Zed's terminal uses with this look: its background and
     /// foreground, and the 16 ANSI colours (the 8 normal, then the 8
@@ -146,6 +147,7 @@ pub(super) const ONE_DARK: Palette = Palette {
     on_accent: hex(0x282c33),
     success: hex(0xa1c181),
     warning: hex(0xdec184),
+    error: hex(0xd07277),
     shadow: 0.45,
     terminal_background: hex(0x282c34),
     terminal_foreground: hex(0xabb2bf),
@@ -186,6 +188,7 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     on_accent: hex(0xfafafa),
     success: hex(0x669f59),
     warning: hex(0xa48819),
+    error: hex(0xd36151),
     shadow: 0.18,
     terminal_background: hex(0xfafafa),
     terminal_foreground: hex(0x2a2c33),

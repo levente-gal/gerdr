@@ -4,8 +4,8 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, Canvas,
     DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH, HINT_GAP,
-    HINT_KEY_GAP, ICON_SIZE, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SMALL_FONT_SIZE, arrow,
-    coverage, mix,
+    HINT_KEY_GAP, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SMALL_FONT_SIZE, arrow, coverage,
+    mix,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
@@ -452,43 +452,6 @@ impl Painter {
             scale,
             color,
         );
-    }
-
-    /// Draw an icon glyph at `ICON_SIZE`, centred on its own ink in a logical
-    /// rectangle ("×" and "+" sit off the cap-height centre `text` uses).
-    pub(super) fn icon(
-        &self,
-        c: &mut Canvas,
-        ch: char,
-        rect: Rectangle<i32, Logical>,
-        scale: f64,
-        color: Rgb,
-    ) {
-        let Some(font) = &self.font else { return };
-        let scaled = font.as_scaled(PxScale::from(ICON_SIZE * scale as f32));
-        let Some(outline) = font.outline_glyph(scaled.scaled_glyph(ch)) else {
-            return;
-        };
-        let ink = outline.px_bounds();
-        let px = |v: i32| (v as f64 * scale) as f32;
-        let x = (px(rect.loc.x) + (px(rect.size.w) - ink.width()) / 2.0 - ink.min.x).round();
-        let y = (px(rect.loc.y) + (px(rect.size.h) - ink.height()) / 2.0 - ink.min.y).round();
-        let glyph = scaled.scaled_glyph(ch);
-        let glyph = ab_glyph::Glyph {
-            position: ab_glyph::point(x, y),
-            ..glyph
-        };
-        if let Some(outline) = font.outline_glyph(glyph) {
-            let bounds = outline.px_bounds();
-            outline.draw(|gx, gy, coverage| {
-                c.blend(
-                    bounds.min.x as i32 + gx as i32,
-                    bounds.min.y as i32 + gy as i32,
-                    color,
-                    coverage,
-                );
-            });
-        }
     }
 
     /// The marks after a branch: a dot for uncommitted changes, then arrows

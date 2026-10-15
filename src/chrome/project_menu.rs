@@ -1169,10 +1169,12 @@ mod tests {
     };
     use crate::WorkspaceKind;
     use crate::chrome::{
-        BAR_HEIGHT, HELP_MARGIN, NOTICE_HEIGHT, PROJECT_MENU_WIDTH, Painter, ProjectRow, ROW_INSET,
-        Rect, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, Theme, inside,
+        BAR_HEIGHT, HELP_MARGIN, PROJECT_MENU_WIDTH, Painter, ProjectRow, ROW_INSET, Rect,
+        SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, SidebarState, SidebarView, Theme,
+        ToastView, inside,
     };
     use crate::text_field::Line;
+    use crate::toast::Level;
     use smithay::utils::{Logical, Point, Size};
 
     fn menu_row(name: &str, running: Option<bool>, current: bool) -> ProjectRow {
@@ -1501,31 +1503,30 @@ mod tests {
                     for view in &views {
                         painter.project_menu(view, size, scale, theme.palette());
                     }
-                    painter.notice(
-                        "Switched to gerdr · aft keeps running",
-                        w / 2,
-                        scale,
-                        theme.palette(),
-                    );
+                    let toast = ToastView {
+                        id: 0,
+                        text: "Switched to gerdr · aft keeps running".into(),
+                        level: Level::Info,
+                        action: None,
+                    };
+                    painter.toast(&toast, (w / 2).max(1), false, scale, theme.palette());
                 }
                 for (name, lit) in [(Some(long), true), (Some("aft"), false), (None, false)] {
                     for width in [SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, SIDEBAR_MAX_WIDTH] {
                         let size = (width, 400).into();
-                        painter.sidebar(
-                            &[],
-                            &[],
-                            None,
-                            false,
-                            (name, lit),
-                            size,
-                            scale,
-                            theme.palette(),
-                        );
+                        let view = SidebarView {
+                            workspaces: Vec::new(),
+                            agents: Vec::new(),
+                            active: None,
+                            project: name.map(str::to_owned),
+                            header_lit: lit,
+                            state: SidebarState::default(),
+                        };
+                        painter.sidebar_view(&view, size, scale, theme.palette());
                     }
                 }
             }
         }
-        assert!(painter.notice_width("Created blog-v2", 10, 1.0) >= NOTICE_HEIGHT);
     }
 
     #[test]

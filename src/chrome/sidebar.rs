@@ -1,22 +1,57 @@
 //! The workspace sidebar: the views of workspaces and agent cards, where
 //! they go, and how they are drawn.
+//!
+//! A workspace row is two lines: its name with a status chip at the right
+//! (one dot and a word for the most pressing agent, a filled badge with a
+//! count when agents are blocked), then its branch and place. Under it, a
+//! compact card per agent: a header line and a detail line, the most
+//! pressing first. The header holds the project's name and one "+" button
+//! opening the menu of what to add. What moves (hover pills, the pulse on
+//! a blocked card, a name being renamed) comes in through `SidebarState`.
 
 use super::{
     BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_GAP, CARD_HEADER, CARD_INDENT, CARD_LINE,
-    CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, FIELD_GAP,
+    CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, Density,
     FONT_SIZE, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
     LABEL_FONT_SIZE, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_BOTTOM, ROW_HEIGHT,
     ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_RADIUS, ROW_TITLE_HEIGHT, ROWS_TOP, Rect,
     SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, chevron_down,
-    distinct, folder, folder_plus, git_branch, icon_sdf, mix, physical, status_mark, terminal,
-    terminal_plus,
+    cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical, status_mark, terminal,
 };
 use crate::WorkspaceKind;
 use crate::git::GitStatus;
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
+use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-use smithay::utils::{Logical, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
+
+/// How many steps a hover or pulse alpha in `SidebarState` has: the value
+/// `anim::quantize` gives 1.0.
+const ALPHA_STEPS: f32 = 16.0;
+/// Room for the status chip at the right of a row's name line, which it
+/// shares with the "×": while the row is hovered the chip shrinks to its
+/// dot and the "×" shows, so the name never moves.
+const CHIP_WIDTH: i32 = 66;
+/// The chip's own part of that room, left of the "×".
+const CHIP_SLOT: i32 = CHIP_WIDTH - CLOSE_WIDTH;
+/// The chip's inner padding, and the gap between its dot and its word.
+const CHIP_PADDING: i32 = 6;
+const CHIP_DOT: i32 = 8;
+const CHIP_GAP: i32 = 4;
+/// The gap between the header's name pill and its "+" button.
+const HEADER_GAP: i32 = 4;
+/// A row in compact density: just the name line.
+const ROW_COMPACT: i32 = 28;
+/// Card padding in compact density: half the comfortable one.
+const CARD_PAD_COMPACT: i32 = CARD_PAD / 2;
+/// The field a row's name turns into while renaming: its height and how
+/// far it reaches left of the name.
+const RENAME_HEIGHT: i32 = 24;
+const RENAME_INSET: i32 = 5;
+/// How much of the warning colour a blocked card's header carries at the
+/// top of its pulse.
+const BLOCKED_TINT: f32 = 0.15;
 
 /// One line of an agent card below its header.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +63,8 @@ pub enum AgentLine {
 }
 
 /// What an agent card shows: everything herdr reports about the agent.
+/// The card draws its header and one detail line; the rest is for its
+/// tooltip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentView {
     /// The herdr pane it runs in; a click on the card shows it.
@@ -103,9 +140,67 @@ impl AgentView {
         }
     }
 
-    /// The card's height, in logical pixels.
-    pub fn height(&self) -> i32 {
-        2 * CARD_PAD + CARD_HEADER + self.lines.len() as i32 * CARD_LINE
+    /// What the card calls the agent: its kind, and its name after it.
+    pub fn label(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{} · {name}", self.kind),
+            None => self.kind.clone(),
+        }
+    }
+
+    /// The card's detail line: the folder it is in (its last component)
+    /// and what it is on.
+    pub fn detail(&self) -> String {
+        let cwd = self.lines.iter().find_map(|l| match l {
+            AgentLine::Field(label, value) if label == "cwd" => Some(basename(value)),
+            _ => None,
+        });
+        let title = self.lines.iter().find_map(|l| match l {
+            AgentLine::Title(title) => Some(title.as_str()),
+            _ => None,
+        });
+        match (cwd, title) {
+            (Some(cwd), Some(title)) => format!("{cwd} · {title}"),
+            (Some(cwd), None) => cwd.to_owned(),
+            (None, Some(title)) => title.to_owned(),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Everything the card knows, on one line, for its tooltip.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![format!("{} {}", self.label(), status_label(self.status))];
+        parts.extend(self.lines.iter().map(|l| match l {
+            AgentLine::Title(title) => title.clone(),
+            AgentLine::Field(label, value) => format!("{label} {value}"),
+        }));
+        parts.join(" · ")
+    }
+
+    /// The card's height at `density`, in logical pixels.
+    pub fn height(&self, density: Density) -> i32 {
+        let detail = if self.detail().is_empty() {
+            0
+        } else {
+            CARD_LINE
+        };
+        2 * card_pad(density) + CARD_HEADER + detail
+    }
+}
+
+/// The last component of a path shown as text.
+fn basename(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|b| !b.is_empty())
+        .unwrap_or(path)
+}
+
+fn card_pad(density: Density) -> i32 {
+    match density {
+        Density::Comfortable => CARD_PAD,
+        Density::Compact => CARD_PAD_COMPACT,
     }
 }
 
@@ -132,6 +227,7 @@ pub struct WorkspaceView {
     pub git: Option<GitStatus>,
     pub place: String,
     /// How many tabs it has and what runs in them; empty without herdr.
+    /// The tab strip shows this, so the row leaves it to its tooltip.
     pub activity: String,
 }
 
@@ -178,34 +274,34 @@ impl WorkspaceView {
         }
     }
 
-    /// How many detail lines it shows below its name.
-    fn detail_lines(&self) -> i32 {
-        (self.branch.is_some() || !self.place.is_empty()) as i32 + !self.activity.is_empty() as i32
+    /// Whether it has a second line: a branch or a place.
+    fn has_detail(&self) -> bool {
+        self.branch.is_some() || !self.place.is_empty()
     }
 
     /// The height of the band holding its name, in logical pixels.
-    fn title_height(&self) -> i32 {
-        if self.detail_lines() == 0 {
-            ROW_HEIGHT
-        } else {
-            ROW_TITLE_HEIGHT
+    fn title_height(&self, density: Density) -> i32 {
+        match density {
+            Density::Compact => ROW_COMPACT,
+            Density::Comfortable if self.has_detail() => ROW_TITLE_HEIGHT,
+            Density::Comfortable => ROW_HEIGHT,
         }
     }
 
-    /// The row's height, in logical pixels.
-    pub fn height(&self) -> i32 {
-        self.title_height()
-            + self.detail_lines() * TAB_LINE
-            + if self.detail_lines() == 0 {
-                0
-            } else {
-                ROW_BOTTOM
-            }
+    /// The row's height at `density`, in logical pixels.
+    pub fn height(&self, density: Density) -> i32 {
+        let title = self.title_height(density);
+        if density == Density::Comfortable && self.has_detail() {
+            title + TAB_LINE + ROW_BOTTOM
+        } else {
+            title
+        }
     }
 }
 
-/// How pressing `status` is, for picking the one a workspace shows.
-pub(super) fn urgency(status: AgentStatus) -> u8 {
+/// How pressing `status` is, for picking the one a workspace shows and
+/// ordering the cards.
+pub fn urgency(status: AgentStatus) -> u8 {
     match status {
         AgentStatus::Blocked => 4,
         AgentStatus::Done => 3,
@@ -215,66 +311,275 @@ pub(super) fn urgency(status: AgentStatus) -> u8 {
     }
 }
 
+/// The order `cards` show in: the most pressing first, and among equals
+/// as given (by tab). Indices into `cards`.
+pub fn card_order(cards: &[AgentView]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..cards.len()).collect();
+    order.sort_by_key(|i| std::cmp::Reverse(urgency(cards[*i].status)));
+    order
+}
+
+/// How many of `cards` are blocked.
+pub fn blocked_count(cards: &[AgentView]) -> usize {
+    cards
+        .iter()
+        .filter(|c| c.status == AgentStatus::Blocked)
+        .count()
+}
+
+/// What moves in a workspace row: its hover pill's alpha (0 to 16) and
+/// whether the pointer is on its "×".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowState {
+    pub hover: u8,
+    pub close: bool,
+}
+
+/// What moves in an agent card: its hover pill's alpha and, while blocked,
+/// where its pulse stands (both 0 to 16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CardState {
+    pub hover: u8,
+    pub pulse: u8,
+}
+
+/// What the sidebar shows beyond its data: the density, the hover and
+/// pulse alphas, whether the "+" menu is open, and the name being renamed.
+/// Alphas are quantized so a buffer drawn from it is drawn again only when
+/// a step changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SidebarState {
+    pub density: Density,
+    /// Per workspace row.
+    pub rows: Vec<RowState>,
+    /// Per workspace, per card as the data lists them (not as drawn).
+    pub cards: Vec<Vec<CardState>>,
+    /// The "+" button's hover alpha, and whether its menu is open.
+    pub plus: u8,
+    pub plus_open: bool,
+    /// The workspace being renamed, and the name typed so far.
+    pub rename: Option<(usize, Line)>,
+}
+
+impl SidebarState {
+    fn row(&self, i: usize) -> RowState {
+        self.rows.get(i).copied().unwrap_or_default()
+    }
+
+    fn card(&self, i: usize, k: usize) -> CardState {
+        self.cards
+            .get(i)
+            .and_then(|cards| cards.get(k))
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// Everything the sidebar is drawn from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SidebarView {
+    pub workspaces: Vec<WorkspaceView>,
+    /// Per workspace, the agents running in it.
+    pub agents: Vec<Vec<AgentView>>,
+    pub active: Option<usize>,
+    /// The project shown, by name, and whether its name is lit (under the
+    /// pointer, or its menu open).
+    pub project: Option<String>,
+    pub header_lit: bool,
+    pub state: SidebarState,
+}
+
+/// Where the parts of a workspace row sit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowLayout {
+    /// The whole row.
+    pub rect: Rect,
+    /// The band holding its name.
+    pub title: Rect,
+    /// Where its name goes, up to the chip (or the "×").
+    pub name: Rect,
+    /// The status chip, when it has agents.
+    pub chip: Option<Rect>,
+    /// Its "×" close button.
+    pub close: Rect,
+}
+
+impl RowLayout {
+    /// The field the name turns into while renaming.
+    pub fn rename_field(&self) -> Rect {
+        let x = self.name.loc.x - RENAME_INSET;
+        let y = self.title.loc.y + (self.title.size.h - RENAME_HEIGHT) / 2;
+        let end = self.chip.map_or(self.close.loc.x, |c| c.loc.x) - 2;
+        Rectangle::new((x, y).into(), (end - x, RENAME_HEIGHT).into())
+    }
+}
+
 pub struct SidebarLayout {
-    /// The project's name, opening the project menu: the header left of
-    /// its buttons.
+    /// The project's name, opening the project menu: the pill at the left
+    /// of the header, exactly as it lights up.
     pub header: Rect,
-    /// Header button: pick a folder to open as a project workspace.
-    pub project: Rect,
-    /// Header split button: a terminal workspace in the home folder, and the
-    /// chevron opening the menu to pick another folder.
-    pub terminal: Rect,
-    pub chevron: Rect,
-    /// One row per workspace, with its "×" close button.
-    pub rows: Vec<(Rect, Rect)>,
-    /// Per workspace, its agent cards, below its row.
-    pub cards: Vec<Vec<Rect>>,
+    /// The "+" button at the right of the header, opening the menu of what
+    /// to add.
+    pub plus: Rect,
+    /// One per workspace.
+    pub rows: Vec<RowLayout>,
+    /// Per workspace, its agent cards as drawn (the most pressing first):
+    /// each with its index among the workspace's cards as the data lists
+    /// them.
+    pub cards: Vec<Vec<(usize, Rect)>>,
     /// Per workspace, all it takes: its row, its cards and the gap after them.
     pub blocks: Vec<Rect>,
 }
 
-/// Where the header buttons, the rows of `workspaces` and their `agents`
-/// cards sit in a sidebar `width` wide.
+/// What is under a point of the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarHit {
+    /// The project's name.
+    Header,
+    /// The "+" button.
+    Plus,
+    /// Workspace `i`: its row off any part below, its name, its status
+    /// chip, its "×".
+    Row(usize),
+    Name(usize),
+    Chip(usize),
+    Close(usize),
+    /// Card `k` (as the data lists it) of workspace `i`.
+    Card(usize, usize),
+}
+
+impl SidebarHit {
+    /// The row a hit on any part of workspace `i` belongs to.
+    pub fn row(self) -> Option<usize> {
+        match self {
+            Self::Row(i) | Self::Name(i) | Self::Chip(i) | Self::Close(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// What lights up under this hit: a row for any part of it.
+    pub fn pill(self) -> Self {
+        match self.row() {
+            Some(i) => Self::Row(i),
+            None => self,
+        }
+    }
+}
+
+impl SidebarLayout {
+    /// What is at `pos`.
+    pub fn hit(&self, pos: Point<f64, Logical>) -> Option<SidebarHit> {
+        let inside = |r: Rect| r.to_f64().contains(pos);
+        if inside(self.plus) {
+            return Some(SidebarHit::Plus);
+        }
+        if inside(self.header) {
+            return Some(SidebarHit::Header);
+        }
+        for (i, cards) in self.cards.iter().enumerate() {
+            if let Some((k, _)) = cards.iter().find(|(_, rect)| inside(*rect)) {
+                return Some(SidebarHit::Card(i, *k));
+            }
+        }
+        let (i, row) = self.rows.iter().enumerate().find(|(_, r)| inside(r.rect))?;
+        Some(if inside(row.close) {
+            SidebarHit::Close(i)
+        } else if row.chip.is_some_and(inside) {
+            SidebarHit::Chip(i)
+        } else if inside(row.name) {
+            SidebarHit::Name(i)
+        } else {
+            SidebarHit::Row(i)
+        })
+    }
+}
+
+/// Where the header's parts, the rows of `workspaces` and their `agents`
+/// cards sit in a sidebar `width` wide, in comfortable density.
+#[cfg(test)]
 pub fn sidebar_layout(
     workspaces: &[WorkspaceView],
     agents: &[Vec<AgentView>],
     width: i32,
 ) -> SidebarLayout {
-    let button = |x: i32, w: i32| Rectangle::new((x, 0).into(), (w, BAR_HEIGHT).into());
-    let chevron = button(width - GAP - HEADER_MARGIN - CHEVRON_WIDTH, CHEVRON_WIDTH);
-    let terminal = button(chevron.loc.x - HEADER_BUTTON, HEADER_BUTTON);
-    let project = button(terminal.loc.x - HEADER_BUTTON, HEADER_BUTTON);
+    sidebar_layout_at(workspaces, agents, width, Density::Comfortable)
+}
+
+/// `sidebar_layout` at `density`.
+pub fn sidebar_layout_at(
+    workspaces: &[WorkspaceView],
+    agents: &[Vec<AgentView>],
+    width: i32,
+    density: Density,
+) -> SidebarLayout {
+    let plus = Rectangle::new(
+        (
+            width - GAP - HEADER_MARGIN - HEADER_BUTTON,
+            (BAR_HEIGHT - HEADER_BUTTON) / 2,
+        )
+            .into(),
+        (HEADER_BUTTON, HEADER_BUTTON).into(),
+    );
+    let header = Rectangle::new(
+        (ROW_INSET, 5).into(),
+        (
+            (plus.loc.x - HEADER_GAP - ROW_INSET).max(0),
+            BAR_HEIGHT - 10,
+        )
+            .into(),
+    );
     let (mut rows, mut card_rects, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
     let mut y = ROWS_TOP;
+    let name_x = ROW_INSET + PADDING as i32 + ROW_ICON_WIDTH + ROW_ICON_GAP;
     let card_x = ROW_INSET + CARD_INDENT;
     let card_w = (width - GAP - ROW_INSET - card_x).max(0);
     let none = Vec::new();
     for (i, ws) in workspaces.iter().enumerate() {
-        let row = Rectangle::new((0, y).into(), (width - GAP, ws.height()).into());
+        let (h, title_h) = (ws.height(density), ws.title_height(density));
+        let rect = Rectangle::new((0, y).into(), (width - GAP, h).into());
+        let title = Rectangle::new((0, y).into(), (width - GAP, title_h).into());
         let close_x = width - GAP - ROW_INSET - CLOSE_WIDTH;
-        let close = Rectangle::new((close_x, y).into(), (CLOSE_WIDTH, ws.title_height()).into());
-        rows.push((row, close));
-        y += ws.height();
+        let close = Rectangle::new((close_x, y).into(), (CLOSE_WIDTH, title_h).into());
+        let chip = ws
+            .status
+            .map(|_| Rectangle::new((close_x - CHIP_SLOT, y).into(), (CHIP_SLOT, title_h).into()));
+        let name_end = chip.map_or(close_x, |c| c.loc.x) - 4;
+        let name = Rectangle::new(
+            (name_x, y).into(),
+            ((name_end - name_x).max(0), title_h).into(),
+        );
+        rows.push(RowLayout {
+            rect,
+            title,
+            name,
+            chip,
+            close,
+        });
+        y += h;
         let cards = agents.get(i).unwrap_or(&none);
-        let ws_cards = cards
-            .iter()
-            .map(|card| {
-                let card = Rectangle::new((card_x, y).into(), (card_w, card.height()).into());
+        let ws_cards = card_order(cards)
+            .into_iter()
+            .map(|k| {
+                let card = Rectangle::new(
+                    (card_x, y).into(),
+                    (card_w, cards[k].height(density)).into(),
+                );
                 y += card.size.h + CARD_GAP;
-                card
+                (k, card)
             })
             .collect();
         card_rects.push(ws_cards);
         if !cards.is_empty() {
             y += CARD_GAP;
         }
-        blocks.push(Rectangle::new(row.loc, (row.size.w, y - row.loc.y).into()));
+        blocks.push(Rectangle::new(
+            rect.loc,
+            (rect.size.w, y - rect.loc.y).into(),
+        ));
     }
     SidebarLayout {
-        header: Rectangle::new((0, 0).into(), (project.loc.x.max(0), BAR_HEIGHT).into()),
-        project,
-        terminal,
-        chevron,
+        header,
+        plus,
         rows,
         cards: card_rects,
         blocks,
@@ -302,98 +607,83 @@ pub fn workspace_slot(blocks: &[Rect], held: usize, y: f64) -> usize {
     blocks.len() - 1
 }
 
+/// Roughly whether `name` at the row's label size fits in `width` logical
+/// pixels, without a font to measure it: for offering the full name as a
+/// tooltip.
+pub fn name_fits(name: &str, width: i32) -> bool {
+    let estimate = name.chars().count() as f32 * LABEL_FONT_SIZE * 0.55;
+    estimate <= width as f32
+}
+
+/// A quantized alpha from `SidebarState` as a fraction.
+fn alpha(step: u8) -> f32 {
+    (step as f32 / ALPHA_STEPS).clamp(0.0, 1.0)
+}
+
 impl Painter {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn sidebar(
+    /// The sidebar: the header (project name and "+"), a row per workspace
+    /// and the agent cards under it, with what moves in `view.state`.
+    pub(super) fn sidebar_view(
         &self,
-        workspaces: &[WorkspaceView],
-        agents: &[Vec<AgentView>],
-        active: Option<usize>,
-        menu_open: bool,
-        (project, lit): (Option<&str>, bool),
+        view: &SidebarView,
         size: Size<i32, Logical>,
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(size, scale));
         let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
         let line = px(1).max(1);
         c.fill(0, 0, c.w, c.h, p.panel);
         c.fill(0, px(BAR_HEIGHT) - line, c.w, line, p.border);
         c.fill(c.w - px(GAP).max(1), 0, px(GAP).max(1), c.h, p.border);
 
-        let layout = sidebar_layout(workspaces, agents, size.w);
-        let s = scale as f32;
-        match project {
-            Some(name) => self.header_name(&mut c, name, lit, layout.header, scale, p),
+        let state = &view.state;
+        let density = state.density;
+        let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density);
+        match &view.project {
+            Some(name) => self.header_name(&mut c, name, view.header_lit, layout.header, scale, p),
             None => {
                 self.text(
                     &mut c,
                     "Workspaces",
                     SMALL_FONT_SIZE,
                     px(ROW_INSET) as f32 + PADDING * s,
-                    px(layout.project.loc.x) as f32,
+                    px(layout.header.loc.x + layout.header.size.w) as f32,
                     (0, px(BAR_HEIGHT)),
                     scale,
                     p.muted,
                 );
             }
         }
-        if menu_open {
-            let chevron = layout.chevron;
-            let (x, w) = (px(chevron.loc.x), px(chevron.size.w));
-            c.rounded(
-                x as f32,
-                px(5) as f32,
-                w as f32,
-                px(BAR_HEIGHT - 10) as f32,
-                4.0 * s,
-                p.selected,
-            );
-        }
-        icon_sdf(&mut c, layout.project, scale, p.muted, |x, y| {
-            folder_plus(x, y, s)
-        });
-        icon_sdf(&mut c, layout.terminal, scale, p.muted, |x, y| {
-            terminal_plus(x, y, s)
-        });
-        icon_sdf(&mut c, layout.chevron, scale, p.muted, |x, y| {
-            chevron_down(x, y, s)
-        });
-        // A thin line splits the terminal button from its chevron.
-        c.fill(
-            px(layout.chevron.loc.x),
-            px(10),
-            line,
-            px(BAR_HEIGHT - 20),
-            p.border,
-        );
+        self.plus_button(&mut c, layout.plus, state, scale, p);
 
-        let name_x = px(ROW_INSET) as f32
-            + PADDING * s
-            + ((ROW_ICON_WIDTH + ROW_ICON_GAP) as f32 * s).round();
-        // Where the name starts, in logical pixels, for the icons lined up with it.
-        let name_lx = ROW_INSET + PADDING as i32 + ROW_ICON_WIDTH + ROW_ICON_GAP;
-        for (i, ((row, close), ws)) in layout.rows.iter().zip(workspaces).enumerate() {
-            let is_active = Some(i) == active;
-            let (y, h) = (px(row.loc.y), px(row.loc.y + row.size.h) - px(row.loc.y));
-            if is_active {
-                let (x, w) = (px(ROW_INSET), px(row.size.w - 2 * ROW_INSET));
-                let (inset_y, inset_h) = (y + px(2), h - 2 * px(2));
+        for (i, (row, ws)) in layout.rows.iter().zip(&view.workspaces).enumerate() {
+            let is_active = Some(i) == view.active;
+            let row_state = state.row(i);
+            let hover = alpha(row_state.hover);
+            let fill = match (is_active, hover > 0.0) {
+                (true, true) => Some(mix(p.selected, p.text, 0.05 * hover)),
+                (true, false) => Some(p.selected),
+                (false, true) => Some(mix(p.panel, p.element, hover)),
+                (false, false) => None,
+            };
+            if let Some(fill) = fill {
+                let (x, y, w, h) = rect_px_in(row.rect, scale);
                 c.rounded(
-                    x as f32,
-                    inset_y as f32,
-                    w as f32,
-                    inset_h as f32,
-                    ROW_RADIUS * scale as f32,
-                    p.selected,
+                    x + px(ROW_INSET) as f32,
+                    y + px(2) as f32,
+                    w - 2.0 * px(ROW_INSET) as f32,
+                    h - 2.0 * px(2) as f32,
+                    ROW_RADIUS * s,
+                    fill,
                 );
             }
             let color = if is_active { p.text } else { p.muted };
-            let title = (y, px(row.loc.y + close.size.h) - y);
+            let title_band = band_of(row.title, scale);
             let icon = Rectangle::new(
-                (ROW_INSET + PADDING as i32, row.loc.y).into(),
-                (ROW_ICON_WIDTH, close.size.h).into(),
+                (ROW_INSET + PADDING as i32, row.title.loc.y).into(),
+                (ROW_ICON_WIDTH, row.title.size.h).into(),
             );
             let small = 0.8 * s;
             match ws.kind {
@@ -404,38 +694,56 @@ impl Painter {
                     terminal(x, y, small)
                 }),
             }
-            let mut ws_name_x = name_x;
-            if let Some(status) = ws.status {
-                let mark = Rectangle::new(
-                    (name_lx, row.loc.y).into(),
-                    (STATUS_WIDTH, close.size.h).into(),
-                );
-                icon_sdf(&mut c, mark, scale, p.status(status), |x, y| {
-                    status_mark(status, x, y, s)
-                });
-                ws_name_x += ((STATUS_WIDTH + STATUS_GAP) as f32 * s).round();
+            let name_x = px(row.name.loc.x) as f32;
+            let name_end = px(row.name.loc.x + row.name.size.w) as f32;
+            match state.rename.as_ref().filter(|(w, _)| *w == i) {
+                Some((_, typed)) => {
+                    self.rename_field(&mut c, typed, row.rename_field(), scale, p);
+                }
+                None => {
+                    self.text(
+                        &mut c,
+                        &ws.name,
+                        LABEL_FONT_SIZE,
+                        name_x,
+                        name_end,
+                        title_band,
+                        scale,
+                        color,
+                    );
+                }
             }
-            self.text(
-                &mut c,
-                &ws.name,
-                LABEL_FONT_SIZE,
-                ws_name_x,
-                px(close.loc.x) as f32,
-                title,
-                scale,
-                color,
-            );
-            self.icon(&mut c, '×', *close, scale, p.placeholder);
+            if let (Some(chip), Some(status)) = (row.chip, ws.status) {
+                let blocked = view.agents.get(i).map_or(0, |cards| blocked_count(cards));
+                // The whole room, or just its own part while the "×" shows.
+                let room = if hover > 0.0 {
+                    chip
+                } else {
+                    Rectangle::new(
+                        chip.loc,
+                        (chip.size.w + row.close.size.w, chip.size.h).into(),
+                    )
+                };
+                self.status_chip(&mut c, status, blocked, room, hover == 0.0, scale, p);
+            }
+            if hover > 0.0 {
+                let color = if row_state.close {
+                    p.text
+                } else {
+                    mix(p.panel, p.placeholder, hover)
+                };
+                icon_sdf(&mut c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
+            }
 
-            // Details, as on a tab: Git branch and folders, then what runs.
-            let right = px(row.loc.x + row.size.w - ROW_INSET) as f32 - PADDING * s;
-            let mut line_y = row.loc.y + close.size.h;
-            if ws.branch.is_some() || !ws.place.is_empty() {
+            // Line 2: Git branch and marks, then the place, in comfortable density.
+            if density == Density::Comfortable && ws.has_detail() {
+                let right = px(row.rect.loc.x + row.rect.size.w - ROW_INSET) as f32 - PADDING * s;
+                let line_y = row.title.loc.y + row.title.size.h;
                 let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
                 let mut place_x = name_x;
                 if let Some(branch) = &ws.branch {
                     let icon = Rectangle::new(
-                        (name_lx, line_y).into(),
+                        (row.name.loc.x, line_y).into(),
                         (BRANCH_ICON_WIDTH, TAB_LINE).into(),
                     );
                     icon_sdf(&mut c, icon, scale, p.accent, |x, y| {
@@ -457,6 +765,12 @@ impl Painter {
                         place_x = self.git_marks(&mut c, git, place_x, right, band, scale, p);
                     }
                     if !ws.place.is_empty() {
+                        // The separator only where a bit of the place fits after it.
+                        let sep = self.text_width(" · ", DETAIL_FONT_SIZE, scale);
+                        let some = self.text_width("…", DETAIL_FONT_SIZE, scale) * 2.0;
+                        if place_x + sep + some > right {
+                            continue;
+                        }
                         place_x = self.text(
                             &mut c,
                             " · ",
@@ -479,33 +793,28 @@ impl Painter {
                     scale,
                     p.muted,
                 );
-                line_y += TAB_LINE;
-            }
-            if !ws.activity.is_empty() {
-                let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
-                self.text(
-                    &mut c,
-                    &ws.activity,
-                    DETAIL_FONT_SIZE,
-                    name_x,
-                    right,
-                    band,
-                    scale,
-                    color,
-                );
             }
         }
-        for (rects, cards) in layout.cards.iter().zip(agents) {
-            for (rect, card) in rects.iter().zip(cards) {
-                self.agent_card(&mut c, card, *rect, scale, p);
+        for (i, (rects, cards)) in layout.cards.iter().zip(&view.agents).enumerate() {
+            for (k, rect) in rects {
+                self.agent_card(
+                    &mut c,
+                    &cards[*k],
+                    *rect,
+                    state.card(i, *k),
+                    density,
+                    scale,
+                    p,
+                );
             }
         }
         c.into_buffer(true)
     }
 
-    /// The project's `name` in the sidebar `header`, cut to fit, and a
-    /// chevron after it; on a rounded highlight when `lit` (under the
-    /// pointer, or its menu open).
+    /// The project's `name` in the sidebar `header` pill, cut to fit, with
+    /// a chevron at the pill's right end; the pill shows when `lit` (under
+    /// the pointer, or its menu open). The pill is `header` itself, so a
+    /// press anywhere it shows opens the menu.
     pub(super) fn header_name(
         &self,
         c: &mut Canvas,
@@ -517,25 +826,17 @@ impl Painter {
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let header_end = header.loc.x + header.size.w - HEADER_MARGIN;
-        let text_x = px(ROW_INSET) as f32 + PADDING * s;
-        let max_x = px(header_end - HEADER_NAME_END - CHEVRON_WIDTH - HEADER_NAME_GAP) as f32;
-        let text_end = (text_x + self.text_width(name, FONT_SIZE, scale)).min(max_x);
-        // The chevron right after the name, in logical pixels.
-        let chevron_x = (text_end / s).ceil() as i32 + HEADER_NAME_GAP;
-        let chevron = Rectangle::new((chevron_x, 0).into(), (CHEVRON_WIDTH, BAR_HEIGHT).into());
+        let (x, y, w, h) = rect_px_in(header, scale);
         if lit {
-            let x = px(ROW_INSET) as f32;
-            let right = px((chevron_x + CHEVRON_WIDTH + HEADER_NAME_END).min(header_end)) as f32;
-            c.rounded(
-                x,
-                px(5) as f32,
-                right - x,
-                px(BAR_HEIGHT - 10) as f32,
-                4.0 * s,
-                p.selected,
-            );
+            c.rounded(x, y, w, h, 4.0 * s, p.selected);
         }
+        let header_end = header.loc.x + header.size.w;
+        let chevron = Rectangle::new(
+            (header_end - HEADER_NAME_END - CHEVRON_WIDTH, 0).into(),
+            (CHEVRON_WIDTH, BAR_HEIGHT).into(),
+        );
+        let text_x = px(ROW_INSET) as f32 + PADDING * s;
+        let max_x = px(chevron.loc.x - HEADER_NAME_GAP) as f32;
         self.text(
             c,
             name,
@@ -549,47 +850,189 @@ impl Painter {
         icon_sdf(c, chevron, scale, p.muted, |x, y| chevron_down(x, y, s));
     }
 
-    /// An agent card: a status mark, the agent's kind and name and a status
-    /// pill, then a line per detail. A stripe down its left edge carries the
-    /// status colour.
-    pub(super) fn agent_card(
+    /// The header's "+" button: on a pill when hovered (fading in) or its
+    /// menu is open.
+    fn plus_button(
         &self,
         c: &mut Canvas,
-        card: &AgentView,
         rect: Rect,
+        state: &SidebarState,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let hover = alpha(state.plus);
+        let fill = if state.plus_open {
+            Some(p.selected)
+        } else if hover > 0.0 {
+            Some(mix(p.panel, p.element, hover))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            let (x, y, w, h) = rect_px_in(rect, scale);
+            c.rounded(x, y, w, h, 6.0 * s, fill);
+        }
+        let color = if state.plus_open || hover > 0.0 {
+            mix(p.muted, p.text, hover.max(state.plus_open as u8 as f32))
+        } else {
+            p.muted
+        };
+        icon_sdf(c, rect, scale, color, |x, y| new_tab(x, y, 0.9 * s));
+    }
+
+    /// The status chip at the right of a row's name line: a dot and a word
+    /// in the status colour; blocked agents make it a filled warning badge
+    /// with their count. Right-aligned in `slot`; the word goes when it
+    /// does not fit, or when `words` is off (the "×" has the room).
+    #[allow(clippy::too_many_arguments)]
+    fn status_chip(
+        &self,
+        c: &mut Canvas,
+        status: AgentStatus,
+        blocked: usize,
+        slot: Rect,
+        words: bool,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let (x, y, w, h) = (
-            px(rect.loc.x),
-            px(rect.loc.y),
-            px(rect.loc.x + rect.size.w) - px(rect.loc.x),
-            px(rect.size.h),
+        let color = p.status(status);
+        let word = match (status, blocked) {
+            (AgentStatus::Blocked, n) if n > 1 => format!("{n} blocked"),
+            _ => status_label(status).to_owned(),
+        };
+        let pad = (CHIP_PADDING as f32 * s).round();
+        let dot = (CHIP_DOT as f32 * s).round();
+        let gap = (CHIP_GAP as f32 * s).round();
+        let word_w = self.text_width(&word, TINY_FONT_SIZE, scale);
+        let (x0, _, slot_w, _) = rect_px_in(slot, scale);
+        let right = x0 + slot_w - (2.0 * s).round();
+        let full = 2.0 * pad + dot + gap + word_w;
+        let with_word = words && full <= slot_w;
+        let w = if with_word { full } else { 2.0 * pad + dot };
+        let x = (right - w).round();
+        let h = px(PILL_HEIGHT) as f32;
+        let y = (px(slot.loc.y) as f32 + (px(slot.size.h) as f32 - h) / 2.0).round();
+        let filled = status == AgentStatus::Blocked;
+        let fill = if filled {
+            color
+        } else {
+            mix(p.panel, color, 0.18)
+        };
+        c.rounded(x, y, w.round(), h, h / 2.0, fill);
+        let dot_color = if filled { p.on_accent } else { color };
+        let (cx, cy) = (x + pad + dot / 2.0, y + h / 2.0);
+        c.paint_in(
+            (x + pad) as i32,
+            y as i32,
+            dot as i32 + 1,
+            h as i32,
+            dot_color,
+            |px, py| super::coverage((px - cx).hypot(py - cy) - dot / 2.0),
         );
+        if with_word {
+            self.text(
+                c,
+                &word,
+                TINY_FONT_SIZE,
+                x + pad + dot + gap,
+                f32::MAX,
+                (y as i32, h as i32),
+                scale,
+                if filled { p.on_accent } else { color },
+            );
+        }
+    }
+
+    /// The field a row's name turns into while renaming, showing `typed`
+    /// with its selection and caret.
+    fn rename_field(&self, c: &mut Canvas, typed: &Line, rect: Rect, scale: f64, p: &Palette) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px_in(rect, scale);
+        let b = (scale.round() as f32).max(1.0);
+        c.rounded(x, y, w, h, 4.0 * s, p.accent);
+        c.rounded(
+            x + b,
+            y + b,
+            w - 2.0 * b,
+            h - 2.0 * b,
+            4.0 * s - b,
+            p.element,
+        );
+        let pad = (RENAME_INSET as f32 * s).round();
+        self.edit_line(
+            c,
+            typed,
+            "",
+            (x + pad, x + w - pad),
+            band_of(rect, scale),
+            true,
+            scale,
+            p,
+        );
+    }
+
+    /// An agent card: a header with the status mark, the agent's kind and
+    /// name and a status pill, then one detail line. A blocked card's
+    /// header carries the warning colour, breathing with `state.pulse`;
+    /// the card lightens under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn agent_card(
+        &self,
+        c: &mut Canvas,
+        card: &AgentView,
+        rect: Rect,
+        state: CardState,
+        density: Density,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px_in(rect, scale);
         let (b, r) = (px(1).max(1) as f32, CARD_RADIUS * s);
         let status = p.status(card.status);
-        let fill = mix(p.panel, p.element, 0.6);
-        let edge = if card.status == AgentStatus::Blocked {
+        let blocked = card.status == AgentStatus::Blocked;
+        let hover = alpha(state.hover);
+        let base = mix(p.panel, p.element, 0.6);
+        let fill = mix(base, p.selected, hover);
+        let edge = if blocked {
             mix(p.border_variant, status, 0.6)
         } else {
-            p.border_variant
+            mix(p.border_variant, p.border, hover)
         };
-        c.rounded(x as f32, y as f32, w as f32, h as f32, r, edge);
+        c.rounded(x, y, w, h, r, edge);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+        let pad = card_pad(density);
+        let header_y = rect.loc.y + pad;
+        if blocked {
+            // The header band in the warning colour, breathing.
+            let tint = BLOCKED_TINT * (0.4 + 0.6 * alpha(state.pulse));
+            let band_h = px(CARD_HEADER + pad) as f32;
+            c.rounded(
+                x + b,
+                y + b,
+                w - 2.0 * b,
+                band_h - b,
+                r - b,
+                mix(fill, p.warning, tint),
+            );
+            // Square off the band's bottom corners against the body.
+            c.fill(
+                (x + b) as i32,
+                (y + band_h - r) as i32,
+                (w - 2.0 * b) as i32,
+                r as i32,
+                mix(fill, p.warning, tint),
+            );
+        }
         c.rounded(
-            x as f32 + b,
-            y as f32 + b,
-            w as f32 - 2.0 * b,
-            h as f32 - 2.0 * b,
-            r - b,
-            fill,
-        );
-        c.rounded(
-            x as f32 + 3.0 * s,
-            (y + px(CARD_PAD)) as f32,
+            x + 3.0 * s,
+            (px(rect.loc.y) + px(pad)) as f32,
             2.0 * s,
-            (h - 2 * px(CARD_PAD)) as f32,
+            (px(rect.size.h) - 2 * px(pad)) as f32,
             s,
             status,
         );
@@ -597,7 +1040,6 @@ impl Painter {
         // Header: status mark, kind and name, status pill.
         let inner_x = rect.loc.x + CARD_PAD;
         let right = px(rect.loc.x + rect.size.w - CARD_PAD) as f32;
-        let header_y = rect.loc.y + CARD_PAD;
         let band = (px(header_y), px(CARD_HEADER));
         let mark = Rectangle::new(
             (inner_x, header_y).into(),
@@ -654,68 +1096,56 @@ impl Painter {
             );
         }
 
-        // Details: labels in one column, values lined up after the widest.
-        let text_x = kind_x;
-        let label_w = card
-            .lines
-            .iter()
-            .filter_map(|l| match l {
-                AgentLine::Field(label, _) => Some(self.text_width(label, DETAIL_FONT_SIZE, scale)),
-                _ => None,
-            })
-            .fold(0.0, f32::max)
-            .min((right - text_x) * 0.4);
-        let value_x = (text_x + label_w + FIELD_GAP as f32 * s).round();
-        for (i, line) in card.lines.iter().enumerate() {
-            let band = (
-                px(header_y + CARD_HEADER + i as i32 * CARD_LINE),
-                px(CARD_LINE),
+        // The detail line: where it is and what it is on.
+        let detail = card.detail();
+        if !detail.is_empty() {
+            let band = (px(header_y + CARD_HEADER), px(CARD_LINE));
+            self.text(
+                c,
+                &detail,
+                DETAIL_FONT_SIZE,
+                kind_x,
+                right,
+                band,
+                scale,
+                p.muted,
             );
-            match line {
-                AgentLine::Title(title) => {
-                    self.text(
-                        c,
-                        title,
-                        DETAIL_FONT_SIZE,
-                        text_x,
-                        right,
-                        band,
-                        scale,
-                        p.text,
-                    );
-                }
-                AgentLine::Field(label, value) => {
-                    self.text(
-                        c,
-                        label,
-                        DETAIL_FONT_SIZE,
-                        text_x,
-                        value_x - px(4) as f32,
-                        band,
-                        scale,
-                        p.placeholder,
-                    );
-                    self.text(
-                        c,
-                        value,
-                        DETAIL_FONT_SIZE,
-                        value_x,
-                        right,
-                        band,
-                        scale,
-                        p.muted,
-                    );
-                }
-            }
         }
     }
 }
 
+/// A logical rectangle in physical pixels (x, y, width, height), its edges
+/// on whole pixels.
+fn rect_px_in(rect: Rect, scale: f64) -> (f32, f32, f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    let (x, y) = (px(rect.loc.x), px(rect.loc.y));
+    (
+        x,
+        y,
+        px(rect.loc.x + rect.size.w) - x,
+        px(rect.loc.y + rect.size.h) - y,
+    )
+}
+
+/// A logical rectangle's rows as the band `(top, height)` text is centred in.
+fn band_of(rect: Rect, scale: f64) -> (i32, i32) {
+    let px = |v: i32| (v as f64 * scale).round() as i32;
+    (
+        px(rect.loc.y),
+        px(rect.loc.y + rect.size.h) - px(rect.loc.y),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::WorkspaceView;
+    use super::{
+        AgentLine, AgentView, CARD_GAP, CARD_HEADER, CARD_LINE, CARD_PAD, CARD_PAD_COMPACT,
+        CHIP_SLOT, CLOSE_WIDTH, Density, GAP, HEADER_BUTTON, ROW_BOTTOM, ROW_COMPACT, ROW_HEIGHT,
+        ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SidebarHit, TAB_LINE, WorkspaceView, card_order,
+        sidebar_layout, sidebar_layout_at, workspace_slot,
+    };
     use crate::WorkspaceKind;
-    use crate::chrome::TabView;
+    use crate::chrome::{BAR_HEIGHT, TabView};
     use crate::herdr::AgentStatus;
 
     #[test]
@@ -750,5 +1180,205 @@ mod tests {
 
         let plain = WorkspaceView::new("~".into(), WorkspaceKind::Terminal, &[TabView::default()]);
         assert_eq!(plain.activity, "");
+    }
+
+    fn workspace(name: &str, status: Option<AgentStatus>, branch: Option<&str>) -> WorkspaceView {
+        WorkspaceView {
+            name: name.into(),
+            kind: WorkspaceKind::Project,
+            status,
+            branch: branch.map(String::from),
+            git: None,
+            place: String::new(),
+            activity: String::new(),
+        }
+    }
+
+    fn agent(pane: &str, status: AgentStatus, cwd: Option<&str>) -> AgentView {
+        AgentView {
+            pane_id: pane.into(),
+            status,
+            kind: "claude".into(),
+            name: None,
+            lines: cwd
+                .map(|cwd| AgentLine::Field("cwd".into(), cwd.into()))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn rows_have_two_lines_in_comfortable_and_one_in_compact() {
+        let with = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
+        let plain = workspace("~", None, None);
+        assert_eq!(
+            with.height(Density::Comfortable),
+            ROW_TITLE_HEIGHT + TAB_LINE + ROW_BOTTOM
+        );
+        assert_eq!(plain.height(Density::Comfortable), ROW_HEIGHT);
+        assert_eq!(with.height(Density::Compact), ROW_COMPACT);
+        assert_eq!(plain.height(Density::Compact), ROW_COMPACT);
+    }
+
+    #[test]
+    fn cards_are_a_header_and_a_detail_line() {
+        let with = agent("p1", AgentStatus::Idle, Some("gerdr/src"));
+        let bare = agent("p2", AgentStatus::Idle, None);
+        assert_eq!(with.detail(), "src");
+        assert_eq!(bare.detail(), "");
+        assert_eq!(
+            with.height(Density::Comfortable),
+            2 * CARD_PAD + CARD_HEADER + CARD_LINE
+        );
+        assert_eq!(
+            bare.height(Density::Comfortable),
+            2 * CARD_PAD + CARD_HEADER
+        );
+        assert_eq!(
+            with.height(Density::Compact),
+            2 * CARD_PAD_COMPACT + CARD_HEADER + CARD_LINE
+        );
+        assert_eq!(with.summary(), "claude idle · cwd gerdr/src");
+    }
+
+    #[test]
+    fn layout_stacks_rows_and_cards_in_both_densities() {
+        let workspaces = vec![
+            workspace("gerdr", Some(AgentStatus::Blocked), Some("main")),
+            workspace("~", None, None),
+        ];
+        let agents = vec![
+            vec![
+                agent("p1", AgentStatus::Idle, Some("gerdr")),
+                agent("p2", AgentStatus::Blocked, Some("gerdr/src")),
+            ],
+            vec![],
+        ];
+        for density in [Density::Comfortable, Density::Compact] {
+            let layout = sidebar_layout_at(&workspaces, &agents, 200, density);
+            // The "+" is a 28 px square centred in the header; the name
+            // pill fills the rest of the header, and ends before it.
+            assert_eq!(layout.plus.size, (HEADER_BUTTON, HEADER_BUTTON).into());
+            assert_eq!(layout.plus.loc.y, (BAR_HEIGHT - HEADER_BUTTON) / 2);
+            assert_eq!(layout.header.loc.x, ROW_INSET);
+            assert!(layout.header.loc.x + layout.header.size.w < layout.plus.loc.x);
+            assert_eq!(layout.header.size.h, BAR_HEIGHT - 10);
+
+            let row0 = layout.rows[0];
+            let h0 = workspaces[0].height(density);
+            assert_eq!(row0.rect.loc.y, ROWS_TOP);
+            assert_eq!(row0.rect.size, (200 - GAP, h0).into());
+            assert_eq!(row0.title.size.h, workspaces[0].title_height(density));
+            assert_eq!(row0.close.size.w, CLOSE_WIDTH);
+            assert_eq!(row0.close.loc.x, 200 - GAP - ROW_INSET - CLOSE_WIDTH);
+            let chip = row0.chip.expect("a chip for a workspace with agents");
+            assert_eq!(chip.loc.x + chip.size.w, row0.close.loc.x);
+            assert_eq!(chip.size.w, CHIP_SLOT);
+            assert!(row0.name.loc.x + row0.name.size.w <= chip.loc.x);
+            assert!(layout.rows[1].chip.is_none());
+            assert_eq!(
+                layout.rows[1].name.loc.x + layout.rows[1].name.size.w,
+                layout.rows[1].close.loc.x - 4
+            );
+
+            // Cards: the blocked one first, each as high as it says, with
+            // a gap between and after them.
+            let cards = &layout.cards[0];
+            assert_eq!(cards.iter().map(|(k, _)| *k).collect::<Vec<_>>(), [1, 0]);
+            assert_eq!(cards[0].1.loc.y, ROWS_TOP + h0);
+            assert_eq!(cards[0].1.size.h, agents[0][1].height(density));
+            assert_eq!(
+                cards[1].1.loc.y,
+                cards[0].1.loc.y + cards[0].1.size.h + CARD_GAP
+            );
+            let block_end = cards[1].1.loc.y + cards[1].1.size.h + 2 * CARD_GAP;
+            assert_eq!(layout.blocks[0].size.h, block_end - ROWS_TOP);
+            assert_eq!(layout.rows[1].rect.loc.y, block_end);
+            assert!(layout.cards[1].is_empty());
+            assert_eq!(layout.blocks[1].size.h, workspaces[1].height(density));
+        }
+        let comfortable = sidebar_layout(&workspaces, &agents, 200);
+        let compact = sidebar_layout_at(&workspaces, &agents, 200, Density::Compact);
+        assert!(compact.blocks[1].loc.y < comfortable.blocks[1].loc.y);
+    }
+
+    #[test]
+    fn hits_name_every_part() {
+        let workspaces = vec![
+            workspace("gerdr", Some(AgentStatus::Working), Some("main")),
+            workspace("~", None, None),
+        ];
+        let agents = vec![vec![agent("p1", AgentStatus::Idle, None)], vec![]];
+        let layout = sidebar_layout(&workspaces, &agents, 200);
+        let at = |r: crate::chrome::Rect| {
+            (
+                r.loc.x as f64 + r.size.w as f64 / 2.0,
+                r.loc.y as f64 + r.size.h as f64 / 2.0,
+            )
+                .into()
+        };
+        assert_eq!(layout.hit(at(layout.plus)), Some(SidebarHit::Plus));
+        assert_eq!(layout.hit(at(layout.header)), Some(SidebarHit::Header));
+        let row = layout.rows[0];
+        assert_eq!(layout.hit(at(row.name)), Some(SidebarHit::Name(0)));
+        assert_eq!(layout.hit(at(row.chip.unwrap())), Some(SidebarHit::Chip(0)));
+        assert_eq!(layout.hit(at(row.close)), Some(SidebarHit::Close(0)));
+        // Line 2 is the row itself.
+        let line2 = (
+            row.name.loc.x as f64,
+            (row.title.loc.y + row.title.size.h + 2) as f64,
+        );
+        assert_eq!(layout.hit(line2.into()), Some(SidebarHit::Row(0)));
+        assert_eq!(
+            layout.hit(at(layout.cards[0][0].1)),
+            Some(SidebarHit::Card(0, 0))
+        );
+        assert_eq!(
+            layout.hit(at(layout.rows[1].name)),
+            Some(SidebarHit::Name(1))
+        );
+        assert_eq!(layout.hit((100.0, 10_000.0).into()), None);
+        assert_eq!(SidebarHit::Close(3).pill(), SidebarHit::Row(3));
+        assert_eq!(SidebarHit::Card(1, 2).pill(), SidebarHit::Card(1, 2));
+    }
+
+    #[test]
+    fn renaming_edits_in_the_name_band() {
+        let workspaces = vec![workspace("gerdr", Some(AgentStatus::Idle), Some("main"))];
+        let layout = sidebar_layout(&workspaces, &[], 200);
+        let row = layout.rows[0];
+        let field = row.rename_field();
+        assert!(field.loc.x < row.name.loc.x);
+        assert!(field.loc.y >= row.title.loc.y);
+        assert!(field.loc.y + field.size.h <= row.title.loc.y + row.title.size.h);
+        assert!(field.loc.x + field.size.w < row.chip.unwrap().loc.x);
+    }
+
+    #[test]
+    fn cards_go_by_urgency_then_as_given() {
+        let cards = vec![
+            agent("a", AgentStatus::Idle, None),
+            agent("b", AgentStatus::Done, None),
+            agent("c", AgentStatus::Blocked, None),
+            agent("d", AgentStatus::Working, None),
+            agent("e", AgentStatus::Blocked, None),
+            agent("f", AgentStatus::Unknown, None),
+        ];
+        assert_eq!(card_order(&cards), [2, 4, 1, 3, 0, 5]);
+        assert_eq!(card_order(&[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_held_row_slots_between_the_others() {
+        let workspaces = vec![
+            workspace("a", None, None),
+            workspace("b", None, None),
+            workspace("c", None, None),
+        ];
+        let layout = sidebar_layout(&workspaces, &[], 200);
+        let blocks = &layout.blocks;
+        assert_eq!(workspace_slot(blocks, 0, blocks[0].loc.y as f64 + 1.0), 0);
+        let last = blocks[2].loc.y + blocks[2].size.h;
+        assert_eq!(workspace_slot(blocks, 0, last as f64 + 50.0), 2);
     }
 }

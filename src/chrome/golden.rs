@@ -8,8 +8,8 @@ use std::time::Instant;
 use super::{
     AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, ItemIcon, MenuEntry,
     MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderView, ProjectMenuView, ProjectRow,
-    QuitHit, QuitView, Rect, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode,
-    ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
+    QuitHit, QuitView, Rect, SidebarState, SidebarView, SwitcherRow, SwitcherView, TabStripView,
+    TabView, Theme, ThemeMode, ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
 use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -350,12 +350,15 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let notice = toast(None, Level::Info);
     let strip = (900, super::tab_strip_height(super::Density::Comfortable)).into();
     vec![
-        hash(painter.sidebar(
-            &workspaces(),
-            &agents(),
-            Some(0),
-            false,
-            (Some("aft"), true),
+        hash(painter.sidebar_view(
+            &SidebarView {
+                workspaces: workspaces(),
+                agents: agents(),
+                active: Some(0),
+                project: Some("aft".into()),
+                header_lit: true,
+                state: SidebarState::default(),
+            },
             (200, 400).into(),
             scale,
             p,
@@ -419,7 +422,7 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0x67589784b798d683, // sidebar
+        0xd96c0e91486d107f, // sidebar
         0xcb4e78de6f504790, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
@@ -433,7 +436,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Dark at 2
     [
-        0xc564686cbb8d9f53, // sidebar
+        0xaa3158f18eda4bcf, // sidebar
         0xc4ac766e3cb8d713, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
@@ -447,7 +450,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 1
     [
-        0x05f69fc665a353b7, // sidebar
+        0x84b44a8448370608, // sidebar
         0x4dc2b2bd8fa87ec4, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
@@ -461,7 +464,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 2
     [
-        0x07d08fe1e4e286dc, // sidebar
+        0x0f382036496e732a, // sidebar
         0x24e49e86c6d850ca, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help

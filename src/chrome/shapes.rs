@@ -106,20 +106,6 @@ pub(super) fn terminal(x: f32, y: f32, s: f32) -> f32 {
     frame.min(prompt(x, y, s)).min(cursor)
 }
 
-/// A terminal with a "+" badge cut into its bottom right corner: add a
-/// terminal. Shifted up and left so the badge stays in the button.
-pub(super) fn terminal_plus(x: f32, y: f32, s: f32) -> f32 {
-    let (x, y) = (x + 1.0 * s, y + 0.5 * s);
-    let (bx, by) = (6.5 * s, 5.5 * s);
-    let frame =
-        rounded_rect(x, y, -8.0 * s, -7.0 * s, 16.0 * s, 14.0 * s, 2.0 * s).abs() - STROKE * s;
-    let gap = (x - bx).hypot(y - by) - 5.0 * s;
-    frame
-        .max(-gap)
-        .min(prompt(x, y, s))
-        .min(plus(x, y, bx, by, 3.0 * s, s))
-}
-
 /// Signed distance to the mark for an agent's status, centred on the origin:
 /// an open ring spinning while it works, a dot when it wants attention
 /// (blocked, done), a ring while it waits.

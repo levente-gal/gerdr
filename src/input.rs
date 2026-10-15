@@ -641,24 +641,15 @@ impl Gerdr {
             };
         }
         let inside = |rect: &chrome::Rect| rect.to_f64().contains(pos);
-        // The sidebar: the header and its buttons, the rows and the cards.
+        // The sidebar: the header and its "+", the rows and the cards.
         if pos.x < self.sidebar_width as f64 {
-            let agents = self.agent_views();
-            let workspaces: Vec<_> = self
-                .workspace_views()
-                .into_iter()
-                .map(|(ws, _)| ws)
-                .collect();
-            let layout = chrome::sidebar_layout(&workspaces, &agents, self.sidebar_width);
-            if let Some(w) = layout.rows.iter().position(|(row, _)| inside(row)) {
-                return RegionHit::Workspace(w);
-            }
-            let header = self.project.is_some() && inside(&layout.header);
-            let buttons = [layout.project, layout.terminal, layout.chevron];
-            if header || buttons.iter().any(inside) || layout.cards.iter().flatten().any(inside) {
-                return RegionHit::Control;
-            }
-            return RegionHit::Nothing;
+            return match self.sidebar_layout().hit(pos) {
+                Some(chrome::SidebarHit::Row(w) | chrome::SidebarHit::Name(w)) => {
+                    RegionHit::Workspace(w)
+                }
+                Some(_) => RegionHit::Control,
+                None => RegionHit::Nothing,
+            };
         }
         // The tab strip: the tabs, the "+", the chips and the theme switch.
         if pos.y < self.tab_strip_height() as f64 {
