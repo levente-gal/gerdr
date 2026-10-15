@@ -26,6 +26,8 @@ mod layout;
 mod menu;
 mod notify;
 mod pane_control;
+mod pane_drag;
+mod pane_moves;
 mod paths;
 mod prepare;
 mod project_list;
@@ -870,6 +872,16 @@ pub enum Action {
     RestartPane,
     /// Stop what runs in the focused terminal.
     StopPane,
+    /// Move the focused pane to `side`: beside its neighbour there, or to
+    /// the tab's edge (see `pane_moves`).
+    MovePane(Side),
+    /// Swap the focused pane with its neighbour on `side`.
+    SwapPane(Side),
+    /// Turn the split the focused pane is in: side by side becomes
+    /// stacked and back.
+    FlipPane,
+    /// Move the focused pane to a new tab of the workspace.
+    PaneToNewTab,
     /// Ask whether to keep the project running, and quit.
     Quit,
 }
@@ -883,8 +895,8 @@ pub enum Drag {
     Split { path: Vec<bool>, dir: Dir },
 }
 
-/// The active workspace's row or the active tab, held with the left button
-/// to drag it to another place.
+/// The active workspace's row, the active tab or a pane, held with the
+/// left button to drag it to another place.
 #[derive(Clone, Copy, Debug)]
 pub struct Reorder {
     pub what: Reorderable,
@@ -898,6 +910,9 @@ pub struct Reorder {
 pub enum Reorderable {
     Workspace,
     Tab,
+    /// Pane `id` of the shown tab, held by its bar; it lands where it is
+    /// dropped (see `pane_drag`).
+    Pane(u32),
 }
 
 pub struct Gerdr {
@@ -926,6 +941,8 @@ pub struct Gerdr {
     pub next_pane: u32,
     /// The divider being dragged, while the left button holds it.
     pub drag: Option<Drag>,
+    /// Where the held pane (see `reorder`) would land if dropped now.
+    pub pane_drop: Option<pane_drag::PaneDrop>,
     /// The workspace row or tab held, while the left button holds it.
     pub reorder: Option<Reorder>,
     /// The cursor shape gerdr last set over its chrome.
@@ -1225,6 +1242,8 @@ impl Gerdr {
                 };
                 move_item(&mut ws.tabs, &mut ws.active_tab, to);
             }
+            // A pane only lands when dropped; meanwhile, where it would.
+            Reorderable::Pane(id) => self.pane_drop = self.pane_drop_at(id, pos),
         }
     }
 
@@ -1238,6 +1257,8 @@ impl Gerdr {
             return;
         };
         let moved = match what {
+            // A dropped pane tells herdr itself (see `pane_moves`).
+            Reorderable::Pane(_) => return,
             Reorderable::Workspace => {
                 let Some(id) = ws.herdr_id() else { return };
                 let before = self.workspaces[self.active_workspace + 1..]
@@ -2893,6 +2914,26 @@ impl Gerdr {
             }
             Action::RestartPane => self.restart_focused_pane(),
             Action::StopPane => self.stop_focused_pane(),
+            Action::MovePane(side) => {
+                if let Some(id) = self.tab().and_then(Tab::focused_id) {
+                    self.move_pane(id, side);
+                }
+            }
+            Action::SwapPane(side) => {
+                if let Some(id) = self.tab().and_then(Tab::focused_id) {
+                    self.swap_pane(id, side);
+                }
+            }
+            Action::FlipPane => {
+                if let Some(id) = self.tab().and_then(Tab::focused_id) {
+                    self.flip_pane(id);
+                }
+            }
+            Action::PaneToNewTab => {
+                if let Some(id) = self.tab().and_then(Tab::focused_id) {
+                    self.move_pane_to_tab(id, None);
+                }
+            }
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -3765,6 +3806,7 @@ impl Gerdr {
         self.active_workspace = 0;
         self.drag = None;
         self.reorder = None;
+        self.pane_drop = None;
         self.context_menu = None;
         self.tooltip.hide();
         self.rename = None;
@@ -4312,6 +4354,7 @@ impl Gerdr {
             pulse: anim::pulse(self.start_time, now),
             tab_strip,
             focused_pane,
+            pane_drop: self.pane_drop_rect(),
             placeholders,
             context_menu: self.context_menu.as_ref().map(ContextMenu::view),
             tooltip: self.tooltip.view(),
@@ -4538,6 +4581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         next_pane: 0,
         drag: None,
         reorder: None,
+        pane_drop: None,
         chrome_cursor: CursorIcon::Default,
         suppressed_keys: Vec::new(),
         prefix_armed: false,

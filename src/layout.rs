@@ -27,6 +27,22 @@ pub enum Side {
     Down,
 }
 
+impl Side {
+    /// The split direction a pane put on this side of another makes.
+    pub fn dir(self) -> Dir {
+        match self {
+            Side::Left | Side::Right => Dir::Right,
+            Side::Up | Side::Down => Dir::Down,
+        }
+    }
+
+    /// Whether a pane put on this side comes first in the split (left of
+    /// or above the other).
+    pub fn before(self) -> bool {
+        matches!(self, Side::Left | Side::Up)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Node {
     Leaf(u32),
@@ -165,11 +181,28 @@ impl Node {
     /// Replace the leaf `target` with a split: `target` keeps `ratio` of its
     /// space, `new` gets the rest. Returns whether `target` was found.
     pub fn split(&mut self, target: u32, new: u32, dir: Dir, ratio: f64) -> bool {
+        let side = match dir {
+            Dir::Right => Side::Right,
+            Dir::Down => Side::Down,
+        };
+        self.split_side(target, new, side, ratio)
+    }
+
+    /// Replace the leaf `target` with a split that puts `new` on `side` of
+    /// it: `target` keeps `ratio` of the space, `new` gets the rest.
+    /// Returns whether `target` was found.
+    pub fn split_side(&mut self, target: u32, new: u32, side: Side, ratio: f64) -> bool {
         match self {
             Node::Leaf(id) if *id == target => {
-                let (first, second) = (Box::new(Node::Leaf(target)), Box::new(Node::Leaf(new)));
+                let (target, new) = (Box::new(Node::Leaf(target)), Box::new(Node::Leaf(new)));
+                // The stored ratio is the first child's share.
+                let (first, second, ratio) = if side.before() {
+                    (new, target, 1.0 - ratio)
+                } else {
+                    (target, new, ratio)
+                };
                 *self = Node::Split {
-                    dir,
+                    dir: side.dir(),
                     ratio,
                     first,
                     second,
@@ -178,9 +211,112 @@ impl Node {
             }
             Node::Leaf(_) => false,
             Node::Split { first, second, .. } => {
-                first.split(target, new, dir, ratio) || second.split(target, new, dir, ratio)
+                first.split_side(target, new, side, ratio)
+                    || second.split_side(target, new, side, ratio)
             }
         }
+    }
+
+    /// Swap the leaves `a` and `b`; the splits stay as they are. Returns
+    /// whether both were found (and differ).
+    pub fn swap(&mut self, a: u32, b: u32) -> bool {
+        if a == b || !self.has(a) || !self.has(b) {
+            return false;
+        }
+        self.relabel(a, b);
+        true
+    }
+
+    /// Give every `Leaf(a)` the id `b` and the other way round.
+    fn relabel(&mut self, a: u32, b: u32) {
+        match self {
+            Node::Leaf(id) if *id == a => *id = b,
+            Node::Leaf(id) if *id == b => *id = a,
+            Node::Leaf(_) => {}
+            Node::Split { first, second, .. } => {
+                first.relabel(a, b);
+                second.relabel(a, b);
+            }
+        }
+    }
+
+    /// Whether the leaf `id` is in the layout.
+    fn has(&self, id: u32) -> bool {
+        match self {
+            Node::Leaf(leaf) => *leaf == id,
+            Node::Split { first, second, .. } => first.has(id) || second.has(id),
+        }
+    }
+
+    /// Turn the split the leaf `id` is a direct child of: side by side
+    /// becomes stacked and back. Returns whether `id` has such a split.
+    pub fn flip(&mut self, id: u32) -> bool {
+        let Node::Split {
+            dir, first, second, ..
+        } = self
+        else {
+            return false;
+        };
+        if **first == Node::Leaf(id) || **second == Node::Leaf(id) {
+            *dir = match dir {
+                Dir::Right => Dir::Down,
+                Dir::Down => Dir::Right,
+            };
+            true
+        } else {
+            first.flip(id) || second.flip(id)
+        }
+    }
+
+    /// Take the leaf `id` out of its place (its sibling takes the space)
+    /// and put it on `side` of the leaf `target`, which keeps `ratio` of
+    /// its space. Returns whether both were found (and differ); nothing
+    /// changes otherwise.
+    pub fn move_beside(&mut self, id: u32, target: u32, side: Side, ratio: f64) -> bool {
+        if id == target || !self.has(id) || !self.has(target) {
+            return false;
+        }
+        // Two different leaves exist, so the root is a split and `id` is
+        // under it.
+        self.remove_child(id);
+        self.split_side(target, id, side, ratio)
+    }
+
+    /// Take the leaf `id` out of its place and put it along the whole
+    /// edge on `side` of the layout; the rest keeps `ratio` of the space.
+    /// Returns whether it moved: `false` if `id` is missing, alone, or
+    /// already the whole edge.
+    pub fn move_to_edge(&mut self, id: u32, side: Side, ratio: f64) -> bool {
+        if !self.has(id) || matches!(self, Node::Leaf(_)) || self.is_edge(id, side) {
+            return false;
+        }
+        self.remove_child(id);
+        let rest = Box::new(std::mem::replace(self, Node::Leaf(id)));
+        let moved = Box::new(Node::Leaf(id));
+        let (first, second, ratio) = if side.before() {
+            (moved, rest, 1.0 - ratio)
+        } else {
+            (rest, moved, ratio)
+        };
+        *self = Node::Split {
+            dir: side.dir(),
+            ratio,
+            first,
+            second,
+        };
+        true
+    }
+
+    /// Whether the leaf `id` already runs along the whole edge on `side`.
+    fn is_edge(&self, id: u32, side: Side) -> bool {
+        let Node::Split {
+            dir, first, second, ..
+        } = self
+        else {
+            return false;
+        };
+        let child = if side.before() { first } else { second };
+        *dir == side.dir() && **child == Node::Leaf(id)
     }
 
     /// The layout that puts the panes where `rects` has them (as herdr reports
@@ -665,5 +801,175 @@ mod tests {
         assert_eq!(neighbor(&rects, 2, Side::Down), Some(3));
         assert_eq!(neighbor(&rects, 3, Side::Up), Some(2));
         assert_eq!(neighbor(&rects, 1, Side::Left), None);
+    }
+
+    fn split(dir: Dir, ratio: f64, first: Node, second: Node) -> Node {
+        Node::Split {
+            dir,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    /// No two of `rects` overlap, and all lie within `area`.
+    fn tiled(rects: &[(u32, Rect)], area: Rect) {
+        for (i, (_, a)) in rects.iter().enumerate() {
+            assert!(area.contains_rect(*a), "{a:?} outside {area:?}");
+            for (_, b) in &rects[i + 1..] {
+                assert!(!a.overlaps(*b), "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn split_side_puts_new_on_its_side() {
+        // Left: new first, and the stored ratio is its share.
+        let mut root = Node::Leaf(1);
+        assert!(root.split_side(1, 2, Side::Left, 0.25));
+        assert_eq!(root, split(Dir::Right, 0.75, Node::Leaf(2), Node::Leaf(1)));
+        let mut root = Node::Leaf(1);
+        assert!(root.split_side(1, 2, Side::Up, 0.25));
+        assert_eq!(root, split(Dir::Down, 0.75, Node::Leaf(2), Node::Leaf(1)));
+        // Right/Down: as `split`.
+        let mut root = Node::Leaf(1);
+        assert!(root.split_side(1, 2, Side::Down, 0.25));
+        assert_eq!(root, split(Dir::Down, 0.25, Node::Leaf(1), Node::Leaf(2)));
+        assert!(!root.split_side(9, 3, Side::Left, 0.5));
+    }
+
+    #[test]
+    fn swap_relabels_leaves() {
+        let mut root = three();
+        assert!(root.swap(1, 3));
+        assert_eq!(
+            root,
+            split(
+                Dir::Right,
+                0.5,
+                Node::Leaf(3),
+                split(Dir::Down, 0.5, Node::Leaf(2), Node::Leaf(1))
+            )
+        );
+        assert!(!root.swap(2, 2));
+        assert!(!root.swap(2, 9));
+        assert_eq!(root.leaves(), [3, 2, 1]);
+    }
+
+    #[test]
+    fn flip_turns_parent_split() {
+        let mut root = three();
+        assert!(root.flip(3));
+        assert_eq!(
+            root,
+            split(
+                Dir::Right,
+                0.5,
+                Node::Leaf(1),
+                split(Dir::Right, 0.5, Node::Leaf(2), Node::Leaf(3))
+            )
+        );
+        assert!(root.flip(1));
+        assert!(matches!(root, Node::Split { dir: Dir::Down, .. }));
+        assert!(!root.flip(9));
+        assert!(!Node::Leaf(1).flip(1));
+    }
+
+    #[test]
+    fn move_beside_swaps_a_pair() {
+        // [1 | 2], 2 left of 1: [2 | 1].
+        let mut root = Node::Leaf(1);
+        root.split(1, 2, Dir::Right, 0.5);
+        assert!(root.move_beside(2, 1, Side::Left, 0.25));
+        assert_eq!(root, split(Dir::Right, 0.75, Node::Leaf(2), Node::Leaf(1)));
+    }
+
+    #[test]
+    fn move_beside_within_a_split() {
+        // 1 | (2 over 3), 3 above 2: 1 | (3 over 2).
+        let mut root = three();
+        assert!(root.move_beside(3, 2, Side::Up, 0.5));
+        assert_eq!(
+            root,
+            split(
+                Dir::Right,
+                0.5,
+                Node::Leaf(1),
+                split(Dir::Down, 0.5, Node::Leaf(3), Node::Leaf(2))
+            )
+        );
+    }
+
+    #[test]
+    fn move_beside_across_splits() {
+        // 1 | (2 over 3), 3 left of 1: (3 | 1) | 2.
+        let mut root = three();
+        assert!(root.move_beside(3, 1, Side::Left, 0.5));
+        assert_eq!(
+            root,
+            split(
+                Dir::Right,
+                0.5,
+                split(Dir::Right, 0.5, Node::Leaf(3), Node::Leaf(1)),
+                Node::Leaf(2)
+            )
+        );
+        let rects = root.rects(area(), 2);
+        assert_eq!(rects[0].1, Rectangle::new((0, 0).into(), (24, 52).into()));
+        assert_eq!(rects[1].1, Rectangle::new((26, 0).into(), (24, 52).into()));
+        assert_eq!(rects[2].1, Rectangle::new((52, 0).into(), (50, 52).into()));
+        tiled(&rects, area());
+    }
+
+    #[test]
+    fn move_beside_rejects_same_missing_or_alone() {
+        let mut root = three();
+        assert!(!root.move_beside(1, 1, Side::Left, 0.5));
+        assert!(!root.move_beside(1, 9, Side::Left, 0.5));
+        assert!(!root.move_beside(9, 1, Side::Left, 0.5));
+        assert_eq!(root, three());
+        assert!(!Node::Leaf(1).move_beside(1, 2, Side::Left, 0.5));
+    }
+
+    #[test]
+    fn move_to_edge_wraps_the_rest() {
+        // 1 | (2 over 3), 3 to the bottom: (1 | 2) over 3.
+        let mut root = three();
+        assert!(root.move_to_edge(3, Side::Down, 0.75));
+        assert_eq!(
+            root,
+            split(
+                Dir::Down,
+                0.75,
+                split(Dir::Right, 0.5, Node::Leaf(1), Node::Leaf(2)),
+                Node::Leaf(3)
+            )
+        );
+        tiled(&root.rects(area(), 2), area());
+        // Already the whole bottom edge.
+        assert!(!root.move_to_edge(3, Side::Down, 0.5));
+        // To the top: first, with the rest's share inverted.
+        let mut root = three();
+        assert!(root.move_to_edge(2, Side::Up, 0.75));
+        assert_eq!(
+            root,
+            split(
+                Dir::Down,
+                0.25,
+                Node::Leaf(2),
+                split(Dir::Right, 0.5, Node::Leaf(1), Node::Leaf(3))
+            )
+        );
+        tiled(&root.rects(area(), 2), area());
+    }
+
+    #[test]
+    fn move_to_edge_rejects_edge_missing_or_alone() {
+        let mut root = three();
+        // 1 is already the whole left edge.
+        assert!(!root.move_to_edge(1, Side::Left, 0.5));
+        assert!(!root.move_to_edge(9, Side::Right, 0.5));
+        assert_eq!(root, three());
+        assert!(!Node::Leaf(1).move_to_edge(1, Side::Right, 0.5));
     }
 }

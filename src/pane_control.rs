@@ -241,6 +241,11 @@ pub struct BarContent {
     pub status: BarStatus,
     pub can_restart: bool,
     pub can_stop: bool,
+    /// The workspace's other tabs, by index, with their titles: where the
+    /// menu can move the pane. Only the menu fills it in.
+    pub other_tabs: Vec<(usize, String)>,
+    /// How many panes share the pane's tab. Only the menu fills it in.
+    pub pane_count: usize,
 }
 
 /// The process leading what runs in a pane, if not its shell.
@@ -284,6 +289,8 @@ pub fn bar_content(
             status: BarStatus::Working,
             can_restart: !settling && !rerun && job.can_rerun,
             can_stop: !settling && rerun,
+            other_tabs: Vec::new(),
+            pane_count: 0,
         };
     }
     if let Some(leader) = process.and_then(running_leader) {
@@ -295,6 +302,8 @@ pub fn bar_content(
             // again, run in front of the last command.
             can_restart: remembered.is_some_and(|r| r.pid == leader.pid),
             can_stop: true,
+            other_tabs: Vec::new(),
+            pane_count: 0,
         };
     }
     if let Some(remembered) = remembered {
@@ -305,6 +314,8 @@ pub fn bar_content(
             status: BarStatus::Exited,
             can_restart: true,
             can_stop: false,
+            other_tabs: Vec::new(),
+            pane_count: 0,
         };
     }
     let shell = process
@@ -316,6 +327,8 @@ pub fn bar_content(
         status: BarStatus::Idle,
         can_restart: false,
         can_stop: false,
+        other_tabs: Vec::new(),
+        pane_count: 0,
     }
 }
 
@@ -483,6 +496,9 @@ const STOP_HELP: (&str, &str, usize) = (
     1,
 );
 const CLOSE_PANE_HELP: (&str, &str, usize) = ("close pane", "close pane", 0);
+const FLIP_HELP: (&str, &str, usize) = ("flip the pane's split", "flip the pane's split", 0);
+const PANE_TO_NEW_TAB_HELP: (&str, &str, usize) =
+    ("move pane to a new tab", "move pane to a new tab", 0);
 
 /// The key for `what` (one of the `_HELP` triples), if `help` lists one.
 /// The key for one of the bar's actions, as the help lists it: on its own
@@ -505,7 +521,7 @@ pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
 }
 
 /// The menu a right press at `at` on the bar of pane `id` (showing
-/// `content`) opens.
+/// `content`) opens: splits, moves to other tabs, then what runs in it.
 pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &Help) -> MenuSpec {
     let item = |label: &str, action, what, enabled| {
         let item = MenuItem::new(label, action).enabled(enabled);
@@ -514,40 +530,62 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             None => item,
         }
     };
+    let mut items = vec![
+        item(
+            "Split right",
+            MenuAction::SplitPane(id, Dir::Right),
+            SPLIT_RIGHT_HELP,
+            true,
+        ),
+        item(
+            "Split down",
+            MenuAction::SplitPane(id, Dir::Down),
+            SPLIT_DOWN_HELP,
+            true,
+        ),
+        item(
+            "Flip split",
+            MenuAction::FlipPane(id),
+            FLIP_HELP,
+            content.pane_count > 1,
+        ),
+        item(
+            "Move to new tab",
+            MenuAction::PaneToTab(id, None),
+            PANE_TO_NEW_TAB_HELP,
+            // Alone in its tab, it has a tab of its own already.
+            content.pane_count > 1,
+        ),
+    ];
+    items.extend(content.other_tabs.iter().map(|(t, title)| {
+        MenuItem::new(
+            &format!("Move to tab: {title}"),
+            MenuAction::PaneToTab(id, Some(*t)),
+        )
+    }));
+    items.extend([
+        item(
+            "Restart",
+            MenuAction::RestartPane(id),
+            RESTART_HELP,
+            content.can_restart,
+        ),
+        item(
+            "Stop",
+            MenuAction::StopPane(id),
+            STOP_HELP,
+            content.can_stop,
+        ),
+        item(
+            "Close pane",
+            MenuAction::ClosePane(id),
+            CLOSE_PANE_HELP,
+            true,
+        ),
+    ]);
     MenuSpec {
         anchor: Rectangle::new(at.to_i32_round(), (0, 0).into()),
-        items: vec![
-            item(
-                "Split right",
-                MenuAction::SplitPane(id, Dir::Right),
-                SPLIT_RIGHT_HELP,
-                true,
-            ),
-            item(
-                "Split down",
-                MenuAction::SplitPane(id, Dir::Down),
-                SPLIT_DOWN_HELP,
-                true,
-            ),
-            item(
-                "Restart",
-                MenuAction::RestartPane(id),
-                RESTART_HELP,
-                content.can_restart,
-            ),
-            item(
-                "Stop",
-                MenuAction::StopPane(id),
-                STOP_HELP,
-                content.can_stop,
-            ),
-            item(
-                "Close pane",
-                MenuAction::ClosePane(id),
-                CLOSE_PANE_HELP,
-                true,
-            ),
-        ],
+        items,
     }
 }
 
@@ -793,8 +831,20 @@ impl Gerdr {
     /// The menu a right press at `pos` on a pane's bar opens, if any.
     pub(crate) fn pane_bar_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
         let (id, _) = self.pane_bar_at(pos)?;
-        let pane_id = &self.tab()?.herdr_pane(id)?.pane_id;
-        let content = self.pane_bar_content(pane_id);
+        let tab = self.tab()?;
+        let pane_id = &tab.herdr_pane(id)?.pane_id;
+        let mut content = self.pane_bar_content(pane_id);
+        // Here rather than in `pane_bar_content`, which every bar calls
+        // every frame.
+        let ws = self.workspace()?;
+        content.other_tabs = self
+            .tab_views(ws)
+            .into_iter()
+            .enumerate()
+            .filter(|(t, _)| *t != ws.active_tab)
+            .map(|(t, view)| (t, view.title))
+            .collect();
+        content.pane_count = tab.layout.as_ref().map_or(0, |l| l.leaves().len());
         Some(bar_menu(pos, id, &content, &self.keymap.help()))
     }
 
@@ -1443,13 +1493,27 @@ mod tests {
     #[test]
     fn the_bar_menu_offers_what_the_pane_can_do() {
         let help = crate::keys::Keymap::default().help();
-        let content = bar_content(Some(&at_prompt()), None, None);
+        let content = BarContent {
+            other_tabs: vec![(0, "zsh".into()), (2, "vim notes".into())],
+            pane_count: 2,
+            ..bar_content(Some(&at_prompt()), None, None)
+        };
         let menu = bar_menu((300.5, 60.2).into(), 7, &content, &help);
         assert_eq!(menu.anchor, Rect::new((301, 60).into(), (0, 0).into()));
         let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["Split right", "Split down", "Restart", "Stop", "Close pane"]
+            [
+                "Split right",
+                "Split down",
+                "Flip split",
+                "Move to new tab",
+                "Move to tab: zsh",
+                "Move to tab: vim notes",
+                "Restart",
+                "Stop",
+                "Close pane"
+            ]
         );
         let actions: Vec<&MenuAction> = menu.items.iter().map(|i| &i.action).collect();
         assert_eq!(
@@ -1457,17 +1521,30 @@ mod tests {
             [
                 &MenuAction::SplitPane(7, Dir::Right),
                 &MenuAction::SplitPane(7, Dir::Down),
+                &MenuAction::FlipPane(7),
+                &MenuAction::PaneToTab(7, None),
+                &MenuAction::PaneToTab(7, Some(0)),
+                &MenuAction::PaneToTab(7, Some(2)),
                 &MenuAction::RestartPane(7),
                 &MenuAction::StopPane(7),
                 &MenuAction::ClosePane(7),
             ]
         );
         let enabled: Vec<bool> = menu.items.iter().map(|i| i.enabled).collect();
-        assert_eq!(enabled, [true, true, false, false, true]);
-        assert_eq!(menu.items[2].hint.as_deref(), Some("Ctrl+B A"));
-        // With a command running: stop; with one exited: restart.
+        assert_eq!(
+            enabled,
+            [true, true, true, true, true, true, false, false, true]
+        );
+        let hints: Vec<Option<&str>> = menu.items.iter().map(|i| i.hint.as_deref()).collect();
+        assert_eq!(hints[2..4], [Some("Ctrl+B Space"), Some("Ctrl+B !")]);
+        assert_eq!(hints[4..6], [None, None]);
+        assert_eq!(hints[6], Some("Ctrl+B A"));
+        // With a command running: stop; with one exited: restart. A pane
+        // alone in its tab has no split to flip, and no other tab to go to.
         let running = bar_content(Some(&running(9, "npm run dev")), None, None);
         let menu = bar_menu((0.0, 0.0).into(), 1, &running, &help);
-        assert!(!menu.items[2].enabled && menu.items[3].enabled);
+        assert!(!menu.items[2].enabled);
+        assert_eq!(menu.items[4].label, "Restart");
+        assert!(!menu.items[4].enabled && menu.items[5].enabled);
     }
 }

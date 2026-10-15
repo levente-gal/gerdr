@@ -5,7 +5,7 @@
 //! [keys]
 //! prefix = "Ctrl+A"
 //! new-tab = "t"                       # in place of c
-//! toggle-theme = ["Shift+L", "F12"]   # in place of t
+//! toggle-theme = ["Alt+T", "F12"]     # in place of t
 //! close-pane = []                     # no key
 //! ```
 //!
@@ -13,8 +13,9 @@
 //! except a default key that a configured action took. A key is modifiers
 //! (Ctrl, Alt, Shift, Super) and a key name joined by "+", as in "Shift+Tab",
 //! "-" or "Down"; letters are the same in either case, so "Shift+X" needs its
-//! Shift. Ctrl held from the prefix doesn't matter unless the key names it.
-//! Mistakes are logged, and the defaults stand in for what they spoil.
+//! Shift; "?" and "!" are Shift and the "/" or "1" key. Ctrl held from the
+//! prefix doesn't matter unless the key names it. Mistakes are logged, and
+//! the defaults stand in for what they spoil.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -124,6 +125,67 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "focus pane right",
         "l",
     ),
+    (
+        "move-left",
+        Action::MovePane(Side::Left),
+        "move pane left",
+        "Shift+H",
+    ),
+    (
+        "move-down",
+        Action::MovePane(Side::Down),
+        "move pane down",
+        "Shift+J",
+    ),
+    (
+        "move-up",
+        Action::MovePane(Side::Up),
+        "move pane up",
+        "Shift+K",
+    ),
+    (
+        "move-right",
+        Action::MovePane(Side::Right),
+        "move pane right",
+        "Shift+L",
+    ),
+    (
+        "swap-left",
+        Action::SwapPane(Side::Left),
+        "swap pane left",
+        "Alt+H",
+    ),
+    (
+        "swap-down",
+        Action::SwapPane(Side::Down),
+        "swap pane down",
+        "Alt+J",
+    ),
+    (
+        "swap-up",
+        Action::SwapPane(Side::Up),
+        "swap pane up",
+        "Alt+K",
+    ),
+    (
+        "swap-right",
+        Action::SwapPane(Side::Right),
+        "swap pane right",
+        "Alt+L",
+    ),
+    (
+        "flip-pane",
+        Action::FlipPane,
+        "flip the pane's split",
+        "Space",
+    ),
+    // tmux's break-pane.
+    (
+        "pane-to-new-tab",
+        Action::PaneToNewTab,
+        "move pane to a new tab",
+        "!",
+    ),
     ("next-pane", Action::CyclePane(1), "next pane", "Tab"),
     (
         "previous-pane",
@@ -147,12 +209,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "Shift+R",
     ),
     ("projects", Action::Projects, "projects", "Shift+P"),
-    (
-        "last-project",
-        Action::LastProject,
-        "last project",
-        "Shift+L",
-    ),
+    ("last-project", Action::LastProject, "last project", "Alt+P"),
     (
         "toggle-restart",
         Action::ToggleRestart,
@@ -212,6 +269,16 @@ const HELP_LINES: &[(&str, &[&str])] = &[
         "focus pane left / down / up / right",
         &["focus-left", "focus-down", "focus-up", "focus-right"],
     ),
+    (
+        "move pane left / down / up / right",
+        &["move-left", "move-down", "move-up", "move-right"],
+    ),
+    (
+        "swap pane left / down / up / right",
+        &["swap-left", "swap-down", "swap-up", "swap-right"],
+    ),
+    ("flip the pane's split", &["flip-pane"]),
+    ("move pane to a new tab", &["pane-to-new-tab"]),
     ("next / previous pane", &["next-pane", "previous-pane"]),
     ("light / dark theme", &["toggle-theme"]),
     ("keep this help open", &["shortcuts"]),
@@ -281,13 +348,17 @@ impl Chord {
             *flag = true;
         }
         let key = key.trim();
-        // "?" is Shift and the slash key: the key's own symbol is matched.
-        let (key, shifted) = match SHIFTED.iter().find(|(c, _)| *c == key) {
-            Some((_, base)) => (*base, true),
-            None => (key, false),
-        };
-        mods.shift |= shifted;
         let sym = key_sym(key).ok_or_else(|| format!("unknown key `{key}` in `{spec}`"))?;
+        // "?" is Shift and the slash key: the key's own symbol is matched.
+        // Its xkb name, "question", is the same key.
+        let shifted = SHIFTED
+            .iter()
+            .find(|(c, _)| key_sym(c) == Some(sym))
+            .and_then(|(_, base)| key_sym(base));
+        if let Some(base) = shifted {
+            mods.shift = true;
+            return Ok(Self { mods, sym: base });
+        }
         Ok(Self { mods, sym })
     }
 
@@ -325,8 +396,9 @@ impl Chord {
 }
 
 /// Characters typed with Shift on the key named after them: written
-/// as themselves in the config and the help, matched as Shift and the key.
-const SHIFTED: &[(&str, &str)] = &[("?", "/")];
+/// as themselves (or their xkb names) in the config and as themselves in
+/// the help, matched as Shift and the key, as on a US layout.
+const SHIFTED: &[(&str, &str)] = &[("?", "/"), ("!", "1")];
 
 /// The symbol for a key name: a character, or an xkb name like "Down" or
 /// "F12" in any case.
@@ -494,6 +566,23 @@ impl Keymap {
     }
 }
 
+/// `keys` with the modifiers they all have written on the first only, as in
+/// "Alt+H / J / K / L": the help's key column is as wide as its widest
+/// line. `Help::key_for` reads the others without them.
+fn shared_mods<'a>(keys: &[&'a str]) -> Vec<&'a str> {
+    // Up to the key: "Ctrl++" is Ctrl and "+".
+    let mods = |key: &'a str| match key.strip_suffix('+') {
+        Some(rest) if rest.is_empty() || rest.ends_with('+') => rest,
+        _ => key.rfind('+').map_or("", |i| &key[..=i]),
+    };
+    let first = keys.first().map_or("", |key| mods(key));
+    if first.is_empty() || keys.iter().any(|key| mods(key) != first) {
+        return keys.to_vec();
+    }
+    let rest = keys[1..].iter().map(|key| &key[first.len()..]);
+    keys[..1].iter().copied().chain(rest).collect()
+}
+
 /// The help panel for these bindings, as (keys, label) lines.
 fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
     let keys = |name: &str| -> Vec<String> {
@@ -528,13 +617,8 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
                 label.to_string(),
             ));
         } else {
-            rows.push((
-                all.iter()
-                    .map(|keys| keys[0].as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / "),
-                label.to_string(),
-            ));
+            let keys: Vec<&str> = all.iter().map(|keys| keys[0].as_str()).collect();
+            rows.push((shared_mods(&keys).join(" / "), label.to_string()));
         }
     }
     let prefix = prefix.label();
@@ -590,6 +674,10 @@ mod tests {
                 "X: close pane",
                 "A / S: restart / stop the pane's command",
                 "H / J / K / L: focus pane left / down / up / right",
+                "Shift+H / J / K / L: move pane left / down / up / right",
+                "Alt+H / J / K / L: swap pane left / down / up / right",
+                "Space: flip the pane's split",
+                "!: move pane to a new tab",
                 "Tab / Shift+Tab: next / previous pane",
                 "T: light / dark theme",
                 "?: keep this help open",
@@ -597,7 +685,7 @@ mod tests {
                 "R: run an app in a split",
                 "Shift+R: run an app in a new tab",
                 "Shift+P: projects",
-                "Shift+L: last project",
+                "Alt+P: last project",
                 "Shift+S: restart after reboot",
                 "Shift+V / Alt+V: python venv on / off, pick",
                 "Shift+B: run the project's start commands",
@@ -670,16 +758,86 @@ mod tests {
     }
 
     #[test]
-    fn last_project_is_shift_l() {
+    fn last_project_is_alt_p() {
         let keymap = Keymap::default();
-        assert_eq!(
-            keymap.action(&mods(false, true), Keysym::l),
-            Some(Action::LastProject)
-        );
+        let alt = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(keymap.action(&alt, Keysym::p), Some(Action::LastProject));
         // Plain l still focuses right.
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::l),
             Some(Action::FocusSide(Side::Right))
+        );
+    }
+
+    #[test]
+    fn pane_moves_have_keys() {
+        let keymap = Keymap::default();
+        let alt = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::h),
+            Some(Action::MovePane(Side::Left))
+        );
+        assert_eq!(
+            keymap.action(&mods(true, true), Keysym::l),
+            Some(Action::MovePane(Side::Right))
+        );
+        assert_eq!(
+            keymap.action(&alt, Keysym::j),
+            Some(Action::SwapPane(Side::Down))
+        );
+        assert_eq!(
+            keymap.action(&alt, Keysym::l),
+            Some(Action::SwapPane(Side::Right))
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::space),
+            Some(Action::FlipPane)
+        );
+        // "!" is Shift and the 1 key, which alone still goes to tab 1.
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::_1),
+            Some(Action::PaneToNewTab)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::_1),
+            Some(Action::GotoTab(0))
+        );
+    }
+
+    #[test]
+    fn shifted_characters_by_name() {
+        let (keymap, problems) = from_config("[keys]\npane-to-new-tab = \"exclam\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::_1),
+            Some(Action::PaneToNewTab)
+        );
+        assert_eq!(Chord::parse("!"), Chord::parse("Shift+1"));
+        assert_eq!(Chord::parse("question"), Chord::parse("?"));
+        assert_eq!(Chord::parse("exclam").map(|c| c.label()), Ok("!".into()));
+    }
+
+    #[test]
+    fn shared_modifiers_are_written_once() {
+        use super::shared_mods;
+        assert_eq!(
+            shared_mods(&["Alt+H", "Alt+J", "Alt+K", "Alt+L"]),
+            ["Alt+H", "J", "K", "L"]
+        );
+        assert_eq!(shared_mods(&["Ctrl++", "Ctrl+-"]), ["Ctrl++", "-"]);
+        assert_eq!(shared_mods(&["V", "-"]), ["V", "-"]);
+        assert_eq!(shared_mods(&["+", "-"]), ["+", "-"]);
+        assert_eq!(shared_mods(&["Tab", "Shift+Tab"]), ["Tab", "Shift+Tab"]);
+        assert_eq!(shared_mods(&["Shift+V", "Alt+V"]), ["Shift+V", "Alt+V"]);
+        assert_eq!(
+            shared_mods(&["Ctrl+Up", "Ctrl+Alt+Up"]),
+            ["Ctrl+Up", "Ctrl+Alt+Up"]
         );
     }
 

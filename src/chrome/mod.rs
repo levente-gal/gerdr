@@ -17,6 +17,7 @@
 
 mod canvas;
 mod consts;
+mod drop;
 #[cfg(test)]
 mod golden;
 mod help;
@@ -54,6 +55,7 @@ use crate::anim::{FAST, Fade, SLOW, phase};
 // `chrome::X`. The canvas and the shapes stay inside.
 use canvas::*;
 pub use consts::*;
+pub use drop::*;
 pub use help::*;
 pub use menu::*;
 pub use painter::*;
@@ -94,6 +96,9 @@ pub struct ChromeView {
     pub tab_strip: TabStripView,
     /// The focused pane's client rect in the active tab, whatever it shows.
     pub focused_pane: Option<Rect>,
+    /// Where a pane held by its bar would land if dropped now: the part of
+    /// the pane, or the tab, under the pointer.
+    pub pane_drop: Option<Rect>,
     /// The panes of the active tab whose window is still to come.
     pub placeholders: Vec<PlaceholderView>,
     /// Set while a context menu is open.
@@ -153,6 +158,8 @@ pub struct Chrome {
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
     /// The strip along the focused pane's top edge.
     focus_strip: Cached<(Size<i32, Logical>, Theme, f64)>,
+    /// The highlight where a held pane would land: its size, theme, scale.
+    pane_drop: Cached<(Size<i32, Logical>, Theme, f64)>,
     /// The red outlines of every hit rect, while `debug_hits`.
     hits: Cached<(Vec<Rect>, Size<i32, Logical>, f64)>,
 }
@@ -185,6 +192,7 @@ impl Chrome {
             spinner: Cached::default(),
             pane_bars: Vec::new(),
             focus_strip: Cached::default(),
+            pane_drop: Cached::default(),
             hits: Cached::default(),
         }
     }
@@ -424,6 +432,14 @@ impl Chrome {
                 painter.pane_bar(bar, scale, theme.palette())
             });
             parts.push((buffer, loc, size, alpha));
+        }
+        // Where a pane held by its bar would land: over the apps and the
+        // tab strip, after the bars so it goes under them.
+        if let Some(rect) = view.pane_drop.filter(|r| r.size.w > 0 && r.size.h > 0) {
+            let buffer = self.pane_drop.get((rect.size, theme, scale), |(size, ..)| {
+                pane_drop_highlight(*size, scale, theme.palette())
+            });
+            parts.push((buffer, rect.loc, rect.size, 1.0));
         }
 
         // The blocked cards' pulse: one band per card, composed over the
