@@ -55,6 +55,14 @@ use crate::{
 /// What a press or the pointer lands on in gerdr's own chrome, as far as
 /// the press dispatch here cares: a workspace row or a tab (a double
 /// click renames them), something else to click, or nothing.
+/// The layouts of the regions under the pointer, as far as they were
+/// worked out for one event (see `Gerdr::regions_at`).
+#[derive(Default)]
+pub struct Regions {
+    pub sidebar: Option<chrome::SidebarLayout>,
+    pub strip: Option<chrome::TabStripView>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionHit {
     Nothing,
@@ -313,15 +321,17 @@ impl Gerdr {
                     self.switcher_motion(pos);
                 }
                 // The region under the pointer lights up, with nothing open
-                // over it, and may offer a tooltip.
+                // over it, and may offer a tooltip. Its layout is worked
+                // out once for the event.
                 let covered = overlay || self.switcher.is_some() || self.context_menu.is_some();
                 self.header_hover = false;
+                let regions = self.regions_at(pos);
                 let tip = if covered {
                     menu_tip
-                } else if pos.x < self.sidebar_width as f64 {
-                    self.sidebar_motion(pos)
-                } else if pos.y < self.tab_strip_height() as f64 {
-                    self.tab_strip_motion(pos)
+                } else if let Some(layout) = &regions.sidebar {
+                    self.sidebar_motion(layout, pos)
+                } else if let Some(view) = &regions.strip {
+                    self.tab_strip_motion(view, pos)
                 } else {
                     self.pane_bar_motion(pos)
                 };
@@ -343,7 +353,7 @@ impl Gerdr {
                         CursorIcon::Grabbing
                     } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
                         drag_cursor(&drag)
-                    } else if self.region_hit(pos) != RegionHit::Nothing {
+                    } else if self.region_hit(pos, &regions) != RegionHit::Nothing {
                         CursorIcon::Pointer
                     } else {
                         CursorIcon::Default
@@ -553,7 +563,8 @@ impl Gerdr {
         }
         // A second click on a workspace row or a tab renames it.
         if button == BTN_LEFT && self.is_double(location) {
-            let target = match self.region_hit(location) {
+            let regions = self.regions_at(location);
+            let target = match self.region_hit(location, &regions) {
                 RegionHit::Workspace(w) => Some(RenameTarget::Workspace(w)),
                 RegionHit::Tab(t) => Some(RenameTarget::Tab(self.active_workspace, t)),
                 RegionHit::Control | RegionHit::Nothing => None,
@@ -625,10 +636,24 @@ impl Gerdr {
             })
     }
 
+    /// The layout of the region under `pos` (the sidebar's or the tab
+    /// strip's, whichever it is in), worked out once so a motion event's
+    /// hover, tooltip and cursor shape share it.
+    pub fn regions_at(&self, pos: Point<f64, Logical>) -> Regions {
+        let mut regions = Regions::default();
+        if pos.x < self.sidebar_width as f64 {
+            regions.sidebar = Some(self.sidebar_layout());
+        } else if pos.y < self.tab_strip_height() as f64 {
+            regions.strip = Some(self.tab_strip_view());
+        }
+        regions
+    }
+
     /// What of gerdr's chrome is at `pos`, as the press dispatch and the
     /// pointer's shape care: a workspace row, a tab, something else to
-    /// click, or nothing. The regions' own layouts say where things are.
-    pub fn region_hit(&self, pos: Point<f64, Logical>) -> RegionHit {
+    /// click, or nothing. The regions' own layouts say where things are:
+    /// `regions` holds the one under `pos` when it was worked out already.
+    pub fn region_hit(&self, pos: Point<f64, Logical>, regions: &Regions) -> RegionHit {
         let output = self.output_size();
         // Over an overlay, only its own controls count.
         if self.quit.is_some() {
@@ -661,7 +686,11 @@ impl Gerdr {
         let inside = |rect: &chrome::Rect| rect.to_f64().contains(pos);
         // The sidebar: the header and its "+", the rows and the cards.
         if pos.x < self.sidebar_width as f64 {
-            return match self.sidebar_layout().hit(pos) {
+            let hit = match &regions.sidebar {
+                Some(layout) => layout.hit(pos),
+                None => self.sidebar_layout().hit(pos),
+            };
+            return match hit {
                 Some(chrome::SidebarHit::Row(w) | chrome::SidebarHit::Name(w)) => {
                     RegionHit::Workspace(w)
                 }
@@ -671,8 +700,11 @@ impl Gerdr {
         }
         // The tab strip: the tabs, the "+", the chips and the theme switch.
         if pos.y < self.tab_strip_height() as f64 {
-            let view = self.tab_strip_view();
-            return match self.tab_strip_hit_at(&view, pos) {
+            let hit = match &regions.strip {
+                Some(view) => self.tab_strip_hit_at(view, pos),
+                None => self.tab_strip_hit_at(&self.tab_strip_view(), pos),
+            };
+            return match hit {
                 Some(chrome::TabHit::Tab(t)) => RegionHit::Tab(t),
                 Some(_) => RegionHit::Control,
                 None => RegionHit::Nothing,

@@ -322,21 +322,39 @@ pub fn bar_content(
 /// How long a pane's bar stays out after the pane gains focus.
 pub const FOCUS_HOLD: Duration = Duration::from_secs(1);
 
-/// Whether a pane's bar shows: while its command is `status` (a job, or
-/// something other than the shell, running), while the pointer asks for
-/// it (`pointer`, see `chrome::pointer_reveals`), or for `FOCUS_HOLD`
-/// after the pane gained focus (`focused_for` while it has it).
-pub fn bar_wanted(status: BarStatus, pointer: bool, focused_for: Option<Duration>) -> bool {
-    matches!(status, BarStatus::Running | BarStatus::Working)
-        || pointer
-        || focused_for.is_some_and(|since| since < FOCUS_HOLD)
+/// How much a pane's bar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarWant {
+    Hidden,
+    /// Drawn over the top of the window, which keeps its room: a passing
+    /// look.
+    Over,
+    /// Out with room of its own, the window below it.
+    Room,
+}
+
+/// Whether a pane's bar shows: with room while its command is `status` (a
+/// job, or something other than the shell, running) or while the pointer
+/// asks for it (`pointer`, see `chrome::pointer_reveals`); over the window
+/// for `FOCUS_HOLD` after the pane gained focus (`focused_for` while it
+/// has it), so a focus change moves no window.
+pub fn bar_wanted(status: BarStatus, pointer: bool, focused_for: Option<Duration>) -> BarWant {
+    if matches!(status, BarStatus::Running | BarStatus::Working) || pointer {
+        BarWant::Room
+    } else if focused_for.is_some_and(|since| since < FOCUS_HOLD) {
+        BarWant::Over
+    } else {
+        BarWant::Hidden
+    }
 }
 
 /// Where one pane's bar stands between hidden and shown.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct BarState {
+    /// The bar is out (or on its way out).
+    visible: bool,
     /// The bar takes room over its window.
-    shown: bool,
+    room: bool,
     /// The fade it is in, while it still moves.
     fade: Option<Fade>,
     /// Since when the pane has had the focus, while it has.
@@ -348,32 +366,32 @@ impl BarState {
     fn alpha(&self, now: Instant) -> f32 {
         match self.fade {
             Some(fade) if !fade.done(now) => fade.value(now),
-            _ if self.shown => 1.0,
+            _ if self.visible => 1.0,
             _ => 0.0,
         }
     }
 
     /// Start showing or hiding at `now`, going on from wherever a fade
     /// under way had got to.
-    fn flip(&mut self, shown: bool, now: Instant) {
+    fn flip(&mut self, visible: bool, now: Instant) {
         let from = self.alpha(now);
-        let done = if shown { from } else { 1.0 - from };
-        let start = now.checked_sub(anim::SLOW.mul_f32(done)).unwrap_or(now);
-        self.shown = shown;
-        self.fade = Some(Fade::new(start, anim::SLOW, shown));
+        self.visible = visible;
+        self.fade = Some(Fade::from_value(now, anim::SLOW, visible, from));
     }
 }
 
 /// How a pane's bar is to be drawn right now.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BarLook {
+    /// The bar is out, or still fading out.
+    pub visible: bool,
     /// The bar takes room over its window.
     pub shown: bool,
     /// Its opacity, in `anim::quantize` steps; 1 at rest.
     pub alpha: f32,
     /// How far it is still under its pane's top edge; 0 at rest.
     pub slide: i32,
-    /// It just started showing or hiding: the window's room changes.
+    /// It just took or gave back its room: the window's room changes.
     pub flipped: bool,
 }
 
@@ -383,15 +401,15 @@ pub struct BarLook {
 pub struct BarStates(Mutex<HashMap<String, BarState>>);
 
 impl BarStates {
-    /// Pane `key`'s bar at `now`: whether the pane is `focused`, and
-    /// whether the bar is wanted given how long the pane has had the
+    /// Pane `key`'s bar at `now`: whether the pane is `focused`, and how
+    /// much of the bar is wanted given how long the pane has had the
     /// focus and whether the bar is out already (`want`).
     pub fn update(
         &self,
         key: &str,
         focused: bool,
         now: Instant,
-        want: impl FnOnce(Option<Duration>, bool) -> bool,
+        want: impl FnOnce(Option<Duration>, bool) -> BarWant,
     ) -> BarLook {
         let mut states = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let state = states.entry(key.to_owned()).or_default();
@@ -401,17 +419,21 @@ impl BarStates {
             (true, None) => Some(now),
         };
         let focused_for = state.focused_since.map(|since| now.duration_since(since));
-        let wanted = want(focused_for, state.shown);
-        let flipped = wanted != state.shown;
-        if flipped {
-            state.flip(wanted, now);
+        let wanted = want(focused_for, state.visible);
+        let visible = wanted != BarWant::Hidden;
+        let room = wanted == BarWant::Room;
+        if visible != state.visible {
+            state.flip(visible, now);
         }
+        let flipped = room != state.room;
+        state.room = room;
         if state.fade.is_some_and(|fade| fade.done(now)) {
             state.fade = None;
         }
         let alpha = anim::quantize(state.alpha(now)) as f32 / 16.0;
         BarLook {
-            shown: state.shown,
+            visible: state.visible,
+            shown: state.room,
             alpha,
             slide: ((1.0 - alpha) * chrome::BAR_SLIDE as f32).round() as i32,
             flipped,
@@ -424,7 +446,16 @@ impl BarStates {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
-            .is_some_and(|state| state.shown)
+            .is_some_and(|state| state.room)
+    }
+
+    /// Whether pane `key`'s bar is out, with room or over its window.
+    pub fn drawn(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .is_some_and(|state| state.visible)
     }
 
     /// Forget every pane but `keep`.
@@ -654,6 +685,24 @@ impl Gerdr {
             .is_some_and(|pane| self.bar_states().shown(&pane.pane_id))
     }
 
+    /// Whether the bar of pane `id` of `tab` is out, with room or over
+    /// its window: there to see and to click.
+    fn pane_bar_drawn(&self, tab: &Tab, id: u32) -> bool {
+        tab.herdr_pane(id)
+            .is_some_and(|pane| self.bar_states().drawn(&pane.pane_id))
+    }
+
+    /// The herdr pane ids of every pane in every workspace: the bars
+    /// whose state is kept, shown or not.
+    fn herdr_pane_ids(&self) -> Vec<String> {
+        self.workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.herdr.as_ref().map(|h| h.pane_id.clone()))
+            .collect()
+    }
+
     /// Arrange the panes again once this event is done: a bar started
     /// showing or hiding, so a window's room changed.
     fn arrange_soon(&self) {
@@ -667,17 +716,17 @@ impl Gerdr {
     }
 
     /// The bars over the active tab's terminal panes, moved on to now:
-    /// a hidden one at rest has no height.
+    /// a hidden one at rest has no height. The other tabs' bars keep
+    /// their state meanwhile, so coming back moves nothing.
     pub fn pane_bar_views(&self) -> Vec<PaneBarView> {
         let states = self.bar_states();
+        states.retain(&self.herdr_pane_ids());
         let Some(tab) = self.tab() else {
-            states.retain(&[]);
             return Vec::new();
         };
         let now = Instant::now();
         let pointer = self.pointer;
         let focused = tab.focused_id();
-        let mut keys = Vec::new();
         let mut flipped = false;
         let views = tab
             .shown_rects(self.content_rect())
@@ -685,16 +734,15 @@ impl Gerdr {
             .filter_map(|(id, rect)| {
                 let pane = tab.panes.iter().find(|p| p.id == id)?;
                 let key = pane.herdr.as_ref()?.pane_id.as_str();
-                keys.push(key.to_owned());
                 let content = self.pane_bar_content(key);
                 let is_focused = focused == Some(id);
-                let look = states.update(key, is_focused, now, |focused_for, shown| {
-                    let near = chrome::pointer_reveals(rect, shown, pointer);
+                let look = states.update(key, is_focused, now, |focused_for, out| {
+                    let near = chrome::pointer_reveals(rect, out, pointer);
                     bar_wanted(content.status, near, focused_for)
                 });
                 flipped |= look.flipped;
                 let full = chrome::pane_bar_rects(rect).0;
-                let drawn = look.shown || look.alpha > 0.0;
+                let drawn = look.visible || look.alpha > 0.0;
                 let bar = if drawn {
                     full
                 } else {
@@ -708,18 +756,17 @@ impl Gerdr {
                     can_restart: content.can_restart,
                     can_stop: content.can_stop,
                     focused: is_focused,
-                    lit: look.shown && full.to_f64().contains(pointer),
+                    lit: look.visible && full.to_f64().contains(pointer),
                     hover: self
                         .pane_bar_hover
                         .filter(|(hovered, _)| *hovered == id)
                         .map(|(_, button)| button),
-                    visible: look.shown,
+                    visible: look.visible,
                     alpha: look.alpha,
                     slide: look.slide,
                 })
             })
             .collect();
-        states.retain(&keys);
         if flipped {
             self.arrange_soon();
         }
@@ -732,7 +779,7 @@ impl Gerdr {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
             .into_iter()
-            .filter(|(id, _)| self.pane_bar_shown(tab, *id))
+            .filter(|(id, _)| self.pane_bar_drawn(tab, *id))
             .find_map(|(id, rect)| {
                 let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, pos)?;
                 Some((id, hit))
@@ -1244,54 +1291,88 @@ mod tests {
     #[test]
     fn a_bar_shows_for_a_command_the_pointer_or_a_new_focus() {
         let ms = Duration::from_millis;
-        assert!(bar_wanted(BarStatus::Running, false, None));
-        assert!(bar_wanted(BarStatus::Working, false, None));
-        assert!(!bar_wanted(BarStatus::Idle, false, None));
-        assert!(!bar_wanted(BarStatus::Exited, false, None));
-        assert!(bar_wanted(BarStatus::Idle, true, None));
-        assert!(bar_wanted(BarStatus::Exited, false, Some(ms(999))));
-        assert!(!bar_wanted(BarStatus::Idle, false, Some(FOCUS_HOLD)));
-        assert!(!bar_wanted(BarStatus::Idle, false, Some(ms(5000))));
+        assert_eq!(bar_wanted(BarStatus::Running, false, None), BarWant::Room);
+        assert_eq!(bar_wanted(BarStatus::Working, false, None), BarWant::Room);
+        assert_eq!(bar_wanted(BarStatus::Idle, false, None), BarWant::Hidden);
+        assert_eq!(bar_wanted(BarStatus::Exited, false, None), BarWant::Hidden);
+        assert_eq!(bar_wanted(BarStatus::Idle, true, None), BarWant::Room);
+        // A new focus shows the bar over the window, taking no room.
+        assert_eq!(
+            bar_wanted(BarStatus::Exited, false, Some(ms(999))),
+            BarWant::Over
+        );
+        assert_eq!(
+            bar_wanted(BarStatus::Idle, true, Some(ms(999))),
+            BarWant::Room
+        );
+        assert_eq!(
+            bar_wanted(BarStatus::Idle, false, Some(FOCUS_HOLD)),
+            BarWant::Hidden
+        );
+        assert_eq!(
+            bar_wanted(BarStatus::Idle, false, Some(ms(5000))),
+            BarWant::Hidden
+        );
     }
 
     #[test]
     fn a_bar_fades_in_when_wanted_and_out_when_not() {
         let states = BarStates::default();
         let t0 = Instant::now();
+        let out = |out: bool| if out { BarWant::Room } else { BarWant::Hidden };
         // Not wanted: hidden from the start, nothing to see.
         let look = states.update("p1", false, t0, |_, shown| {
             assert!(!shown);
-            false
+            BarWant::Hidden
         });
         assert_eq!((look.shown, look.alpha, look.flipped), (false, 0.0, false));
         assert_eq!(look.slide, chrome::BAR_SLIDE);
         assert!(!states.shown("p1"));
         // Wanted: it starts showing, taking its room at once.
-        let look = states.update("p1", false, t0, |_, _| true);
+        let look = states.update("p1", false, t0, |_, _| BarWant::Room);
         assert!(look.shown && look.flipped && look.alpha == 0.0);
-        assert!(states.shown("p1"));
-        let look = states.update("p1", false, t0 + anim::SLOW / 2, |_, shown| shown);
+        assert!(states.shown("p1") && states.drawn("p1"));
+        let look = states.update("p1", false, t0 + anim::SLOW / 2, |_, shown| out(shown));
         assert!(look.alpha > 0.3 && look.alpha < 0.7, "{}", look.alpha);
         assert!(look.slide > 0 && look.slide < chrome::BAR_SLIDE);
         assert!(!look.flipped);
-        let look = states.update("p1", false, t0 + anim::SLOW, |_, _| true);
+        let look = states.update("p1", false, t0 + anim::SLOW, |_, _| BarWant::Room);
         assert_eq!((look.alpha, look.slide), (1.0, 0));
         // Not wanted any more: it gives its room back and fades out.
         let t1 = t0 + Duration::from_secs(2);
-        let look = states.update("p1", false, t1, |_, _| false);
+        let look = states.update("p1", false, t1, |_, _| BarWant::Hidden);
         assert!(!look.shown && look.flipped && look.alpha == 1.0);
-        assert!(!states.shown("p1"));
-        let look = states.update("p1", false, t1 + 2 * anim::SLOW, |_, _| false);
+        // On its way out it is neither shown nor there to click.
+        assert!(!states.shown("p1") && !states.drawn("p1"));
+        let look = states.update("p1", false, t1 + 2 * anim::SLOW, |_, _| BarWant::Hidden);
         assert_eq!((look.alpha, look.slide), (0.0, chrome::BAR_SLIDE));
+    }
+
+    #[test]
+    fn a_bar_over_the_window_takes_no_room() {
+        let states = BarStates::default();
+        let t0 = Instant::now();
+        // A new focus: out, seen, but the window keeps its room.
+        let look = states.update("p1", true, t0, |_, _| BarWant::Over);
+        assert!(look.visible && !look.shown && !look.flipped);
+        assert!(states.drawn("p1") && !states.shown("p1"));
+        // The pointer asks for it: it takes its room without fading again.
+        let look = states.update("p1", true, t0 + anim::SLOW, |_, _| BarWant::Room);
+        assert!(look.visible && look.shown && look.flipped);
+        assert_eq!(look.alpha, 1.0);
+        // Back to a passing look: the room goes, the bar stays.
+        let look = states.update("p1", true, t0 + 2 * anim::SLOW, |_, _| BarWant::Over);
+        assert!(look.visible && !look.shown && look.flipped);
+        assert_eq!(look.alpha, 1.0);
     }
 
     #[test]
     fn a_fade_turned_around_goes_on_from_where_it_was() {
         let states = BarStates::default();
         let t0 = Instant::now();
-        states.update("p1", false, t0, |_, _| true);
-        let half = states.update("p1", false, t0 + anim::SLOW / 2, |_, _| true);
-        let back = states.update("p1", false, t0 + anim::SLOW / 2, |_, _| false);
+        states.update("p1", false, t0, |_, _| BarWant::Room);
+        let half = states.update("p1", false, t0 + anim::SLOW / 2, |_, _| BarWant::Room);
+        let back = states.update("p1", false, t0 + anim::SLOW / 2, |_, _| BarWant::Hidden);
         assert!(back.flipped && !back.shown);
         assert!(
             (back.alpha - half.alpha).abs() < 0.1,
@@ -1299,7 +1380,7 @@ mod tests {
             back.alpha,
             half.alpha
         );
-        let gone = states.update("p1", false, t0 + anim::SLOW, |_, _| false);
+        let gone = states.update("p1", false, t0 + anim::SLOW, |_, _| BarWant::Hidden);
         assert_eq!(gone.alpha, 0.0);
     }
 
@@ -1311,7 +1392,7 @@ mod tests {
             let mut since = None;
             states.update("p1", focused, at, |focused_for, _| {
                 since = focused_for;
-                false
+                BarWant::Hidden
             });
             since
         };

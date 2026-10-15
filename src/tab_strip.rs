@@ -205,12 +205,13 @@ impl Gerdr {
     }
 
     /// Move the strip's hover on, once a frame: what the pointer is over
-    /// fades in, what it left fades out and is forgotten once gone.
-    pub(crate) fn tab_hover_tick(&mut self, now: Instant) {
+    /// fades in, what it left fades out and is forgotten once gone. The
+    /// strip's view as it then is, for the frame to draw.
+    pub(crate) fn tab_hover_tick(&mut self, now: Instant) -> TabStripView {
+        let mut view = self.tab_strip_view();
         let hit = if self.tab_strip_covered() {
             None
         } else {
-            let view = self.tab_strip_view();
             self.tab_strip_hit_at(&view, self.pointer)
         };
         self.tab_hover = match (self.tab_hover, hit) {
@@ -230,6 +231,11 @@ impl Gerdr {
             (Some((old, fade)), None) if !fade.done(now) => Some((old, fade)),
             _ => None,
         };
+        view.hover = self.tab_hover.map(|(hit, _)| hit);
+        view.hover_alpha = self
+            .tab_hover
+            .map_or(0, |(_, fade)| anim::quantize(fade.value(now)));
+        view
     }
 
     /// The tab a drag at window x `x` would put the held tab at: the
@@ -318,14 +324,17 @@ impl Gerdr {
         }
     }
 
-    /// The pointer moved to `pos` (window coordinates) over the tab strip
-    /// with nothing open over it: the tooltip for what is under it, if it
-    /// has one. (The hover itself is read off the pointer when the strip
-    /// is drawn.)
-    pub(crate) fn tab_strip_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
-        let view = self.tab_strip_view();
-        let hit = self.tab_strip_hit_at(&view, pos)?;
-        let layout = self.tab_strip_layout(&view);
+    /// The pointer moved to `pos` (window coordinates) over the tab strip,
+    /// showing `view`, with nothing open over it: the tooltip for what is
+    /// under it, if it has one. (The hover itself is read off the pointer
+    /// when the strip is drawn.)
+    pub(crate) fn tab_strip_motion(
+        &mut self,
+        view: &TabStripView,
+        pos: Point<f64, Logical>,
+    ) -> Option<Tooltip> {
+        let hit = self.tab_strip_hit_at(view, pos)?;
+        let layout = self.tab_strip_layout(view);
         let strip = self.tab_strip_rect();
         let anchor = |mut rect: Rectangle<i32, Logical>| {
             rect.loc += strip.loc;

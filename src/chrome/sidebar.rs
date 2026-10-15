@@ -52,6 +52,28 @@ const RENAME_INSET: i32 = 5;
 /// How much of the warning colour a blocked card's header carries at the
 /// top of its pulse.
 const BLOCKED_TINT: f32 = 0.15;
+/// How much of the tint a blocked card's header keeps at the bottom of its
+/// breathing; the rest comes and goes with the pulse.
+const BLOCKED_REST: f32 = 0.4;
+
+/// The header band of a blocked agent card at `card`, as `agent_card`
+/// tints it: the part the pulse breathes over.
+pub fn blocked_band(card: Rect, density: Density) -> Rect {
+    Rectangle::new(
+        (card.loc.x + 1, card.loc.y + 1).into(),
+        (
+            (card.size.w - 2).max(0),
+            (CARD_HEADER + card_pad(density) - 1).max(0),
+        )
+            .into(),
+    )
+}
+
+/// How opaque the pulse band over a blocked card's header is drawn when
+/// the pulse stands at `pulse` (0 to 1).
+pub fn pulse_alpha(pulse: f32) -> f32 {
+    BLOCKED_TINT * (1.0 - BLOCKED_REST) * pulse.clamp(0.0, 1.0)
+}
 
 /// One line of an agent card below its header.
 #[derive(Clone, Debug, PartialEq)]
@@ -336,11 +358,11 @@ pub struct RowState {
 }
 
 /// What moves in an agent card: its hover pill's alpha and, while blocked,
-/// where its pulse stands (both 0 to 16).
+/// (0 to 16). A blocked card's pulse is not here: it is composed over the
+/// sidebar as its own part (see `blocked_band`), so it never redraws it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CardState {
     pub hover: u8,
-    pub pulse: u8,
 }
 
 /// What the sidebar shows beyond its data: the density, the hover and
@@ -976,8 +998,8 @@ impl Painter {
 
     /// An agent card: a header with the status mark, the agent's kind and
     /// name and a status pill, then one detail line. A blocked card's
-    /// header carries the warning colour, breathing with `state.pulse`;
-    /// the card lightens under the pointer.
+    /// header carries the warning colour (its breathing is composed on
+    /// top, see `pulse_band`); the card lightens under the pointer.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn agent_card(
         &self,
@@ -1008,8 +1030,9 @@ impl Painter {
         let pad = card_pad(density);
         let header_y = rect.loc.y + pad;
         if blocked {
-            // The header band in the warning colour, breathing.
-            let tint = BLOCKED_TINT * (0.4 + 0.6 * alpha(state.pulse));
+            // The header band in the warning colour, at the bottom of its
+            // breathing.
+            let tint = BLOCKED_TINT * BLOCKED_REST;
             let band_h = px(CARD_HEADER + pad) as f32;
             c.rounded(
                 x + b,
@@ -1111,6 +1134,28 @@ impl Painter {
                 p.muted,
             );
         }
+    }
+}
+
+impl Painter {
+    /// The band composed over a blocked card's header as its pulse: the
+    /// warning colour, `size` big, rounded at the top like the card and
+    /// square at the bottom where the header meets the body. Its opacity
+    /// is given when it is composed (`pulse_alpha`).
+    pub(super) fn pulse_band(
+        &self,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let s = scale as f32;
+        let b = (scale.round() as f32).max(1.0);
+        let r = CARD_RADIUS * s - b;
+        let (w, h) = (c.w as f32, c.h as f32);
+        c.rounded(0.0, 0.0, w, h, r, p.warning);
+        c.fill(0, (h - r).max(0.0) as i32, c.w, r.ceil() as i32, p.warning);
+        c.into_buffer(false)
     }
 }
 

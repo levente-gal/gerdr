@@ -146,8 +146,9 @@ pub struct PaneBarView {
     pub lit: bool,
     /// The button under the pointer.
     pub hover: Option<BarButton>,
-    /// The bar takes room over its window (see `pane_bar_rects_shown`).
-    /// While false with a height, it is still fading out.
+    /// The bar is out: with room of its own over its window (see
+    /// `pane_bar_rects_shown`) or drawn over the window's top. While
+    /// false with a height, it is still fading out.
     pub visible: bool,
     /// Its opacity, 0 to 1, from the fade showing or hiding it; 1 at rest.
     pub alpha: f32,

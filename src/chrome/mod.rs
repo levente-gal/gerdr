@@ -88,6 +88,8 @@ pub struct ChromeView {
     pub help_pinned: bool,
     /// The sidebar: its workspaces, their agents and what moves in it.
     pub sidebar: SidebarView,
+    /// Where the blocked agents' pulse stands, 0 to 1 (see `anim::pulse`).
+    pub pulse: f32,
     /// The tab strip of the active workspace.
     pub tab_strip: TabStripView,
     /// The focused pane's client rect in the active tab, whatever it shows.
@@ -131,6 +133,9 @@ pub struct Chrome {
     /// Outline every hit rect in red (`DEBUG_HITS` in the environment).
     debug_hits: bool,
     sidebar: Cached<SidebarKey>,
+    /// The band breathing over a blocked card's header (one size fits all
+    /// the cards).
+    pulse: Cached<(Size<i32, Logical>, Theme, f64)>,
     tabs: Cached<(TabStripView, Theme, i32, f64)>,
     help: Overlay<(HelpLayout, Theme, f64)>,
     menu: Overlay<(MenuView, Theme, f64)>,
@@ -166,6 +171,7 @@ impl Chrome {
             epoch: Instant::now(),
             debug_hits: std::env::var_os(DEBUG_HITS).is_some_and(|v| v == "1"),
             sidebar: Cached::default(),
+            pulse: Cached::default(),
             tabs: Cached::default(),
             help: Overlay::default(),
             menu: Overlay::default(),
@@ -420,6 +426,36 @@ impl Chrome {
             parts.push((buffer, loc, size, alpha));
         }
 
+        // The blocked cards' pulse: one band per card, composed over the
+        // sidebar with the pulse as its opacity, so the sidebar itself is
+        // not redrawn for it.
+        let pulse_alpha = pulse_alpha(view.pulse);
+        let mut bands = Vec::new();
+        if pulse_alpha > 0.0 {
+            let layout = sidebar_layout_at(
+                &view.sidebar.workspaces,
+                &view.sidebar.agents,
+                sidebar_w,
+                view.density,
+            );
+            for (i, cards) in view.sidebar.agents.iter().enumerate() {
+                for (k, card) in cards.iter().enumerate() {
+                    if card.status != crate::herdr::AgentStatus::Blocked {
+                        continue;
+                    }
+                    let rect = layout
+                        .cards
+                        .get(i)
+                        .and_then(|cards| cards.iter().find(|(c, _)| *c == k))
+                        .map(|(_, rect)| *rect);
+                    let band = rect.map(|rect| blocked_band(rect, view.density));
+                    if let Some(band) = band.filter(|b| b.size.w > 0 && b.size.h > 0) {
+                        bands.push(band);
+                    }
+                }
+            }
+        }
+
         // The sidebar and the tab strip.
         let sidebar = self.sidebar.get(
             (view.sidebar, theme, sidebar_size, scale),
@@ -430,6 +466,15 @@ impl Chrome {
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
         parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
+        // Every card is as wide as the next, so one band buffer fits all.
+        if let Some(size) = bands.first().map(|band| band.size) {
+            let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
+                painter.pulse_band(*size, scale, theme.palette())
+            });
+            for band in bands.iter().filter(|band| band.size == size) {
+                parts.push((buffer, band.loc, size, pulse_alpha));
+            }
+        }
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size, 1.0));
         render_parts(renderer, parts, scale)
     }

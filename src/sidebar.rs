@@ -3,23 +3,22 @@
 //! its context menus, and what moves in it (see `chrome::sidebar` for what
 //! it shows).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use smithay::utils::{Logical, Point};
 
 use crate::{
     Gerdr, Reorderable,
     anim::{FAST, Fade, quantize},
-    chrome::{self, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState},
-    herdr::AgentStatus,
+    chrome::{
+        self, AgentView, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState,
+        WorkspaceView,
+    },
     input::{BTN_LEFT, BTN_MIDDLE},
     menu::{MenuAction, MenuItem, MenuSpec},
     rename::RenameTarget,
     tooltip::Tooltip,
 };
-
-/// How long a blocked card's pulse takes to go up and back down.
-const PULSE: Duration = Duration::from_millis(1500);
 
 /// What the pointer is on in the sidebar and since when, and what it just
 /// left, each with its fade: the hover pills fade in and out.
@@ -67,14 +66,6 @@ fn reverse(fade: Fade, now: Instant) -> Fade {
     Fade::new(now - fade.dur.mul_f32(progress), fade.dur, rising)
 }
 
-/// Where a blocked card's pulse stands at `now`, from 0 to 1 and back
-/// every `PULSE`, as a looping fade from `epoch`.
-fn pulse(epoch: Instant, now: Instant) -> f32 {
-    let half = PULSE / 2;
-    let n = (now.saturating_duration_since(epoch).as_nanos() / half.as_nanos().max(1)) as u32;
-    Fade::new(epoch + half * n, half, n.is_multiple_of(2)).value(now)
-}
-
 impl Gerdr {
     /// Where the sidebar's parts sit, at the configured density.
     pub(crate) fn sidebar_layout(&self) -> SidebarLayout {
@@ -104,10 +95,17 @@ impl Gerdr {
         layout.hit(pos)
     }
 
-    /// What moves in the sidebar at `now`: the hover pills, the blocked
-    /// cards' pulse, the "+" menu, the name being renamed.
-    pub(crate) fn sidebar_state(&mut self, now: Instant) -> SidebarState {
-        let layout = self.sidebar_layout();
+    /// What moves in the sidebar at `now`, given its `workspaces` and
+    /// their `agents` as the view has them: the hover pills, the "+" menu,
+    /// the name being renamed.
+    pub(crate) fn sidebar_state(
+        &mut self,
+        now: Instant,
+        workspaces: &[WorkspaceView],
+        agents: &[Vec<AgentView>],
+    ) -> SidebarState {
+        let layout =
+            chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density);
         let hit = self.sidebar_hit(&layout, self.pointer);
         self.sidebar_hover.track(hit.map(SidebarHit::pill), now);
         let hover = &self.sidebar_hover;
@@ -117,21 +115,13 @@ impl Gerdr {
                 close: hit == Some(SidebarHit::Close(i)),
             })
             .collect();
-        let cards = self
-            .agent_views()
+        let cards = agents
             .iter()
             .enumerate()
             .map(|(i, cards)| {
-                cards
-                    .iter()
-                    .enumerate()
-                    .map(|(k, card)| CardState {
+                (0..cards.len())
+                    .map(|k| CardState {
                         hover: quantize(hover.alpha(SidebarHit::Card(i, k), now)),
-                        pulse: if card.status == AgentStatus::Blocked {
-                            quantize(pulse(self.start_time, now))
-                        } else {
-                            0
-                        },
                     })
                     .collect()
             })
@@ -197,12 +187,16 @@ impl Gerdr {
         }
     }
 
-    /// The pointer moved to `pos` with nothing open over the sidebar: the
-    /// header's project name and the row, card or button under it light
-    /// up. The tooltip for what is under the pointer, if it has one.
-    pub(crate) fn sidebar_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
-        let layout = self.sidebar_layout();
-        let hit = self.sidebar_hit(&layout, pos);
+    /// The pointer moved to `pos` with nothing open over the sidebar, laid
+    /// out as `layout`: the header's project name and the row, card or
+    /// button under it light up. The tooltip for what is under the
+    /// pointer, if it has one.
+    pub(crate) fn sidebar_motion(
+        &mut self,
+        layout: &SidebarLayout,
+        pos: Point<f64, Logical>,
+    ) -> Option<Tooltip> {
+        let hit = self.sidebar_hit(layout, pos);
         self.header_hover = self.project.is_some() && hit == Some(SidebarHit::Header);
         self.sidebar_hover
             .track(hit.map(SidebarHit::pill), Instant::now());
@@ -336,9 +330,9 @@ impl Gerdr {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAST, Fade, Hover, PULSE, pulse, reverse};
+    use super::{FAST, Fade, Hover, reverse};
     use crate::chrome::SidebarHit;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     #[test]
     fn a_reversed_fade_keeps_its_value() {
@@ -375,18 +369,5 @@ mod tests {
         hover.track(Some(SidebarHit::Row(0)), half);
         assert!((hover.alpha(SidebarHit::Row(0), half) - v).abs() < 0.01);
         assert_eq!(hover.alpha(SidebarHit::Row(0), half + FAST), 1.0);
-    }
-
-    #[test]
-    fn the_pulse_loops() {
-        let epoch = Instant::now();
-        assert_eq!(pulse(epoch, epoch), 0.0);
-        assert_eq!(pulse(epoch, epoch + PULSE / 2), 1.0);
-        assert!(pulse(epoch, epoch + PULSE) < 0.01);
-        let quarter = pulse(epoch, epoch + PULSE / 4);
-        assert!(quarter > 0.45 && quarter < 0.55, "{quarter}");
-        let three = pulse(epoch, epoch + PULSE * 3 / 4);
-        assert!(three > 0.45 && three < 0.55, "{three}");
-        assert!(pulse(epoch, epoch + PULSE * 10 + Duration::from_millis(750)) > 0.99);
     }
 }

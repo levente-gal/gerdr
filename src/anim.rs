@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 pub const FAST: Duration = Duration::from_millis(120);
 /// How long a larger surface (the welcome screen, a pane bar) fades.
 pub const SLOW: Duration = Duration::from_millis(150);
+/// How long a blocked agent's pulse takes to go up and back down.
+pub const PULSE: Duration = Duration::from_millis(1500);
 
 /// How many steps a fade's value is quantized to.
 const STEPS: f32 = 16.0;
@@ -68,9 +70,15 @@ pub fn phase(start: Instant, period: Duration, now: Instant) -> f32 {
     t - t.floor()
 }
 
+/// Where a blocked agent's pulse stands at `now`: from 0 up to 1 and back
+/// down every `PULSE`, counted from `epoch`.
+pub fn pulse(epoch: Instant, now: Instant) -> f32 {
+    1.0 - (2.0 * phase(epoch, PULSE, now) - 1.0).abs()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FAST, Fade, phase, quantize};
+    use super::{FAST, Fade, PULSE, phase, pulse, quantize};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -104,6 +112,19 @@ mod tests {
         // Already at the end, it is done at once.
         assert!(Fade::from_value(mid, FAST, true, 1.0).done(mid));
         assert!(Fade::from_value(mid, FAST, false, 0.0).done(mid));
+    }
+
+    #[test]
+    fn the_pulse_loops() {
+        let epoch = Instant::now();
+        assert_eq!(pulse(epoch, epoch), 0.0);
+        assert_eq!(pulse(epoch, epoch + PULSE / 2), 1.0);
+        assert!(pulse(epoch, epoch + PULSE) < 0.01);
+        let quarter = pulse(epoch, epoch + PULSE / 4);
+        assert!(quarter > 0.45 && quarter < 0.55, "{quarter}");
+        let three = pulse(epoch, epoch + PULSE * 3 / 4);
+        assert!(three > 0.45 && three < 0.55, "{three}");
+        assert!(pulse(epoch, epoch + PULSE * 10 + Duration::from_millis(750)) > 0.99);
     }
 
     #[test]

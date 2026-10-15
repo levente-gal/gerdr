@@ -4115,15 +4115,16 @@ impl Gerdr {
         let now = Instant::now();
         self.tooltip.tick(now);
         self.expire_toasts(now);
-        self.tab_hover_tick(now);
-        let sidebar_state = self.sidebar_state(now);
-        let ws = self.workspace();
-        let active = ws.map(|_| self.active_workspace);
+        let tab_strip = self.tab_hover_tick(now);
         let workspaces: Vec<_> = self
             .workspace_views()
             .into_iter()
             .map(|(ws, _)| ws)
             .collect();
+        let agents = self.agent_views();
+        let sidebar_state = self.sidebar_state(now, &workspaces, &agents);
+        let ws = self.workspace();
+        let active = ws.map(|_| self.active_workspace);
         let area = self.content_rect();
         let tab = self.tab();
         let focused_pane = tab.and_then(|tab| {
@@ -4160,13 +4161,14 @@ impl Gerdr {
             help_pinned: self.help_pinned,
             sidebar: chrome::SidebarView {
                 workspaces,
-                agents: self.agent_views(),
+                agents,
                 active,
                 project,
                 header_lit: self.header_hover || self.project_menu.is_some(),
                 state: sidebar_state,
             },
-            tab_strip: self.tab_strip_view(),
+            pulse: anim::pulse(self.start_time, now),
+            tab_strip,
             focused_pane,
             placeholders,
             context_menu: self.context_menu.as_ref().map(ContextMenu::view),
