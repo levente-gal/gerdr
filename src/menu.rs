@@ -43,6 +43,8 @@ pub enum MenuAction {
     /// Start again what pane `id` of the active tab waits for, after it
     /// failed to show a window.
     RetryExpected(u32),
+    /// Open the run prompt for an app in `place`.
+    RunApp(crate::launch::Place),
 }
 
 /// One row of a menu.
@@ -264,6 +266,7 @@ impl Gerdr {
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
+            MenuAction::RunApp(place) => self.open_run_prompt(place),
         }
     }
 

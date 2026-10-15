@@ -84,8 +84,8 @@ pub struct ChromeView {
     /// Per workspace, the agents running in it.
     pub agents: Vec<Vec<AgentView>>,
     pub active_workspace: Option<usize>,
-    pub tabs: Vec<TabView>,
-    pub active_tab: usize,
+    /// The tab strip of the active workspace.
+    pub tab_strip: TabStripView,
     /// The focused pane's client rect in the active tab, whatever it shows.
     pub focused_pane: Option<Rect>,
     /// The panes of the active tab whose window is still to come.
@@ -147,7 +147,7 @@ pub struct Chrome {
     /// Outline every hit rect in red (`DEBUG_HITS` in the environment).
     debug_hits: bool,
     sidebar: Cached<SidebarKey>,
-    tabs: Cached<(Vec<TabView>, usize, bool, Theme, i32, f64)>,
+    tabs: Cached<(TabStripView, Theme, i32, f64)>,
     help: Overlay<(HelpLayout, Theme, f64)>,
     menu: Overlay<(MenuView, Theme, f64)>,
     tooltip: Overlay<(TooltipView, i32, Theme, f64)>,
@@ -481,17 +481,8 @@ impl Chrome {
             },
         );
         let strip = self.tabs.get(
-            (
-                view.tabs,
-                view.active_tab,
-                view.prefix.is_some(),
-                theme,
-                strip_size.w,
-                scale,
-            ),
-            |(tabs, active, prefix, ..)| {
-                painter.tab_strip(tabs, *active, *prefix, theme, strip_size, scale)
-            },
+            (view.tab_strip, theme, strip_size.w, scale),
+            |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
         parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size, 1.0));
@@ -684,11 +675,15 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
             rect.size,
         )
     };
-    let (tabs, plus, chevron) = tab_layout(view.tabs.len(), strip_w);
-    for (tab, close) in tabs {
-        rects.extend([shift(tab), shift(close)]);
+    let strip = &view.tab_strip;
+    let strip_size = (strip_w, tab_strip_height(view.density)).into();
+    let layout = tab_layout(strip.tabs.len(), strip_size, strip.prefix, strip.overflow());
+    rects.extend(layout.tabs.iter().chain(&layout.closes).map(|r| shift(*r)));
+    if !layout.tabs.is_empty() {
+        rects.push(shift(layout.plus));
     }
-    rects.extend([shift(plus), shift(chevron), shift(theme_toggle(strip_w))]);
+    rects.extend(layout.overflow.into_iter().chain(layout.prefix).map(shift));
+    rects.push(shift(layout.toggle));
     for bar in view.pane_bars.iter().filter(|bar| bar.visible) {
         rects.push(bar.rect);
         rects.extend(pane_bar_buttons(bar.rect).map(|(_, rect)| rect));

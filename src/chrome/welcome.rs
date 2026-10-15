@@ -413,7 +413,9 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{ProjectRow, WelcomeHit, WelcomeView, welcome_layout, welcome_page};
-    use crate::chrome::{Painter, QuitHit, QuitView, Rect, TabView, Theme, inside};
+    use crate::chrome::{
+        Painter, QuitHit, QuitView, Rect, TabStripView, TabView, Theme, ThemeMode, inside,
+    };
     use crate::text_field::Line;
     use smithay::utils::{Logical, Size};
 
@@ -545,6 +547,7 @@ mod tests {
             },
             TabView::default(),
         ];
-        painter.tab_strip(&tabs, 0, false, Theme::Dark, (900, 48).into(), 1.25);
+        let strip = TabStripView::plain(tabs.to_vec(), 0, false, ThemeMode::Dark);
+        painter.tab_strip_view(&strip, Theme::Dark, (900, 48).into(), 1.25);
     }
 }

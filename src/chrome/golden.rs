@@ -8,8 +8,8 @@ use std::time::Instant;
 use super::{
     AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, ItemIcon, MenuEntry,
     MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderView, ProjectMenuView, ProjectRow,
-    QuitHit, QuitView, Rect, SwitcherRow, SwitcherView, TabView, Theme, ToastView, TooltipView,
-    WelcomeHit, WelcomeView, WorkspaceView,
+    QuitHit, QuitView, Rect, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode,
+    ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
 use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -360,7 +360,12 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
             scale,
             p,
         )),
-        hash(painter.tab_strip(&tabs(), 1, true, theme, strip, scale)),
+        hash(painter.tab_strip_view(
+            &TabStripView::plain(tabs(), 1, true, ThemeMode::System),
+            theme,
+            strip,
+            scale,
+        )),
         hash(painter.pane_bar(&pane_bar(), scale, p)),
         hash(painter.help_panel(&help, &help_layout, scale, p)),
         hash(painter.menu(&menu(), scale, p)),
@@ -415,7 +420,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0x67589784b798d683, // sidebar
-        0x13e27886dba77bed, // tab_strip
+        0xcb4e78de6f504790, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
@@ -429,7 +434,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 2
     [
         0xc564686cbb8d9f53, // sidebar
-        0x10cad43cd88fc070, // tab_strip
+        0xc4ac766e3cb8d713, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
@@ -443,7 +448,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Light at 1
     [
         0x05f69fc665a353b7, // sidebar
-        0x13d9d07a680d567f, // tab_strip
+        0x4dc2b2bd8fa87ec4, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
@@ -457,7 +462,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Light at 2
     [
         0x07d08fe1e4e286dc, // sidebar
-        0xaebc10244cf8b919, // tab_strip
+        0x24e49e86c6d850ca, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu

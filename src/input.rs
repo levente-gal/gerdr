@@ -626,7 +626,7 @@ impl Gerdr {
             return RegionHit::Nothing;
         }
         if let Some(switcher) = self.switcher_view() {
-            let (_, _, rows) = chrome::switcher_layout(switcher.rows.len(), self.content_rect());
+            let rows = chrome::switcher_geometry(&switcher, self.content_rect()).rows;
             return if rows.iter().any(|row| row.to_f64().contains(pos)) {
                 RegionHit::Control
             } else {
@@ -660,20 +660,14 @@ impl Gerdr {
             }
             return RegionHit::Nothing;
         }
-        // The tab strip: the tabs, the "+" and its chevron, the theme switch.
+        // The tab strip: the tabs, the "+", the chips and the theme switch.
         if pos.y < self.tab_strip_height() as f64 {
-            let width = output.w - self.sidebar_width;
-            let local = Point::from((pos.x - self.sidebar_width as f64, pos.y));
-            let inside = |rect: &chrome::Rect| rect.to_f64().contains(local);
-            let count = self.workspace().map_or(0, |ws| ws.tabs.len());
-            let (tabs, plus, chevron) = chrome::tab_layout(count, width);
-            if let Some(t) = tabs.iter().position(|(tab, _)| inside(tab)) {
-                return RegionHit::Tab(t);
-            }
-            if inside(&chrome::theme_toggle(width)) || inside(&plus) || inside(&chevron) {
-                return RegionHit::Control;
-            }
-            return RegionHit::Nothing;
+            let view = self.tab_strip_view();
+            return match self.tab_strip_hit_at(&view, pos) {
+                Some(chrome::TabHit::Tab(t)) => RegionHit::Tab(t),
+                Some(_) => RegionHit::Control,
+                None => RegionHit::Nothing,
+            };
         }
         // Over the apps: the toasts, the pane bars' buttons, a Retry.
         let views = self.toast_views();

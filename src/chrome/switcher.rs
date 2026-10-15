@@ -94,8 +94,9 @@ pub fn switcher_geometry(view: &SwitcherView, area: Rect) -> SwitcherLayout {
 }
 
 /// The switcher showing `rows` rows without any section heading in the app
-/// `area`: the panel, its query field and the rows. `switcher_geometry`
-/// knows the headings; this is for callers with only a count.
+/// `area`: the panel, its query field and the rows, for tests with only a
+/// count (`switcher_geometry` knows the headings).
+#[cfg(test)]
 pub fn switcher_layout(rows: usize, area: Rect) -> (Rect, Rect, Vec<Rect>) {
     let layout = switcher_parts(&vec![None; rows], panel_origin(area), panel_width(area));
     (layout.panel, layout.input, layout.rows)

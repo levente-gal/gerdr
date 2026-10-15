@@ -912,6 +912,9 @@ pub struct Gerdr {
     pub last_press: Option<(Instant, Point<f64, Logical>, u32)>,
     /// A workspace or tab being renamed in place.
     pub rename: Option<Rename>,
+    /// What the pointer is over in the tab strip, and how far it has lit
+    /// up (or faded since the pointer left).
+    pub tab_hover: Option<(chrome::TabHit, anim::Fade)>,
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
@@ -1179,11 +1182,10 @@ impl Gerdr {
                 move_item(&mut self.workspaces, &mut self.active_workspace, to);
             }
             Reorderable::Tab => {
-                let width = self.output_size().w - self.sidebar_width;
+                let to = self.tab_slot_at(pos.x);
                 let Some(ws) = self.workspaces.get_mut(self.active_workspace) else {
                     return;
                 };
-                let to = chrome::tab_slot(ws.tabs.len(), width, pos.x - self.sidebar_width as f64);
                 move_item(&mut ws.tabs, &mut ws.active_tab, to);
             }
         }
@@ -3423,21 +3425,19 @@ impl Gerdr {
             .map(|tab| {
                 // A tab is named after its first window's title.
                 let main = tab.shown().first().and_then(|id| tab.window(*id));
-                let title = main
-                    .and_then(|window| {
-                        with_states(window.toplevel().unwrap().wl_surface(), |states| {
-                            let data = states
-                                .data_map
-                                .get::<XdgToplevelSurfaceData>()?
-                                .lock()
-                                .unwrap();
-                            data.title.clone().or_else(|| data.app_id.clone())
-                        })
+                let title: Option<String> = main.and_then(|window| {
+                    with_states(window.toplevel().unwrap().wl_surface(), |states| {
+                        let data = states
+                            .data_map
+                            .get::<XdgToplevelSurfaceData>()?
+                            .lock()
+                            .unwrap();
+                        data.title.clone().or_else(|| data.app_id.clone())
                     })
-                    .unwrap_or_else(|| "…".into());
-                let title = tab.label.clone().unwrap_or(title);
+                });
                 let detail = tab.herdr_tab_id().and_then(|id| self.herdr_tabs.get(id));
-                let mut view = TabView::new(title, detail, &self.agents);
+                let mut view =
+                    TabView::derive(tab.label.as_deref(), title.as_deref(), detail, &self.agents);
                 let record = tab.restart_target().and_then(|p| self.pane_record(p));
                 view.restart = record.and_then(|r| {
                     let command = r.command.as_ref()?;
@@ -4116,10 +4116,14 @@ impl Gerdr {
         let now = Instant::now();
         self.tooltip.tick(now);
         self.expire_toasts(now);
+        self.tab_hover_tick(now);
         let ws = self.workspace();
         let active = ws.map(|_| self.active_workspace);
-        let (workspaces, mut tabs): (Vec<_>, Vec<_>) = self.workspace_views().into_iter().unzip();
-        let tabs = active.map_or(Vec::new(), |i| std::mem::take(&mut tabs[i]));
+        let workspaces: Vec<_> = self
+            .workspace_views()
+            .into_iter()
+            .map(|(ws, _)| ws)
+            .collect();
         let area = self.content_rect();
         let tab = self.tab();
         let focused_pane = tab.and_then(|tab| {
@@ -4150,8 +4154,7 @@ impl Gerdr {
             workspaces,
             agents: self.agent_views(),
             active_workspace: active,
-            tabs,
-            active_tab: ws.map_or(0, |ws| ws.active_tab),
+            tab_strip: self.tab_strip_view(),
             focused_pane,
             placeholders,
             context_menu: self.context_menu.as_ref().map(ContextMenu::view),
@@ -4370,6 +4373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pointer: (0.0, 0.0).into(),
         last_press: None,
         rename: None,
+        tab_hover: None,
         frecency: Frecency::load(),
         bar_states: pane_control::BarStates::default(),
         socket_name: socket_name.clone(),
