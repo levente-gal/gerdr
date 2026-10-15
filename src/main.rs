@@ -4156,6 +4156,8 @@ impl Gerdr {
             .map(|p| p.name.clone());
         ChromeView {
             now,
+            pointer: self.pointer,
+            help_pinned: self.help_pinned,
             sidebar: chrome::SidebarView {
                 workspaces,
                 agents: self.agent_views(),

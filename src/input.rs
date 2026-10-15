@@ -265,13 +265,11 @@ impl Gerdr {
                     self.apply_intercepted(intercepted);
                 }
                 self.copy_from_field();
-                self.sync_chrome();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output_geo = self.space.output_geometry(&self.output).unwrap();
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
                 self.pointer = pos;
-                self.chrome.set_pointer(pos);
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
                 if let Some(drag) = self.drag.clone() {
@@ -409,7 +407,6 @@ impl Gerdr {
                     let button = event.button_code();
                     let taken = self.press(location, button);
                     self.last_press = Some((Instant::now(), location, button));
-                    self.sync_chrome();
                     if taken {
                         return;
                     }
@@ -675,12 +672,6 @@ impl Gerdr {
             return RegionHit::Control;
         }
         RegionHit::Nothing
-    }
-
-    /// Tell the chrome what it draws from gerdr's state but gets no view
-    /// of: whether the help is pinned.
-    fn sync_chrome(&mut self) {
-        self.chrome.set_help_pinned(self.help_pinned);
     }
 
     /// Whether a press at `pos` now, after the last one, makes a double

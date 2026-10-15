@@ -80,6 +80,12 @@ pub const DEBUG_HITS: &str = "GERDR_DEBUG_HITS";
 pub struct ChromeView {
     /// When the view was taken, for what moves with time.
     pub now: Instant,
+    /// Where the pointer is (window coordinates): the toasts' buttons and
+    /// the placeholders' Retry light up under it.
+    pub pointer: Point<f64, Logical>,
+    /// The help panel is pinned open, rather than up for the prefix: it
+    /// then carries a title and an Esc hint.
+    pub help_pinned: bool,
     /// The sidebar: its workspaces, their agents and what moves in it.
     pub sidebar: SidebarView,
     /// The tab strip of the active workspace.
@@ -122,11 +128,6 @@ pub struct Chrome {
     painter: Painter,
     /// When the chrome was made: what spins is timed from it.
     epoch: Instant,
-    /// Where the pointer is (window coordinates), for what lights up
-    /// under it in the surfaces the chrome hit-tests itself.
-    pointer: Point<f64, Logical>,
-    /// The help panel is pinned open, rather than up for the prefix.
-    help_pinned: bool,
     /// Outline every hit rect in red (`DEBUG_HITS` in the environment).
     debug_hits: bool,
     sidebar: Cached<SidebarKey>,
@@ -163,8 +164,6 @@ impl Chrome {
         Self {
             painter: Painter::new(),
             epoch: Instant::now(),
-            pointer: (0.0, 0.0).into(),
-            help_pinned: false,
             debug_hits: std::env::var_os(DEBUG_HITS).is_some_and(|v| v == "1"),
             sidebar: Cached::default(),
             tabs: Cached::default(),
@@ -182,18 +181,6 @@ impl Chrome {
             focus_strip: Cached::default(),
             hits: Cached::default(),
         }
-    }
-
-    /// Where the pointer is now (window coordinates): the toasts' buttons
-    /// and the placeholders' Retry light up under it.
-    pub fn set_pointer(&mut self, pointer: Point<f64, Logical>) {
-        self.pointer = pointer;
-    }
-
-    /// Whether the help panel is pinned open: it then carries a title and
-    /// an Esc hint.
-    pub fn set_help_pinned(&mut self, pinned: bool) {
-        self.help_pinned = pinned;
     }
 
     /// Hide the tooltip at once, without its fade: a press did.
@@ -225,7 +212,7 @@ impl Chrome {
             (sidebar_w, strip_h).into(),
             (strip_size.w, (view.size.h - strip_h).max(1)).into(),
         );
-        let pointer = self.pointer;
+        let pointer = view.pointer;
         let painter = &self.painter;
         // A popup's buffer reaches past its panel by the shadow on every side.
         let shadowed = |panel: Rect| {
@@ -322,7 +309,7 @@ impl Chrome {
         }));
 
         // The help panel, centred at the bottom of the app area.
-        let pinned = self.help_pinned;
+        let pinned = view.help_pinned;
         let help = view.prefix.as_deref().map(|help| {
             let layout = painter.help_layout(help, area.size.w - 2 * HELP_MARGIN, pinned, scale);
             let panel = Rectangle::new(
