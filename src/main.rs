@@ -4369,6 +4369,29 @@ pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Puts the user's bin folders (`~/.local/bin`, `~/.cargo/bin`) on `PATH`
+/// when they are missing: started from an app launcher, gerdr gets the
+/// session's bare `PATH`, where herdr and Zed are not found, and so would
+/// every app it starts.
+fn extend_path() {
+    let Some(home) = home_dir() else { return };
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let missing: Vec<PathBuf> = [".local/bin", ".cargo/bin"]
+        .map(|d| home.join(d))
+        .into_iter()
+        .filter(|d| !dirs.contains(d))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    dirs.splice(0..0, missing);
+    if let Ok(path) = std::env::join_paths(dirs) {
+        // SAFETY: called at the start of `main`, before any other thread.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
+
 /// gerdr's state folder, for logs: `$XDG_STATE_HOME/gerdr`, by default
 /// `~/.local/state/gerdr`.
 pub fn state_dir() -> PathBuf {
@@ -4405,6 +4428,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
+
+    extend_path();
 
     // `--project <name>` picks the project; every other argument is a
     // folder to open as a workspace in it.
