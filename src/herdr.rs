@@ -734,20 +734,21 @@ impl Herdr {
         cwd: &Path,
         env: &Value,
     ) -> Result<PaneInfo, String> {
-        let direction = match dir {
-            Dir::Right => "right",
-            Dir::Down => "down",
-        };
         let params =
-            json!({"target_pane_id": target, "direction": direction, "cwd": cwd, "env": env});
+            json!({"target_pane_id": target, "direction": split_name(dir), "cwd": cwd, "env": env});
         self.get("pane.split", params, "pane")
     }
 
     /// Swap the panes `source` and `target` (of one tab).
     pub fn pane_swap(&mut self, source: &str, target: &str) -> Result<(), String> {
-        // TODO(pane-move): wave 1, herdr agent.
-        let _ = (source, target);
-        Err("pane.swap not wired yet".into())
+        let params = json!({"source_pane_id": source, "target_pane_id": target});
+        let result = self.call("pane.swap", params)?;
+        let swap = &result["swap"];
+        if swap["changed"].as_bool().unwrap_or(false) {
+            return Ok(());
+        }
+        let reason = swap["reason"].as_str().unwrap_or("not swapped");
+        Err(format!("pane.swap: {reason}"))
     }
 
     /// Move `pane_id` into the tab `tab_id`, split off `target` (right of
@@ -762,9 +763,15 @@ impl Herdr {
         dir: Dir,
         ratio: f64,
     ) -> Result<PaneInfo, String> {
-        // TODO(pane-move): wave 1, herdr agent.
-        let _ = (pane_id, tab_id, target, dir, ratio);
-        Err("pane.move not wired yet".into())
+        let destination = json!({
+            "type": "tab",
+            "tab_id": tab_id,
+            "split": split_name(dir),
+            "target_pane_id": target,
+            "ratio": ratio,
+        });
+        let mut result = self.call("pane.move", move_params(pane_id, destination))?;
+        moved_pane(result["move_result"].take())
     }
 
     /// Move `pane_id` into a new tab of `workspace_id`. Returns the pane as
@@ -774,9 +781,9 @@ impl Herdr {
         pane_id: &str,
         workspace_id: &str,
     ) -> Result<PaneInfo, String> {
-        // TODO(pane-move): wave 1, herdr agent.
-        let _ = (pane_id, workspace_id);
-        Err("pane.move not wired yet".into())
+        let destination = json!({"type": "new_tab", "workspace_id": workspace_id, "label": null});
+        let mut result = self.call("pane.move", move_params(pane_id, destination))?;
+        moved_pane(result["move_result"].take())
     }
 
     /// Close a pane, ending what runs in it.
@@ -1131,6 +1138,32 @@ fn parse_event(mut value: Value) -> Option<Event> {
     })
 }
 
+/// The split direction as herdr names it.
+fn split_name(dir: Dir) -> &'static str {
+    match dir {
+        Dir::Right => "right",
+        Dir::Down => "down",
+    }
+}
+
+/// The params of a `pane.move` of `pane_id` to `destination`. Focus stays
+/// where it is herdr-side: gerdr decides what is focused.
+fn move_params(pane_id: &str, destination: Value) -> Value {
+    json!({"pane_id": pane_id, "focus": false, "destination": destination})
+}
+
+/// The pane a `pane.move` reply's `move_result` leaves behind. A move herdr turned down as
+/// `same_tab` is still a success: within a tab gerdr's tree is the source
+/// of truth and the pane is where it was; any other refusal is an error.
+fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
+    let changed = result["changed"].as_bool().unwrap_or(false);
+    let reason = result["reason"].as_str();
+    if !changed && reason != Some("same_tab") {
+        return Err(format!("pane.move: {}", reason.unwrap_or("not moved")));
+    }
+    serde_json::from_value(result["pane"].take()).map_err(|e| format!("pane.move: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1275,5 +1308,28 @@ mod tests {
         let order = ["a".to_string(), "b".into(), "c".into()];
         assert_eq!(insert_index(&order, Some("b")), 1);
         assert_eq!(insert_index(&order, None), 3);
+    }
+
+    #[test]
+    fn a_pane_move_never_takes_the_focus_with_it() {
+        let to_tab = json!({"type": "tab", "tab_id": "w1:t2", "split": split_name(Dir::Down), "target_pane_id": Value::Null, "ratio": 0.5});
+        assert_eq!(
+            move_params("w1:p1", to_tab),
+            json!({"pane_id": "w1:p1", "focus": false, "destination": {"type": "tab", "tab_id": "w1:t2", "split": "down", "target_pane_id": null, "ratio": 0.5}})
+        );
+        assert_eq!(split_name(Dir::Right), "right");
+    }
+
+    #[test]
+    fn a_move_within_the_tab_is_still_the_pane_as_herdr_has_it() {
+        let pane = json!({"pane_id": "w1:p1", "terminal_id": "t1", "workspace_id": "w1", "tab_id": "w1:t1", "cwd": "/tmp"});
+        let moved = moved_pane(json!({"changed": true, "reason": null, "pane": pane})).unwrap();
+        assert_eq!(moved.tab_id, "w1:t1");
+        let same =
+            moved_pane(json!({"changed": false, "reason": "same_tab", "pane": pane})).unwrap();
+        assert_eq!(same.pane_id, "w1:p1");
+        let zoomed = moved_pane(json!({"changed": false, "reason": "zoomed_tab", "pane": pane}));
+        assert_eq!(zoomed.unwrap_err(), "pane.move: zoomed_tab");
+        assert!(moved_pane(json!({"changed": false, "pane": pane})).is_err());
     }
 }
