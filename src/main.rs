@@ -3806,6 +3806,7 @@ impl Gerdr {
         self.active_workspace = 0;
         self.drag = None;
         self.reorder = None;
+        self.pane_drop = None;
         self.context_menu = None;
         self.tooltip.hide();
         self.rename = None;
