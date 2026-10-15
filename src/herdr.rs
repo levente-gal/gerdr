@@ -743,6 +743,42 @@ impl Herdr {
         self.get("pane.split", params, "pane")
     }
 
+    /// Swap the panes `source` and `target` (of one tab).
+    pub fn pane_swap(&mut self, source: &str, target: &str) -> Result<(), String> {
+        // TODO(pane-move): wave 1, herdr agent.
+        let _ = (source, target);
+        Err("pane.swap not wired yet".into())
+    }
+
+    /// Move `pane_id` into the tab `tab_id`, split off `target` (right of
+    /// or below it; `None`: wherever herdr puts it) with `target` keeping
+    /// `ratio` of the space. Returns the pane as herdr has it now (its tab
+    /// may have changed).
+    pub fn pane_move(
+        &mut self,
+        pane_id: &str,
+        tab_id: &str,
+        target: Option<&str>,
+        dir: Dir,
+        ratio: f64,
+    ) -> Result<PaneInfo, String> {
+        // TODO(pane-move): wave 1, herdr agent.
+        let _ = (pane_id, tab_id, target, dir, ratio);
+        Err("pane.move not wired yet".into())
+    }
+
+    /// Move `pane_id` into a new tab of `workspace_id`. Returns the pane as
+    /// herdr has it now (in the new tab).
+    pub fn pane_move_to_new_tab(
+        &mut self,
+        pane_id: &str,
+        workspace_id: &str,
+    ) -> Result<PaneInfo, String> {
+        // TODO(pane-move): wave 1, herdr agent.
+        let _ = (pane_id, workspace_id);
+        Err("pane.move not wired yet".into())
+    }
+
     /// Close a pane, ending what runs in it.
     pub fn pane_close(&mut self, pane_id: &str) -> Result<(), String> {
         self.call("pane.close", json!({"pane_id": pane_id}))

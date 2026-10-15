@@ -94,6 +94,9 @@ pub struct ChromeView {
     pub tab_strip: TabStripView,
     /// The focused pane's client rect in the active tab, whatever it shows.
     pub focused_pane: Option<Rect>,
+    /// Where a pane held by its bar would land if dropped now: the part of
+    /// the pane, or the tab, under the pointer.
+    pub pane_drop: Option<Rect>,
     /// The panes of the active tab whose window is still to come.
     pub placeholders: Vec<PlaceholderView>,
     /// Set while a context menu is open.

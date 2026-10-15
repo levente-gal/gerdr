@@ -14,7 +14,7 @@ use smithay::{
 use crate::{
     Action, Gerdr, WorkspaceKind,
     chrome::{self, MenuRow, MenuView, Rect, ThemeMode},
-    layout::Dir,
+    layout::{Dir, Side},
     rename::RenameTarget,
 };
 
@@ -34,6 +34,16 @@ pub enum MenuAction {
     /// Split pane `id` of the active tab.
     SplitPane(u32, Dir),
     ClosePane(u32),
+    /// Move pane `id` of the active tab to `side`: beside its neighbour
+    /// there, or to the tab's edge.
+    MovePane(u32, Side),
+    /// Swap pane `id` of the active tab with its neighbour on `side`.
+    SwapPane(u32, Side),
+    /// Turn the split pane `id` of the active tab is in.
+    FlipPane(u32),
+    /// Move pane `id` of the active tab to tab `t` of the workspace, or a
+    /// new tab (`None`).
+    PaneToTab(u32, Option<usize>),
     RestartPane(u32),
     StopPane(u32),
     /// Show the agent in herdr pane `pane_id`.
@@ -254,6 +264,10 @@ impl Gerdr {
                 self.focus_pane(|_| Some(id));
                 self.close_pane();
             }
+            MenuAction::MovePane(id, side) => self.move_pane(id, side),
+            MenuAction::SwapPane(id, side) => self.swap_pane(id, side),
+            MenuAction::FlipPane(id) => self.flip_pane(id),
+            MenuAction::PaneToTab(id, to) => self.move_pane_to_tab(id, to),
             MenuAction::RestartPane(id) => {
                 self.focus_pane(|_| Some(id));
                 self.restart_focused_pane();

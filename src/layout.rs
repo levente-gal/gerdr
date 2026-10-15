@@ -27,6 +27,22 @@ pub enum Side {
     Down,
 }
 
+impl Side {
+    /// The split direction a pane put on this side of another makes.
+    pub fn dir(self) -> Dir {
+        match self {
+            Side::Left | Side::Right => Dir::Right,
+            Side::Up | Side::Down => Dir::Down,
+        }
+    }
+
+    /// Whether a pane put on this side comes first in the split (left of
+    /// or above the other).
+    pub fn before(self) -> bool {
+        matches!(self, Side::Left | Side::Up)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Node {
     Leaf(u32),
@@ -181,6 +197,51 @@ impl Node {
                 first.split(target, new, dir, ratio) || second.split(target, new, dir, ratio)
             }
         }
+    }
+
+    /// Replace the leaf `target` with a split that puts `new` on `side` of
+    /// it: `target` keeps `ratio` of the space, `new` gets the rest.
+    /// Returns whether `target` was found.
+    pub fn split_side(&mut self, target: u32, new: u32, side: Side, ratio: f64) -> bool {
+        // TODO(pane-move): wave 1, layout agent.
+        let _ = (target, new, side, ratio);
+        false
+    }
+
+    /// Swap the leaves `a` and `b`; the splits stay as they are. Returns
+    /// whether both were found (and differ).
+    pub fn swap(&mut self, a: u32, b: u32) -> bool {
+        // TODO(pane-move): wave 1, layout agent.
+        let _ = (a, b);
+        false
+    }
+
+    /// Turn the split the leaf `id` is a direct child of: side by side
+    /// becomes stacked and back. Returns whether `id` has such a split.
+    pub fn flip(&mut self, id: u32) -> bool {
+        // TODO(pane-move): wave 1, layout agent.
+        let _ = id;
+        false
+    }
+
+    /// Take the leaf `id` out of its place (its sibling takes the space)
+    /// and put it on `side` of the leaf `target`, which keeps `ratio` of
+    /// its space. Returns whether both were found (and differ); nothing
+    /// changes otherwise.
+    pub fn move_beside(&mut self, id: u32, target: u32, side: Side, ratio: f64) -> bool {
+        // TODO(pane-move): wave 1, layout agent.
+        let _ = (id, target, side, ratio);
+        false
+    }
+
+    /// Take the leaf `id` out of its place and put it along the whole
+    /// edge on `side` of the layout; the rest keeps `ratio` of the space.
+    /// Returns whether it moved: `false` if `id` is missing, alone, or
+    /// already the whole edge.
+    pub fn move_to_edge(&mut self, id: u32, side: Side, ratio: f64) -> bool {
+        // TODO(pane-move): wave 1, layout agent.
+        let _ = (id, side, ratio);
+        false
     }
 
     /// The layout that puts the panes where `rects` has them (as herdr reports
