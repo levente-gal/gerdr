@@ -22,8 +22,6 @@ pub struct Fade {
 }
 
 impl Fade {
-    // The hover pills and the pane bars' slide take this up.
-    #[allow(dead_code)]
     pub fn new(start: Instant, dur: Duration, rising: bool) -> Self {
         Self { start, dur, rising }
     }
@@ -56,8 +54,6 @@ impl Fade {
 }
 
 /// `a` (0 to 1) as one of `STEPS` steps, for a cache key.
-// The hover pills, drawn into their surface's buffer, key on it.
-#[allow(dead_code)]
 pub fn quantize(a: f32) -> u8 {
     (a.clamp(0.0, 1.0) * STEPS).round() as u8
 }

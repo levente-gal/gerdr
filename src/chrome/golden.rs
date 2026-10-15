@@ -434,7 +434,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0xd96c0e91486d107f, // sidebar
-        0xcb4e78de6f504790, // tab_strip
+        0x35a1890943b945e0, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
@@ -448,7 +448,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 2
     [
         0xaa3158f18eda4bcf, // sidebar
-        0xc4ac766e3cb8d713, // tab_strip
+        0x057804639bd5f3d2, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
@@ -462,7 +462,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Light at 1
     [
         0x84b44a8448370608, // sidebar
-        0x4dc2b2bd8fa87ec4, // tab_strip
+        0x76286b9148f6cf2c, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
@@ -476,7 +476,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Light at 2
     [
         0x0f382036496e732a, // sidebar
-        0x24e49e86c6d850ca, // tab_strip
+        0xb977630fd30a1f46, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
@@ -580,7 +580,7 @@ fn dump(dir: &std::path::Path, name: &str, mut buffer: MemoryRenderBuffer, w: us
     let _ = buffer.render().draw(|mem| {
         let h = mem.len() / 4 / w;
         out.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
-        for px in mem.chunks_exact(4) {
+        for px in mem.as_chunks::<4>().0 {
             let a = px[3] as u32;
             // Premultiplied over a grey ground.
             for c in [px[2], px[1], px[0]] {
