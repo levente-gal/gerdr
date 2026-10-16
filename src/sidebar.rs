@@ -3,7 +3,7 @@
 //! its context menus, and what moves in it (see `chrome::sidebar` for what
 //! it shows).
 
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use smithay::utils::{Logical, Point};
 
@@ -12,13 +12,42 @@ use crate::{
     anim::quantize,
     chrome::{
         self, AgentView, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState,
-        WorkspaceView,
+        TooltipRow, WorkspaceView,
     },
+    git::Worktree,
+    home_dir,
     input::{BTN_LEFT, BTN_MIDDLE},
     menu::{MenuAction, MenuItem, MenuSpec},
+    paths,
     rename::RenameTarget,
     tooltip::Tooltip,
 };
+
+/// The tooltip listing a workspace's other `worktrees`, about `anchor`:
+/// how many, then a line each with its state and where it is, from `root`
+/// (the workspace's own worktree) when inside it.
+fn worktrees_tooltip(worktrees: &[Worktree], root: Option<&Path>, anchor: Rect) -> Tooltip {
+    let home = home_dir();
+    let place = |path: &Path| match root.and_then(|r| path.strip_prefix(r).ok()) {
+        Some(rest) => rest.display().to_string(),
+        None => paths::display(path, home.as_deref(), 40),
+    };
+    let rows = worktrees
+        .iter()
+        .map(|w| TooltipRow {
+            name: w.name(),
+            dirty: w.dirty,
+            // The row's word for one needing a look; else it is merged.
+            tag: Some(w.tag().into()),
+            path: place(&w.path),
+        })
+        .collect();
+    let text = match worktrees.len() {
+        1 => "1 other worktree".to_owned(),
+        n => format!("{n} other worktrees"),
+    };
+    Tooltip::new(&text, anchor).rows(rows)
+}
 
 impl Gerdr {
     /// Where the sidebar's parts sit, at the configured density.
@@ -67,6 +96,7 @@ impl Gerdr {
             .map(|i| RowState {
                 hover: quantize(hover.alpha(SidebarHit::Row(i), now)),
                 close: hit == Some(SidebarHit::Close(i)),
+                worktrees: hit == Some(SidebarHit::Worktrees(i)),
             })
             .collect();
         let cards = agents
@@ -128,6 +158,19 @@ impl Gerdr {
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
+            (SidebarHit::Worktrees(i), BTN_LEFT) => {
+                let dir = self.workspaces.get(i).map(|ws| ws.dir.clone());
+                self.open_worktrees(dir);
+            }
+            (SidebarHit::Attention(i, k), BTN_LEFT) => {
+                // The worktree on that line, else (on "+N more") the row's.
+                let picked = self.workspace_views().get(i).and_then(|ws| {
+                    let needing = ws.0.needing_attention();
+                    needing.get(k).map(|wt| wt.path.clone())
+                });
+                let dir = picked.or_else(|| self.workspaces.get(i).map(|ws| ws.dir.clone()));
+                self.open_worktrees(dir);
+            }
             (SidebarHit::Row(i) | SidebarHit::Name(i) | SidebarHit::Chip(i), BTN_LEFT) => {
                 self.switch_workspace(i);
                 self.hold(Reorderable::Workspace);
@@ -200,7 +243,30 @@ impl Gerdr {
                 let rect = layout.cards[i].iter().find(|(c, _)| *c == k)?.1;
                 Some(Tooltip::new(&card.summary(), rect))
             }
-            SidebarHit::Header | SidebarHit::Row(_) => None,
+            SidebarHit::Worktrees(i) => {
+                let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
+                let root = ws.0.git.as_ref().and_then(|g| g.root.as_deref());
+                // Below the whole row, clear of the lines it explains.
+                row.worktrees?;
+                Some(worktrees_tooltip(ws.0.worktrees(), root, row.rect))
+            }
+            SidebarHit::Attention(i, _) => {
+                let lines = layout.rows.get(i)?.attention?;
+                let tip = Tooltip::new("Review, merge or delete", lines);
+                Some(match self.keymap.help().key_for("worktrees", 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
+                })
+            }
+            SidebarHit::Row(i) => {
+                // Without line 2 (compact) the row itself lists them.
+                let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
+                let (worktrees, git) = (ws.0.worktrees(), ws.0.git.as_ref());
+                let root = git.and_then(|g| g.root.as_deref());
+                (row.worktrees.is_none() && !worktrees.is_empty())
+                    .then(|| worktrees_tooltip(worktrees, root, row.rect))
+            }
+            SidebarHit::Header => None,
         }
     }
 
@@ -234,18 +300,20 @@ impl Gerdr {
                     Some(key) => item.hint(&key),
                     None => item,
                 };
-                Some(MenuSpec {
-                    anchor: at,
-                    items: vec![
-                        hinted(MenuItem::new("New tab", MenuAction::NewTab(i)), "new tab"),
-                        MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
-                        MenuItem::new("Copy path", MenuAction::CopyPath(dir)),
-                        hinted(
-                            MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
-                            "close workspace",
-                        ),
-                    ],
-                })
+                let mut items = vec![
+                    hinted(MenuItem::new("New tab", MenuAction::NewTab(i)), "new tab"),
+                    MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
+                    MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
+                ];
+                if self.git.get(&dir).is_some_and(|g| !g.worktrees.is_empty()) {
+                    let item = MenuItem::new("Worktrees…", MenuAction::Worktrees(dir));
+                    items.push(hinted(item, "worktrees"));
+                }
+                items.push(hinted(
+                    MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
+                    "close workspace",
+                ));
+                Some(MenuSpec { anchor: at, items })
             }
         }
     }

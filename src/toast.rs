@@ -22,8 +22,9 @@ use crate::{
     menu::MenuAction,
 };
 
-/// How long a toast stays.
+/// How long a toast stays; one with a button, longer, to reach it.
 pub const TOAST_TIME: Duration = Duration::from_secs(4);
+const ACTION_TOAST_TIME: Duration = Duration::from_secs(10);
 /// How long a toast that goes keeps its place: as long as its fade out
 /// (`FAST`), with room for the frame that fade starts on.
 const LEAVE_TIME: Duration = FAST.saturating_mul(2);
@@ -118,13 +119,19 @@ impl Gerdr {
         self.toast_with(text, level, None);
     }
 
-    /// Show `text` for `TOAST_TIME`, with a button doing `action`.
+    /// Show `text` for `TOAST_TIME`, with a button doing `action` (then
+    /// for `ACTION_TOAST_TIME`).
     pub fn toast_with(&mut self, text: String, level: Level, action: Option<(String, MenuAction)>) {
         let now = Instant::now();
+        let time = if action.is_some() {
+            ACTION_TOAST_TIME
+        } else {
+            TOAST_TIME
+        };
         let button_w = action
             .as_ref()
             .map_or(0, |(label, _)| self.chrome.toast_button_width(label));
-        let toast = Toast::new(text, level, action, button_w, now + TOAST_TIME);
+        let toast = Toast::new(text, level, action, button_w, now + time);
         enqueue(&mut self.toasts, toast, now);
         // Gone from the next frame, as every frame draws the chrome.
         let clear = move |_, _: &mut (), state: &mut Gerdr| {
@@ -133,7 +140,7 @@ impl Gerdr {
         };
         if let Err(err) = self
             .loop_handle
-            .insert_source(Timer::from_duration(TOAST_TIME), clear)
+            .insert_source(Timer::from_duration(time), clear)
         {
             // `chrome_view` leaves it out once it is past anyway.
             tracing::warn!("timing the toast out: {err}");

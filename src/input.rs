@@ -49,7 +49,7 @@ use crate::{
     switcher::Target,
     text_field::{self, TextField},
     toast::ToastHit,
-    welcome,
+    welcome, worktrees,
 };
 
 /// What a press or the pointer lands on in gerdr's own chrome, as far as
@@ -93,6 +93,8 @@ enum Intercepted {
     ProjectMenu(project_menu::Outcome),
     /// The quit dialog asked for this.
     Quit(quit::Outcome),
+    /// The worktrees popup asked for this.
+    Worktrees(worktrees::Outcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -100,6 +102,7 @@ enum Intercepted {
 pub enum Overlay {
     Welcome,
     ProjectMenu,
+    Worktrees,
     /// The switcher of this serial: not one opened after it.
     Switcher(u64),
 }
@@ -230,6 +233,25 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::ProjectMenu));
                         }
+                        if state.worktrees.is_open() {
+                            state.suppressed_keys.push(code);
+                            if state.prefix_armed {
+                                state.prefix_armed = false;
+                                let action =
+                                    state.keymap.action(mods, sym).filter(over_project_menu);
+                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                            }
+                            if state.keymap.is_prefix(mods, sym) {
+                                state.prefix_armed = true;
+                                return FilterResult::Intercept(None);
+                            }
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.worktrees_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
+                            return FilterResult::Intercept(out.map(Intercepted::Worktrees));
+                        }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
@@ -305,8 +327,10 @@ impl Gerdr {
                     self.drag_field(pos);
                 }
                 // An overlay takes the hover from everything under it.
-                let overlay =
-                    self.quit.is_some() || self.welcome.is_some() || self.project_menu.is_some();
+                let overlay = self.quit.is_some()
+                    || self.welcome.is_some()
+                    || self.project_menu.is_some()
+                    || self.worktrees.is_open();
                 // The project menu has a tooltip of its own (on Browse).
                 let mut menu_tip = None;
                 if self.quit.is_some() {
@@ -315,6 +339,8 @@ impl Gerdr {
                     self.welcome_hover(pos);
                 } else if self.project_menu.is_some() {
                     menu_tip = self.project_menu_hover(pos);
+                } else if self.worktrees.is_open() {
+                    self.worktrees_hover(pos);
                 } else if self.context_menu.is_some() {
                     self.menu_motion(pos);
                 } else if self.switcher.is_some() {
@@ -410,7 +436,8 @@ impl Gerdr {
                 if state == ButtonState::Released
                     && (self.quit.is_some()
                         || self.welcome.is_some()
-                        || self.project_menu.is_some())
+                        || self.project_menu.is_some()
+                        || self.worktrees.is_open())
                 {
                     if pointer.is_grabbed() {
                         pointer.button(
@@ -457,7 +484,10 @@ impl Gerdr {
                 // Nothing scrolls behind an overlay; the project menu's and
                 // the switcher's lists move a row per notch of the wheel, or
                 // per row's height scrolled on a touchpad.
-                if self.project_menu.is_some() || self.switcher.is_some() {
+                if self.project_menu.is_some()
+                    || self.switcher.is_some()
+                    || self.worktrees.is_open()
+                {
                     let rows = event
                         .amount_v120(Axis::Vertical)
                         .map(|v120| v120 / 120.0)
@@ -466,6 +496,8 @@ impl Gerdr {
                     if rows != 0.0 {
                         if self.project_menu.is_some() {
                             self.project_menu_scroll(rows);
+                        } else if self.worktrees.is_open() {
+                            self.worktrees_scroll(rows);
                         } else {
                             self.switcher_scroll(rows);
                         }
@@ -534,6 +566,13 @@ impl Gerdr {
         if self.project_menu.is_some() {
             if button == BTN_LEFT {
                 self.project_menu_click(location);
+                self.press_field(location);
+            }
+            return true;
+        }
+        if self.worktrees.is_open() {
+            if button == BTN_LEFT {
+                self.worktrees_click(location);
                 self.press_field(location);
             }
             return true;
@@ -688,6 +727,15 @@ impl Gerdr {
         if self.welcome.is_some() || self.project_menu.is_some() {
             return RegionHit::Nothing;
         }
+        if let Some(view) = self.worktrees_view() {
+            let layout = chrome::worktrees_layout(&view, output);
+            let mut rows = layout.entries.iter();
+            return if rows.any(|(rect, _)| rect.to_f64().contains(pos)) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
         if let Some(switcher) = self.switcher_view() {
             let rows = chrome::switcher_geometry(&switcher, self.content_rect()).rows;
             return if rows.iter().any(|row| row.to_f64().contains(pos)) {
@@ -796,6 +844,7 @@ impl Gerdr {
             Intercepted::Welcome(outcome) => self.apply_welcome(outcome),
             Intercepted::ProjectMenu(outcome) => self.apply_project_menu(outcome),
             Intercepted::Quit(outcome) => self.apply_quit(outcome),
+            Intercepted::Worktrees(outcome) => self.apply_worktrees(outcome),
         }
     }
 
@@ -808,6 +857,8 @@ impl Gerdr {
             Some(Overlay::Welcome)
         } else if self.project_menu.is_some() {
             Some(Overlay::ProjectMenu)
+        } else if self.worktrees.is_open() {
+            Some(Overlay::Worktrees)
         } else {
             self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial))
         }
@@ -840,6 +891,9 @@ impl Gerdr {
             Overlay::ProjectMenu => self
                 .project_menu_key(mods, sym, typed)
                 .map(Intercepted::ProjectMenu),
+            Overlay::Worktrees => self
+                .worktrees_key(mods, sym, typed)
+                .map(Intercepted::Worktrees),
             Overlay::Switcher(_) => self
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
@@ -855,6 +909,11 @@ impl Gerdr {
             Overlay::ProjectMenu => {
                 chrome::project_menu_field(&self.project_menu_view()?, size, scale)
             }
+            Overlay::Worktrees => Some(chrome::worktrees_field(
+                &self.worktrees_view()?,
+                size,
+                scale,
+            )),
             Overlay::Switcher(_) => Some(chrome::switcher_field(
                 &self.switcher_view()?,
                 self.content_rect(),
@@ -868,6 +927,7 @@ impl Gerdr {
         match self.text_overlay()? {
             Overlay::Welcome => self.welcome.as_mut()?.field_mut(),
             Overlay::ProjectMenu => self.project_menu.as_mut()?.field_mut(),
+            Overlay::Worktrees => self.worktrees.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
         }
     }

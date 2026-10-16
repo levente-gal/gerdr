@@ -35,6 +35,7 @@ mod theme;
 mod toast;
 mod tooltip;
 mod welcome;
+mod worktrees;
 
 use std::time::Instant;
 
@@ -71,6 +72,7 @@ pub use theme::*;
 pub use toast::*;
 pub use tooltip::*;
 pub use welcome::*;
+pub use worktrees::*;
 
 pub(crate) type Rect = Rectangle<i32, Logical>;
 
@@ -120,6 +122,8 @@ pub struct ChromeView {
     pub quit: Option<QuitView>,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
+    /// Set while the worktrees popup is open.
+    pub worktrees: Option<WorktreesView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
@@ -153,6 +157,7 @@ pub struct Chrome {
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
     project_menu: Overlay<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
+    worktrees: Overlay<(WorktreesView, Size<i32, Logical>, Theme, f64)>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -191,6 +196,7 @@ impl Chrome {
             welcome: Overlay::default(),
             quit: Overlay::default(),
             project_menu: Overlay::default(),
+            worktrees: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -287,6 +293,18 @@ impl Chrome {
             return render_parts(renderer, parts, scale);
         }
 
+        // The worktrees popup, over the sidebar and the apps.
+        let worktrees = view.worktrees.map(|popup| {
+            let (loc, size) = shadowed(worktrees_layout(&popup, output).panel);
+            ((popup, output, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.worktrees
+                .part(worktrees, now, true, |(popup, output, ..)| {
+                    painter.worktrees(popup, *output, scale, theme.palette())
+                }),
+        );
+
         // The project menu reaches over the sidebar and the apps.
         let project_menu = view.project_menu.map(|menu| {
             let (loc, size) = shadowed(project_menu_layout(&menu, output).panel);
@@ -325,7 +343,8 @@ impl Chrome {
         // The tooltip, by what it is about.
         let tooltip = view.tooltip.map(|tip| {
             let w = painter.tooltip_width(&tip, output.w - 2 * HELP_MARGIN, scale);
-            let (loc, size) = shadowed(tooltip_layout(tip.anchor, w, output));
+            let size = (w, tip.height()).into();
+            let (loc, size) = shadowed(tooltip_layout(tip.anchor, size, output));
             ((tip, w, theme, scale), loc, size)
         });
         parts.extend(self.tooltip.part(tooltip, now, true, |(tip, w, ..)| {
@@ -718,6 +737,12 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     }
     if let Some(switcher) = &view.switcher {
         rects.extend(switcher_geometry(switcher, area).rows);
+    }
+    if let Some(popup) = &view.worktrees {
+        for (rect, buttons) in worktrees_layout(popup, output).entries {
+            rects.push(rect);
+            rects.extend(buttons.into_iter().map(|(_, rect)| rect));
+        }
     }
     if view.quit.is_some() {
         let quit = quit_layout(output);

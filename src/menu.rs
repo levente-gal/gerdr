@@ -58,6 +58,11 @@ pub enum MenuAction {
     CloseExpected(u32),
     /// Open the run prompt for an app in `place`.
     RunApp(crate::launch::Place),
+    /// Open the worktrees popup, the repository of the workspace in this
+    /// folder first.
+    Worktrees(PathBuf),
+    /// Delete the worktree in this folder, squashed in: it loses nothing.
+    DeleteWorktree(PathBuf),
 }
 
 /// One row of a menu.
@@ -285,6 +290,8 @@ impl Gerdr {
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
             MenuAction::CloseExpected(pane) => self.close_expected(pane),
             MenuAction::RunApp(place) => self.open_run_prompt(place),
+            MenuAction::Worktrees(dir) => self.open_worktrees(Some(dir)),
+            MenuAction::DeleteWorktree(path) => self.delete_merged_worktree(&path),
         }
     }
 }

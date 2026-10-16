@@ -10,7 +10,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
     Gerdr,
-    chrome::{Rect, TooltipView},
+    chrome::{Rect, TooltipRow, TooltipView},
 };
 
 /// How long the pointer rests on something before its tooltip shows.
@@ -23,6 +23,8 @@ pub struct Tooltip {
     /// The key that does the same, shown as a keycap.
     pub key: Option<String>,
     pub anchor: Rect,
+    /// A list under the text, a line each.
+    pub rows: Vec<TooltipRow>,
 }
 
 impl Tooltip {
@@ -31,11 +33,17 @@ impl Tooltip {
             text: text.into(),
             key: None,
             anchor,
+            rows: Vec::new(),
         }
     }
 
     pub fn key(mut self, key: &str) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    pub fn rows(mut self, rows: Vec<TooltipRow>) -> Self {
+        self.rows = rows;
         self
     }
 }
@@ -106,6 +114,7 @@ impl TooltipState {
             text: tip.text.clone(),
             key: tip.key.clone(),
             anchor: tip.anchor,
+            rows: tip.rows.clone(),
         })
     }
 }

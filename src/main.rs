@@ -44,6 +44,7 @@ mod toast;
 mod tooltip;
 mod web_pages;
 mod welcome;
+mod worktrees;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -894,6 +895,9 @@ pub enum Action {
     FlipPane,
     /// Move the focused pane to a new tab of the workspace.
     PaneToNewTab,
+    /// Open the worktrees popup, to review, merge and delete the
+    /// repositories' worktrees.
+    Worktrees,
     /// Ask whether to keep the project running, and quit.
     Quit,
 }
@@ -1007,6 +1011,12 @@ pub struct Gerdr {
     pub web_pending: bool,
     /// A round of reading the Git status is still running.
     pub git_pending: bool,
+    /// Another round is wanted once it is done.
+    pub git_again: bool,
+    /// Hands a round's Git status to the event loop (see `watch_git`).
+    git_read: Option<channel::Sender<HashMap<PathBuf, git::GitStatus>>>,
+    /// The worktrees popup and what is being done to worktrees.
+    pub worktrees: worktrees::Worktrees,
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
@@ -1352,8 +1362,23 @@ impl Gerdr {
         t: Option<usize>,
         split: Dir,
     ) -> Option<(u32, Option<herdr::PaneInfo>)> {
-        let dir = self.workspaces[w].dir.clone();
-        let pane = self.new_herdr_pane(w, t, split);
+        self.start_terminal_running(w, t, split, None)
+    }
+
+    /// `start_terminal`, its shell running `run`'s command in `run`'s
+    /// folder.
+    fn start_terminal_running(
+        &mut self,
+        w: usize,
+        t: Option<usize>,
+        split: Dir,
+        run: Option<(PathBuf, String)>,
+    ) -> Option<(u32, Option<herdr::PaneInfo>)> {
+        let dir = match &run {
+            Some((cd, _)) => cd.clone(),
+            None => self.workspaces[w].dir.clone(),
+        };
+        let pane = self.new_herdr_pane(w, t, split, run.clone());
         let pid = match &pane {
             Some(pane) => self.attach(pane, &dir),
             None => {
@@ -1361,6 +1386,9 @@ impl Gerdr {
                 term.arg("--working-directory")
                     .arg(&dir)
                     .args(self.theme().palette().alacritty_options());
+                if let Some((_, command)) = &run {
+                    term.args(["-e", "sh", "-c", command]);
+                }
                 self.spawn(term, &dir, "alacritty")
             }
         };
@@ -1377,6 +1405,7 @@ impl Gerdr {
         w: usize,
         t: Option<usize>,
         split: Dir,
+        run: Option<(PathBuf, String)>,
     ) -> Option<herdr::PaneInfo> {
         let env = self.herdr.as_ref()?.pane_env(&self.socket_name);
         let ws = &self.workspaces[w];
@@ -1412,8 +1441,8 @@ impl Gerdr {
             ws_dir: dir,
             venv,
             captured_env: Vec::new(),
-            cd: None,
-            command: None,
+            cd: run.as_ref().map(|(cd, _)| cd.clone()),
+            command: run.map(|(_, command)| command),
         };
         prepare::spawn_prepare(socket, vec![prep]);
         Some(pane)
@@ -1657,6 +1686,17 @@ impl Gerdr {
                 previous_pane_id,
                 pane,
             } => {
+                // herdr keeps the pane's id on a move. One gerdr moved
+                // itself (see `pane_moves`) shows in its new tab already.
+                let shown = self
+                    .workspaces
+                    .iter()
+                    .flat_map(|ws| &ws.tabs)
+                    .flat_map(Tab::herdr_panes)
+                    .any(|p| p.pane_id == pane.pane_id && p.tab_id == pane.tab_id);
+                if shown {
+                    return;
+                }
                 // Shown elsewhere now: close the old window, then show the
                 // pane where it went.
                 for (window, pid) in self.forget_herdr_pane(&previous_pane_id) {
@@ -1928,22 +1968,19 @@ impl Gerdr {
             if let channel::Event::Msg(git) = event {
                 state.git = git;
                 state.git_pending = false;
+                state.worktrees_read();
+                if std::mem::take(&mut state.git_again) {
+                    state.refresh_git();
+                }
             }
         });
+        self.git_read = Some(tx);
         let timer = self
             .loop_handle
             .insert_source(Timer::immediate(), move |_, _, state| {
                 // A round can outlast the interval in a big repository.
                 if !state.git_pending {
-                    state.git_pending = true;
-                    let mut dirs: Vec<PathBuf> =
-                        state.workspaces.iter().map(|ws| ws.dir.clone()).collect();
-                    dirs.sort();
-                    dirs.dedup();
-                    let tx = tx.clone();
-                    git::read_all(dirs, move |git| {
-                        let _ = tx.send(git);
-                    });
+                    state.refresh_git();
                 }
                 TimeoutAction::ToDuration(GIT_INTERVAL)
             });
@@ -1953,6 +1990,25 @@ impl Gerdr {
         {
             tracing::warn!("git status: {err}");
         }
+    }
+
+    /// Read the Git status of the workspace folders now, off the event
+    /// loop; once the round under way is done, if there is one.
+    pub fn refresh_git(&mut self) {
+        let Some(tx) = self.git_read.clone() else {
+            return;
+        };
+        if self.git_pending {
+            self.git_again = true;
+            return;
+        }
+        self.git_pending = true;
+        let mut dirs: Vec<PathBuf> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
+        dirs.sort();
+        dirs.dedup();
+        git::read_all(dirs, move |git| {
+            let _ = tx.send(git);
+        });
     }
 
     /// Ask the browsers where the web pages' windows are now and every
@@ -2878,6 +2934,26 @@ impl Gerdr {
         self.show_active();
     }
 
+    /// Open a tab in workspace `w` whose shell runs `command` in `cd`, and
+    /// show it.
+    pub fn new_tab_running(&mut self, w: usize, cd: &Path, command: String) {
+        if w >= self.workspaces.len() {
+            return;
+        }
+        if w != self.active_workspace {
+            self.switch_workspace(w);
+        }
+        let run = Some((cd.to_path_buf(), command));
+        let Some((pid, herdr)) = self.start_terminal_running(w, None, Dir::Right, run) else {
+            return;
+        };
+        let id = self.new_pane_id();
+        let ws = &mut self.workspaces[w];
+        ws.tabs.push(Tab::terminal(pid, id, herdr));
+        ws.active_tab = ws.tabs.len() - 1;
+        self.show_active();
+    }
+
     /// Split the focused pane like herdr: it keeps the left or top half, a
     /// new terminal in the workspace folder gets the other and the focus.
     pub fn split_pane(&mut self, dir: Dir) {
@@ -2996,6 +3072,7 @@ impl Gerdr {
                     self.move_pane_to_tab(id, None);
                 }
             }
+            Action::Worktrees => self.open_worktrees(None),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -3730,7 +3807,11 @@ impl Gerdr {
             .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
         let reordering = self.reorder.is_some_and(|r| r.moving);
         // These take every click.
-        if self.quit.is_some() || self.welcome.is_some() || self.project_menu.is_some() {
+        if self.quit.is_some()
+            || self.welcome.is_some()
+            || self.project_menu.is_some()
+            || self.worktrees.is_open()
+        {
             return None;
         }
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
@@ -3966,6 +4047,7 @@ impl Gerdr {
         self.stop_key_repeat();
         self.switcher = None;
         self.project_menu = None;
+        self.worktrees.close();
         self.header_hover = false;
         self.project = None;
         self.focus(None);
@@ -4517,6 +4599,7 @@ impl Gerdr {
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             project_menu: self.project_menu_view(),
+            worktrees: self.worktrees_view(),
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
             theme: self.theme(),
@@ -4759,6 +4842,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         herdr_tabs: HashMap::new(),
         git: HashMap::new(),
         git_pending: false,
+        git_again: false,
+        git_read: None,
+        worktrees: worktrees::Worktrees::default(),
         web_pending: false,
         notifier: None,
         blocked_since: HashMap::new(),

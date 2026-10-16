@@ -40,6 +40,9 @@ fn workspaces() -> Vec<WorkspaceView> {
                 dirty: true,
                 ahead: 2,
                 behind: 1,
+                worktrees: Vec::new(),
+                here: None,
+                root: None,
             }),
             place: "gerdr, gerdr/src".into(),
             activity: "2 tabs · claude working, zsh".into(),
@@ -63,6 +66,7 @@ fn agents() -> Vec<Vec<AgentView>> {
             status: AgentStatus::Blocked,
             kind: "claude".into(),
             name: Some("reviewer".into()),
+            model: None,
             lines: vec![
                 AgentLine::Title("Reviewing the split".into()),
                 AgentLine::Field("cwd".into(), "gerdr/src".into()),
@@ -158,6 +162,7 @@ fn tooltip() -> TooltipView {
         text: "Restart what runs here".into(),
         key: Some("Ctrl+B a".into()),
         anchor: Rect::new((300, 48).into(), (24, 24).into()),
+        rows: Vec::new(),
     }
 }
 

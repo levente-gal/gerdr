@@ -3,7 +3,9 @@
 //!
 //! A workspace row is two lines: its name with a status chip at the right
 //! (one dot and a word for the most pressing agent, a filled badge with a
-//! count when agents are blocked), then its branch and place. Under it, a
+//! count when agents are blocked), then its branch and place, and at the
+//! right how many other worktrees its repository has; then a line per
+//! worktree that needs a look (a few at most). Under it, a
 //! compact card per agent: a header line and a detail line, the most
 //! pressing first. The header holds the project's name and one "+" button
 //! opening the menu of what to add. What moves (hover pills, the pulse on
@@ -20,7 +22,7 @@ use super::{
     status_mark, terminal,
 };
 use crate::WorkspaceKind;
-use crate::git::GitStatus;
+use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
 use crate::text_field::Line;
@@ -38,6 +40,13 @@ const CHIP_WIDTH: i32 = 66;
 const CHIP_SLOT: i32 = CHIP_WIDTH - CLOSE_WIDTH;
 /// The chip's inner padding, and the gap between its dot and its word.
 const CHIP_PADDING: i32 = 6;
+/// Room for the count of other worktrees at the right end of line 2.
+const WORKTREE_COUNT_WIDTH: i32 = 30;
+/// How far the count's hover pill reaches past it on each side.
+const COUNT_PILL_PAD: i32 = 4;
+/// The most lines a row gives worktrees that need a look; a last line
+/// counts the rest.
+const WORKTREE_LINES: usize = 3;
 const CHIP_DOT: i32 = 8;
 const CHIP_GAP: i32 = 4;
 /// The gap between the header's name pill and its "+" button.
@@ -96,6 +105,8 @@ pub struct AgentView {
     /// How herdr names its kind, and the name it was given.
     pub kind: String,
     pub name: Option<String>,
+    /// The model it runs, as its status line reports it to herdr.
+    pub model: Option<String>,
     pub lines: Vec<AgentLine>,
 }
 
@@ -153,22 +164,32 @@ impl AgentView {
                 lines.push(field("agent", session.agent.clone()));
             }
         }
-        lines.extend(info.tokens.iter().map(|(k, v)| field(k, v.clone())));
+        let model = info.tokens.get("model").filter(|m| !m.is_empty()).cloned();
+        lines.extend(
+            info.tokens
+                .iter()
+                .filter(|(k, _)| *k != "model")
+                .map(|(k, v)| field(k, v.clone())),
+        );
         Self {
             pane_id: info.pane_id.clone(),
             status: info.agent_status,
             kind,
             name: info.name.clone(),
+            model,
             lines,
         }
     }
 
-    /// What the card calls the agent: its kind, and its name after it.
+    /// What the card calls the agent: its kind, then its name and its
+    /// model.
     pub fn label(&self) -> String {
-        match &self.name {
-            Some(name) => format!("{} · {name}", self.kind),
-            None => self.kind.clone(),
-        }
+        [Some(&self.kind), self.name.as_ref(), self.model.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// The card's detail line: the folder it is in (its last component)
@@ -315,9 +336,31 @@ impl WorkspaceView {
     pub fn height(&self, density: Density) -> i32 {
         let title = self.title_height(density);
         if density == Density::Comfortable && self.has_detail() {
-            title + TAB_LINE + ROW_BOTTOM
+            title + TAB_LINE * (1 + self.attention_lines() as i32) + ROW_BOTTOM
         } else {
             title
+        }
+    }
+
+    /// The other worktrees of its folder's repository.
+    pub fn worktrees(&self) -> &[Worktree] {
+        self.git.as_ref().map_or(&[], |g| &g.worktrees)
+    }
+
+    /// Those of them that need a look: unmerged, changed or gone.
+    pub fn needing_attention(&self) -> Vec<&Worktree> {
+        let all = self.worktrees().iter();
+        all.filter(|w| w.needs_attention()).collect()
+    }
+
+    /// How many lines those take under line 2: one each up to
+    /// `WORKTREE_LINES`, and one counting the rest.
+    fn attention_lines(&self) -> usize {
+        let n = self.needing_attention().len();
+        if n > WORKTREE_LINES {
+            WORKTREE_LINES + 1
+        } else {
+            n
         }
     }
 }
@@ -351,11 +394,12 @@ pub fn blocked_count(cards: &[AgentView]) -> usize {
 }
 
 /// What moves in a workspace row: its hover pill's alpha (0 to 16) and
-/// whether the pointer is on its "×".
+/// whether the pointer is on its "×", on its worktree count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowState {
     pub hover: u8,
     pub close: bool,
+    pub worktrees: bool,
 }
 
 /// What moves in an agent card: its hover pill's alpha and, while blocked,
@@ -425,6 +469,12 @@ pub struct RowLayout {
     pub chip: Option<Rect>,
     /// Its "×" close button.
     pub close: Rect,
+    /// The count of its other worktrees on line 2, when it has any and
+    /// line 2 shows.
+    pub worktrees: Option<Rect>,
+    /// The lines under line 2 of the worktrees needing a look, when it
+    /// shows any.
+    pub attention: Option<Rect>,
 }
 
 impl RowLayout {
@@ -462,11 +512,15 @@ pub enum SidebarHit {
     /// The "+" button.
     Plus,
     /// Workspace `i`: its row off any part below, its name, its status
-    /// chip, its "×".
+    /// chip, its "×", the count of its other worktrees.
     Row(usize),
     Name(usize),
     Chip(usize),
     Close(usize),
+    Worktrees(usize),
+    /// Line `k` of workspace `i`'s worktrees needing a look: the worktree
+    /// `k` of `WorkspaceView::needing_attention`, or the "+N more" line.
+    Attention(usize, usize),
     /// Card `k` (as the data lists it) of workspace `i`.
     Card(usize, usize),
 }
@@ -475,7 +529,12 @@ impl SidebarHit {
     /// The row a hit on any part of workspace `i` belongs to.
     pub fn row(self) -> Option<usize> {
         match self {
-            Self::Row(i) | Self::Name(i) | Self::Chip(i) | Self::Close(i) => Some(i),
+            Self::Row(i)
+            | Self::Name(i)
+            | Self::Chip(i)
+            | Self::Close(i)
+            | Self::Worktrees(i)
+            | Self::Attention(i, _) => Some(i),
             _ => None,
         }
     }
@@ -507,6 +566,10 @@ impl SidebarLayout {
         let (i, row) = self.rows.iter().enumerate().find(|(_, r)| inside(r.rect))?;
         Some(if inside(row.close) {
             SidebarHit::Close(i)
+        } else if row.worktrees.is_some_and(inside) {
+            SidebarHit::Worktrees(i)
+        } else if let Some(lines) = row.attention.filter(|r| inside(*r)) {
+            SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
         } else if row.chip.is_some_and(inside) {
             SidebarHit::Chip(i)
         } else if inside(row.name) {
@@ -571,12 +634,31 @@ pub fn sidebar_layout_at(
             (name_x, y).into(),
             ((name_end - name_x).max(0), title_h).into(),
         );
+        let worktrees =
+            (density == Density::Comfortable && ws.has_detail() && !ws.worktrees().is_empty())
+                .then(|| {
+                    let x = width - GAP - ROW_INSET - PADDING as i32 - WORKTREE_COUNT_WIDTH;
+                    Rectangle::new(
+                        (x, y + title_h).into(),
+                        (WORKTREE_COUNT_WIDTH, TAB_LINE).into(),
+                    )
+                });
+        let lines = ws.attention_lines() as i32;
+        let attention =
+            (density == Density::Comfortable && ws.has_detail() && lines > 0).then(|| {
+                Rectangle::new(
+                    (ROW_INSET, y + title_h + TAB_LINE).into(),
+                    (width - GAP - 2 * ROW_INSET, lines * TAB_LINE).into(),
+                )
+            });
         rows.push(RowLayout {
             rect,
             title,
             name,
             chip,
             close,
+            worktrees,
+            attention,
         });
         y += h;
         let cards = agents.get(i).unwrap_or(&none);
@@ -758,9 +840,112 @@ impl Painter {
                 icon_sdf(&mut c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
             }
 
-            // Line 2: Git branch and marks, then the place, in comfortable density.
+            // The count of its other worktrees at the right end of line 2;
+            // hovering it lists them, on a pill as it opens the popup.
+            if let Some(count) = row.worktrees {
+                let n = ws.worktrees().len().to_string();
+                let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
+                let end = count.loc.x + count.size.w;
+                let icon = Rectangle::new(
+                    (end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH, count.loc.y).into(),
+                    (BRANCH_ICON_WIDTH, count.size.h).into(),
+                );
+                let on = row_state.worktrees;
+                if on {
+                    let pill = Rectangle::new(
+                        (icon.loc.x - COUNT_PILL_PAD, count.loc.y).into(),
+                        (end - icon.loc.x + 2 * COUNT_PILL_PAD, count.size.h).into(),
+                    );
+                    let (x, y, w, h) = rect_px(pill, scale);
+                    let under = fill.unwrap_or(p.panel);
+                    c.rounded(x, y, w, h, 4.0 * s, mix(under, p.text, 0.1));
+                }
+                let (icon_color, n_color) = if on {
+                    (p.text, p.text)
+                } else {
+                    (p.placeholder, p.muted)
+                };
+                icon_sdf(&mut c, icon, scale, icon_color, |x, y| {
+                    git_branch(x, y, 0.75 * s)
+                });
+                self.text(
+                    &mut c,
+                    &n,
+                    DETAIL_FONT_SIZE,
+                    px(end - n_w) as f32,
+                    px(end) as f32,
+                    band(count, scale),
+                    scale,
+                    n_color,
+                );
+            }
+
+            // Under line 2, a line per worktree that needs a look: its name,
+            // a dot when changed, and why ("unmerged", "gone").
             if density == Density::Comfortable && ws.has_detail() {
                 let right = px(row.rect.loc.x + row.rect.size.w - ROW_INSET) as f32 - PADDING * s;
+                let text_x = name_x + ((BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32 * s).round();
+                let needing = ws.needing_attention();
+                for k in 0..ws.attention_lines() {
+                    let line_y = row.title.loc.y + row.title.size.h + TAB_LINE * (1 + k as i32);
+                    let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
+                    let Some(wt) = needing.get(k).filter(|_| k < WORKTREE_LINES) else {
+                        let more = format!("+{} more", needing.len() - WORKTREE_LINES);
+                        self.text(
+                            &mut c,
+                            &more,
+                            DETAIL_FONT_SIZE,
+                            text_x,
+                            right,
+                            band,
+                            scale,
+                            p.placeholder,
+                        );
+                        break;
+                    };
+                    let icon = Rectangle::new(
+                        (row.name.loc.x, line_y).into(),
+                        (BRANCH_ICON_WIDTH, TAB_LINE).into(),
+                    );
+                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
+                        git_branch(x, y, 0.75 * s)
+                    });
+                    let x = self.text(
+                        &mut c,
+                        &wt.name(),
+                        DETAIL_FONT_SIZE,
+                        text_x,
+                        right,
+                        band,
+                        scale,
+                        p.muted,
+                    );
+                    let dirty = GitStatus {
+                        dirty: wt.dirty,
+                        ..GitStatus::default()
+                    };
+                    let x = self.git_marks(&mut c, &dirty, x, right, band, scale, p);
+                    if let Some(tag) = wt.attention_tag() {
+                        self.text(
+                            &mut c,
+                            &format!("  {tag}"),
+                            DETAIL_FONT_SIZE,
+                            x,
+                            right,
+                            band,
+                            scale,
+                            p.placeholder,
+                        );
+                    }
+                }
+            }
+
+            // Line 2: Git branch and marks, then the place, in comfortable density.
+            if density == Density::Comfortable && ws.has_detail() {
+                let right = match row.worktrees {
+                    Some(count) => px(count.loc.x - BRANCH_ICON_GAP) as f32,
+                    None => px(row.rect.loc.x + row.rect.size.w - ROW_INSET) as f32 - PADDING * s,
+                };
                 let line_y = row.title.loc.y + row.title.size.h;
                 let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
                 let mut place_x = name_x;
@@ -1061,7 +1246,7 @@ impl Painter {
             status,
         );
 
-        // Header: status mark, kind and name, status pill.
+        // Header: status mark, kind, name and model, status pill.
         let inner_x = rect.loc.x + CARD_PAD;
         let right = px(rect.loc.x + rect.size.w - CARD_PAD) as f32;
         let band = (px(header_y), px(CARD_HEADER));
@@ -1107,8 +1292,8 @@ impl Painter {
             scale,
             p.text,
         );
-        if let Some(name) = &card.name {
-            self.text(
+        let after = match &card.name {
+            Some(name) => self.text(
                 c,
                 &format!("· {name}"),
                 FONT_SIZE,
@@ -1117,6 +1302,19 @@ impl Painter {
                 band,
                 scale,
                 p.accent,
+            ),
+            None => after,
+        };
+        if let Some(model) = &card.model {
+            self.text(
+                c,
+                &format!("· {model}"),
+                FONT_SIZE,
+                after + px(5) as f32,
+                heading_end,
+                band,
+                scale,
+                p.muted,
             );
         }
 
@@ -1182,6 +1380,7 @@ mod tests {
     };
     use crate::WorkspaceKind;
     use crate::chrome::{BAR_HEIGHT, TabView};
+    use crate::git::{GitStatus, Worktree};
     use crate::herdr::AgentStatus;
 
     #[test]
@@ -1236,11 +1435,59 @@ mod tests {
             status,
             kind: "claude".into(),
             name: None,
+            model: None,
             lines: cwd
                 .map(|cwd| AgentLine::Field("cwd".into(), cwd.into()))
                 .into_iter()
                 .collect(),
         }
+    }
+
+    #[test]
+    fn worktrees_show_as_a_count_on_line_two() {
+        let mut ws = workspace("gerdr", None, Some("main"));
+        let plain = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
+        assert_eq!(plain.rows[0].worktrees, None);
+        let done = Worktree {
+            merged: true,
+            ..Worktree::default()
+        };
+        ws.git = Some(GitStatus {
+            worktrees: vec![done.clone(); 5],
+            ..GitStatus::default()
+        });
+        // Merged and clean: only counted.
+        let height = ROW_TITLE_HEIGHT + TAB_LINE + ROW_BOTTOM;
+        assert_eq!(ws.height(Density::Comfortable), height);
+        // Those needing a look get a line each, up to a count of the rest.
+        let worktrees = &mut ws.git.as_mut().unwrap().worktrees;
+        worktrees[0].dirty = true;
+        worktrees[1].merged = false;
+        assert_eq!(ws.height(Density::Comfortable), height + 2 * TAB_LINE);
+        for w in &mut ws.git.as_mut().unwrap().worktrees {
+            w.merged = false;
+        }
+        assert_eq!(ws.height(Density::Comfortable), height + 4 * TAB_LINE);
+        assert_eq!(ws.height(Density::Compact), ROW_COMPACT);
+        let layout = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
+        let count = layout.rows[0].worktrees.expect("a count");
+        assert_eq!(count.loc.y, ROWS_TOP + ROW_TITLE_HEIGHT);
+        let mid = (count.loc.x as f64 + 5.0, count.loc.y as f64 + 5.0).into();
+        assert_eq!(layout.hit(mid), Some(SidebarHit::Worktrees(0)));
+        assert_eq!(SidebarHit::Worktrees(0).pill(), SidebarHit::Row(0));
+        // Compact rows have no line 2 to put it on.
+        let compact = sidebar_layout_at(&[ws], &[], 240, Density::Compact);
+        assert_eq!(compact.rows[0].worktrees, None);
+    }
+
+    #[test]
+    fn the_label_names_the_model() {
+        let mut card = agent("p1", AgentStatus::Working, None);
+        assert_eq!(card.label(), "claude");
+        card.model = Some("Opus 5.5".into());
+        assert_eq!(card.label(), "claude · Opus 5.5");
+        card.name = Some("reviewer".into());
+        assert_eq!(card.label(), "claude · reviewer · Opus 5.5");
     }
 
     #[test]
