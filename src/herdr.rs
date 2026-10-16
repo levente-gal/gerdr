@@ -838,6 +838,14 @@ impl Herdr {
         self.get("workspace.list", json!({}), "workspaces")
     }
 
+    pub fn workspace_rename(&mut self, workspace_id: &str, label: &str) -> Result<(), String> {
+        self.call(
+            "workspace.rename",
+            json!({"workspace_id": workspace_id, "label": label}),
+        )
+        .map(drop)
+    }
+
     pub fn workspace_get(&mut self, workspace_id: &str) -> Result<WorkspaceInfo, String> {
         self.get(
             "workspace.get",

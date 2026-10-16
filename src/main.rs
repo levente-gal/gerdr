@@ -34,6 +34,7 @@ mod project_list;
 mod project_menu;
 mod projects;
 mod quit;
+mod reload;
 mod rename;
 mod sidebar;
 mod switcher;
@@ -898,6 +899,8 @@ pub enum Action {
     /// Open the worktrees popup, to review, merge and delete the
     /// repositories' worktrees.
     Worktrees,
+    /// Read the projects file again, after it was edited by hand.
+    ReloadProjects,
     /// Ask whether to keep the project running, and quit.
     Quit,
 }
@@ -1111,6 +1114,9 @@ pub struct Gerdr {
     pub shared_generation: u32,
     /// Since when the tab layouts differ from what was saved of them.
     pub tabs_changed: Option<Instant>,
+    /// The projects whose file was reloaded while they weren't running: they
+    /// take its workspace order and labels when they start.
+    pub order_pending: HashSet<String>,
     /// The process leading each herdr pane's foreground when its command was
     /// last noted, by pane id: a command is noted once per process, as
     /// some rewrite their command line once running.
@@ -1552,6 +1558,18 @@ impl Gerdr {
                 self.projects.save();
             }
         }
+        if complete
+            && let Some(id) = self.project.clone()
+            && self.order_pending.remove(&id)
+            && let (Some(herdr), Some(project)) = (self.herdr.as_mut(), self.projects.project(&id))
+        {
+            for problem in reload::apply_order(herdr, project) {
+                tracing::warn!("projects.json order: {problem}");
+            }
+            if let Ok(list) = herdr.workspace_list() {
+                workspaces = list;
+            }
+        }
         for ws in &workspaces {
             self.sync_herdr_workspace(&ws.workspace_id);
         }
@@ -1778,6 +1796,13 @@ impl Gerdr {
             {
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                if state.projects.take_conflict() {
+                    state.toast_with(
+                        "projects.json edited; saves paused".into(),
+                        Level::Warning,
+                        Some(("Reload".into(), MenuAction::ReloadProjects)),
+                    );
+                }
                 if let Some(agents) = round.agents {
                     state.notify_agents(&agents);
                     state.agents = agents;
@@ -1919,6 +1944,7 @@ impl Gerdr {
         } else if now - *self.tabs_changed.get_or_insert(now) >= TABS_SETTLE {
             changed |= self.record_tabs();
         }
+        changed |= self.record_workspace_order();
         if changed {
             self.projects.save();
         }
@@ -1957,7 +1983,21 @@ impl Gerdr {
                 record.tabs = tabs;
             }
         }
-        any
+        self.record_workspace_order() || any
+    }
+
+    /// Keep the shown project's workspaces in the sidebar's order, which
+    /// herdr is told of but the projects file isn't; whether it changed.
+    fn record_workspace_order(&mut self) -> bool {
+        let Some(project) = self.project.as_deref() else {
+            return false;
+        };
+        let order: Vec<&str> = self
+            .workspaces
+            .iter()
+            .filter_map(Workspace::herdr_id)
+            .collect();
+        self.projects.order_workspaces(project, &order)
     }
 
     /// Read the Git status of the workspace folders now and every
@@ -3010,7 +3050,11 @@ impl Gerdr {
         // Without a project, there is nothing to act on yet.
         let anywhere = matches!(
             action,
-            Action::Projects | Action::ToggleTheme | Action::Shortcuts | Action::Quit
+            Action::Projects
+                | Action::ToggleTheme
+                | Action::Shortcuts
+                | Action::ReloadProjects
+                | Action::Quit
         );
         if self.project.is_none() && !anywhere {
             return;
@@ -3035,6 +3079,7 @@ impl Gerdr {
                 });
             }
             Action::ToggleTheme => self.toggle_theme(),
+            Action::ReloadProjects => self.reload_projects(),
             Action::Shortcuts => self.help_pinned = !self.help_pinned,
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(launch::Place::Split),
@@ -4885,6 +4930,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         retired_groups: Vec::new(),
         shared_generation: 0,
         tabs_changed: None,
+        order_pending: HashSet::new(),
         pane_leaders: HashMap::new(),
         last_commands: HashMap::new(),
         pane_jobs: HashMap::new(),

@@ -67,6 +67,10 @@ pub enum Target {
     Shortcuts,
     /// The config file, to edit.
     Settings,
+    /// The projects file, to edit.
+    ProjectsFile,
+    /// The projects file, read again after an edit.
+    ReloadProjects,
     /// A folder, opened as a project unless a workspace has it already.
     Folder(PathBuf),
     /// The command of an app named in the config file or installed, to
@@ -87,9 +91,12 @@ impl Target {
             Target::Project(_) => Section::Projects,
             Target::App(_) => Section::Apps,
             Target::Folder(_) => Section::Folders,
-            Target::Welcome | Target::Shortcuts | Target::Settings | Target::Command(_) => {
-                Section::Commands
-            }
+            Target::Welcome
+            | Target::Shortcuts
+            | Target::Settings
+            | Target::ProjectsFile
+            | Target::ReloadProjects
+            | Target::Command(_) => Section::Commands,
         }
     }
 
@@ -102,9 +109,12 @@ impl Target {
             Target::Project(_) => "project",
             Target::App(_) => "app",
             Target::Folder(_) => "folder",
-            Target::Welcome | Target::Shortcuts | Target::Settings | Target::Command(_) => {
-                "command"
-            }
+            Target::Welcome
+            | Target::Shortcuts
+            | Target::Settings
+            | Target::ProjectsFile
+            | Target::ReloadProjects
+            | Target::Command(_) => "command",
         }
     }
 }
@@ -497,7 +507,11 @@ fn frecency_key(
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
         Target::App(command) | Target::Command(command) => format!("app:{command}"),
-        Target::Welcome | Target::Shortcuts | Target::Settings => return None,
+        Target::Welcome
+        | Target::Shortcuts
+        | Target::Settings
+        | Target::ProjectsFile
+        | Target::ReloadProjects => return None,
     })
 }
 
@@ -751,6 +765,8 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Settings => self.open_settings(place),
+            Target::ProjectsFile => self.open_projects_file(place),
+            Target::ReloadProjects => self.reload_projects(),
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),
@@ -772,6 +788,25 @@ impl Gerdr {
             let path = tilde(&path, home_dir().as_deref());
             return self.toast(format!("Can't make {path}: {err}"), Level::Error);
         }
+        self.open_in_zed(&path, place, "the settings file");
+    }
+
+    /// Open the projects file, saved first so it shows what is on screen,
+    /// as the settings file is opened. Edits in it apply once reloaded.
+    fn open_projects_file(&mut self, place: Place) {
+        if self.record_tabs() {
+            self.projects.save();
+        }
+        let path = crate::projects::store_file();
+        if !path.exists() {
+            self.projects.save();
+        }
+        self.open_in_zed(&path, place, "the projects file");
+    }
+
+    /// Open `path` in the active workspace's Zed, shown, when it has one;
+    /// else with `xdg-open`, in `place`. `what` names it in a toast.
+    fn open_in_zed(&mut self, path: &Path, place: Place, what: &str) {
         let zed = self.workspace().and_then(|ws| {
             ws.tabs.iter().enumerate().find_map(|(t, tab)| {
                 let pane = tab.panes.iter().find(|p| crate::is_zed(&p.window))?;
@@ -789,9 +824,9 @@ impl Gerdr {
         zed.arg("--user-data-dir")
             .arg(&self.zed_data)
             .arg("--existing")
-            .arg(&path);
+            .arg(path);
         if self.spawn(zed, &dir, "zed").is_none() {
-            self.toast("Zed didn't open the settings file".into(), Level::Error);
+            self.toast(format!("Zed didn't open {what}"), Level::Error);
         }
     }
 
@@ -900,6 +935,19 @@ impl Gerdr {
             "Settings file",
             display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
             Target::Settings,
+        ));
+        let projects_file = crate::projects::store_file();
+        items.push(Item::new(
+            ItemIcon::Settings,
+            "Projects file",
+            display(&projects_file, home.as_deref(), DETAIL_CHARS),
+            Target::ProjectsFile,
+        ));
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Reload projects file",
+            "apply what was edited in it",
+            Target::ReloadProjects,
         ));
         self.weighed(items)
     }

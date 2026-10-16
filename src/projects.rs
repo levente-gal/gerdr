@@ -40,6 +40,35 @@ pub struct Store {
     /// The file couldn't be read nor set aside: saving would lose it.
     #[serde(skip)]
     frozen: bool,
+    #[serde(skip)]
+    disk: Disk,
+}
+
+/// What gerdr last read or wrote of the file, to tell an edit made outside
+/// gerdr (in Zed, say) from its own, and not save over it.
+#[derive(Clone, Debug, Default)]
+struct Disk {
+    /// A digest of the file's bytes, as gerdr last read or wrote them.
+    written: Option<u64>,
+    /// The file changed outside gerdr: saves wait until it is reloaded, or
+    /// put back as it was.
+    conflict: bool,
+    /// The user was told about the conflict.
+    told: bool,
+}
+
+/// Bookkeeping, not part of what a store holds.
+impl PartialEq for Disk {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// What `Store::load` found.
@@ -203,7 +232,7 @@ impl Store {
             (store, Loaded::Failed)
         };
         match std::fs::read(path) {
-            Ok(raw) => match serde_json::from_slice(&raw) {
+            Ok(raw) => match Self::parse(&raw) {
                 Ok(store) => (store, Loaded::File),
                 Err(err) => failed(&err),
             },
@@ -213,6 +242,31 @@ impl Store {
             },
             Err(err) => failed(&err),
         }
+    }
+
+    /// The store in the file now, for a reload. Unlike `load`, a file that
+    /// can't be read is left where it is, to be fixed and reloaded.
+    pub fn read() -> Result<Self, String> {
+        Self::read_from(&store_file())
+    }
+
+    fn read_from(path: &Path) -> Result<Self, String> {
+        let raw = std::fs::read(path).map_err(|err| err.to_string())?;
+        Self::parse(&raw).map_err(|err| err.to_string())
+    }
+
+    fn parse(raw: &[u8]) -> serde_json::Result<Self> {
+        let mut store: Self = serde_json::from_slice(raw)?;
+        store.disk.written = Some(digest(raw));
+        Ok(store)
+    }
+
+    /// Whether the file changed outside gerdr and the user wasn't told yet;
+    /// once.
+    pub fn take_conflict(&mut self) -> bool {
+        let tell = self.disk.conflict && !self.disk.told;
+        self.disk.told |= tell;
+        tell
     }
 
     fn empty() -> Self {
@@ -241,22 +295,46 @@ impl Store {
         })
     }
 
-    /// Write it out atomically (temporary file, then rename).
-    pub fn save(&self) {
-        let path = store_file();
+    /// Write it out atomically (temporary file, then rename), unless the
+    /// file changed outside gerdr since gerdr last read or wrote it.
+    pub fn save(&mut self) {
+        self.save_to(&store_file());
+    }
+
+    fn save_to(&mut self, path: &Path) {
         if self.frozen {
             return tracing::warn!("not saving over the unreadable {}", path.display());
         }
+        let on_disk = match std::fs::read(path) {
+            Ok(raw) => Some(digest(&raw)),
+            // Gone: nothing to lose.
+            Err(err) if err.kind() == ErrorKind::NotFound => self.disk.written,
+            Err(_) => None,
+        };
+        if on_disk != self.disk.written {
+            if !self.disk.conflict {
+                tracing::warn!(
+                    "{} changed outside gerdr: not saving over it",
+                    path.display()
+                );
+            }
+            self.disk.conflict = true;
+            return;
+        }
+        self.disk.conflict = false;
+        self.disk.told = false;
         let tmp = path.with_extension("json.tmp");
         let written = serde_json::to_vec_pretty(self)
             .map_err(std::io::Error::other)
             .and_then(|json| {
                 path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
-                std::fs::write(&tmp, json)?;
-                std::fs::rename(&tmp, &path)
+                std::fs::write(&tmp, &json)?;
+                std::fs::rename(&tmp, path)?;
+                Ok(digest(&json))
             });
-        if let Err(err) = written {
-            tracing::warn!("saving {}: {err}", path.display());
+        match written {
+            Ok(digest) => self.disk.written = Some(digest),
+            Err(err) => tracing::warn!("saving {}: {err}", path.display()),
         }
     }
 
@@ -268,6 +346,20 @@ impl Store {
         self.projects.iter_mut().find(|p| p.id == id)
     }
 
+    /// Put project `project`'s workspaces in `order` (herdr ids), those not
+    /// in it last; whether that moved any.
+    pub fn order_workspaces(&mut self, project: &str, order: &[&str]) -> bool {
+        let Some(project) = self.project_mut(project) else {
+            return false;
+        };
+        let place = |id: &str| order.iter().position(|o| *o == id).unwrap_or(usize::MAX);
+        if project.workspaces.is_sorted_by_key(|r| place(&r.herdr_id)) {
+            return false;
+        }
+        project.workspaces.sort_by_key(|r| place(&r.herdr_id));
+        true
+    }
+
     /// Project `project`'s record of herdr workspace `herdr_id`.
     pub fn record_mut(&mut self, project: &str, herdr_id: &str) -> Option<&mut WorkspaceRecord> {
         self.project_mut(project)?
@@ -277,7 +369,7 @@ impl Store {
     }
 }
 
-fn store_file() -> PathBuf {
+pub fn store_file() -> PathBuf {
     home_dir()
         .unwrap_or_default()
         .join(".local/share/gerdr/projects.json")
@@ -874,6 +966,7 @@ mod tests {
             last_active: Some("api".into()),
             quit_choice: Some(QuitChoice::Keep),
             frozen: false,
+            disk: Disk::default(),
             projects: vec![Project {
                 id: "api".into(),
                 name: "API".into(),
@@ -906,6 +999,24 @@ mod tests {
                 after_stop: "docker compose down".into(),
             }],
         }
+    }
+
+    #[test]
+    fn workspaces_take_the_order_given() {
+        let mut store = sample();
+        let workspaces = &mut store.projects[0].workspaces;
+        for id in ["w2", "w3"] {
+            workspaces.push(record(id.into(), id.into(), Kind::Project, "/w".into()));
+        }
+        assert!(!store.order_workspaces("api", &["w1", "w2", "w3"]));
+        assert!(store.order_workspaces("api", &["w3", "w1"]));
+        let ids: Vec<&str> = store.projects[0]
+            .workspaces
+            .iter()
+            .map(|r| r.herdr_id.as_str())
+            .collect();
+        assert_eq!(ids, ["w3", "w1", "w2"]);
+        assert!(!store.order_workspaces("api", &["w3", "w1"]));
     }
 
     #[test]
@@ -1433,6 +1544,66 @@ mod tests {
         let root = unsafe { libc::geteuid() } == 0;
         assert_eq!(store.frozen, !root);
         assert!(!set_aside(&dir.join("nowhere/projects.json")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_edit_made_outside_gerdr_isnt_saved_over() {
+        let dir = scratch("edited");
+        let path = dir.join("projects.json");
+        let mut store = sample();
+        store.save_to(&path);
+        assert!(!store.take_conflict());
+
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"API\"", "\"Site\"");
+        std::fs::write(&path, &edited).unwrap();
+        store.last_active = None;
+        store.save_to(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+        assert!(store.take_conflict());
+        // Said once.
+        store.save_to(&path);
+        assert!(!store.take_conflict());
+
+        // Reloaded: saved again, from what was read.
+        let mut reloaded = Store::read_from(&path).unwrap();
+        assert_eq!(reloaded.projects[0].name, "Site");
+        reloaded.last_active = None;
+        reloaded.save_to(&path);
+        assert_eq!(Store::read_from(&path).unwrap().last_active, None);
+
+        // Put back as gerdr wrote it: saves go on.
+        let ours = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        reloaded.save_to(&path);
+        assert!(reloaded.take_conflict());
+        std::fs::write(&path, &ours).unwrap();
+        reloaded.last_active = Some("api".into());
+        reloaded.save_to(&path);
+        assert!(!reloaded.take_conflict());
+        assert_eq!(
+            Store::read_from(&path).unwrap().last_active,
+            Some("api".into())
+        );
+
+        // Deleted: nothing to lose.
+        std::fs::remove_file(&path).unwrap();
+        reloaded.save_to(&path);
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_a_broken_file_leaves_it_alone() {
+        let dir = scratch("broken");
+        let path = dir.join("projects.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let err = Store::read_from(&path).unwrap_err();
+        assert!(err.contains("line 1"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        assert!(Store::read_from(&dir.join("nowhere.json")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

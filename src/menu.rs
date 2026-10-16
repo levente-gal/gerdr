@@ -63,6 +63,8 @@ pub enum MenuAction {
     Worktrees(PathBuf),
     /// Delete the worktree in this folder, squashed in: it loses nothing.
     DeleteWorktree(PathBuf),
+    /// Read the projects file again, after it was edited by hand.
+    ReloadProjects,
 }
 
 /// One row of a menu.
@@ -292,6 +294,7 @@ impl Gerdr {
             MenuAction::RunApp(place) => self.open_run_prompt(place),
             MenuAction::Worktrees(dir) => self.open_worktrees(Some(dir)),
             MenuAction::DeleteWorktree(path) => self.delete_merged_worktree(&path),
+            MenuAction::ReloadProjects => self.reload_projects(),
         }
     }
 }
