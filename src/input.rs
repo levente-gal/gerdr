@@ -622,11 +622,15 @@ impl Gerdr {
             }
             return true;
         }
-        // The Retry button of a placeholder whose window never came.
+        // The Retry and Close buttons of a placeholder whose window never
+        // came, or went.
         if button == BTN_LEFT
-            && let Some(pane) = self.retry_at(location)
+            && let Some((pane, hit)) = self.placeholder_button_at(location)
         {
-            self.menu_action(MenuAction::RetryExpected(pane));
+            self.menu_action(match hit {
+                chrome::PlaceholderButton::Retry => MenuAction::RetryExpected(pane),
+                chrome::PlaceholderButton::Close => MenuAction::CloseExpected(pane),
+            });
             return true;
         }
         // Click to focus a pane.
@@ -637,14 +641,18 @@ impl Gerdr {
         false
     }
 
-    /// The pane whose placeholder's Retry button is at `pos`, if one is.
-    fn retry_at(&self, pos: Point<f64, Logical>) -> Option<u32> {
+    /// The pane whose placeholder's button is at `pos`, and which button,
+    /// if one is.
+    fn placeholder_button_at(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(u32, chrome::PlaceholderButton)> {
         let tab = self.tab()?;
         tab.expected_rects(self.content_rect())
             .into_iter()
             .find_map(|(expected, rect)| {
-                let retry = chrome::placeholder_layout(rect, expected.timed_out).retry?;
-                retry.to_f64().contains(pos).then_some(expected.pane)
+                let hit = chrome::placeholder_layout(rect, expected.timed_out).button_at(pos)?;
+                Some((expected.pane, hit))
             })
     }
 
@@ -722,7 +730,7 @@ impl Gerdr {
                 None => RegionHit::Nothing,
             };
         }
-        // Over the apps: the toasts, the pane bars' buttons, a Retry.
+        // Over the apps: the toasts, the pane bars' buttons, a placeholder's.
         let views = self.toast_views();
         let toasts = chrome::toast_layout(&views, self.content_rect());
         if toasts
@@ -733,7 +741,7 @@ impl Gerdr {
             return RegionHit::Control;
         }
         if matches!(self.pane_bar_at(pos), Some((_, BarHit::Button(_))))
-            || self.retry_at(pos).is_some()
+            || self.placeholder_button_at(pos).is_some()
         {
             return RegionHit::Control;
         }

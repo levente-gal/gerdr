@@ -79,11 +79,15 @@ const SLIDE: i32 = 4;
 /// The environment variable that outlines every hit rect in red.
 pub const DEBUG_HITS: &str = "GERDR_DEBUG_HITS";
 
+/// What a placeholder's drawing depends on: it, its button under the
+/// pointer, the theme and the scale.
+type PlaceholderKey = (PlaceholderView, Option<PlaceholderButton>, Theme, f64);
+
 pub struct ChromeView {
     /// When the view was taken, for what moves with time.
     pub now: Instant,
     /// Where the pointer is (window coordinates): the toasts' buttons and
-    /// the placeholders' Retry light up under it.
+    /// the placeholders' Retry and Close light up under it.
     pub pointer: Point<f64, Logical>,
     /// The help panel is pinned open, rather than up for the prefix: it
     /// then carries a title and an Esc hint.
@@ -152,7 +156,7 @@ pub struct Chrome {
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
-    placeholders: Vec<Cached<(PlaceholderView, bool, Theme, f64)>>,
+    placeholders: Vec<Cached<PlaceholderKey>>,
     spinner: Cached<(u32, Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
@@ -403,9 +407,7 @@ impl Chrome {
             if let Some(spot) = layout.spinner {
                 parts.push((spinner, spot.loc, spot.size, 1.0));
             }
-            let hovered = layout
-                .retry
-                .is_some_and(|retry| retry.to_f64().contains(pointer));
+            let hovered = layout.button_at(pointer);
             let buffer = cached.get(
                 (placeholder, hovered, theme, scale),
                 |(placeholder, hovered, ..)| {
@@ -711,7 +713,8 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(layout.button);
     }
     for placeholder in &view.placeholders {
-        rects.extend(placeholder_layout(placeholder.rect, placeholder.timed_out).retry);
+        let layout = placeholder_layout(placeholder.rect, placeholder.timed_out);
+        rects.extend(layout.retry.into_iter().chain(layout.close));
     }
     if let Some(switcher) = &view.switcher {
         rects.extend(switcher_geometry(switcher, area).rows);

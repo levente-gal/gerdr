@@ -7,9 +7,10 @@ use std::time::Instant;
 
 use super::{
     AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, ItemIcon, MenuEntry,
-    MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderView, ProjectMenuView, ProjectRow,
-    QuitHit, QuitView, Rect, SidebarState, SidebarView, SwitcherRow, SwitcherView, TabStripView,
-    TabView, Theme, ThemeMode, ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
+    MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton, PlaceholderView,
+    ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState, SidebarView, SwitcherRow,
+    SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView, TooltipView, WelcomeHit,
+    WelcomeView, WorkspaceView,
 };
 use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -166,6 +167,7 @@ fn placeholder(timed_out: bool) -> PlaceholderView {
         label: "Zed".into(),
         since: Instant::now(),
         timed_out,
+        closed: false,
     }
 }
 
@@ -419,8 +421,8 @@ fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.help_panel(&help, &pinned, scale, p)),
         hash(painter.toast(&toast(Some("Retry"), Level::Error), 360, true, scale, p)),
         hash(painter.tooltip(&tip, tip_w, scale, p)),
-        hash(painter.placeholder(&placeholder(false), false, scale, p)),
-        hash(painter.placeholder(&placeholder(true), true, scale, p)),
+        hash(painter.placeholder(&placeholder(false), None, scale, p)),
+        hash(painter.placeholder(&placeholder(true), Some(PlaceholderButton::Retry), scale, p)),
         hash(painter.spinner(5, scale, p)),
     ]
 }
@@ -501,7 +503,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x1be09a92a642789d, // toast_action
         0x08b20795a8acaa71, // tooltip
         0xd5b2438c44e2d360, // placeholder
-        0x11543d384eae786f, // placeholder_timed_out
+        0x3f94e9f481ad4ddb, // placeholder_timed_out
         0x7a426c6be23d66a6, // spinner
     ],
     // Dark at 2
@@ -511,7 +513,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0xc1ea1c0802cb326e, // toast_action
         0x78986509fec8138c, // tooltip
         0x94bf628b2c8d8e61, // placeholder
-        0xe03b73375f1bb153, // placeholder_timed_out
+        0x914e6acce8dc1bda, // placeholder_timed_out
         0x2f28c94a7002e520, // spinner
     ],
     // Light at 1
@@ -521,7 +523,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x0482566dca739991, // toast_action
         0x59892211d7643278, // tooltip
         0x848913a059883552, // placeholder
-        0x0e2d07d0ca3988e3, // placeholder_timed_out
+        0x8bb8ef097eeae24a, // placeholder_timed_out
         0x4345ed79149d747b, // spinner
     ],
     // Light at 2
@@ -531,7 +533,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0xc47e8d329efbe42a, // toast_action
         0xc0b4132b818d96b8, // tooltip
         0x9bc50d6953da1fd5, // placeholder
-        0x7a29e3abd1973978, // placeholder_timed_out
+        0xb6a46ef59a601576, // placeholder_timed_out
         0x883035c0209e314f, // spinner
     ],
 ];
@@ -650,13 +652,13 @@ fn dump_overlays() {
         dump(
             &dir,
             &format!("placeholder_{tag}"),
-            painter.placeholder(&waiting, false, scale, p),
+            painter.placeholder(&waiting, None, scale, p),
             px(waiting.rect.size.w),
         );
         dump(
             &dir,
             &format!("placeholder_late_{tag}"),
-            painter.placeholder(&placeholder(true), true, scale, p),
+            painter.placeholder(&placeholder(true), Some(PlaceholderButton::Retry), scale, p),
             px(waiting.rect.size.w),
         );
         dump(

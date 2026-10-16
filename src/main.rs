@@ -213,9 +213,14 @@ pub struct Expected {
     pub app_command: Option<String>,
     /// When the process was started (or queued).
     pub started: Instant,
-    /// The process has run for `EXPECT_TIMEOUT` without a window (see
-    /// `reap_children`); the placeholder says so and offers a retry.
+    /// The process has run for `EXPECT_TIMEOUT` without a window, or (a
+    /// Zed's) exited without one (see `reap_children`); the placeholder says
+    /// so and offers to retry or close. Without a pid, it is waited for no
+    /// more (see `Expected::is_stopped`).
     pub timed_out: bool,
+    /// A Zed window of the pane went away without gerdr closing it (see
+    /// `remove_window`): its placeholder says so.
+    pub closed: bool,
 }
 
 impl Expected {
@@ -230,7 +235,15 @@ impl Expected {
             app_command: None,
             started: Instant::now(),
             timed_out: false,
+            closed: false,
         }
+    }
+
+    /// Whether nothing is started for it, nor will be, until its placeholder's
+    /// Retry: a Zed that didn't start or whose window went away. Its leaf is
+    /// kept so the layout stays.
+    fn is_stopped(&self) -> bool {
+        self.pid.is_none() && self.timed_out
     }
 
     /// Whether, at `now`, the process has run for `EXPECT_TIMEOUT` with
@@ -1114,6 +1127,9 @@ pub struct Gerdr {
     /// (`""` for windows of no known project while none is shown): shown
     /// once their project is.
     pub held: HashMap<String, Vec<Window>>,
+    /// Windows of panes gerdr was asked to close (see `close_panes`): a Zed
+    /// one leaves no placeholder when it goes (see `remove_window`).
+    pub closing: Vec<Window>,
     /// The process groups of the Zed launches of the shown project.
     pub zed_groups: Vec<i32>,
     /// Those of the project switched away from, while they may still take
@@ -2639,7 +2655,9 @@ impl Gerdr {
                         if e.pid.is_some() {
                             return dropped; // one is already on its way
                         }
-                        queued.get_or_insert((w, t, i));
+                        if !e.is_stopped() {
+                            queued.get_or_insert((w, t, i));
+                        }
                     }
                 }
             }
@@ -2653,6 +2671,13 @@ impl Gerdr {
                     tab.expected[i].pid = Some(pid);
                     return dropped;
                 }
+                // A Zed keeps its leaf, for the layout, with a Retry.
+                None if app_id == launch::ZED_APP_ID => {
+                    let e = &mut tab.expected[i];
+                    e.timed_out = true;
+                    let (pane, label) = (e.pane, e.label());
+                    self.toast_not_started(pane, &label);
+                }
                 None => {
                     let gone = tab.expected.remove(i);
                     layout::remove(&mut tab.layout, gone.pane);
@@ -2660,6 +2685,15 @@ impl Gerdr {
                 }
             }
         }
+    }
+
+    /// Say `label`, for pane `pane`, didn't start, with a Retry.
+    fn toast_not_started(&mut self, pane: u32, label: &str) {
+        self.toast_with(
+            format!("{label} didn't start"),
+            Level::Error,
+            Some(("Retry".into(), MenuAction::RetryExpected(pane))),
+        );
     }
 
     /// Whether the Zed of a project switched away from is still on its way
@@ -2762,6 +2796,25 @@ impl Gerdr {
         if let Some(ws) = self.workspaces.get(idx) {
             let tabs: Vec<_> = ws.tabs.iter().map(Self::closing).collect();
             tabs.into_iter().for_each(|panes| self.close_panes(panes));
+            for t in 0..self.workspaces[idx].tabs.len() {
+                self.drop_unstarted(idx, t);
+            }
+            self.prune();
+            self.arrange();
+        }
+    }
+
+    /// Give up on the windows of tab `t` of workspace `w`, closing, that
+    /// nothing was started for (a Zed's that didn't start, say): no window
+    /// would come to close.
+    fn drop_unstarted(&mut self, w: usize, t: usize) {
+        let tab = &mut self.workspaces[w].tabs[t];
+        let (gone, kept) = std::mem::take(&mut tab.expected)
+            .into_iter()
+            .partition(|e| e.pid.is_none() && e.herdr.is_none());
+        tab.expected = kept;
+        for e in gone {
+            layout::remove(&mut tab.layout, e.pane);
         }
     }
 
@@ -2793,8 +2846,11 @@ impl Gerdr {
                     .is_ok(),
                 _ => false,
             };
-            if !closed && let Some(window) = window {
-                window.toplevel().unwrap().send_close();
+            if let Some(window) = window {
+                if !closed {
+                    window.toplevel().unwrap().send_close();
+                }
+                self.closing.push(window);
             }
         }
     }
@@ -2856,6 +2912,9 @@ impl Gerdr {
     pub fn close_tab(&mut self, idx: usize) {
         if let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx)) {
             self.close_panes(Self::closing(tab));
+            self.drop_unstarted(self.active_workspace, idx);
+            self.prune();
+            self.arrange();
         }
     }
 
@@ -3152,6 +3211,8 @@ impl Gerdr {
         });
         let now = Instant::now();
         let mut dropped = false;
+        // A Zed that exited without a window: the next queued one may start.
+        let mut stopped = false;
         // What took too long to show a window: its pane and what it is.
         let mut overdue = Vec::new();
         for tab in self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs) {
@@ -3170,11 +3231,22 @@ impl Gerdr {
                 } else {
                     HANDOFF_GRACE
                 };
-                let keep = e.exited.is_none_or(|t| now - t < grace);
-                if !keep {
-                    gone.push(e.pane);
+                if e.exited.is_none_or(|t| now - t < grace) {
+                    return true;
                 }
-                keep
+                // A Zed keeps its leaf, for the layout, until Retry or Close.
+                if e.app_id == launch::ZED_APP_ID {
+                    if !e.timed_out {
+                        overdue.push((e.pane, e.label()));
+                    }
+                    e.pid = None;
+                    e.exited = None;
+                    e.timed_out = true;
+                    stopped = true;
+                    return true;
+                }
+                gone.push(e.pane);
+                false
             });
             // The space kept for a window that never came goes to the other panes.
             for pane in gone {
@@ -3182,7 +3254,7 @@ impl Gerdr {
                 dropped = true;
             }
         }
-        if dropped || !self.old_zed.is_empty() {
+        if dropped || stopped || !self.old_zed.is_empty() {
             // The next queued windows, and the Zed waiting for the old one
             // to exit.
             dropped |= self.launch_next_zed();
@@ -3192,14 +3264,11 @@ impl Gerdr {
             self.prune();
             self.arrange();
         }
-        // Once per window that took too long (see `Expected::timed_out`).
+        // Once per window that took too long or never came (see
+        // `Expected::timed_out`).
         for (pane, label) in overdue {
-            tracing::warn!("{label} didn't show a window in {EXPECT_TIMEOUT:?}");
-            self.toast_with(
-                format!("{label} didn't start"),
-                Level::Error,
-                Some(("Retry".into(), MenuAction::RetryExpected(pane))),
-            );
+            tracing::warn!("{label} didn't show a window");
+            self.toast_not_started(pane, &label);
         }
         self.retired_groups.retain(|g| group_alive(*g));
         self.poll_picker();
@@ -3240,23 +3309,13 @@ impl Gerdr {
             return;
         };
         if let Some(pid) = self.workspaces[w].tabs[t].expected[i].pid.take() {
-            self.zed_groups.retain(|g| *g != pid as i32);
-            // A `zed` that started the editor leads its group, and the
-            // editor may show other workspaces' windows by now: then only
-            // the `zed` itself is ended, not the windows with it.
-            let target = if self.group_shows_windows(pid as i32) {
-                pid as i32
-            } else {
-                -(pid as i32)
-            };
-            // Safety: signals a process, or a process group, gerdr started
-            // (see `spawn`).
-            unsafe { libc::kill(target, libc::SIGTERM) };
+            self.end_expected(pid);
         }
         let e = &mut self.workspaces[w].tabs[t].expected[i];
         e.exited = None;
         e.started = Instant::now();
         e.timed_out = false;
+        e.closed = false;
         let (app_id, command, herdr_pane) =
             (e.app_id.clone(), e.app_command.clone(), e.herdr.clone());
         let dir = self.workspaces[w].dir.clone();
@@ -3298,6 +3357,52 @@ impl Gerdr {
         if dropped {
             self.prune();
         }
+        self.arrange();
+    }
+
+    /// End `pid`, started for a window that didn't show up: a `zed -n`
+    /// would hand its window to the stuck editor.
+    fn end_expected(&mut self, pid: u32) {
+        self.zed_groups.retain(|g| *g != pid as i32);
+        // A `zed` that started the editor leads its group, and the
+        // editor may show other workspaces' windows by now: then only
+        // the `zed` itself is ended, not the windows with it.
+        let target = if self.group_shows_windows(pid as i32) {
+            pid as i32
+        } else {
+            -(pid as i32)
+        };
+        // Safety: signals a process, or a process group, gerdr started
+        // (see `spawn`).
+        unsafe { libc::kill(target, libc::SIGTERM) };
+    }
+
+    /// Give up on what pane `pane` (of any tab) waits for (see
+    /// `retry_expected`): end what was started for it, and the pane goes,
+    /// its space to the others.
+    pub fn close_expected(&mut self, pane: u32) {
+        let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+                let i = tab.expected.iter().position(|e| e.pane == pane)?;
+                Some((w, t, i))
+            })
+        });
+        let Some((w, t, i)) = found else {
+            return;
+        };
+        let tab = &mut self.workspaces[w].tabs[t];
+        let gone = tab.expected.remove(i);
+        layout::remove(&mut tab.layout, gone.pane);
+        if let Some(pid) = gone.pid {
+            self.end_expected(pid);
+        }
+        if let Some(herdr_pane) = gone.herdr {
+            self.close_panes(vec![(None, Some(herdr_pane))]);
+        }
+        // The next queued windows, if it was on its way.
+        self.launch_next_zed();
+        self.launch_next_apps();
+        self.prune();
         self.arrange();
     }
 
@@ -3557,11 +3662,33 @@ impl Gerdr {
                 .enumerate()
                 .find_map(|(t, tab)| tab.panes.iter().position(is_it).map(|p| (w, t, p)))
         });
+        let asked = self.closing.iter().any(|w| !not_it(w));
+        self.closing.retain(not_it);
         let Some((w, t, p)) = found else { return };
 
         let tab = &mut self.workspaces[w].tabs[t];
         let pane = tab.panes.remove(p);
         self.space.unmap_elem(&pane.window);
+        // A Zed that crashed or quit keeps its leaf, for the layout, with a
+        // Retry and a Close: Zed runs every workspace's window in one
+        // process, so they all go at once.
+        if is_zed(&pane.window) && !asked {
+            tracing::warn!("a Zed window went away");
+            let mut e = Expected::new(None, launch::ZED_APP_ID, pane.id, false);
+            e.focus = tab.focused.as_ref() == Some(&pane.window);
+            e.app_command = pane.app_command;
+            e.timed_out = true;
+            e.closed = true;
+            tab.expected.push(e);
+            if tab.focused.as_ref() == Some(&pane.window) {
+                tab.focused = tab.panes.first().map(|p| p.window.clone());
+            }
+            self.arrange();
+            if self.is_visible(w, t) {
+                self.focus(self.workspaces[w].tabs[t].focused.clone());
+            }
+            return;
+        }
         // Like herdr: the pane that takes over the space takes the focus too.
         let next = layout::remove(&mut tab.layout, pane.id);
         if tab.focused.as_ref() == Some(&pane.window) {
@@ -4357,6 +4484,7 @@ impl Gerdr {
                     label: expected.label(),
                     since: expected.started,
                     timed_out: expected.timed_out,
+                    closed: expected.closed,
                 })
                 .collect()
         });
@@ -4680,6 +4808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         restored_at: None,
         replay_pending: HashSet::new(),
         held: HashMap::new(),
+        closing: Vec::new(),
         zed_groups: Vec::new(),
         old_zed: Vec::new(),
         old_zed_until: None,
