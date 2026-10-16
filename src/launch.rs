@@ -448,12 +448,7 @@ fn web_app(url: &str, opener: &str) -> Option<(String, String)> {
         return None;
     }
     let site = format!("-{}_", host.to_ascii_lowercase());
-    // DevTools on a free port of localhost, to read back where each window
-    // is (see `web_pages`); a browser already running keeps its own.
-    Some((
-        format!("{browser} --remote-debugging-port=0 --app={quoted}"),
-        site,
-    ))
+    Some((format!("{browser} --app={quoted}"), site))
 }
 
 /// The folder of the profile of gerdr's that the browser showing `command`
@@ -849,7 +844,7 @@ mod tests {
         assert_eq!(
             web_app(url, &format!("/usr/bin/brave-browser-stable '{url}'")).unwrap(),
             (
-                format!("/usr/bin/brave-browser-stable --remote-debugging-port=0 --app='{url}'"),
+                format!("/usr/bin/brave-browser-stable --app='{url}'"),
                 "-example.com_".to_owned()
             )
         );
