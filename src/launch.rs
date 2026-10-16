@@ -286,13 +286,21 @@ impl Gerdr {
             }
             None => url.unwrap_or_else(|| command.to_owned()),
         };
+        let bare_zed = opens_nothing_in_zed(&command);
         match own_instance(&command) {
-            Some((command, profile)) => {
+            Some((mut command, profile)) => {
                 if command.contains(BROWSER_APP_ID) {
                     app_id = BROWSER_APP_ID.to_owned();
                 } else if program_name(&command).is_some_and(|key| ZEDS.contains(&key.as_str())) {
                     // The CLI hands the window to gerdr's editor and quits.
                     app_id = ZED_APP_ID.to_owned();
+                    // With nothing to open, Zed brings back the windows of
+                    // its last session, which gerdr takes for the ones it
+                    // waits for: open the workspace's folder instead.
+                    if bare_zed {
+                        command.push_str(" -n ");
+                        command.push_str(&desktop::shell_quote(&dir.to_string_lossy()));
+                    }
                 }
                 Prepared {
                     command,
@@ -487,6 +495,14 @@ const ZEDS: &[&str] = &[
     "dev.zed.Zed-Nightly",
     "dev.zed.Zed-Dev",
 ];
+
+/// Whether `command` starts Zed with nothing after the program: no
+/// options, no paths.
+fn opens_nothing_in_zed(command: &str) -> bool {
+    program(command).is_some_and(|(key, end, _)| {
+        ZEDS.contains(&key.as_str()) && command[end..].trim().is_empty()
+    })
+}
 
 /// The app_id a Zed window is expected by (see `Expected`).
 pub const ZED_APP_ID: &str = "zed";
@@ -812,7 +828,10 @@ pub fn log_file(app: &str) -> Option<std::fs::File> {
 mod tests {
     use std::path::Path;
 
-    use super::{alacritty_command, ghostty_command, lineage, log_path, own_instance, web_app};
+    use super::{
+        alacritty_command, ghostty_command, lineage, log_path, opens_nothing_in_zed, own_instance,
+        web_app,
+    };
     use crate::home_dir;
 
     #[test]
@@ -983,6 +1002,11 @@ mod tests {
             "flatpak run dev.zed.Zed --user-data-dir=~/.var/app/dev.zed.Zed/gerdr-profile"
         );
         assert_eq!(run("zed --user-data-dir /x"), None);
+        assert!(opens_nothing_in_zed("/home/me/.local/zed.app/bin/zed"));
+        assert!(opens_nothing_in_zed("flatpak run dev.zed.Zed "));
+        assert!(!opens_nothing_in_zed("zed -n ."));
+        assert!(!opens_nothing_in_zed("zed src/main.rs"));
+        assert!(!opens_nothing_in_zed("code"));
         assert_eq!(
             run("librewolf --private-window").unwrap(),
             "librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/profiles/librewolf --private-window"
