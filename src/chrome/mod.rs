@@ -182,8 +182,13 @@ impl Chrome {
     /// The byte of `field`'s text nearest output x `x`, as it is drawn on
     /// an output of `scale`: where a click there puts the caret.
     pub fn caret_at(&self, field: &FieldSpot, x: f64, scale: f64) -> usize {
-        self.painter
-            .caret_at(&field.line, field.text, (x * scale) as f32, scale)
+        self.painter.caret_at(
+            &field.line,
+            field.text,
+            (x * scale) as f32,
+            field.size,
+            scale,
+        )
     }
 
     pub fn new() -> Self {
@@ -715,7 +720,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         view.sidebar_width,
         view.density,
     );
-    rects.extend([sidebar.header, sidebar.plus]);
+    rects.extend([sidebar.header, sidebar.plus, sidebar.repos]);
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);
         rects.extend(row.chip);

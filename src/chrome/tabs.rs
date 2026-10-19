@@ -487,6 +487,7 @@ pub fn tab_rename_field(view: &TabStripView, strip: Rect, scale: f64) -> Option<
     let mut area = layout.rename_field(*t)?;
     area.loc += strip.loc;
     Some(FieldSpot {
+        size: FONT_SIZE,
         area,
         text: field_text(area, scale),
         line: line.clone(),

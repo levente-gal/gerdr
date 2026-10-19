@@ -53,6 +53,8 @@ pub(super) fn band(rect: Rect, scale: f64) -> (i32, i32) {
 pub struct FieldSpot {
     pub area: Rect,
     pub text: (f32, f32),
+    /// The size of the font its text is in.
+    pub size: f32,
     pub line: Line,
 }
 
@@ -332,6 +334,7 @@ impl Painter {
             field_text(rect, scale),
             field_band,
             focused,
+            FONT_SIZE,
             scale,
             p,
         );
@@ -351,6 +354,7 @@ impl Painter {
         (x, max_x): (f32, f32),
         field_band: (i32, i32),
         focused: bool,
+        size: f32,
         scale: f64,
         p: &Palette,
     ) {
@@ -361,7 +365,7 @@ impl Painter {
             self.text(
                 c,
                 placeholder,
-                FONT_SIZE,
+                size,
                 shown,
                 max_x,
                 field_band,
@@ -373,7 +377,7 @@ impl Painter {
             }
             return;
         }
-        let width = |text: &str| self.text_width(text, FONT_SIZE, scale);
+        let width = |text: &str| self.text_width(text, size, scale);
         let to_caret = width(&line[..line.caret]);
         // How far the text moves left for the caret to show.
         let scrolled = (to_caret - (max_x - x)).max(0.0);
@@ -394,9 +398,10 @@ impl Painter {
             );
         }
         if scrolled > 0.0 {
-            self.clipped_text(c, line, start, (x, max_x), field_band, scale, p.text);
+            let clip = (x, max_x);
+            self.clipped_text(c, line, start, clip, field_band, size, scale, p.text);
         } else {
-            self.text(c, line, FONT_SIZE, x, max_x, field_band, scale, p.text);
+            self.text(c, line, size, x, max_x, field_band, scale, p.text);
         }
         if focused {
             let nudge = if line.caret > 0 { px(1) as f32 } else { 0.0 };
@@ -729,9 +734,10 @@ impl Painter {
         line: &Line,
         (x, max_x): (f32, f32),
         at: f32,
+        size: f32,
         scale: f64,
     ) -> usize {
-        let width = |text: &str| self.text_width(text, FONT_SIZE, scale);
+        let width = |text: &str| self.text_width(text, size, scale);
         let scrolled = (width(&line[..line.caret]) - (max_x - x)).max(0.0);
         let mut pen = x - scrolled;
         for (i, ch) in line.char_indices() {
@@ -754,11 +760,12 @@ impl Painter {
         x: f32,
         (min_x, max_x): (f32, f32),
         (top, height): (i32, i32),
+        size: f32,
         scale: f64,
         color: Rgb,
     ) {
         let Some(font) = &self.font else { return };
-        let scaled = font.as_scaled(PxScale::from(FONT_SIZE * scale as f32));
+        let scaled = font.as_scaled(PxScale::from(size * scale as f32));
         let cap_height = font
             .outline_glyph(scaled.scaled_glyph('H'))
             .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
@@ -792,7 +799,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{Canvas, Painter};
-    use crate::chrome::{Check, Theme};
+    use crate::chrome::{Check, FONT_SIZE, Theme};
     use crate::git::{Change, GitStatus, InProgress};
     use crate::text_field::Line;
 
@@ -845,7 +852,7 @@ mod tests {
         let width = |text: &str| painter.text_width(text, super::FONT_SIZE, 1.0);
         let line = Line::from("abc def");
         let (x, max_x) = (100.0, 1000.0);
-        let at = |px: f32| painter.caret_at(&line, (x, max_x), px, 1.0);
+        let at = |px: f32| painter.caret_at(&line, (x, max_x), px, FONT_SIZE, 1.0);
         assert_eq!(at(0.0), 0);
         assert_eq!(at(x + width("ab") + 1.0), 2);
         assert_eq!(at(x + width("abc ") - 1.0), 4);
@@ -853,8 +860,8 @@ mod tests {
         // Scrolled to keep the caret in view, the text starts left of `x`.
         let long = Line::from("a long line typed past the end of a narrow field");
         let narrow = (x, x + width("a long line"));
-        let end = painter.caret_at(&long, narrow, narrow.1, 1.0);
+        let end = painter.caret_at(&long, narrow, narrow.1, FONT_SIZE, 1.0);
         assert_eq!(end, long.len());
-        assert!(painter.caret_at(&long, narrow, x, 1.0) > 0);
+        assert!(painter.caret_at(&long, narrow, x, FONT_SIZE, 1.0) > 0);
     }
 }
