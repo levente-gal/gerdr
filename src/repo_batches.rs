@@ -149,6 +149,18 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("switching…");
             git_ops::switch_or_create(dir, &name)
         }
+        BatchKind::DeleteBranch { names, force } => {
+            let local = local_names(dir, names);
+            if local.is_empty() {
+                return Err(blocked("no such local branch here"));
+            }
+            step("deleting…");
+            let mut log = Vec::new();
+            for name in local {
+                log = chain(log, git_ops::delete_branch(dir, name, *force))?;
+            }
+            Ok(log)
+        }
         // A checked repository with nothing to commit is only pushed.
         BatchKind::Commit { push: true, .. } if task.job.files.is_empty() => {
             step("pushing…");
@@ -281,8 +293,34 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
                 files(&blockers)
             ))
         }
+        BatchKind::DeleteBranch { names, .. } => {
+            let local = local_names(root, names);
+            if local.is_empty() {
+                return Verdict::Blocked("no such local branch here".into());
+            }
+            if status.branch.as_ref().is_some_and(|b| names.contains(b)) {
+                return Verdict::Blocked("checked out here: switch away first".into());
+            }
+            let lost = local
+                .iter()
+                .map(|name| git_ops::unmerged_commits(root, name))
+                .sum::<Option<usize>>();
+            match lost {
+                Some(0) => Verdict::Clean,
+                Some(n) => Verdict::Unmerged(n),
+                None => Verdict::Blocked("can't tell what it would lose".into()),
+            }
+        }
         _ => Verdict::Clean,
     }
+}
+
+/// Of `names`, those the repository at `dir` has as local branches.
+fn local_names<'a>(dir: &Path, names: &'a [String]) -> Vec<&'a String> {
+    names
+        .iter()
+        .filter(|name| git_ops::has_ref(dir, &format!("refs/heads/{name}")))
+        .collect()
 }
 
 /// Why a rebase isn't tried: git won't over uncommitted changes, and the
@@ -619,6 +657,14 @@ impl Gerdr {
                     false => "Show its changed files",
                 };
                 Some(Tooltip::new(text, rect))
+            }
+            ReposHit::BranchDelete(i) => {
+                let (_, rect) = layout.branch_deletes.iter().find(|(j, _)| *j == i)?;
+                let armed = view.branch.menu.as_ref()?.armed == Some(i);
+                Some(match armed {
+                    true => Tooltip::new("Click again to delete it", *rect),
+                    false => Tooltip::new("Delete this local branch", *rect).key("Ctrl+D"),
+                })
             }
             ReposHit::BranchButton if view.branch.menu.is_none() => Some(
                 Tooltip::new("Switch them to a branch they all have", layout.branch).key("Ctrl+S"),

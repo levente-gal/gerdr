@@ -185,6 +185,8 @@ pub struct BranchMenu {
     pub first: usize,
     pub picked: usize,
     pub query: TextField,
+    /// The branch a second Ctrl+D or click deletes, by `branch_key`.
+    pub armed: Option<String>,
 }
 
 /// A branch the picker offers: its names (more than one for a group of
@@ -265,6 +267,12 @@ pub enum BatchKind {
     /// `master`) the repository has as a branch, else the first its remote
     /// has.
     Switch(Vec<String>),
+    /// Delete those of these names (one branch) the repository has as
+    /// local branches; unless `force`, only those losing no commit.
+    DeleteBranch {
+        names: Vec<String>,
+        force: bool,
+    },
     Commit {
         msg: String,
         push: bool,
@@ -290,6 +298,7 @@ impl BatchKind {
         match self {
             BatchKind::Branch(_) => "Branch",
             BatchKind::Switch(_) => "Switch branch",
+            BatchKind::DeleteBranch { .. } => "Delete branch",
             BatchKind::Commit { push: false, .. } => "Commit",
             BatchKind::Commit { push: true, .. } => "Commit and push",
             BatchKind::Push { force: false } => "Push",
@@ -319,6 +328,7 @@ impl BatchKind {
             self,
             BatchKind::Branch(_)
                 | BatchKind::Switch(_)
+                | BatchKind::DeleteBranch { .. }
                 | BatchKind::Pull(Pull::Rebase | Pull::Merge)
                 | BatchKind::Integrate(_)
         )
@@ -1117,8 +1127,17 @@ impl Panel {
             let shown = &branches[first..(first + page).min(branches.len())];
             let current = self.current_branch(ctx);
             let in_view = |k: usize| (first..first + shown.len()).contains(&k).then(|| k - first);
+            let armed = menu.armed.as_ref().and_then(|key| {
+                let k = branches.iter().position(|b| b.names.join(" / ") == *key)?;
+                in_view(k)
+            });
             BranchMenuView {
                 rows: shown.iter().map(|b| b.label.clone()).collect(),
+                deletable: shown
+                    .iter()
+                    .map(|b| self.delete_jobs(b, ctx).is_ok())
+                    .collect(),
+                armed,
                 current: current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
                     .and_then(in_view),
@@ -1161,12 +1180,14 @@ impl Panel {
             first: picked.saturating_sub(page - 1),
             picked,
             query: TextField::default(),
+            armed: None,
         });
     }
 
     /// A key while the branch menu is open, which takes them all:
-    /// Up/Down, the pages and Ctrl+Home/End choose, Enter picks, Esc
-    /// closes; the rest edit its search, which starts over at the top.
+    /// Up/Down, the pages and Ctrl+Home/End choose, Enter picks, Ctrl+D
+    /// deletes (pressed twice), Esc closes; the rest edit its search, which
+    /// starts over at the top.
     fn branch_menu_key(
         &mut self,
         mods: &ModifiersState,
@@ -1176,6 +1197,13 @@ impl Panel {
     ) -> Option<Outcome> {
         let len = self.shown_branches(ctx).len();
         let page = branch_page(ctx);
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
+        if only_ctrl && matches!(sym, Keysym::d | Keysym::D) {
+            let picked = self.branch_menu.as_ref()?.picked;
+            return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
+        }
+        // Any other key takes back the delete armed.
+        self.disarm_delete();
         let menu = self.branch_menu.as_mut()?;
         let at = menu.picked.min(len.saturating_sub(1)) as isize;
         let to = match sym {
@@ -1243,6 +1271,90 @@ impl Panel {
             kind: BatchKind::Switch(branch.names),
             jobs,
         })
+    }
+
+    /// The jobs deleting local branch `branch` in the repositories acted on
+    /// that have it, else why it can't be.
+    fn delete_jobs(&self, branch: &Branch, ctx: &Ctx) -> Result<Vec<Job>, String> {
+        let items = ctx.items;
+        let local = |k: &usize| {
+            let status = &items[*k].status;
+            branch
+                .names
+                .iter()
+                .any(|n| status.local_branches.contains(n))
+        };
+        let has: Vec<usize> = self.targets(items).into_iter().filter(local).collect();
+        if has.is_empty() {
+            return Err(format!("{} is only on the remote", branch.label));
+        }
+        let on = |k: &usize| {
+            let on = items[*k].status.branch.as_ref();
+            on.is_some_and(|b| branch.names.contains(b))
+        };
+        if has.iter().all(on) {
+            return Err(format!(
+                "On {}: switch to another branch first",
+                branch.label
+            ));
+        }
+        // Those on it stay in: the check says why they're left out.
+        Ok(has
+            .into_iter()
+            .map(|k| Job {
+                root: items[k].root.clone(),
+                files: Vec::new(),
+            })
+            .collect())
+    }
+
+    /// Delete local branch `k` of `shown_branches` where the repositories
+    /// acted on have it: the first press arms it, the second deletes. The
+    /// menu stays open, for the next.
+    fn delete_branch(&mut self, k: usize, ctx: &Ctx) -> Option<Outcome> {
+        let branch = self.shown_branches(ctx).into_iter().nth(k)?;
+        if ctx.batch.is_some_and(|b| !b.finished()) {
+            self.disarm_delete();
+            self.error = Some("Wait for the batch to finish".into());
+            return None;
+        }
+        let jobs = match self.delete_jobs(&branch, ctx) {
+            Ok(jobs) => jobs,
+            Err(why) => {
+                self.disarm_delete();
+                self.error = Some(why);
+                return None;
+            }
+        };
+        let key = branch.names.join(" / ");
+        let menu = self.branch_menu.as_mut()?;
+        menu.picked = k;
+        if menu.armed.as_ref() != Some(&key) {
+            menu.armed = Some(key);
+            self.error = Some(format!(
+                "Delete local branch {}? Ctrl+D or click again to delete",
+                branch.label
+            ));
+            return None;
+        }
+        menu.armed = None;
+        self.error = None;
+        Some(Outcome::Batch {
+            kind: BatchKind::DeleteBranch {
+                names: branch.names,
+                force: false,
+            },
+            jobs,
+        })
+    }
+
+    /// Take back the delete armed in the branch menu, and what it said.
+    fn disarm_delete(&mut self) {
+        if let Some(menu) = self.branch_menu.as_mut()
+            && menu.armed.take().is_some()
+        {
+            self.error = None;
+        }
     }
 
     /// The wheel turned `rows` rows (down positive) over the branch menu.
@@ -1516,7 +1628,7 @@ impl Panel {
         match (sheet, button) {
             (
                 Sheet::Preflight {
-                    kind,
+                    mut kind,
                     jobs,
                     verdicts,
                     ..
@@ -1528,10 +1640,14 @@ impl Panel {
                 // A repository not checked has nothing against it.
                 let keep = |job: &Job| match verdict(&job.root) {
                     None | Some(Verdict::Clean) => true,
-                    Some(Verdict::Conflicts(_)) => button == B::All,
+                    Some(Verdict::Conflicts(_) | Verdict::Unmerged(_)) => button == B::All,
                     Some(Verdict::Blocked(_)) => false,
                 };
                 let jobs: Vec<Job> = jobs.into_iter().filter(keep).collect();
+                // All: the branches with commits nowhere else go too.
+                if let BatchKind::DeleteBranch { force, .. } = &mut kind {
+                    *force = button == B::All;
+                }
                 (!jobs.is_empty()).then_some(Outcome::Confirmed { kind, jobs })
             }
             (Sheet::Diverged { roots, .. }, B::PullRebase | B::PullMerge) => {
@@ -1753,13 +1869,15 @@ impl Panel {
         }
         // The open menu takes the click: elsewhere, it closes.
         if let Some(first) = self.branch_menu.as_ref().map(|m| m.first) {
+            let page = branch_page(ctx);
+            let len = self.shown_branches(ctx).len();
+            let first = first.min(len.saturating_sub(page));
+            if !matches!(hit, ReposHit::BranchDelete(_)) {
+                self.disarm_delete();
+            }
             return match hit {
-                ReposHit::BranchRow(i) => {
-                    let page = branch_page(ctx);
-                    let len = self.shown_branches(ctx).len();
-                    let first = first.min(len.saturating_sub(page));
-                    self.pick_branch(first + i, ctx)
-                }
+                ReposHit::BranchRow(i) => self.pick_branch(first + i, ctx),
+                ReposHit::BranchDelete(i) => self.delete_branch(first + i, ctx),
                 ReposHit::BranchMenu => None,
                 _ => {
                     self.branch_menu = None;
@@ -1800,7 +1918,11 @@ impl Panel {
             ReposHit::Button(button) => return self.act(button, armed, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
             ReposHit::BranchButton => self.open_branch_menu(ctx),
-            ReposHit::Detail | ReposHit::Panel | ReposHit::BranchRow(_) | ReposHit::BranchMenu => {}
+            ReposHit::Detail
+            | ReposHit::Panel
+            | ReposHit::BranchRow(_)
+            | ReposHit::BranchDelete(_)
+            | ReposHit::BranchMenu => {}
         }
         None
     }
@@ -2193,7 +2315,7 @@ impl Panel {
                     BatchKind::Integrate(Integrate::Rebase) | BatchKind::Pull(Pull::Rebase)
                 );
                 let conflict = if rebase { "may conflict" } else { "conflicts" };
-                let (mut clean, mut conflicts, mut blocked) = (0, 0, 0);
+                let (mut clean, mut conflicts, mut unmerged, mut blocked) = (0, 0, 0, 0);
                 let lines: Vec<(String, String, Tone)> = jobs
                     .iter()
                     .map(|job| {
@@ -2206,6 +2328,11 @@ impl Panel {
                             Some(Verdict::Conflicts(files)) => {
                                 conflicts += 1;
                                 (format!("{conflict}: {}", files.join(", ")), Tone::Warning)
+                            }
+                            Some(Verdict::Unmerged(n)) => {
+                                unmerged += 1;
+                                let lost = count(*n, "commit");
+                                (format!("unmerged: {lost} only on it"), Tone::Warning)
                             }
                             Some(Verdict::Blocked(why)) => {
                                 blocked += 1;
@@ -2226,6 +2353,9 @@ impl Panel {
                         "would conflict"
                     };
                     found.push(format!("{conflicts} {would}"));
+                }
+                if unmerged > 0 {
+                    found.push(format!("{unmerged} unmerged"));
                 }
                 if blocked > 0 {
                     found.push(format!("{blocked} blocked"));
@@ -2346,7 +2476,7 @@ impl Panel {
     ) {
         let conflicts = verdicts
             .iter()
-            .any(|(_, v)| matches!(v, Verdict::Conflicts(_)));
+            .any(|(_, v)| matches!(v, Verdict::Conflicts(_) | Verdict::Unmerged(_)));
         self.armed = None;
         self.branch_menu = None;
         self.sheet = Some(Sheet::Preflight {
@@ -3773,6 +3903,119 @@ mod tests {
         press(&mut one, ctrl(), Keysym::s, &ctx);
         assert_eq!(press(&mut one, none(), Keysym::Return, &ctx), None);
         assert_eq!(one.error.as_deref(), Some("Already on main"));
+    }
+
+    #[test]
+    fn a_local_branch_is_deleted_on_a_second_press() {
+        let items = branched();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        for name in ["gerdr", "herdr", "zed"] {
+            check_repo(&mut panel, name, &ctx);
+        }
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.rows, ["main / master", "feat/x"]);
+        assert_eq!(menu.deletable, [true, true]);
+        // The first press arms it; any other key takes it back.
+        assert_eq!(press(&mut panel, ctrl(), Keysym::d, &ctx), None);
+        assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().armed, Some(0));
+        assert!(panel.error.as_deref().unwrap().contains("main / master?"));
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().armed, None);
+        assert_eq!(panel.error, None);
+        // Those on it go too: the check tells why they are left out.
+        assert_eq!(press(&mut panel, ctrl(), Keysym::d, &ctx), None);
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::d, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::DeleteBranch {
+                    names: vec!["feat/x".into()],
+                    force: false,
+                },
+                jobs: jobs(&["gerdr", "herdr", "zed"]),
+            })
+        );
+        // The menu stays, for the next.
+        assert!(panel.branch_menu.is_some());
+        // A click on a row's button does the same; elsewhere it disarms.
+        assert_eq!(panel.click(ReposHit::BranchDelete(1), &ctx), None);
+        assert_eq!(panel.click(ReposHit::BranchMenu, &ctx), None);
+        assert_eq!(panel.click(ReposHit::BranchDelete(1), &ctx), None);
+        assert!(matches!(
+            panel.click(ReposHit::BranchDelete(1), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::DeleteBranch { .. },
+                ..
+            })
+        ));
+        // Not the branch they are all on, nor one only on the remote.
+        let mut one = Panel::new(&items);
+        press(&mut one, ctrl(), Keysym::s, &ctx);
+        assert_eq!(menu_rows(&one, &ctx), ["main", "feat/x", "production"]);
+        let menu = one.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.deletable, [false, true, true]);
+        assert_eq!(press(&mut one, ctrl(), Keysym::d, &ctx), None);
+        assert_eq!(press(&mut one, ctrl(), Keysym::d, &ctx), None);
+        assert_eq!(
+            one.error.as_deref(),
+            Some("On main: switch to another branch first")
+        );
+        press(&mut one, none(), Keysym::Escape, &ctx);
+        select(&mut one, "herdr");
+        press(&mut one, ctrl(), Keysym::s, &ctx);
+        assert_eq!(menu_rows(&one, &ctx), ["master", "feat/x", "release"]);
+        press(&mut one, ctrl(), Keysym::End, &ctx);
+        assert_eq!(press(&mut one, ctrl(), Keysym::d, &ctx), None);
+        assert_eq!(one.error.as_deref(), Some("release is only on the remote"));
+    }
+
+    #[test]
+    fn deleting_unmerged_branches_is_asked_about() {
+        let items = branched();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let kind = BatchKind::DeleteBranch {
+            names: vec!["feat/x".into()],
+            force: false,
+        };
+        let ask = |panel: &mut Panel| {
+            panel.ask_preflight(
+                kind.clone(),
+                jobs(&["gerdr", "herdr", "zed"]),
+                vec![
+                    (root("gerdr"), Verdict::Clean),
+                    (root("herdr"), Verdict::Unmerged(2)),
+                    (root("zed"), Verdict::Blocked("checked out here".into())),
+                ],
+            )
+        };
+        ask(&mut panel);
+        let sheet = panel.view("p", &ctx).sheet.unwrap();
+        assert_eq!(
+            sheet.title,
+            "Delete branch: 1 clean · 1 unmerged · 1 blocked"
+        );
+        assert_eq!(sheet.lines[1].1, "unmerged: 2 commits only on it");
+        // Clean only, by default.
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Confirmed {
+                kind: kind.clone(),
+                jobs: jobs(&["gerdr"]),
+            })
+        );
+        ask(&mut panel);
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::All), &ctx),
+            Some(Outcome::Confirmed {
+                kind: BatchKind::DeleteBranch {
+                    names: vec!["feat/x".into()],
+                    force: true,
+                },
+                jobs: jobs(&["gerdr", "herdr"]),
+            })
+        );
     }
 
     #[test]
