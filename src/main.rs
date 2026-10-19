@@ -1804,9 +1804,13 @@ impl Gerdr {
             {
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
-                if state.projects.take_conflict() {
+                for id in state.projects.take_conflicts() {
+                    let name = state
+                        .projects
+                        .project(&id)
+                        .map_or(id.clone(), |p| p.name.clone());
                     state.toast_with(
-                        "projects.json edited; saves paused".into(),
+                        format!("{name}'s project file edited; saves paused"),
                         Level::Warning,
                         Some(("Reload".into(), MenuAction::ReloadProjects)),
                     );

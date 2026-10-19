@@ -274,6 +274,33 @@ impl Store {
         tell
     }
 
+    /// The ids of the projects whose file changed outside gerdr since the
+    /// user was last told; each once.
+    // CONTRACT STUB: wave 2 makes the guard per file.
+    pub fn take_conflicts(&mut self) -> Vec<String> {
+        if !self.take_conflict() {
+            return Vec::new();
+        }
+        self.projects.iter().map(|p| p.id.clone()).collect()
+    }
+
+    /// The store in the files now, for a reload. A file that can't be read
+    /// is left where it is, to be fixed and reloaded: its project stays as
+    /// it is in `self` and its saves stay paused, and `errors` names it.
+    // CONTRACT STUB: wave 2 reads the files one by one.
+    pub fn reread(&self) -> Reread {
+        match Self::read_from(&store_file()) {
+            Ok(store) => Reread {
+                store,
+                errors: Vec::new(),
+            },
+            Err(err) => Reread {
+                store: self.clone(),
+                errors: vec![format!("projects.json: {err}")],
+            },
+        }
+    }
+
     fn empty() -> Self {
         Self {
             version: VERSION,
@@ -372,6 +399,34 @@ impl Store {
             .iter_mut()
             .find(|w| w.herdr_id == herdr_id)
     }
+}
+
+/// What `Store::reread` found.
+#[derive(Debug)]
+pub struct Reread {
+    pub store: Store,
+    /// The files that couldn't be read, each with why, ready to show.
+    pub errors: Vec<String>,
+}
+
+/// The folder holding a file per project.
+pub fn projects_dir() -> PathBuf {
+    home_dir()
+        .unwrap_or_default()
+        .join(".local/share/gerdr/projects")
+}
+
+/// Project `id`'s file.
+pub fn project_file(id: &str) -> PathBuf {
+    projects_dir().join(format!("{id}.json"))
+}
+
+/// The file of what isn't any one project's: the last project shown, the
+/// quit choice.
+pub fn state_file() -> PathBuf {
+    home_dir()
+        .unwrap_or_default()
+        .join(".local/share/gerdr/state.json")
 }
 
 pub fn store_file() -> PathBuf {

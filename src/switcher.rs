@@ -67,8 +67,8 @@ pub enum Target {
     Shortcuts,
     /// The config file, to edit.
     Settings,
-    /// The projects file, to edit.
-    ProjectsFile,
+    /// A project's file, by id, to edit in a new tab.
+    ProjectFile(String),
     /// The projects file, read again after an edit.
     ReloadProjects,
     /// A folder, opened as a project unless a workspace has it already.
@@ -94,7 +94,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Settings
-            | Target::ProjectsFile
+            | Target::ProjectFile(_)
             | Target::ReloadProjects
             | Target::Command(_) => Section::Commands,
         }
@@ -112,7 +112,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Settings
-            | Target::ProjectsFile
+            | Target::ProjectFile(_)
             | Target::ReloadProjects
             | Target::Command(_) => "command",
         }
@@ -510,7 +510,7 @@ fn frecency_key(
         Target::Welcome
         | Target::Shortcuts
         | Target::Settings
-        | Target::ProjectsFile
+        | Target::ProjectFile(_)
         | Target::ReloadProjects => return None,
     })
 }
@@ -765,7 +765,7 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Settings => self.open_settings(place),
-            Target::ProjectsFile => self.open_projects_file(place),
+            Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
@@ -793,7 +793,9 @@ impl Gerdr {
 
     /// Open the projects file, saved first so it shows what is on screen,
     /// as the settings file is opened. Edits in it apply once reloaded.
-    fn open_projects_file(&mut self, place: Place) {
+    // CONTRACT STUB: wave 2 opens `projects::project_file(id)` in a new tab.
+    pub fn open_project_file(&mut self, _id: &str) {
+        let place = Place::Tab;
         if self.record_tabs() {
             self.projects.save();
         }
@@ -941,7 +943,7 @@ impl Gerdr {
             ItemIcon::Settings,
             "Projects file",
             display(&projects_file, home.as_deref(), DETAIL_CHARS),
-            Target::ProjectsFile,
+            Target::ProjectFile(self.project.clone().unwrap_or_default()),
         ));
         items.push(Item::new(
             ItemIcon::Command,
