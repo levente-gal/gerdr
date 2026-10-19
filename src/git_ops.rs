@@ -9,7 +9,6 @@
 //! went wrong can be told from them, and a time limit. Each returns every
 //! command it ran with what it printed, for the panel's log, and on
 //! failure what kind it was, for the panel to offer what fixes it.
-#![allow(dead_code)]
 
 use std::{
     io::Read,
@@ -1061,6 +1060,9 @@ pub fn has_ref(dir: &Path, name: &str) -> bool {
 }
 
 /// Whether `name` is a valid branch name (`check-ref-format --branch`).
+/// Only tests ask git: the panel checks names itself
+/// (`repos::branch_name_problem`), against this.
+#[cfg(test)]
 pub fn valid_branch(dir: &Path, name: &str) -> bool {
     // `--branch` would take `@{-1}` for the branch before; `HEAD` and a
     // leading dash would read as something else.
@@ -2070,6 +2072,50 @@ mod tests {
             "", "a..b", "-x", "a b", "x.lock", "HEAD", "@{-1}", "a/", "~x",
         ] {
             assert!(!valid_branch(dir, bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_panel_judges_branch_names_as_git_does() {
+        // Not `@`: `--branch` takes it for the branch checked out.
+        let fx = Fx::new();
+        let dir = &fx.repo;
+        for name in [
+            "feat/x",
+            "fix-1",
+            "ü",
+            "a.b",
+            "a@b",
+            "x/y/z",
+            "",
+            "a..b",
+            "-x",
+            "a b",
+            "x.lock",
+            "HEAD",
+            "@{-1}",
+            "a@{b",
+            "a/",
+            "/a",
+            "a//b",
+            ".a",
+            "a/.b",
+            "a.",
+            "~x",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[b",
+            "a\\b",
+            "a\tb",
+            "a/x.lock/b",
+        ] {
+            assert_eq!(
+                crate::repos::branch_name_problem(name).is_none(),
+                valid_branch(dir, name),
+                "{name:?}"
+            );
         }
     }
 

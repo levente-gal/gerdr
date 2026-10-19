@@ -37,6 +37,7 @@ mod projects;
 mod quit;
 mod reload;
 mod rename;
+mod repo_batches;
 mod repos;
 mod sidebar;
 mod switcher;
@@ -901,6 +902,9 @@ pub enum Action {
     /// Open the worktrees popup, to review, merge and delete the
     /// repositories' worktrees.
     Worktrees,
+    /// Open the repositories panel, to branch, commit, push and sync the
+    /// project's repositories as one.
+    Repos,
     /// Read the projects file again, after it was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -1022,6 +1026,8 @@ pub struct Gerdr {
     git_read: Option<channel::Sender<HashMap<PathBuf, git::GitStatus>>>,
     /// The worktrees popup and what is being done to worktrees.
     pub worktrees: worktrees::Worktrees,
+    /// The repositories panel and its batches.
+    pub repos: repos::Repos,
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
@@ -2011,6 +2017,7 @@ impl Gerdr {
                 state.git = git;
                 state.git_pending = false;
                 state.worktrees_read();
+                state.repos_read();
                 if std::mem::take(&mut state.git_again) {
                     state.refresh_git();
                 }
@@ -3120,6 +3127,7 @@ impl Gerdr {
                 }
             }
             Action::Worktrees => self.open_worktrees(None),
+            Action::Repos => self.open_repos(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -3858,6 +3866,7 @@ impl Gerdr {
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.worktrees.is_open()
+            || self.repos.is_open()
         {
             return None;
         }
@@ -4095,6 +4104,7 @@ impl Gerdr {
         self.switcher = None;
         self.project_menu = None;
         self.worktrees.close();
+        self.repos.close();
         self.header_hover = false;
         self.project = None;
         self.focus(None);
@@ -4647,6 +4657,7 @@ impl Gerdr {
             quit: self.quit_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
+            repos: self.repos_view(),
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
             theme: self.theme(),
@@ -4892,6 +4903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         git_again: false,
         git_read: None,
         worktrees: worktrees::Worktrees::default(),
+        repos: repos::Repos::default(),
         web_pending: false,
         notifier: None,
         blocked_since: HashMap::new(),

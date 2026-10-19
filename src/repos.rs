@@ -21,7 +21,6 @@
 //! a file resolved, Ctrl+G continues (Ctrl+Shift+Delete aborts, twice),
 //! Alt+Z undoes the last batch (twice), Alt+R retries what failed, Ctrl+D
 //! and Ctrl+T show the diff and the log; Esc closes.
-#![allow(dead_code)]
 
 use std::{
     collections::HashSet,
@@ -56,6 +55,15 @@ pub struct Repos {
     pub(crate) done: Option<channel::Sender<RepoEvent>>,
     /// The id the next batch, check or detail read gets.
     pub(crate) next_id: u64,
+    /// What the panel lists, as of the last Git status read.
+    pub(crate) items: Vec<RepoItem>,
+    /// The panel as closed, with the project it was for: opened again for
+    /// the same project, it is as it was left.
+    pub(crate) kept: Option<(Option<String>, Panel)>,
+    /// The detail being read.
+    pub(crate) reading: Option<DetailKey>,
+    /// The check under way, by id: an older one's answer is stale.
+    pub(crate) checking: Option<u64>,
 }
 
 impl Repos {
@@ -63,8 +71,10 @@ impl Repos {
         self.panel.is_some()
     }
 
+    /// Close it for good, as when leaving the project.
     pub fn close(&mut self) {
         self.panel = None;
+        self.kept = None;
     }
 
     /// The field, while the panel is open.
@@ -426,8 +436,11 @@ pub enum RepoEvent {
         batch: u64,
         root: PathBuf,
         result: OpResult,
+        before: Option<Head>,
         after: Option<Head>,
     },
+    /// The fetch on opening the panel is done.
+    Fetched,
     /// The check before batch `kind` over `jobs`.
     Checked {
         id: u64,

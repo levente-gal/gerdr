@@ -126,6 +126,8 @@ pub struct ChromeView {
     pub project_menu: Option<ProjectMenuView>,
     /// Set while the worktrees popup is open.
     pub worktrees: Option<WorktreesView>,
+    /// Set while the repositories panel is open.
+    pub repos: Option<ReposView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
@@ -160,6 +162,7 @@ pub struct Chrome {
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
     project_menu: Overlay<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
     worktrees: Overlay<(WorktreesView, Size<i32, Logical>, Theme, f64)>,
+    repos: Overlay<(ReposView, Size<i32, Logical>, Theme, f64)>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -199,6 +202,7 @@ impl Chrome {
             quit: Overlay::default(),
             project_menu: Overlay::default(),
             worktrees: Overlay::default(),
+            repos: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -304,6 +308,18 @@ impl Chrome {
             self.worktrees
                 .part(worktrees, now, true, |(popup, output, ..)| {
                     painter.worktrees(popup, *output, scale, theme.palette())
+                }),
+        );
+
+        // The repositories panel, over nearly everything.
+        let repos = view.repos.map(|panel| {
+            let (loc, size) = shadowed(repos_layout(&panel, output).panel);
+            ((panel, output, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.repos
+                .part(repos, now, true, |(panel, output, ..)| {
+                    painter.repos(panel, *output, scale, theme.palette())
                 }),
         );
 
@@ -745,6 +761,16 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
             rects.push(rect);
             rects.extend(buttons.into_iter().map(|(_, rect)| rect));
         }
+    }
+    if let Some(panel) = &view.repos {
+        let layout = repos_layout(panel, output);
+        for (line, check, expander) in layout.lines {
+            rects.extend([line, check]);
+            rects.extend(expander);
+        }
+        rects.extend(layout.buttons.into_iter().map(|(_, rect)| rect));
+        rects.extend(layout.detail_tabs.into_iter().map(|(_, rect)| rect));
+        rects.push(layout.field);
     }
     if view.quit.is_some() {
         let quit = quit_layout(output);

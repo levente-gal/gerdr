@@ -46,6 +46,7 @@ use crate::{
     menu::MenuAction,
     project_menu, quit,
     rename::RenameTarget,
+    repos,
     switcher::Target,
     text_field::{self, TextField},
     toast::ToastHit,
@@ -95,6 +96,8 @@ enum Intercepted {
     Quit(quit::Outcome),
     /// The worktrees popup asked for this.
     Worktrees(worktrees::Outcome),
+    /// The repositories panel asked for this.
+    Repos(repos::Outcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -103,6 +106,7 @@ pub enum Overlay {
     Welcome,
     ProjectMenu,
     Worktrees,
+    Repos,
     /// The switcher of this serial: not one opened after it.
     Switcher(u64),
 }
@@ -252,6 +256,25 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::Worktrees));
                         }
+                        if state.repos.is_open() {
+                            state.suppressed_keys.push(code);
+                            if state.prefix_armed {
+                                state.prefix_armed = false;
+                                let action =
+                                    state.keymap.action(mods, sym).filter(over_project_menu);
+                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                            }
+                            if state.keymap.is_prefix(mods, sym) {
+                                state.prefix_armed = true;
+                                return FilterResult::Intercept(None);
+                            }
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.repos_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
+                            return FilterResult::Intercept(out.map(Intercepted::Repos));
+                        }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
@@ -330,7 +353,8 @@ impl Gerdr {
                 let overlay = self.quit.is_some()
                     || self.welcome.is_some()
                     || self.project_menu.is_some()
-                    || self.worktrees.is_open();
+                    || self.worktrees.is_open()
+                    || self.repos.is_open();
                 // The project menu has a tooltip of its own (on Browse).
                 let mut menu_tip = None;
                 if self.quit.is_some() {
@@ -341,6 +365,8 @@ impl Gerdr {
                     menu_tip = self.project_menu_hover(pos);
                 } else if self.worktrees.is_open() {
                     self.worktrees_hover(pos);
+                } else if self.repos.is_open() {
+                    self.repos_hover(pos);
                 } else if self.context_menu.is_some() {
                     self.menu_motion(pos);
                 } else if self.switcher.is_some() {
@@ -437,7 +463,8 @@ impl Gerdr {
                     && (self.quit.is_some()
                         || self.welcome.is_some()
                         || self.project_menu.is_some()
-                        || self.worktrees.is_open())
+                        || self.worktrees.is_open()
+                        || self.repos.is_open())
                 {
                     if pointer.is_grabbed() {
                         pointer.button(
@@ -487,6 +514,7 @@ impl Gerdr {
                 if self.project_menu.is_some()
                     || self.switcher.is_some()
                     || self.worktrees.is_open()
+                    || self.repos.is_open()
                 {
                     let rows = event
                         .amount_v120(Axis::Vertical)
@@ -498,6 +526,8 @@ impl Gerdr {
                             self.project_menu_scroll(rows);
                         } else if self.worktrees.is_open() {
                             self.worktrees_scroll(rows);
+                        } else if self.repos.is_open() {
+                            self.repos_scroll(rows);
                         } else {
                             self.switcher_scroll(rows);
                         }
@@ -573,6 +603,13 @@ impl Gerdr {
         if self.worktrees.is_open() {
             if button == BTN_LEFT {
                 self.worktrees_click(location);
+                self.press_field(location);
+            }
+            return true;
+        }
+        if self.repos.is_open() {
+            if button == BTN_LEFT {
+                self.repos_click(location);
                 self.press_field(location);
             }
             return true;
@@ -727,6 +764,20 @@ impl Gerdr {
         if self.welcome.is_some() || self.project_menu.is_some() {
             return RegionHit::Nothing;
         }
+        if let Some(view) = self.repos_view() {
+            let layout = chrome::repos_layout(&view, output);
+            let mut controls = layout
+                .lines
+                .iter()
+                .map(|(line, ..)| *line)
+                .chain(layout.buttons.iter().map(|(_, r)| *r))
+                .chain(layout.detail_tabs.iter().map(|(_, r)| *r));
+            return if controls.any(|r| r.to_f64().contains(pos)) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
         if let Some(view) = self.worktrees_view() {
             let layout = chrome::worktrees_layout(&view, output);
             let mut rows = layout.entries.iter();
@@ -845,6 +896,7 @@ impl Gerdr {
             Intercepted::ProjectMenu(outcome) => self.apply_project_menu(outcome),
             Intercepted::Quit(outcome) => self.apply_quit(outcome),
             Intercepted::Worktrees(outcome) => self.apply_worktrees(outcome),
+            Intercepted::Repos(outcome) => self.apply_repos(outcome),
         }
     }
 
@@ -859,6 +911,8 @@ impl Gerdr {
             Some(Overlay::ProjectMenu)
         } else if self.worktrees.is_open() {
             Some(Overlay::Worktrees)
+        } else if self.repos.is_open() {
+            Some(Overlay::Repos)
         } else {
             self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial))
         }
@@ -894,6 +948,7 @@ impl Gerdr {
             Overlay::Worktrees => self
                 .worktrees_key(mods, sym, typed)
                 .map(Intercepted::Worktrees),
+            Overlay::Repos => self.repos_key(mods, sym, typed).map(Intercepted::Repos),
             Overlay::Switcher(_) => self
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
@@ -914,6 +969,7 @@ impl Gerdr {
                 size,
                 scale,
             )),
+            Overlay::Repos => Some(chrome::repos_field(&self.repos_view()?, size, scale)),
             Overlay::Switcher(_) => Some(chrome::switcher_field(
                 &self.switcher_view()?,
                 self.content_rect(),
@@ -928,6 +984,7 @@ impl Gerdr {
             Overlay::Welcome => self.welcome.as_mut()?.field_mut(),
             Overlay::ProjectMenu => self.project_menu.as_mut()?.field_mut(),
             Overlay::Worktrees => self.worktrees.field_mut(),
+            Overlay::Repos => self.repos.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
         }
     }

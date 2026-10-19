@@ -5,7 +5,6 @@
 //! diff or the selected repository's log; under both a field (a branch
 //! name or a commit message), the last batch's result and the actions.
 //! A sheet over it asks before a batch that could conflict.
-#![allow(dead_code)]
 
 use super::{
     BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,

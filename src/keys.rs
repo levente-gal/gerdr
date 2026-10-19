@@ -230,6 +230,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "Shift+B",
     ),
     ("worktrees", Action::Worktrees, "worktrees", "w"),
+    ("repos", Action::Repos, "repositories", "g"),
     (
         "reload-projects",
         Action::ReloadProjects,
@@ -298,6 +299,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("python venv on / off, pick", &["toggle-venv", "pick-venv"]),
     ("run the project's start commands", &["run-start-commands"]),
     ("worktrees", &["worktrees"]),
+    ("repositories", &["repos"]),
     ("reload the projects file", &["reload-projects"]),
     ("quit…", &["quit"]),
 ];
@@ -699,6 +701,7 @@ mod tests {
                 "Shift+V / Alt+V: python venv on / off, pick",
                 "Shift+B: run the project's start commands",
                 "W: worktrees",
+                "G: repositories",
                 "Alt+R: reload the projects file",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",

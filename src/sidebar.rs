@@ -305,7 +305,12 @@ impl Gerdr {
                     MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
                 ];
-                if self.git.get(&dir).is_some_and(|g| !g.worktrees.is_empty()) {
+                let git = self.git.get(&dir);
+                if git.is_some_and(|g| g.root.is_some()) {
+                    let item = MenuItem::new("Repositories…", MenuAction::Repos);
+                    items.push(hinted(item, "repositories"));
+                }
+                if git.is_some_and(|g| !g.worktrees.is_empty()) {
                     let item = MenuItem::new("Worktrees…", MenuAction::Worktrees(dir));
                     items.push(hinted(item, "worktrees"));
                 }
