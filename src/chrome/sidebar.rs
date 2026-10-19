@@ -215,6 +215,9 @@ impl AgentView {
         if row.worktree {
             lines.push(field("Worktree", "its own".into()));
         }
+        lines.extend(chat.subagents.iter().map(|task| {
+            field(SUBAGENT, task.clone().unwrap_or_else(|| "Working".into()))
+        }));
         Self {
             key: AgentKey::Cursor(row.id.clone()),
             dir,
@@ -245,19 +248,28 @@ impl AgentView {
             .join(" · ")
     }
 
-    /// The card's detail line: the folder it is in (its last component)
-    /// and what it is on.
+    /// The card's detail line: the folder it is in (its last component),
+    /// how many subagents of its run, and what it is on.
     pub fn detail(&self) -> String {
         let cwd = self.lines.iter().find_map(|l| match l {
             AgentLine::Field(label, value) if label == FOLDER => Some(basename(value)),
             _ => None,
         });
-        match (cwd, self.title()) {
-            (Some(cwd), Some(title)) => format!("{cwd} · {title}"),
-            (Some(cwd), None) => cwd.to_owned(),
-            (None, Some(title)) => title.to_owned(),
-            (None, None) => String::new(),
-        }
+        let subagents = self
+            .lines
+            .iter()
+            .filter(|l| matches!(l, AgentLine::Field(label, _) if label == SUBAGENT))
+            .count();
+        let subagents = match subagents {
+            0 => None,
+            1 => Some("1 subagent".to_owned()),
+            n => Some(format!("{n} subagents")),
+        };
+        [cwd.map(str::to_owned), subagents, self.title().map(str::to_owned)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// Everything the card knows, for its tooltip under `label`: a line
@@ -284,6 +296,8 @@ impl AgentView {
 
 /// The label of the field holding the folder an agent works in.
 const FOLDER: &str = "Folder";
+/// The label of a field holding what a subagent that runs is to do.
+const SUBAGENT: &str = "Subagent";
 
 /// `key` as a label: its words split on `_` and `-`, the first capitalised.
 fn sentence_case(key: &str) -> String {
@@ -1649,6 +1663,34 @@ mod tests {
         assert_eq!(card.label(), "claude · Opus 5.5");
         card.name = Some("reviewer".into());
         assert_eq!(card.label(), "claude · reviewer · Opus 5.5");
+    }
+
+    #[test]
+    fn a_cursor_card_shows_its_subagents() {
+        use crate::cursor_agents::{ChatRow, CursorChat};
+        let mut chat = CursorChat {
+            row: ChatRow {
+                id: "c1".into(),
+                subtitle: Some("Read main.rs".into()),
+                paths: vec!["/src/gerdr".into()],
+                ..ChatRow::default()
+            },
+            status: AgentStatus::Working,
+            model: None,
+            subagents: vec![Some("Audit the plan".into()), None],
+        };
+        let card = AgentView::cursor(&chat);
+        assert_eq!(card.detail(), "gerdr · 2 subagents · Read main.rs");
+        let fields = card.tooltip_fields();
+        assert!(fields.contains(&("Subagent".into(), "Audit the plan".into())));
+        assert!(fields.contains(&("Subagent".into(), "Working".into())));
+        chat.subagents.pop();
+        assert_eq!(
+            AgentView::cursor(&chat).detail(),
+            "gerdr · 1 subagent · Read main.rs"
+        );
+        chat.subagents.clear();
+        assert_eq!(AgentView::cursor(&chat).detail(), "gerdr · Read main.rs");
     }
 
     #[test]
