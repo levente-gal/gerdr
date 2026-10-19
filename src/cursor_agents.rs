@@ -37,6 +37,11 @@ pub const HOOK_HOLD_MS: i64 = 30_000;
 /// How long a hook's word that a chat runs holds: one tool can take long
 /// without a hook between, and a run that dies says nothing.
 pub const WORKING_HOLD_MS: i64 = 30 * 60_000;
+/// How long a subagent left running in the background counts as running
+/// after its last hook: none says when one stops.
+pub const BACKGROUND_HOLD_MS: i64 = 2 * 60_000;
+/// The tool through which a chat runs a subagent.
+const SUBAGENT_TOOL: &str = "Subagent";
 /// The most of a prompt a chat the database doesn't know yet is named by.
 const PROMPT_CHARS: usize = 80;
 /// The subcommand Cursor's hooks run.
@@ -124,8 +129,33 @@ pub struct HookEvent {
     /// What the user asked it, cut short, for `beforeSubmitPrompt`.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Whether the chat has a transcript yet. A subagent's never has, nor
+    /// a chat's first run before its first answer.
+    #[serde(default)]
+    pub transcript: bool,
+    /// The subagent call it is about, for the subagent tool's hooks.
+    #[serde(default)]
+    pub call: Option<SubagentCall>,
     /// When the hook ran, in milliseconds since the epoch.
     pub at_ms: i64,
+}
+
+/// A chat's call of a subagent. Cursor runs each subagent as a chat of its
+/// own, whose hooks say nothing of whose it is and which never stops: only
+/// its parent's call says when it ends.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubagentCall {
+    /// The tool call's id.
+    pub id: String,
+    /// What the subagent is to do, in a few words.
+    #[serde(default)]
+    pub task: Option<String>,
+    /// The subagent's chat, once the call returns.
+    #[serde(default)]
+    pub chat: Option<String>,
+    /// The subagent runs on in the background once the call returns.
+    #[serde(default)]
+    pub background: bool,
 }
 
 impl HookEvent {
@@ -147,6 +177,23 @@ impl HookEvent {
                 Some((cut, _)) => format!("{}…", &line[..cut]),
                 None => line,
             });
+        let call = (text("tool_name").as_deref() == Some(SUBAGENT_TOOL))
+            .then(|| text("tool_use_id"))
+            .flatten()
+            .map(|id| {
+                let input = payload.get("tool_input");
+                let output = text("tool_output")
+                    .and_then(|o| serde_json::from_str::<Value>(&o).ok())
+                    .unwrap_or_default();
+                SubagentCall {
+                    id,
+                    task: input
+                        .and_then(|i| i.get("description")?.as_str())
+                        .map(str::to_owned),
+                    chat: output["agentId"].as_str().map(str::to_owned),
+                    background: output["isBackground"].as_bool().unwrap_or(false),
+                }
+            });
         Some(Self {
             event: text("hook_event_name")?,
             chat: text("conversation_id").or_else(|| text("session_id"))?,
@@ -154,8 +201,18 @@ impl HookEvent {
             model: text("model").filter(|m| !m.is_empty()),
             roots,
             prompt,
+            transcript: text("transcript_path").is_some(),
+            call,
             at_ms,
         })
+    }
+
+    /// Whether it is about a tool the chat runs.
+    fn is_tool(&self) -> bool {
+        matches!(
+            self.event.as_str(),
+            "preToolUse" | "postToolUse" | "postToolUseFailure"
+        )
     }
 
     /// Whether its word still holds at `now_ms`: that a chat runs, for
@@ -202,14 +259,36 @@ pub struct CursorChat {
     pub row: ChatRow,
     pub status: AgentStatus,
     pub model: Option<String>,
+    /// What each of its subagents that run is to do, if known.
+    pub subagents: Vec<Option<String>>,
 }
 
-/// What gerdr knows of Cursor's chats: the database's rows and what the
-/// hooks said last of each.
+/// A subagent heard of: whose it is and whether it still runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Subagent {
+    /// Its parent's chat.
+    pub parent: String,
+    /// What it is to do, known once its call returned.
+    pub task: Option<String>,
+    /// It runs on in the background after its call returned.
+    pub background: bool,
+    /// It is over: its call returned, or its parent stopped.
+    pub ended: bool,
+    /// When it was last heard of, in milliseconds since the epoch.
+    pub at_ms: i64,
+}
+
+/// What gerdr knows of Cursor's chats: the database's rows, what the
+/// hooks said last of each, and their subagents, which their parents'
+/// cards show rather than cards of their own.
 #[derive(Default)]
 pub struct Chats {
     pub rows: HashMap<String, ChatRow>,
     pub hooks: HashMap<String, HookEvent>,
+    /// The subagent calls each chat has open, the oldest first.
+    pub calls: HashMap<String, Vec<SubagentCall>>,
+    /// The subagents heard of, by their chats.
+    pub subagents: HashMap<String, Subagent>,
 }
 
 impl Chats {
@@ -220,11 +299,27 @@ impl Chats {
 
     /// Take in what a hook said, keeping what earlier ones said of the
     /// chat's folders, prompt and model when it doesn't; a session's end
-    /// forgets its chat's.
+    /// forgets its chat's. A subagent's hook only says it still runs.
     pub fn hear(&mut self, mut event: HookEvent) {
         if event.event == "sessionEnd" {
             self.hooks.remove(&event.chat);
+            self.calls.remove(&event.chat);
             return;
+        }
+        if self.hear_subagent(&event) {
+            return;
+        }
+        if let Some(call) = event.call.clone() {
+            if event.event == "preToolUse" {
+                self.calls.entry(event.chat.clone()).or_default().push(call);
+            } else if event.is_tool() {
+                self.call_returned(&event.chat, call, event.at_ms);
+            }
+        }
+        if event.event == "stop" {
+            // Its calls returned before it stopped, unless it was stopped.
+            self.calls.remove(&event.chat);
+            self.end_subagents(&event.chat);
         }
         if let Some(before) = self.hooks.remove(&event.chat) {
             if event.roots.is_empty() {
@@ -236,12 +331,123 @@ impl Chats {
         self.hooks.insert(event.chat.clone(), event);
     }
 
+    /// Take in `event` if it is a subagent's, and say whether it was. A
+    /// chat is taken for one when a tool's hook without a transcript is
+    /// the first heard of it while another chat has a subagent call open.
+    /// While it runs, so does its parent, which hears nothing meanwhile.
+    fn hear_subagent(&mut self, event: &HookEvent) -> bool {
+        if !self.subagents.contains_key(&event.chat) {
+            let first = event.is_tool()
+                && !event.transcript
+                && !self.hooks.contains_key(&event.chat)
+                && !self.rows.contains_key(&event.chat);
+            let Some(parent) = first.then(|| self.calling(&event.roots)).flatten() else {
+                return false;
+            };
+            let subagent = Subagent {
+                parent,
+                task: None,
+                background: false,
+                ended: false,
+                at_ms: event.at_ms,
+            };
+            self.subagents.insert(event.chat.clone(), subagent);
+        }
+        if let Some(subagent) = self.subagents.get_mut(&event.chat) {
+            subagent.at_ms = subagent.at_ms.max(event.at_ms);
+            let parent = self.hooks.get_mut(&subagent.parent);
+            if let Some(parent) = parent.filter(|_| !subagent.ended)
+                && parent.status() == Some(AgentStatus::Working)
+            {
+                parent.at_ms = parent.at_ms.max(event.at_ms);
+            }
+        }
+        true
+    }
+
+    /// The chat with a subagent call open that one starting in `roots`
+    /// likeliest belongs to: one in the same folders, the latest heard.
+    fn calling(&self, roots: &[PathBuf]) -> Option<String> {
+        self.calls
+            .iter()
+            .filter(|(_, calls)| !calls.is_empty())
+            .map(|(chat, _)| chat)
+            .max_by_key(|chat| {
+                let hook = self.hooks.get(*chat);
+                (
+                    hook.is_some_and(|h| h.roots == roots),
+                    hook.map_or(0, |h| h.at_ms),
+                )
+            })
+            .cloned()
+    }
+
+    /// Take in that `parent`'s subagent `call` returned at `at_ms`: its
+    /// subagent is over unless it runs on in the background, and once no
+    /// call is open, so are all that don't.
+    fn call_returned(&mut self, parent: &str, call: SubagentCall, at_ms: i64) {
+        let open = self.calls.entry(parent.to_owned()).or_default();
+        let task = open
+            .iter()
+            .position(|c| c.id == call.id)
+            .and_then(|i| open.remove(i).task)
+            .or(call.task);
+        let none_open = open.is_empty();
+        if let Some(chat) = call.chat {
+            let subagent = Subagent {
+                parent: parent.to_owned(),
+                task,
+                background: call.background,
+                ended: !call.background,
+                at_ms,
+            };
+            self.subagents.insert(chat, subagent);
+        }
+        if none_open {
+            self.calls.remove(parent);
+            self.end_subagents(parent);
+        }
+    }
+
+    /// Take in that the subagents of `parent` not in the background are
+    /// over.
+    fn end_subagents(&mut self, parent: &str) {
+        for subagent in self.subagents.values_mut() {
+            if subagent.parent == parent && !subagent.background {
+                subagent.ended = true;
+            }
+        }
+    }
+
+    /// What each subagent of `parent` running at `now_ms` is to do: those
+    /// its open calls run, and those it left in the background that were
+    /// heard of in the last `BACKGROUND_HOLD_MS`.
+    fn running_subagents(&self, parent: &str, now_ms: i64) -> Vec<Option<String>> {
+        let called = self.calls.get(parent).into_iter().flatten();
+        let background = self.subagents.values().filter(|s| {
+            s.parent == parent && s.background && !s.ended && now_ms - s.at_ms <= BACKGROUND_HOLD_MS
+        });
+        called
+            .map(|c| c.task.clone())
+            .chain(background.map(|s| s.task.clone()))
+            .collect()
+    }
+
+    /// Whether what is live may change with time alone: a hook's word or a
+    /// subagent's may get old.
+    pub fn ageing(&self) -> bool {
+        !self.hooks.is_empty() || !self.subagents.is_empty()
+    }
+
     /// The chats doing something or with news at `now_ms`, the most
     /// recently changed first: those of the database, and those only
-    /// hooks know of yet (a first run), named by their prompt. What hooks
-    /// said long ago is forgotten.
+    /// hooks know of yet (a first run), named by their prompt. One runs
+    /// while a subagent of its runs. What hooks said long ago is forgotten.
     pub fn live(&mut self, now_ms: i64) -> Vec<CursorChat> {
         self.hooks.retain(|_, h| h.holds(now_ms));
+        self.calls.retain(|chat, _| self.hooks.contains_key(chat));
+        self.subagents
+            .retain(|_, s| now_ms - s.at_ms <= WORKING_HOLD_MS);
         let unwritten = self
             .hooks
             .values()
@@ -260,9 +466,15 @@ impl Chats {
                 if row.paths.is_empty() {
                     row.paths = hook.map(|h| h.roots.clone()).unwrap_or_default();
                 }
+                let subagents = self.running_subagents(&row.id, now_ms);
+                let mut status = merged_status(&row, hook, now_ms);
+                if !subagents.is_empty() && status != AgentStatus::Blocked {
+                    status = AgentStatus::Working;
+                }
                 CursorChat {
-                    status: merged_status(&row, hook, now_ms),
+                    status,
                     model: hook.and_then(|h| h.model.clone()),
+                    subagents,
                     row,
                 }
             })
@@ -709,7 +921,7 @@ impl crate::Gerdr {
         }
         let timer = Timer::from_duration(DB_INTERVAL);
         let tick = |_, _: &mut (), state: &mut crate::Gerdr| {
-            if !state.cursor.hooks.is_empty() {
+            if state.cursor.ageing() {
                 state.cursor_changed();
             }
             TimeoutAction::ToDuration(DB_INTERVAL)
@@ -824,6 +1036,8 @@ mod tests {
             model: None,
             roots: Vec::new(),
             prompt: None,
+            transcript: true,
+            call: None,
             at_ms,
         }
     }
@@ -923,6 +1137,163 @@ mod tests {
         assert!(chats.hooks.is_empty());
     }
 
+    /// A tool's hook of chat `chat` at `at_ms`, about subagent call `call`
+    /// if any; a subagent's has no transcript.
+    fn tool(event: &str, chat: &str, call: Option<SubagentCall>, at_ms: i64) -> HookEvent {
+        HookEvent {
+            chat: chat.into(),
+            transcript: call.is_some() || !chat.starts_with("sub"),
+            call,
+            ..hook(event, None, at_ms)
+        }
+    }
+
+    fn call(id: &str, task: &str) -> SubagentCall {
+        SubagentCall {
+            id: id.into(),
+            task: Some(task.into()),
+            ..SubagentCall::default()
+        }
+    }
+
+    fn returned(id: &str, chat: &str, background: bool) -> SubagentCall {
+        SubagentCall {
+            id: id.into(),
+            chat: Some(chat.into()),
+            background,
+            ..SubagentCall::default()
+        }
+    }
+
+    #[test]
+    fn subagent_calls_are_read_from_hook_input() {
+        // As Cursor 3.16 sends them.
+        let started = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "conversation_id": "c1",
+            "tool_name": "Subagent",
+            "tool_input": { "description": "Audit deck", "prompt": "…" },
+            "tool_use_id": "call_1\nfc_1",
+            "transcript_path": "/home/u/.cursor/c1.jsonl",
+        });
+        let event = HookEvent::from_payload(&started, 7).unwrap();
+        assert!(event.transcript);
+        assert_eq!(event.call, Some(call("call_1\nfc_1", "Audit deck")));
+        let ended = serde_json::json!({
+            "hook_event_name": "postToolUse",
+            "conversation_id": "c1",
+            "tool_name": "Subagent",
+            "tool_use_id": "call_1\nfc_1",
+            "tool_output": "{\"status\":\"success\",\"agentId\":\"s1\",\"isBackground\":false}",
+        });
+        let call = HookEvent::from_payload(&ended, 7).unwrap().call.unwrap();
+        assert_eq!((call.chat.as_deref(), call.background), (Some("s1"), false));
+        // Another tool's say nothing of subagents; a subagent's have no
+        // transcript.
+        let other = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "conversation_id": "s1",
+            "tool_name": "Read",
+            "tool_use_id": "call_2",
+            "transcript_path": null,
+        });
+        let event = HookEvent::from_payload(&other, 7).unwrap();
+        assert_eq!((event.call, event.transcript), (None, false));
+    }
+
+    #[test]
+    fn subagents_show_on_their_parents_card_while_their_calls_run() {
+        let mut chats = Chats::default();
+        chats.hear(hook("beforeSubmitPrompt", None, 1_000));
+        chats.hear(tool("preToolUse", "c1", Some(call("t1", "Audit")), 1_100));
+        chats.hear(tool("preToolUse", "c1", Some(call("t2", "Review")), 1_200));
+        for (sub, at) in [("sub1", 1_300), ("sub2", 1_400), ("sub1", 1_500)] {
+            chats.hear(tool("preToolUse", sub, None, at));
+        }
+        let live = chats.live(2_000);
+        assert_eq!(live.len(), 1, "no cards of their own");
+        assert_eq!(live[0].row.id, "c1");
+        assert_eq!(live[0].status, AgentStatus::Working);
+        assert_eq!(
+            live[0].subagents,
+            [Some("Audit".into()), Some("Review".into())]
+        );
+        // Their hooks keep the parent running, which hears nothing itself.
+        assert_eq!(chats.hooks["c1"].at_ms, 1_500);
+        // One returns; a late hook of its doesn't bring it back.
+        chats.hear(tool(
+            "postToolUse",
+            "c1",
+            Some(returned("t1", "sub1", false)),
+            2_100,
+        ));
+        chats.hear(tool("postToolUse", "sub1", None, 2_150));
+        let live = chats.live(2_200);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].subagents, [Some("Review".into())]);
+        // The parent stops: none runs, and the subagents never stopped.
+        chats.hear(hook("stop", Some("completed"), 3_000));
+        let live = chats.live(3_100);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].status, AgentStatus::Done);
+        assert!(live[0].subagents.is_empty());
+        chats.hear(tool("postToolUse", "sub2", None, 3_200));
+        assert_eq!(chats.live(3_300).len(), 1);
+        assert!(chats.calls.is_empty());
+    }
+
+    #[test]
+    fn a_subagent_in_the_background_runs_while_heard_of() {
+        let mut chats = Chats::default();
+        chats.hear(hook("beforeSubmitPrompt", None, 1_000));
+        chats.hear(tool("preToolUse", "c1", Some(call("t1", "Watch")), 1_100));
+        chats.hear(tool(
+            "postToolUse",
+            "c1",
+            Some(returned("t1", "sub1", true)),
+            1_200,
+        ));
+        chats.hear(hook("stop", Some("completed"), 1_300));
+        // Its row is written once it stops.
+        let mut news = row("c1");
+        news.unread = true;
+        chats.set_rows(vec![news]);
+        chats.hear(tool("preToolUse", "sub1", None, 1_400));
+        let live = chats.live(1_500);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].status, AgentStatus::Working);
+        assert_eq!(live[0].subagents, [Some("Watch".into())]);
+        assert!(chats.ageing());
+        let quiet = chats.live(1_400 + BACKGROUND_HOLD_MS + 1);
+        assert_eq!(quiet[0].status, AgentStatus::Done);
+        assert!(quiet[0].subagents.is_empty());
+    }
+
+    #[test]
+    fn only_a_chat_first_heard_by_a_tool_without_transcript_is_a_subagent() {
+        let mut chats = Chats::default();
+        chats.hear(tool("preToolUse", "c1", Some(call("t1", "Audit")), 1_000));
+        // A chat the user starts meanwhile says so first.
+        let mut other = hook("sessionStart", None, 1_100);
+        other.chat = "sub-not".into();
+        chats.hear(other);
+        chats.hear(tool("preToolUse", "sub-not", None, 1_200));
+        // One already running, when gerdr started, has a transcript.
+        chats.hear(tool("preToolUse", "c2", None, 1_300));
+        let mut ids: Vec<_> = chats.live(2_000).into_iter().map(|c| c.row.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["c1", "c2", "sub-not"]);
+        // With no call open, a chat without transcript is one of its own.
+        chats.hear(tool(
+            "postToolUseFailure",
+            "c1",
+            Some(call("t1", "Audit")),
+            2_100,
+        ));
+        chats.hear(tool("preToolUse", "sub3", None, 2_200));
+        assert!(chats.live(2_300).iter().any(|c| c.row.id == "sub3"));
+    }
+
     #[test]
     fn hook_input_is_read() {
         let payload = serde_json::json!({
@@ -943,6 +1314,8 @@ mod tests {
                 model: Some("gpt-5".into()),
                 roots: vec![PathBuf::from("/src/gerdr")],
                 prompt: None,
+                transcript: false,
+                call: None,
                 at_ms: 7,
             }
         );
