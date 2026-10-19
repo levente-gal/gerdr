@@ -43,6 +43,7 @@ fn workspaces() -> Vec<WorkspaceView> {
                 worktrees: Vec::new(),
                 here: None,
                 root: None,
+                ..GitStatus::default()
             }),
             place: "gerdr, gerdr/src".into(),
             activity: "2 tabs · claude working, zsh".into(),

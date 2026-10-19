@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
+    time::SystemTime,
 };
 
 /// Where a folder's repository stands.
@@ -29,6 +30,61 @@ pub struct GitStatus {
     /// The top folder of the worktree the folder is in, which the others'
     /// paths are shown from.
     pub root: Option<PathBuf>,
+    /// The commit checked out; `None` before the first commit.
+    pub head: Option<String>,
+    /// The changed, staged, untracked and conflicted files, in `git status`
+    /// order.
+    pub changes: Vec<Change>,
+    /// The branch's upstream, as `origin/feat/x`; `None` without one.
+    pub upstream: Option<String>,
+    /// The remote the repository's branches go to: the upstream's, else
+    /// `origin`, else its only remote; `None` without a remote.
+    pub remote: Option<String>,
+    /// The remote's default branch, as `main` (no remote prefix): what
+    /// `<remote>/HEAD` points at, else a local `main` or `master`.
+    pub default_branch: Option<String>,
+    /// The worktree's own git folder (`.git`, or `.git/worktrees/<name>`
+    /// for a linked worktree), absolute.
+    pub git_dir: Option<PathBuf>,
+    /// The git folder its worktrees share, absolute: two checkouts with the
+    /// same one are the same repository.
+    pub common_dir: Option<PathBuf>,
+    /// A merge, rebase, cherry-pick or revert stopped half-way in it.
+    pub op: Option<InProgress>,
+    /// How many stashes the repository has (shared by its worktrees).
+    pub stashes: u32,
+    /// When it last fetched (`FETCH_HEAD`'s time); `None` if never.
+    pub fetched: Option<SystemTime>,
+}
+
+/// A file `git status` lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    /// From the worktree's top folder, as git prints it with `-z` (not
+    /// quoted). An untracked folder ends in `/`.
+    pub path: String,
+    /// Where a renamed or copied file was.
+    pub orig: Option<String>,
+    /// What happened to it, as one letter: `M` changed, `A` added, `D`
+    /// deleted, `R` renamed, `C` copied, `T` type changed, `U` conflicted,
+    /// `?` untracked.
+    pub code: char,
+}
+
+impl Change {
+    pub fn conflicted(&self) -> bool {
+        self.code == 'U'
+    }
+}
+
+/// An operation stopped half-way, waiting to be continued or aborted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InProgress {
+    Merge,
+    /// At commit `step` of `total`.
+    Rebase { step: u32, total: u32 },
+    CherryPick,
+    Revert,
 }
 
 /// A worktree of the repository a folder is in.
@@ -530,6 +586,7 @@ mod tests {
                 worktrees: Vec::new(),
                 here: None,
                 root: None,
+                ..GitStatus::default()
             }
         );
     }
@@ -547,6 +604,7 @@ mod tests {
                 worktrees: Vec::new(),
                 here: None,
                 root: None,
+                ..GitStatus::default()
             }
         );
         assert!(parse("# branch.head main\n? notes.txt\n").dirty);

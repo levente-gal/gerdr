@@ -27,6 +27,7 @@ mod pane_bar;
 mod placeholder;
 mod project_menu;
 mod quit;
+mod repos;
 mod shapes;
 mod sidebar;
 mod switcher;
@@ -72,6 +73,7 @@ pub use theme::*;
 pub use toast::*;
 pub use tooltip::*;
 pub use welcome::*;
+pub use repos::*;
 pub use worktrees::*;
 
 pub(crate) type Rect = Rectangle<i32, Logical>;

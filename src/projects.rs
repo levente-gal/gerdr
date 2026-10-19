@@ -6,6 +6,7 @@
 //! `~/.local/share/gerdr/projects.json`.
 
 use std::{
+    collections::BTreeMap,
     io::ErrorKind,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -37,6 +38,10 @@ pub struct Store {
     pub quit_choice: Option<QuitChoice>,
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Per project id, its feature: the branch its repositories are to be
+    /// on, set by the repositories panel.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, String>,
     /// The file couldn't be read nor set aside: saving would lose it.
     #[serde(skip)]
     frozen: bool,
@@ -965,6 +970,7 @@ mod tests {
             version: VERSION,
             last_active: Some("api".into()),
             quit_choice: Some(QuitChoice::Keep),
+            features: BTreeMap::new(),
             frozen: false,
             disk: Disk::default(),
             projects: vec![Project {
