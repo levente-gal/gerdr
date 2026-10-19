@@ -11,7 +11,7 @@ use super::{
     PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE,
     RENAME_FIELD, RENAME_INSET, ROW_BUTTON, ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect,
     SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross,
-    field_text, focus_ring, folder, icon_sdf, magnifier, mix, pencil, phys, physical, plus,
+    field_text, file, focus_ring, folder, icon_sdf, magnifier, mix, pencil, phys, physical, plus,
     rect_px, stop,
 };
 use crate::WorkspaceKind;
@@ -121,6 +121,8 @@ pub enum SettingsField {
 pub enum RowButton {
     /// Its start and stop commands.
     Settings,
+    /// Its file, to edit.
+    ProjectFile,
     Rename,
     Stop,
     Forget,
@@ -285,10 +287,14 @@ pub(super) fn menu_entries(
 }
 
 /// The buttons a project row shows under the pointer, left to right:
-/// settings and rename always; stop while its session may run, and forget,
-/// unless it is the current project.
+/// settings, its file and rename always; stop while its session may run,
+/// and forget, unless it is the current project.
 pub(super) fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
-    let mut buttons = vec![RowButton::Settings, RowButton::Rename];
+    let mut buttons = vec![
+        RowButton::Settings,
+        RowButton::ProjectFile,
+        RowButton::Rename,
+    ];
     if !row.current && row.running != Some(false) {
         buttons.push(RowButton::Stop);
     }
@@ -999,6 +1005,7 @@ impl Painter {
             };
             icon_sdf(c, rect, scale, color, |x, y| match button {
                 RowButton::Settings => commands_prompt(x, y, s),
+                RowButton::ProjectFile => file(x, y, s),
                 RowButton::Rename => pencil(x, y, s),
                 RowButton::Stop => stop(x, y, s),
                 RowButton::Forget => cross(x, y, s),
@@ -1575,14 +1582,14 @@ mod tests {
 
         // Row buttons: only on the hovered project row, and which depend on
         // whether it is current and runs.
-        use RowButton::{Forget, Rename, Settings, Stop};
+        use RowButton::{Forget, ProjectFile, Rename, Settings, Stop};
         let expected: [&[RowButton]; 8] = [
             &[],
-            &[Settings, Rename],
+            &[Settings, ProjectFile, Rename],
             &[],
-            &[Settings, Rename, Stop, Forget],
-            &[Settings, Rename, Forget],
-            &[Settings, Rename, Stop, Forget],
+            &[Settings, ProjectFile, Rename, Stop, Forget],
+            &[Settings, ProjectFile, Rename, Forget],
+            &[Settings, ProjectFile, Rename, Stop, Forget],
             &[],
             &[],
         ];

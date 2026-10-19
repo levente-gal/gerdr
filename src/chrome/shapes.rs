@@ -215,6 +215,28 @@ pub(super) fn commands_prompt(x: f32, y: f32, s: f32) -> f32 {
     chevron.min(line) - STROKE * s
 }
 
+/// Signed distance to a page outline centred on the origin, its top right
+/// corner folded over: a file.
+pub(super) fn file(x: f32, y: f32, s: f32) -> f32 {
+    let (left, right, top, bottom) = (-3.4 * s, 3.4 * s, -4.6 * s, 4.6 * s);
+    let (fold_x, fold_y) = (0.8 * s, -2.0 * s);
+    let edges = [
+        (left, top, fold_x, top),
+        (fold_x, top, right, fold_y),
+        (right, fold_y, right, bottom),
+        (right, bottom, left, bottom),
+        (left, bottom, left, top),
+        // The fold.
+        (fold_x, top, fold_x, fold_y),
+        (fold_x, fold_y, right, fold_y),
+    ];
+    edges
+        .into_iter()
+        .map(|(ax, ay, bx, by)| segment(x, y, ax, ay, bx, by))
+        .fold(f32::MAX, f32::min)
+        - STROKE * s
+}
+
 /// Signed distance to a filled square centred on the origin: stop.
 pub(super) fn stop(x: f32, y: f32, s: f32) -> f32 {
     rounded_rect(x, y, -3.8 * s, -3.8 * s, 7.6 * s, 7.6 * s, 1.2 * s)
