@@ -1029,6 +1029,38 @@ impl Panel {
             .unwrap_or_default()
     }
 
+    /// What `button` says in the footer: a merge or rebase names the
+    /// default branch it brings in (`Merge main`), its names joined when
+    /// the repositories acted on differ but have them as one branch
+    /// (`main / master`), else `base`.
+    fn button_label(&self, button: ReposButton, ctx: &Ctx) -> String {
+        let verb = match button {
+            ReposButton::Merge => "Merge",
+            ReposButton::Rebase => "Rebase on",
+            _ => return button.label().into(),
+        };
+        let mut names: Vec<&str> = self
+            .targets(ctx.items)
+            .into_iter()
+            .filter_map(|k| ctx.items[k].status.default_branch.as_deref())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let one = match names.as_slice() {
+            [] => false,
+            [first, rest @ ..] => {
+                let key = branch_key(first, ctx.same);
+                rest.iter().all(|n| branch_key(n, ctx.same) == key)
+            }
+        };
+        let base = if one {
+            names.join(" / ")
+        } else {
+            "base".into()
+        };
+        format!("{verb} {base}")
+    }
+
     /// The branches every repository acted on has, local or on its remote:
     /// their default branch first, then by name.
     fn branches(&self, ctx: &Ctx) -> Vec<Branch> {
@@ -2199,6 +2231,7 @@ impl Panel {
             .into_iter()
             .map(|button| Hint {
                 button,
+                label: self.button_label(button, ctx),
                 key: key_name(button).into(),
                 disabled: match self.plan(button, ctx) {
                     Err(Why::Other(why)) => Some(why),
@@ -3889,6 +3922,33 @@ mod tests {
     fn check_repo(panel: &mut Panel, name: &str, ctx: &Ctx) {
         select(panel, name);
         press(panel, none(), Keysym::space, ctx);
+    }
+
+    #[test]
+    fn merge_and_rebase_name_the_default_branch() {
+        let label = |items: &[RepoItem], checked: &[&str], button| {
+            let ctx = ctx(items, None);
+            let mut panel = Panel::new(items);
+            select(&mut panel, "gerdr");
+            for name in checked {
+                check_repo(&mut panel, name, &ctx);
+            }
+            panel.button_label(button, &ctx)
+        };
+        let mut items = branched();
+        assert_eq!(label(&items, &[], ReposButton::Merge), "Merge main");
+        assert_eq!(label(&items, &[], ReposButton::Rebase), "Rebase on main");
+        assert_eq!(label(&items, &[], ReposButton::Fetch), "Fetch");
+        // main and master are one branch.
+        let both = ["gerdr", "herdr"];
+        assert_eq!(
+            label(&items, &both, ReposButton::Merge),
+            "Merge main / master"
+        );
+        items[1].status.default_branch = Some("trunk".into());
+        assert_eq!(label(&items, &both, ReposButton::Merge), "Merge base");
+        items[0].status.default_branch = None;
+        assert_eq!(label(&items, &[], ReposButton::Merge), "Merge base");
     }
 
     #[test]

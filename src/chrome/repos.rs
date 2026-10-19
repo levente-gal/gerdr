@@ -284,6 +284,9 @@ pub struct ResultBar {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
     pub button: ReposButton,
+    /// What it says: the button's label, a merge's with its branch
+    /// (`Merge main`).
+    pub label: String,
     /// As shown: `Ctrl+N`.
     pub key: String,
     /// `None` when it can be done now, else why not (in a tooltip-like
@@ -648,14 +651,14 @@ fn text_extent(text: &str, size: f32, per_char: f64) -> i32 {
 /// without a key, its label on a button.
 fn hint_width(hint: &Hint) -> i32 {
     if hint.key.is_empty() {
-        let label = text_extent(hint.button.label(), SMALL_FONT_SIZE, SMALL_CHAR);
+        let label = text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR);
         return 2 * HINT_PAD + 2 * CAP_PADDING + label;
     }
     2 * HINT_PAD
         + 2 * CAP_PADDING
         + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR)
         + HINT_KEY_GAP
-        + text_extent(hint.button.label(), SMALL_FONT_SIZE, SMALL_CHAR)
+        + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
 /// How wide a pill button in the result bar is.
@@ -1988,7 +1991,7 @@ impl Painter {
             );
             self.mixed_text(
                 c,
-                hint.button.label(),
+                &hint.label,
                 SMALL_FONT_SIZE,
                 bx + pad,
                 right,
@@ -2023,7 +2026,7 @@ impl Painter {
         );
         self.mixed_text(
             c,
-            hint.button.label(),
+            &hint.label,
             SMALL_FONT_SIZE,
             cap_x + cap_w + (HINT_KEY_GAP as f32 * s).round(),
             right - (HINT_PAD as f32 * s).round() / 2.0,
@@ -2342,6 +2345,7 @@ mod tests {
     fn hint(button: ReposButton, key: &str, disabled: Option<&str>) -> Hint {
         Hint {
             button,
+            label: button.label().into(),
             key: key.into(),
             disabled: disabled.map(Into::into),
         }
