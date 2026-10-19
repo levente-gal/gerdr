@@ -221,7 +221,7 @@ pub struct ResultBar {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
     pub button: ReposButton,
-    /// As shown: `Ctrl+B`.
+    /// As shown: `Ctrl+N`.
     pub key: String,
     /// `None` when it can be done now, else why not (in a tooltip-like
     /// muted line when hovered).
@@ -1903,8 +1903,8 @@ mod tests {
                 buttons: vec![Undo, RetryFailed],
             }),
             hints: vec![
-                hint(Branch, "Ctrl+B", None),
-                hint(StartFeature, "Ctrl+Shift+B", None),
+                hint(Branch, "Ctrl+N", None),
+                hint(StartFeature, "Ctrl+Shift+N", None),
                 hint(Join, "Ctrl+J", None),
                 hint(Commit, "Ctrl+Enter", None),
                 hint(CommitPush, "Ctrl+Shift+Enter", None),

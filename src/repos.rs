@@ -13,7 +13,7 @@
 //!
 //! Keys: Tab moves between the tree and the field. In the tree Up/Down
 //! select, Space checks, Left/Right fold, and typing goes to the field.
-//! Ctrl+B branches (Ctrl+Shift+B starts the feature), Ctrl+J joins it,
+//! Ctrl+N branches (Ctrl+Shift+N starts the feature), Ctrl+J joins it,
 //! Ctrl+Enter commits (Ctrl+Shift+Enter then pushes), Ctrl+P pushes
 //! (Ctrl+Shift+P force pushes, twice), Ctrl+F fetches, Ctrl+L pulls, Ctrl+M
 //! merges the default branch in (Ctrl+Shift+M rebases on it), Ctrl+K parks
@@ -543,8 +543,8 @@ fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
     }
     // Shift changes the symbol: match both cases.
     let button = match sym {
-        Keysym::b | Keysym::B if shift => B::StartFeature,
-        Keysym::b | Keysym::B => B::Branch,
+        Keysym::n | Keysym::N if shift => B::StartFeature,
+        Keysym::n | Keysym::N => B::Branch,
         Keysym::j | Keysym::J => B::Join,
         Keysym::Return | Keysym::KP_Enter if shift => B::CommitPush,
         Keysym::Return | Keysym::KP_Enter => B::Commit,
@@ -569,8 +569,8 @@ fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
 fn key_name(button: ReposButton) -> &'static str {
     use ReposButton as B;
     match button {
-        B::Branch => "Ctrl+B",
-        B::StartFeature => "Ctrl+Shift+B",
+        B::Branch => "Ctrl+N",
+        B::StartFeature => "Ctrl+Shift+N",
         B::Join => "Ctrl+J",
         B::Commit => "Ctrl+Enter",
         B::CommitPush => "Ctrl+Shift+Enter",
@@ -1080,7 +1080,7 @@ impl Panel {
         let feature = || {
             ctx.feature
                 .map(str::to_owned)
-                .ok_or_else(|| Why::other("No feature yet: start one with Ctrl+Shift+B"))
+                .ok_or_else(|| Why::other("No feature yet: start one with Ctrl+Shift+N"))
         };
         let targets = self.targets(items);
         let selected = self.selected_item(items);
@@ -2590,6 +2590,14 @@ mod tests {
     }
 
     #[test]
+    fn no_action_takes_the_default_prefix() {
+        // Ctrl+B arms the prefix before the panel sees it, and the prefix
+        // then eats the next key too.
+        assert_eq!(action_key(&ctrl(), Keysym::b), None);
+        assert_eq!(action_key(&ctrl_shift(), Keysym::B), None);
+    }
+
+    #[test]
     fn actions_say_why_they_are_not_done() {
         let items = items();
         let ctx = ctx(&items, None, None);
@@ -2619,14 +2627,14 @@ mod tests {
         fails(
             &mut panel,
             ctrl(),
-            Keysym::b,
+            Keysym::n,
             &ctx,
             "Type a branch name first",
         );
         fails(
             &mut panel,
             ctrl_shift(),
-            Keysym::B,
+            Keysym::N,
             &ctx,
             "Type a branch name first",
         );
@@ -2636,18 +2644,18 @@ mod tests {
         fails(
             &mut panel,
             ctrl(),
-            Keysym::b,
+            Keysym::n,
             &ctx,
             "Not a branch name: it can't have spaces",
         );
-        let no_feature = "No feature yet: start one with Ctrl+Shift+B";
+        let no_feature = "No feature yet: start one with Ctrl+Shift+N";
         fails(&mut panel, ctrl(), Keysym::j, &ctx, no_feature);
         fails(&mut panel, ctrl(), Keysym::k, &ctx, no_feature);
         fails(&mut panel, ctrl_shift(), Keysym::K, &ctx, no_feature);
         // Done, the message goes.
         panel.field.set("feat/x");
         assert_eq!(
-            press(&mut panel, ctrl(), Keysym::b, &ctx),
+            press(&mut panel, ctrl(), Keysym::n, &ctx),
             Some(Outcome::Batch {
                 kind: BatchKind::Branch("feat/x".into()),
                 jobs: jobs(&["gerdr"])
@@ -3373,7 +3381,7 @@ mod tests {
         assert!(usual.contains(&ReposButton::Fetch));
         assert!(!usual.contains(&ReposButton::Park));
         let hints = panel.view("p", &ctx).hints;
-        assert_eq!(hints[0].key, "Ctrl+B");
+        assert_eq!(hints[0].key, "Ctrl+N");
         // Wanting text doesn't disable: pressed, it asks for it.
         assert_eq!(hints[0].disabled, None);
         assert_eq!(
