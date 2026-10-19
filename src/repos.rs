@@ -1831,7 +1831,7 @@ impl Panel {
         self.first = self.first.min(rows.len().saturating_sub(page));
         let at = |i: usize| (i < page && self.first + i < rows.len()).then_some(self.first + i);
         match hit {
-            ReposHit::Line(i) => {
+            ReposHit::Line(i) | ReposHit::Mark(i, _) => {
                 let k = at(i)?;
                 if self.selected_row(&rows, items) == Some(k) {
                     self.armed = armed;
@@ -2026,7 +2026,8 @@ impl Panel {
                 branch: status.branch.clone(),
                 off_feature: ctx
                     .feature
-                    .is_some_and(|f| status.branch.as_deref() != Some(f)),
+                    .filter(|&f| status.branch.as_deref() != Some(f))
+                    .map(str::to_owned),
                 dirty: status.dirty,
                 ahead: status.ahead,
                 behind: status.behind,
@@ -3377,8 +3378,8 @@ mod tests {
         );
         assert_eq!(view.placeholder, "Branch name or commit message");
         let lines = repo_lines(&view);
-        assert!(!lines[0].off_feature);
-        assert!(lines[2].off_feature);
+        assert_eq!(lines[0].off_feature, None);
+        assert_eq!(lines[2].off_feature.as_deref(), Some("feat/x"));
         let ctx = super::Ctx {
             feature: None,
             ..ctx
