@@ -42,15 +42,10 @@ struct Task {
     kind: BatchKind,
     job: Job,
     remote: Option<String>,
-    /// What a feature starts from and merges in: `origin/main`, else a
-    /// local `main`.
+    /// What merges and rebases bring in: `origin/main`, else a local
+    /// `main`.
     base: Option<String>,
-    default: Option<String>,
     op: Option<InProgress>,
-    feature: Option<String>,
-    /// A resume's stash applied with conflicts here: what Continue and
-    /// Abort see through when no operation is stopped half-way.
-    stash_conflict: bool,
     /// For an undo: where the batch undone found it, and left it, and
     /// whether to keep what its commits changed (it committed).
     undo: Option<(Head, Head, bool)>,
@@ -120,7 +115,7 @@ fn chain(log: Vec<Ran>, then: OpResult) -> OpResult {
     }
 }
 
-/// The branch a feature starts from and takes new commits from.
+/// The branch new commits are merged or rebased in from.
 fn base_of(status: &GitStatus) -> Option<String> {
     let default = status.default_branch.as_ref()?;
     Some(match &status.remote {
@@ -144,7 +139,7 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
     let dir = task.job.root.as_path();
     let need = |v: &Option<String>, why: &str| v.clone().ok_or_else(|| blocked(why));
     match &task.kind {
-        BatchKind::Branch(name) | BatchKind::Join(name) => {
+        BatchKind::Branch(name) => {
             step("switching…");
             git_ops::switch_or_create(dir, name)
         }
@@ -153,11 +148,6 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
                 .ok_or_else(|| blocked("no such branch here"))?;
             step("switching…");
             git_ops::switch_or_create(dir, &name)
-        }
-        BatchKind::StartFeature(name) => {
-            let base = need(&task.base, "no default branch")?;
-            step("starting…");
-            git_ops::start_from(dir, name, &base)
         }
         // A checked repository with nothing to commit is only pushed.
         BatchKind::Commit { push: true, .. } if task.job.files.is_empty() => {
@@ -200,15 +190,6 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             });
             chain(log, git_ops::integrate(dir, &base, *how))
         }
-        BatchKind::Park(feature) => {
-            let default = need(&task.default, "no default branch")?;
-            step("parking…");
-            git_ops::park(dir, feature, &default)
-        }
-        BatchKind::Resume(feature) => {
-            step("resuming…");
-            git_ops::resume(dir, feature)
-        }
         BatchKind::MarkResolved => {
             let mut log = Vec::new();
             for file in &task.job.files {
@@ -216,15 +197,12 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             }
             Ok(log)
         }
-        // Without an operation stopped half-way, only a resume's stash is
-        // the panel's to see through: other conflicts are left to the user.
+        // Without an operation stopped half-way, conflicts are left to
+        // the user.
         BatchKind::Continue => {
             step("continuing…");
             match task.op {
                 Some(op) => git_ops::continue_op(dir, op),
-                None if task.stash_conflict => {
-                    git_ops::finish_stash(dir, &need(&task.feature, "no feature")?)
-                }
                 None => Err(blocked("nothing stopped half-way here")),
             }
         }
@@ -232,9 +210,6 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("aborting…");
             match task.op {
                 Some(op) => git_ops::abort_op(dir, op),
-                None if task.stash_conflict => {
-                    git_ops::abort_stash(dir, &need(&task.feature, "no feature")?)
-                }
                 None => Err(blocked("nothing stopped half-way here")),
             }
         }
@@ -281,12 +256,10 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
             }
             git_ops::predict_merge(root, "HEAD", upstream)
         }
-        BatchKind::Branch(name) | BatchKind::Join(name) | BatchKind::StartFeature(name) => {
+        BatchKind::Branch(name) => {
             let local = format!("refs/heads/{name}");
             let target = if git_ops::has_ref(root, &local) {
                 Some(name.clone())
-            } else if matches!(kind, BatchKind::StartFeature(_)) {
-                base_of(status)
             } else {
                 status
                     .remote
@@ -304,7 +277,7 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
                 return Verdict::Clean;
             }
             Verdict::Blocked(format!(
-                "{} differ on {target}: park them first",
+                "{} differ on {target}: commit or stash them first",
                 files(&blockers)
             ))
         }
@@ -314,7 +287,7 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
 
 /// Why a rebase isn't tried: git won't over uncommitted changes, and the
 /// panel doesn't stash them around it (see `git_ops::pull`).
-const UNCOMMITTED: &str = "uncommitted changes: commit or park them first";
+const UNCOMMITTED: &str = "uncommitted changes: commit or stash them first";
 
 /// Whether a tracked file is changed: untracked ones don't stop a rebase.
 fn tracked_changes(status: &GitStatus) -> bool {
@@ -388,12 +361,6 @@ impl Gerdr {
             });
         }
         items
-    }
-
-    /// The shown project's feature branch.
-    fn repos_feature(&self) -> Option<String> {
-        let id = self.project.as_deref()?;
-        self.projects.features.get(id).cloned()
     }
 
     fn repos_page(&self) -> (usize, usize) {
@@ -490,7 +457,6 @@ impl Gerdr {
     /// The panel's state brought in line with the last Git status read,
     /// and the detail it wants read.
     fn repos_refresh(&mut self) {
-        let feature = self.repos_feature();
         let page = self.repos_page();
         let Repos {
             panel,
@@ -503,7 +469,6 @@ impl Gerdr {
             let ctx = Ctx {
                 items,
                 batch: batch.as_ref(),
-                feature: feature.as_deref(),
                 page,
                 now: SystemTime::now(),
                 same: same_branches,
@@ -525,7 +490,6 @@ impl Gerdr {
     /// Read the diff or log the selection wants, off the event loop, unless
     /// it is being read.
     fn repos_detail(&mut self) {
-        let feature = self.repos_feature();
         let page = self.repos_page();
         let Some(panel) = self.repos.panel.as_ref() else {
             return;
@@ -533,7 +497,6 @@ impl Gerdr {
         let ctx = Ctx {
             items: &self.repos.items,
             batch: self.repos.batch.as_ref(),
-            feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
             same: &self.repos.same_branches,
@@ -574,7 +537,6 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Outcome> {
-        let feature = self.repos_feature();
         let page = self.repos_page();
         let Repos {
             panel,
@@ -586,7 +548,6 @@ impl Gerdr {
         let ctx = Ctx {
             items,
             batch: batch.as_ref(),
-            feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
             same: same_branches,
@@ -605,7 +566,6 @@ impl Gerdr {
         let Some(hit) = chrome::repos_hit(&layout, pos) else {
             return self.close_repos();
         };
-        let feature = self.repos_feature();
         let page = self.repos_page();
         let Repos {
             panel,
@@ -617,7 +577,6 @@ impl Gerdr {
         let ctx = Ctx {
             items,
             batch: batch.as_ref(),
-            feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
             same: same_branches,
@@ -681,7 +640,6 @@ impl Gerdr {
             .branch_menu
             .as_ref()
             .is_some_and(|(menu, _)| menu.to_f64().contains(pos));
-        let feature = self.repos_feature();
         let page = self.repos_page();
         let Repos {
             panel,
@@ -693,7 +651,6 @@ impl Gerdr {
         let ctx = Ctx {
             items,
             batch: batch.as_ref(),
-            feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
             same: same_branches,
@@ -708,11 +665,9 @@ impl Gerdr {
     /// What the panel shows, while it is open.
     pub fn repos_view(&self) -> Option<ReposView> {
         let panel = self.repos.panel.as_ref()?;
-        let feature = self.repos_feature();
         let ctx = Ctx {
             items: &self.repos.items,
             batch: self.repos.batch.as_ref(),
-            feature: feature.as_deref(),
             page: self.repos_page(),
             now: SystemTime::now(),
             same: &self.repos.same_branches,
@@ -808,13 +763,7 @@ impl Gerdr {
     /// Check before `kind` over `jobs`, off the event loop: run it straight
     /// away when all is clean, else ask about what was found.
     fn repos_check(&mut self, kind: BatchKind, jobs: Vec<Job>) {
-        let switching = matches!(
-            kind,
-            BatchKind::Branch(_)
-                | BatchKind::Switch(_)
-                | BatchKind::Join(_)
-                | BatchKind::StartFeature(_)
-        );
+        let switching = matches!(kind, BatchKind::Branch(_) | BatchKind::Switch(_));
         // A branch can be out in only one worktree of a repository.
         let mut found = Vec::new();
         let mut probes = Vec::new();
@@ -905,19 +854,7 @@ impl Gerdr {
         };
         let id = self.repos.next_id;
         self.repos.next_id += 1;
-        let feature = self.repos_feature();
-        let stash_conflicts = self
-            .repos
-            .panel
-            .as_ref()
-            .or(self.repos.kept.as_ref().map(|(_, panel)| panel))
-            .map(|panel| panel.stash_conflicts.clone())
-            .unwrap_or_default();
         let previous = self.repos.batch.take();
-        self.repos.undoing = match kind {
-            BatchKind::Undo => previous.as_ref().map(|b| b.id),
-            _ => None,
-        };
         let mut tasks = VecDeque::new();
         let mut runs = Vec::new();
         for job in jobs {
@@ -940,10 +877,7 @@ impl Gerdr {
                 job: job.clone(),
                 remote: status.remote.clone(),
                 base: base_of(status),
-                default: status.default_branch.clone(),
                 op: status.op,
-                feature: feature.clone(),
-                stash_conflict: stash_conflicts.contains(&job.root),
                 undo,
                 common: status.common_dir.clone(),
             });
@@ -1090,8 +1024,8 @@ impl Gerdr {
         }
     }
 
-    /// The batch is done in every repository: remember the feature it
-    /// branched to, empty the field it used, ask which way to pull those
+    /// The batch is done in every repository: empty the field it used, ask
+    /// which way to pull those
     /// that diverged; told in a toast when the panel is closed.
     fn batch_finished(&mut self) {
         let Some(batch) = &self.repos.batch else {
@@ -1113,30 +1047,8 @@ impl Gerdr {
             .map(|r| r.root.clone())
             .collect();
         let (summary, tone) = batch.summary();
-        let (id, kind) = (batch.id, batch.kind.clone());
-        match &kind {
-            // A branch made with no feature yet is the feature.
-            BatchKind::Branch(name) | BatchKind::StartFeature(name) if done => {
-                let previous = self.repos_feature();
-                if matches!(kind, BatchKind::StartFeature(_)) || previous.is_none() {
-                    self.repos.feature_set = Some((id, previous));
-                    self.set_feature(Some(name.clone()));
-                }
-                if let Some(panel) = self.repos.panel.as_mut() {
-                    panel.clear_field();
-                }
-            }
-            BatchKind::Undo if done => {
-                let undone = self.repos.undoing.take();
-                if let Some((set_by, previous)) = self.repos.feature_set.take() {
-                    if Some(set_by) == undone {
-                        self.set_feature(previous);
-                    } else {
-                        self.repos.feature_set = Some((set_by, previous));
-                    }
-                }
-            }
-            BatchKind::Commit { .. } if done => {
+        match batch.kind {
+            BatchKind::Branch(_) | BatchKind::Commit { .. } if done => {
                 if let Some(panel) = self.repos.panel.as_mut() {
                     panel.clear_field();
                 }
@@ -1151,18 +1063,6 @@ impl Gerdr {
         if self.repos.panel.is_none() {
             self.toast(summary, level(tone));
         }
-    }
-
-    /// Make `feature` the shown project's feature, or forget it.
-    fn set_feature(&mut self, feature: Option<String>) {
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        match feature {
-            Some(name) => self.projects.features.insert(project, name),
-            None => self.projects.features.remove(&project),
-        };
-        self.projects.save();
     }
 
     /// Open `paths` of the repository at `root` in its workspace's Zed; in

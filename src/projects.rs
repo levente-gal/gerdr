@@ -40,10 +40,6 @@ pub struct Store {
     pub quit_choice: Option<QuitChoice>,
     #[serde(default)]
     pub projects: Vec<Project>,
-    /// Per project id, its feature: the branch its repositories are to be
-    /// on, set by the repositories panel.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub features: BTreeMap<String, String>,
     #[serde(skip)]
     books: Books,
 }
@@ -56,8 +52,6 @@ struct State {
     last_active: Option<String>,
     #[serde(default)]
     quit_choice: Option<QuitChoice>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    features: BTreeMap<String, String>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -329,7 +323,6 @@ impl Store {
         self.version = state.version;
         self.last_active = state.last_active;
         self.quit_choice = state.quit_choice;
-        self.features = state.features;
     }
 
     fn state(&self) -> State {
@@ -337,7 +330,6 @@ impl Store {
             version: self.version,
             last_active: self.last_active.clone(),
             quit_choice: self.quit_choice,
-            features: self.features.clone(),
         }
     }
 
@@ -1394,7 +1386,6 @@ mod tests {
             version: VERSION,
             last_active: Some("api".into()),
             quit_choice: Some(QuitChoice::Keep),
-            features: BTreeMap::new(),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),
@@ -1971,7 +1962,7 @@ mod tests {
         }
     }
 
-    /// `sample` with a second project, and a feature.
+    /// `sample` with a second project.
     fn two() -> Store {
         let mut store = sample();
         let web = Project {
@@ -1981,7 +1972,6 @@ mod tests {
             ..store.projects[0].clone()
         };
         store.projects.push(web);
-        store.features.insert("api".into(), "fix-login".into());
         store
     }
 
@@ -2033,7 +2023,7 @@ mod tests {
         // Unreadable: set aside, the rest loaded.
         std::fs::write(dir.join("web.json"), b"{ not json").unwrap();
         let (store, loaded) = Store::load_from(&root, none);
-        assert_eq!((store, loaded), (sample_with_feature(), Loaded::File));
+        assert_eq!((store, loaded), (sample(), Loaded::File));
         let set_aside: Vec<_> = names(&dir)
             .into_iter()
             .filter(|name| name.starts_with("web.json.bad-"))
@@ -2058,14 +2048,6 @@ mod tests {
             bad_name(Path::new("/d/projects/api.json"), 42),
             Path::new("/d/projects/api.json.bad-42")
         );
-    }
-
-    /// `sample` with `two`'s feature.
-    fn sample_with_feature() -> Store {
-        Store {
-            features: two().features,
-            ..sample()
-        }
     }
 
     #[test]
@@ -2359,7 +2341,6 @@ mod tests {
         let Reread { store: gone, .. } = store.reread();
         assert_eq!(gone.projects.len(), 1);
         assert_eq!(gone.last_active, store.last_active);
-        assert_eq!(gone.features, store.features);
 
         // The whole folder gone: nothing changes.
         std::fs::remove_dir_all(&dir).unwrap();

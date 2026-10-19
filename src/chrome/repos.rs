@@ -13,7 +13,7 @@ use super::{
     GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, LineState,
     MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, arrow, band, check,
     chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
-    rect_px, rounded_rect, segment,
+    rect_px, rounded_rect,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -214,8 +214,6 @@ pub struct RepoLine {
     pub label: String,
     /// Its branch; `None` on a detached HEAD.
     pub branch: Option<String>,
-    /// The project's feature, when this isn't on it: a `≠` badge.
-    pub off_feature: Option<String>,
     pub dirty: bool,
     pub ahead: u32,
     pub behind: u32,
@@ -223,7 +221,7 @@ pub struct RepoLine {
     pub no_upstream: bool,
     pub stashes: u32,
     /// What it is in the middle of, or what went wrong: `MERGING · 2`,
-    /// `REBASING 2/5`, `STASH CONFLICT`, `login needed`, `detached`.
+    /// `REBASING 2/5`, `login needed`, `detached`.
     pub chip: Option<Chip>,
     /// What is being done to it, `pushing…`, or a second press's warning.
     pub state: LineState,
@@ -345,8 +343,6 @@ pub struct SheetView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReposButton {
     Branch,
-    StartFeature,
-    Join,
     Commit,
     CommitPush,
     Push,
@@ -355,8 +351,6 @@ pub enum ReposButton {
     Pull,
     Merge,
     Rebase,
-    Park,
-    Resume,
     OpenInZed,
     MarkResolved,
     Continue,
@@ -380,8 +374,6 @@ impl ReposButton {
     pub fn label(self) -> &'static str {
         match self {
             ReposButton::Branch => "Branch",
-            ReposButton::StartFeature => "Start feature",
-            ReposButton::Join => "Join feature",
             ReposButton::Commit => "Commit",
             ReposButton::CommitPush => "Commit and push",
             ReposButton::Push => "Push",
@@ -390,8 +382,6 @@ impl ReposButton {
             ReposButton::Pull => "Pull",
             ReposButton::Merge => "Merge base",
             ReposButton::Rebase => "Rebase on base",
-            ReposButton::Park => "Park",
-            ReposButton::Resume => "Resume",
             ReposButton::OpenInZed => "Open in Zed",
             ReposButton::MarkResolved => "Resolved",
             ReposButton::Continue => "Continue",
@@ -441,8 +431,6 @@ pub enum ReposHit {
 /// A mark after a repository's branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepoMark {
-    /// `≠`: not on the project's feature.
-    OffFeature,
     /// A dot: changes not committed.
     Dirty,
     /// An arrow up and a count: commits to push.
@@ -459,10 +447,6 @@ impl RepoMark {
             n => format!("{n} commits"),
         };
         match self {
-            RepoMark::OffFeature => match &repo.off_feature {
-                Some(feature) => format!("Not on the feature, {feature}"),
-                None => "Not on the feature".into(),
-            },
             RepoMark::Dirty => "Changes not committed".into(),
             RepoMark::Ahead => format!("{} to push", commits(repo.ahead)),
             RepoMark::Behind => format!("{} to pull", commits(repo.behind)),
@@ -521,12 +505,6 @@ fn line_spans(
         (GIT_MARK_GAP as f32 * s).round(),
     );
     let wanted = [
-        (
-            RepoMark::OffFeature,
-            repo.off_feature.is_some(),
-            w + 2.0 * s,
-            0,
-        ),
         (RepoMark::Dirty, repo.dirty, w, 0),
         (RepoMark::Ahead, repo.ahead > 0, w, repo.ahead),
         (RepoMark::Behind, repo.behind > 0, w, repo.behind),
@@ -1092,21 +1070,6 @@ pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> Fi
     }
 }
 
-/// Signed distance to a "≠" centred on the origin: a repository off the
-/// project's feature.
-fn not_equal(x: f32, y: f32, s: f32) -> f32 {
-    let bars = segment(x, y, -3.0 * s, -1.6 * s, 3.0 * s, -1.6 * s).min(segment(
-        x,
-        y,
-        -3.0 * s,
-        1.6 * s,
-        3.0 * s,
-        1.6 * s,
-    ));
-    let slash = segment(x, y, 1.6 * s, -4.2 * s, -1.6 * s, 4.2 * s);
-    bars.min(slash) - 0.7 * s
-}
-
 /// Signed distance to a small chevron centred on the origin pointing right
 /// (a folded repository) or down (an open one).
 fn expander_mark(open: bool, x: f32, y: f32, s: f32) -> f32 {
@@ -1130,7 +1093,7 @@ fn tone_color(tone: Tone, p: &Palette) -> Rgb {
 
 impl Painter {
     /// `text` split into runs drawn in the UI font (`false`) or, for the
-    /// characters it lacks (`→`, `≠`), in the monospace font.
+    /// characters it lacks (`→`), in the monospace font.
     fn runs<'a>(&self, text: &'a str) -> Vec<(&'a str, bool)> {
         let mut runs: Vec<(&str, bool)> = Vec::new();
         let mut start = 0;
@@ -1621,7 +1584,6 @@ impl Painter {
         for m in &spans.marks {
             let cx = m.x + m.w / 2.0;
             let (color, count) = match m.mark {
-                RepoMark::OffFeature => (p.warning, 0),
                 RepoMark::Dirty => (p.warning, 0),
                 RepoMark::Ahead => (p.muted, repo.ahead),
                 RepoMark::Behind => (p.muted, repo.behind),
@@ -1629,7 +1591,6 @@ impl Painter {
             c.paint_in(m.x as i32, top, m.w as i32 + 1, height, color, |x, y| {
                 let (x, y) = (x - cx, y - cy);
                 coverage(match m.mark {
-                    RepoMark::OffFeature => not_equal(x, y, s),
                     RepoMark::Dirty => x.hypot(y) - 2.5 * s,
                     RepoMark::Ahead => arrow(true, x, y, s),
                     RepoMark::Behind => arrow(false, x, y, s),
@@ -2248,7 +2209,6 @@ mod tests {
             expanded: None,
             label: label.into(),
             branch: branch.map(Into::into),
-            off_feature: None,
             dirty: false,
             ahead: 0,
             behind: 0,
@@ -2314,7 +2274,6 @@ mod tests {
             TreeLine::Repo(RepoLine {
                 check: Check::On,
                 expanded: Some(false),
-                off_feature: Some("feat/x".into()),
                 behind: 1,
                 ..repo("zed-ext", Some("main"))
             }),
@@ -2340,7 +2299,7 @@ mod tests {
         ];
         ReposView {
             title: "gerdr".into(),
-            summary: "feat/x · 3 of 4 on it · 2 dirty · 1 conflict · fetched 2m ago".into(),
+            summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
             lines,
             selected: Some(1),
             hover: Some(ReposHit::Line(6)),
@@ -2355,8 +2314,6 @@ mod tests {
             }),
             hints: vec![
                 hint(Branch, "Ctrl+N", None),
-                hint(StartFeature, "Ctrl+Shift+N", None),
-                hint(Join, "Ctrl+J", None),
                 hint(Commit, "Ctrl+Enter", None),
                 hint(CommitPush, "Ctrl+Shift+Enter", None),
                 hint(Push, "Ctrl+P", None),
@@ -2365,8 +2322,6 @@ mod tests {
                 hint(Pull, "Ctrl+L", None),
                 hint(Merge, "Ctrl+M", None),
                 hint(Rebase, "Ctrl+Shift+M", None),
-                hint(Park, "Ctrl+K", None),
-                hint(Resume, "Ctrl+Shift+K", Some("no parked changes")),
                 hint(OpenInZed, "Ctrl+E", None),
                 hint(MarkResolved, "Ctrl+R", None),
                 hint(Continue, "Ctrl+G", None),
@@ -2656,12 +2611,10 @@ mod tests {
         let view = full();
         let l = repos_layout(&view, (1600, 1000).into());
         let marks: Vec<_> = l.marks.iter().map(|&(i, m, _)| (i, m)).collect();
-        assert!(marks.contains(&(6, RepoMark::OffFeature)), "{marks:?}");
         assert!(marks.contains(&(6, RepoMark::Behind)), "{marks:?}");
         let TreeLine::Repo(repo) = &view.lines[6] else {
             panic!("a repository");
         };
-        assert_eq!(RepoMark::OffFeature.tip(repo), "Not on the feature, feat/x");
         assert_eq!(RepoMark::Behind.tip(repo), "1 commit to pull");
         assert_eq!(RepoMark::Dirty.tip(repo), "Changes not committed");
         let more = RepoLine {
@@ -2884,7 +2837,7 @@ mod tests {
             (
                 "mark",
                 ReposView {
-                    hover: Some(ReposHit::Mark(6, RepoMark::OffFeature)),
+                    hover: Some(ReposHit::Mark(6, RepoMark::Behind)),
                     ..full()
                 },
             ),

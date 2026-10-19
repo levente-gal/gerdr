@@ -1,6 +1,6 @@
 //! What the repositories panel does to repositories: branch, commit, push,
-//! fetch, pull, merge or rebase onto the default branch, park and resume
-//! work, and see a conflicted operation through or abort it; and what it
+//! fetch, pull, merge or rebase onto the default branch, and see a
+//! conflicted operation through or abort it; and what it
 //! checks before (whether a merge would conflict, what blocks a switch).
 //!
 //! Each runs `git` off the event loop, never waiting on a prompt: no
@@ -55,8 +55,7 @@ pub struct Ran {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     /// It stopped on conflicts in these files (from the worktree's top
-    /// folder); the repository is left mid-operation (or, for a stash,
-    /// with the stash kept) to resolve.
+    /// folder); the repository is left mid-operation to resolve.
     Conflict(Vec<String>),
     /// A password, passphrase or login was wanted.
     Auth,
@@ -109,7 +108,7 @@ pub enum Pull {
     Merge,
 }
 
-/// How the default branch's new commits come into a feature branch.
+/// How the default branch's new commits come into the checked-out branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integrate {
     Merge,
@@ -574,27 +573,6 @@ fn switch_args(dir: &Path, name: &str) -> Vec<String> {
     }
 }
 
-/// The worktree other than `dir`'s that has branch `name` checked out.
-fn checked_out_elsewhere(dir: &Path, name: &str) -> Option<PathBuf> {
-    let list = query(dir, &["worktree", "list", "--porcelain", "-z"])?;
-    let here = top(dir);
-    let want = format!("branch refs/heads/{name}");
-    let mut path = None;
-    for field in list.split('\0') {
-        if let Some(p) = field.strip_prefix("worktree ") {
-            path = Some(PathBuf::from(p));
-        } else if field == want {
-            let p = path.take()?;
-            let same =
-                |a: &Path, b: &Path| a == b || a.canonicalize().ok() == b.canonicalize().ok();
-            if !same(&p, &here) {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
 /// Where `dir`'s checkout stands now.
 pub fn head(dir: &Path) -> Option<Head> {
     let sym = exec(
@@ -621,31 +599,6 @@ pub fn switch_or_create(dir: &Path, name: &str) -> OpResult {
     let mut op = Op::new(dir);
     let args = switch_args(dir, name);
     op.run(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    op.done()
-}
-
-/// Start feature branch `name` from `base` (`origin/main`, fetched first
-/// when it is a remote's): new and not tracking `base` (`--no-track`, so
-/// its first push sets its own upstream); an existing `name`, local or a
-/// remote's, is only switched to.
-pub fn start_from(dir: &Path, name: &str, base: &str) -> OpResult {
-    let mut op = Op::new(dir);
-    // One made already, here or by someone else on the remote, is joined.
-    if has_ref(dir, &format!("refs/heads/{name}")) || remote_having(dir, name).is_some() {
-        let switch = switch_args(dir, name);
-        op.run(&switch.iter().map(String::as_str).collect::<Vec<_>>())?;
-        return op.done();
-    }
-    // The longest remote name that prefixes it: remotes may have slashes.
-    let remote = remotes(dir)
-        .into_iter()
-        .filter(|r| base.starts_with(&format!("{r}/")))
-        .max_by_key(String::len);
-    if let Some(remote) = remote {
-        let branch = &base[remote.len() + 1..];
-        op.net(&["fetch", &remote, branch])?;
-    }
-    op.run(&["switch", "--no-track", "-c", name, base])?;
     op.done()
 }
 
@@ -783,158 +736,6 @@ pub fn integrate(dir: &Path, base: &str, how: Integrate) -> OpResult {
         Integrate::Merge => op.run(&["merge", "--no-edit", "--no-autostash", base])?,
         Integrate::Rebase => op.run(&["rebase", "--no-autostash", base])?,
     };
-    op.done()
-}
-
-/// The message the stash of `feature` parked in the worktree at `top` has:
-/// `gerdr park <feature> in <top>`. The stack is the repository's, so
-/// another worktree's parked work isn't taken for this one's.
-pub fn park_message(feature: &str, top: &Path) -> String {
-    format!("gerdr park {feature} in {}", top.display())
-}
-
-/// The newest stash `feature` was parked in: its commit and its current
-/// `stash@{n}`. Others' stashes come and go, so `n` is only good now.
-fn park_stash(dir: &Path, feature: &str) -> Option<(String, String)> {
-    let out = query(dir, &["stash", "list", "--format=%H %gd %gs"])?;
-    // The subject is "On <branch>: <message>".
-    let tail = format!(": {}", park_message(feature, &top(dir)));
-    out.lines().find_map(|line| {
-        let (sha, rest) = line.split_once(' ')?;
-        let (at, subject) = rest.split_once(' ')?;
-        subject
-            .ends_with(&tail)
-            .then(|| (sha.to_owned(), at.to_owned()))
-    })
-}
-
-/// Drop the stash with commit `sha`, wherever it is in the stack now.
-fn drop_stash(op: &mut Op, sha: &str) -> Result<(), Failed> {
-    let out = query(op.dir, &["stash", "list", "--format=%H %gd"]).unwrap_or_default();
-    let at = out
-        .lines()
-        .find_map(|l| l.strip_prefix(sha)?.strip_prefix(' '));
-    if let Some(at) = at {
-        op.run(&["stash", "drop", "-q", at])?;
-    }
-    Ok(())
-}
-
-/// Park the work on `feature`: stash every change, untracked files too,
-/// as `park_message(feature)` (when there are any), then switch to
-/// `default`. The stash stack is shared by the repository's worktrees, so
-/// a stash is only ever found again by its message. When the switch fails
-/// the work is put back.
-pub fn park(dir: &Path, feature: &str, default: &str) -> OpResult {
-    let mut op = Op::new(dir);
-    // Work on another branch isn't the feature's, to bring back onto it.
-    if branch(dir).as_deref() != Some(feature) {
-        return Err(op.blocked(&format!("not on {feature}")));
-    }
-    // A default branch checked out in another worktree (the main one, from
-    // a linked one) would stop the switch after the stash.
-    if let Some(path) = checked_out_elsewhere(dir, default) {
-        return Err(Failed {
-            why: format!("{default} is checked out at {}", path.display()),
-            failure: Failure::CheckedOut(path),
-            log: Vec::new(),
-        });
-    }
-    let changes = query(dir, &["status", "--porcelain", "--untracked-files=all"]);
-    let sha = if changes.is_some_and(|c| !c.trim().is_empty()) {
-        op.run(&[
-            "stash",
-            "push",
-            "-u",
-            "-m",
-            &park_message(feature, &top(dir)),
-        ])?;
-        park_stash(dir, feature).map(|(sha, _)| sha)
-    } else {
-        None
-    };
-    let switch = switch_args(dir, default);
-    if let Err(mut failed) = op.run(&switch.iter().map(String::as_str).collect::<Vec<_>>()) {
-        if let Some(sha) = sha {
-            let mut back = Op::new(dir);
-            if back.run(&["stash", "apply", "-q", &sha]).is_ok() {
-                let _ = drop_stash(&mut back, &sha);
-            }
-            failed.log.extend(back.log);
-        }
-        return Err(failed);
-    }
-    op.done()
-}
-
-/// Resume `feature`: switch to it, then apply its park stash (found by
-/// message, applied by commit id, then dropped, found again by commit);
-/// with its stash, only from a clean worktree.
-/// On conflicts the stash is kept: `Failure::Conflict`, then
-/// `finish_stash` or `abort_stash`. Without a park stash it only switches.
-pub fn resume(dir: &Path, feature: &str) -> OpResult {
-    let mut op = Op::new(dir);
-    let parked = park_stash(dir, feature);
-    // Applied over other changes, a stash can half apply, and aborting its
-    // conflicts would take those changes with it.
-    let changes = query(dir, &["status", "--porcelain", "--untracked-files=all"]);
-    if parked.is_some() && changes.is_some_and(|c| !c.trim().is_empty()) {
-        return Err(op.blocked("uncommitted changes: commit or park them first"));
-    }
-    let switch = switch_args(dir, feature);
-    op.run(&switch.iter().map(String::as_str).collect::<Vec<_>>())?;
-    let Some((sha, _)) = parked else {
-        return op.done();
-    };
-    op.run(&["stash", "apply", &sha])?;
-    drop_stash(&mut op, &sha)?;
-    op.done()
-}
-
-/// After a resume's conflicts are resolved: unstage (`reset -q`) and drop
-/// the feature's park stash. Files still conflicted stop it.
-pub fn finish_stash(dir: &Path, feature: &str) -> OpResult {
-    let files = conflicted(dir);
-    if !files.is_empty() {
-        return Err(Failed {
-            why: format!("still conflicted: {}", files.join(", ")),
-            failure: Failure::Conflict(files),
-            log: Vec::new(),
-        });
-    }
-    let mut op = Op::new(dir);
-    op.run(&["reset", "-q"])?;
-    if let Some((sha, _)) = park_stash(dir, feature) {
-        drop_stash(&mut op, &sha)?;
-    }
-    op.done()
-}
-
-/// Give up a resume's conflicted stash apply (`reset --merge`); the stash
-/// stays. The apply put the stash's untracked files back too, which the
-/// reset leaves: those still as the stash has them go, so the next resume
-/// doesn't trip over them.
-pub fn abort_stash(dir: &Path, feature: &str) -> OpResult {
-    let top = top(dir);
-    let mut op = Op::new(&top);
-    op.run(&["reset", "--merge"])?;
-    if let Some((sha, _)) = park_stash(&top, feature) {
-        let untracked = format!("{sha}^3");
-        let tree = query(&top, &["ls-tree", "-r", "-z", &untracked]).unwrap_or_default();
-        for entry in tree.split('\0').filter(|e| !e.is_empty()) {
-            let Some((meta, path)) = entry.split_once('\t') else {
-                continue;
-            };
-            let Some(blob) = meta.split_whitespace().nth(2) else {
-                continue;
-            };
-            let file = top.join(path);
-            let same = query(&top, &["hash-object", "--", path]).is_some_and(|h| h.trim() == blob);
-            if same {
-                let _ = std::fs::remove_file(&file);
-            }
-        }
-    }
     op.done()
 }
 
@@ -1553,44 +1354,6 @@ mod tests {
             failure(switch_or_create(&fx.repo, "wtb")),
             Failure::CheckedOut(wt.clone())
         );
-        // A park there stops before stashing anything.
-        write(&wt, "a", "changed");
-        let failed = park(&wt, "wtb", "main").unwrap_err();
-        assert_eq!(failed.failure, Failure::CheckedOut(fx.repo.clone()));
-        assert!(failed.log.is_empty());
-        assert_eq!(read(&wt, "a"), "changed");
-        assert_eq!(branch(&wt).as_deref(), Some("wtb"));
-    }
-
-    #[test]
-    fn start_a_feature_from_the_fresh_default_branch() {
-        let fx = Fx::new();
-        let other = fx.clone("other");
-        commit(&other, "b", "upstream work");
-        git(&other, &["push", "-q"]);
-        let log = start_from(&fx.repo, "feat/x", "origin/main").unwrap();
-        let commands: Vec<_> = log.iter().map(|r| r.command.as_str()).collect();
-        assert_eq!(
-            commands,
-            [
-                "git fetch origin main",
-                "git switch --no-track -c feat/x origin/main"
-            ]
-        );
-        assert_eq!(rev(&fx.repo, "HEAD"), rev(&other, "HEAD"));
-        assert!(query(&fx.repo, &["rev-parse", "-q", "--verify", "@{upstream}"]).is_none());
-        // Its first push makes its own upstream.
-        push(&fx.repo, None, false).unwrap();
-        let up = git(&fx.repo, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
-        assert_eq!(up.trim(), "origin/feat/x");
-        // Once there, it is only switched to.
-        git(&fx.repo, &["switch", "-q", "main"]);
-        let log = start_from(&fx.repo, "feat/x", "origin/main").unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].command, "git switch feat/x");
-        // A local base isn't fetched.
-        let log = start_from(&fx.repo, "feat/y", "main").unwrap();
-        assert_eq!(log[0].command, "git switch --no-track -c feat/y main");
     }
 
     /// The files HEAD's commit changed, as `<letter> <path>`.
@@ -1905,123 +1668,6 @@ mod tests {
         assert_eq!(subjects, "f2\nf1\n");
     }
 
-    /// The stash stack, as `<sha> <subject>` lines.
-    fn stashes(dir: &Path) -> Vec<String> {
-        let out = git(dir, &["stash", "list", "--format=%H %gs"]);
-        out.lines().map(str::to_owned).collect()
-    }
-
-    #[test]
-    fn park_and_resume_leave_others_stashes_alone() {
-        let fx = Fx::local();
-        let dir = &fx.repo;
-        write(dir, "a", "someone's");
-        git(dir, &["stash", "push", "-q", "-m", "someone's work"]);
-        git(dir, &["switch", "-q", "-c", "feat"]);
-        commit(dir, "f", "feat");
-        write(dir, "f", "changed");
-        write(dir, "u/new.txt", "untracked");
-        write(dir, "s", "staged");
-        git(dir, &["add", "s"]);
-
-        let log = park(dir, "feat", "main").unwrap();
-        assert_eq!(log.len(), 2);
-        let message = format!("gerdr park feat in {}", dir.display());
-        assert_eq!(
-            log[0].command,
-            format!(
-                "git stash push -u -m {}",
-                crate::desktop::shell_quote(&message)
-            )
-        );
-        assert_eq!(branch(dir).as_deref(), Some("main"));
-        assert!(git(dir, &["status", "--porcelain"]).is_empty());
-        // More of someone else's on top: ours isn't stash@{0} any more.
-        write(dir, "a", "later");
-        git(dir, &["stash", "push", "-q", "-m", "later work"]);
-        let before = stashes(dir);
-        assert_eq!(before.len(), 3);
-        assert!(before[1].ends_with(&format!(": {message}")));
-
-        resume(dir, "feat").unwrap();
-        assert_eq!(branch(dir).as_deref(), Some("feat"));
-        assert_eq!(read(dir, "f"), "changed");
-        assert_eq!(read(dir, "u/new.txt"), "untracked");
-        assert_eq!(read(dir, "s"), "staged");
-        assert_eq!(stashes(dir), [before[0].clone(), before[2].clone()]);
-
-        // Nothing to park: only a switch; nothing parked: the same.
-        git(dir, &["stash", "push", "-q", "-u", "-m", "clear it"]);
-        let log = park(dir, "feat", "main").unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].command, "git switch main");
-        let log = resume(dir, "feat").unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(stashes(dir).len(), 3);
-
-        // Only the feature's own work is parked as the feature's.
-        git(dir, &["switch", "-q", "main"]);
-        write(dir, "f", "main's");
-        assert_eq!(
-            failure(park(dir, "feat", "main")),
-            Failure::Blocked("not on feat".into())
-        );
-        // Its stash isn't applied over other changes.
-        std::fs::remove_file(dir.join("f")).unwrap();
-        git(dir, &["switch", "-q", "feat"]);
-        write(dir, "f", "more");
-        park(dir, "feat", "main").unwrap();
-        write(dir, "x", "in the way");
-        assert_eq!(
-            failure(resume(dir, "feat")),
-            Failure::Blocked("uncommitted changes: commit or park them first".into())
-        );
-        assert_eq!(branch(dir).as_deref(), Some("main"));
-        assert_eq!(stashes(dir).len(), 4);
-    }
-
-    #[test]
-    fn a_resume_that_conflicts() {
-        let fx = Fx::local();
-        let dir = &fx.repo;
-        git(dir, &["switch", "-q", "-c", "feat"]);
-        write(dir, "a", "parked");
-        write(dir, "n", "new");
-        park(dir, "feat", "main").unwrap();
-        // Meanwhile feat moved on: the parked change no longer applies.
-        git(dir, &["switch", "-q", "feat"]);
-        commit(dir, "a", "committed");
-        git(dir, &["switch", "-q", "main"]);
-
-        assert_eq!(
-            failure(resume(dir, "feat")),
-            Failure::Conflict(vec!["a".into()])
-        );
-        assert!(park_stash(dir, "feat").is_some());
-        assert_eq!(
-            failure(finish_stash(dir, "feat")),
-            Failure::Conflict(vec!["a".into()])
-        );
-        // The apply brought the untracked file back; aborting takes it away.
-        assert_eq!(read(dir, "n"), "new");
-        abort_stash(dir, "feat").unwrap();
-        assert_eq!(read(dir, "a"), "committed");
-        assert!(git(dir, &["status", "--porcelain"]).is_empty());
-        assert!(park_stash(dir, "feat").is_some());
-
-        assert_eq!(
-            failure(resume(dir, "feat")),
-            Failure::Conflict(vec!["a".into()])
-        );
-        write(dir, "a", "resolved");
-        mark_resolved(dir, "a").unwrap();
-        finish_stash(dir, "feat").unwrap();
-        assert!(park_stash(dir, "feat").is_none());
-        assert_eq!(read(dir, "a"), "resolved");
-        assert_eq!(read(dir, "n"), "new");
-        assert_eq!(git(dir, &["status", "--porcelain"]), " M a\n?? n\n");
-    }
-
     #[test]
     fn undo_a_batch_unless_head_moved() {
         let fx = Fx::local();
@@ -2029,7 +1675,7 @@ mod tests {
         let before = head(dir).unwrap();
         // A branch switch is undone by switching back, and only that: main
         // moving on meanwhile (in another worktree, say) stays.
-        start_from(dir, "feat", "main").unwrap();
+        switch_or_create(dir, "feat").unwrap();
         commit(dir, "f", "feat");
         let after = head(dir).unwrap();
         git(dir, &["branch", "-f", "main", "feat"]);
