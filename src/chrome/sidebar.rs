@@ -138,7 +138,7 @@ impl AgentView {
         match (title, term_title) {
             (Some(title), term) => {
                 lines.push(AgentLine::Title(title));
-                lines.extend(term.map(|t| field("terminal", t)));
+                lines.extend(term.map(|t| field("Terminal title", t)));
             }
             (None, Some(term)) => lines.push(AgentLine::Title(term)),
             (None, None) => {}
@@ -149,36 +149,30 @@ impl AgentView {
             .or_else(|| info.agent.clone())
             .unwrap_or_else(|| "agent".into());
         if let Some(agent) = info.agent.as_ref().filter(|a| **a != kind) {
-            lines.push(field("kind", agent.clone()));
+            lines.push(field("Agent", agent.clone()));
         }
         let root = pane.and_then(repo_root);
         if let Some(cwd) = &info.cwd {
-            lines.push(field("cwd", short_path(cwd, root)));
+            lines.push(field(FOLDER, short_path(cwd, root)));
         }
         if let Some(fg) = info
             .foreground_cwd
             .as_ref()
             .filter(|fg| Some(*fg) != info.cwd.as_ref())
         {
-            lines.push(field("fg cwd", short_path(fg, root)));
+            lines.push(field("Running in", short_path(fg, root)));
         }
-        lines.extend(info.state_labels.iter().map(|(k, v)| field(k, v.clone())));
-        if let Some(session) = &info.agent_session {
-            lines.push(field(
-                "session",
-                format!("{} {}", session.kind, session.value),
-            ));
-            lines.push(field("source", session.source.clone()));
-            if Some(&session.agent) != info.agent.as_ref() {
-                lines.push(field("agent", session.agent.clone()));
-            }
-        }
+        lines.extend(
+            info.state_labels
+                .iter()
+                .map(|(k, v)| field(&sentence_case(k), v.clone())),
+        );
         let model = info.tokens.get("model").filter(|m| !m.is_empty()).cloned();
         lines.extend(
             info.tokens
                 .iter()
                 .filter(|(k, _)| *k != "model")
-                .map(|(k, v)| field(k, v.clone())),
+                .map(|(k, v)| field(&sentence_case(k), v.clone())),
         );
         Self {
             key: AgentKey::Herdr(info.pane_id.clone()),
@@ -205,23 +199,22 @@ impl AgentView {
         );
         let dir = row.paths.first().cloned();
         if let Some(dir) = &dir {
-            lines.push(field("cwd", short_path(dir, None)));
+            lines.push(field(FOLDER, short_path(dir, None)));
         }
         if let Some(pct) = row.context_pct {
-            lines.push(field("context", format!("{pct:.0}%")));
+            lines.push(field("Context used", format!("{pct:.0}%")));
         }
         if let Some(files) = row.files.filter(|n| *n > 0) {
             let plural = if files == 1 { "" } else { "s" };
             let (added, removed) = (row.added.unwrap_or(0), row.removed.unwrap_or(0));
             lines.push(field(
-                "changes",
-                format!("{files} file{plural} +{added} -{removed}"),
+                "Changes",
+                format!("{files} file{plural}, {added} lines added, {removed} removed"),
             ));
         }
         if row.worktree {
-            lines.push(field("worktree", "yes".into()));
+            lines.push(field("Worktree", "its own".into()));
         }
-        lines.push(field("chat", row.id.clone()));
         Self {
             key: AgentKey::Cursor(row.id.clone()),
             dir,
@@ -256,7 +249,7 @@ impl AgentView {
     /// and what it is on.
     pub fn detail(&self) -> String {
         let cwd = self.lines.iter().find_map(|l| match l {
-            AgentLine::Field(label, value) if label == "cwd" => Some(basename(value)),
+            AgentLine::Field(label, value) if label == FOLDER => Some(basename(value)),
             _ => None,
         });
         match (cwd, self.title()) {
@@ -267,14 +260,15 @@ impl AgentView {
         }
     }
 
-    /// Everything the card knows, on one line, for its tooltip.
-    pub fn summary(&self) -> String {
-        let mut parts = vec![format!("{} {}", self.label(), status_label(self.status))];
-        parts.extend(self.lines.iter().map(|l| match l {
-            AgentLine::Title(title) => title.clone(),
-            AgentLine::Field(label, value) => format!("{label} {value}"),
+    /// Everything the card knows, for its tooltip under `label`: a line
+    /// each, its status first, said in full.
+    pub fn tooltip_fields(&self) -> Vec<(String, String)> {
+        let mut fields = vec![("Status".to_owned(), status_meaning(self.status).to_owned())];
+        fields.extend(self.lines.iter().map(|l| match l {
+            AgentLine::Title(title) => ("Working on".to_owned(), title.clone()),
+            AgentLine::Field(label, value) => (label.clone(), value.clone()),
         }));
-        parts.join(" · ")
+        fields
     }
 
     /// The card's height at `density`, in logical pixels.
@@ -285,6 +279,19 @@ impl AgentView {
             CARD_LINE
         };
         2 * card_pad(density) + CARD_HEADER + detail
+    }
+}
+
+/// The label of the field holding the folder an agent works in.
+const FOLDER: &str = "Folder";
+
+/// `key` as a label: its words split on `_` and `-`, the first capitalised.
+fn sentence_case(key: &str) -> String {
+    let words = key.replace(['_', '-'], " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => words,
     }
 }
 
@@ -311,6 +318,17 @@ pub fn status_label(status: AgentStatus) -> &'static str {
         AgentStatus::Blocked => "blocked",
         AgentStatus::Done => "done",
         AgentStatus::Unknown => "unknown",
+    }
+}
+
+/// What `status` means, said in full for a tooltip.
+pub fn status_meaning(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "Idle, waiting for a prompt",
+        AgentStatus::Working => "Working",
+        AgentStatus::Blocked => "Blocked, needs your answer",
+        AgentStatus::Done => "Done, not looked at yet",
+        AgentStatus::Unknown => "Unknown",
     }
 }
 
@@ -1471,9 +1489,9 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
 mod tests {
     use super::{
         AgentLine, AgentView, CARD_GAP, CARD_HEADER, CARD_LINE, CARD_PAD, CARD_PAD_COMPACT,
-        CHIP_SLOT, CLOSE_WIDTH, Density, GAP, HEADER_BUTTON, ROW_BOTTOM, ROW_COMPACT, ROW_HEIGHT,
-        ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SidebarHit, TAB_LINE, WorkspaceView, card_order,
-        sidebar_layout, sidebar_layout_at, workspace_slot,
+        CHIP_SLOT, CLOSE_WIDTH, Density, FOLDER, GAP, HEADER_BUTTON, ROW_BOTTOM, ROW_COMPACT,
+        ROW_HEIGHT, ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SidebarHit, TAB_LINE, WorkspaceView,
+        card_order, sentence_case, sidebar_layout, sidebar_layout_at, workspace_slot,
     };
     use crate::WorkspaceKind;
     use crate::chrome::{BAR_HEIGHT, TabView};
@@ -1580,7 +1598,7 @@ mod tests {
             name: None,
             model: None,
             lines: cwd
-                .map(|cwd| AgentLine::Field("cwd".into(), cwd.into()))
+                .map(|cwd| AgentLine::Field(FOLDER.into(), cwd.into()))
                 .into_iter()
                 .collect(),
         }
@@ -1664,7 +1682,14 @@ mod tests {
             with.height(Density::Compact),
             2 * CARD_PAD_COMPACT + CARD_HEADER + CARD_LINE
         );
-        assert_eq!(with.summary(), "claude idle · cwd gerdr/src");
+        assert_eq!(
+            with.tooltip_fields(),
+            [
+                ("Status".into(), "Idle, waiting for a prompt".into()),
+                ("Folder".into(), "gerdr/src".into()),
+            ]
+        );
+        assert_eq!(sentence_case("context_tokens"), "Context tokens");
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub struct Tooltip {
     pub anchor: Rect,
     /// A list under the text, a line each.
     pub rows: Vec<TooltipRow>,
+    /// Labelled values under the text, a line each.
+    pub fields: Vec<(String, String)>,
 }
 
 impl Tooltip {
@@ -34,6 +36,7 @@ impl Tooltip {
             key: None,
             anchor,
             rows: Vec::new(),
+            fields: Vec::new(),
         }
     }
 
@@ -44,6 +47,11 @@ impl Tooltip {
 
     pub fn rows(mut self, rows: Vec<TooltipRow>) -> Self {
         self.rows = rows;
+        self
+    }
+
+    pub fn fields(mut self, fields: Vec<(String, String)>) -> Self {
+        self.fields = fields;
         self
     }
 }
@@ -115,6 +123,7 @@ impl TooltipState {
             key: tip.key.clone(),
             anchor: tip.anchor,
             rows: tip.rows.clone(),
+            fields: tip.fields.clone(),
         })
     }
 }

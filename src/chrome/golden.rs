@@ -73,8 +73,8 @@ fn agents() -> Vec<Vec<AgentView>> {
             model: None,
             lines: vec![
                 AgentLine::Title("Reviewing the split".into()),
-                AgentLine::Field("cwd".into(), "gerdr/src".into()),
-                AgentLine::Field("tokens".into(), "12k".into()),
+                AgentLine::Field("Folder".into(), "gerdr/src".into()),
+                AgentLine::Field("Tokens".into(), "12k".into()),
             ],
         }],
         vec![],
@@ -167,6 +167,7 @@ fn tooltip() -> TooltipView {
         key: Some("Ctrl+B a".into()),
         anchor: Rect::new((300, 48).into(), (24, 24).into()),
         rows: Vec::new(),
+        fields: Vec::new(),
     }
 }
 

@@ -1,6 +1,7 @@
 //! The tooltip over the thing under the pointer: a small popup below it
 //! (above it near the bottom) with what it is and the key doing the same,
-//! and under that, for a list of worktrees, a line for each.
+//! and under that, for a list of worktrees, a line for each, or for an
+//! agent, a line per thing known of it: a label, then its value.
 
 use super::{
     BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, DETAIL_FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH,
@@ -24,6 +25,8 @@ const TOOLTIP_RADIUS: f32 = 6.0;
 const TOOLTIP_ROW: i32 = 20;
 const TOOLTIP_ROWS_BOTTOM: i32 = 6;
 const TOOLTIP_COLUMN_GAP: i32 = 16;
+/// The widest a field's value gets before it is cut with an ellipsis.
+const TOOLTIP_VALUE_MAX: i32 = 360;
 
 /// A line of a tooltip's list: a worktree's name, a dot when it has
 /// changes, a word on its state ("merged", "gone"), and where it is.
@@ -44,12 +47,14 @@ pub struct TooltipView {
     pub anchor: Rect,
     /// The list under the text; empty for a plain tooltip.
     pub rows: Vec<TooltipRow>,
+    /// Labelled values under the text (and under `rows`), a line each.
+    pub fields: Vec<(String, String)>,
 }
 
 impl TooltipView {
-    /// How high it is: its text's line, and its list under it.
+    /// How high it is: its text's line, and its lists under it.
     pub fn height(&self) -> i32 {
-        match self.rows.len() as i32 {
+        match (self.rows.len() + self.fields.len()) as i32 {
             0 => TOOLTIP_HEIGHT,
             n => TOOLTIP_HEIGHT + n * TOOLTIP_ROW + TOOLTIP_ROWS_BOTTOM,
         }
@@ -89,6 +94,10 @@ impl Painter {
             };
             w = w.max(names + gap + paths);
         }
+        if !view.fields.is_empty() {
+            let (labels, values) = self.field_columns(&view.fields, scale);
+            w = w.max(labels + TOOLTIP_COLUMN_GAP as f32 * scale as f32 + values);
+        }
         let w = (w / scale as f32).ceil() as i32 + 2 * TOOLTIP_PADDING;
         w.min(max).max(TOOLTIP_HEIGHT)
     }
@@ -113,6 +122,23 @@ impl Painter {
             .iter()
             .map(|row| self.text_width(&row.path, DETAIL_FONT_SIZE, scale));
         (names.fold(0.0, f32::max), paths.fold(0.0, f32::max))
+    }
+
+    /// How wide the fields' columns are, in physical pixels: the widest
+    /// label, and the widest value up to `TOOLTIP_VALUE_MAX`.
+    fn field_columns(&self, fields: &[(String, String)], scale: f64) -> (f32, f32) {
+        let width = |text: &str, size| self.text_width(text, size, scale);
+        let labels = fields
+            .iter()
+            .map(|(label, _)| width(label, DETAIL_FONT_SIZE));
+        let values = fields
+            .iter()
+            .map(|(_, value)| width(value, SMALL_FONT_SIZE));
+        let max = TOOLTIP_VALUE_MAX as f32 * scale as f32;
+        (
+            labels.fold(0.0, f32::max),
+            values.fold(0.0, f32::max).min(max),
+        )
     }
 
     /// The tooltip `w` wide, inside a margin of `SHADOW` holding its drop
@@ -152,6 +178,8 @@ impl Painter {
             p.text,
         );
         self.tooltip_rows(&mut c, &view.rows, panel, scale, p);
+        let below = TOOLTIP_HEIGHT + view.rows.len() as i32 * TOOLTIP_ROW;
+        self.tooltip_fields(&mut c, &view.fields, panel, below, scale, p);
         c.into_buffer(false)
     }
 
@@ -222,6 +250,53 @@ impl Painter {
     }
 }
 
+impl Painter {
+    /// The labelled values under a tooltip's text in `panel`, from `top`
+    /// down: per line, a muted label, then its value in a column of its
+    /// own, cut with an ellipsis when it runs past the tooltip.
+    fn tooltip_fields(
+        &self,
+        c: &mut Canvas,
+        fields: &[(String, String)],
+        panel: Rect,
+        top: i32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let px = |v: i32| (v as f64 * scale).round() as f32;
+        let (labels, _) = self.field_columns(fields, scale);
+        let left = px(panel.loc.x + TOOLTIP_PADDING);
+        let right = px(panel.loc.x + panel.size.w - TOOLTIP_PADDING);
+        let value_x = left + labels + TOOLTIP_COLUMN_GAP as f32 * s;
+        for (k, (label, value)) in fields.iter().enumerate() {
+            let y = panel.loc.y + top + k as i32 * TOOLTIP_ROW;
+            let line = Rectangle::new((panel.loc.x, y).into(), (panel.size.w, TOOLTIP_ROW).into());
+            let line_band = band(line, scale);
+            self.text(
+                c,
+                label,
+                DETAIL_FONT_SIZE,
+                left,
+                value_x,
+                line_band,
+                scale,
+                p.muted,
+            );
+            self.text(
+                c,
+                value,
+                SMALL_FONT_SIZE,
+                value_x,
+                right,
+                line_band,
+                scale,
+                p.text,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -269,6 +344,7 @@ mod tests {
             key: None,
             anchor,
             rows: Vec::new(),
+            fields: Vec::new(),
         };
         assert_eq!(view.height(), TOOLTIP_HEIGHT);
         view.rows = vec![row; 3];

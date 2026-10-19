@@ -261,17 +261,16 @@ impl Gerdr {
                 })
             }
             SidebarHit::Chip(i) => {
-                let text = agents
-                    .get(i)
-                    .map(|cards| {
-                        cards
-                            .iter()
-                            .map(|c| format!("{} {}", c.label(), chrome::status_label(c.status)))
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    })
-                    .filter(|t| !t.is_empty())?;
-                Some(Tooltip::new(&text, layout.rows[i].chip?))
+                let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
+                let text = match cards.len() {
+                    1 => "1 agent".to_owned(),
+                    n => format!("{n} agents"),
+                };
+                let fields = cards
+                    .iter()
+                    .map(|c| (c.label(), chrome::status_meaning(c.status).to_owned()))
+                    .collect();
+                Some(Tooltip::new(&text, layout.rows[i].chip?).fields(fields))
             }
             SidebarHit::Name(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
@@ -281,7 +280,7 @@ impl Gerdr {
             SidebarHit::Card(i, k) => {
                 let card = agents.get(i)?.get(k)?;
                 let rect = layout.cards[i].iter().find(|(c, _)| *c == k)?.1;
-                Some(Tooltip::new(&card.summary(), rect))
+                Some(Tooltip::new(&card.label(), rect).fields(card.tooltip_fields()))
             }
             SidebarHit::Worktrees(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
