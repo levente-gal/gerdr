@@ -234,7 +234,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     (
         "reload-projects",
         Action::ReloadProjects,
-        "reload the projects file",
+        "reload the project file",
         "Alt+R",
     ),
     ("quit", Action::Quit, "quit…", "Shift+Q"),
@@ -300,7 +300,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("run the project's start commands", &["run-start-commands"]),
     ("worktrees", &["worktrees"]),
     ("repositories", &["repos"]),
-    ("reload the projects file", &["reload-projects"]),
+    ("reload the project file", &["reload-projects"]),
     ("quit…", &["quit"]),
 ];
 
@@ -702,7 +702,7 @@ mod tests {
                 "Shift+B: run the project's start commands",
                 "W: worktrees",
                 "G: repositories",
-                "Alt+R: reload the projects file",
+                "Alt+R: reload the project file",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",
                 "Esc: cancel",

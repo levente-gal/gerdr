@@ -918,7 +918,7 @@ pub enum Action {
     /// Open the repositories panel, to branch, commit, push and sync the
     /// project's repositories as one.
     Repos,
-    /// Read the projects file again, after it was edited by hand.
+    /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
     Quit,
@@ -1665,7 +1665,7 @@ impl Gerdr {
             && let (Some(herdr), Some(project)) = (self.herdr.as_mut(), self.projects.project(&id))
         {
             for problem in reload::apply_order(herdr, project) {
-                tracing::warn!("projects.json order: {problem}");
+                tracing::warn!("project file order: {problem}");
             }
             if let Ok(list) = herdr.workspace_list() {
                 workspaces = list;
@@ -1898,9 +1898,13 @@ impl Gerdr {
             {
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
-                if state.projects.take_conflict() {
+                for id in state.projects.take_conflicts() {
+                    let name = state
+                        .projects
+                        .project(&id)
+                        .map_or(id.clone(), |p| p.name.clone());
                     state.toast_with(
-                        "projects.json edited; saves paused".into(),
+                        format!("{name}'s project file edited; saves paused"),
                         Level::Warning,
                         Some(("Reload".into(), MenuAction::ReloadProjects)),
                     );
@@ -2181,7 +2185,7 @@ impl Gerdr {
     }
 
     /// Keep the shown project's workspaces in the sidebar's order, which
-    /// herdr is told of but the projects file isn't; whether it changed.
+    /// herdr is told of but its project file isn't; whether it changed.
     fn record_workspace_order(&mut self) -> bool {
         let Some(project) = self.project.as_deref() else {
             return false;
@@ -4481,7 +4485,7 @@ impl Gerdr {
     }
 
     /// A new, empty project called `name`; returns its id. A herdr session
-    /// left behind by a forgotten project isn't reused.
+    /// or project file left behind by a forgotten project isn't reused.
     fn add_project(&mut self, name: &str) -> String {
         let name = name.trim();
         let mut taken: Vec<String> = self
@@ -4493,7 +4497,8 @@ impl Gerdr {
         let id = loop {
             let refs: Vec<&str> = taken.iter().map(String::as_str).collect();
             let id = projects::slugify(name, &refs);
-            let left_behind = herdr::session_dir(&projects::session_name(&id)).exists();
+            let left_behind = herdr::session_dir(&projects::session_name(&id)).exists()
+                || projects::project_file(&id).exists();
             if !left_behind || taken.len() > 1000 {
                 break id;
             }

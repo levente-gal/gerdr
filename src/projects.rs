@@ -2,11 +2,12 @@
 //! lives in a herdr session of its own, so it can keep running while gerdr is
 //! closed and come back after a reboot. herdr restores the layout and the
 //! folders by itself; what ran in the panes, the venvs and the apps gerdr
-//! launched outside herdr are remembered here, in
-//! `~/.local/share/gerdr/projects.json`.
+//! launched outside herdr are remembered here, a file per project in
+//! `~/.local/share/gerdr/projects/<id>.json`; the rest (the project shown
+//! last, the quit choice) in `~/.local/share/gerdr/state.json`.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -25,7 +26,8 @@ const LEGACY: &str = "gerdr";
 /// foreground process group, nothing worth running again runs.
 const SHELLS: [&str; 7] = ["sh", "bash", "zsh", "fish", "dash", "nu", "herdr"];
 
-/// Everything gerdr remembers about the projects.
+/// Everything gerdr remembers about the projects. Also the format of the
+/// old single file, `projects.json`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     pub version: u32,
@@ -42,31 +44,63 @@ pub struct Store {
     /// on, set by the repositories panel.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, String>,
-    /// The file couldn't be read nor set aside: saving would lose it.
     #[serde(skip)]
-    frozen: bool,
-    #[serde(skip)]
-    disk: Disk,
+    books: Books,
 }
 
-/// What gerdr last read or wrote of the file, to tell an edit made outside
-/// gerdr (in Zed, say) from its own, and not save over it.
+/// What `state.json` holds: the store but its projects.
+#[derive(Debug, Serialize, Deserialize)]
+struct State {
+    version: u32,
+    #[serde(default)]
+    last_active: Option<String>,
+    #[serde(default)]
+    quit_choice: Option<QuitChoice>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    features: BTreeMap<String, String>,
+}
+
+/// Where the store lives and what gerdr last read or wrote of its files.
+#[derive(Clone, Debug, Default)]
+struct Books {
+    /// The folder of the files; `None` for `~/.local/share/gerdr`.
+    root: Option<PathBuf>,
+    /// Per project id, its file.
+    files: BTreeMap<String, Disk>,
+    /// The ids whose file couldn't be read nor set aside: saving would lose
+    /// it, so it is never written nor removed.
+    frozen: BTreeSet<String>,
+    /// The old `projects.json` couldn't be read nor set aside: nothing is
+    /// saved, lest the files made in its place hide it.
+    legacy_frozen: bool,
+    /// A digest of `state.json`'s bytes, as gerdr last read or wrote them.
+    state: Option<u64>,
+}
+
+/// Bookkeeping, not part of what a store holds.
+impl PartialEq for Books {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Books {
+    fn root(&self) -> PathBuf {
+        self.root.clone().unwrap_or_else(data_dir)
+    }
+}
+
+/// What gerdr last read or wrote of a project's file, to tell an edit made
+/// outside gerdr (in Zed, say) from its own, and not save over it.
 #[derive(Clone, Debug, Default)]
 struct Disk {
     /// A digest of the file's bytes, as gerdr last read or wrote them.
     written: Option<u64>,
-    /// The file changed outside gerdr: saves wait until it is reloaded, or
-    /// put back as it was.
+    /// The file changed outside gerdr: its saves wait until it is reloaded,
+    /// or put back as it was.
     conflict: bool,
     /// The user was told about the conflict.
     told: bool,
-}
-
-/// Bookkeeping, not part of what a store holds.
-impl PartialEq for Disk {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
 }
 
 fn digest(bytes: &[u8]) -> u64 {
@@ -79,16 +113,21 @@ fn digest(bytes: &[u8]) -> u64 {
 /// What `Store::load` found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loaded {
-    /// The saved store.
+    /// The saved store. A project file that can't be read is set aside as
+    /// `<id>.json.bad-<unix time>`, or, if even that failed, left where it
+    /// is and never saved over.
     File,
-    /// No store yet: the session gerdr used before it had projects, made a
-    /// project. On disk only once saved.
+    /// No store yet: the old single file, `projects.json`, split into a file
+    /// per project (and kept as `projects.json.migrated`); else the session
+    /// gerdr used before it had projects, made a project, on disk only once
+    /// saved.
     Migrated,
     /// No store yet, and nothing to make one of.
     Empty,
-    /// A store that can't be read: set aside as `projects.json.bad-<unix
-    /// time>` for the user to rescue, or, if even that failed, left where
-    /// it is and never saved over.
+    /// A store that can't be read: the old `projects.json` set aside as
+    /// `projects.json.bad-<unix time>` for the user to rescue, or, if even
+    /// that failed, left where it is and nothing saved; or the projects
+    /// folder can't be listed.
     Failed,
 }
 
@@ -230,70 +269,224 @@ pub struct Captured {
 }
 
 impl Store {
-    /// The saved store; on first run, the session gerdr used before it had
-    /// projects (see `migrate`); else an empty one. Says which.
+    /// The saved store; the first time, the old single file `projects.json`
+    /// split into a file per project, or the session gerdr used before it
+    /// had projects (see `migrate`); else an empty one. Says which.
     pub fn load() -> (Self, Loaded) {
-        Self::load_from(&store_file(), Self::first_run)
+        Self::load_from(&data_dir(), Self::first_run)
     }
 
-    fn load_from(path: &Path, first_run: impl FnOnce() -> Option<Self>) -> (Self, Loaded) {
+    /// `load`, from the files under `root`.
+    fn load_from(root: &Path, first_run: impl FnOnce() -> Option<Self>) -> (Self, Loaded) {
+        let books = Books {
+            root: Some(root.to_owned()),
+            ..Books::default()
+        };
+        let dir = projects_in(root);
+        match project_files(&dir) {
+            Ok(files) => {
+                let mut store = Self {
+                    books,
+                    ..Self::empty()
+                };
+                store.load_state(&root.join("state.json"));
+                for (id, path) in files {
+                    store.load_project(&id, &path);
+                }
+                (store, Loaded::File)
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                Self::load_legacy(&root.join("projects.json"), books, first_run)
+            }
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", dir.display());
+                let mut store = Self {
+                    books,
+                    ..Self::empty()
+                };
+                store.load_state(&root.join("state.json"));
+                (store, Loaded::Failed)
+            }
+        }
+    }
+
+    /// Take `state.json` in; one that can't be read is set aside.
+    fn load_state(&mut self, path: &Path) {
+        match read_state(path) {
+            Ok(Some((state, written))) => {
+                self.set_state(state);
+                self.books.state = Some(written);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                set_aside(path);
+            }
+        }
+    }
+
+    fn set_state(&mut self, state: State) {
+        self.version = state.version;
+        self.last_active = state.last_active;
+        self.quit_choice = state.quit_choice;
+        self.features = state.features;
+    }
+
+    fn state(&self) -> State {
+        State {
+            version: self.version,
+            last_active: self.last_active.clone(),
+            quit_choice: self.quit_choice,
+            features: self.features.clone(),
+        }
+    }
+
+    /// Take project file `path` in. One that can't be read is set aside, or,
+    /// if even that failed, never saved over.
+    fn load_project(&mut self, id: &str, path: &Path) {
+        match read_project(id, path) {
+            Ok((project, written)) => {
+                let disk = Disk {
+                    written: Some(written),
+                    ..Disk::default()
+                };
+                self.books.files.insert(project.id.clone(), disk);
+                self.projects.push(project);
+            }
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                if !set_aside(path) && valid_id(id) {
+                    self.books.frozen.insert(id.to_owned());
+                }
+            }
+        }
+    }
+
+    /// The store in the old single file at `path`, written out as a file per
+    /// project, the old one kept as `projects.json.migrated` once they all
+    /// are; without one, `first_run`'s.
+    fn load_legacy(
+        path: &Path,
+        books: Books,
+        first_run: impl FnOnce() -> Option<Self>,
+    ) -> (Self, Loaded) {
         let failed = |err: &dyn std::fmt::Display| {
             tracing::warn!("reading {}: {err}", path.display());
+            let books = Books {
+                legacy_frozen: !set_aside(path),
+                ..books.clone()
+            };
             let store = Self {
-                frozen: !set_aside(path),
+                books,
                 ..Self::empty()
             };
             (store, Loaded::Failed)
         };
         match std::fs::read(path) {
-            Ok(raw) => match Self::parse(&raw) {
-                Ok(store) => (store, Loaded::File),
+            Ok(raw) => match serde_json::from_slice::<Self>(&raw) {
+                Ok(mut store) => {
+                    store
+                        .projects
+                        .iter_mut()
+                        .for_each(Project::fill_workspace_ids);
+                    let mut store = Self {
+                        books: books.clone(),
+                        ..store
+                    };
+                    if store.write() {
+                        let mut migrated = path.as_os_str().to_owned();
+                        migrated.push(".migrated");
+                        if let Err(err) = std::fs::rename(path, &migrated) {
+                            tracing::warn!("moving {} aside: {err}", path.display());
+                        }
+                    } else {
+                        tracing::warn!("{} not all written out: kept", path.display());
+                    }
+                    (store, Loaded::Migrated)
+                }
                 Err(err) => failed(&err),
             },
             Err(err) if err.kind() == ErrorKind::NotFound => match first_run() {
-                Some(store) => (store, Loaded::Migrated),
-                None => (Self::empty(), Loaded::Empty),
+                Some(store) => (Self { books, ..store }, Loaded::Migrated),
+                None => (
+                    Self {
+                        books,
+                        ..Self::empty()
+                    },
+                    Loaded::Empty,
+                ),
             },
             Err(err) => failed(&err),
         }
     }
 
-    /// The store in the file now, for a reload. Unlike `load`, a file that
-    /// can't be read is left where it is, to be fixed and reloaded.
-    pub fn read() -> Result<Self, String> {
-        Self::read_from(&store_file())
-    }
-
-    fn read_from(path: &Path) -> Result<Self, String> {
-        let raw = std::fs::read(path).map_err(|err| err.to_string())?;
-        Self::parse(&raw).map_err(|err| err.to_string())
-    }
-
-    fn parse(raw: &[u8]) -> serde_json::Result<Self> {
-        let mut store: Self = serde_json::from_slice(raw)?;
-        store.disk.written = Some(digest(raw));
-        // Saved before records had ids of their own.
-        for project in &mut store.projects {
-            for record in &mut project.workspaces {
-                if record.id.is_empty() {
-                    record.id = record.herdr_id.clone().unwrap_or_default();
-                }
+    /// The ids of the projects whose file changed outside gerdr since the
+    /// user was last told; each once.
+    pub fn take_conflicts(&mut self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for (id, disk) in &mut self.books.files {
+            if disk.conflict && !disk.told {
+                disk.told = true;
+                ids.push(id.clone());
             }
-            for i in 0..project.workspaces.len() {
-                if project.workspaces[i].id.is_empty() {
-                    project.workspaces[i].id = project.new_workspace_id();
+        }
+        ids
+    }
+
+    /// The store in the files now, for a reload. A file that can't be read
+    /// is left where it is, to be fixed and reloaded: its project stays as
+    /// it is in `self` and its saves stay paused, and `errors` names it. A
+    /// project whose file is gone was deleted. What isn't any one project's
+    /// stays as it is in `self`: `state.json` isn't for editing.
+    pub fn reread(&self) -> Reread {
+        let dir = projects_in(&self.books.root());
+        let files = match project_files(&dir) {
+            Ok(files) => files,
+            Err(err) => {
+                return Reread {
+                    store: self.clone(),
+                    errors: vec![format!("{}: {err}", dir.display())],
+                };
+            }
+        };
+        let mut store = Self {
+            projects: Vec::new(),
+            books: Books {
+                files: BTreeMap::new(),
+                ..self.books.clone()
+            },
+            ..self.clone()
+        };
+        let mut errors = Vec::new();
+        for (id, path) in files {
+            match read_project(&id, &path) {
+                Ok((project, written)) => {
+                    let disk = Disk {
+                        written: Some(written),
+                        ..Disk::default()
+                    };
+                    // Readable again: fixed.
+                    store.books.frozen.remove(&project.id);
+                    store.books.files.insert(project.id.clone(), disk);
+                    store.projects.push(project);
+                }
+                Err(err) => {
+                    errors.push(format!("{id}.json: {err}"));
+                    let Some(project) = self.project(&id) else {
+                        continue;
+                    };
+                    // Told by `errors`.
+                    let disk = Disk {
+                        conflict: true,
+                        told: true,
+                        ..self.books.files.get(&id).cloned().unwrap_or_default()
+                    };
+                    store.books.files.insert(id, disk);
+                    store.projects.push(project.clone());
                 }
             }
         }
-        Ok(store)
-    }
-
-    /// Whether the file changed outside gerdr and the user wasn't told yet;
-    /// once.
-    pub fn take_conflict(&mut self) -> bool {
-        let tell = self.disk.conflict && !self.disk.told;
-        self.disk.told |= tell;
-        tell
+        Reread { store, errors }
     }
 
     fn empty() -> Self {
@@ -322,47 +515,110 @@ impl Store {
         })
     }
 
-    /// Write it out atomically (temporary file, then rename), unless the
-    /// file changed outside gerdr since gerdr last read or wrote it.
+    /// Write out what changed, each file atomically (temporary file, then
+    /// rename). A project's file that changed outside gerdr since gerdr last
+    /// read or wrote it isn't saved over, nor removed once the project is
+    /// gone; the other projects save on.
     pub fn save(&mut self) {
-        self.save_to(&store_file());
+        self.write();
     }
 
-    fn save_to(&mut self, path: &Path) {
-        if self.frozen {
-            return tracing::warn!("not saving over the unreadable {}", path.display());
+    /// `save`; whether all of it is on disk.
+    fn write(&mut self) -> bool {
+        let root = self.books.root();
+        if self.books.legacy_frozen {
+            let legacy = root.join("projects.json");
+            tracing::warn!("not saving while {} can't be read", legacy.display());
+            return false;
         }
-        let on_disk = match std::fs::read(path) {
-            Ok(raw) => Some(digest(&raw)),
-            // Gone: nothing to lose.
-            Err(err) if err.kind() == ErrorKind::NotFound => self.disk.written,
-            Err(_) => None,
-        };
-        if on_disk != self.disk.written {
-            if !self.disk.conflict {
-                tracing::warn!(
-                    "{} changed outside gerdr: not saving over it",
-                    path.display()
-                );
+        let mut all = true;
+        let state = serde_json::to_vec_pretty(&self.state()).map_err(std::io::Error::other);
+        let state = state.and_then(|json| {
+            let written = digest(&json);
+            if self.books.state != Some(written) {
+                write_atomic(&root.join("state.json"), &json)?;
             }
-            self.disk.conflict = true;
-            return;
+            Ok(written)
+        });
+        match state {
+            Ok(written) => self.books.state = Some(written),
+            Err(err) => {
+                tracing::warn!("saving state.json: {err}");
+                all = false;
+            }
         }
-        self.disk.conflict = false;
-        self.disk.told = false;
-        let tmp = path.with_extension("json.tmp");
-        let written = serde_json::to_vec_pretty(self)
-            .map_err(std::io::Error::other)
-            .and_then(|json| {
-                path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
-                std::fs::write(&tmp, &json)?;
-                std::fs::rename(&tmp, path)?;
-                Ok(digest(&json))
-            });
-        match written {
-            Ok(digest) => self.disk.written = Some(digest),
-            Err(err) => tracing::warn!("saving {}: {err}", path.display()),
+        let dir = projects_in(&root);
+        for project in &self.projects {
+            let id = &project.id;
+            if !valid_id(id) {
+                tracing::warn!("not saving project {id:?}: it isn't a valid id");
+                all = false;
+                continue;
+            }
+            let path = dir.join(format!("{id}.json"));
+            if self.books.frozen.contains(id) {
+                tracing::warn!("not saving over the unreadable {}", path.display());
+                all = false;
+                continue;
+            }
+            let json = match serde_json::to_vec_pretty(project) {
+                Ok(json) => json,
+                Err(err) => {
+                    tracing::warn!("saving {}: {err}", path.display());
+                    all = false;
+                    continue;
+                }
+            };
+            let disk = self.books.files.entry(id.clone()).or_default();
+            let written = digest(&json);
+            if disk.written == Some(written) {
+                continue;
+            }
+            if on_disk(&path, disk.written) != disk.written {
+                if !disk.conflict {
+                    tracing::warn!(
+                        "{} changed outside gerdr: not saving over it",
+                        path.display()
+                    );
+                }
+                disk.conflict = true;
+                all = false;
+                continue;
+            }
+            match write_atomic(&path, &json) {
+                Ok(()) => {
+                    *disk = Disk {
+                        written: Some(written),
+                        ..Disk::default()
+                    };
+                }
+                Err(err) => {
+                    tracing::warn!("saving {}: {err}", path.display());
+                    all = false;
+                }
+            }
         }
+        // The files of the projects gone, unless edited outside gerdr.
+        let kept: BTreeSet<&str> = self.projects.iter().map(|p| p.id.as_str()).collect();
+        self.books.files.retain(|id, disk| {
+            if kept.contains(id.as_str()) {
+                return true;
+            }
+            let path = dir.join(format!("{id}.json"));
+            if on_disk(&path, disk.written) != disk.written {
+                tracing::warn!("{} changed outside gerdr: not removing it", path.display());
+                return false;
+            }
+            match std::fs::remove_file(&path) {
+                Err(err) if err.kind() != ErrorKind::NotFound => {
+                    tracing::warn!("removing {}: {err}", path.display());
+                    all = false;
+                }
+                _ => {}
+            }
+            false
+        });
+        all
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -409,6 +665,21 @@ impl Store {
 }
 
 impl Project {
+    /// Give the workspace records saved before they had ids of their own
+    /// one: their herdr workspace's id, else a new one.
+    fn fill_workspace_ids(&mut self) {
+        for record in &mut self.workspaces {
+            if record.id.is_empty() {
+                record.id = record.herdr_id.clone().unwrap_or_default();
+            }
+        }
+        for i in 0..self.workspaces.len() {
+            if self.workspaces[i].id.is_empty() {
+                self.workspaces[i].id = self.new_workspace_id();
+            }
+        }
+    }
+
     /// An id for a new workspace record, unlike any it has.
     pub fn new_workspace_id(&self) -> String {
         (1..)
@@ -430,22 +701,118 @@ impl WorkspaceRecord {
     }
 }
 
-pub fn store_file() -> PathBuf {
-    home_dir()
-        .unwrap_or_default()
-        .join(".local/share/gerdr/projects.json")
+/// What `Store::reread` found.
+#[derive(Debug)]
+pub struct Reread {
+    pub store: Store,
+    /// The files that couldn't be read, each with why, ready to show.
+    pub errors: Vec<String>,
 }
 
-/// Move the unreadable store at `path` out of the way of the next save, as
+/// The folder of gerdr's files.
+fn data_dir() -> PathBuf {
+    home_dir().unwrap_or_default().join(".local/share/gerdr")
+}
+
+/// The folder holding a file per project.
+pub fn projects_dir() -> PathBuf {
+    projects_in(&data_dir())
+}
+
+fn projects_in(root: &Path) -> PathBuf {
+    root.join("projects")
+}
+
+/// Project `id`'s file.
+pub fn project_file(id: &str) -> PathBuf {
+    projects_dir().join(format!("{id}.json"))
+}
+
+/// Whether `id` can be a project's, and so a file's name: lowercase
+/// `[a-z0-9-]`, not starting with a dash, as `slugify` makes them.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The project files in `dir`, as (id, path), by name: `<id>.json`, not
+/// hidden. Leftovers (`.json.tmp`, `.json.bad-<unix time>`) aren't.
+fn project_files(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if let Some(id) = name.strip_suffix(".json") {
+            files.push((id.to_owned(), entry.path()));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The project in file `path`, and a digest of its bytes; it must be
+/// project `id`'s.
+fn read_project(id: &str, path: &Path) -> Result<(Project, u64), String> {
+    let raw = std::fs::read(path).map_err(|err| err.to_string())?;
+    let mut project: Project = serde_json::from_slice(&raw).map_err(|err| err.to_string())?;
+    project.fill_workspace_ids();
+    if !valid_id(&project.id) {
+        return Err(format!("{:?} isn't a valid id", project.id));
+    }
+    if project.id != id {
+        return Err(format!("id {:?} doesn't match the file name", project.id));
+    }
+    Ok((project, digest(&raw)))
+}
+
+/// What `state.json` at `path` holds, and a digest of its bytes; `None` if
+/// there is none.
+fn read_state(path: &Path) -> Result<Option<(State, u64)>, String> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    let state = serde_json::from_slice(&raw).map_err(|err| err.to_string())?;
+    Ok(Some((state, digest(&raw))))
+}
+
+/// A digest of the file at `path` now: `written` if it is gone, as there is
+/// nothing to lose; `None` if it can't be read.
+fn on_disk(path: &Path, written: Option<u64>) -> Option<u64> {
+    match std::fs::read(path) {
+        Ok(raw) => Some(digest(&raw)),
+        Err(err) if err.kind() == ErrorKind::NotFound => written,
+        Err(_) => None,
+    }
+}
+
+/// Write `bytes` to `path` atomically: to `<path>.tmp`, then renamed.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Move the unreadable file at `path` out of the way of the next save, as
 /// `<path>.bad-<unix time>`; whether it is out of the way.
 fn set_aside(path: &Path) -> bool {
     let bad = bad_name(path, now());
     match std::fs::rename(path, &bad) {
         Ok(()) => {
-            tracing::warn!(
-                "starting without projects; the old store is {}",
-                bad.display()
-            );
+            tracing::warn!("set {} aside as {}", path.display(), bad.display());
             true
         }
         Err(err) => {
@@ -1028,8 +1395,7 @@ mod tests {
             last_active: Some("api".into()),
             quit_choice: Some(QuitChoice::Keep),
             features: BTreeMap::new(),
-            frozen: false,
-            disk: Disk::default(),
+            books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),
                 name: "API".into(),
@@ -1145,7 +1511,11 @@ mod tests {
                 ],
             }],
         });
-        let store = Store::parse(old.to_string().as_bytes()).unwrap();
+        let mut store: Store = serde_json::from_value(old).unwrap();
+        store
+            .projects
+            .iter_mut()
+            .for_each(Project::fill_workspace_ids);
         let records = &store.project("a").unwrap().workspaces;
         let ids: Vec<_> = records
             .iter()
@@ -1590,125 +1960,416 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn loading_says_what_it_found() {
-        let dir = scratch("load");
-        let path = dir.join("projects.json");
-        let none = || None;
+    /// `store`, kept under `root`.
+    fn at(root: &Path, store: Store) -> Store {
+        Store {
+            books: Books {
+                root: Some(root.to_owned()),
+                ..Books::default()
+            },
+            ..store
+        }
+    }
 
-        assert_eq!(
-            Store::load_from(&path, none),
-            (Store::empty(), Loaded::Empty)
-        );
-        let (migrated, loaded) = Store::load_from(&path, || Some(sample()));
-        assert_eq!((migrated, loaded), (sample(), Loaded::Migrated));
+    /// `sample` with a second project, and a feature.
+    fn two() -> Store {
+        let mut store = sample();
+        let web = Project {
+            id: "web".into(),
+            name: "Web".into(),
+            session: session_name("web"),
+            ..store.projects[0].clone()
+        };
+        store.projects.push(web);
+        store.features.insert("api".into(), "fix-login".into());
+        store
+    }
 
-        std::fs::write(&path, serde_json::to_vec(&sample()).unwrap()).unwrap();
-        assert_eq!(Store::load_from(&path, none), (sample(), Loaded::File));
-
-        // Unreadable: set aside, not saved over.
-        std::fs::write(&path, b"{ not json").unwrap();
-        let (store, loaded) = Store::load_from(&path, none);
-        assert_eq!((loaded, store.frozen), (Loaded::Failed, false));
-        assert!(store.projects.is_empty());
-        assert!(!path.exists());
-        let set_aside: Vec<_> = std::fs::read_dir(&dir)
+    /// The names in folder `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
+        names.sort();
+        names
+    }
+
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().ino()
+    }
+
+    #[test]
+    fn loading_says_what_it_found() {
+        let root = scratch("load");
+        let dir = root.join("projects");
+        let none = || None;
+
+        assert_eq!(
+            Store::load_from(&root, none),
+            (Store::empty(), Loaded::Empty)
+        );
+        let (migrated, loaded) = Store::load_from(&root, || Some(sample()));
+        assert_eq!((migrated, loaded), (sample(), Loaded::Migrated));
+        // On disk only once saved.
+        assert!(!dir.exists());
+
+        at(&root, two()).save();
+        assert_eq!(names(&dir), ["api.json", "web.json"]);
+        assert_eq!(
+            std::fs::read(dir.join("api.json")).unwrap(),
+            serde_json::to_vec_pretty(&two().projects[0]).unwrap()
+        );
+        assert_eq!(Store::load_from(&root, none), (two(), Loaded::File));
+
+        // Leftovers and hidden files aren't projects.
+        for name in ["x.json.tmp", "x.json.bad-1", ".x.json", "x.txt"] {
+            std::fs::write(dir.join(name), b"{ not json").unwrap();
+        }
+        assert_eq!(Store::load_from(&root, none), (two(), Loaded::File));
+        assert_eq!(names(&dir).len(), 6);
+
+        // Unreadable: set aside, the rest loaded.
+        std::fs::write(dir.join("web.json"), b"{ not json").unwrap();
+        let (store, loaded) = Store::load_from(&root, none);
+        assert_eq!((store, loaded), (sample_with_feature(), Loaded::File));
+        let set_aside: Vec<_> = names(&dir)
+            .into_iter()
+            .filter(|name| name.starts_with("web.json.bad-"))
+            .collect();
         assert_eq!(set_aside.len(), 1);
-        assert!(set_aside[0].starts_with("projects.json.bad-"));
+        assert!(!dir.join("web.json").exists());
         assert_eq!(
             std::fs::read(dir.join(&set_aside[0])).unwrap(),
             b"{ not json"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+
+        // So is `state.json`, and the rest comes back as it was.
+        std::fs::write(root.join("state.json"), b"[]").unwrap();
+        let (store, loaded) = Store::load_from(&root, none);
+        assert_eq!(loaded, Loaded::File);
+        assert_eq!((store.last_active, store.quit_choice), (None, None));
+        assert_eq!(store.projects, sample().projects);
+        assert!(!root.join("state.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(
-            bad_name(Path::new("/d/projects.json"), 42),
-            Path::new("/d/projects.json.bad-42")
+            bad_name(Path::new("/d/projects/api.json"), 42),
+            Path::new("/d/projects/api.json.bad-42")
         );
+    }
+
+    /// `sample` with `two`'s feature.
+    fn sample_with_feature() -> Store {
+        Store {
+            features: two().features,
+            ..sample()
+        }
+    }
+
+    #[test]
+    fn migrates_the_old_single_file() {
+        let root = scratch("migrate");
+        let dir = root.join("projects");
+        let legacy = root.join("projects.json");
+        let old = serde_json::to_vec_pretty(&two()).unwrap();
+        std::fs::write(&legacy, &old).unwrap();
+
+        let (mut store, loaded) = Store::load_from(&root, || None);
+        assert_eq!((&store, loaded), (&two(), Loaded::Migrated));
+        assert_eq!(names(&dir), ["api.json", "web.json"]);
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read(root.join("projects.json.migrated")).unwrap(),
+            old
+        );
+        // Saving it again, as a migrated store is, changes nothing.
+        let files = ["projects/api.json", "projects/web.json", "state.json"];
+        let before: Vec<_> = files.iter().map(|f| inode(&root.join(f))).collect();
+        store.save();
+        let after: Vec<_> = files.iter().map(|f| inode(&root.join(f))).collect();
+        assert_eq!(before, after);
+        assert_eq!(Store::load_from(&root, || None), (two(), Loaded::File));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A project that can't have a file: the old file stays.
+        let root = scratch("migrate-bad-id");
+        let mut bad = sample();
+        bad.projects[0].id = "../x".into();
+        let old = serde_json::to_vec(&bad).unwrap();
+        std::fs::write(root.join("projects.json"), &old).unwrap();
+        let (store, loaded) = Store::load_from(&root, || None);
+        assert_eq!((store, loaded), (bad, Loaded::Migrated));
+        assert_eq!(std::fs::read(root.join("projects.json")).unwrap(), old);
+        assert!(!root.join("projects").exists());
+        assert!(!root.join("x.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Unreadable: set aside, nothing migrated.
+        let root = scratch("migrate-broken");
+        std::fs::write(root.join("projects.json"), b"{ not json").unwrap();
+        let (store, loaded) = Store::load_from(&root, || Some(sample()));
+        assert_eq!((store, loaded), (Store::empty(), Loaded::Failed));
+        assert!(!root.join("projects").exists());
+        let left = names(&root);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].starts_with("projects.json.bad-"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_must_be_its_projects() {
+        for id in ["api", "gerdr", "project-2", "2fa"] {
+            assert!(valid_id(id), "{id}");
+        }
+        for id in [
+            "", "-api", "Api", "../x", "a/b", "a b", "a_b", "café", "a.json",
+        ] {
+            assert!(!valid_id(id), "{id}");
+        }
+
+        let root = scratch("ids");
+        let dir = root.join("projects");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, id: &str| {
+            let project = Project {
+                id: id.into(),
+                ..sample().projects[0].clone()
+            };
+            let path = dir.join(name);
+            std::fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
+            path
+        };
+        let web = write("web.json", "api");
+        assert_eq!(
+            read_project("web", &web).unwrap_err(),
+            "id \"api\" doesn't match the file name"
+        );
+        let up = write("up.json", "../up");
+        assert_eq!(
+            read_project("up", &up).unwrap_err(),
+            "\"../up\" isn't a valid id"
+        );
+        let caps = write("Api.json", "Api");
+        assert_eq!(
+            read_project("Api", &caps).unwrap_err(),
+            "\"Api\" isn't a valid id"
+        );
+        let (store, loaded) = Store::load_from(&root, || None);
+        assert_eq!(loaded, Loaded::File);
+        assert!(store.projects.is_empty());
+        assert!(names(&dir).iter().all(|name| name.contains(".json.bad-")));
+
+        // Never written out, wherever it would land.
+        let mut store = at(&root, sample());
+        store.projects[0].id = "../escaped".into();
+        assert!(!store.write());
+        assert!(!root.join("escaped.json").exists());
+        assert_eq!(names(&dir).len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_store_that_cant_be_set_aside_is_never_saved_over() {
-        // Can't be read (a folder), and can't be moved: frozen.
-        let dir = scratch("frozen");
-        let path = dir.join("projects.json");
-        std::fs::create_dir_all(path.join("x")).unwrap();
-        let readonly = |mode| {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
-        };
-        readonly(0o500);
-        let (store, loaded) = Store::load_from(&path, || None);
-        readonly(0o700);
-        assert_eq!(loaded, Loaded::Failed);
         // Root moves it anyway.
-        let root = unsafe { libc::geteuid() } == 0;
-        assert_eq!(store.frozen, !root);
-        assert!(!set_aside(&dir.join("nowhere/projects.json")));
-        let _ = std::fs::remove_dir_all(&dir);
+        let root_user = unsafe { libc::geteuid() } == 0;
+        let mode = |dir: &Path, mode| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        // A project file that can't be read (a folder), nor moved: frozen.
+        let root = scratch("frozen");
+        let dir = root.join("projects");
+        let api = dir.join("api.json");
+        std::fs::create_dir_all(api.join("x")).unwrap();
+        mode(&dir, 0o500);
+        let (mut store, loaded) = Store::load_from(&root, || None);
+        mode(&dir, 0o700);
+        assert_eq!(loaded, Loaded::File);
+        assert_eq!(store.books.frozen.contains("api"), !root_user);
+        store.projects = sample().projects;
+        store.save();
+        assert_eq!(api.is_dir(), !root_user);
+        store.projects.clear();
+        store.save();
+        assert_eq!(api.is_dir(), !root_user);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // The old single file, likewise: nothing saved, not even beside it.
+        let root = scratch("frozen-legacy");
+        std::fs::create_dir_all(root.join("projects.json/x")).unwrap();
+        mode(&root, 0o500);
+        let (mut store, loaded) = Store::load_from(&root, || None);
+        mode(&root, 0o700);
+        assert_eq!(loaded, Loaded::Failed);
+        assert_eq!(store.books.legacy_frozen, !root_user);
+        store.projects = sample().projects;
+        store.save();
+        assert_eq!(root.join("projects").exists(), root_user);
+        assert!(!set_aside(&root.join("nowhere/api.json")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn an_edit_made_outside_gerdr_isnt_saved_over() {
-        let dir = scratch("edited");
-        let path = dir.join("projects.json");
-        let mut store = sample();
-        store.save_to(&path);
-        assert!(!store.take_conflict());
+        let root = scratch("edited");
+        let api = root.join("projects/api.json");
+        let web = root.join("projects/web.json");
+        let mut store = at(&root, two());
+        store.save();
+        assert!(store.take_conflicts().is_empty());
 
-        let edited = std::fs::read_to_string(&path)
+        let edited = std::fs::read_to_string(&api)
             .unwrap()
             .replace("\"API\"", "\"Site\"");
-        std::fs::write(&path, &edited).unwrap();
-        store.last_active = None;
-        store.save_to(&path);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
-        assert!(store.take_conflict());
+        std::fs::write(&api, &edited).unwrap();
+        for project in &mut store.projects {
+            project.last_used = 300;
+        }
+        store.save();
+        // Only that project's saves wait.
+        assert_eq!(std::fs::read_to_string(&api).unwrap(), edited);
+        assert_eq!(read_project("web", &web).unwrap().0.last_used, 300);
+        assert_eq!(store.take_conflicts(), ["api"]);
         // Said once.
-        store.save_to(&path);
-        assert!(!store.take_conflict());
+        store.save();
+        assert!(store.take_conflicts().is_empty());
 
         // Reloaded: saved again, from what was read.
-        let mut reloaded = Store::read_from(&path).unwrap();
+        let Reread {
+            store: mut reloaded,
+            errors,
+        } = store.reread();
+        assert!(errors.is_empty());
         assert_eq!(reloaded.projects[0].name, "Site");
-        reloaded.last_active = None;
-        reloaded.save_to(&path);
-        assert_eq!(Store::read_from(&path).unwrap().last_active, None);
+        assert_eq!(reloaded.projects[0].last_used, 200);
+        reloaded.projects[0].last_used = 400;
+        reloaded.save();
+        assert!(reloaded.take_conflicts().is_empty());
+        assert_eq!(read_project("api", &api).unwrap().0.last_used, 400);
 
         // Put back as gerdr wrote it: saves go on.
-        let ours = std::fs::read(&path).unwrap();
-        std::fs::write(&path, b"{}").unwrap();
-        reloaded.save_to(&path);
-        assert!(reloaded.take_conflict());
-        std::fs::write(&path, &ours).unwrap();
-        reloaded.last_active = Some("api".into());
-        reloaded.save_to(&path);
-        assert!(!reloaded.take_conflict());
-        assert_eq!(
-            Store::read_from(&path).unwrap().last_active,
-            Some("api".into())
-        );
+        let ours = std::fs::read(&api).unwrap();
+        std::fs::write(&api, b"{}").unwrap();
+        reloaded.projects[0].last_used = 500;
+        reloaded.save();
+        assert_eq!(reloaded.take_conflicts(), ["api"]);
+        std::fs::write(&api, &ours).unwrap();
+        reloaded.save();
+        assert!(reloaded.take_conflicts().is_empty());
+        assert_eq!(read_project("api", &api).unwrap().0.last_used, 500);
 
         // Deleted: nothing to lose.
-        std::fs::remove_file(&path).unwrap();
-        reloaded.save_to(&path);
-        assert!(path.exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_file(&api).unwrap();
+        reloaded.projects[0].last_used = 600;
+        reloaded.save();
+        assert_eq!(read_project("api", &api).unwrap().0.last_used, 600);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn reading_a_broken_file_leaves_it_alone() {
-        let dir = scratch("broken");
-        let path = dir.join("projects.json");
-        std::fs::write(&path, b"{ not json").unwrap();
-        let err = Store::read_from(&path).unwrap_err();
-        assert!(err.contains("line 1"), "{err}");
-        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
-        assert!(Store::read_from(&dir.join("nowhere.json")).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn an_unchanged_project_file_isnt_rewritten() {
+        let root = scratch("unchanged");
+        let api = root.join("projects/api.json");
+        let web = root.join("projects/web.json");
+        let state = root.join("state.json");
+        let mut store = at(&root, two());
+        store.save();
+        let (api_was, web_was, state_was) = (inode(&api), inode(&web), inode(&state));
+
+        store.projects[1].last_used = 300;
+        store.save();
+        assert_eq!(inode(&api), api_was);
+        assert_ne!(inode(&web), web_was);
+        assert_eq!(inode(&state), state_was);
+
+        let web_was = inode(&web);
+        store.last_active = Some("web".into());
+        store.save();
+        assert_eq!((inode(&api), inode(&web)), (api_was, web_was));
+        assert_ne!(inode(&state), state_was);
+        let (store, _) = Store::load_from(&root, || None);
+        assert_eq!(store.last_active.as_deref(), Some("web"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_forgotten_projects_file_is_removed() {
+        let root = scratch("forgotten");
+        let web = root.join("projects/web.json");
+        let mut store = at(&root, two());
+        store.save();
+        let gone = store.projects.pop().unwrap();
+        store.save();
+        assert!(!web.exists());
+        assert_eq!(names(&root.join("projects")), ["api.json"]);
+
+        // Unless edited outside gerdr.
+        store.projects.push(gone.clone());
+        store.save();
+        std::fs::write(&web, b"{ edited").unwrap();
+        store.projects.pop();
+        store.save();
+        assert_eq!(std::fs::read(&web).unwrap(), b"{ edited");
+        // Nor saved over when it comes back.
+        store.projects.push(gone);
+        store.save();
+        assert_eq!(std::fs::read(&web).unwrap(), b"{ edited");
+        assert_eq!(store.take_conflicts(), ["web"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rereading_a_broken_file_leaves_it_alone() {
+        let root = scratch("broken");
+        let dir = root.join("projects");
+        let api = dir.join("api.json");
+        let mut store = at(&root, two());
+        store.save();
+        std::fs::write(&api, b"{ not json").unwrap();
+
+        let Reread {
+            store: mut reread,
+            errors,
+        } = store.reread();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("api.json: "), "{errors:?}");
+        assert!(errors[0].contains("line 1"), "{errors:?}");
+        // Its project as it was, its saves paused; the rest saves on.
+        assert_eq!(reread, two());
+        assert_eq!(std::fs::read(&api).unwrap(), b"{ not json");
+        reread.projects[0].last_used = 300;
+        reread.projects[1].last_used = 300;
+        reread.save();
+        assert_eq!(std::fs::read(&api).unwrap(), b"{ not json");
+        assert_eq!(
+            read_project("web", &dir.join("web.json"))
+                .unwrap()
+                .0
+                .last_used,
+            300
+        );
+        // Already told.
+        assert!(reread.take_conflicts().is_empty());
+
+        // A file deleted: its project is gone.
+        std::fs::remove_file(dir.join("web.json")).unwrap();
+        let Reread { store: gone, .. } = store.reread();
+        assert_eq!(gone.projects.len(), 1);
+        assert_eq!(gone.last_active, store.last_active);
+        assert_eq!(gone.features, store.features);
+
+        // The whole folder gone: nothing changes.
+        std::fs::remove_dir_all(&dir).unwrap();
+        let Reread {
+            store: kept,
+            errors,
+        } = store.reread();
+        assert_eq!(kept, store);
+        assert_eq!(errors.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

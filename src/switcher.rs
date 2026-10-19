@@ -72,8 +72,8 @@ pub enum Target {
     Shortcuts,
     /// The config file, to edit.
     Settings,
-    /// The projects file, to edit.
-    ProjectsFile,
+    /// A project's file, by id, to edit in a new tab.
+    ProjectFile(String),
     /// The projects file, read again after an edit.
     ReloadProjects,
     /// A folder, opened as a project unless a workspace has it already.
@@ -99,7 +99,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Settings
-            | Target::ProjectsFile
+            | Target::ProjectFile(_)
             | Target::ReloadProjects
             | Target::Command(_) => Section::Commands,
         }
@@ -117,7 +117,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Settings
-            | Target::ProjectsFile
+            | Target::ProjectFile(_)
             | Target::ReloadProjects
             | Target::Command(_) => "command",
         }
@@ -306,7 +306,7 @@ impl Switcher {
     /// Match the items in the category against the query again, in their
     /// sections, and select the best match. In the run prompt, the typed
     /// command goes first and is selected, unless the best match is an app
-    /// whose name starts with it.
+    /// or a project file command whose name starts with it.
     fn refilter(&mut self) {
         let command = self.query.trim().to_owned();
         if self.run {
@@ -357,11 +357,13 @@ impl Switcher {
         let at = |found: &[Match], item: usize| found.iter().position(|m| m.item == item);
         let named = |item: usize| {
             let item = &self.items[item];
-            matches!(item.target, Target::App(_))
-                && item
-                    .label
-                    .to_lowercase()
-                    .starts_with(&command.to_lowercase())
+            matches!(
+                item.target,
+                Target::App(_) | Target::ProjectFile(_) | Target::ReloadProjects
+            ) && item
+                .label
+                .to_lowercase()
+                .starts_with(&command.to_lowercase())
         };
         let mut selected = 0;
         if self.run && !command.is_empty() {
@@ -617,7 +619,7 @@ fn frecency_key(
         Target::Welcome
         | Target::Shortcuts
         | Target::Settings
-        | Target::ProjectsFile
+        | Target::ProjectFile(_)
         | Target::ReloadProjects => return None,
     })
 }
@@ -648,6 +650,29 @@ fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
         "Projects…",
         "find, create, manage",
         Target::Welcome,
+    ));
+    items
+}
+
+/// The rows for the shown project's file (none while no project is shown),
+/// to edit, and for reading the project files again after an edit.
+fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
+    let mut items: Vec<Item> = current
+        .map(|id| {
+            Item::new(
+                ItemIcon::Settings,
+                "Project file",
+                display(&crate::projects::project_file(id), home, DETAIL_CHARS),
+                Target::ProjectFile(id.to_owned()),
+            )
+        })
+        .into_iter()
+        .collect();
+    items.push(Item::new(
+        ItemIcon::Command,
+        "Reload project file",
+        "apply what was edited in it",
+        Target::ReloadProjects,
     ));
     items
 }
@@ -694,8 +719,8 @@ impl Gerdr {
     }
 
     /// What the run prompt offers: the page of the workspace's repository,
-    /// the apps named in the config file and the installed apps, then the
-    /// commands typed before.
+    /// the apps named in the config file and the installed apps, the
+    /// commands typed before, then the project file's commands.
     fn run_items(&self) -> Vec<Item> {
         let icons = self.program_icons();
         let page = self
@@ -726,6 +751,10 @@ impl Gerdr {
                 Target::Command(command),
             )
         }));
+        items.extend(project_file_items(
+            self.project.as_deref(),
+            home_dir().as_deref(),
+        ));
         self.weighed(items)
     }
 
@@ -887,7 +916,7 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Settings => self.open_settings(place),
-            Target::ProjectsFile => self.open_projects_file(place),
+            Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
@@ -913,17 +942,28 @@ impl Gerdr {
         self.open_in_zed(&path, place, "the settings file");
     }
 
-    /// Open the projects file, saved first so it shows what is on screen,
-    /// as the settings file is opened. Edits in it apply once reloaded.
-    fn open_projects_file(&mut self, place: Place) {
+    /// Open project `id`'s file in a new Zed window, in a new tab of the
+    /// active workspace: saved first (made if missing) so it shows what is
+    /// on screen when the project is shown, and again once the tab is in
+    /// it. Edits in it apply once reloaded.
+    pub fn open_project_file(&mut self, id: &str) {
+        if self.projects.project(id).is_none() {
+            return;
+        }
+        let path = crate::projects::project_file(id);
+        if self.project.as_deref() == Some(id) {
+            self.record_tabs();
+        }
+        self.projects.save();
+        if !path.exists() {
+            let path = tilde(&path, home_dir().as_deref());
+            return self.toast(format!("Can't make {path}"), Level::Error);
+        }
+        let zed = format!("zed -n {}", desktop::shell_quote(&path.to_string_lossy()));
+        self.launch(&zed, Place::Tab);
         if self.record_tabs() {
             self.projects.save();
         }
-        let path = crate::projects::store_file();
-        if !path.exists() {
-            self.projects.save();
-        }
-        self.open_in_zed(&path, place, "the projects file");
     }
 
     /// Open `path` in the active workspace's Zed, shown, when it has one;
@@ -970,7 +1010,8 @@ impl Gerdr {
     /// Everything to switch to: the workspaces, their tabs (of those with
     /// more than one), the agents, the other projects, the apps, zoxide's
     /// folders not open yet, then gerdr's own commands: the project menu,
-    /// the shortcuts and the settings file. The sections sort them.
+    /// the shortcuts, the settings file and the project file's commands.
+    /// The sections sort them.
     fn switcher_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
         let home = home_dir();
@@ -1055,19 +1096,7 @@ impl Gerdr {
             display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
             Target::Settings,
         ));
-        let projects_file = crate::projects::store_file();
-        items.push(Item::new(
-            ItemIcon::Settings,
-            "Projects file",
-            display(&projects_file, home.as_deref(), DETAIL_CHARS),
-            Target::ProjectsFile,
-        ));
-        items.push(Item::new(
-            ItemIcon::Command,
-            "Reload projects file",
-            "apply what was edited in it",
-            Target::ReloadProjects,
-        ));
+        items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
         self.weighed(items)
     }
 
@@ -1429,6 +1458,8 @@ mod tests {
         assert_eq!(key(&Target::Welcome), None);
         assert_eq!(key(&Target::Shortcuts), None);
         assert_eq!(key(&Target::Settings), None);
+        assert_eq!(key(&Target::ProjectFile("aft".into())), None);
+        assert_eq!(key(&Target::ReloadProjects), None);
     }
 
     #[test]
@@ -1653,5 +1684,55 @@ mod tests {
         );
         type_in(&mut switcher, "es -x");
         assert_eq!(switcher.picked(), Some(&Target::Command("files -x".into())));
+    }
+
+    #[test]
+    fn run_prompt_offers_the_project_file() {
+        let home = home_dir();
+        let home = home.as_deref();
+        assert_eq!(
+            project_file_items(None, home)
+                .iter()
+                .map(|item| &item.target)
+                .collect::<Vec<_>>(),
+            [&Target::ReloadProjects]
+        );
+        let items = project_file_items(Some("aft"), home);
+        assert_eq!(items[0].label, "Project file");
+        assert!(
+            items[0]
+                .detail
+                .ends_with("/.local/share/gerdr/projects/aft.json")
+        );
+        let history = Item::new(
+            ItemIcon::App,
+            "imv",
+            "run before",
+            Target::Command("imv".into()),
+        );
+        let mut switcher = Switcher::new(
+            std::iter::once(history).chain(items).collect(),
+            true,
+            Place::Split,
+        );
+        assert_eq!(
+            labels(&switcher),
+            ["imv", "Project file", "Reload project file"]
+        );
+        // Named, it is what Enter picks, past the typed command.
+        type_in(&mut switcher, "proj");
+        assert_eq!(labels(&switcher)[0], "proj");
+        let none = ModifiersState::default();
+        assert!(matches!(
+            switcher.key(&none, Keysym::Return, Keysym::Return, 5),
+            Outcome::Picked(Target::ProjectFile(id), _) if id == "aft"
+        ));
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        switcher.key(&ctrl, Keysym::u, Keysym::u, 5);
+        type_in(&mut switcher, "reload");
+        assert_eq!(switcher.picked(), Some(&Target::ReloadProjects));
     }
 }

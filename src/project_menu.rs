@@ -159,6 +159,8 @@ pub enum Outcome {
     Stop(String),
     /// Open the form for project `id`'s start and stop commands.
     Settings(String),
+    /// Open project `id`'s file, to edit.
+    ProjectFile(String),
     /// Keep project `id`'s start and stop commands, and run the start ones
     /// now if `run`.
     SaveSettings {
@@ -363,6 +365,7 @@ impl ProjectMenu {
             Keysym::r if ctrl => self.start_renaming(self.selected),
             Keysym::s if ctrl => return self.stop(self.selected),
             Keysym::e if ctrl => return self.edit_settings(self.selected),
+            Keysym::o if ctrl => return self.project_file(self.selected),
             Keysym::Delete | Keysym::KP_Delete => return self.forget(self.selected, armed),
             Keysym::Up | Keysym::KP_Up => self.step(-1, page),
             Keysym::Down | Keysym::KP_Down => self.step(1, page),
@@ -501,6 +504,14 @@ impl ProjectMenu {
             return None;
         };
         Some(Outcome::Settings(self.projects[p].0.clone()))
+    }
+
+    /// Ask for entry `i`'s project's file, if it is a project.
+    fn project_file(&self, i: usize) -> Option<Outcome> {
+        let Item::Project(p) = *self.items.get(i)? else {
+            return None;
+        };
+        Some(Outcome::ProjectFile(self.projects[p].0.clone()))
     }
 
     /// Show the form for project `id`'s start and stop commands: `before`
@@ -741,6 +752,7 @@ impl ProjectMenu {
                 self.select(i, page);
                 match button {
                     RowButton::Settings => self.edit_settings(i),
+                    RowButton::ProjectFile => self.project_file(i),
                     RowButton::Rename => {
                         self.start_renaming(i);
                         None
@@ -1006,6 +1018,7 @@ impl ProjectMenu {
                 ("Ctrl+N", "new"),
                 ("Ctrl+R", "rename"),
                 ("Ctrl+E", "commands"),
+                ("Ctrl+O", "project file"),
                 ("Ctrl+S", "stop"),
                 ("Del", "forget"),
                 ("Esc", "close"),
@@ -1270,6 +1283,10 @@ impl Gerdr {
                 {
                     menu.open_settings(&id, &before, &after, &dir);
                 }
+            }
+            Outcome::ProjectFile(id) => {
+                self.project_menu = None;
+                self.open_project_file(&id);
             }
             Outcome::SaveSettings {
                 id,
@@ -1762,6 +1779,29 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_o_opens_a_projects_file() {
+        let mut m = menu(&["gerdr", "blog"]);
+        assert_eq!(
+            chord(&mut m, ctrl(), Keysym::o),
+            Some(Outcome::ProjectFile("gerdr".into()))
+        );
+        // The current project's too; not on the other entries.
+        press(&mut m, Keysym::Home);
+        assert_eq!(
+            chord(&mut m, ctrl(), Keysym::o),
+            Some(Outcome::ProjectFile("aft".into()))
+        );
+        press(&mut m, Keysym::End);
+        assert_eq!(chord(&mut m, ctrl(), Keysym::o), None);
+        // In the form it still browses.
+        chord(&mut m, ctrl(), Keysym::n);
+        assert!(matches!(
+            chord(&mut m, ctrl(), Keysym::o),
+            Some(Outcome::Browse(_))
+        ));
+    }
+
+    #[test]
     fn ctrl_e_edits_a_projects_commands() {
         let mut m = menu(&["gerdr", "blog"]);
         assert_eq!(
@@ -2099,6 +2139,10 @@ mod tests {
         assert_eq!(
             m.click(MenuHit::Button(4, RowButton::Stop), 10),
             Some(Outcome::Stop("blog".into()))
+        );
+        assert_eq!(
+            m.click(MenuHit::Button(4, RowButton::ProjectFile), 10),
+            Some(Outcome::ProjectFile("blog".into()))
         );
         m.click(MenuHit::Button(1, RowButton::Rename), 10);
         assert_eq!(m.renaming.as_ref().map(|r| r.id.as_str()), Some("aft"));
