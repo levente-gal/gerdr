@@ -788,8 +788,9 @@ impl Gerdr {
             };
         }
         if let Some(switcher) = self.switcher_view() {
-            let rows = chrome::switcher_geometry(&switcher, self.content_rect()).rows;
-            return if rows.iter().any(|row| row.to_f64().contains(pos)) {
+            let layout = chrome::switcher_geometry(&switcher, self.content_rect());
+            let mut hits = layout.rows.iter().chain(&layout.chips);
+            return if hits.any(|rect| rect.to_f64().contains(pos)) {
                 RegionHit::Control
             } else {
                 RegionHit::Nothing

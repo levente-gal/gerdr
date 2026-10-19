@@ -1,16 +1,19 @@
 //! The switcher: its rows, where they go, and how it is drawn.
 //!
-//! The rows come in sections (Workspaces, Tabs, Agents, …), each under an
-//! upper case heading. A row has two lines: what it is on the first, more
-//! about it in muted text on the second, with a small pill at the right
-//! naming its kind.
+//! Under the query, a row of category chips ("All", then a chip per
+//! section listed) narrows the rows to one section. The rows come in
+//! sections (Workspaces, Tabs, Agents, …), each under an upper case
+//! heading. A row has two lines: what it is on the first, more about it in
+//! muted text on the second, with a small pill at the right naming its
+//! kind. The key hints go in a footer, as in the project menu.
 
 use super::{
-    CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, MENU_RADIUS,
-    PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect,
-    SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
-    SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder, folder_plus, icon_sdf, mix, pencil,
-    physical, prompt, status_mark, tab, terminal,
+    BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_MARGIN,
+    HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
+    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
+    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder,
+    folder_plus, footer_height, footer_rows, icon_sdf, mix, pencil, physical, prompt, rect_px,
+    status_mark, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -31,6 +34,15 @@ const LINE_INSET: i32 = 4;
 const LABEL_LINE: i32 = 18;
 /// The pill at the right of a row and the gap before it.
 const PILL_GAP: i32 = 10;
+/// A category chip's height, and the gap between chips.
+const CHIP_HEIGHT: i32 = 24;
+const CHIP_GAP: i32 = 4;
+/// A chip's room per character of its label, and around the label: an
+/// estimate of the text's width, as the layout has no font to measure with.
+const CHIP_CHAR: i32 = 7;
+const CHIP_INSET: i32 = 12;
+/// The row of chips: a chip and the gap under it.
+const CHIPS_ROW: i32 = CHIP_HEIGHT + SWITCHER_PADDING;
 
 /// The icon of a switcher row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,40 +77,56 @@ pub struct SwitcherRow {
     pub detail_hits: Vec<usize>,
 }
 
-/// What the switcher shows: the query (or `hint` without one), the rows in
-/// view, which of them is selected (none when nothing matches), and which
-/// the pointer is over.
+/// What the switcher shows: the query (or `hint` without one), the
+/// category chips, the rows in view, which of them is selected (none when
+/// nothing matches), which the pointer is over, and the key hints.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitcherView {
     pub query: Line,
     pub hint: &'static str,
+    /// The category chips' labels, "All" first; none without a choice.
+    pub categories: Vec<&'static str>,
+    /// The chip on, by index into `categories`.
+    pub category: usize,
+    /// The chip under the pointer.
+    pub category_hover: Option<usize>,
     pub rows: Vec<SwitcherRow>,
     pub selected: Option<usize>,
     pub hover: Option<usize>,
+    /// The footer's key hints, as (key, what it does).
+    pub hints: Vec<(String, String)>,
 }
 
 /// Where the switcher's parts go: the panel, its query field, a rect per
-/// row shown, and the section headings with their text.
+/// category chip, a rect per row shown, the section headings with their
+/// text, and the footer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitcherLayout {
     pub panel: Rect,
     pub input: Rect,
+    pub chips: Vec<Rect>,
     pub rows: Vec<Rect>,
     pub sections: Vec<(Rect, &'static str)>,
+    pub footer: Rect,
 }
 
 /// The switcher showing `view` in the app `area` (window coordinates).
 pub fn switcher_geometry(view: &SwitcherView, area: Rect) -> SwitcherLayout {
-    let sections: Vec<_> = view.rows.iter().map(|row| row.section).collect();
-    switcher_parts(&sections, panel_origin(area), panel_width(area))
+    switcher_parts(view, panel_origin(area), panel_width(area))
 }
 
-/// The switcher showing `rows` rows without any section heading in the app
-/// `area`: the panel, its query field and the rows, for tests with only a
-/// count (`switcher_geometry` knows the headings).
+/// The switcher showing `rows` rows without any section heading, category
+/// chip or key hint in the app `area`: the panel, its query field and the
+/// rows, for tests with only a count (`switcher_geometry` knows the rest).
 #[cfg(test)]
 pub fn switcher_layout(rows: usize, area: Rect) -> (Rect, Rect, Vec<Rect>) {
-    let layout = switcher_parts(&vec![None; rows], panel_origin(area), panel_width(area));
+    let layout = parts(
+        &vec![None; rows],
+        &[],
+        0,
+        panel_origin(area),
+        panel_width(area),
+    );
     (layout.panel, layout.input, layout.rows)
 }
 
@@ -115,24 +143,73 @@ fn panel_origin(area: Rect) -> Point<i32, Logical> {
 }
 
 /// How many rows the switcher shows at most in the app `area`, keeping
-/// room for the headings of `sections` sections.
-pub fn switcher_page(area: Rect, sections: usize) -> usize {
-    let room = area.size.h - SWITCHER_TOP - SWITCHER_INPUT - 2 * SWITCHER_PADDING - HELP_MARGIN;
+/// room for the headings of `sections` sections, the category chips (when
+/// there are `chips`) and the footer.
+pub fn switcher_page(area: Rect, sections: usize, chips: bool) -> usize {
+    let room = area.size.h
+        - SWITCHER_TOP
+        - SWITCHER_INPUT
+        - 2 * SWITCHER_PADDING
+        - HELP_MARGIN
+        - if chips { CHIPS_ROW } else { 0 }
+        - footer_height(SWITCHER_HINTS);
     let headings = (sections.min(SWITCHER_ROWS as usize) as i32) * SECTION_HEIGHT;
     ((room - headings) / ROW_HEIGHT).clamp(1, SWITCHER_ROWS) as usize
 }
 
-/// `switcher_geometry` for a panel `w` wide at `loc`, with a row per entry
-/// of `sections` (the heading over it, if any); it keeps room for one row
-/// without any.
+/// The most key hints the switcher shows: one footer row's worth.
+pub const SWITCHER_HINTS: usize = 4;
+
+/// `switcher_geometry` for a panel `w` wide at `loc`.
 pub(super) fn switcher_parts(
+    view: &SwitcherView,
+    loc: Point<i32, Logical>,
+    w: i32,
+) -> SwitcherLayout {
+    let sections: Vec<_> = view.rows.iter().map(|row| row.section).collect();
+    parts(&sections, &view.categories, view.hints.len(), loc, w)
+}
+
+/// The chips of `labels` in a row from `x` to `right` at `y`: each as
+/// wide as its label needs, all narrowed alike when they don't fit.
+fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
+    let natural: Vec<i32> = labels
+        .iter()
+        .map(|label| label.chars().count() as i32 * CHIP_CHAR + 2 * CHIP_INSET)
+        .collect();
+    let gaps = CHIP_GAP * (labels.len() as i32 - 1).max(0);
+    let room = (right - x - gaps).max(0);
+    let total: i32 = natural.iter().sum();
+    let mut left = x;
+    natural
+        .into_iter()
+        .map(|w| {
+            let w = if total > room { w * room / total } else { w };
+            let rect = Rectangle::new((left, y).into(), (w, CHIP_HEIGHT).into());
+            left += w + CHIP_GAP;
+            rect
+        })
+        .collect()
+}
+
+/// The panel `w` wide at `loc`, with the chips of `categories` (none
+/// without any), a row per entry of `sections` (the heading over it, if
+/// any) and a footer for `hints` key hints; it keeps room for one row
+/// without any.
+fn parts(
     sections: &[Option<&'static str>],
+    categories: &[&str],
+    hints: usize,
     loc: Point<i32, Logical>,
     w: i32,
 ) -> SwitcherLayout {
     let mut y = loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
     let x = loc.x + SWITCHER_PADDING;
     let row_w = w - 2 * SWITCHER_PADDING;
+    let chips = chip_rects(categories, x, y, x + row_w);
+    if !chips.is_empty() {
+        y += CHIPS_ROW;
+    }
     let mut rows = Vec::with_capacity(sections.len());
     let mut headings = Vec::new();
     for section in sections {
@@ -149,12 +226,16 @@ pub(super) fn switcher_parts(
     if sections.is_empty() {
         y += ROW_HEIGHT;
     }
-    let h = y + SWITCHER_PADDING - loc.y;
+    let footer_h = footer_height(hints);
+    let footer = Rectangle::new((loc.x, y + SWITCHER_PADDING).into(), (w, footer_h).into());
+    let h = y + SWITCHER_PADDING + footer_h - loc.y;
     SwitcherLayout {
         panel: Rectangle::new(loc, (w, h).into()),
         input: Rectangle::new(loc, (w, SWITCHER_INPUT).into()),
+        chips,
         rows,
         sections: headings,
+        footer,
     }
 }
 
@@ -179,8 +260,8 @@ pub fn switcher_field(view: &SwitcherView, area: Rect, scale: f64) -> FieldSpot 
 
 impl Painter {
     /// The switcher `w` wide inside a margin of `SHADOW` holding its drop
-    /// shadow: the query (or what to type) with a caret, then the rows
-    /// under their section headings.
+    /// shadow: the query (or what to type) with a caret, the category
+    /// chips, the rows under their section headings, then the key hints.
     pub(super) fn switcher(
         &self,
         view: &SwitcherView,
@@ -188,8 +269,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let sections: Vec<_> = view.rows.iter().map(|row| row.section).collect();
-        let layout = switcher_parts(&sections, (SHADOW, SHADOW).into(), w);
+        let layout = switcher_parts(view, (SHADOW, SHADOW).into(), w);
         let (panel, input) = (layout.panel, layout.input);
         let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
         let mut c = Canvas::new(physical(outer, scale));
@@ -209,17 +289,29 @@ impl Painter {
             scale,
             p,
         );
-        let line_y = px(input.loc.y + input.size.h) - border;
-        c.fill(
-            px(panel.loc.x) + border,
-            line_y,
-            px(panel.size.w) - 2 * border,
-            border,
-            p.border_variant,
-        );
+        let divider = |c: &mut Canvas, y: i32| {
+            c.fill(
+                px(panel.loc.x) + border,
+                y,
+                px(panel.size.w) - 2 * border,
+                border,
+                p.border_variant,
+            );
+        };
+        divider(&mut c, px(input.loc.y + input.size.h) - border);
+
+        for (i, (rect, label)) in layout.chips.iter().zip(&view.categories).enumerate() {
+            self.category_chip(&mut c, view, i, label, *rect, scale, p);
+        }
 
         if view.rows.is_empty() {
-            let empty = switcher_parts(&[None], (SHADOW, SHADOW).into(), w);
+            let empty = parts(
+                &[None],
+                &view.categories,
+                view.hints.len(),
+                (SHADOW, SHADOW).into(),
+                w,
+            );
             let slot = empty.rows[0];
             let band = (px(slot.loc.y), px(slot.size.h));
             self.text(
@@ -368,15 +460,69 @@ impl Painter {
                 (p.muted, p.accent),
             );
         }
+
+        let footer = layout.footer;
+        divider(&mut c, px(footer.loc.y));
+        let hints: Vec<(&str, &str)> = view
+            .hints
+            .iter()
+            .map(|(keys, action)| (keys.as_str(), action.as_str()))
+            .collect();
+        let inner_w = (footer.size.w - 2 * HELP_PADDING).max(0);
+        let rows = self.hint_rows(&hints, inner_w, scale, footer_rows(hints.len()) as usize);
+        for (i, row) in rows.into_iter().enumerate() {
+            let inner = Rectangle::new(
+                (
+                    footer.loc.x + HELP_PADDING,
+                    footer.loc.y + FOOTER_PAD + i as i32 * FOOTER_ROW,
+                )
+                    .into(),
+                (inner_w, FOOTER_ROW).into(),
+            );
+            self.hints(&mut c, &hints[row], inner, scale, p);
+        }
         c.into_buffer(false)
+    }
+
+    /// Category chip `i`, `label`, in `rect`: an outlined pill, filled and
+    /// outlined in the accent when it is the category shown, lighter under
+    /// the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn category_chip(
+        &self,
+        c: &mut Canvas,
+        view: &SwitcherView,
+        i: usize,
+        label: &str,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let b = ((scale.round() as i32).max(1)) as f32;
+        let r = BUTTON_RADIUS * s;
+        let on = view.category == i;
+        let fill = if on {
+            p.selected
+        } else if view.category_hover == Some(i) {
+            mix(p.element, p.selected, 0.5)
+        } else {
+            p.element
+        };
+        c.rounded(x, y, w, h, r, if on { p.accent } else { p.border });
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+        let color = if on { p.text } else { p.muted };
+        self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ItemIcon, ROW_HEIGHT, SECTION_HEIGHT, SWITCHER_INPUT, SWITCHER_PADDING, SwitcherRow,
-        SwitcherView, switcher_geometry, switcher_layout, switcher_page,
+        CHIP_GAP, CHIP_HEIGHT, CHIPS_ROW, ItemIcon, ROW_HEIGHT, SECTION_HEIGHT, SWITCHER_INPUT,
+        SWITCHER_PADDING, SwitcherRow, SwitcherView, chip_rects, footer_height, switcher_geometry,
+        switcher_layout, switcher_page,
     };
     use smithay::utils::Rectangle;
 
@@ -398,9 +544,13 @@ mod tests {
         let view = SwitcherView {
             query: "".into(),
             hint: "",
+            categories: Vec::new(),
+            category: 0,
+            category_hover: None,
             rows: vec![row(Some("Workspaces")), row(None), row(Some("Apps"))],
             selected: Some(0),
             hover: None,
+            hints: Vec::new(),
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
@@ -417,36 +567,88 @@ mod tests {
             layout.rows[2].loc.y,
             top + 2 * SECTION_HEIGHT + 2 * ROW_HEIGHT
         );
+        let footer = footer_height(0);
         assert_eq!(
             layout.panel.size.h,
-            SWITCHER_INPUT + 2 * SWITCHER_PADDING + 2 * SECTION_HEIGHT + 3 * ROW_HEIGHT
+            SWITCHER_INPUT + 2 * SWITCHER_PADDING + 2 * SECTION_HEIGHT + 3 * ROW_HEIGHT + footer
+        );
+        // The footer closes the panel.
+        assert_eq!(
+            layout.footer.loc.y + layout.footer.size.h,
+            layout.panel.loc.y + layout.panel.size.h
         );
         // The same rows without headings, from the count alone.
         let (panel, input, rows) = switcher_layout(3, area);
         assert_eq!(
             panel.size.h,
-            SWITCHER_INPUT + 2 * SWITCHER_PADDING + 3 * ROW_HEIGHT
+            SWITCHER_INPUT + 2 * SWITCHER_PADDING + 3 * ROW_HEIGHT + footer
         );
         assert_eq!((panel.loc, input.loc), (layout.panel.loc, layout.input.loc));
         assert_eq!(rows[0].loc.y, top);
         // An empty list keeps room for the "Nothing matches" row.
         assert_eq!(
             switcher_layout(0, area).0.size.h,
-            SWITCHER_INPUT + 2 * SWITCHER_PADDING + ROW_HEIGHT
+            SWITCHER_INPUT + 2 * SWITCHER_PADDING + ROW_HEIGHT + footer
         );
+    }
+
+    #[test]
+    fn the_category_chips_go_between_the_query_and_the_rows() {
+        let area = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let view = SwitcherView {
+            query: "".into(),
+            hint: "",
+            categories: vec!["All", "Workspaces", "Apps"],
+            category: 0,
+            category_hover: None,
+            rows: vec![row(Some("Workspaces"))],
+            selected: Some(0),
+            hover: None,
+            hints: vec![("Esc".into(), "close".into())],
+        };
+        let layout = switcher_geometry(&view, area);
+        let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
+        assert_eq!(layout.chips.len(), 3);
+        assert!(layout.chips.iter().all(|chip| chip.loc.y == top));
+        // Wider for a longer label, in order, apart.
+        assert!(layout.chips[1].size.w > layout.chips[0].size.w);
+        for pair in layout.chips.windows(2) {
+            assert_eq!(pair[0].loc.x + pair[0].size.w + CHIP_GAP, pair[1].loc.x);
+        }
+        assert_eq!(layout.sections[0].0.loc.y, top + CHIPS_ROW);
+        assert_eq!(layout.rows[0].loc.y, top + CHIPS_ROW + SECTION_HEIGHT);
+    }
+
+    #[test]
+    fn chips_too_wide_together_are_narrowed_to_fit() {
+        let labels = [
+            "All",
+            "Workspaces",
+            "Tabs",
+            "Agents",
+            "Projects",
+            "Apps",
+            "Folders",
+        ];
+        let chips = chip_rects(&labels, 10, 0, 310);
+        let last = chips.last().unwrap();
+        assert!(last.loc.x + last.size.w <= 310);
+        assert!(chips.iter().all(|chip| chip.size.h == CHIP_HEIGHT));
+        assert!(chip_rects(&[], 0, 0, 100).is_empty());
     }
 
     #[test]
     fn the_page_keeps_room_for_the_headings() {
         let area = Rectangle::new((0, 0).into(), (1000, 600).into());
-        assert!(switcher_page(area, 7) < switcher_page(area, 1));
-        assert!(switcher_page(area, 7) >= 1);
+        assert!(switcher_page(area, 7, false) < switcher_page(area, 1, false));
+        assert!(switcher_page(area, 1, true) <= switcher_page(area, 1, false));
+        assert!(switcher_page(area, 7, true) >= 1);
         assert_eq!(
-            switcher_page(Rectangle::new((0, 0).into(), (1000, 100).into()), 7),
+            switcher_page(Rectangle::new((0, 0).into(), (1000, 100).into()), 7, true),
             1
         );
         assert_eq!(
-            switcher_page(Rectangle::new((0, 0).into(), (1000, 2000).into()), 7),
+            switcher_page(Rectangle::new((0, 0).into(), (1000, 2000).into()), 7, true),
             12
         );
     }

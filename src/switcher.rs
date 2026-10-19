@@ -16,6 +16,10 @@
 //!
 //! Alt+Enter launches the picked app or command in a new tab, wherever
 //! Enter would launch it.
+//!
+//! A row of category chips over the list, "All" first, narrows it to one
+//! section; Tab and Shift+Tab move along them. The key hints show in a
+//! footer.
 
 use std::{
     cmp::Reverse,
@@ -147,6 +151,14 @@ impl Section {
             Section::Commands => "Commands",
         }
     }
+
+    /// Its category chip's label.
+    fn chip(self) -> &'static str {
+        match self {
+            Section::Folders => "Folders",
+            section => section.label(),
+        }
+    }
 }
 
 /// One thing to switch to, as listed.
@@ -216,7 +228,15 @@ pub struct Switcher {
     wheel: f64,
     /// The shown row the pointer is over.
     hover: Option<usize>,
-    /// How many sections the items span, for the room the headings take.
+    /// The sections the items span, but the typed command's: a category
+    /// chip each.
+    categories: Vec<Section>,
+    /// The category the list is narrowed to; all of them when `None`.
+    category: Option<Section>,
+    /// The category chip the pointer is over, by index among the chips.
+    chip_hover: Option<usize>,
+    /// How many sections the items in the category span, for the room the
+    /// headings take.
     sections: usize,
     /// The installed apps' icons by program, for the typed command.
     icons: HashMap<String, AppIcon>,
@@ -236,6 +256,9 @@ impl Switcher {
             scroll: 0,
             wheel: 0.0,
             hover: None,
+            categories: Vec::new(),
+            category: None,
+            chip_hover: None,
             sections: 1,
             icons: HashMap::new(),
         };
@@ -251,10 +274,17 @@ impl Switcher {
             // The typed command's place; `refilter` fills it in.
             items.insert(0, typed_command("", &self.icons, self.place));
         }
-        let mut sections: Vec<Section> = items.iter().map(|item| item.section).collect();
-        sections.sort();
-        sections.dedup();
-        self.sections = sections.len().max(1);
+        let mut categories: Vec<Section> = items
+            .iter()
+            .map(|item| item.section)
+            .filter(|section| *section != Section::Run)
+            .collect();
+        categories.sort();
+        categories.dedup();
+        if self.category.is_some_and(|c| !categories.contains(&c)) {
+            self.category = None;
+        }
+        self.categories = categories;
         self.items = items;
         self.refilter();
         if let Some(i) = picked.and_then(|target| {
@@ -266,21 +296,37 @@ impl Switcher {
         }
     }
 
-    /// Match the items against the query again, in their sections, and
-    /// select the best match. In the run prompt, the typed command goes
-    /// first and is selected, unless the best match is an app whose name
-    /// starts with it.
+    /// Whether `section` is in the category shown; the typed command's
+    /// always is.
+    fn shows(&self, section: Section) -> bool {
+        section == Section::Run || self.category.is_none_or(|c| c == section)
+    }
+
+    /// Match the items in the category against the query again, in their
+    /// sections, and select the best match. In the run prompt, the typed
+    /// command goes first and is selected, unless the best match is an app
+    /// whose name starts with it.
     fn refilter(&mut self) {
         let command = self.query.trim().to_owned();
         if self.run {
             self.items[0] = typed_command(&command, &self.icons, self.place);
         }
+        let mut sections: Vec<Section> = self
+            .items
+            .iter()
+            .map(|item| item.section)
+            .filter(|section| self.shows(*section))
+            .collect();
+        sections.sort();
+        sections.dedup();
+        self.sections = sections.len().max(1);
         let typed = self.run.then(|| self.items[0].target.clone());
         let candidates = self
             .items
             .iter()
             .enumerate()
             .skip(usize::from(self.run))
+            .filter(|(_, item)| self.shows(item.section))
             // The typed command, run before, is listed once: first.
             .filter(|(_, item)| Some(&item.target) != typed.as_ref());
         let ranked = fuzzy::rank(
@@ -344,6 +390,32 @@ impl Switcher {
         &mut self.query
     }
 
+    /// Whether there are category chips: with more than one category.
+    fn chips(&self) -> bool {
+        self.categories.len() > 1
+    }
+
+    /// Show category chip `chip` (0 for all of them), keeping the query.
+    fn set_category(&mut self, chip: usize) {
+        let category = chip
+            .checked_sub(1)
+            .and_then(|i| self.categories.get(i).copied());
+        if category != self.category {
+            self.category = category;
+            self.refilter();
+        }
+    }
+
+    /// Move along the category chips by `by`, wrapping around.
+    fn step_category(&mut self, by: isize) {
+        let n = self.categories.len() as isize + 1;
+        let at = self
+            .category
+            .and_then(|c| self.categories.iter().position(|s| *s == c))
+            .map_or(0, |i| i as isize + 1);
+        self.set_category((at + by).rem_euclid(n) as usize);
+    }
+
     fn picked(&self) -> Option<&Target> {
         self.matches
             .get(self.selected)
@@ -374,6 +446,9 @@ impl Switcher {
             }
             Keysym::Up | Keysym::KP_Up => self.step(-1, page),
             Keysym::Down | Keysym::KP_Down => self.step(1, page),
+            Keysym::Tab | Keysym::ISO_Left_Tab if self.chips() => {
+                self.step_category(if mods.shift { -1 } else { 1 })
+            }
             Keysym::Tab | Keysym::ISO_Left_Tab => self.step(if mods.shift { -1 } else { 1 }, page),
             Keysym::Page_Up => self.step(-(page as isize), page),
             Keysym::Page_Down => self.step(page as isize, page),
@@ -431,17 +506,48 @@ impl Switcher {
         let selected = (!self.matches.is_empty()).then(|| self.selected - scroll);
         let hover = self.hover.filter(|h| *h < rows.len());
         let hint = match (self.run, self.place) {
-            (true, Place::Split) => "Command to run in a split (Alt+Enter: new tab)…",
+            (true, Place::Split) => "Command to run in a split…",
             (true, Place::Tab) => "Command to run in a new tab…",
             (false, _) => "Workspace, tab, agent, project, app, folder or command…",
         };
+        let categories: Vec<&'static str> = if self.chips() {
+            std::iter::once("All")
+                .chain(self.categories.iter().map(|c| c.chip()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let category = self
+            .category
+            .and_then(|c| self.categories.iter().position(|s| *s == c))
+            .map_or(0, |i| i + 1);
         SwitcherView {
             query: self.query.line(),
             hint,
+            category_hover: self.chip_hover.filter(|h| *h < categories.len()),
+            categories,
+            category,
             rows,
             selected,
             hover,
+            hints: self.hints(),
         }
+    }
+
+    /// The footer's key hints: at most `chrome::SWITCHER_HINTS`.
+    fn hints(&self) -> Vec<(String, String)> {
+        let mut hints = vec![("Enter", if self.run { "run" } else { "open" })];
+        if self.place == Place::Split {
+            hints.push(("Alt+Enter", "in a new tab"));
+        }
+        if self.chips() {
+            hints.push(("Tab", "category"));
+        }
+        hints.push(("Esc", "close"));
+        hints
+            .into_iter()
+            .map(|(keys, what)| (keys.to_owned(), what.to_owned()))
+            .collect()
     }
 
     /// The target of shown row `row`.
@@ -649,8 +755,13 @@ impl Gerdr {
             .rows
             .iter()
             .position(|row| row.to_f64().contains(pos));
+        let chip = layout
+            .chips
+            .iter()
+            .position(|chip| chip.to_f64().contains(pos));
         if let Some(switcher) = self.switcher.as_mut() {
             switcher.hover = hover;
+            switcher.chip_hover = chip;
         }
     }
 
@@ -716,13 +827,23 @@ impl Gerdr {
     }
 
     /// A button pressed while the switcher is open: on a row it switches to
-    /// that row's target, outside the panel it closes the switcher.
+    /// that row's target, on a category chip it shows that category,
+    /// outside the panel it closes the switcher.
     pub fn switcher_click(&mut self, pos: Point<f64, Logical>) {
         let page = self.switcher_page();
-        let Some(switcher) = self.switcher.take() else {
+        let Some(mut switcher) = self.switcher.take() else {
             return;
         };
         let layout = chrome::switcher_geometry(&switcher.view(page), self.content_rect());
+        if let Some(chip) = layout
+            .chips
+            .iter()
+            .position(|chip| chip.to_f64().contains(pos))
+        {
+            switcher.set_category(chip);
+            self.switcher = Some(switcher);
+            return;
+        }
         match layout
             .rows
             .iter()
@@ -831,8 +952,11 @@ impl Gerdr {
     }
 
     fn switcher_page(&self) -> usize {
-        let sections = self.switcher.as_ref().map_or(1, |s| s.sections);
-        chrome::switcher_page(self.content_rect(), sections)
+        let (sections, chips) = self
+            .switcher
+            .as_ref()
+            .map_or((1, false), |s| (s.sections, s.chips()));
+        chrome::switcher_page(self.content_rect(), sections, chips)
     }
 
     /// The apps named in the config file, with the icons of the installed
@@ -1120,6 +1244,86 @@ mod tests {
         let view = switcher.view(10);
         assert_eq!(view.rows[0].section, Some("Commands"));
         assert_eq!(view.selected, Some(0));
+    }
+
+    #[test]
+    fn category_chips_narrow_the_list_to_a_section() {
+        let mut switcher = Switcher::new(
+            vec![
+                Item::new(ItemIcon::App, "firefox", "", Target::App("firefox".into())),
+                item("gerdr", "~/Personal/gerdr", 0),
+                Item::new(ItemIcon::Folder, "herdr", "", Target::Folder("/h".into())),
+                item("aft", "~/Work/aft", 1),
+            ],
+            false,
+            Place::Split,
+        );
+        // All of them at first.
+        let view = switcher.view(10);
+        assert_eq!(view.categories, ["All", "Workspaces", "Apps", "Folders"]);
+        assert_eq!(view.category, 0);
+        assert_eq!(labels(&switcher), ["gerdr", "aft", "firefox", "herdr"]);
+        assert!(view.hints.iter().any(|(k, _)| k == "Tab"));
+        // Tab moves to the next category, keeping the query.
+        let none = ModifiersState::default();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        switcher.key(&none, Keysym::Tab, Keysym::Tab, 5);
+        assert_eq!(switcher.view(10).category, 1);
+        assert_eq!(labels(&switcher), ["gerdr", "aft"]);
+        assert_eq!(switcher.sections, 1);
+        type_in(&mut switcher, "af");
+        assert_eq!(labels(&switcher), ["aft"]);
+        assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
+        // Shift+Tab goes back, and wraps around past "All".
+        switcher.key(&shift, Keysym::ISO_Left_Tab, Keysym::ISO_Left_Tab, 5);
+        assert_eq!(switcher.view(10).category, 0);
+        switcher.key(&shift, Keysym::ISO_Left_Tab, Keysym::ISO_Left_Tab, 5);
+        assert_eq!(switcher.view(10).category, 3);
+        // A category gone from the items shows all of them again.
+        switcher.set_items(vec![
+            item("gerdr", "", 0),
+            Item::new(ItemIcon::App, "x", "", Target::App("x".into())),
+        ]);
+        assert_eq!(switcher.view(10).category, 0);
+        // With one category there are no chips, and Tab walks the rows.
+        switcher.set_items(vec![item("a", "", 0), item("b", "", 1)]);
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        switcher.key(&ctrl, Keysym::u, Keysym::u, 5);
+        let view = switcher.view(10);
+        assert!(view.categories.is_empty());
+        assert!(view.hints.iter().all(|(k, _)| k != "Tab"));
+        switcher.key(&none, Keysym::Tab, Keysym::Tab, 5);
+        assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
+    }
+
+    #[test]
+    fn the_run_prompt_keeps_the_typed_command_in_any_category() {
+        let mut switcher = Switcher::new(
+            vec![
+                Item::new(ItemIcon::App, "Files", "", Target::App("nautilus".into())),
+                Item::new(
+                    ItemIcon::App,
+                    "fish",
+                    "run before",
+                    Target::Command("fish".into()),
+                ),
+            ],
+            true,
+            Place::Split,
+        );
+        assert_eq!(switcher.view(5).categories, ["All", "Apps", "Commands"]);
+        switcher.set_category(2);
+        type_in(&mut switcher, "f");
+        assert_eq!(labels(&switcher), ["f", "fish"]);
+        let hints = switcher.view(5).hints;
+        assert_eq!(hints[0], ("Enter".into(), "run".into()));
+        assert_eq!(hints.len(), chrome::SWITCHER_HINTS);
     }
 
     #[test]

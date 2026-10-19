@@ -210,6 +210,15 @@ fn switcher() -> SwitcherView {
     SwitcherView {
         query: "ger".into(),
         hint: "Switch to…",
+        categories: vec!["All", "Workspaces", "Tabs", "Agents", "Folders"],
+        category: 0,
+        category_hover: Some(2),
+        hints: vec![
+            ("Enter".into(), "open".into()),
+            ("Alt+Enter".into(), "in a new tab".into()),
+            ("Tab".into(), "category".into()),
+            ("Esc".into(), "close".into()),
+        ],
         rows: vec![
             row(
                 ItemIcon::Workspace(WorkspaceKind::Project),
@@ -451,7 +460,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
-        0xbecc6c3736626091, // switcher
+        0x9ff4f582252e5a7d, // switcher
         0x587634021d6e12a7, // welcome
         0x59378f4fb455dd74, // quit
         0xbef0eb8bfc45b7c0, // project_menu
@@ -465,7 +474,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
-        0x45784693663a03df, // switcher
+        0x9cc47dd9b2c6fe42, // switcher
         0x0509f39369ec1781, // welcome
         0xca6aac6e936af23a, // quit
         0x47b12202a46547b2, // project_menu
@@ -479,7 +488,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
-        0xe665a2357ee54f13, // switcher
+        0x38ffd61880514d09, // switcher
         0xf3e329f9a28eb517, // welcome
         0x9141f1eb6dfa4384, // quit
         0xdeec3a957d917fcf, // project_menu
@@ -493,7 +502,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
-        0x05fad9e0a3cb7d27, // switcher
+        0x9263128b8fc2829f, // switcher
         0x25745fe948c0e47b, // welcome
         0xea36deb588723e15, // quit
         0xc782f9b22f729c10, // project_menu
@@ -650,6 +659,12 @@ fn dump_overlays() {
             &format!("toast_info_{tag}"),
             painter.toast(&toast(None, Level::Info), 360, false, scale, p),
             px(360 + shadow),
+        );
+        dump(
+            &dir,
+            &format!("switcher_{tag}"),
+            painter.switcher(&switcher(), 640, scale, p),
+            px(640 + shadow),
         );
         dump(
             &dir,
