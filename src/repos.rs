@@ -155,6 +155,8 @@ pub struct Panel {
     pub(crate) tab: Option<DetailTab>,
     /// The detail read for, and what it says.
     pub(crate) detail: Option<(DetailKey, String)>,
+    /// A diff read, its lines told apart once, not with every frame.
+    pub(crate) diff: Vec<DetailLine>,
     pub(crate) hover: Option<ReposHit>,
     /// What a second press does.
     pub(crate) armed: Option<Armed>,
@@ -740,8 +742,10 @@ fn undo_jobs(batch: Option<&Batch>) -> Result<Vec<Job>, String> {
 /// Whether `batch` is over with something failed that trying again could
 /// fix: conflicts are resolved instead.
 fn retryable(batch: Option<&Batch>) -> bool {
+    // An undo again would undo from where the failed one left it.
     batch.is_some_and(|b| {
-        b.finished()
+        b.kind != BatchKind::Undo
+            && b.finished()
             && b.runs.iter().any(|r| {
                 r.state
                     .failure()
@@ -877,6 +881,10 @@ impl Panel {
 
     /// Whether `change` of `item` is checked.
     fn file_checked(&self, item: &RepoItem, change: &Change) -> bool {
+        // Asked per file per frame: no copies while nothing is checked.
+        if self.checked_files.is_empty() {
+            return false;
+        }
         let key = (item.root.clone(), change.path.clone());
         self.checked_files.contains(&key)
     }
@@ -1876,7 +1884,7 @@ impl Panel {
             DetailTab::Diff if c.is_none() => {
                 vec![detail_line("Select a file for its diff", DiffTone::Plain)]
             }
-            DetailTab::Diff => text.map(diff_lines).unwrap_or_default(),
+            DetailTab::Diff => text.map(|_| self.diff.clone()).unwrap_or_default(),
             DetailTab::Log => {
                 let mut lines: Vec<DetailLine> = text
                     .into_iter()
@@ -1920,15 +1928,27 @@ impl Panel {
         };
         let item = &ctx.items[k];
         let page = ctx.page.1.max(1);
-        let lines = self.detail_lines(ctx);
-        let first = self.detail_first.min(lines.len().saturating_sub(page));
+        let tab = self.tab_for(c.is_some());
+        let read = self
+            .detail
+            .as_ref()
+            .is_some_and(|(key, _)| Some(key) == self.detail_key().as_ref());
+        // Only the page of a long diff is copied.
+        let lines = if tab == DetailTab::Diff && c.is_some() && read {
+            let first = self.detail_first.min(self.diff.len().saturating_sub(page));
+            self.diff[first..(first + page).min(self.diff.len())].to_vec()
+        } else {
+            let lines = self.detail_lines(ctx);
+            let first = self.detail_first.min(lines.len().saturating_sub(page));
+            lines.into_iter().skip(first).take(page).collect()
+        };
         DetailView {
-            tab: self.tab_for(c.is_some()),
+            tab,
             title: match c {
                 Some(c) => change_text(&item.status.changes[c]),
                 None => item.label.clone(),
             },
-            lines: lines.into_iter().skip(first).take(page).collect(),
+            lines,
         }
     }
 
@@ -2092,6 +2112,10 @@ impl Panel {
         if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
             self.detail_first = 0;
         }
+        self.diff = match key.tab {
+            DetailTab::Diff => diff_lines(&text),
+            DetailTab::Log => Vec::new(),
+        };
         self.detail = Some((key, text));
         self.detail_stale = false;
     }

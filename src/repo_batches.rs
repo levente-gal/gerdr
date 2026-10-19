@@ -47,8 +47,55 @@ struct Task {
     default: Option<String>,
     op: Option<InProgress>,
     feature: Option<String>,
-    /// For an undo: where the batch undone found it, and left it.
-    undo: Option<(Head, Head)>,
+    /// A resume's stash applied with conflicts here: what Continue and
+    /// Abort see through when no operation is stopped half-way.
+    stash_conflict: bool,
+    /// For an undo: where the batch undone found it, and left it, and
+    /// whether to keep what its commits changed (it committed).
+    undo: Option<(Head, Head, bool)>,
+    /// The git folder the repository's worktrees share: those of one
+    /// repository take turns.
+    common: Option<PathBuf>,
+}
+
+/// A batch's tasks waiting, and the repositories being worked in, by
+/// shared git folder: a repository's worktrees take turns, since at once
+/// they'd fight over its refs, its stash and its fetches.
+struct Queue {
+    tasks: VecDeque<Task>,
+    busy: Vec<PathBuf>,
+}
+
+impl Queue {
+    /// The next task whose repository is free, waiting while every task
+    /// left is in a busy one; `None` once none are left.
+    fn next(queue: &Mutex<Queue>) -> Option<Task> {
+        loop {
+            {
+                let mut q = queue.lock().ok()?;
+                if q.tasks.is_empty() {
+                    return None;
+                }
+                let free = q
+                    .tasks
+                    .iter()
+                    .position(|t| t.common.as_ref().is_none_or(|c| !q.busy.contains(c)));
+                if let Some(k) = free {
+                    let task = q.tasks.remove(k)?;
+                    q.busy.extend(task.common.clone());
+                    return Some(task);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `task` is done: its repository is free again.
+    fn done(queue: &Mutex<Queue>, task: &Task) {
+        if let (Ok(mut q), Some(common)) = (queue.lock(), &task.common) {
+            q.busy.retain(|c| c != common);
+        }
+    }
 }
 
 /// Not tried, and why.
@@ -162,27 +209,34 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             }
             Ok(log)
         }
-        // Without an operation stopped half-way, it is a resume's stash.
+        // Without an operation stopped half-way, only a resume's stash is
+        // the panel's to see through: other conflicts are left to the user.
         BatchKind::Continue => {
             step("continuing…");
             match task.op {
                 Some(op) => git_ops::continue_op(dir, op),
-                None => git_ops::finish_stash(dir, &need(&task.feature, "no feature")?),
+                None if task.stash_conflict => {
+                    git_ops::finish_stash(dir, &need(&task.feature, "no feature")?)
+                }
+                None => Err(blocked("nothing stopped half-way here")),
             }
         }
         BatchKind::Abort => {
             step("aborting…");
             match task.op {
                 Some(op) => git_ops::abort_op(dir, op),
-                None => git_ops::abort_stash(dir, &need(&task.feature, "no feature")?),
+                None if task.stash_conflict => {
+                    git_ops::abort_stash(dir, &need(&task.feature, "no feature")?)
+                }
+                None => Err(blocked("nothing stopped half-way here")),
             }
         }
         BatchKind::Undo => {
-            let Some((before, after)) = &task.undo else {
+            let Some((before, after, soft)) = &task.undo else {
                 return Err(blocked("nothing to undo"));
             };
             step("undoing…");
-            git_ops::undo(dir, before, after)
+            git_ops::undo(dir, before, after, *soft)
         }
     }
 }
@@ -200,17 +254,18 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
             if status.head.is_none() {
                 return Verdict::Blocked("no commits yet".into());
             }
-            // Against what the batch will merge, not what was fetched last.
-            if status.remote.is_some() {
-                let _ = git_ops::fetch_all(root);
+            if *kind == BatchKind::Integrate(Integrate::Rebase) && tracked_changes(status) {
+                return Verdict::Blocked(UNCOMMITTED.into());
             }
             git_ops::predict_merge(root, "HEAD", &base)
         }
-        BatchKind::Pull(_) => {
+        BatchKind::Pull(how) => {
             let Some(upstream) = &status.upstream else {
                 return Verdict::Blocked("no upstream".into());
             };
-            let _ = git_ops::fetch_all(root);
+            if *how == Pull::Rebase && tracked_changes(status) {
+                return Verdict::Blocked(UNCOMMITTED.into());
+            }
             git_ops::predict_merge(root, "HEAD", upstream)
         }
         BatchKind::Branch(name) | BatchKind::Join(name) | BatchKind::StartFeature(name) => {
@@ -242,6 +297,35 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
         }
         _ => Verdict::Clean,
     }
+}
+
+/// Why a rebase isn't tried: git won't over uncommitted changes, and the
+/// panel doesn't stash them around it (see `git_ops::pull`).
+const UNCOMMITTED: &str = "uncommitted changes: commit or park them first";
+
+/// Whether a tracked file is changed: untracked ones don't stop a rebase.
+fn tracked_changes(status: &GitStatus) -> bool {
+    status.changes.iter().any(|c| c.code != '?')
+}
+
+/// Whether the check before `kind` fetches first, to judge against what
+/// the batch will bring in.
+fn fetches_first(kind: &BatchKind) -> bool {
+    matches!(kind, BatchKind::Integrate(_) | BatchKind::Pull(_))
+}
+
+/// Of `roots` with their shared git folders, one per repository.
+fn one_per_repository(roots: Vec<(PathBuf, Option<PathBuf>)>) -> Vec<PathBuf> {
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    for (root, common) in roots {
+        if common.as_ref().is_some_and(|c| seen.contains(c)) {
+            continue;
+        }
+        seen.extend(common);
+        out.push(root);
+    }
+    out
 }
 
 /// A few file names, then how many more.
@@ -344,13 +428,16 @@ impl Gerdr {
                     .and_then(|t| now.duration_since(t).ok())
                     .is_none_or(|age| age > FETCH_AGE)
         };
-        let roots: Vec<PathBuf> = self
-            .repos
-            .items
-            .iter()
-            .filter(|i| stale(&i.status))
-            .map(|i| i.root.clone())
-            .collect();
+        // Worktrees of one repository fetch once: at once they'd fight over
+        // its refs' locks.
+        let roots = one_per_repository(
+            self.repos
+                .items
+                .iter()
+                .filter(|i| stale(&i.status))
+                .map(|i| (i.root.clone(), i.status.common_dir.clone()))
+                .collect(),
+        );
         if roots.is_empty() {
             return;
         }
@@ -586,6 +673,11 @@ impl Gerdr {
     pub fn apply_repos(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Close => self.close_repos(),
+            Outcome::Batch { .. } | Outcome::Confirmed { .. } | Outcome::RetryFailed
+                if self.repos.checking.is_some() =>
+            {
+                self.repos_refuse("Wait for the check to finish")
+            }
             Outcome::Batch { kind, jobs } if kind.checked_first() => self.repos_check(kind, jobs),
             Outcome::Batch { kind, jobs } | Outcome::Confirmed { kind, jobs } => {
                 self.start_batch(kind, jobs)
@@ -603,7 +695,18 @@ impl Gerdr {
                         }
                         _ => false,
                     })
-                    .map(|r| r.job.clone())
+                    .map(|r| {
+                        // What committed is only pushed again.
+                        let committed = r
+                            .log
+                            .iter()
+                            .any(|ran| ran.ok && ran.command.contains(" commit "));
+                        let mut job = r.job.clone();
+                        if matches!(batch.kind, BatchKind::Commit { push: true, .. }) && committed {
+                            job.files.clear();
+                        }
+                        job
+                    })
                     .collect();
                 let kind = batch.kind.clone();
                 self.start_batch(kind, jobs);
@@ -671,6 +774,19 @@ impl Gerdr {
             }
             probes.push((job.root.clone(), item.status.clone()));
         }
+        // Judged against what the batch will bring in, fetched once per
+        // repository.
+        let fetches = if fetches_first(&kind) {
+            one_per_repository(
+                probes
+                    .iter()
+                    .filter(|(_, s)| s.remote.is_some())
+                    .map(|(root, s)| (root.clone(), s.common_dir.clone()))
+                    .collect(),
+            )
+        } else {
+            Vec::new()
+        };
         // Switching clean checkouts needs no look.
         let clean = probes
             .iter()
@@ -689,6 +805,11 @@ impl Gerdr {
         }
         std::thread::spawn(move || {
             let mut verdicts = found;
+            std::thread::scope(|scope| {
+                for root in &fetches {
+                    scope.spawn(move || git_ops::fetch_all(root));
+                }
+            });
             std::thread::scope(|scope| {
                 let kind = &kind;
                 let handles: Vec<_> = probes
@@ -714,8 +835,11 @@ impl Gerdr {
     /// Run `kind` over `jobs`, a few repositories at a time, off the event
     /// loop; each one's progress and result come back as `RepoEvent`s.
     fn start_batch(&mut self, kind: BatchKind, jobs: Vec<Job>) {
-        if jobs.is_empty() || self.repos.batch.as_ref().is_some_and(|b| !b.finished()) {
+        if jobs.is_empty() {
             return;
+        }
+        if self.repos.batch.as_ref().is_some_and(|b| !b.finished()) {
+            return self.repos_refuse("Wait for the batch to finish");
         }
         let Some(tx) = self.repos_sender() else {
             return;
@@ -723,6 +847,13 @@ impl Gerdr {
         let id = self.repos.next_id;
         self.repos.next_id += 1;
         let feature = self.repos_feature();
+        let stash_conflicts = self
+            .repos
+            .panel
+            .as_ref()
+            .or(self.repos.kept.as_ref().map(|(_, panel)| panel))
+            .map(|panel| panel.stash_conflicts.clone())
+            .unwrap_or_default();
         let previous = self.repos.batch.take();
         self.repos.undoing = match kind {
             BatchKind::Undo => previous.as_ref().map(|b| b.id),
@@ -734,11 +865,13 @@ impl Gerdr {
             let Some(item) = self.repos.items.iter().find(|i| i.root == job.root) else {
                 continue;
             };
-            let undo = match kind {
-                BatchKind::Undo => previous
-                    .as_ref()
-                    .and_then(|b| b.run(&job.root))
-                    .and_then(|r| Some((r.before.clone()?, r.after.clone()?))),
+            let undo = match (&kind, &previous) {
+                (BatchKind::Undo, Some(undone)) => {
+                    let soft = matches!(undone.kind, BatchKind::Commit { .. });
+                    undone
+                        .run(&job.root)
+                        .and_then(|r| Some((r.before.clone()?, r.after.clone()?, soft)))
+                }
                 _ => None,
             };
             let status = &item.status;
@@ -751,7 +884,9 @@ impl Gerdr {
                 default: status.default_branch.clone(),
                 op: status.op,
                 feature: feature.clone(),
+                stash_conflict: stash_conflicts.contains(&job.root),
                 undo,
+                common: status.common_dir.clone(),
             });
             runs.push(RepoRun {
                 root: job.root.clone(),
@@ -771,13 +906,15 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.error = None;
         }
-        let queue = Arc::new(Mutex::new(tasks));
+        let queue = Arc::new(Mutex::new(Queue {
+            tasks,
+            busy: Vec::new(),
+        }));
         for _ in 0..threads {
             let (queue, tx) = (queue.clone(), tx.clone());
             std::thread::spawn(move || {
                 loop {
-                    let task = queue.lock().ok().and_then(|mut q| q.pop_front());
-                    let Some(task) = task else {
+                    let Some(task) = Queue::next(&queue) else {
                         break;
                     };
                     let root = task.job.root.clone();
@@ -791,6 +928,7 @@ impl Gerdr {
                     };
                     let result = perform(&task, &step);
                     let after = git_ops::head(&root);
+                    Queue::done(&queue, &task);
                     let _ = tx.send(RepoEvent::Finished {
                         batch: task.batch,
                         root,
@@ -800,6 +938,15 @@ impl Gerdr {
                     });
                 }
             });
+        }
+    }
+
+    /// Say under the field why the panel's last ask wasn't done; in a toast
+    /// when the panel is closed.
+    fn repos_refuse(&mut self, why: &str) {
+        match self.repos.panel.as_mut() {
+            Some(panel) => panel.error = Some(why.to_owned()),
+            None => self.toast(why.to_owned(), Level::Warning),
         }
     }
 

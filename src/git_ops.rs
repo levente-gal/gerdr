@@ -626,12 +626,14 @@ pub fn switch_or_create(dir: &Path, name: &str) -> OpResult {
 
 /// Start feature branch `name` from `base` (`origin/main`, fetched first
 /// when it is a remote's): new and not tracking `base` (`--no-track`, so
-/// its first push sets its own upstream); an existing `name` is only
-/// switched to.
+/// its first push sets its own upstream); an existing `name`, local or a
+/// remote's, is only switched to.
 pub fn start_from(dir: &Path, name: &str, base: &str) -> OpResult {
     let mut op = Op::new(dir);
-    if has_ref(dir, &format!("refs/heads/{name}")) {
-        op.run(&["switch", name])?;
+    // One made already, here or by someone else on the remote, is joined.
+    if has_ref(dir, &format!("refs/heads/{name}")) || remote_having(dir, name).is_some() {
+        let switch = switch_args(dir, name);
+        op.run(&switch.iter().map(String::as_str).collect::<Vec<_>>())?;
         return op.done();
     }
     // The longest remote name that prefixes it: remotes may have slashes.
@@ -705,9 +707,23 @@ pub fn push(dir: &Path, remote: Option<&str>, force_lease: bool) -> OpResult {
     let (up_remote, up_ref) = upstream.trim().split_once(' ').unwrap_or(("", ""));
     // "." is a local branch's upstream: no remote.
     let up_remote = (!up_remote.is_empty() && up_remote != ".").then_some(up_remote);
-    let lease = force_lease.then_some("--force-with-lease");
-    if up_remote.is_some() && up_ref == format!("refs/heads/{branch}") {
-        let args: Vec<&str> = ["push"].into_iter().chain(lease).collect();
+    // The lease alone protects nothing once a fetch moved the remote's
+    // branch, as the panel's own fetches do: the remote's commits must be
+    // in this one too.
+    let lease: &[&str] = if force_lease {
+        &["--force-with-lease", "--force-if-includes"]
+    } else {
+        &[]
+    };
+    // Named in full, so a push.default or pushDefault of the user's can't
+    // push other branches, or elsewhere.
+    if let Some(up_remote) = up_remote.filter(|_| up_ref == format!("refs/heads/{branch}")) {
+        let target = format!("HEAD:{up_ref}");
+        let args: Vec<&str> = ["push"]
+            .into_iter()
+            .chain(lease.iter().copied())
+            .chain([up_remote, target.as_str()])
+            .collect();
         op.net(&args)?;
         return op.done();
     }
@@ -720,7 +736,7 @@ pub fn push(dir: &Path, remote: Option<&str>, force_lease: bool) -> OpResult {
     };
     let args: Vec<&str> = ["push"]
         .into_iter()
-        .chain(lease)
+        .chain(lease.iter().copied())
         .chain(["-u", &remote, "HEAD"])
         .collect();
     op.net(&args)?;
@@ -734,9 +750,9 @@ pub fn fetch_all(dir: &Path) -> OpResult {
     op.done()
 }
 
-/// Pull the upstream's commits, `how`. A rebase or a merge stashes
-/// uncommitted changes around it (`--autostash`); a fast-forward that
-/// would touch them is refused instead, leaving all as it was.
+/// Pull the upstream's commits, `how`. Uncommitted changes it would touch
+/// make git refuse, leaving all as it was: not stashed around it, since
+/// a stash that conflicts coming back would read as done.
 pub fn pull(dir: &Path, how: Pull) -> OpResult {
     let mut op = Op::new(dir);
     if branch(dir).is_none() {
@@ -748,31 +764,33 @@ pub fn pull(dir: &Path, how: Pull) -> OpResult {
     // --no-rebase too, so a pull.rebase of the user's doesn't win.
     let args: &[&str] = match how {
         Pull::FastForward => &["pull", "--no-rebase", "--ff-only"],
-        Pull::Rebase => &["pull", "--rebase", "--autostash"],
-        Pull::Merge => &["pull", "--no-rebase", "--no-edit", "--autostash"],
+        Pull::Rebase => &["pull", "--rebase", "--no-autostash"],
+        Pull::Merge => &["pull", "--no-rebase", "--no-edit", "--no-autostash"],
     };
     op.net(args)?;
     op.done()
 }
 
-/// Bring `base` (`origin/main`) into the checked-out branch, `how`, with
-/// `--autostash`; a merge with `--no-edit`. Blocked before the first
-/// commit.
+/// Bring `base` (`origin/main`) into the checked-out branch, `how`; a
+/// merge with `--no-edit`. Uncommitted changes in the way make git refuse
+/// (see `pull`). Blocked before the first commit.
 pub fn integrate(dir: &Path, base: &str, how: Integrate) -> OpResult {
     let mut op = Op::new(dir);
     if head_oid(dir).is_none() {
         return Err(op.blocked("no commits yet"));
     }
     match how {
-        Integrate::Merge => op.run(&["merge", "--no-edit", "--autostash", base])?,
-        Integrate::Rebase => op.run(&["rebase", "--autostash", base])?,
+        Integrate::Merge => op.run(&["merge", "--no-edit", "--no-autostash", base])?,
+        Integrate::Rebase => op.run(&["rebase", "--no-autostash", base])?,
     };
     op.done()
 }
 
-/// The message a parked feature's stash has: `gerdr park <feature>`.
-pub fn park_message(feature: &str) -> String {
-    format!("gerdr park {feature}")
+/// The message the stash of `feature` parked in the worktree at `top` has:
+/// `gerdr park <feature> in <top>`. The stack is the repository's, so
+/// another worktree's parked work isn't taken for this one's.
+pub fn park_message(feature: &str, top: &Path) -> String {
+    format!("gerdr park {feature} in {}", top.display())
 }
 
 /// The newest stash `feature` was parked in: its commit and its current
@@ -780,7 +798,7 @@ pub fn park_message(feature: &str) -> String {
 fn park_stash(dir: &Path, feature: &str) -> Option<(String, String)> {
     let out = query(dir, &["stash", "list", "--format=%H %gd %gs"])?;
     // The subject is "On <branch>: <message>".
-    let tail = format!(": {}", park_message(feature));
+    let tail = format!(": {}", park_message(feature, &top(dir)));
     out.lines().find_map(|line| {
         let (sha, rest) = line.split_once(' ')?;
         let (at, subject) = rest.split_once(' ')?;
@@ -809,6 +827,10 @@ fn drop_stash(op: &mut Op, sha: &str) -> Result<(), Failed> {
 /// the work is put back.
 pub fn park(dir: &Path, feature: &str, default: &str) -> OpResult {
     let mut op = Op::new(dir);
+    // Work on another branch isn't the feature's, to bring back onto it.
+    if branch(dir).as_deref() != Some(feature) {
+        return Err(op.blocked(&format!("not on {feature}")));
+    }
     // A default branch checked out in another worktree (the main one, from
     // a linked one) would stop the switch after the stash.
     if let Some(path) = checked_out_elsewhere(dir, default) {
@@ -820,7 +842,13 @@ pub fn park(dir: &Path, feature: &str, default: &str) -> OpResult {
     }
     let changes = query(dir, &["status", "--porcelain", "--untracked-files=all"]);
     let sha = if changes.is_some_and(|c| !c.trim().is_empty()) {
-        op.run(&["stash", "push", "-u", "-m", &park_message(feature)])?;
+        op.run(&[
+            "stash",
+            "push",
+            "-u",
+            "-m",
+            &park_message(feature, &top(dir)),
+        ])?;
         park_stash(dir, feature).map(|(sha, _)| sha)
     } else {
         None
@@ -840,14 +868,22 @@ pub fn park(dir: &Path, feature: &str, default: &str) -> OpResult {
 }
 
 /// Resume `feature`: switch to it, then apply its park stash (found by
-/// message, applied by commit id, then dropped, found again by commit).
+/// message, applied by commit id, then dropped, found again by commit);
+/// with its stash, only from a clean worktree.
 /// On conflicts the stash is kept: `Failure::Conflict`, then
 /// `finish_stash` or `abort_stash`. Without a park stash it only switches.
 pub fn resume(dir: &Path, feature: &str) -> OpResult {
     let mut op = Op::new(dir);
+    let parked = park_stash(dir, feature);
+    // Applied over other changes, a stash can half apply, and aborting its
+    // conflicts would take those changes with it.
+    let changes = query(dir, &["status", "--porcelain", "--untracked-files=all"]);
+    if parked.is_some() && changes.is_some_and(|c| !c.trim().is_empty()) {
+        return Err(op.blocked("uncommitted changes: commit or park them first"));
+    }
     let switch = switch_args(dir, feature);
     op.run(&switch.iter().map(String::as_str).collect::<Vec<_>>())?;
-    let Some((sha, _)) = park_stash(dir, feature) else {
+    let Some((sha, _)) = parked else {
         return op.done();
     };
     op.run(&["stash", "apply", &sha])?;
@@ -938,10 +974,12 @@ pub fn abort_op(dir: &Path, op: InProgress) -> OpResult {
     op.done()
 }
 
-/// Undo a batch: back to `before` (switch to its branch if it differs,
-/// then `reset --keep` to its commit), only while HEAD is still at
-/// `after`, else `Blocked("HEAD moved since")`.
-pub fn undo(dir: &Path, before: &Head, after: &Head) -> OpResult {
+/// Undo a batch, only while HEAD is still at `after` (else `Blocked("HEAD
+/// moved since")`): back to `before`'s branch if it differs, else to its
+/// commit; `soft` keeps what the commits undone changed as staged changes
+/// (undoing a commit), else they go (`reset --keep`: undoing a merge, a
+/// rebase or a pull, whose commits the remote still has).
+pub fn undo(dir: &Path, before: &Head, after: &Head, soft: bool) -> OpResult {
     let mut op = Op::new(dir);
     if head(dir).as_ref() != Some(after) {
         return Err(op.blocked("HEAD moved since"));
@@ -949,16 +987,16 @@ pub fn undo(dir: &Path, before: &Head, after: &Head) -> OpResult {
     let Some(oid) = &before.oid else {
         return Err(op.blocked("no commit to go back to"));
     };
+    // A switch is undone by switching back, and only that: the branch
+    // left may have moved on since, in another worktree.
     if before.branch != after.branch {
         match &before.branch {
             Some(branch) => op.run(&["switch", branch])?,
-            None => {
-                op.run(&["switch", "--detach", oid])?;
-                return op.done();
-            }
+            None => op.run(&["switch", "--detach", oid])?,
         };
+        return op.done();
     }
-    op.run(&["reset", "--keep", oid])?;
+    op.run(&["reset", if soft { "--soft" } else { "--keep" }, oid])?;
     op.done()
 }
 
@@ -1650,13 +1688,20 @@ mod tests {
         let up = git(dir, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
         assert_eq!(up.trim(), "origin/feat");
         commit(dir, "f", "two");
-        assert_eq!(push(dir, None, false).unwrap()[0].command, "git push");
+        // Named in full: no push.default of the user's in the way.
+        assert_eq!(
+            push(dir, None, false).unwrap()[0].command,
+            "git push origin HEAD:refs/heads/feat"
+        );
 
         // Rewritten: refused, then pushed with a lease.
         git(dir, &["commit", "-q", "--amend", "-m", "two again"]);
         assert_eq!(failure(push(dir, None, false)), Failure::Rejected);
         let log = push(dir, None, true).unwrap();
-        assert_eq!(log[0].command, "git push --force-with-lease");
+        assert_eq!(
+            log[0].command,
+            "git push --force-with-lease --force-if-includes origin HEAD:refs/heads/feat"
+        );
         assert_eq!(rev(&fx.origin, "feat"), rev(dir, "HEAD"));
 
         // Someone else pushed: refused, with a lease too.
@@ -1675,6 +1720,10 @@ mod tests {
         git(dir, &["fetch", "-q"]);
         commit(dir, "f", "four");
         assert_eq!(failure(push(dir, None, false)), Failure::Rejected);
+        // Fetched, their commit is what the lease expects: only that it
+        // isn't in this branch keeps it from being pushed over.
+        assert_eq!(failure(push(dir, None, true)), Failure::Rejected);
+        assert_eq!(rev(&fx.origin, "feat"), rev(&other, "HEAD"));
 
         // An upstream of another name: a branch of its own.
         git(
@@ -1721,7 +1770,7 @@ mod tests {
         assert_eq!(rev(dir, "HEAD~1"), rev(&other, "HEAD"));
         assert_eq!(read(dir, "m"), "mine 1");
 
-        // A merge, with a change stashed around it.
+        // A merge, beside an uncommitted change it doesn't touch.
         commit(&other, "o", "theirs 3");
         git(&other, &["push", "-q"]);
         commit(dir, "m", "mine 2");
@@ -1761,7 +1810,7 @@ mod tests {
         assert_eq!(failed.failure, Failure::Conflict(vec!["a".into()]));
         assert_eq!(
             failed.log[0].command,
-            "git merge --no-edit --autostash main"
+            "git merge --no-edit --no-autostash main"
         );
         // Not resolved yet: still conflicted.
         assert_eq!(
@@ -1845,7 +1894,14 @@ mod tests {
 
         let log = park(dir, "feat", "main").unwrap();
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].command, "git stash push -u -m 'gerdr park feat'");
+        let message = format!("gerdr park feat in {}", dir.display());
+        assert_eq!(
+            log[0].command,
+            format!(
+                "git stash push -u -m {}",
+                crate::desktop::shell_quote(&message)
+            )
+        );
         assert_eq!(branch(dir).as_deref(), Some("main"));
         assert!(git(dir, &["status", "--porcelain"]).is_empty());
         // More of someone else's on top: ours isn't stash@{0} any more.
@@ -1853,7 +1909,7 @@ mod tests {
         git(dir, &["stash", "push", "-q", "-m", "later work"]);
         let before = stashes(dir);
         assert_eq!(before.len(), 3);
-        assert!(before[1].ends_with(": gerdr park feat"));
+        assert!(before[1].ends_with(&format!(": {message}")));
 
         resume(dir, "feat").unwrap();
         assert_eq!(branch(dir).as_deref(), Some("feat"));
@@ -1870,6 +1926,26 @@ mod tests {
         let log = resume(dir, "feat").unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(stashes(dir).len(), 3);
+
+        // Only the feature's own work is parked as the feature's.
+        git(dir, &["switch", "-q", "main"]);
+        write(dir, "f", "main's");
+        assert_eq!(
+            failure(park(dir, "feat", "main")),
+            Failure::Blocked("not on feat".into())
+        );
+        // Its stash isn't applied over other changes.
+        std::fs::remove_file(dir.join("f")).unwrap();
+        git(dir, &["switch", "-q", "feat"]);
+        write(dir, "f", "more");
+        park(dir, "feat", "main").unwrap();
+        write(dir, "x", "in the way");
+        assert_eq!(
+            failure(resume(dir, "feat")),
+            Failure::Blocked("uncommitted changes: commit or park them first".into())
+        );
+        assert_eq!(branch(dir).as_deref(), Some("main"));
+        assert_eq!(stashes(dir).len(), 4);
     }
 
     #[test]
@@ -1919,23 +1995,44 @@ mod tests {
         let fx = Fx::local();
         let dir = &fx.repo;
         let before = head(dir).unwrap();
+        // A branch switch is undone by switching back, and only that: main
+        // moving on meanwhile (in another worktree, say) stays.
         start_from(dir, "feat", "main").unwrap();
         commit(dir, "f", "feat");
         let after = head(dir).unwrap();
-        undo(dir, &before, &after).unwrap();
-        assert_eq!(head(dir), Some(before.clone()));
+        git(dir, &["branch", "-f", "main", "feat"]);
+        undo(dir, &before, &after, false).unwrap();
+        assert_eq!(branch(dir).as_deref(), Some("main"));
+        assert_eq!(head_oid(dir), after.oid);
+        git(
+            dir,
+            &["reset", "-q", "--keep", before.oid.as_deref().unwrap()],
+        );
 
+        // A commit undone keeps its changes, staged; what wasn't committed
+        // stays as it was.
         commit(dir, "b", "batch");
         let after = head(dir).unwrap();
         write(dir, "a", "uncommitted");
         commit(dir, "c", "since");
-        let failed = undo(dir, &before, &after).unwrap_err();
+        let failed = undo(dir, &before, &after, true).unwrap_err();
         assert_eq!(failed.failure, Failure::Blocked("HEAD moved since".into()));
         assert!(failed.log.is_empty());
         git(dir, &["reset", "-q", "--keep", "HEAD~1"]);
-        undo(dir, &before, &after).unwrap();
+        undo(dir, &before, &after, true).unwrap();
         assert_eq!(head(dir), Some(before.clone()));
-        // reset --keep keeps what wasn't committed.
+        assert_eq!(read(dir, "b"), "batch");
+        assert_eq!(read(dir, "a"), "uncommitted");
+        assert_eq!(git(dir, &["status", "--porcelain"]), " M a\nA  b\n");
+
+        // A merge or a pull undone goes, what wasn't committed stays.
+        git(dir, &["reset", "-q", "HEAD", "--", "b"]);
+        std::fs::remove_file(dir.join("b")).unwrap();
+        commit(dir, "d", "merged");
+        let after = head(dir).unwrap();
+        undo(dir, &before, &after, false).unwrap();
+        assert_eq!(head(dir), Some(before.clone()));
+        assert!(!dir.join("d").exists());
         assert_eq!(read(dir, "a"), "uncommitted");
 
         let unborn = Head {
@@ -1944,7 +2041,7 @@ mod tests {
         };
         let now = head(dir).unwrap();
         assert_eq!(
-            failure(undo(dir, &unborn, &now)),
+            failure(undo(dir, &unborn, &now, false)),
             Failure::Blocked("no commit to go back to".into())
         );
     }
