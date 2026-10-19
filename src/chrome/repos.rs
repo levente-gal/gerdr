@@ -192,6 +192,9 @@ pub struct BranchMenuView {
     pub picked: Option<usize>,
     /// What it says without rows.
     pub empty: String,
+    /// What is typed to find a branch, and what it says while empty.
+    pub query: Line,
+    pub placeholder: String,
 }
 
 /// A line of the tree.
@@ -582,6 +585,8 @@ pub struct ReposLayout {
     /// open.
     pub branch: Rect,
     pub branch_menu: Option<(Rect, Vec<Rect>)>,
+    /// The branch menu's search, at its top.
+    pub branch_search: Option<Rect>,
 }
 
 /// Inside the panel's parts: what the painter needs besides `ReposLayout`.
@@ -901,13 +906,14 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         sheet = Some(card);
     }
 
-    // The branch menu under the button, its right edge on the button's,
-    // as many rows as fit above the field.
+    // The branch menu under the button, its right edge on the button's:
+    // its search, then as many rows as fit above the field.
+    let mut branch_search = None;
     let branch_menu = view.branch.menu.as_ref().map(|menu| {
         let widest = menu
             .rows
             .iter()
-            .chain([&menu.empty])
+            .chain([&menu.empty, &menu.placeholder, &menu.query.text])
             .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
             .max()
             .unwrap_or(0);
@@ -915,19 +921,21 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .clamp(pw, BRANCH_MENU_MAX.max(pw))
             .min(inner_w);
         let my = branch.loc.y + branch.size.h + BRANCH_MENU_GAP;
-        let room = (field.loc.y - REPOS_PAD - my - 2 * BRANCH_MENU_PAD).max(0) / REPOS_ROW;
+        let rows_y = my + 2 * BRANCH_MENU_PAD + REPOS_ROW;
+        let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / REPOS_ROW;
         let shown = menu.rows.len().max(1).min(room.max(1) as usize);
-        let mh = 2 * BRANCH_MENU_PAD + shown as i32 * REPOS_ROW;
+        let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * REPOS_ROW;
         let mx = branch.loc.x + branch.size.w - mw;
         let card = Rectangle::new((mx, my).into(), (mw, mh).into());
+        let inner = (mw - 2 * BRANCH_MENU_PAD).max(0);
+        branch_search = Some(Rectangle::new(
+            (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
+            (inner, REPOS_ROW).into(),
+        ));
         let rows = (0..shown.min(menu.rows.len()))
             .map(|i| {
                 Rectangle::new(
-                    (
-                        mx + BRANCH_MENU_PAD,
-                        my + BRANCH_MENU_PAD + i as i32 * REPOS_ROW,
-                    )
-                        .into(),
+                    (mx + BRANCH_MENU_PAD, rows_y + i as i32 * REPOS_ROW).into(),
                     ((mw - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
                 )
             })
@@ -956,6 +964,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             sheet,
             branch,
             branch_menu,
+            branch_search,
         },
         error,
         body,
@@ -1069,12 +1078,17 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
 
 /// The panel's field, for the caret and selection, on an output of `size`.
 pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
-    let area = repos_layout(view, size).field;
+    let layout = repos_layout(view, size);
+    // The open branch menu's search has the keyboard.
+    let (area, line) = match (&view.branch.menu, layout.branch_search) {
+        (Some(menu), Some(search)) => (search, &menu.query),
+        _ => (layout.field, &view.field),
+    };
     FieldSpot {
         size: FONT_SIZE,
         area,
         text: field_text(area, scale),
-        line: view.field.clone(),
+        line: line.clone(),
     }
 }
 
@@ -1401,9 +1415,12 @@ impl Painter {
             self.hint_button(&mut c, view, &view.hints[i], shift(rect), scale, p);
         }
 
-        if let (Some(menu), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) {
+        if let (Some(menu), Some((card, rows)), Some(search)) =
+            (&view.branch.menu, &layout.branch_menu, layout.branch_search)
+        {
             let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
-            self.branch_menu(&mut c, view, menu, shift(*card), &rows, scale, p);
+            let parts = (shift(*card), shift(search), &rows[..]);
+            self.branch_menu(&mut c, view, menu, parts, scale, p);
         }
         match &view.sheet {
             Some(sheet) => self.sheet(&mut c, view, sheet, &parts, shift, scale, p),
@@ -2054,24 +2071,42 @@ impl Painter {
         );
     }
 
-    /// The branch menu, a card in `card` with a row per branch in `rows`:
-    /// the one Enter picks lit, the one they are all on checked.
-    #[allow(clippy::too_many_arguments)]
+    /// The branch menu, a card in `card` with its search in `search`, then
+    /// a row per branch in `rows`: the one Enter picks lit, the one they
+    /// are all on checked.
     fn branch_menu(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         menu: &BranchMenuView,
-        card: Rect,
-        rows: &[Rect],
+        (card, search, rows): (Rect, Rect, &[Rect]),
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
         card_over(c, card, MENU_RADIUS, scale, p);
+        let (x, y, w, h) = rect_px(search, scale);
+        let (b, r) = ((scale.round() as i32).max(1) as f32, BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.accent);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        self.edit_line(
+            c,
+            &menu.query,
+            &menu.placeholder,
+            field_text(search, scale),
+            band(search, scale),
+            true,
+            FONT_SIZE,
+            scale,
+            p,
+        );
         if menu.rows.is_empty() {
             let row = Rectangle::new(
-                (card.loc.x + BRANCH_MENU_PAD, card.loc.y + BRANCH_MENU_PAD).into(),
+                (
+                    card.loc.x + BRANCH_MENU_PAD,
+                    search.loc.y + search.size.h + BRANCH_MENU_PAD,
+                )
+                    .into(),
                 ((card.size.w - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
             );
             let (x, end) = phys(row, scale);
@@ -2397,6 +2432,8 @@ mod tests {
                     current: Some(1),
                     picked: Some(0),
                     empty: "No branch they all have".into(),
+                    query: Line::default(),
+                    placeholder: "Find a branch".into(),
                 }),
                 ..full().branch
             },
@@ -2412,7 +2449,9 @@ mod tests {
         view.branch.mixed = false;
         if let Some(menu) = &mut view.branch.menu {
             *menu = BranchMenuView {
-                empty: menu.empty.clone(),
+                empty: "No branch matches".into(),
+                query: "zzz".into(),
+                placeholder: menu.placeholder.clone(),
                 ..BranchMenuView::default()
             };
         }
@@ -2652,6 +2691,16 @@ mod tests {
             for (i, row) in rows.iter().enumerate() {
                 assert_eq!(repos_hit(&l, centre(*row)), Some(ReposHit::BranchRow(i)));
             }
+            // Its search at the top has the keyboard.
+            let search = l.branch_search.expect("a search");
+            assert!(within(menu, search) && search.loc.y + search.size.h <= rows[0].loc.y);
+            assert_eq!(repos_hit(&l, centre(search)), Some(ReposHit::BranchMenu));
+            assert_eq!(repos_field(&view, size, 1.0).area, search);
+            let closed = ReposView {
+                branch: full().branch,
+                ..view.clone()
+            };
+            assert_eq!(repos_field(&closed, size, 1.0).area, l.field);
             let pad = (menu.loc.x as f64 + 1.0, menu.loc.y as f64 + 1.0);
             assert_eq!(repos_hit(&l, pad.into()), Some(ReposHit::BranchMenu));
             assert_eq!(
@@ -2684,8 +2733,8 @@ mod tests {
             let l = repos_layout(&view, size);
             let (menu, rows) = l.branch_menu.expect("a menu");
             assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
-            // As many as the tree's page, whatever the size.
-            let page = repos_page(size).0.min(BRANCH_MENU_ROWS);
+            // As many as the tree's page less the search, whatever the size.
+            let page = (repos_page(size).0 - 1).min(BRANCH_MENU_ROWS);
             assert!(rows.len() >= page, "{size:?}: {} < {page}", rows.len());
             assert!(menu.size.w <= BRANCH_MENU_MAX.max(l.branch.size.w));
         }

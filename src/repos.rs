@@ -8,7 +8,8 @@
 //! in Zed, then are marked resolved and continued, or aborted; a login runs
 //! in a terminal; the whole batch can be undone while nothing moved since.
 //! The header's branch picker switches them all to a branch they all have,
-//! names that are one branch (`main`, `master`) taken as one.
+//! names that are one branch (`main`, `master`) taken as one; typing in
+//! its menu finds one.
 //!
 //! The project remembers its feature, the branch its repositories should
 //! be on; those on another get a badge, and Join brings them over.
@@ -91,7 +92,11 @@ impl Repos {
 
     /// The field, while the panel is open.
     pub fn field_mut(&mut self) -> Option<&mut TextField> {
-        self.panel.as_mut().map(|p| &mut p.field)
+        let panel = self.panel.as_mut()?;
+        Some(match &mut panel.branch_menu {
+            Some(menu) => &mut menu.query,
+            None => &mut panel.field,
+        })
     }
 }
 
@@ -189,11 +194,13 @@ pub struct Panel {
 }
 
 /// The branch picker's menu: the first branch in view, and the one Enter
-/// picks, by index into `Panel::branches`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// picks, by index into `Panel::shown_branches`; what is typed to find
+/// one, which has the keyboard.
+#[derive(Clone, Debug, Default)]
 pub struct BranchMenu {
     pub first: usize,
     pub picked: usize,
+    pub query: TextField,
 }
 
 /// A branch the picker offers: its names (more than one for a group of
@@ -362,9 +369,10 @@ impl BatchKind {
     }
 }
 
-/// How many of the branch menu's rows are in view: no more than the tree's.
+/// How many of the branch menu's rows are in view: no more than the tree's,
+/// less one for its search.
 fn branch_page(ctx: &Ctx) -> usize {
-    BRANCH_MENU_ROWS.min(ctx.page.0).max(1)
+    BRANCH_MENU_ROWS.min(ctx.page.0.saturating_sub(1)).max(1)
 }
 
 /// `n` and `one`, or its plural with an `s`: `1 conflict`, `2 conflicts`.
@@ -1085,6 +1093,22 @@ impl Panel {
         branches.into_iter().map(|(_, b)| b).collect()
     }
 
+    /// The branches the menu shows: those with every word typed in its
+    /// search in their name, whatever the case.
+    fn shown_branches(&self, ctx: &Ctx) -> Vec<Branch> {
+        let mut branches = self.branches(ctx);
+        let query = self.branch_menu.as_ref().map(|m| m.query.to_lowercase());
+        let words: Vec<&str> = query.as_deref().unwrap_or("").split_whitespace().collect();
+        branches.retain(|b| {
+            let named = |w: &str| {
+                let has = |name: &str| name.to_lowercase().contains(w);
+                has(&b.label) || b.names.iter().any(|n| has(n))
+            };
+            words.iter().all(|w| named(w))
+        });
+        branches
+    }
+
     /// The branch every repository acted on is on, by `branch_key`; `None`
     /// when they are on different ones, or there are none.
     fn current_branch(&self, ctx: &Ctx) -> Option<String> {
@@ -1120,8 +1144,8 @@ impl Panel {
         } else {
             ("mixed branches".to_owned(), true)
         };
-        let menu = self.branch_menu.map(|menu| {
-            let branches = self.branches(ctx);
+        let menu = self.branch_menu.as_ref().map(|menu| {
+            let branches = self.shown_branches(ctx);
             let page = branch_page(ctx);
             let first = menu.first.min(branches.len().saturating_sub(page));
             let shown = &branches[first..(first + page).min(branches.len())];
@@ -1133,7 +1157,13 @@ impl Panel {
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
                     .and_then(in_view),
                 picked: in_view(menu.picked.min(branches.len().saturating_sub(1))),
-                empty: "No branch they all have".into(),
+                empty: if menu.query.trim().is_empty() {
+                    "No branch they all have".into()
+                } else {
+                    "No branch matches".into()
+                },
+                query: menu.query.line(),
+                placeholder: "Find a branch".into(),
             }
         });
         BranchPicker {
@@ -1164,13 +1194,21 @@ impl Panel {
         self.branch_menu = Some(BranchMenu {
             first: picked.saturating_sub(page - 1),
             picked,
+            query: TextField::default(),
         });
     }
 
     /// A key while the branch menu is open, which takes them all:
-    /// Up/Down and the pages choose, Enter picks, Esc closes.
-    fn branch_menu_key(&mut self, sym: Keysym, ctx: &Ctx) -> Option<Outcome> {
-        let len = self.branches(ctx).len();
+    /// Up/Down, the pages and Ctrl+Home/End choose, Enter picks, Esc
+    /// closes; the rest edit its search, which starts over at the top.
+    fn branch_menu_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        ctx: &Ctx,
+    ) -> Option<Outcome> {
+        let len = self.shown_branches(ctx).len();
         let page = branch_page(ctx);
         let menu = self.branch_menu.as_mut()?;
         let at = menu.picked.min(len.saturating_sub(1)) as isize;
@@ -1179,8 +1217,8 @@ impl Panel {
             Keysym::Up | Keysym::KP_Up => at - 1,
             Keysym::Page_Down | Keysym::KP_Page_Down => at + page as isize,
             Keysym::Page_Up | Keysym::KP_Page_Up => at - page as isize,
-            Keysym::Home | Keysym::KP_Home => 0,
-            Keysym::End | Keysym::KP_End => len as isize,
+            Keysym::Home | Keysym::KP_Home if mods.ctrl => 0,
+            Keysym::End | Keysym::KP_End if mods.ctrl => len as isize,
             Keysym::Return | Keysym::KP_Enter => {
                 let picked = menu.picked;
                 return self.pick_branch(picked, ctx);
@@ -1189,7 +1227,12 @@ impl Panel {
                 self.branch_menu = None;
                 return None;
             }
-            _ => return None,
+            _ => {
+                if menu.query.key(mods, sym, typed).changed() {
+                    (menu.first, menu.picked) = (0, 0);
+                }
+                return None;
+            }
         };
         let to = to.clamp(0, len.saturating_sub(1) as isize) as usize;
         menu.picked = to;
@@ -1204,12 +1247,13 @@ impl Panel {
     /// Switch the repositories acted on to branch `k` of `branches`, but
     /// those already on it; the menu closes.
     fn pick_branch(&mut self, k: usize, ctx: &Ctx) -> Option<Outcome> {
+        // None found: the menu stays for another search.
+        let branch = self.shown_branches(ctx).into_iter().nth(k)?;
         self.branch_menu = None;
         if ctx.batch.is_some_and(|b| !b.finished()) {
             self.error = Some("Wait for the batch to finish".into());
             return None;
         }
-        let branch = self.branches(ctx).into_iter().nth(k)?;
         let key = branch.names.join(" / ");
         let items = ctx.items;
         let jobs: Vec<Job> = self
@@ -1237,7 +1281,7 @@ impl Panel {
 
     /// The wheel turned `rows` rows (down positive) over the branch menu.
     pub fn scroll_branches(&mut self, rows: f64, ctx: &Ctx) {
-        let len = self.branches(ctx).len();
+        let len = self.shown_branches(ctx).len();
         let page = branch_page(ctx);
         let Some(menu) = self.branch_menu.as_mut() else {
             return;
@@ -1665,7 +1709,7 @@ impl Panel {
             return self.sheet_key(mods, sym);
         }
         if self.branch_menu.is_some() {
-            return self.branch_menu_key(sym, ctx);
+            return self.branch_menu_key(mods, sym, typed, ctx);
         }
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         if only_ctrl && matches!(sym, Keysym::s | Keysym::S) {
@@ -1809,12 +1853,12 @@ impl Panel {
             };
         }
         // The open menu takes the click: elsewhere, it closes.
-        if let Some(menu) = self.branch_menu {
+        if let Some(first) = self.branch_menu.as_ref().map(|m| m.first) {
             return match hit {
                 ReposHit::BranchRow(i) => {
                     let page = branch_page(ctx);
-                    let len = self.branches(ctx).len();
-                    let first = menu.first.min(len.saturating_sub(page));
+                    let len = self.shown_branches(ctx).len();
+                    let first = first.min(len.saturating_sub(page));
                     self.pick_branch(first + i, ctx)
                 }
                 ReposHit::BranchMenu => None,
@@ -2385,7 +2429,7 @@ impl Panel {
                 .map(|k| k - first),
             hover: self.hover,
             field: self.field.line(),
-            field_focused: self.focus == Focus::Field,
+            field_focused: self.focus == Focus::Field && self.branch_menu.is_none(),
             placeholder: "Branch name or commit message".into(),
             error: self.armed_warning(ctx).or_else(|| self.error.clone()),
             result,
@@ -3886,7 +3930,7 @@ mod tests {
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
         assert_eq!((menu.current, menu.picked), (Some(0), Some(0)));
         press(&mut panel, none(), Keysym::Escape, &ctx);
-        assert_eq!(panel.branch_menu, None);
+        assert!(panel.branch_menu.is_none());
         // main and master are one branch, called by both names.
         check_repo(&mut panel, "gerdr", &ctx);
         check_repo(&mut panel, "herdr", &ctx);
@@ -3929,7 +3973,7 @@ mod tests {
                 jobs: jobs(&["zed"]),
             })
         );
-        assert_eq!(panel.branch_menu, None);
+        assert!(panel.branch_menu.is_none());
         press(&mut panel, ctrl(), Keysym::s, &ctx);
         press(&mut panel, none(), Keysym::Down, &ctx);
         assert_eq!(
@@ -3943,7 +3987,7 @@ mod tests {
         panel.click(ReposHit::BranchButton, &ctx);
         assert!(panel.branch_menu.is_some());
         assert_eq!(panel.click(ReposHit::Line(0), &ctx), None);
-        assert_eq!(panel.branch_menu, None);
+        assert!(panel.branch_menu.is_none());
         panel.click(ReposHit::BranchButton, &ctx);
         assert_eq!(
             panel.click(ReposHit::BranchRow(1), &ctx),
@@ -3967,7 +4011,7 @@ mod tests {
         let mut panel = Panel::new(&items);
         assert!(!panel.view("p", &ctx).branch.enabled);
         press(&mut panel, ctrl(), Keysym::s, &ctx);
-        assert_eq!(panel.branch_menu, None);
+        assert!(panel.branch_menu.is_none());
         assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
         // With nothing selected, there is nothing to switch.
         let mut none_selected = Panel::new(&items);
@@ -3981,8 +4025,9 @@ mod tests {
     fn a_long_branch_menu_scrolls_with_the_pick() {
         let mut items = branched();
         items[0].status.local_branches = (0..30).map(|i| format!("b{i:02}")).collect();
+        // Five rows: the tree's six, less the search's.
         let ctx = super::Ctx {
-            page: (5, 5),
+            page: (6, 6),
             ..ctx(&items, None, None)
         };
         let mut panel = Panel::new(&items);
@@ -3995,9 +4040,61 @@ mod tests {
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
         assert_eq!(menu.picked, Some(4));
         assert_eq!(menu.rows[4], "b06");
-        press(&mut panel, none(), Keysym::End, &ctx);
+        press(&mut panel, ctrl(), Keysym::End, &ctx);
         assert_eq!(menu_rows(&panel, &ctx).last().unwrap(), "feat/x");
         panel.scroll_branches(-100.0, &ctx);
         assert_eq!(menu_rows(&panel, &ctx)[0], "main");
+    }
+
+    #[test]
+    fn typing_finds_a_branch() {
+        let mut items = branched();
+        items[0].status.local_branches = (0..30).map(|i| format!("b{i:02}")).collect();
+        items[0].status.local_branches.push("Feature/Login".into());
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        let view = panel.view("p", &ctx);
+        assert!(!view.field_focused);
+        assert_eq!(view.branch.menu.unwrap().placeholder, "Find a branch");
+        // Whatever the case, each word somewhere in the name.
+        type_text(&mut panel, "FEAT", &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["Feature/Login", "feat/x"]);
+        type_text(&mut panel, " log", &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["Feature/Login"]);
+        assert_eq!(&*panel.field, "");
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!((menu.query.as_str(), menu.picked), ("FEAT log", Some(0)));
+        // A name in a group finds the group.
+        for _ in 0.."FEAT log".len() {
+            press(&mut panel, none(), Keysym::BackSpace, &ctx);
+        }
+        type_text(&mut panel, "mast", &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["main"]);
+        // Nothing found: Enter leaves the menu for another try.
+        type_text(&mut panel, "zz", &ctx);
+        assert!(menu_rows(&panel, &ctx).is_empty());
+        let empty = panel.view("p", &ctx).branch.menu.unwrap().empty;
+        assert_eq!(empty, "No branch matches");
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.branch_menu.is_some());
+        // Enter picks what was found; Down moves among it.
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        type_text(&mut panel, "b2", &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        let picked = press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(
+            picked,
+            Some(Outcome::Batch {
+                kind: BatchKind::Switch(vec!["b21".into()]),
+                jobs: jobs(&["gerdr"]),
+            })
+        );
+        // It opens empty again.
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        assert_eq!(
+            panel.view("p", &ctx).branch.menu.unwrap().query.as_str(),
+            ""
+        );
     }
 }
