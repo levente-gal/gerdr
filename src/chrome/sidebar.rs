@@ -409,9 +409,12 @@ pub struct RowState {
 /// What moves in an agent card: its hover pill's alpha and, while blocked,
 /// (0 to 16). A blocked card's pulse is not here: it is composed over the
 /// sidebar as its own part (see `blocked_band`), so it never redraws it.
+/// Also whether its agent is open: its pane has the keyboard in the shown
+/// tab.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CardState {
     pub hover: u8,
+    pub open: bool,
 }
 
 /// What the sidebar shows beyond its data: the density, the hover and
@@ -1195,7 +1198,8 @@ impl Painter {
     /// An agent card: a header with the status mark, the agent's kind and
     /// name and a status pill, then one detail line. A blocked card's
     /// header carries the warning colour (its breathing is composed on
-    /// top, see `pulse_band`); the card lightens under the pointer.
+    /// top, see `pulse_band`); the card lightens under the pointer. The
+    /// open agent's card is filled as the active workspace row.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn agent_card(
         &self,
@@ -1214,8 +1218,11 @@ impl Painter {
         let status = p.status(card.status);
         let blocked = card.status == AgentStatus::Blocked;
         let hover = alpha(state.hover);
-        let base = mix(p.panel, p.element, 0.6);
-        let fill = mix(base, p.selected, hover);
+        let fill = if state.open {
+            mix(p.selected, p.text, 0.05 * hover)
+        } else {
+            mix(mix(p.panel, p.element, 0.6), p.selected, hover)
+        };
         let edge = if blocked {
             mix(p.border_variant, status, 0.6)
         } else {
@@ -1437,6 +1444,50 @@ mod tests {
             place: String::new(),
             activity: String::new(),
             icon: None,
+        }
+    }
+
+    /// The sidebar with one workspace of three agents, their cards open
+    /// or not by `open`, painted as bytes.
+    fn painted_cards(open: [bool; 3], scale: f64) -> Vec<u8> {
+        use super::{CardState, Painter, SidebarState, SidebarView};
+        let agents = vec![vec![
+            agent("1", AgentStatus::Working, Some("~/src/gerdr")),
+            agent("2", AgentStatus::Idle, Some("~/src/gerdr")),
+            agent("3", AgentStatus::Done, Some("~/src/gerdr")),
+        ]];
+        let view = SidebarView {
+            workspaces: vec![workspace("gerdr", None, Some("main"))],
+            agents,
+            active: Some(0),
+            project: None,
+            header_lit: false,
+            state: SidebarState {
+                cards: vec![open.map(|open| CardState { hover: 0, open }).to_vec()],
+                ..SidebarState::default()
+            },
+        };
+        let palette = crate::chrome::Theme::Dark.palette();
+        let mut buffer = Painter::new().sidebar_view(&view, (240, 600).into(), scale, palette);
+        let mut bytes = Vec::new();
+        let _ = buffer.render().draw(|mem| {
+            bytes.extend_from_slice(mem);
+            Ok::<_, ()>(Vec::new())
+        });
+        bytes
+    }
+
+    #[test]
+    fn the_open_agents_card_stands_out() {
+        for scale in [1.0, 2.0] {
+            let plain = painted_cards([false; 3], scale);
+            let first = painted_cards([true, false, false], scale);
+            let second = painted_cards([false, true, false], scale);
+            assert_ne!(plain, first);
+            assert_ne!(plain, second);
+            assert_ne!(first, second);
+            // The same states paint the same pixels.
+            assert_eq!(painted_cards([false; 3], scale), plain);
         }
     }
 

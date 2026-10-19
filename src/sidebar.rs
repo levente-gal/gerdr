@@ -78,6 +78,14 @@ impl Gerdr {
         layout.hit(pos)
     }
 
+    /// The herdr pane with the keyboard in the shown tab.
+    fn focused_herdr_pane(&self) -> Option<&str> {
+        let tab = self.tab()?;
+        let id = tab.focused_id()?;
+        let pane = tab.panes.iter().find(|p| p.id == id)?;
+        Some(pane.herdr.as_ref()?.pane_id.as_str())
+    }
+
     /// What moves in the sidebar at `now`, given its `workspaces` and
     /// their `agents` as the view has them: the hover pills, the "+" menu,
     /// the name being renamed.
@@ -99,13 +107,21 @@ impl Gerdr {
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
             })
             .collect();
+        let focused = self.focused_herdr_pane();
         let cards = agents
             .iter()
             .enumerate()
             .map(|(i, cards)| {
-                (0..cards.len())
-                    .map(|k| CardState {
-                        hover: quantize(hover.alpha(SidebarHit::Card(i, k), now)),
+                cards
+                    .iter()
+                    .enumerate()
+                    .map(|(k, card)| {
+                        let open =
+                            i == self.active_workspace && focused == Some(card.pane_id.as_str());
+                        CardState {
+                            hover: quantize(hover.alpha(SidebarHit::Card(i, k), now)),
+                            open,
+                        }
                     })
                     .collect()
             })
