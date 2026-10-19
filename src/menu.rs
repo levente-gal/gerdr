@@ -65,7 +65,7 @@ pub enum MenuAction {
     DeleteWorktree(PathBuf),
     /// Open the repositories panel.
     Repos,
-    /// Read the projects file again, after it was edited by hand.
+    /// Read the project files again, after one was edited by hand.
     ReloadProjects,
 }
 
