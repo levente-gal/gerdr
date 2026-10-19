@@ -259,7 +259,8 @@ mod tests {
         let workspaces = dirs
             .iter()
             .map(|dir| WorkspaceRecord {
-                herdr_id: "w1".into(),
+                id: "w1".into(),
+                herdr_id: Some("w1".into()),
                 label: "ws".into(),
                 kind: Kind::Project,
                 dir: dir.to_path_buf(),

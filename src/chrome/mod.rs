@@ -754,7 +754,8 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(layout.retry.into_iter().chain(layout.close));
     }
     if let Some(switcher) = &view.switcher {
-        rects.extend(switcher_geometry(switcher, area).rows);
+        let layout = switcher_geometry(switcher, area);
+        rects.extend(layout.rows.into_iter().chain(layout.chips));
     }
     if let Some(popup) = &view.worktrees {
         for (rect, buttons) in worktrees_layout(popup, output).entries {

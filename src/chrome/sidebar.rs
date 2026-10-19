@@ -16,12 +16,13 @@ use super::{
     CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, Density,
     FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
     LABEL_FONT_SIZE, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_BOTTOM, ROW_HEIGHT,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_RADIUS, ROW_TITLE_HEIGHT, ROWS_TOP, Rect,
-    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, band,
-    chevron_down, cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical, rect_px,
-    status_mark, terminal,
+    ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROW_TITLE_HEIGHT,
+    ROWS_TOP, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView,
+    app, band, chevron_down, cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical,
+    rect_px, status_mark, terminal,
 };
 use crate::WorkspaceKind;
+use crate::app_icons::AppIcon;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
@@ -273,6 +274,8 @@ pub struct WorkspaceView {
     /// How many tabs it has and what runs in them; empty without herdr.
     /// The tab strip shows this, so the row leaves it to its tooltip.
     pub activity: String,
+    /// The app icon its row shows in place of its kind's, if any.
+    pub icon: Option<AppIcon>,
 }
 
 impl WorkspaceView {
@@ -315,6 +318,7 @@ impl WorkspaceView {
             git: None,
             place,
             activity,
+            icon: None,
         }
     }
 
@@ -405,9 +409,12 @@ pub struct RowState {
 /// What moves in an agent card: its hover pill's alpha and, while blocked,
 /// (0 to 16). A blocked card's pulse is not here: it is composed over the
 /// sidebar as its own part (see `blocked_band`), so it never redraws it.
+/// Also whether its agent is open: its pane has the keyboard in the shown
+/// tab.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CardState {
     pub hover: u8,
+    pub open: bool,
 }
 
 /// What the sidebar shows beyond its data: the density, the hover and
@@ -798,6 +805,12 @@ impl Painter {
                 WorkspaceKind::Terminal => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
                     terminal(x, y, small)
                 }),
+                WorkspaceKind::Cursor => match &ws.icon {
+                    Some(picture) => {
+                        c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
+                    }
+                    None => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
+                },
             }
             let name_x = px(row.name.loc.x) as f32;
             let name_end = px(row.name.loc.x + row.name.size.w) as f32;
@@ -1185,7 +1198,8 @@ impl Painter {
     /// An agent card: a header with the status mark, the agent's kind and
     /// name and a status pill, then one detail line. A blocked card's
     /// header carries the warning colour (its breathing is composed on
-    /// top, see `pulse_band`); the card lightens under the pointer.
+    /// top, see `pulse_band`); the card lightens under the pointer. The
+    /// open agent's card is filled as the active workspace row.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn agent_card(
         &self,
@@ -1204,8 +1218,11 @@ impl Painter {
         let status = p.status(card.status);
         let blocked = card.status == AgentStatus::Blocked;
         let hover = alpha(state.hover);
-        let base = mix(p.panel, p.element, 0.6);
-        let fill = mix(base, p.selected, hover);
+        let fill = if state.open {
+            mix(p.selected, p.text, 0.05 * hover)
+        } else {
+            mix(mix(p.panel, p.element, 0.6), p.selected, hover)
+        };
         let edge = if blocked {
             mix(p.border_variant, status, 0.6)
         } else {
@@ -1426,6 +1443,51 @@ mod tests {
             git: None,
             place: String::new(),
             activity: String::new(),
+            icon: None,
+        }
+    }
+
+    /// The sidebar with one workspace of three agents, their cards open
+    /// or not by `open`, painted as bytes.
+    fn painted_cards(open: [bool; 3], scale: f64) -> Vec<u8> {
+        use super::{CardState, Painter, SidebarState, SidebarView};
+        let agents = vec![vec![
+            agent("1", AgentStatus::Working, Some("~/src/gerdr")),
+            agent("2", AgentStatus::Idle, Some("~/src/gerdr")),
+            agent("3", AgentStatus::Done, Some("~/src/gerdr")),
+        ]];
+        let view = SidebarView {
+            workspaces: vec![workspace("gerdr", None, Some("main"))],
+            agents,
+            active: Some(0),
+            project: None,
+            header_lit: false,
+            state: SidebarState {
+                cards: vec![open.map(|open| CardState { hover: 0, open }).to_vec()],
+                ..SidebarState::default()
+            },
+        };
+        let palette = crate::chrome::Theme::Dark.palette();
+        let mut buffer = Painter::new().sidebar_view(&view, (240, 600).into(), scale, palette);
+        let mut bytes = Vec::new();
+        let _ = buffer.render().draw(|mem| {
+            bytes.extend_from_slice(mem);
+            Ok::<_, ()>(Vec::new())
+        });
+        bytes
+    }
+
+    #[test]
+    fn the_open_agents_card_stands_out() {
+        for scale in [1.0, 2.0] {
+            let plain = painted_cards([false; 3], scale);
+            let first = painted_cards([true, false, false], scale);
+            let second = painted_cards([false, true, false], scale);
+            assert_ne!(plain, first);
+            assert_ne!(plain, second);
+            assert_ne!(first, second);
+            // The same states paint the same pixels.
+            assert_eq!(painted_cards([false; 3], scale), plain);
         }
     }
 

@@ -177,8 +177,15 @@ pub struct Project {
 /// What gerdr kept of a workspace of a project.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRecord {
-    /// The herdr workspace id (`w6`): stable across a server restart.
-    pub herdr_id: String,
+    /// gerdr's id for it, stable for as long as it is kept: the herdr id
+    /// it had first for one saved before records had their own (`w6`),
+    /// else `g1`, `g2`… (see `Store::new_workspace_id`).
+    #[serde(default)]
+    pub id: String,
+    /// The herdr workspace it mirrors (`w6`), while it has one: stable
+    /// across a server restart. One with only apps has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_id: Option<String>,
     pub label: String,
     pub kind: Kind,
     pub dir: PathBuf,
@@ -198,6 +205,8 @@ pub enum Kind {
     /// Zed over a terminal.
     Project,
     Terminal,
+    /// The project's Cursor.
+    Cursor,
 }
 
 /// Which Python venv the workspace's shells activate.
@@ -375,7 +384,11 @@ impl Store {
         };
         match std::fs::read(path) {
             Ok(raw) => match serde_json::from_slice::<Self>(&raw) {
-                Ok(store) => {
+                Ok(mut store) => {
+                    store
+                        .projects
+                        .iter_mut()
+                        .for_each(Project::fill_workspace_ids);
                     let mut store = Self {
                         books: books.clone(),
                         ..store
@@ -616,26 +629,75 @@ impl Store {
         self.projects.iter_mut().find(|p| p.id == id)
     }
 
-    /// Put project `project`'s workspaces in `order` (herdr ids), those not
-    /// in it last; whether that moved any.
+    /// Put project `project`'s workspaces in `order` (record ids), those
+    /// not in it last; whether that moved any.
     pub fn order_workspaces(&mut self, project: &str, order: &[&str]) -> bool {
         let Some(project) = self.project_mut(project) else {
             return false;
         };
         let place = |id: &str| order.iter().position(|o| *o == id).unwrap_or(usize::MAX);
-        if project.workspaces.is_sorted_by_key(|r| place(&r.herdr_id)) {
+        if project.workspaces.is_sorted_by_key(|r| place(&r.id)) {
             return false;
         }
-        project.workspaces.sort_by_key(|r| place(&r.herdr_id));
+        project.workspaces.sort_by_key(|r| place(&r.id));
         true
     }
 
-    /// Project `project`'s record of herdr workspace `herdr_id`.
-    pub fn record_mut(&mut self, project: &str, herdr_id: &str) -> Option<&mut WorkspaceRecord> {
+    /// Project `project`'s workspace record `id`.
+    pub fn record_mut(&mut self, project: &str, id: &str) -> Option<&mut WorkspaceRecord> {
         self.project_mut(project)?
             .workspaces
             .iter_mut()
-            .find(|w| w.herdr_id == herdr_id)
+            .find(|w| w.id == id)
+    }
+
+    /// Project `project`'s record of herdr workspace `herdr_id`.
+    pub fn herdr_record_mut(
+        &mut self,
+        project: &str,
+        herdr_id: &str,
+    ) -> Option<&mut WorkspaceRecord> {
+        self.project_mut(project)?
+            .workspaces
+            .iter_mut()
+            .find(|w| w.mirrors(herdr_id))
+    }
+}
+
+impl Project {
+    /// Give the workspace records saved before they had ids of their own
+    /// one: their herdr workspace's id, else a new one.
+    fn fill_workspace_ids(&mut self) {
+        for record in &mut self.workspaces {
+            if record.id.is_empty() {
+                record.id = record.herdr_id.clone().unwrap_or_default();
+            }
+        }
+        for i in 0..self.workspaces.len() {
+            if self.workspaces[i].id.is_empty() {
+                self.workspaces[i].id = self.new_workspace_id();
+            }
+        }
+    }
+
+    /// An id for a new workspace record, unlike any it has.
+    pub fn new_workspace_id(&self) -> String {
+        (1..)
+            .map(|n| format!("g{n}"))
+            .find(|id| self.workspaces.iter().all(|r| r.id != *id))
+            .unwrap()
+    }
+
+    /// Its record of herdr workspace `herdr_id`.
+    pub fn herdr_record(&self, herdr_id: &str) -> Option<&WorkspaceRecord> {
+        self.workspaces.iter().find(|r| r.mirrors(herdr_id))
+    }
+}
+
+impl WorkspaceRecord {
+    /// Whether it mirrors herdr workspace `herdr_id`.
+    pub fn mirrors(&self, herdr_id: &str) -> bool {
+        self.herdr_id.as_deref() == Some(herdr_id)
     }
 }
 
@@ -700,7 +762,8 @@ fn project_files(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
 /// project `id`'s.
 fn read_project(id: &str, path: &Path) -> Result<(Project, u64), String> {
     let raw = std::fs::read(path).map_err(|err| err.to_string())?;
-    let project: Project = serde_json::from_slice(&raw).map_err(|err| err.to_string())?;
+    let mut project: Project = serde_json::from_slice(&raw).map_err(|err| err.to_string())?;
+    project.fill_workspace_ids();
     if !valid_id(&project.id) {
         return Err(format!("{:?} isn't a valid id", project.id));
     }
@@ -1226,7 +1289,8 @@ pub fn migrate(
 
 fn record(herdr_id: String, label: String, kind: Kind, dir: PathBuf) -> WorkspaceRecord {
     WorkspaceRecord {
-        herdr_id,
+        id: herdr_id.clone(),
+        herdr_id: Some(herdr_id),
         label,
         kind,
         dir,
@@ -1340,7 +1404,8 @@ mod tests {
                 last_used: 200,
                 state: RunState::Stopped,
                 workspaces: vec![WorkspaceRecord {
-                    herdr_id: "w1".into(),
+                    id: "w1".into(),
+                    herdr_id: Some("w1".into()),
                     label: "services-api".into(),
                     kind: Kind::Project,
                     dir: "/work/services-api".into(),
@@ -1378,7 +1443,7 @@ mod tests {
         let ids: Vec<&str> = store.projects[0]
             .workspaces
             .iter()
-            .map(|r| r.herdr_id.as_str())
+            .map(|r| r.id.as_str())
             .collect();
         assert_eq!(ids, ["w3", "w1", "w2"]);
         assert!(!store.order_workspaces("api", &["w3", "w1"]));
@@ -1426,6 +1491,50 @@ mod tests {
                 pane_id: "w1:p1".into(),
                 ..PaneRecord::default()
             }
+        );
+    }
+
+    #[test]
+    fn records_get_ids_of_their_own() {
+        let old = json!({
+            "version": 1,
+            "projects": [{
+                "id": "a",
+                "name": "A",
+                "session": "gerdr-a",
+                "created": 1,
+                "last_used": 2,
+                "workspaces": [
+                    {"herdr_id": "w1", "label": "a", "kind": "terminal", "dir": "/a"},
+                    {"label": "b", "kind": "project", "dir": "/b"},
+                    {"id": "g7", "label": "c", "kind": "project", "dir": "/c"},
+                ],
+            }],
+        });
+        let mut store: Store = serde_json::from_value(old).unwrap();
+        store
+            .projects
+            .iter_mut()
+            .for_each(Project::fill_workspace_ids);
+        let records = &store.project("a").unwrap().workspaces;
+        let ids: Vec<_> = records
+            .iter()
+            .map(|r| (r.id.as_str(), r.herdr_id.as_deref()))
+            .collect();
+        assert_eq!(ids, [("w1", Some("w1")), ("g1", None), ("g7", None)]);
+        assert_eq!(serde_json::to_value(Kind::Cursor).unwrap(), json!("cursor"));
+        // Without a herdr workspace, it saves without one.
+        let json = serde_json::to_value(&records[1]).unwrap();
+        assert!(json.get("herdr_id").is_none());
+        let back: WorkspaceRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, records[1]);
+        assert_eq!(
+            store
+                .project("a")
+                .unwrap()
+                .herdr_record("w1")
+                .map(|r| &r.id),
+            Some(&"w1".to_owned())
         );
     }
 
@@ -2408,7 +2517,7 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
         );
         // Nothing of gerdr's running: what was saved.
         let project = migrate(Some(&live[2..]), Some(saved)).unwrap();
-        assert_eq!(project.workspaces[0].herdr_id, "w9");
+        assert_eq!(project.workspaces[0].herdr_id.as_deref(), Some("w9"));
         assert_eq!(migrate(Some(&[]), None), None);
     }
 }

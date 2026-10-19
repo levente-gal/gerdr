@@ -63,6 +63,8 @@ pub(super) const ROW_ICON_GAP: i32 = 8;
 /// An app's own icon in a switcher row: bigger than the drawn ones, reaching
 /// a little into the room around them.
 pub(super) const APP_ICON_SIZE: i32 = 20;
+/// How big an app icon a sidebar row shows for its workspace.
+pub(super) const ROW_PICTURE_SIZE: i32 = 16;
 pub(super) const GAP: i32 = 1;
 /// Agent cards, under their workspace's row: indent past the row's icon,
 /// space around them, inner padding, the header line and each detail line.
