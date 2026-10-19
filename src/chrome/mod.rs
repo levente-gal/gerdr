@@ -279,6 +279,18 @@ impl Chrome {
             parts.push((buffer, Point::from((0, 0)), output, 1.0));
         }
 
+        // The tooltip, by what it is about, over all else: it is offered
+        // only for what nothing covers, or by the popup it is on.
+        let tooltip = view.tooltip.map(|tip| {
+            let w = painter.tooltip_width(&tip, output.w - 2 * HELP_MARGIN, scale);
+            let size = (w, tip.height()).into();
+            let (loc, size) = shadowed(tooltip_layout(tip.anchor, size, output));
+            ((tip, w, theme, scale), loc, size)
+        });
+        parts.extend(self.tooltip.part(tooltip, now, true, |(tip, w, ..)| {
+            painter.tooltip(tip, *w, scale, theme.palette())
+        }));
+
         // The quit dialog covers everything.
         let quit = view.quit.map(|quit| {
             let (loc, size) = shadowed(quit_layout(output).panel);
@@ -361,17 +373,6 @@ impl Chrome {
         });
         parts.extend(self.menu.part(menu, now, true, |(menu, ..)| {
             painter.menu(menu, scale, theme.palette())
-        }));
-
-        // The tooltip, by what it is about.
-        let tooltip = view.tooltip.map(|tip| {
-            let w = painter.tooltip_width(&tip, output.w - 2 * HELP_MARGIN, scale);
-            let size = (w, tip.height()).into();
-            let (loc, size) = shadowed(tooltip_layout(tip.anchor, size, output));
-            ((tip, w, theme, scale), loc, size)
-        });
-        parts.extend(self.tooltip.part(tooltip, now, true, |(tip, w, ..)| {
-            painter.tooltip(tip, *w, scale, theme.palette())
         }));
 
         // The help panel, centred at the bottom of the app area.

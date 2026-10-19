@@ -161,6 +161,25 @@ pub fn welcome_layout(
     }
 }
 
+/// Where the mark of the project card in `row` goes, which says whether its
+/// session runs.
+pub fn welcome_mark(row: Rect) -> Rect {
+    Rectangle::new(
+        (row.loc.x + PADDING as i32, row.loc.y).into(),
+        (STATUS_WIDTH, row.size.h).into(),
+    )
+}
+
+/// What a project's mark says, by whether its session runs (`None` until
+/// known).
+pub fn running_label(running: Option<bool>) -> &'static str {
+    match running {
+        Some(true) => "Running",
+        Some(false) => "Not running",
+        None => "Finding out whether it runs",
+    }
+}
+
 /// How high the list of `rows` cards is.
 fn list_height(rows: usize) -> i32 {
     let rows = rows as i32;
@@ -382,10 +401,7 @@ impl Painter {
         let s = scale as f32;
         let (x, y, w, h) = rect_px(rect, scale);
         let (b, r) = (px(1).max(1) as f32, ROW_RADIUS * s);
-        let mark = Rectangle::new(
-            (rect.loc.x + PADDING as i32, rect.loc.y).into(),
-            (STATUS_WIDTH, rect.size.h).into(),
-        );
+        let mark = welcome_mark(rect);
         let name_x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
         let right = x + w - PADDING * s;
         let dot = move |x: f32, y: f32| x.hypot(y) - 4.2 * s;
@@ -492,7 +508,7 @@ impl Painter {
 mod tests {
     use super::{
         HINTS_GAP, ProjectRow, WELCOME_CARD, WELCOME_CARD_GAP, WelcomeHit, WelcomeView,
-        welcome_label, welcome_layout, welcome_page,
+        running_label, welcome_label, welcome_layout, welcome_mark, welcome_page,
     };
     use crate::chrome::{
         Painter, QuitHit, QuitView, Rect, TabStripView, TabView, Theme, ThemeMode, inside,
@@ -534,6 +550,17 @@ mod tests {
             in_app: true,
             quit_keys: Some("Ctrl+B q".into()),
         }
+    }
+
+    #[test]
+    fn a_cards_mark_is_on_it_and_says_whether_it_runs() {
+        let layout = welcome_layout((1280, 800).into(), 3, false, false);
+        for row in &layout.rows {
+            let mark = welcome_mark(*row);
+            assert!(inside(*row, mark));
+        }
+        assert_eq!(running_label(Some(true)), "Running");
+        assert_eq!(running_label(Some(false)), "Not running");
     }
 
     #[test]

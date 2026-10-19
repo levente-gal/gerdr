@@ -128,6 +128,28 @@ pub enum RowButton {
     Forget,
 }
 
+impl RowButton {
+    /// What it does and the key that does the same, for its tooltip.
+    pub fn tip(self) -> (&'static str, &'static str) {
+        match self {
+            RowButton::Settings => ("Start and stop commands", "Ctrl+E"),
+            RowButton::ProjectFile => ("Edit the project file", "Ctrl+O"),
+            RowButton::Rename => ("Rename", "Ctrl+R"),
+            RowButton::Stop => ("Stop its session", "Ctrl+S"),
+            RowButton::Forget => ("Forget the project", "Delete"),
+        }
+    }
+}
+
+/// Where the mark of the menu entry in `rect` goes: whether a project
+/// runs, or what the entry is.
+pub fn menu_mark(rect: Rect) -> Rect {
+    Rectangle::new(
+        (rect.loc.x + PADDING as i32, rect.loc.y).into(),
+        (MENU_MARK_WIDTH, rect.size.h).into(),
+    )
+}
+
 /// What the pointer is over in the project menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuHit {
@@ -807,10 +829,7 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let row_band = band(rect, scale);
-        let mark = Rectangle::new(
-            (rect.loc.x + PADDING as i32, rect.loc.y).into(),
-            (MENU_MARK_WIDTH, rect.size.h).into(),
-        );
+        let mark = menu_mark(rect);
         let label_lx = mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP;
         let label_x = px(label_lx) as f32;
         let (x, y, w, h) = rect_px(rect, scale);

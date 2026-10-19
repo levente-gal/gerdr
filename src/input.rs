@@ -173,6 +173,16 @@ impl Gerdr {
                         if sym.is_modifier_key() {
                             return FilterResult::Forward;
                         }
+                        // A key moves what an overlay shows from under
+                        // its tooltip.
+                        let overlay = state.welcome.is_some()
+                            || state.project_menu.is_some()
+                            || state.worktrees.is_open()
+                            || state.repos.is_open()
+                            || state.switcher.is_some();
+                        if overlay {
+                            state.tooltip.hide();
+                        }
                         if state.quit.is_some() {
                             state.suppressed_keys.push(code);
                             let out = state.quit_key(mods, sym, handle.modified_sym());
@@ -355,22 +365,22 @@ impl Gerdr {
                     || self.project_menu.is_some()
                     || self.worktrees.is_open()
                     || self.repos.is_open();
-                // The project menu has a tooltip of its own (on Browse).
-                let mut menu_tip = None;
+                // An overlay's icons have tooltips of their own.
+                let mut overlay_tip = None;
                 if self.quit.is_some() {
                     self.quit_hover(pos);
                 } else if self.welcome.is_some() {
-                    self.welcome_hover(pos);
+                    overlay_tip = self.welcome_hover(pos);
                 } else if self.project_menu.is_some() {
-                    menu_tip = self.project_menu_hover(pos);
+                    overlay_tip = self.project_menu_hover(pos);
                 } else if self.worktrees.is_open() {
-                    self.worktrees_hover(pos);
+                    overlay_tip = self.worktrees_hover(pos);
                 } else if self.repos.is_open() {
-                    self.repos_hover(pos);
+                    overlay_tip = self.repos_hover(pos);
                 } else if self.context_menu.is_some() {
                     self.menu_motion(pos);
                 } else if self.switcher.is_some() {
-                    self.switcher_motion(pos);
+                    overlay_tip = self.switcher_motion(pos);
                 }
                 // The region under the pointer lights up, with nothing open
                 // over it, and may offer a tooltip. Its layout is worked
@@ -379,7 +389,7 @@ impl Gerdr {
                 self.header_hover = false;
                 let regions = self.regions_at(pos);
                 let tip = if covered {
-                    menu_tip
+                    overlay_tip
                 } else if let Some(layout) = &regions.sidebar {
                     self.sidebar_motion(layout, pos)
                 } else if let Some(view) = &regions.strip {
@@ -390,7 +400,7 @@ impl Gerdr {
                 // So do the buttons of a terminal pane's bar.
                 let free = !covered && self.drag.is_none() && self.reorder.is_none();
                 self.pane_bar_hover(free.then_some(pos));
-                let offered = free || self.project_menu.is_some();
+                let offered = free || covered;
                 self.offer_tooltip(tip.filter(|_| offered), Instant::now());
                 let under = self.pointer_target(pos);
                 // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.

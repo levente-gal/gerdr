@@ -34,6 +34,7 @@ use crate::{
     paths,
     text_field::{Edit, TextField},
     toast::Level,
+    tooltip::Tooltip,
 };
 
 /// The worktrees popup, while open, and what is being done to worktrees.
@@ -787,15 +788,25 @@ impl Gerdr {
     }
 
     /// The pointer moved while the worktrees popup is open.
-    pub fn worktrees_hover(&mut self, pos: Point<f64, Logical>) {
-        let Some(view) = self.worktrees_view() else {
-            return;
-        };
+    pub fn worktrees_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let view = self.worktrees_view()?;
         let layout = chrome::worktrees_layout(&view, self.output_size());
         let hit = chrome::worktrees_hit(&layout, pos);
         if let Some(popup) = self.worktrees.popup.as_mut() {
             popup.hover = hit;
         }
+        // A row's marks say what they mean.
+        let Some(WorktreesHit::Entry(i)) = hit else {
+            return None;
+        };
+        let WorktreeEntry::Worktree(line) = view.entries.get(i)? else {
+            return None;
+        };
+        let (rect, buttons) = layout.entries.get(i)?;
+        chrome::worktree_marks(line, *rect, buttons)
+            .into_iter()
+            .find(|(r, _)| r.to_f64().contains(pos))
+            .map(|(r, text)| Tooltip::new(text, r))
     }
 
     /// The wheel turned `rows` rows (down positive) over the popup.

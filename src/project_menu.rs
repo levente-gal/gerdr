@@ -1338,10 +1338,36 @@ impl Gerdr {
         let now = Instant::now();
         let menu = self.project_menu.as_mut()?;
         menu.set_hover(hit, now);
-        match hit {
-            Some(MenuHit::Field(FormField::Browse)) => {
-                let anchor = chrome::project_menu_layout(&view, size).form?.browse;
-                Some(Tooltip::new("Pick a folder", anchor).key("Ctrl+O"))
+        let layout = chrome::project_menu_layout(&view, size);
+        match hit? {
+            MenuHit::Field(FormField::Browse) => {
+                Some(Tooltip::new("Pick a folder", layout.form?.browse).key("Ctrl+O"))
+            }
+            MenuHit::Button(i, button) => {
+                let (_, rect) = layout
+                    .entries
+                    .get(i)?
+                    .1
+                    .iter()
+                    .find(|(b, _)| *b == button)?;
+                let (text, key) = button.tip();
+                Some(Tooltip::new(text, *rect).key(key))
+            }
+            // A project's mark says whether it runs.
+            MenuHit::Entry(i) => {
+                let MenuEntry::Project {
+                    row,
+                    confirm_forget: false,
+                    ..
+                } = view.entries.get(i)?
+                else {
+                    return None;
+                };
+                row.running?;
+                let mark = chrome::menu_mark(layout.entries.get(i)?.0);
+                mark.to_f64()
+                    .contains(pos)
+                    .then(|| Tooltip::new(chrome::running_label(row.running), mark))
             }
             _ => None,
         }
