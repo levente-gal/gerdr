@@ -876,10 +876,30 @@ pub fn finish_stash(dir: &Path, feature: &str) -> OpResult {
 }
 
 /// Give up a resume's conflicted stash apply (`reset --merge`); the stash
-/// stays.
-pub fn abort_stash(dir: &Path) -> OpResult {
-    let mut op = Op::new(dir);
+/// stays. The apply put the stash's untracked files back too, which the
+/// reset leaves: those still as the stash has them go, so the next resume
+/// doesn't trip over them.
+pub fn abort_stash(dir: &Path, feature: &str) -> OpResult {
+    let top = top(dir);
+    let mut op = Op::new(&top);
     op.run(&["reset", "--merge"])?;
+    if let Some((sha, _)) = park_stash(&top, feature) {
+        let untracked = format!("{sha}^3");
+        let tree = query(&top, &["ls-tree", "-r", "-z", &untracked]).unwrap_or_default();
+        for entry in tree.split('\0').filter(|e| !e.is_empty()) {
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            let Some(blob) = meta.split_whitespace().nth(2) else {
+                continue;
+            };
+            let file = top.join(path);
+            let same = query(&top, &["hash-object", "--", path]).is_some_and(|h| h.trim() == blob);
+            if same {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
+    }
     op.done()
 }
 
@@ -1852,6 +1872,7 @@ mod tests {
         let dir = &fx.repo;
         git(dir, &["switch", "-q", "-c", "feat"]);
         write(dir, "a", "parked");
+        write(dir, "n", "new");
         park(dir, "feat", "main").unwrap();
         // Meanwhile feat moved on: the parked change no longer applies.
         git(dir, &["switch", "-q", "feat"]);
@@ -1867,7 +1888,9 @@ mod tests {
             failure(finish_stash(dir, "feat")),
             Failure::Conflict(vec!["a".into()])
         );
-        abort_stash(dir).unwrap();
+        // The apply brought the untracked file back; aborting takes it away.
+        assert_eq!(read(dir, "n"), "new");
+        abort_stash(dir, "feat").unwrap();
         assert_eq!(read(dir, "a"), "committed");
         assert!(git(dir, &["status", "--porcelain"]).is_empty());
         assert!(park_stash(dir, "feat").is_some());
@@ -1881,7 +1904,8 @@ mod tests {
         finish_stash(dir, "feat").unwrap();
         assert!(park_stash(dir, "feat").is_none());
         assert_eq!(read(dir, "a"), "resolved");
-        assert_eq!(git(dir, &["status", "--porcelain"]), " M a\n");
+        assert_eq!(read(dir, "n"), "new");
+        assert_eq!(git(dir, &["status", "--porcelain"]), " M a\n?? n\n");
     }
 
     #[test]
