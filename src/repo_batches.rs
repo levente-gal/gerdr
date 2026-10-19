@@ -913,10 +913,7 @@ impl Gerdr {
         for _ in 0..threads {
             let (queue, tx) = (queue.clone(), tx.clone());
             std::thread::spawn(move || {
-                loop {
-                    let Some(task) = Queue::next(&queue) else {
-                        break;
-                    };
+                while let Some(task) = Queue::next(&queue) {
                     let root = task.job.root.clone();
                     let before = git_ops::head(&root);
                     let step = |what: &str| {
