@@ -2,18 +2,21 @@
 //! system font.
 
 use super::{
-    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, Canvas,
-    DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH, HINT_GAP,
-    HINT_KEY_GAP, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SMALL_FONT_SIZE, arrow, coverage,
-    mix,
+    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
+    Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
+    GIT_MARK_WIDTH, HINT_GAP, HINT_KEY_GAP, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb,
+    SMALL_FONT_SIZE, arrow, check, coverage, cross, mix, segment,
 };
-use crate::git::GitStatus;
+use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use smithay::utils::{Logical, Rectangle, Size};
 
 pub(super) struct Painter {
     pub(super) font: Option<FontVec>,
+    /// The monospace font, for diffs and logs; `None` when there is none,
+    /// and the font above is used instead.
+    pub(super) mono: Option<FontVec>,
 }
 
 /// A logical rectangle's left and right edges in physical pixels.
@@ -100,25 +103,205 @@ pub(super) fn physical(size: Size<i32, Logical>, scale: f64) -> Size<i32, Logica
     (px(size.w), px(size.h)).into()
 }
 
+/// The file of the system's sans-serif font, as fontconfig picks it.
 pub(super) fn find_font() -> Option<String> {
+    find_family("sans-serif")
+}
+
+/// The file of the system's monospace font, as fontconfig picks it.
+fn find_mono_font() -> Option<String> {
+    find_family("monospace")
+}
+
+/// The file fontconfig picks for `family`.
+fn find_family(family: &str) -> Option<String> {
     let out = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}", "sans-serif"])
+        .args(["-f", "%{file}", family])
         .output()
         .ok()?;
     let path = String::from_utf8(out.stdout).ok()?;
     (!path.is_empty()).then_some(path)
 }
 
+/// The font in the file at `path`, if it can be read.
+fn load_font(path: Option<String>) -> Option<FontVec> {
+    let data = std::fs::read(path?).ok()?;
+    FontVec::try_from_vec(data).ok()
+}
+
+/// How wide `text` is in the UI font at `size`, in logical pixels, for a
+/// layout that has no painter at hand; `None` without a font. The font is
+/// loaded the first time.
+pub(super) fn measure(text: &str, size: f32) -> Option<f32> {
+    static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
+    let font = FONT.get_or_init(|| load_font(find_font())).as_ref()?;
+    Some(width_in(font, text, size, 1.0))
+}
+
+/// Width of `text` in `font` at `size` (logical) and `scale`, in physical
+/// pixels.
+fn width_in(font: &FontVec, text: &str, size: f32, scale: f64) -> f32 {
+    let font = font.as_scaled(PxScale::from(size * scale as f32));
+    text.chars().map(|c| font.h_advance(font.glyph_id(c))).sum()
+}
+
+/// Draw `text` in `font` as `Painter::text` does.
+#[allow(clippy::too_many_arguments)]
+fn text_in(
+    font: &FontVec,
+    c: &mut Canvas,
+    text: &str,
+    size: f32,
+    x: f32,
+    max_x: f32,
+    (top, height): (i32, i32),
+    scale: f64,
+    color: Rgb,
+) -> f32 {
+    let scaled = font.as_scaled(PxScale::from(size * scale as f32));
+    // Centre on the cap height; the font's ascent/descent include line gap padding.
+    let cap_height = font
+        .outline_glyph(scaled.scaled_glyph('H'))
+        .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
+    let baseline = (top as f32 + (height as f32 + cap_height) / 2.0).round();
+
+    let (mut shown, mut cut) = (text, false);
+    if x + width_in(font, text, size, scale) > max_x {
+        // The longest start of `text` that fits with an ellipsis after it.
+        let ellipsis = width_in(font, "…", size, scale);
+        let mut width = 0.0;
+        let mut end = 0;
+        for (i, ch) in text.char_indices() {
+            width += scaled.h_advance(scaled.glyph_id(ch));
+            if x + width + ellipsis > max_x {
+                break;
+            }
+            end = i + ch.len_utf8();
+        }
+        (shown, cut) = (&text[..end], true);
+    }
+
+    let mut pen = x;
+    for ch in shown.chars().chain(cut.then_some('…')) {
+        let id = scaled.glyph_id(ch);
+        let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
+        pen += scaled.h_advance(id);
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let bounds = outline.px_bounds();
+            outline.draw(|gx, gy, coverage| {
+                c.blend(
+                    bounds.min.x as i32 + gx as i32,
+                    bounds.min.y as i32 + gy as i32,
+                    color,
+                    coverage,
+                );
+            });
+        }
+    }
+    pen
+}
+
 impl Painter {
     pub(super) fn new() -> Self {
-        let font = find_font().and_then(|path| {
-            let data = std::fs::read(&path).ok()?;
-            FontVec::try_from_vec(data).ok()
-        });
+        let font = load_font(find_font());
         if font.is_none() {
             tracing::warn!("chrome: no usable font found, labels will be blank");
         }
-        Self { font }
+        let mono = load_font(find_mono_font());
+        if mono.is_none() {
+            tracing::warn!("chrome: no monospace font found, diffs use the UI font");
+        }
+        Self { font, mono }
+    }
+
+    /// The monospace font, else the UI font.
+    fn mono_font(&self) -> Option<&FontVec> {
+        self.mono.as_ref().or(self.font.as_ref())
+    }
+
+    /// Whether the UI font has a glyph for `ch`.
+    pub(super) fn has_glyph(&self, ch: char) -> bool {
+        self.font
+            .as_ref()
+            .is_some_and(|font| font.glyph_id(ch).0 != 0)
+    }
+
+    /// Width of `text` in the monospace font, in physical pixels.
+    pub(super) fn mono_width(&self, text: &str, size: f32, scale: f64) -> f32 {
+        self.mono_font()
+            .map_or(0.0, |font| width_in(font, text, size, scale))
+    }
+
+    /// Draw `text` in the monospace font as `text` does. Returns where it
+    /// ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn mono_text(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        size: f32,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        color: Rgb,
+    ) -> f32 {
+        match self.mono_font() {
+            Some(font) => text_in(font, c, text, size, x, max_x, band, scale, color),
+            None => x,
+        }
+    }
+
+    /// A checkbox at the left of `rect`, vertically centred: an outlined
+    /// square, filled in the accent with a check mark when `On` and a dash
+    /// when `Partial`; lighter when `hovered`. Returns where it ends
+    /// (physical pixels).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn checkbox(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        state: Check,
+        hovered: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> f32 {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let side = px(CHECKBOX_SIZE) as f32;
+        let (bx, by) = (
+            px(rect.loc.x) as f32,
+            (px(rect.loc.y) as f32 + (px(rect.size.h) as f32 - side) / 2.0).round(),
+        );
+        let (b, r) = (px(1).max(1) as f32, CAP_RADIUS * s);
+        if state == Check::Off {
+            c.rounded(bx, by, side, side, r, p.border);
+            let inner = if hovered { p.selected } else { p.elevated };
+            c.rounded(bx + b, by + b, side - 2.0 * b, side - 2.0 * b, r - b, inner);
+            return bx + side;
+        }
+        let fill = if hovered {
+            mix(p.accent, p.text, 0.12)
+        } else {
+            p.accent
+        };
+        c.rounded(bx, by, side, side, r, fill);
+        let (cx, cy) = (bx + side / 2.0, by + side / 2.0);
+        c.paint_in(
+            bx as i32,
+            by as i32,
+            side as i32,
+            side as i32,
+            p.on_accent,
+            |x, y| {
+                let (x, y) = (x - cx, y - cy);
+                coverage(match state {
+                    Check::Partial => segment(x, y, -3.5 * s, 0.0, 3.5 * s, 0.0) - 1.1 * s,
+                    _ => check(x, y, s),
+                })
+            },
+        );
+        bx + side
     }
 
     /// A text field in `rect`, like the switcher's query: `line` (or
@@ -424,8 +607,7 @@ impl Painter {
 
     pub(super) fn text_width(&self, text: &str, size: f32, scale: f64) -> f32 {
         let Some(font) = &self.font else { return 0.0 };
-        let font = font.as_scaled(PxScale::from(size * scale as f32));
-        text.chars().map(|c| font.h_advance(font.glyph_id(c))).sum()
+        width_in(font, text, size, scale)
     }
 
     /// Draw `text` centred in a logical rectangle.
@@ -454,7 +636,9 @@ impl Painter {
         );
     }
 
-    /// The marks after a branch: a dot for uncommitted changes, then arrows
+    /// The marks after a branch: a red cross for a merge, rebase or the
+    /// like stopped half-way or a conflicted file, a dot for uncommitted
+    /// changes, then arrows
     /// with the commits ahead of and behind the upstream. Drawn from `x` in
     /// the band `(top, height)`, as far as `max_x` leaves room. Returns where
     /// they end.
@@ -486,6 +670,12 @@ impl Painter {
             Some(x + w)
         };
         let mut x = x;
+        if git.op.is_some() || git.changes.iter().any(Change::conflicted) {
+            let Some(end) = mark(c, x, p.error, &|x, y| cross(x, y, 0.85 * s) - 0.3 * s) else {
+                return x;
+            };
+            x = end;
+        }
         if git.dirty {
             let Some(end) = mark(c, x, p.warning, &|x, y| x.hypot(y) - 2.5 * s) else {
                 return x;
@@ -529,47 +719,7 @@ impl Painter {
         color: Rgb,
     ) -> f32 {
         let Some(font) = &self.font else { return x };
-        let scaled = font.as_scaled(PxScale::from(size * scale as f32));
-        // Centre on the cap height; the font's ascent/descent include line gap padding.
-        let cap_height = font
-            .outline_glyph(scaled.scaled_glyph('H'))
-            .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
-        let baseline = (top as f32 + (height as f32 + cap_height) / 2.0).round();
-
-        let (mut shown, mut cut) = (text, false);
-        if x + self.text_width(text, size, scale) > max_x {
-            // The longest start of `text` that fits with an ellipsis after it.
-            let ellipsis = self.text_width("…", size, scale);
-            let mut width = 0.0;
-            let mut end = 0;
-            for (i, ch) in text.char_indices() {
-                width += scaled.h_advance(scaled.glyph_id(ch));
-                if x + width + ellipsis > max_x {
-                    break;
-                }
-                end = i + ch.len_utf8();
-            }
-            (shown, cut) = (&text[..end], true);
-        }
-
-        let mut pen = x;
-        for ch in shown.chars().chain(cut.then_some('…')) {
-            let id = scaled.glyph_id(ch);
-            let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
-            pen += scaled.h_advance(id);
-            if let Some(outline) = font.outline_glyph(glyph) {
-                let bounds = outline.px_bounds();
-                outline.draw(|gx, gy, coverage| {
-                    c.blend(
-                        bounds.min.x as i32 + gx as i32,
-                        bounds.min.y as i32 + gy as i32,
-                        color,
-                        coverage,
-                    );
-                });
-            }
-        }
-        pen
+        text_in(font, c, text, size, x, max_x, (top, height), scale, color)
     }
 
     /// The byte of `line`, drawn by `edit_line` between `x` and `max_x`,
@@ -641,8 +791,50 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use super::Painter;
+    use super::{Canvas, Painter};
+    use crate::chrome::{Check, Theme};
+    use crate::git::{Change, GitStatus, InProgress};
     use crate::text_field::Line;
+
+    #[test]
+    fn a_conflict_or_an_operation_half_done_adds_a_mark_before_the_dirty_dot() {
+        let painter = Painter::new();
+        let p = Theme::Dark.palette();
+        let end = |git: &GitStatus| {
+            let mut c = Canvas::new((200, 30).into());
+            painter.git_marks(&mut c, git, 0.0, 200.0, (0, 30), 1.0, p)
+        };
+        let dirty = GitStatus {
+            dirty: true,
+            ..GitStatus::default()
+        };
+        let conflicted = GitStatus {
+            changes: vec![Change {
+                path: "a.rs".into(),
+                orig: None,
+                code: 'U',
+            }],
+            ..dirty.clone()
+        };
+        let merging = GitStatus {
+            op: Some(InProgress::Merge),
+            ..dirty.clone()
+        };
+        assert!(end(&conflicted) > end(&dirty));
+        assert_eq!(end(&merging), end(&conflicted));
+    }
+
+    #[test]
+    fn a_checkbox_ends_after_its_box_whatever_its_state() {
+        let painter = Painter::new();
+        let p = Theme::Light.palette();
+        let rect = smithay::utils::Rectangle::new((10, 0).into(), (100, 24).into());
+        for state in [Check::Off, Check::On, Check::Partial] {
+            let mut c = Canvas::new((120, 24).into());
+            let end = painter.checkbox(&mut c, rect, state, false, 1.0, p);
+            assert_eq!(end, (10 + super::CHECKBOX_SIZE) as f32);
+        }
+    }
 
     #[test]
     fn a_click_puts_the_caret_by_the_nearest_character() {

@@ -1,10 +1,10 @@
 //! The quit dialog over everything.
 
 use super::{
-    BUTTON_RADIUS, CAP_RADIUS, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_SIZE, CHECKBOX_WIDTH, Canvas,
-    FONT_SIZE, HELP_RADIUS, LABEL_FONT_SIZE, Painter, Palette, QUIT_BODY, QUIT_BUTTON,
-    QUIT_BUTTON_GAP, QUIT_BUTTONS, QUIT_HEIGHT, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
-    QUIT_WIDTH, Rect, SHADOW, band, check, coverage, focus_ring, mix, phys, physical, rect_px,
+    BUTTON_RADIUS, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_WIDTH, Canvas, Check, FONT_SIZE,
+    HELP_RADIUS, LABEL_FONT_SIZE, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
+    QUIT_BUTTONS, QUIT_HEIGHT, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, QUIT_WIDTH, Rect, SHADOW,
+    band, focus_ring, mix, phys, physical, rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -138,39 +138,14 @@ impl Painter {
 
         // The checkbox: an outlined square, filled with a check mark when checked.
         let checkbox = shift(layout.checkbox);
-        let side = px(CHECKBOX_SIZE) as f32;
-        let (bx, by) = (
-            px(checkbox.loc.x) as f32,
-            (px(checkbox.loc.y) as f32 + (px(checkbox.size.h) as f32 - side) / 2.0).round(),
-        );
-        let (b, r) = (px(1).max(1) as f32, CAP_RADIUS * s);
         let hovered = view.hover == Some(QuitHit::Checkbox);
-        if view.dont_ask {
-            let fill = if hovered {
-                mix(p.accent, p.text, 0.12)
-            } else {
-                p.accent
-            };
-            c.rounded(bx, by, side, side, r, fill);
-            let (cx, cy) = (bx + side / 2.0, by + side / 2.0);
-            c.paint_in(
-                bx as i32,
-                by as i32,
-                side as i32,
-                side as i32,
-                p.on_accent,
-                |x, y| coverage(check(x - cx, y - cy, s)),
-            );
-        } else {
-            c.rounded(bx, by, side, side, r, p.border);
-            let inner = if hovered { p.selected } else { p.elevated };
-            c.rounded(bx + b, by + b, side - 2.0 * b, side - 2.0 * b, r - b, inner);
-        }
+        let state = if view.dont_ask { Check::On } else { Check::Off };
+        let box_end = self.checkbox(&mut c, checkbox, state, hovered, scale, p);
         self.text(
             &mut c,
             "Don't ask again",
             FONT_SIZE,
-            bx + side + (CHECKBOX_GAP as f32 * s).round(),
+            box_end + (CHECKBOX_GAP as f32 * s).round(),
             phys(checkbox, scale).1,
             band(checkbox, scale),
             scale,
@@ -178,6 +153,7 @@ impl Painter {
         );
 
         // The buttons; the last, the default, in the accent.
+        let b = px(1).max(1) as f32;
         for (i, (rect, (label, _))) in layout.buttons.iter().zip(QUIT_BUTTONS).enumerate() {
             let rect = shift(*rect);
             let (x, y, w, h) = rect_px(rect, scale);
