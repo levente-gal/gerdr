@@ -16,12 +16,13 @@ use super::{
     CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, Density,
     FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
     LABEL_FONT_SIZE, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_BOTTOM, ROW_HEIGHT,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_RADIUS, ROW_TITLE_HEIGHT, ROWS_TOP, Rect,
-    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, band,
-    chevron_down, cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical, rect_px,
-    status_mark, terminal,
+    ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROW_TITLE_HEIGHT,
+    ROWS_TOP, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView,
+    app, band, chevron_down, cross, distinct, folder, git_branch, icon_sdf, mix, new_tab, physical,
+    rect_px, status_mark, terminal,
 };
 use crate::WorkspaceKind;
+use crate::app_icons::AppIcon;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
@@ -273,6 +274,8 @@ pub struct WorkspaceView {
     /// How many tabs it has and what runs in them; empty without herdr.
     /// The tab strip shows this, so the row leaves it to its tooltip.
     pub activity: String,
+    /// The app icon its row shows in place of its kind's, if any.
+    pub icon: Option<AppIcon>,
 }
 
 impl WorkspaceView {
@@ -315,6 +318,7 @@ impl WorkspaceView {
             git: None,
             place,
             activity,
+            icon: None,
         }
     }
 
@@ -798,6 +802,12 @@ impl Painter {
                 WorkspaceKind::Terminal => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
                     terminal(x, y, small)
                 }),
+                WorkspaceKind::Cursor => match &ws.icon {
+                    Some(picture) => {
+                        c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
+                    }
+                    None => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
+                },
             }
             let name_x = px(row.name.loc.x) as f32;
             let name_end = px(row.name.loc.x + row.name.size.w) as f32;
@@ -1426,6 +1436,7 @@ mod tests {
             git: None,
             place: String::new(),
             activity: String::new(),
+            icon: None,
         }
     }
 

@@ -14,7 +14,8 @@
 //! `own_instance`), kept between runs: logins, bookmarks and settings there
 //! are apart from the desktop's. A Firefox locks its profile, so gerdr's
 //! runs under a name of its own, and the next ones hand their window to it:
-//! that window is told by its app_id.
+//! that window is told by its app_id. A project runs one VS Code of a kind:
+//! starting it again shows the one running (see `running_vs_code`).
 //!
 //! Ghostty and Alacritty can open all their windows from one process.
 //! gerdr keeps one of each for the project shown, apart from the desktop's
@@ -34,8 +35,8 @@ use std::{
 use smithay::reexports::calloop::channel;
 
 use crate::{
-    Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, desktop, home_dir, layout,
-    state_dir,
+    Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, desktop, home_dir, hooks,
+    layout, state_dir,
 };
 
 /// The start of the class of the Ghostty gerdr keeps (see `Gerdr::shared_name`),
@@ -49,6 +50,13 @@ pub const ALACRITTY_APP_ID: &str = "dev.gerdr.terminal";
 /// The start of the app_id gerdr's Firefox windows are told by (and of the
 /// name it hands windows by), followed by the browser's program.
 const BROWSER_APP_ID: &str = "dev.gerdr.browser";
+
+/// The program of Cursor, which a project keeps a workspace of its own for
+/// (see `Gerdr::open_cursor`).
+const CURSOR: &str = "cursor";
+
+/// The name of the Cursor workspace.
+const CURSOR_WORKSPACE: &str = "Cursor";
 
 /// How many typed commands the run prompt remembers.
 const HISTORY_LEN: usize = 100;
@@ -90,11 +98,16 @@ impl Gerdr {
         if command.trim().is_empty() {
             return;
         }
+        if let Some((w, t, leaf)) = self.running_vs_code(command) {
+            return self.show_leaf(w, t, leaf);
+        }
+        // Cursor goes to the project's workspace of its own.
+        if program_name(command).as_deref() == Some(CURSOR) {
+            return self.open_cursor(Some(command));
+        }
         if self.workspaces.is_empty() {
-            self.workspaces.push(Workspace::new(
-                home_dir().unwrap_or_default(),
-                WorkspaceKind::Terminal,
-            ));
+            let ws = self.new_workspace(home_dir().unwrap_or_default(), WorkspaceKind::Terminal);
+            self.workspaces.push(ws);
             self.active_workspace = 0;
         }
         let w = self.active_workspace;
@@ -138,6 +151,15 @@ impl Gerdr {
         let original = command.trim();
         let ws = self.workspaces.get(w)?;
         ws.tabs.get(t)?;
+        // A restored leaf for a second VS Code of the project goes (see
+        // `running_vs_code`).
+        if let Some(id) = leaf
+            && self.running_vs_code(original).is_some()
+        {
+            layout::remove(&mut self.workspaces[w].tabs[t].layout, id);
+            return None;
+        }
+        let ws = &self.workspaces[w];
         let app_id = self.prepare(original, &ws.dir).app_id;
         let queued = !app_id.is_empty();
         let pid = if queued {
@@ -174,6 +196,101 @@ impl Gerdr {
             self.prune();
         }
         waiting.then_some(id)
+    }
+
+    /// Where the shown project already runs the VS Code `command` starts
+    /// (see `vs_code_of`), or waits for its window: its workspace, tab and
+    /// leaf. A second one would only open an editor window of the same copy
+    /// (for Cursor, not its Agents window), so a project keeps one.
+    fn running_vs_code(&self, command: &str) -> Option<(usize, usize, u32)> {
+        let key = vs_code_of(command)?;
+        let same = |c: &Option<String>| c.as_deref().and_then(vs_code_of).as_ref() == Some(&key);
+        self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+                let shown = tab
+                    .panes
+                    .iter()
+                    .find(|p| same(&p.app_command))
+                    .map(|p| p.id);
+                let waiting = || {
+                    tab.expected
+                        .iter()
+                        .find(|e| same(&e.app_command))
+                        .map(|e| e.pane)
+                };
+                Some((w, t, shown.or_else(waiting)?))
+            })
+        })
+    }
+
+    /// Show the shown project's Cursor, else start `command` (the installed
+    /// Cursor without one) in a new tab of its Cursor workspace, else in a
+    /// new one called "Cursor", in the project's folder. The workspace
+    /// takes splits and tabs like any other.
+    pub fn open_cursor(&mut self, command: Option<&str>) {
+        let command = command
+            .map(str::to_owned)
+            .or_else(|| self.installed_cursor().map(|app| app.command.clone()))
+            .unwrap_or_else(|| CURSOR.to_owned());
+        if let Some((w, t, leaf)) = self.running_vs_code(&command) {
+            return self.show_leaf(w, t, leaf);
+        }
+        let existing = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.kind == WorkspaceKind::Cursor);
+        let w = existing.unwrap_or_else(|| {
+            let dir = self
+                .project
+                .as_deref()
+                .and_then(|id| self.projects.project(id))
+                .map(hooks::project_dir)
+                .or_else(home_dir)
+                .unwrap_or_default();
+            let mut ws = Workspace::new(dir, WorkspaceKind::Cursor);
+            ws.name = CURSOR_WORKSPACE.to_owned();
+            ws.record = self.remember_workspace(&ws.name, ws.kind, &ws.dir, None);
+            self.workspaces.push(ws);
+            self.workspaces.len() - 1
+        });
+        let record = self.workspaces[w].record.clone();
+        let ws = &mut self.workspaces[w];
+        ws.tabs.push(Tab::default());
+        ws.active_tab = ws.tabs.len() - 1;
+        self.active_workspace = w;
+        let t = ws.active_tab;
+        if self.launch_into(w, t, None, &command).is_none()
+            && existing.is_none()
+            && self.workspaces.iter().all(|ws| ws.record != record)
+        {
+            self.forget_workspace(&record);
+        }
+        self.show_active();
+    }
+
+    /// The installed Cursor, if any.
+    fn installed_cursor(&self) -> Option<&App> {
+        self.installed_apps
+            .iter()
+            .find(|app| program_name(&app.command).as_deref() == Some(CURSOR))
+    }
+
+    /// The installed Cursor's icon, for its workspace's row.
+    pub fn cursor_icon(&self) -> Option<AppIcon> {
+        self.installed_cursor()?.icon.clone()
+    }
+
+    /// Show tab `t` of workspace `w` with the pane in `leaf` focused, or
+    /// its placeholder while the window is on its way.
+    fn show_leaf(&mut self, w: usize, t: usize, leaf: u32) {
+        self.active_workspace = w;
+        let ws = &mut self.workspaces[w];
+        ws.active_tab = t;
+        let tab = &mut ws.tabs[t];
+        if let Some(window) = tab.window(leaf).cloned() {
+            tab.focused = Some(window);
+        }
+        self.show_active();
     }
 
     /// Start the first queued window of each app whose windows are told by
@@ -654,6 +771,12 @@ pub fn program_name(command: &str) -> Option<String> {
     program(command).map(|(name, ..)| name)
 }
 
+/// The VS Code `command` starts (`cursor`, `code`…), by program, if any:
+/// one copy runs gerdr's profile and the next ones hand it their window.
+fn vs_code_of(command: &str) -> Option<String> {
+    program_name(command).filter(|key| VS_CODES.contains(&key.as_str()))
+}
+
 /// `command` changed to start a copy of its own of an app that hands new
 /// windows to a running one: a browser or a VS Code with gerdr's profile
 /// for it, a Zed with gerdr's data dir (see `zed_data_dir`), and that
@@ -825,9 +948,24 @@ mod tests {
 
     use super::{
         alacritty_command, ghostty_command, lineage, log_path, opens_nothing_in_zed, own_instance,
-        web_app,
+        vs_code_of, web_app,
     };
     use crate::home_dir;
+
+    #[test]
+    fn vs_codes_by_program() {
+        assert_eq!(
+            vs_code_of("/usr/share/cursor/cursor").as_deref(),
+            Some("cursor")
+        );
+        assert_eq!(vs_code_of("cursor --glass .").as_deref(), Some("cursor"));
+        assert_eq!(
+            vs_code_of("flatpak run com.visualstudio.code").as_deref(),
+            Some("com.visualstudio.code")
+        );
+        assert_eq!(vs_code_of("zed ."), None);
+        assert_eq!(vs_code_of("ghostty -e htop"), None);
+    }
 
     #[test]
     fn lineage_goes_up() {

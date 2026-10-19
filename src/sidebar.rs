@@ -201,7 +201,7 @@ impl Gerdr {
         let agents = self.agent_views();
         match hit? {
             SidebarHit::Plus => {
-                let tip = Tooltip::new("New terminal, folder or project", layout.plus);
+                let tip = Tooltip::new("New terminal, folder, project or Cursor", layout.plus);
                 let help = self.keymap.help();
                 let keys: Vec<_> = ["terminal workspace in home", "open project"]
                     .into_iter()
@@ -343,6 +343,7 @@ impl Gerdr {
                     MenuItem::new("New project…", MenuAction::NewProject),
                     "open project",
                 ),
+                MenuItem::new("New Cursor", MenuAction::NewCursor),
             ],
         }
     }

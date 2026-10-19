@@ -131,9 +131,9 @@ impl Gerdr {
             return;
         };
         ws.name = name.clone();
-        let herdr_id = ws.herdr_id().map(str::to_owned);
-        if let Some((project, herdr_id)) = self.project.clone().zip(herdr_id)
-            && let Some(record) = self.projects.record_mut(&project, &herdr_id)
+        let id = ws.record.clone();
+        if let Some(project) = self.project.clone()
+            && let Some(record) = self.projects.record_mut(&project, &id)
             && record.label != name
         {
             record.label = name;

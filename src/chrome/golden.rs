@@ -47,6 +47,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             }),
             place: "gerdr, gerdr/src".into(),
             activity: "2 tabs · claude working, zsh".into(),
+            icon: None,
         },
         WorkspaceView {
             name: "~".into(),
@@ -56,6 +57,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             git: None,
             place: String::new(),
             activity: String::new(),
+            icon: None,
         },
     ]
 }

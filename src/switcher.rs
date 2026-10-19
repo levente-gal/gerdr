@@ -862,8 +862,12 @@ impl Gerdr {
             .into_iter()
             .flatten()
             .collect();
+            let icon = match view.icon {
+                Some(picture) => ItemIcon::Picture(picture),
+                None => ItemIcon::Workspace(ws.kind),
+            };
             items.push(Item::new(
-                ItemIcon::Workspace(ws.kind),
+                icon,
                 ws.name.clone(),
                 detail.join(" · "),
                 Target::Workspace(w),
@@ -1301,7 +1305,8 @@ mod tests {
 
     fn project(id: &str, last_used: u64, workspaces: usize) -> Project {
         let record = crate::projects::WorkspaceRecord {
-            herdr_id: "w1".into(),
+            id: "w1".into(),
+            herdr_id: Some("w1".into()),
             label: id.into(),
             kind: crate::projects::Kind::Project,
             dir: PathBuf::from("/tmp"),

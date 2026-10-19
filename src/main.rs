@@ -158,6 +158,9 @@ const FORGET_IDLE: Duration = Duration::from_secs(10);
 /// they are saved again: windows closing as the machine shuts down mustn't
 /// count.
 const TABS_SETTLE: Duration = Duration::from_secs(3);
+/// How often the workspace records are brought up to date (see
+/// `Gerdr::keep_records`).
+const RECORDS_INTERVAL: Duration = Duration::from_secs(1);
 /// How long the windows of a project switched away from (or of gerdr
 /// quitting) have to close, say to save their work, before their processes
 /// are ended.
@@ -770,11 +773,13 @@ pub enum PickFor {
     Venv { project: String, workspace: String },
 }
 
-/// What a workspace opens with: Zed over a terminal, or just a terminal.
+/// What a workspace opens with: Zed over a terminal, just a terminal, or
+/// the project's Cursor (see `Gerdr::open_cursor`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceKind {
     Project,
     Terminal,
+    Cursor,
 }
 
 impl WorkspaceKind {
@@ -782,6 +787,7 @@ impl WorkspaceKind {
         match kind {
             projects::Kind::Project => Self::Project,
             projects::Kind::Terminal => Self::Terminal,
+            projects::Kind::Cursor => Self::Cursor,
         }
     }
 
@@ -789,6 +795,7 @@ impl WorkspaceKind {
         match self {
             Self::Project => projects::Kind::Project,
             Self::Terminal => projects::Kind::Terminal,
+            Self::Cursor => projects::Kind::Cursor,
         }
     }
 }
@@ -802,6 +809,9 @@ pub struct Workspace {
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// The id of the shown project's record of it (see
+    /// `Gerdr::new_workspace`); empty without a project.
+    pub record: String,
 }
 
 impl Workspace {
@@ -828,6 +838,7 @@ impl Workspace {
             name,
             tabs: Vec::new(),
             active_tab: 0,
+            record: String::new(),
         }
     }
 }
@@ -1141,6 +1152,12 @@ pub struct Gerdr {
     /// Since when each workspace herdr said closed has been, by herdr id:
     /// forgotten only after a while, so a server going down doesn't count.
     pub closed_workspaces: HashMap<String, Instant>,
+    /// Since when each record without a herdr workspace has had no
+    /// workspace open, by id (see `keep_records`).
+    pub gone_since: HashMap<String, Instant>,
+    /// The records of the workspaces closed on purpose, to forget once
+    /// they are gone (see `keep_records`).
+    pub closing_records: HashSet<String>,
     /// When the shown project's server was restarted and brought its
     /// workspaces back, if it was.
     pub restored_at: Option<Instant>,
@@ -1428,6 +1445,7 @@ impl Gerdr {
             .map(|p| p.pane_id.clone());
         let workspace_id = ws.herdr_id().map(str::to_owned);
         let (dir, name, kind) = (ws.dir.clone(), ws.name.clone(), ws.kind);
+        let record = ws.record.clone();
         let new_workspace = target.is_none() && workspace_id.is_none();
         let herdr = self.herdr.as_mut()?;
         let pane = match (target, workspace_id) {
@@ -1442,11 +1460,11 @@ impl Gerdr {
             .ok()?;
         let socket = herdr.socket().to_path_buf();
         if new_workspace {
-            self.remember_workspace(&pane.workspace_id, &name, kind, &dir);
+            self.mirror_herdr(&record, &pane.workspace_id);
         }
         // The new shell gets the workspace's venv.
         let venv = self
-            .workspace_record(&pane.workspace_id)
+            .herdr_record(&pane.workspace_id)
             .map(|r| r.venv.clone())
             .unwrap_or_default();
         let prep = prepare::Prep {
@@ -1463,31 +1481,55 @@ impl Gerdr {
     }
 
     /// The shown project's record of herdr workspace `herdr_id`.
-    fn workspace_record(&self, herdr_id: &str) -> Option<&WorkspaceRecord> {
+    fn herdr_record(&self, herdr_id: &str) -> Option<&WorkspaceRecord> {
         let project = self.projects.project(self.project.as_deref()?)?;
-        project.workspaces.iter().find(|r| r.herdr_id == herdr_id)
+        project.herdr_record(herdr_id)
+    }
+
+    /// The shown project's record `id`.
+    fn record(&self, id: &str) -> Option<&WorkspaceRecord> {
+        let project = self.projects.project(self.project.as_deref()?)?;
+        project.workspaces.iter().find(|r| r.id == id)
     }
 
     /// The shown project's record of herdr pane `pane`.
     fn pane_record(&self, pane: &herdr::PaneInfo) -> Option<&PaneRecord> {
-        let record = self.workspace_record(&pane.workspace_id)?;
+        let record = self.herdr_record(&pane.workspace_id)?;
         record.panes.iter().find(|r| r.pane_id == pane.pane_id)
     }
 
-    /// Add herdr workspace `herdr_id` to the shown project, unless it has it.
-    fn remember_workspace(&mut self, herdr_id: &str, label: &str, kind: WorkspaceKind, dir: &Path) {
+    /// A new workspace of `kind` in `dir`, with a record of it in the shown
+    /// project, for it to come back after a restart whatever it holds.
+    fn new_workspace(&mut self, dir: PathBuf, kind: WorkspaceKind) -> Workspace {
+        let mut ws = Workspace::new(dir, kind);
+        ws.record = self.remember_workspace(&ws.name, kind, &ws.dir, None);
+        ws
+    }
+
+    /// Add a workspace to the shown project's records, mirroring herdr
+    /// workspace `herdr_id` if given (the one there already is, if any):
+    /// the record's id; empty without a project.
+    fn remember_workspace(
+        &mut self,
+        label: &str,
+        kind: WorkspaceKind,
+        dir: &Path,
+        herdr_id: Option<&str>,
+    ) -> String {
         let Some(project) = self
             .project
             .clone()
             .and_then(|id| self.projects.project_mut(&id))
         else {
-            return;
+            return String::new();
         };
-        if project.workspaces.iter().any(|r| r.herdr_id == herdr_id) {
-            return;
+        if let Some(record) = herdr_id.and_then(|id| project.herdr_record(id)) {
+            return record.id.clone();
         }
+        let id = project.new_workspace_id();
         project.workspaces.push(WorkspaceRecord {
-            herdr_id: herdr_id.to_owned(),
+            id: id.clone(),
+            herdr_id: herdr_id.map(str::to_owned),
             label: label.to_owned(),
             kind: kind.to_record(),
             dir: dir.to_path_buf(),
@@ -1496,6 +1538,36 @@ impl Gerdr {
             panes: Vec::new(),
         });
         self.projects.save();
+        id
+    }
+
+    /// Forget the shown project's record `id`.
+    fn forget_workspace(&mut self, id: &str) {
+        if let Some(project) = self
+            .project
+            .clone()
+            .and_then(|p| self.projects.project_mut(&p))
+        {
+            let before = project.workspaces.len();
+            project.workspaces.retain(|r| r.id != id);
+            if project.workspaces.len() != before {
+                self.projects.save();
+            }
+        }
+    }
+
+    /// Record `id` of the shown project mirrors herdr workspace
+    /// `herdr_id` from now on.
+    fn mirror_herdr(&mut self, id: &str, herdr_id: &str) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        if let Some(record) = self.projects.record_mut(&project, id)
+            && !record.mirrors(herdr_id)
+        {
+            record.herdr_id = Some(herdr_id.to_owned());
+            self.projects.save();
+        }
     }
 
     /// Show herdr pane `pane` in an Alacritty window.
@@ -1542,7 +1614,8 @@ impl Gerdr {
         let subscribed = herdr.subscribe();
         let socket = herdr.socket().to_path_buf();
         self.herdr = Some(herdr);
-        // Forget the workspaces closed while gerdr wasn't looking. An empty
+        // Let go of the workspaces closed while gerdr wasn't looking: their
+        // apps come back without them (see `restore_saved`). An empty
         // list may be a server still restoring: keep them then, unless it
         // had nothing saved to restore (its new workspaces would take the
         // ids of the old ones). A restarted one must have brought back all
@@ -1558,11 +1631,16 @@ impl Gerdr {
                 .clone()
                 .and_then(|id| self.projects.project_mut(&id))
         {
-            let before = project.workspaces.len();
-            project
-                .workspaces
-                .retain(|r| workspaces.iter().any(|ws| ws.workspace_id == r.herdr_id));
-            if project.workspaces.len() != before {
+            let mut changed = false;
+            for record in &mut project.workspaces {
+                if let Some(id) = &record.herdr_id
+                    && workspaces.iter().all(|ws| ws.workspace_id != *id)
+                {
+                    record.herdr_id = None;
+                    changed = true;
+                }
+            }
+            if changed {
                 self.projects.save();
             }
         }
@@ -1581,6 +1659,7 @@ impl Gerdr {
         for ws in &workspaces {
             self.sync_herdr_workspace(&ws.workspace_id);
         }
+        self.restore_saved(false);
         if start == herdr::Start::Restored {
             self.restored_at = Some(Instant::now());
             self.replay_pending = self
@@ -1590,7 +1669,7 @@ impl Gerdr {
                 .map_or_else(HashSet::new, |p| {
                     p.workspaces
                         .iter()
-                        .map(|r| r.herdr_id.clone())
+                        .filter_map(|r| r.herdr_id.clone())
                         .filter(|id| workspaces.iter().all(|ws| ws.workspace_id != *id))
                         .collect()
                 });
@@ -1665,8 +1744,7 @@ impl Gerdr {
             let order = herdr.tab_list(&ws.workspace_id).unwrap_or_default();
             let panes = herdr.pane_list(&ws.workspace_id).unwrap_or_default();
             let live: HashSet<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
-            let record =
-                project.and_then(|p| p.workspaces.iter().find(|r| r.herdr_id == ws.workspace_id));
+            let record = project.and_then(|p| p.herdr_record(&ws.workspace_id));
             for pane in &panes {
                 let tab = order.iter().position(|t| *t == pane.tab_id).unwrap_or(0);
                 let index = panes
@@ -1746,7 +1824,7 @@ impl Gerdr {
                 label,
             } => {
                 if let Some(project) = self.project.clone()
-                    && let Some(record) = self.projects.record_mut(&project, &workspace_id)
+                    && let Some(record) = self.projects.herdr_record_mut(&project, &workspace_id)
                     && record.label != label
                 {
                     record.label = label.clone();
@@ -1888,7 +1966,7 @@ impl Gerdr {
                 if restoring && note == Note::Clear {
                     note = Note::Keep;
                 }
-                if let Some(record) = self.projects.record_mut(&project, &pane.workspace_id) {
+                if let Some(record) = self.projects.herdr_record_mut(&project, &pane.workspace_id) {
                     let place = (detail.index, index);
                     changed |= note_pane(&mut record.panes, &pane.pane_id, place, note);
                 }
@@ -1918,14 +1996,36 @@ impl Gerdr {
             .map(String::as_str)
             .filter(|id| !seen_workspaces.contains(id))
             .collect();
+        // A workspace still open in gerdr, with its apps, keeps its record.
+        let open: HashSet<&str> = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.record.as_str())
+            .collect();
         // Panes gone from a workspace still there.
         if let Some(p) = self.projects.project_mut(&project) {
             let before = p.workspaces.len();
-            p.workspaces
-                .retain(|r| !closed.contains(r.herdr_id.as_str()));
+            p.workspaces.retain(|r| {
+                !r.herdr_id
+                    .as_deref()
+                    .is_some_and(|id| closed.contains(id) && !open.contains(r.id.as_str()))
+            });
             changed |= p.workspaces.len() != before;
             for record in &mut p.workspaces {
-                if !seen_workspaces.contains(record.herdr_id.as_str()) || restoring {
+                if record
+                    .herdr_id
+                    .as_deref()
+                    .is_some_and(|id| closed.contains(id))
+                {
+                    record.herdr_id = None;
+                    record.panes.clear();
+                    changed = true;
+                }
+                let seen = record
+                    .herdr_id
+                    .as_deref()
+                    .is_some_and(|id| seen_workspaces.contains(id));
+                if !seen || restoring {
                     continue;
                 }
                 let before = record.panes.len();
@@ -1947,12 +2047,6 @@ impl Gerdr {
             self.idle_since
                 .retain(|id, _| live.contains(id.as_str()) || recorded.contains(id.as_str()));
         }
-        if self.changed_tabs().is_empty() {
-            self.tabs_changed = None;
-        } else if now - *self.tabs_changed.get_or_insert(now) >= TABS_SETTLE {
-            changed |= self.record_tabs();
-        }
-        changed |= self.record_workspace_order();
         if changed {
             self.projects.save();
         }
@@ -1961,17 +2055,93 @@ impl Gerdr {
         }
     }
 
+    /// Keep the shown project's records up to date with its workspaces,
+    /// herdr or not, every `RECORDS_INTERVAL`.
+    fn watch_records(&mut self) {
+        let timer = Timer::from_duration(RECORDS_INTERVAL);
+        let keep = |_, _: &mut (), state: &mut Gerdr| {
+            state.keep_records();
+            TimeoutAction::ToDuration(RECORDS_INTERVAL)
+        };
+        if let Err(err) = self.loop_handle.insert_source(timer, keep) {
+            tracing::warn!("keeping workspace records: {err}");
+        }
+    }
+
+    /// Remember the shown project's tab layouts once they settled and its
+    /// workspaces' order; mirror the herdr workspaces they took on; forget
+    /// a record without one once its workspace has been gone `FORGET_IDLE`,
+    /// and any once its workspace closed on purpose is gone.
+    fn keep_records(&mut self) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        let mut changed = false;
+        if self.changed_tabs().is_empty() {
+            self.tabs_changed = None;
+        } else if now - *self.tabs_changed.get_or_insert(now) >= TABS_SETTLE {
+            changed |= self.record_tabs();
+        }
+        changed |= self.record_workspace_order();
+        let mirrored: Vec<(String, String)> = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| Some((ws.record.clone(), ws.herdr_id()?.to_owned())))
+            .collect();
+        for (id, herdr_id) in mirrored {
+            self.mirror_herdr(&id, &herdr_id);
+        }
+        let restoring = self.restoring();
+        let open: HashSet<&str> = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.record.as_str())
+            .collect();
+        let closed: Vec<String> = self
+            .closing_records
+            .extract_if(|id| !open.contains(id.as_str()))
+            .collect();
+        if let Some(p) = self.projects.project_mut(&project)
+            && !closed.is_empty()
+        {
+            p.workspaces.retain(|r| !closed.contains(&r.id));
+            changed = true;
+        }
+        let gone: Vec<String> = self.projects.project(&project).map_or(Vec::new(), |p| {
+            p.workspaces
+                .iter()
+                .filter(|r| r.herdr_id.is_none() && !open.contains(r.id.as_str()))
+                .map(|r| r.id.clone())
+                .collect()
+        });
+        self.gone_since.retain(|id, _| gone.contains(id));
+        for id in gone {
+            let since = *self.gone_since.entry(id.clone()).or_insert(now);
+            if now - since >= FORGET_IDLE && !restoring {
+                self.gone_since.remove(&id);
+                if let Some(p) = self.projects.project_mut(&project) {
+                    p.workspaces.retain(|r| r.id != id);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.projects.save();
+        }
+    }
+
     /// The tab layouts of the shown project's workspaces that differ from
-    /// what was saved of them, by herdr workspace id.
+    /// what was saved of them, by record id.
     fn changed_tabs(&self) -> Vec<(String, Vec<TabRecord>)> {
         let mut changed = Vec::new();
         for ws in &self.workspaces {
-            let Some(record) = ws.herdr_id().and_then(|id| self.workspace_record(id)) else {
+            let Some(record) = self.record(&ws.record) else {
                 continue;
             };
             let tabs: Vec<TabRecord> = ws.tabs.iter().filter_map(Tab::save).collect();
             if record.tabs != tabs {
-                changed.push((record.herdr_id.clone(), tabs));
+                changed.push((record.id.clone(), tabs));
             }
         }
         changed
@@ -1986,8 +2156,8 @@ impl Gerdr {
             return false;
         };
         let any = !changed.is_empty();
-        for (herdr_id, tabs) in changed {
-            if let Some(record) = self.projects.record_mut(&project, &herdr_id) {
+        for (id, tabs) in changed {
+            if let Some(record) = self.projects.record_mut(&project, &id) {
                 record.tabs = tabs;
             }
         }
@@ -2003,7 +2173,7 @@ impl Gerdr {
         let order: Vec<&str> = self
             .workspaces
             .iter()
-            .filter_map(Workspace::herdr_id)
+            .map(|ws| ws.record.as_str())
             .collect();
         self.projects.order_workspaces(project, &order)
     }
@@ -2407,10 +2577,15 @@ impl Gerdr {
         if panes.is_empty() {
             return;
         }
-        let existing = self
-            .workspaces
-            .iter()
-            .position(|ws| ws.herdr_id() == Some(workspace_id));
+        // Or the one whose record it is, back after its panes went.
+        let mirroring = self
+            .project
+            .as_deref()
+            .and_then(|p| self.projects.project(p)?.herdr_record(workspace_id))
+            .map(|r| r.id.as_str());
+        let existing = self.workspaces.iter().position(|ws| {
+            ws.herdr_id() == Some(workspace_id) || Some(ws.record.as_str()) == mirroring
+        });
         let info = match existing {
             Some(_) => None,
             None => match herdr.workspace_get(workspace_id) {
@@ -2445,14 +2620,18 @@ impl Gerdr {
             tabs.push((tab_id, in_tab, cells));
         }
 
-        let record = self.workspace_record(workspace_id).cloned();
+        let record = self.herdr_record(workspace_id).cloned();
         let saved = record.as_ref().map_or(Vec::new(), |r| r.tabs.clone());
         let w = match existing {
             Some(w) => w,
             None => {
                 let info = info.unwrap();
-                let (dir, kind) = match &record {
-                    Some(record) => (record.dir.clone(), WorkspaceKind::from_record(record.kind)),
+                let (dir, kind, id) = match &record {
+                    Some(record) => (
+                        record.dir.clone(),
+                        WorkspaceKind::from_record(record.kind),
+                        record.id.clone(),
+                    ),
                     None => {
                         let dir = info
                             .dir()
@@ -2464,14 +2643,15 @@ impl Gerdr {
                         } else {
                             WorkspaceKind::Terminal
                         };
-                        self.remember_workspace(workspace_id, &info.label, kind, &dir);
-                        (dir, kind)
+                        let id =
+                            self.remember_workspace(&info.label, kind, &dir, Some(workspace_id));
+                        (dir, kind, id)
                     }
                 };
                 let mut ws = Workspace::new(dir, kind);
                 ws.name = info.label;
-                self.workspaces.push(ws);
-                self.workspaces.len() - 1
+                ws.record = id;
+                self.insert_workspace(ws)
             }
         };
         let dir = self.workspaces[w].dir.clone();
@@ -2569,29 +2749,9 @@ impl Gerdr {
         }
 
         if existing.is_none() {
-            // Tabs without terminals (Zed alone, apps) come back where they were.
-            for (i, saved_tab) in saved.iter().enumerate() {
-                if !saved_tab.layout.herdr_panes().is_empty() {
-                    continue;
-                }
-                let mut restored =
-                    restore_tab(&saved_tab.layout, &HashMap::new(), &mut self.next_pane);
-                let Some(layout) = restored.layout.take() else {
-                    continue;
-                };
-                restored_any = true;
-                let ws = &mut self.workspaces[w];
-                let t = i.min(ws.tabs.len());
-                ws.tabs.insert(
-                    t,
-                    Tab {
-                        layout: Some(layout),
-                        label: saved_tab.label.clone(),
-                        ..Default::default()
-                    },
-                );
-                zed_expected |= self.fill_restored(w, t, restored);
-            }
+            let (restored, zed) = self.restore_app_tabs(w, &saved, false);
+            restored_any |= restored;
+            zed_expected |= zed;
             let ws = &mut self.workspaces[w];
             if let Some(t) = focused_tab
                 .and_then(|id| ws.tabs.iter().position(|t| t.herdr_tab_id() == Some(&id)))
@@ -2632,6 +2792,105 @@ impl Gerdr {
         self.arrange();
     }
 
+    /// Bring back the saved tabs of workspace `w` without terminals (Zed
+    /// alone, apps) where they were; with `all`, the others too, without
+    /// their terminals. Whether any came back, and whether a Zed window was
+    /// queued.
+    fn restore_app_tabs(&mut self, w: usize, saved: &[TabRecord], all: bool) -> (bool, bool) {
+        let mut restored_any = false;
+        let mut zed_expected = false;
+        for (i, saved_tab) in saved.iter().enumerate() {
+            if !all && !saved_tab.layout.herdr_panes().is_empty() {
+                continue;
+            }
+            let mut restored = restore_tab(&saved_tab.layout, &HashMap::new(), &mut self.next_pane);
+            let Some(layout) = restored.layout.take() else {
+                continue;
+            };
+            restored_any = true;
+            let ws = &mut self.workspaces[w];
+            let t = i.min(ws.tabs.len());
+            ws.tabs.insert(
+                t,
+                Tab {
+                    layout: Some(layout),
+                    label: saved_tab.label.clone(),
+                    ..Default::default()
+                },
+            );
+            zed_expected |= self.fill_restored(w, t, restored);
+        }
+        (restored_any, zed_expected)
+    }
+
+    /// Bring back the shown project's workspaces herdr won't: those its
+    /// records keep without a herdr workspace (all of them, if `all`: herdr
+    /// isn't there), with their Zed and apps, minus their terminals, in
+    /// their place in the records' order. One with nothing else to bring
+    /// back is forgotten.
+    fn restore_saved(&mut self, all: bool) {
+        let Some(records) = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+        else {
+            return;
+        };
+        let records: Vec<WorkspaceRecord> = records
+            .workspaces
+            .iter()
+            .filter(|r| all || r.herdr_id.is_none())
+            .filter(|r| self.workspaces.iter().all(|ws| ws.record != r.id))
+            .cloned()
+            .collect();
+        let mut zed_expected = false;
+        for record in records {
+            if !record.tabs.iter().any(|t| t.layout.holds_apps()) {
+                if record.herdr_id.is_none() {
+                    self.forget_workspace(&record.id);
+                }
+                continue;
+            }
+            let mut ws =
+                Workspace::new(record.dir.clone(), WorkspaceKind::from_record(record.kind));
+            if !record.label.is_empty() {
+                ws.name = record.label.clone();
+            }
+            ws.record = record.id.clone();
+            let w = self.insert_workspace(ws);
+            zed_expected |= self.restore_app_tabs(w, &record.tabs, true).1;
+        }
+        if zed_expected {
+            self.launch_next_zed();
+        }
+        self.prune();
+        self.arrange();
+    }
+
+    /// Add `ws` in its record's place in the shown project's order (last
+    /// without one), keeping the active workspace; its index.
+    fn insert_workspace(&mut self, ws: Workspace) -> usize {
+        let order: Vec<&str> = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+            .map_or(Vec::new(), |p| {
+                p.workspaces.iter().map(|r| r.id.as_str()).collect()
+            });
+        let place = |id: &str| order.iter().position(|o| *o == id).unwrap_or(usize::MAX);
+        let mine = place(&ws.record);
+        let w = self
+            .workspaces
+            .iter()
+            .filter(|open| place(&open.record) <= mine)
+            .count();
+        if w <= self.active_workspace && w < self.workspaces.len() {
+            self.active_workspace += 1;
+        }
+        self.workspaces.insert(w, ws);
+        w
+    }
+
     /// Fill the leaves `restored` kept in tab `t` of workspace `w`: queue
     /// its Zed windows and launch its apps. Whether a Zed window was queued.
     fn fill_restored(&mut self, w: usize, t: usize, restored: RestoredTab) -> bool {
@@ -2667,7 +2926,7 @@ impl Gerdr {
             ..Default::default()
         };
         tab.expected.push(Expected::new(None, "zed", zed, true));
-        let mut ws = Workspace::new(dir, WorkspaceKind::Project);
+        let mut ws = self.new_workspace(dir, WorkspaceKind::Project);
         ws.tabs.push(tab);
         self.workspaces.push(ws);
         let w = self.workspaces.len() - 1;
@@ -2691,11 +2950,13 @@ impl Gerdr {
     pub fn open_terminal(&mut self, dir: PathBuf) {
         let dir = dir.canonicalize().unwrap_or(dir);
         switcher::remember(&dir);
-        self.workspaces
-            .push(Workspace::new(dir, WorkspaceKind::Terminal));
+        let ws = self.new_workspace(dir, WorkspaceKind::Terminal);
+        self.workspaces.push(ws);
         let w = self.workspaces.len() - 1;
         let Some((pid, herdr)) = self.start_terminal(w, None, Dir::Right) else {
-            self.workspaces.pop();
+            if let Some(ws) = self.workspaces.pop() {
+                self.forget_workspace(&ws.record);
+            }
             return;
         };
         let id = self.new_pane_id();
@@ -2821,7 +3082,7 @@ impl Gerdr {
             .or_else(home_dir);
         let title = match kind {
             WorkspaceKind::Project => "Open project folder",
-            WorkspaceKind::Terminal => "Open terminal folder",
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor => "Open terminal folder",
         };
         self.pick_folder(title, start, PickFor::Workspace(kind));
     }
@@ -2888,6 +3149,7 @@ impl Gerdr {
                 PickFor::Workspace(WorkspaceKind::Terminal) => {
                     self.open_terminal(PathBuf::from(path))
                 }
+                PickFor::Workspace(WorkspaceKind::Cursor) => self.open_cursor(None),
                 PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
                 PickFor::Venv { project, workspace } => {
                     self.set_venv(&project, &workspace, PathBuf::from(path))
@@ -2899,6 +3161,8 @@ impl Gerdr {
     /// Close every pane of the workspace; it goes away once their windows do.
     pub fn close_workspace(&mut self, idx: usize) {
         if let Some(ws) = self.workspaces.get(idx) {
+            // Closed on purpose: once gone, it doesn't come back.
+            self.closing_records.insert(ws.record.clone());
             let tabs: Vec<_> = ws.tabs.iter().map(Self::closing).collect();
             tabs.into_iter().for_each(|panes| self.close_panes(panes));
             for t in 0..self.workspaces[idx].tabs.len() {
@@ -3151,7 +3415,7 @@ impl Gerdr {
             .zip(project)
             .and_then(|(pane, project)| {
                 self.projects
-                    .record_mut(&project, &pane.workspace_id)?
+                    .herdr_record_mut(&project, &pane.workspace_id)?
                     .panes
                     .iter_mut()
                     .find(|r| r.pane_id == pane.pane_id)
@@ -3174,12 +3438,12 @@ impl Gerdr {
         self.toast(summary, Level::Info);
     }
 
-    /// The shown project and the active workspace's herdr workspace: whose
-    /// shells a venv setting is for.
+    /// The shown project and the active workspace's record: whose shells a
+    /// venv setting is for.
     fn venv_target(&self) -> Option<(String, String)> {
         let project = self.project.clone()?;
-        let workspace = self.workspace()?.herdr_id()?.to_owned();
-        self.projects.project(&project)?;
+        let workspace = self.workspace()?.record.clone();
+        self.record(&workspace)?;
         Some((project, workspace))
     }
 
@@ -3210,7 +3474,7 @@ impl Gerdr {
         let start = self
             .projects
             .project(&project)
-            .and_then(|p| p.workspaces.iter().find(|r| r.herdr_id == workspace))
+            .and_then(|p| p.workspaces.iter().find(|r| r.id == workspace))
             .map(|r| match &r.venv {
                 VenvSetting::Path(path) => r.dir.join(path),
                 _ => r.dir.clone(),
@@ -3611,10 +3875,8 @@ impl Gerdr {
     /// the focused pane of the current tab along its longer side.
     fn place_stray(&mut self, window: Window, stray: bool) {
         if self.workspaces.is_empty() {
-            self.workspaces.push(Workspace::new(
-                home_dir().unwrap_or_default(),
-                WorkspaceKind::Project,
-            ));
+            let ws = self.new_workspace(home_dir().unwrap_or_default(), WorkspaceKind::Project);
+            self.workspaces.push(ws);
             self.active_workspace = 0;
         }
         let w = self.active_workspace;
@@ -3926,6 +4188,9 @@ impl Gerdr {
             .map(|ws| {
                 let tabs = self.tab_views(ws);
                 let mut view = WorkspaceView::new(ws.name.clone(), ws.kind, &tabs);
+                if ws.kind == WorkspaceKind::Cursor {
+                    view.icon = self.cursor_icon();
+                }
                 if let Some(git) = self.git.get(&ws.dir) {
                     // Without herdr the panes don't report a branch: take the folder's.
                     view.branch = view.branch.or_else(|| {
@@ -4025,6 +4290,10 @@ impl Gerdr {
         self.projects.save();
         self.frecency.touch(&format!("project:{id}"));
         self.connect_herdr(&session);
+        // Without herdr, what comes back without it still does.
+        if self.herdr.is_none() {
+            self.restore_saved(true);
+        }
         self.running.insert(id.to_owned(), true);
         self.place_held(id);
         self.show_active();
@@ -4090,6 +4359,8 @@ impl Gerdr {
         self.pane_jobs.clear();
         self.pane_bar_hover = None;
         self.closed_workspaces.clear();
+        self.gone_since.clear();
+        self.closing_records.clear();
         self.restored_at = None;
         self.replay_pending.clear();
         self.herdr = None;
@@ -4235,6 +4506,7 @@ impl Gerdr {
         match (folder, kind) {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
             (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
+            (_, WorkspaceKind::Cursor) => self.open_cursor(None),
             (None, _) => {}
         }
         // After the switch's notice, so it wins.
@@ -4951,6 +5223,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pane_job_tx: None,
         pane_bar_hover: None,
         closed_workspaces: HashMap::new(),
+        gone_since: HashMap::new(),
+        closing_records: HashSet::new(),
         restored_at: None,
         replay_pending: HashSet::new(),
         held: HashMap::new(),
@@ -5095,6 +5369,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(system_theme)
     };
     state.watch_git();
+    state.watch_records();
     state.watch_web_pages();
     state.connect_notifier();
     state.watch_system_theme(system_theme);

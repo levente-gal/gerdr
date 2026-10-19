@@ -289,6 +289,9 @@ impl Painter {
                         terminal(x, y, small)
                     })
                 }
+                ItemIcon::Workspace(WorkspaceKind::Cursor) => {
+                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small))
+                }
                 ItemIcon::Tab => {
                     icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| tab(x, y, small))
                 }

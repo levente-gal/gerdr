@@ -54,9 +54,13 @@ pub fn plan(project: &Project, live: &[LiveWorkspace]) -> Plan {
     let mut seen = HashSet::new();
     let mut taken = HashSet::new();
     for (w, record) in project.workspaces.iter().enumerate() {
-        let Some(ws) = live.iter().find(|ws| ws.id == record.herdr_id) else {
+        // Only apps: nothing of it in herdr.
+        let Some(herdr_id) = &record.herdr_id else {
+            continue;
+        };
+        let Some(ws) = live.iter().find(|ws| ws.id == *herdr_id) else {
             plan.warnings
-                .push(format!("workspace {} isn't open in herdr", record.herdr_id));
+                .push(format!("workspace {herdr_id} isn't open in herdr"));
             continue;
         };
         plan.workspace_order.push(ws.id.clone());
@@ -135,7 +139,7 @@ pub fn patch(
                 return true;
             };
             pane.pane_id = to.pane_id.clone();
-            if to.workspace_id == herdr_id {
+            if Some(&to.workspace_id) == herdr_id.as_ref() {
                 return true;
             }
             travelling.push((to.workspace_id.clone(), pane.clone()));
@@ -146,7 +150,7 @@ pub fn patch(
         if let Some(record) = project
             .workspaces
             .iter_mut()
-            .find(|r| r.herdr_id == workspace_id)
+            .find(|r| r.mirrors(&workspace_id))
         {
             record.panes.push(pane);
         }
@@ -217,7 +221,10 @@ pub fn apply(herdr: &mut Herdr, project: &mut Project) -> Vec<String> {
         .collect();
     let mut moved: HashMap<String, Moved> = HashMap::new();
     for (pane, key) in plan.moves {
-        let workspace_id = &project.workspaces[key.0].herdr_id;
+        // A move is planned only into a workspace open in herdr.
+        let Some(workspace_id) = project.workspaces[key.0].herdr_id.as_deref() else {
+            continue;
+        };
         let into = tabs
             .get(&key)
             .filter(|tab| count.get(*tab).is_some_and(|n| *n > 0));
@@ -422,7 +429,8 @@ mod tests {
 
     fn workspace(id: &str, label: &str, tabs: Vec<TabRecord>) -> WorkspaceRecord {
         WorkspaceRecord {
-            herdr_id: id.into(),
+            id: id.into(),
+            herdr_id: Some(id.into()),
             label: label.into(),
             kind: Kind::Project,
             dir: "/w".into(),
@@ -579,6 +587,27 @@ mod tests {
         assert_eq!(plan.tab_order[0], ("w2".to_string(), vec![(0, 0), (0, 1)]));
         assert_eq!(plan.tabs[&(0, 0)], "w2:t2");
         assert_eq!(plan.renames, [("w2".to_string(), "web".to_string())]);
+    }
+
+    #[test]
+    fn workspaces_of_only_apps_are_left_out() {
+        let apps = WorkspaceRecord {
+            herdr_id: None,
+            ..workspace(
+                "g1",
+                "cursor",
+                vec![tab(None, SavedNode::Leaf(SavedLeaf::Zed))],
+            )
+        };
+        let file = project(vec![
+            apps,
+            workspace("w1", "api", vec![tab(Some("w1:t1"), herdr("w1:p1"))]),
+        ]);
+        let plan = plan(&file, &[live("w1", "api", &[("w1:t1", &["w1:p1"])])]);
+        assert!(plan.warnings.is_empty());
+        assert!(plan.moves.is_empty());
+        assert_eq!(plan.workspace_order, ["w1"]);
+        assert_eq!(plan.tab_order, [("w1".to_string(), vec![(1, 0)])]);
     }
 
     #[test]

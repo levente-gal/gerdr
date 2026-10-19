@@ -143,6 +143,16 @@ impl SavedNode {
         out
     }
 
+    /// Whether any of its leaves is a Zed or an app: something that comes
+    /// back without herdr.
+    pub fn holds_apps(&self) -> bool {
+        match self {
+            SavedNode::Leaf(SavedLeaf::Herdr { .. }) => false,
+            SavedNode::Leaf(_) => true,
+            SavedNode::Split { first, second, .. } => first.holds_apps() || second.holds_apps(),
+        }
+    }
+
     fn collect_herdr_panes<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             SavedNode::Leaf(SavedLeaf::Herdr { pane_id }) => out.push(pane_id),

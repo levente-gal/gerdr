@@ -22,6 +22,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
     NewTerminal,
+    /// The project's Cursor workspace (see `Gerdr::open_cursor`).
+    NewCursor,
     OpenFolder,
     NewProject,
     CloseWorkspace(usize),
@@ -255,6 +257,7 @@ impl Gerdr {
     pub fn menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
+            MenuAction::NewCursor => self.open_cursor(None),
             MenuAction::OpenFolder => self.pick_workspace(WorkspaceKind::Terminal),
             MenuAction::NewProject => self.run_action(Action::NewProject),
             MenuAction::CloseWorkspace(w) => self.close_workspace(w),

@@ -91,7 +91,20 @@ impl Canvas {
     /// `icon` `APP_ICON_SIZE` big, centred on `rect` (logical pixels); a
     /// symbolic one in `tint`.
     pub(super) fn picture(&mut self, icon: &AppIcon, rect: Rect, scale: f64, tint: Rgb) {
-        let size = (APP_ICON_SIZE as f64 * scale).round() as usize;
+        self.picture_sized(icon, rect, scale, tint, APP_ICON_SIZE);
+    }
+
+    /// `icon` `size` big (logical pixels), centred on `rect`; a symbolic
+    /// one in `tint`.
+    pub(super) fn picture_sized(
+        &mut self,
+        icon: &AppIcon,
+        rect: Rect,
+        scale: f64,
+        tint: Rgb,
+        size: i32,
+    ) {
+        let size = (size as f64 * scale).round() as usize;
         let (w, h, rgba) = icon.scaled(size);
         let centre = |start: i32, len: i32| (start as f64 + len as f64 / 2.0) * scale;
         let x0 = (centre(rect.loc.x, rect.size.w) - w as f64 / 2.0).round() as i32;
