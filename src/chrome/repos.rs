@@ -12,7 +12,7 @@ use super::{
     BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, FIELD_GAP, FieldSpot,
     GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, LineState,
     MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, arrow, band, check,
-    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
+    chevron_down, coverage, cross, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
     rect_px, rounded_rect,
 };
 use crate::text_field::Line;
@@ -186,6 +186,10 @@ pub struct BranchPicker {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BranchMenuView {
     pub rows: Vec<String>,
+    /// Per row: whether it has a local branch to delete, with a button.
+    pub deletable: Vec<bool>,
+    /// The row whose delete a second press confirms.
+    pub armed: Option<usize>,
     /// The row of the branch they are all on, by index into `rows`.
     pub current: Option<usize>,
     /// The row Enter picks, by index into `rows`.
@@ -421,6 +425,8 @@ pub enum ReposHit {
     BranchButton,
     /// A row of the branch menu, by index into `BranchMenuView::rows`.
     BranchRow(usize),
+    /// A branch menu row's delete button, by the same index.
+    BranchDelete(usize),
     /// The branch menu, on no row (for the wheel).
     BranchMenu,
     /// A mark on a repository's line, by index into `ReposView::lines`:
@@ -595,6 +601,8 @@ pub struct ReposLayout {
     pub branch_menu: Option<(Rect, Vec<Rect>)>,
     /// The branch menu's search, at its top.
     pub branch_search: Option<Rect>,
+    /// The delete buttons of the menu's rows that have one, by row.
+    pub branch_deletes: Vec<(usize, Rect)>,
 }
 
 /// Inside the panel's parts: what the painter needs besides `ReposLayout`.
@@ -925,7 +933,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
             .max()
             .unwrap_or(0);
-        let mw = (widest + 2 * BRANCH_ROW_PAD + BRANCH_CHECK)
+        let mw = (widest + 2 * BRANCH_ROW_PAD + 2 * BRANCH_CHECK)
             .clamp(pw, BRANCH_MENU_MAX.max(pw))
             .min(inner_w);
         let my = branch.loc.y + branch.size.h + BRANCH_MENU_GAP;
@@ -940,7 +948,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
             (inner, REPOS_ROW).into(),
         ));
-        let rows = (0..shown.min(menu.rows.len()))
+        let rows: Vec<Rect> = (0..shown.min(menu.rows.len()))
             .map(|i| {
                 Rectangle::new(
                     (mx + BRANCH_MENU_PAD, rows_y + i as i32 * REPOS_ROW).into(),
@@ -950,6 +958,15 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .collect();
         (card, rows)
     });
+    let branch_deletes = match (&view.branch.menu, &branch_menu) {
+        (Some(menu), Some((_, rows))) => rows
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| menu.deletable.get(i) == Some(&true))
+            .map(|(i, row)| (i, branch_delete(*row)))
+            .collect(),
+        _ => Vec::new(),
+    };
 
     let mut buttons = result_buttons.clone();
     buttons.extend(hints.iter().map(|&(i, r)| (view.hints[i].button, r)));
@@ -973,6 +990,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             branch,
             branch_menu,
             branch_search,
+            branch_deletes,
         },
         error,
         body,
@@ -1018,6 +1036,27 @@ fn card_over(c: &mut Canvas, rect: Rect, radius: f32, scale: f64, p: &Palette) {
 }
 
 /// `inner` lies wholly in `outer`.
+/// Where a branch menu row's check mark goes, at its right end.
+fn branch_check(row: Rect) -> Rect {
+    Rectangle::new(
+        (
+            row.loc.x + row.size.w - BRANCH_ROW_PAD / 2 - BRANCH_CHECK,
+            row.loc.y,
+        )
+            .into(),
+        (BRANCH_CHECK, row.size.h).into(),
+    )
+}
+
+/// Where a branch menu row's delete button goes, left of its check mark.
+fn branch_delete(row: Rect) -> Rect {
+    let check = branch_check(row);
+    Rectangle::new(
+        (check.loc.x - BRANCH_CHECK, row.loc.y).into(),
+        (BRANCH_CHECK, row.size.h).into(),
+    )
+}
+
 fn within(outer: Rect, inner: Rect) -> bool {
     inner.loc.x >= outer.loc.x
         && inner.loc.y >= outer.loc.y
@@ -1041,6 +1080,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     }
     // The open menu is over the rest, which it closes on a click.
     if let Some((menu, rows)) = &layout.branch_menu {
+        if let Some((i, _)) = layout.branch_deletes.iter().find(|(_, r)| at(r)) {
+            return Some(ReposHit::BranchDelete(*i));
+        }
         if let Some(i) = rows.iter().position(at) {
             return Some(ReposHit::BranchRow(i));
         }
@@ -2137,24 +2179,34 @@ impl Painter {
         for (i, (rect, label)) in rows.iter().zip(&menu.rows).enumerate() {
             let (x, y, w, h) = rect_px(*rect, scale);
             let r = (MENU_RADIUS - 2.0) * s;
-            if menu.picked == Some(i) {
+            let on_delete = view.hover == Some(ReposHit::BranchDelete(i));
+            let hovered = on_delete || view.hover == Some(ReposHit::BranchRow(i));
+            let armed = menu.armed == Some(i);
+            if armed {
+                c.rounded(x, y, w, h, r, mix(p.elevated, p.error, 0.25));
+            } else if menu.picked == Some(i) {
                 c.rounded(x, y, w, h, r, p.selected);
-            } else if view.hover == Some(ReposHit::BranchRow(i)) {
+            } else if hovered {
                 c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
             }
-            let mark = Rectangle::new(
-                (
-                    rect.loc.x + rect.size.w - BRANCH_ROW_PAD / 2 - BRANCH_CHECK,
-                    rect.loc.y,
-                )
-                    .into(),
-                (BRANCH_CHECK, rect.size.h).into(),
-            );
+            let mark = branch_check(*rect);
             if menu.current == Some(i) {
                 icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
             }
+            // The delete button shows on the row pointed at, picked or
+            // armed.
+            let delete = branch_delete(*rect);
+            let deletable = menu.deletable.get(i) == Some(&true);
+            if deletable && (armed || hovered || menu.picked == Some(i)) {
+                let color = if armed || on_delete {
+                    p.error
+                } else {
+                    p.placeholder
+                };
+                icon_sdf(c, delete, scale, color, |x, y| cross(x, y, 0.8 * s));
+            }
             let pad = BRANCH_ROW_PAD as f32 * s;
-            let end = (mark.loc.x as f64 * scale) as f32;
+            let end = (delete.loc.x as f64 * scale) as f32;
             let row_band = band(*rect, scale);
             self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
         }
@@ -2433,6 +2485,8 @@ mod tests {
             branch: BranchPicker {
                 menu: Some(BranchMenuView {
                     rows: rows.map(String::from).to_vec(),
+                    deletable: vec![false, true, true, false],
+                    armed: Some(2),
                     current: Some(1),
                     picked: Some(0),
                     empty: "No branch they all have".into(),
@@ -2722,6 +2776,14 @@ mod tests {
             for (i, row) in rows.iter().enumerate() {
                 assert_eq!(repos_hit(&l, centre(*row)), Some(ReposHit::BranchRow(i)));
             }
+            // Rows with a local branch have a delete button, in them.
+            let deletes: Vec<usize> = l.branch_deletes.iter().map(|(i, _)| *i).collect();
+            let shown: Vec<usize> = [1, 2].into_iter().filter(|&i| i < rows.len()).collect();
+            assert_eq!(deletes, shown);
+            for &(i, r) in &l.branch_deletes {
+                assert!(within(rows[i], r));
+                assert_eq!(repos_hit(&l, centre(r)), Some(ReposHit::BranchDelete(i)));
+            }
             // Its search at the top has the keyboard.
             let search = l.branch_search.expect("a search");
             assert!(within(menu, search) && search.loc.y + search.size.h <= rows[0].loc.y);
@@ -2922,6 +2984,13 @@ mod tests {
             ("hover", disabled_hover),
             ("menu", with_menu()),
             ("menu_empty", with_empty_menu()),
+            (
+                "menu_delete",
+                ReposView {
+                    hover: Some(ReposHit::BranchDelete(1)),
+                    ..with_menu()
+                },
+            ),
             (
                 "mark",
                 ReposView {

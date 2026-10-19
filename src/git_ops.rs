@@ -123,6 +123,9 @@ pub enum Verdict {
     Conflicts(Vec<String>),
     /// It can't be done here: why.
     Blocked(String),
+    /// Deleting the branch loses this many commits no other branch, remote
+    /// branch or tag has.
+    Unmerged(usize),
 }
 
 /// Whether a command talks to a remote: it gets longer, and ssh in batch
@@ -379,14 +382,12 @@ pub fn classify(stderr: &str, stdout: &str) -> Failure {
 }
 
 /// The worktree a branch is checked out in, from git's "'x' is already
-/// checked out at '<path>'" or "is already used by worktree at '<path>'".
+/// checked out at '<path>'", "is already used by worktree at '<path>'" or
+/// "cannot delete branch 'x' used by worktree at '<path>'".
 fn checked_out_at(text: &str) -> Option<PathBuf> {
-    let (_, rest) = [
-        "is already checked out at '",
-        "is already used by worktree at '",
-    ]
-    .iter()
-    .find_map(|s| text.split_once(s))?;
+    let (_, rest) = ["is already checked out at '", "used by worktree at '"]
+        .iter()
+        .find_map(|s| text.split_once(s))?;
     let line = rest.lines().next()?;
     Some(PathBuf::from(line.rsplit_once('\'')?.0))
 }
@@ -798,6 +799,39 @@ pub fn undo(dir: &Path, before: &Head, after: &Head, soft: bool) -> OpResult {
         return op.done();
     }
     op.run(&["reset", if soft { "--soft" } else { "--keep" }, oid])?;
+    op.done()
+}
+
+/// How many commits of local branch `name` no other branch, remote branch
+/// or tag has: what deleting it loses. `None` when git can't tell.
+pub fn unmerged_commits(dir: &Path, name: &str) -> Option<usize> {
+    let exclude = format!("--exclude={name}");
+    let args = [
+        "rev-list",
+        "--count",
+        &format!("refs/heads/{name}"),
+        "--not",
+        &exclude,
+        "--branches",
+        "--remotes",
+        "--tags",
+    ];
+    query(dir, &args)?.trim().parse().ok()
+}
+
+/// Delete local branch `name`; unless `force`, only when that loses no
+/// commit (see `unmerged_commits`): else `Blocked`.
+pub fn delete_branch(dir: &Path, name: &str, force: bool) -> OpResult {
+    let mut op = Op::new(dir);
+    if !force {
+        match unmerged_commits(dir, name) {
+            Some(0) => {}
+            Some(1) => return Err(op.blocked("1 commit only on it")),
+            Some(n) => return Err(op.blocked(&format!("{n} commits only on it"))),
+            None => return Err(op.blocked("can't tell what it would lose")),
+        }
+    }
+    op.run(&["branch", "-D", name])?;
     op.done()
 }
 
@@ -1364,6 +1398,47 @@ mod tests {
         assert_eq!(
             failure(switch_or_create(&fx.repo, "wtb")),
             Failure::CheckedOut(wt.clone())
+        );
+    }
+
+    #[test]
+    fn a_branch_is_deleted_only_when_nothing_is_lost() {
+        let fx = Fx::new();
+        let r = &fx.repo;
+        let commit_on = |branch: &str| {
+            git(r, &["switch", "-q", "-c", branch]);
+            git(r, &["commit", "-q", "--allow-empty", "-m", branch]);
+            git(r, &["switch", "-q", "main"]);
+        };
+        git(r, &["branch", "-q", "merged"]);
+        commit_on("feat");
+        assert_eq!(unmerged_commits(r, "merged"), Some(0));
+        assert_eq!(unmerged_commits(r, "feat"), Some(1));
+        assert_eq!(
+            failure(delete_branch(r, "feat", false)),
+            Failure::Blocked("1 commit only on it".into())
+        );
+        assert!(has_ref(r, "refs/heads/feat"));
+        // Pushed, its commits are kept on the remote.
+        git(r, &["push", "-q", "origin", "feat"]);
+        assert_eq!(unmerged_commits(r, "feat"), Some(0));
+        for name in ["merged", "feat"] {
+            assert!(delete_branch(r, name, false).is_ok());
+            assert!(!has_ref(r, &format!("refs/heads/{name}")));
+        }
+        // Forced, whatever it loses.
+        commit_on("lost");
+        assert!(delete_branch(r, "lost", true).is_ok());
+        assert!(!has_ref(r, "refs/heads/lost"));
+        // Not while another worktree has it out.
+        let wt = fx.root.join("wt");
+        git(
+            r,
+            &["worktree", "add", "-q", "-b", "wtb", wt.to_str().unwrap()],
+        );
+        assert_eq!(
+            failure(delete_branch(r, "wtb", true)),
+            Failure::CheckedOut(wt)
         );
     }
 
