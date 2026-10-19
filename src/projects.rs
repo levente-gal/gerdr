@@ -407,27 +407,6 @@ impl Store {
         }
     }
 
-    /// The store in the files now, for callers without one; see `reread`.
-    /// Any file that can't be read is an error.
-    pub fn read() -> Result<Self, String> {
-        let mut store = Self::empty();
-        let path = state_file();
-        match read_state(&path) {
-            Ok(Some((state, written))) => {
-                store.set_state(state);
-                store.books.state = Some(written);
-            }
-            Ok(None) => {}
-            Err(err) => return Err(format!("state.json: {err}")),
-        }
-        let Reread { store, errors } = store.reread();
-        if errors.is_empty() {
-            Ok(store)
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
     /// The ids of the projects whose file changed outside gerdr since the
     /// user was last told; each once.
     pub fn take_conflicts(&mut self) -> Vec<String> {
@@ -685,12 +664,6 @@ fn projects_in(root: &Path) -> PathBuf {
 /// Project `id`'s file.
 pub fn project_file(id: &str) -> PathBuf {
     projects_dir().join(format!("{id}.json"))
-}
-
-/// The file of what isn't any one project's: the last project shown, the
-/// quit choice.
-pub fn state_file() -> PathBuf {
-    data_dir().join("state.json")
 }
 
 /// The old single file of the store, before a file per project: split up
