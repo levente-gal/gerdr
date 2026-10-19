@@ -321,6 +321,7 @@ fn project_menu() -> ProjectMenuView {
             ("Ctrl+N".into(), "new".into()),
             ("Ctrl+R".into(), "rename".into()),
             ("Ctrl+E".into(), "commands".into()),
+            ("Ctrl+O".into(), "project file".into()),
             ("Ctrl+S".into(), "stop".into()),
             ("Del".into(), "forget".into()),
             ("Esc".into(), "close".into()),
@@ -452,7 +453,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xbecc6c3736626091, // switcher
         0x587634021d6e12a7, // welcome
         0x59378f4fb455dd74, // quit
-        0xbef0eb8bfc45b7c0, // project_menu
+        0x77ad122625699ef8, // project_menu
         0x8ee98ca10770cddc, // project_form
         0xa135931fecb12b15, // toast
     ],
@@ -466,7 +467,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x45784693663a03df, // switcher
         0x0509f39369ec1781, // welcome
         0xca6aac6e936af23a, // quit
-        0x47b12202a46547b2, // project_menu
+        0x91598fd2bdae834a, // project_menu
         0x4493e298ea9ee362, // project_form
         0x03fe8c8c1a28bb89, // toast
     ],
@@ -480,7 +481,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xe665a2357ee54f13, // switcher
         0xf3e329f9a28eb517, // welcome
         0x9141f1eb6dfa4384, // quit
-        0xdeec3a957d917fcf, // project_menu
+        0xe6f2cd115f6ebbd6, // project_menu
         0x6c3fd3a9752c217d, // project_form
         0x09527b9387445087, // toast
     ],
@@ -494,7 +495,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x05fad9e0a3cb7d27, // switcher
         0x25745fe948c0e47b, // welcome
         0xea36deb588723e15, // quit
-        0xc782f9b22f729c10, // project_menu
+        0xede87d592c8cc683, // project_menu
         0x6643b13592192371, // project_form
         0x3a08c772671fb90b, // toast
     ],
