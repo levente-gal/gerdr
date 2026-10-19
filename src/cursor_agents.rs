@@ -283,7 +283,9 @@ pub struct Spot<'a> {
 /// Which of `spots` a chat working in `paths` goes under: the one whose
 /// folder holds the likeliest path deepest (one in the home folder holds
 /// everything, so it doesn't count), else the Cursor workspace, if the
-/// path is in one of `project_dirs`; `None` for a chat of another project.
+/// path is in one of `project_dirs` or holds one (a chat at the root of a
+/// project whose workspaces are its subfolders), short of holding the home
+/// folder; `None` for a chat of another project.
 pub fn place(
     paths: &[PathBuf],
     spots: &[Spot],
@@ -301,9 +303,10 @@ pub fn place(
         }
     }
     let ours = paths.iter().any(|path| {
-        project_dirs
-            .iter()
-            .any(|dir| Some(*dir) != home && path.starts_with(dir))
+        !home.is_some_and(|home| home.starts_with(path))
+            && project_dirs
+                .iter()
+                .any(|dir| Some(*dir) != home && (path.starts_with(dir) || dir.starts_with(path)))
     });
     ours.then(|| spots.iter().position(|s| s.cursor)).flatten()
 }
@@ -1003,6 +1006,15 @@ mod tests {
         }];
         let paths = [PathBuf::from("/home/u/app/web")];
         assert_eq!(place(&paths, &lone, &project, Some(home)), Some(0));
+        // At the root of a project whose workspaces are its subfolders.
+        let subfolders = [Path::new("/home/u/app/api"), Path::new("/home/u/app/web")];
+        let paths = [PathBuf::from("/home/u/app")];
+        assert_eq!(place(&paths, &lone, &subfolders, Some(home)), Some(0));
+        // A folder holding home holds every project.
+        for path in ["/home/u", "/home", "/"] {
+            let paths = [PathBuf::from(path)];
+            assert_eq!(place(&paths, &lone, &subfolders, Some(home)), None);
+        }
     }
 
     #[test]
