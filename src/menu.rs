@@ -48,8 +48,8 @@ pub enum MenuAction {
     PaneToTab(u32, Option<usize>),
     RestartPane(u32),
     StopPane(u32),
-    /// Show the agent in herdr pane `pane_id`.
-    FocusAgent(String),
+    /// Show the agent.
+    FocusAgent(crate::agents::AgentKey),
     CopyPath(PathBuf),
     Theme(ThemeMode),
     /// Start again what pane `id` of the active tab waits for, after it
@@ -291,7 +291,7 @@ impl Gerdr {
                 self.focus_pane(|_| Some(id));
                 self.stop_focused_pane();
             }
-            MenuAction::FocusAgent(pane_id) => self.focus_agent(&pane_id),
+            MenuAction::FocusAgent(key) => self.focus_agent(&key),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),

@@ -58,6 +58,9 @@ const CURSOR: &str = "cursor";
 /// The name of the Cursor workspace.
 const CURSOR_WORKSPACE: &str = "Cursor";
 
+/// The link Cursor opens a chat by, its id following.
+const CHAT_LINK: &str = "cursor://anysphere.cursor-deeplink/background-agent?bcId=";
+
 /// How many typed commands the run prompt remembers.
 const HISTORY_LEN: usize = 100;
 
@@ -268,6 +271,30 @@ impl Gerdr {
         self.show_active();
     }
 
+    /// Show Cursor chat `id`: the project's Cursor, started if it isn't
+    /// running, and in a running one the chat, by a link Cursor opens (see
+    /// `CHAT_LINK`).
+    pub fn focus_cursor_chat(&mut self, id: &str) {
+        let command = self
+            .installed_cursor()
+            .map(|app| app.command.clone())
+            .unwrap_or_else(|| CURSOR.to_owned());
+        let running = self.running_vs_code(&command).is_some();
+        self.open_cursor(Some(&command));
+        self.cursor_opened = Some(id.to_owned());
+        // One just started would take the link as its own start.
+        let Some((own, _)) = own_instance(&command).filter(|_| running) else {
+            return;
+        };
+        let link = format!("{CHAT_LINK}{id}");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("{own} --open-url {}", desktop::shell_quote(&link)))
+            .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
+        let dir = home_dir().unwrap_or_default();
+        self.spawn(cmd, &dir, CURSOR);
+    }
+
     /// The installed Cursor, if any.
     fn installed_cursor(&self) -> Option<&App> {
         self.installed_apps
@@ -456,6 +483,16 @@ impl Gerdr {
             .arg(&prepared.command)
             .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
         let log = program_name(command).unwrap_or_else(|| "app".into());
+        if log == CURSOR
+            && let Some(home) = home_dir()
+            && let Err(err) = crate::cursor_agents::install_hooks(&home)
+        {
+            tracing::warn!("adding gerdr to Cursor's hooks: {err}");
+            self.toast(
+                format!("Cursor's agents won't show at once: {err}"),
+                crate::toast::Level::Warning,
+            );
+        }
         self.spawn(cmd, &dir, &log)
     }
 
@@ -777,6 +814,16 @@ fn vs_code_of(command: &str) -> Option<String> {
     program_name(command).filter(|key| VS_CODES.contains(&key.as_str()))
 }
 
+/// The profile gerdr keeps for the app of program `key`.
+fn profile_dir(home: &Path, key: &str) -> PathBuf {
+    home.join(".local/share/gerdr/profiles").join(key)
+}
+
+/// The profile of gerdr's Cursor.
+pub fn cursor_profile() -> Option<PathBuf> {
+    Some(profile_dir(&home_dir()?, CURSOR))
+}
+
 /// `command` changed to start a copy of its own of an app that hands new
 /// windows to a running one: a browser or a VS Code with gerdr's profile
 /// for it, a Zed with gerdr's data dir (see `zed_data_dir`), and that
@@ -817,7 +864,7 @@ fn own_instance(command: &str) -> Option<(String, Option<PathBuf>)> {
     } else if ZEDS.contains(&key.as_str()) {
         zed_data_dir(&home)
     } else {
-        home.join(".local/share/gerdr/profiles").join(&key)
+        profile_dir(&home, &key)
     };
     let quoted = desktop::shell_quote(&profile.to_string_lossy());
     let flags = if FIREFOXES.contains(&key.as_str()) {

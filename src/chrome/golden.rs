@@ -65,7 +65,8 @@ fn workspaces() -> Vec<WorkspaceView> {
 fn agents() -> Vec<Vec<AgentView>> {
     vec![
         vec![AgentView {
-            pane_id: "p1".into(),
+            key: crate::agents::AgentKey::Herdr("p1".into()),
+            dir: None,
             status: AgentStatus::Blocked,
             kind: "claude".into(),
             name: Some("reviewer".into()),

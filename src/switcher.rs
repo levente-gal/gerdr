@@ -40,6 +40,7 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
+    agents::AgentKey,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     desktop, fuzzy, git, home_dir,
@@ -60,8 +61,8 @@ pub enum Target {
     Workspace(usize),
     /// A tab of a workspace.
     Tab(usize, usize),
-    /// The agent in a herdr pane.
-    Agent(String),
+    /// An agent: herdr's in a pane, a Cursor chat.
+    Agent(AgentKey),
     /// Another project, by id.
     Project(String),
     /// The project menu, to find, start or manage projects there (the
@@ -609,7 +610,7 @@ fn frecency_key(
     Some(match target {
         Target::Workspace(w) => format!("workspace:{}", workspace_dir(*w)?.display()),
         Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
-        Target::Agent(pane_id) => format!("agent:{pane_id}"),
+        Target::Agent(key) => format!("agent:{key}"),
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
         Target::App(command) | Target::Command(command) => format!("app:{command}"),
@@ -876,7 +877,7 @@ impl Gerdr {
                     self.switch_workspace(w);
                 }
             }
-            Target::Agent(pane_id) => self.focus_agent(&pane_id),
+            Target::Agent(key) => self.focus_agent(&key),
             Target::Project(id) => self.switch_project(&id),
             Target::Welcome if self.project.is_some() => {
                 if self.project_menu.is_none() {
@@ -1008,27 +1009,17 @@ impl Gerdr {
                 }
             }
         }
-        for agent in &self.agents {
-            let Some((w, _)) = self.herdr_pane_place(&agent.pane_id) else {
-                continue;
-            };
-            let mut detail = vec![
-                status_label(agent.agent_status),
-                self.workspaces[w].name.as_str(),
-            ];
-            detail.extend(
-                agent
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty()),
-            );
-            items.push(Item::new(
-                ItemIcon::Agent(agent.agent_status),
-                agent.label(),
-                detail.join(" · "),
-                Target::Agent(agent.pane_id.clone()),
-            ));
+        for (w, cards) in self.agent_views().into_iter().enumerate() {
+            for card in cards {
+                let mut detail = vec![status_label(card.status), self.workspaces[w].name.as_str()];
+                detail.extend(card.title().map(str::trim).filter(|t| !t.is_empty()));
+                items.push(Item::new(
+                    ItemIcon::Agent(card.status),
+                    card.label(),
+                    detail.join(" · "),
+                    Target::Agent(card.key.clone()),
+                ));
+            }
         }
         items.extend(project_items(
             &self.projects.projects,
@@ -1432,7 +1423,7 @@ mod tests {
             Some("project:aft")
         );
         assert_eq!(
-            key(&Target::Agent("p1".into())).as_deref(),
+            key(&Target::Agent(AgentKey::Herdr("p1".into()))).as_deref(),
             Some("agent:p1")
         );
         assert_eq!(key(&Target::Welcome), None);

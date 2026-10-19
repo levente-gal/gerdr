@@ -7,11 +7,13 @@
 //! keep running when gerdr quits and come back when it starts again. Any
 //! other Wayland app can be launched into a split too (see `launch`).
 
+mod agents;
 mod anim;
 mod app_icons;
 mod chrome;
 mod clipboard;
 mod config;
+mod cursor_agents;
 mod desktop;
 mod frecency;
 mod fuzzy;
@@ -1043,8 +1045,21 @@ pub struct Gerdr {
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
     /// Since when each blocked agent was last notified of (or seen to be
-    /// blocked), by herdr pane id: a reminder goes after `BLOCKED_REMINDER`.
-    pub blocked_since: HashMap<String, Instant>,
+    /// blocked): a reminder goes after `BLOCKED_REMINDER`.
+    pub blocked_since: HashMap<agents::AgentKey, Instant>,
+    /// What each agent was doing when last looked at, to tell news by.
+    pub agent_statuses: HashMap<agents::AgentKey, herdr::AgentStatus>,
+    /// What gerdr knows of its Cursor's chats (see `cursor_agents`).
+    pub cursor: cursor_agents::Chats,
+    /// Those doing something or with news, shown as cards.
+    pub cursor_chats: Vec<cursor_agents::CursorChat>,
+    /// Asks for Cursor's database to be read now.
+    cursor_poke: Option<std::sync::mpsc::Sender<()>>,
+    /// Where Cursor's hooks reach this gerdr.
+    cursor_socket: Option<PathBuf>,
+    /// The Cursor chat last shown from its card, whose card is filled
+    /// while Cursor has the keyboard.
+    pub cursor_opened: Option<String>,
     /// gerdr's own window has the host's keyboard focus.
     pub host_focused: bool,
     /// Process groups we started, all terminated when gerdr exits.
@@ -1707,6 +1722,7 @@ impl Gerdr {
                     state.herdr = None;
                     state.herdr_poke = None;
                     state.agents.clear();
+                    state.notify_agents();
                     state.herdr_tabs.clear();
                     // Closed as it went down: they come back with it.
                     state.closed_workspaces.clear();
@@ -1890,8 +1906,8 @@ impl Gerdr {
                     );
                 }
                 if let Some(agents) = round.agents {
-                    state.notify_agents(&agents);
                     state.agents = agents;
+                    state.notify_agents();
                 }
             }
         });
@@ -2318,8 +2334,8 @@ impl Gerdr {
         };
         match herdr.agent_list() {
             Ok(agents) => {
-                self.notify_agents(&agents);
                 self.agents = agents;
+                self.notify_agents();
             }
             Err(err) => tracing::debug!("herdr: {err}"),
         }
@@ -2332,74 +2348,50 @@ impl Gerdr {
         }
     }
 
-    /// Notify of each of `agents` that just came to need input or finished
-    /// where the user can't see it: in a hidden tab, or anywhere while
-    /// gerdr's window is in the background. herdr's own idea of what the
-    /// user has seen follows its focused pane, not gerdr's, so a finished
-    /// agent may come back `idle` rather than `done`: both count.
-    ///
-    /// An agent that stays blocked out of sight is reminded of every
-    /// `BLOCKED_REMINDER`, counted from when it was last notified of or
-    /// last in sight.
-    fn notify_agents(&mut self, agents: &[herdr::AgentInfo]) {
-        use herdr::AgentStatus::{Blocked, Done, Idle, Working};
-        let now = Instant::now();
-        let mut news = Vec::new();
-        for agent in agents {
-            // Only a change is news; an agent seen for the first time (as all
-            // are when gerdr starts) isn't.
-            let before = self
-                .agents
-                .iter()
-                .find(|a| a.pane_id == agent.pane_id)
-                .map(|a| a.agent_status);
-            let place = self.herdr_pane_place(&agent.pane_id);
-            let seen = self.host_focused && place.is_some_and(|(w, t)| self.is_visible(w, t));
-            let what = match (before, agent.agent_status) {
-                (_, Blocked) => {
-                    let since = *self
-                        .blocked_since
-                        .entry(agent.pane_id.clone())
-                        .or_insert(now);
-                    if seen {
-                        self.blocked_since.insert(agent.pane_id.clone(), now);
-                        continue;
-                    }
-                    let what = if before.is_some_and(|b| b != Blocked) {
-                        "needs input"
-                    } else if now.duration_since(since) >= BLOCKED_REMINDER {
-                        "still needs input"
-                    } else {
-                        continue;
-                    };
-                    self.blocked_since.insert(agent.pane_id.clone(), now);
-                    what
+    /// Notify of each agent that just came to need input or finished where
+    /// the user can't see it: in a hidden tab, or anywhere while gerdr's
+    /// window is in the background (see `agents::agent_news`). herdr's own
+    /// idea of what the user has seen follows its focused pane, not
+    /// gerdr's, so a finished agent may come back `idle` rather than
+    /// `done`: both count.
+    fn notify_agents(&mut self) {
+        let mut watched: Vec<agents::Watched> = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let place = self.herdr_pane_place(&agent.pane_id);
+                let mut body: Vec<&str> = place
+                    .map(|(w, _)| self.workspaces[w].name.as_str())
+                    .into_iter()
+                    .collect();
+                body.extend(
+                    agent
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty()),
+                );
+                agents::Watched {
+                    key: agents::AgentKey::Herdr(agent.pane_id.clone()),
+                    status: agent.agent_status,
+                    label: agent.label().to_owned(),
+                    body: body.join(" · "),
+                    seen: self.host_focused && place.is_some_and(|(w, t)| self.is_visible(w, t)),
                 }
-                (Some(Working), Idle | Done) if !seen => "is done",
-                _ => continue,
-            };
-            let who = agent.label();
-            let mut body: Vec<&str> = place
-                .map(|(w, _)| self.workspaces[w].name.as_str())
-                .into_iter()
-                .collect();
-            body.extend(
-                agent
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty()),
-            );
-            news.push((&agent.pane_id, format!("{who} {what}"), body.join(" · ")));
-        }
-        self.blocked_since.retain(|id, _| {
-            agents
-                .iter()
-                .any(|a| a.pane_id == *id && a.agent_status == Blocked)
-        });
+            })
+            .collect();
+        watched.extend(self.cursor_watched());
+        let news = agents::agent_news(
+            &self.agent_statuses,
+            &watched,
+            &mut self.blocked_since,
+            Instant::now(),
+            BLOCKED_REMINDER,
+        );
+        self.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
         if let Some(notifier) = self.notifier.as_mut() {
-            for (pane_id, summary, body) in news {
-                notifier.send(pane_id, &summary, &body);
+            for news in news {
+                notifier.send(&news.key.to_string(), &news.summary, &news.body);
             }
         }
     }
@@ -2440,8 +2432,8 @@ impl Gerdr {
             };
             match notifier.dispatch() {
                 Ok(clicked) => {
-                    for pane_id in clicked {
-                        state.focus_agent(&pane_id);
+                    for key in clicked {
+                        state.focus_agent(&agents::AgentKey::parse(&key));
                         state.backend.window().focus_window();
                     }
                     Ok(PostAction::Continue)
@@ -2471,9 +2463,17 @@ impl Gerdr {
         })
     }
 
+    /// Show agent `key`: herdr's in its pane, a Cursor chat in Cursor.
+    pub fn focus_agent(&mut self, key: &agents::AgentKey) {
+        match key {
+            agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
+            agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
+        }
+    }
+
     /// Show the pane agent card `pane_id` stands for: switch to its workspace
     /// and tab and focus its window. herdr counts the agent as seen then.
-    pub fn focus_agent(&mut self, pane_id: &str) {
+    fn focus_herdr_agent(&mut self, pane_id: &str) {
         let shows = |p: &Pane| p.herdr.as_ref().is_some_and(|h| h.pane_id == pane_id);
         let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             ws.tabs.iter().enumerate().find_map(|(t, tab)| {
@@ -2498,7 +2498,19 @@ impl Gerdr {
     pub fn agent_views(&self) -> Vec<Vec<AgentView>> {
         self.workspaces
             .iter()
-            .map(|ws| {
+            .enumerate()
+            .map(|(w, ws)| {
+                let mut views = self.herdr_cards(ws);
+                views.extend(self.cursor_cards(w));
+                views
+            })
+            .collect()
+    }
+
+    /// The cards of herdr's agents in workspace `ws`, by tab.
+    fn herdr_cards(&self, ws: &Workspace) -> Vec<AgentView> {
+        {
+            {
                 let Some(id) = ws.herdr_id() else {
                     return Vec::new();
                 };
@@ -2526,8 +2538,8 @@ impl Gerdr {
                     .into_iter()
                     .map(|(_, a)| AgentView::new(a, pane_of(a)))
                     .collect()
-            })
-            .collect()
+            }
+        }
     }
 
     /// Unlink herdr pane `pane_id` from what shows it; returns its window, or
@@ -4185,12 +4197,21 @@ impl Gerdr {
     fn workspace_views(&self) -> Vec<(WorkspaceView, Vec<TabView>)> {
         self.workspaces
             .iter()
-            .map(|ws| {
+            .enumerate()
+            .map(|(w, ws)| {
                 let tabs = self.tab_views(ws);
                 let mut view = WorkspaceView::new(ws.name.clone(), ws.kind, &tabs);
                 if ws.kind == WorkspaceKind::Cursor {
                     view.icon = self.cursor_icon();
                 }
+                // Cursor's chats under it count as its tabs' agents do.
+                view.status = self
+                    .cursor_chats
+                    .iter()
+                    .filter(|chat| self.cursor_chat_place(chat) == Some(w))
+                    .map(|chat| chat.status)
+                    .chain(view.status)
+                    .max_by_key(|s| chrome::urgency(*s));
                 if let Some(git) = self.git.get(&ws.dir) {
                     // Without herdr the panes don't report a branch: take the folder's.
                     view.branch = view.branch.or_else(|| {
@@ -4350,6 +4371,7 @@ impl Gerdr {
         }
         self.agents.clear();
         self.blocked_since.clear();
+        self.agent_statuses.clear();
         self.herdr_tabs.clear();
         self.git.clear();
         self.idle_since.clear();
@@ -4694,6 +4716,7 @@ impl Gerdr {
             };
         }
         self.projects.save();
+        self.close_cursor_socket();
         self.loop_signal.stop();
     }
 
@@ -5033,6 +5056,11 @@ impl ClientData for ClientState {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Run by Cursor's hooks, many times a chat: in and out at once.
+    if std::env::args().nth(1).as_deref() == Some(cursor_agents::HOOK_COMMAND) {
+        cursor_agents::run_hook();
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -5179,6 +5207,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_pending: false,
         notifier: None,
         blocked_since: HashMap::new(),
+        agent_statuses: HashMap::new(),
+        cursor: Default::default(),
+        cursor_chats: Vec::new(),
+        cursor_poke: None,
+        cursor_socket: None,
+        cursor_opened: None,
         host_focused: true,
         process_groups: Vec::new(),
         picker: None,
@@ -5370,6 +5404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     state.watch_git();
     state.watch_records();
+    state.watch_cursor_agents();
     state.watch_web_pages();
     state.connect_notifier();
     state.watch_system_theme(system_theme);

@@ -9,6 +9,7 @@ use smithay::utils::{Logical, Point};
 
 use crate::{
     Gerdr, Reorderable,
+    agents::AgentKey,
     anim::quantize,
     chrome::{
         self, AgentView, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState,
@@ -17,6 +18,7 @@ use crate::{
     git::Worktree,
     home_dir,
     input::{BTN_LEFT, BTN_MIDDLE},
+    launch,
     menu::{MenuAction, MenuItem, MenuSpec},
     paths,
     rename::RenameTarget,
@@ -78,12 +80,21 @@ impl Gerdr {
         layout.hit(pos)
     }
 
-    /// The herdr pane with the keyboard in the shown tab.
-    fn focused_herdr_pane(&self) -> Option<&str> {
+    /// The agent whose pane has the keyboard in the shown tab: herdr's in
+    /// it, or the Cursor chat last shown from its card in Cursor.
+    fn focused_agent(&self) -> Option<AgentKey> {
         let tab = self.tab()?;
         let id = tab.focused_id()?;
         let pane = tab.panes.iter().find(|p| p.id == id)?;
-        Some(pane.herdr.as_ref()?.pane_id.as_str())
+        if let Some(herdr) = &pane.herdr {
+            return Some(AgentKey::Herdr(herdr.pane_id.clone()));
+        }
+        let cursor = pane.app_command.as_deref().and_then(launch::program_name);
+        let chat = self
+            .cursor_opened
+            .clone()
+            .filter(|_| cursor.as_deref() == Some("cursor"))?;
+        Some(AgentKey::Cursor(chat))
     }
 
     /// What moves in the sidebar at `now`, given its `workspaces` and
@@ -107,7 +118,7 @@ impl Gerdr {
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
             })
             .collect();
-        let focused = self.focused_herdr_pane();
+        let focused = self.focused_agent();
         let cards = agents
             .iter()
             .enumerate()
@@ -117,7 +128,7 @@ impl Gerdr {
                     .enumerate()
                     .map(|(k, card)| {
                         let open =
-                            i == self.active_workspace && focused == Some(card.pane_id.as_str());
+                            i == self.active_workspace && focused.as_ref() == Some(&card.key);
                         CardState {
                             hover: quantize(hover.alpha(SidebarHit::Card(i, k), now)),
                             open,
@@ -169,8 +180,8 @@ impl Gerdr {
             }
             (SidebarHit::Card(i, k), BTN_LEFT) => {
                 if let Some(card) = self.agent_views().get(i).and_then(|c| c.get(k)) {
-                    let pane_id = card.pane_id.clone();
-                    self.focus_agent(&pane_id);
+                    let key = card.key.clone();
+                    self.focus_agent(&key);
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
@@ -296,13 +307,8 @@ impl Gerdr {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
             SidebarHit::Card(i, k) => {
                 let card = self.agent_views().get(i)?.get(k)?.clone();
-                let cwd = self
-                    .agents
-                    .iter()
-                    .find(|a| a.pane_id == card.pane_id)
-                    .and_then(|a| a.cwd.clone());
-                let mut items = vec![MenuItem::new("Focus", MenuAction::FocusAgent(card.pane_id))];
-                items.push(match cwd {
+                let mut items = vec![MenuItem::new("Focus", MenuAction::FocusAgent(card.key))];
+                items.push(match card.dir {
                     Some(cwd) => MenuItem::new("Copy path", MenuAction::CopyPath(cwd)),
                     None => MenuItem::new("Copy path", MenuAction::NewTerminal).enabled(false),
                 });

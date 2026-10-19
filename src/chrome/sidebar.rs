@@ -22,13 +22,16 @@ use super::{
     rect_px, status_mark, terminal,
 };
 use crate::WorkspaceKind;
+use crate::agents::AgentKey;
 use crate::app_icons::AppIcon;
+use crate::cursor_agents::CursorChat;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
+use std::path::PathBuf;
 
 /// How many steps a hover or pulse alpha in `SidebarState` has: the value
 /// `anim::quantize` gives 1.0.
@@ -95,13 +98,15 @@ pub enum AgentLine {
     Field(String, String),
 }
 
-/// What an agent card shows: everything herdr reports about the agent.
-/// The card draws its header and one detail line; the rest is for its
-/// tooltip.
+/// What an agent card shows: everything herdr (or Cursor) reports about
+/// the agent. The card draws its header and one detail line; the rest is
+/// for its tooltip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentView {
-    /// The herdr pane it runs in; a click on the card shows it.
-    pub pane_id: String,
+    /// Which agent; a click on the card shows it.
+    pub key: AgentKey,
+    /// The folder it works in, for "Copy path".
+    pub dir: Option<PathBuf>,
     pub status: AgentStatus,
     /// How herdr names its kind, and the name it was given.
     pub kind: String,
@@ -173,13 +178,64 @@ impl AgentView {
                 .map(|(k, v)| field(k, v.clone())),
         );
         Self {
-            pane_id: info.pane_id.clone(),
+            key: AgentKey::Herdr(info.pane_id.clone()),
+            dir: info.cwd.clone(),
             status: info.agent_status,
             kind,
             name: info.name.clone(),
             model,
             lines,
         }
+    }
+
+    /// The card for Cursor chat `chat`.
+    pub fn cursor(chat: &CursorChat) -> Self {
+        let row = &chat.row;
+        let field = |label: &str, value: String| AgentLine::Field(label.into(), value);
+        let mut lines = Vec::new();
+        lines.extend(
+            row.subtitle
+                .as_deref()
+                .map(tidy_title)
+                .filter(|t| !t.is_empty())
+                .map(AgentLine::Title),
+        );
+        let dir = row.paths.first().cloned();
+        if let Some(dir) = &dir {
+            lines.push(field("cwd", short_path(dir, None)));
+        }
+        if let Some(pct) = row.context_pct {
+            lines.push(field("context", format!("{pct:.0}%")));
+        }
+        if let Some(files) = row.files.filter(|n| *n > 0) {
+            let plural = if files == 1 { "" } else { "s" };
+            let (added, removed) = (row.added.unwrap_or(0), row.removed.unwrap_or(0));
+            lines.push(field(
+                "changes",
+                format!("{files} file{plural} +{added} -{removed}"),
+            ));
+        }
+        if row.worktree {
+            lines.push(field("worktree", "yes".into()));
+        }
+        lines.push(field("chat", row.id.clone()));
+        Self {
+            key: AgentKey::Cursor(row.id.clone()),
+            dir,
+            status: chat.status,
+            kind: "cursor".into(),
+            name: row.name.clone().filter(|n| !n.trim().is_empty()),
+            model: chat.model.clone(),
+            lines,
+        }
+    }
+
+    /// What it is on: its title line, if any.
+    pub fn title(&self) -> Option<&str> {
+        self.lines.iter().find_map(|l| match l {
+            AgentLine::Title(title) => Some(title.as_str()),
+            _ => None,
+        })
     }
 
     /// What the card calls the agent: its kind, then its name and its
@@ -200,11 +256,7 @@ impl AgentView {
             AgentLine::Field(label, value) if label == "cwd" => Some(basename(value)),
             _ => None,
         });
-        let title = self.lines.iter().find_map(|l| match l {
-            AgentLine::Title(title) => Some(title.as_str()),
-            _ => None,
-        });
-        match (cwd, title) {
+        match (cwd, self.title()) {
             (Some(cwd), Some(title)) => format!("{cwd} · {title}"),
             (Some(cwd), None) => cwd.to_owned(),
             (None, Some(title)) => title.to_owned(),
@@ -1493,7 +1545,8 @@ mod tests {
 
     fn agent(pane: &str, status: AgentStatus, cwd: Option<&str>) -> AgentView {
         AgentView {
-            pane_id: pane.into(),
+            key: crate::agents::AgentKey::Herdr(pane.into()),
+            dir: None,
             status,
             kind: "claude".into(),
             name: None,
