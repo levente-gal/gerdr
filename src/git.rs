@@ -55,6 +55,11 @@ pub struct GitStatus {
     pub stashes: u32,
     /// When it last fetched (`FETCH_HEAD`'s time); `None` if never.
     pub fetched: Option<SystemTime>,
+    /// The local branches, by name, in git's order.
+    pub local_branches: Vec<String>,
+    /// The remote's branches, by name without the remote (`feat/x`), in
+    /// git's order, its `HEAD` left out.
+    pub remote_branches: Vec<String>,
 }
 
 /// A file `git status` lists.
@@ -162,7 +167,7 @@ impl GitStatus {
 /// The status of the repository `dir` is in; `None` outside one or without git.
 ///
 /// It runs every few seconds for every workspace folder, so it keeps to
-/// four git commands where it can and reads git's own files for the rest.
+/// five git commands where it can and reads git's own files for the rest.
 pub fn status(dir: &Path) -> Option<GitStatus> {
     // -z: paths come unquoted, whatever is in them. --show-stash counts
     // the stashes from git itself, whichever ref store it uses.
@@ -191,8 +196,13 @@ pub fn status(dir: &Path) -> Option<GitStatus> {
     let remotes = git(dir, &["remote"]).unwrap_or_default();
     let remotes: Vec<&str> = remotes.lines().filter(|r| !r.is_empty()).collect();
     status.remote = pick_remote(&remotes, status.upstream.as_deref());
-    status.default_branch =
-        default_branch(dir, status.common_dir.as_deref(), status.remote.as_deref());
+    (status.local_branches, status.remote_branches) = branches(dir, status.remote.as_deref());
+    status.default_branch = default_branch(
+        dir,
+        status.common_dir.as_deref(),
+        status.remote.as_deref(),
+        &status.local_branches,
+    );
     (status.here, status.worktrees) = worktrees(dir, status.root.as_deref());
     Some(status)
 }
@@ -271,10 +281,39 @@ fn pick_remote(remotes: &[&str], upstream: Option<&str>) -> Option<String> {
     Some((*remote).to_owned())
 }
 
+/// The local branches of the repository `dir` is in, and `remote`'s, by
+/// name.
+fn branches(dir: &Path, remote: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let theirs = remote.map(|remote| format!("refs/remotes/{remote}/"));
+    let mut args = vec!["for-each-ref", "--format=%(refname)", "refs/heads"];
+    // The pattern matches whole folders: `origin` isn't `origin-x`.
+    if let Some(theirs) = &theirs {
+        args.push(theirs.trim_end_matches('/'));
+    }
+    let out = git(dir, &args).unwrap_or_default();
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for line in out.lines() {
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            local.push(name.to_owned());
+        } else if let Some(name) = theirs.as_deref().and_then(|t| line.strip_prefix(t))
+            && name != "HEAD"
+        {
+            remote.push(name.to_owned());
+        }
+    }
+    (local, remote)
+}
+
 /// The default branch of the repository `dir` is in, whose shared git
 /// folder is `common_dir`: what `remote`'s HEAD points at, else a local
-/// `main`, else `master`.
-fn default_branch(dir: &Path, common_dir: Option<&Path>, remote: Option<&str>) -> Option<String> {
+/// `main`, else `master` (from `local`, its local branches).
+fn default_branch(
+    dir: &Path,
+    common_dir: Option<&Path>,
+    remote: Option<&str>,
+    local: &[String],
+) -> Option<String> {
     // The files ref store keeps symbolic refs as files of their own, never
     // packed, and a branch just committed to as one too; a reftable store
     // (or a packed branch) needs git.
@@ -295,24 +334,9 @@ fn default_branch(dir: &Path, common_dir: Option<&Path>, remote: Option<&str>) -
             return Some(branch.to_owned());
         }
     }
-    if files.is_some_and(|common| common.join("refs/heads/main").is_file()) {
-        return Some("main".into());
-    }
-    let out = git(
-        dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/heads/main",
-            "refs/heads/master",
-        ],
-    )?;
-    // The patterns also match branches under main/, so the names are
-    // checked whole.
-    let has = |name: &str| out.lines().any(|r| r == format!("refs/heads/{name}"));
     ["main", "master"]
         .into_iter()
-        .find(|name| has(name))
+        .find(|name| local.iter().any(|b| b == name))
         .map(str::to_owned)
 }
 
@@ -1159,6 +1183,35 @@ mod tests {
         assert_eq!(renamed.remote.as_deref(), Some("fork"));
         assert_eq!(renamed.upstream.as_deref(), Some("fork/main"));
         assert_eq!(renamed.default_branch.as_deref(), Some("trunk"));
+    }
+
+    #[test]
+    fn local_and_remote_branches() {
+        let repo = Repo::new();
+        let alone = status(&repo.0).unwrap();
+        assert_eq!(alone.local_branches, ["main"]);
+        assert!(alone.remote_branches.is_empty());
+        repo.bare_remote();
+        repo.git(
+            &repo.0,
+            &["push", "-q", "origin", "main:main", "main:feat/x"],
+        );
+        repo.git(&repo.0, &["fetch", "-q", "origin"]);
+        repo.git(&repo.0, &["remote", "set-head", "origin", "-a"]);
+        repo.git(&repo.0, &["branch", "-q", "work"]);
+        // Another remote's branches, and one whose name starts the same,
+        // aren't the remote's.
+        let other = repo.beside("other");
+        repo.git(&repo.0, &["init", "-q", "--bare", other.to_str().unwrap()]);
+        for name in ["upstream", "origin-x"] {
+            repo.git(&repo.0, &["remote", "add", name, other.to_str().unwrap()]);
+            repo.git(&repo.0, &["push", "-q", name, "main:other"]);
+            repo.git(&repo.0, &["fetch", "-q", name]);
+        }
+        let both = status(&repo.0).unwrap();
+        assert_eq!(both.remote.as_deref(), Some("origin"));
+        assert_eq!(both.local_branches, ["main", "work"]);
+        assert_eq!(both.remote_branches, ["feat/x", "main"]);
     }
 
     #[test]

@@ -1081,6 +1081,21 @@ pub fn switch_blockers(dir: &Path, target: &str, dirty: &[String]) -> Vec<String
         .collect()
 }
 
+/// The first of `names` the repository at `dir` has as a branch, else the
+/// first `remote` has: what a switch to them goes to there.
+pub fn branch_named(dir: &Path, names: &[String], remote: Option<&str>) -> Option<String> {
+    let local = names
+        .iter()
+        .find(|name| has_ref(dir, &format!("refs/heads/{name}")));
+    let theirs = || {
+        let remote = remote?;
+        names
+            .iter()
+            .find(|name| has_ref(dir, &format!("refs/remotes/{remote}/{name}")))
+    };
+    local.or_else(theirs).cloned()
+}
+
 /// Whether ref `name` (`refs/heads/x`, `refs/remotes/origin/x`) exists;
 /// any other name, whether it names a commit.
 pub fn has_ref(dir: &Path, name: &str) -> bool {
@@ -1507,6 +1522,23 @@ mod tests {
             failure(switch_or_create(&fx.repo, "bad..name")),
             Failure::Other
         );
+    }
+
+    #[test]
+    fn the_first_name_a_repository_has_a_branch_by() {
+        let fx = Fx::new();
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let found = |n: &[&str]| branch_named(&fx.repo, &names(n), Some("origin"));
+        assert_eq!(found(&["main", "master"]).as_deref(), Some("main"));
+        assert_eq!(found(&["master", "main"]).as_deref(), Some("main"));
+        assert_eq!(found(&["trunk"]), None);
+        // A local one first, though later in the group.
+        git(&fx.repo, &["push", "-q", "origin", "main:master"]);
+        git(&fx.repo, &["fetch", "-q"]);
+        assert_eq!(found(&["master", "main"]).as_deref(), Some("main"));
+        git(&fx.repo, &["branch", "-q", "-m", "main", "trunk"]);
+        assert_eq!(found(&["master", "main"]).as_deref(), Some("master"));
+        assert_eq!(branch_named(&fx.repo, &names(&["master"]), None), None);
     }
 
     #[test]

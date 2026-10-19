@@ -4,13 +4,16 @@
 //! files under it, each with a checkbox; on the right the selected file's
 //! diff or the selected repository's log; under both a field (a branch
 //! name or a commit message), the last batch's result and the actions.
-//! A sheet over it asks before a batch that could conflict.
+//! A sheet over it asks before a batch that could conflict. At the right
+//! of the header, a branch picker: the branch the repositories acted on
+//! are on, and a menu of the ones they all have to switch them to.
 
 use super::{
     BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, FIELD_GAP, FieldSpot,
     GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, LineState,
-    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, band, chevron_down,
-    coverage, field_text, icon_sdf, measure, mix, phys, physical, rect_px, rounded_rect, segment,
+    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, band, check,
+    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
+    rect_px, rounded_rect, segment,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
@@ -112,6 +115,24 @@ const SHEET_NAME_SHARE: f32 = 0.32;
 /// How dark the panel is under a sheet, as a share of the palette's
 /// shadow.
 const SCRIM: f32 = 0.5;
+/// The branch picker's button: the room inside either end, its icon's and
+/// chevron's room, the gap after the icon and before the chevron, and the
+/// narrowest it gets.
+const PICKER_PAD: i32 = 10;
+const PICKER_ICON: i32 = 18;
+const PICKER_CHEVRON: i32 = 14;
+const PICKER_GAP: i32 = 6;
+const PICKER_MIN: i32 = 140;
+/// The branch menu: at most this many rows in view, the gap between it
+/// and the button, the room above and below its rows, the room inside
+/// either end of a row and a row's check mark's room, and the widest it
+/// gets.
+pub const BRANCH_MENU_ROWS: usize = 10;
+const BRANCH_MENU_GAP: i32 = 4;
+const BRANCH_MENU_PAD: i32 = 4;
+const BRANCH_ROW_PAD: i32 = 10;
+const BRANCH_CHECK: i32 = 22;
+const BRANCH_MENU_MAX: i32 = 420;
 
 /// What the repositories panel shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +164,34 @@ pub struct ReposView {
     /// A question over the panel, which then has the keyboard.
     pub sheet: Option<SheetView>,
     /// What the tree says when the project has no repository.
+    pub empty: String,
+    /// The header's branch picker.
+    pub branch: BranchPicker,
+}
+
+/// The header's branch picker: the branch the repositories acted on are
+/// on, and its menu while open.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchPicker {
+    /// The branch they are all on, else `mixed branches`.
+    pub label: String,
+    /// The label says they differ (or that there are none): it is muted.
+    pub mixed: bool,
+    /// There are repositories to switch, and no batch running.
+    pub enabled: bool,
+    pub menu: Option<BranchMenuView>,
+}
+
+/// The branch picker's menu: the branches the repositories acted on all
+/// have, in view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchMenuView {
+    pub rows: Vec<String>,
+    /// The row of the branch they are all on, by index into `rows`.
+    pub current: Option<usize>,
+    /// The row Enter picks, by index into `rows`.
+    pub picked: Option<usize>,
+    /// What it says without rows.
     pub empty: String,
 }
 
@@ -374,6 +423,12 @@ pub enum ReposHit {
     DetailTab(DetailTab),
     /// The detail pane (for the wheel).
     Detail,
+    /// The branch picker's button.
+    BranchButton,
+    /// A row of the branch menu, by index into `BranchMenuView::rows`.
+    BranchRow(usize),
+    /// The branch menu, on no row (for the wheel).
+    BranchMenu,
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -396,6 +451,10 @@ pub struct ReposLayout {
     pub buttons: Vec<(ReposButton, Rect)>,
     pub footer: Rect,
     pub sheet: Option<Rect>,
+    /// The branch picker's button, and its menu with a rect per row while
+    /// open.
+    pub branch: Rect,
+    pub branch_menu: Option<(Rect, Vec<Rect>)>,
 }
 
 /// Inside the panel's parts: what the painter needs besides `ReposLayout`.
@@ -501,6 +560,12 @@ fn tree_width(w: i32) -> i32 {
         .min(w)
 }
 
+/// How wide the branch picker's button is for `label`.
+fn picker_width(label: &str) -> i32 {
+    let text = text_extent(label, FONT_SIZE, BUTTON_CHAR);
+    (2 * PICKER_PAD + PICKER_ICON + 2 * PICKER_GAP + text + PICKER_CHEVRON).max(PICKER_MIN)
+}
+
 /// How many tree lines and detail lines the panel shows at once on an
 /// output of `size`: with the error line, the result bar and the footer's
 /// rows all there, so that the page doesn't change as they come and go.
@@ -528,6 +593,16 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let inner_x = x + HELP_PADDING;
     let inner_w = (w - 2 * HELP_PADDING).max(0);
     let header = Rectangle::new((x, top).into(), (w, REPOS_HEADER).into());
+    // The branch picker at the header's right, no more than a third of it.
+    let pw = picker_width(&view.branch.label).min(inner_w / 3).max(1);
+    let branch = Rectangle::new(
+        (
+            inner_x + inner_w - pw,
+            top + (REPOS_HEADER - ROW_BUTTON) / 2,
+        )
+            .into(),
+        (pw, ROW_BUTTON).into(),
+    );
 
     // From the bottom up: the footer, the result bar, the error, the field.
     let rows = hint_rows(&view.hints, inner_w);
@@ -686,6 +761,40 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         sheet = Some(card);
     }
 
+    // The branch menu under the button, its right edge on the button's,
+    // as many rows as fit above the field.
+    let branch_menu = view.branch.menu.as_ref().map(|menu| {
+        let widest = menu
+            .rows
+            .iter()
+            .chain([&menu.empty])
+            .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
+            .max()
+            .unwrap_or(0);
+        let mw = (widest + 2 * BRANCH_ROW_PAD + BRANCH_CHECK)
+            .clamp(pw, BRANCH_MENU_MAX.max(pw))
+            .min(inner_w);
+        let my = branch.loc.y + branch.size.h + BRANCH_MENU_GAP;
+        let room = (field.loc.y - REPOS_PAD - my - 2 * BRANCH_MENU_PAD).max(0) / REPOS_ROW;
+        let shown = menu.rows.len().max(1).min(room.max(1) as usize);
+        let mh = 2 * BRANCH_MENU_PAD + shown as i32 * REPOS_ROW;
+        let mx = branch.loc.x + branch.size.w - mw;
+        let card = Rectangle::new((mx, my).into(), (mw, mh).into());
+        let rows = (0..shown.min(menu.rows.len()))
+            .map(|i| {
+                Rectangle::new(
+                    (
+                        mx + BRANCH_MENU_PAD,
+                        my + BRANCH_MENU_PAD + i as i32 * REPOS_ROW,
+                    )
+                        .into(),
+                    ((mw - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
+                )
+            })
+            .collect();
+        (card, rows)
+    });
+
     let mut buttons = result_buttons.clone();
     buttons.extend(hints.iter().map(|&(i, r)| (view.hints[i].button, r)));
     if let Some(s) = &view.sheet {
@@ -704,6 +813,8 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             buttons,
             footer,
             sheet,
+            branch,
+            branch_menu,
         },
         error,
         body,
@@ -713,6 +824,39 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         sheet_lines,
         sheet_buttons,
     }
+}
+
+/// A card over the panel in `rect`, with corners of `radius`: its drop
+/// shadow, its border and its face.
+fn card_over(c: &mut Canvas, rect: Rect, radius: f32, scale: f64, p: &Palette) {
+    let s = scale as f32;
+    let radius = radius * s;
+    let (x, y, w, h) = rect_px(rect, scale);
+    let blur = (SHADOW as f32 - 2.0) * s;
+    let drop = 3.0 * s;
+    let grow = blur;
+    c.paint_in(
+        (x - grow) as i32,
+        (y - grow) as i32,
+        (w + 2.0 * grow) as i32 + 1,
+        (h + 2.0 * grow + drop) as i32 + 1,
+        [0, 0, 0],
+        |px, py| {
+            let d = rounded_rect(px, py, x, y + drop, w, h, radius);
+            let t = 1.0 - (d / blur).clamp(0.0, 1.0);
+            if d < 0.0 { 0.0 } else { p.shadow * t * t }
+        },
+    );
+    let b = ((scale.round() as i32).max(1)) as f32;
+    c.rounded(x, y, w, h, radius, p.border);
+    c.rounded(
+        x + b,
+        y + b,
+        w - 2.0 * b,
+        h - 2.0 * b,
+        radius - b,
+        p.elevated,
+    );
 }
 
 /// `inner` lies wholly in `outer`.
@@ -736,6 +880,21 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
             .iter()
             .find(|(_, r)| within(sheet, *r) && at(r));
         return Some(button.map_or(ReposHit::Panel, |(b, _)| ReposHit::Button(*b)));
+    }
+    // The open menu is over the rest, which it closes on a click.
+    if let Some((menu, rows)) = &layout.branch_menu {
+        if let Some(i) = rows.iter().position(at) {
+            return Some(ReposHit::BranchRow(i));
+        }
+        if at(menu) {
+            return Some(ReposHit::BranchMenu);
+        }
+    }
+    if at(&layout.branch) {
+        return Some(ReposHit::BranchButton);
+    }
+    if layout.branch_menu.is_some() {
+        return Some(ReposHit::Panel);
     }
     for (i, (line, check, expander)) in layout.lines.iter().enumerate() {
         if at(check) {
@@ -986,8 +1145,10 @@ impl Painter {
 
         // The header: the title, then where the repositories stand.
         let header = shift(layout.header);
-        let (hx, hend) = phys(header, scale);
-        let (hx, hend) = (hx + px(HELP_PADDING) as f32, hend - px(HELP_PADDING) as f32);
+        let picker = shift(layout.branch);
+        let (hx, _) = phys(header, scale);
+        let hx = hx + px(HELP_PADDING) as f32;
+        let hend = px(picker.loc.x - HEADER_GAP) as f32;
         let heading = if view.title.is_empty() {
             "Repositories".to_owned()
         } else {
@@ -1014,6 +1175,7 @@ impl Painter {
             scale,
             p.muted,
         );
+        self.branch_button(&mut c, view, picker, scale, p);
         across(&mut c, px(header.loc.y + header.size.h) - border);
 
         // The tree, then the line between it and the detail pane.
@@ -1094,6 +1256,10 @@ impl Painter {
             self.hint_button(&mut c, view, &view.hints[i], shift(rect), scale, p);
         }
 
+        if let (Some(menu), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) {
+            let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
+            self.branch_menu(&mut c, view, menu, shift(*card), &rows, scale, p);
+        }
         match &view.sheet {
             Some(sheet) => self.sheet(&mut c, view, sheet, &parts, shift, scale, p),
             None => {
@@ -1675,6 +1841,117 @@ impl Painter {
         );
     }
 
+    /// The branch picker's button in `rect`: the branch icon, the label
+    /// (muted when they differ) and a chevron; lit while its menu is open
+    /// or under the pointer, dimmed when there is nothing to switch.
+    fn branch_button(&self, c: &mut Canvas, view: &ReposView, rect: Rect, scale: f64, p: &Palette) {
+        let picker = &view.branch;
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let b = ((scale.round() as i32).max(1)) as f32;
+        let r = BUTTON_RADIUS * s;
+        let hovered = picker.enabled && view.hover == Some(ReposHit::BranchButton);
+        let fill = if picker.menu.is_some() || hovered {
+            p.selected
+        } else {
+            p.element
+        };
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+        let (icon_color, label_color) = match (picker.enabled, picker.mixed) {
+            (false, _) => (p.placeholder, p.placeholder),
+            (true, true) => (p.muted, p.muted),
+            (true, false) => (p.muted, p.text),
+        };
+        let icon = Rectangle::new(
+            (rect.loc.x + PICKER_PAD, rect.loc.y).into(),
+            (PICKER_ICON, rect.size.h).into(),
+        );
+        icon_sdf(c, icon, scale, icon_color, |x, y| git_branch(x, y, 0.9 * s));
+        let chevron = Rectangle::new(
+            (
+                rect.loc.x + rect.size.w - PICKER_PAD - PICKER_CHEVRON,
+                rect.loc.y,
+            )
+                .into(),
+            (PICKER_CHEVRON, rect.size.h).into(),
+        );
+        icon_sdf(c, chevron, scale, icon_color, |x, y| chevron_down(x, y, s));
+        let tx = ((icon.loc.x + icon.size.w + PICKER_GAP) as f64 * scale) as f32;
+        let tend = ((chevron.loc.x - PICKER_GAP) as f64 * scale) as f32;
+        self.mixed_text(
+            c,
+            &picker.label,
+            FONT_SIZE,
+            tx,
+            tend,
+            band(rect, scale),
+            scale,
+            label_color,
+        );
+    }
+
+    /// The branch menu, a card in `card` with a row per branch in `rows`:
+    /// the one Enter picks lit, the one they are all on checked.
+    #[allow(clippy::too_many_arguments)]
+    fn branch_menu(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        menu: &BranchMenuView,
+        card: Rect,
+        rows: &[Rect],
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        card_over(c, card, MENU_RADIUS, scale, p);
+        if menu.rows.is_empty() {
+            let row = Rectangle::new(
+                (card.loc.x + BRANCH_MENU_PAD, card.loc.y + BRANCH_MENU_PAD).into(),
+                ((card.size.w - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
+            );
+            let (x, end) = phys(row, scale);
+            let pad = BRANCH_ROW_PAD as f32 * s;
+            let row_band = band(row, scale);
+            self.text(
+                c,
+                &menu.empty,
+                FONT_SIZE,
+                x + pad,
+                end - pad,
+                row_band,
+                scale,
+                p.placeholder,
+            );
+            return;
+        }
+        for (i, (rect, label)) in rows.iter().zip(&menu.rows).enumerate() {
+            let (x, y, w, h) = rect_px(*rect, scale);
+            let r = (MENU_RADIUS - 2.0) * s;
+            if menu.picked == Some(i) {
+                c.rounded(x, y, w, h, r, p.selected);
+            } else if view.hover == Some(ReposHit::BranchRow(i)) {
+                c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
+            }
+            let mark = Rectangle::new(
+                (
+                    rect.loc.x + rect.size.w - BRANCH_ROW_PAD / 2 - BRANCH_CHECK,
+                    rect.loc.y,
+                )
+                    .into(),
+                (BRANCH_CHECK, rect.size.h).into(),
+            );
+            if menu.current == Some(i) {
+                icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
+            }
+            let pad = BRANCH_ROW_PAD as f32 * s;
+            let end = (mark.loc.x as f64 * scale) as f32;
+            let row_band = band(*rect, scale);
+            self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
+        }
+    }
+
     /// The sheet over the panel, which is dimmed under it: its title, a
     /// line per repository and its buttons, the default one in the accent.
     #[allow(clippy::too_many_arguments)]
@@ -1702,33 +1979,7 @@ impl Painter {
             [0, 0, 0],
             |x, y| coverage(rounded_rect(x, y, px_, py_, pw, ph, radius)) * SCRIM * p.shadow,
         );
-        let card = shift(card);
-        let (x, y, w, h) = rect_px(card, scale);
-        let blur = (SHADOW as f32 - 2.0) * s;
-        let drop = 3.0 * s;
-        let grow = blur;
-        c.paint_in(
-            (x - grow) as i32,
-            (y - grow) as i32,
-            (w + 2.0 * grow) as i32 + 1,
-            (h + 2.0 * grow + drop) as i32 + 1,
-            [0, 0, 0],
-            |px, py| {
-                let d = rounded_rect(px, py, x, y + drop, w, h, radius);
-                let t = 1.0 - (d / blur).clamp(0.0, 1.0);
-                if d < 0.0 { 0.0 } else { p.shadow * t * t }
-            },
-        );
-        let b = ((scale.round() as i32).max(1)) as f32;
-        c.rounded(x, y, w, h, radius, p.border);
-        c.rounded(
-            x + b,
-            y + b,
-            w - 2.0 * b,
-            h - 2.0 * b,
-            radius - b,
-            p.elevated,
-        );
+        card_over(c, shift(card), HELP_RADIUS, scale, p);
 
         if let Some(title) = parts.sheet_title {
             let title = shift(title);
@@ -1964,7 +2215,45 @@ mod tests {
             },
             sheet: None,
             empty: "No repositories in this project".into(),
+            branch: BranchPicker {
+                label: "mixed branches".into(),
+                mixed: true,
+                enabled: true,
+                menu: None,
+            },
         }
+    }
+
+    /// `full` with the branch menu open, the pointer on its second row.
+    fn with_menu() -> ReposView {
+        let rows = ["main / master", "feat/x", "production", "release/2.1"];
+        ReposView {
+            branch: BranchPicker {
+                menu: Some(BranchMenuView {
+                    rows: rows.map(String::from).to_vec(),
+                    current: Some(1),
+                    picked: Some(0),
+                    empty: "No branch they all have".into(),
+                }),
+                ..full().branch
+            },
+            hover: Some(ReposHit::BranchRow(1)),
+            ..full()
+        }
+    }
+
+    /// `with_menu` with no branch they all have, on one branch.
+    fn with_empty_menu() -> ReposView {
+        let mut view = with_menu();
+        view.branch.label = "main / master".into();
+        view.branch.mixed = false;
+        if let Some(menu) = &mut view.branch.menu {
+            *menu = BranchMenuView {
+                empty: menu.empty.clone(),
+                ..BranchMenuView::default()
+            };
+        }
+        view
     }
 
     /// Nothing in it: no repositories, hints, error or result.
@@ -1979,6 +2268,11 @@ mod tests {
             result: None,
             hints: Vec::new(),
             detail: DetailView::default(),
+            branch: BranchPicker {
+                label: "No repository".into(),
+                mixed: true,
+                ..BranchPicker::default()
+            },
             ..full()
         }
     }
@@ -2013,7 +2307,14 @@ mod tests {
             result: None,
             ..full()
         };
-        vec![empty(), bare, full(), with_sheet()]
+        vec![
+            empty(),
+            bare,
+            full(),
+            with_sheet(),
+            with_menu(),
+            with_empty_menu(),
+        ]
     }
 
     fn centre(r: Rect) -> Point<f64, Logical> {
@@ -2034,6 +2335,21 @@ mod tests {
                 assert!(inside(output, l.panel), "{size:?}");
                 assert_eq!(l.panel.loc.x, w - (l.panel.loc.x + l.panel.size.w));
                 let mut parts = vec![l.header, l.tree, l.detail, l.field, l.footer];
+                // The branch picker in the header, its menu above the field.
+                assert!(inside(l.header, l.branch), "{size:?}");
+                parts.push(l.branch);
+                assert_eq!(l.branch_menu.is_some(), view.branch.menu.is_some());
+                if let (Some((menu, rows)), Some(m)) = (&l.branch_menu, &view.branch.menu) {
+                    parts.push(*menu);
+                    assert!(menu.loc.y >= l.branch.loc.y + l.branch.size.h);
+                    assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
+                    assert!(menu.size.w >= l.branch.size.w);
+                    assert!(!rows.is_empty() || m.rows.is_empty());
+                    assert!(rows.len() <= m.rows.len());
+                    for row in rows {
+                        assert!(inside(*menu, *row));
+                    }
+                }
                 parts.extend(l.result);
                 parts.extend(l.sheet);
                 parts.extend(l.detail_tabs.iter().map(|(_, r)| *r));
@@ -2103,9 +2419,11 @@ mod tests {
     fn hits_land_on_what_is_under_them() {
         for (w, h) in SIZES {
             let size: Size<i32, Logical> = (w, h).into();
-            for view in views().into_iter().filter(|v| v.sheet.is_none()) {
+            let plain = |v: &ReposView| v.sheet.is_none() && v.branch.menu.is_none();
+            for view in views().into_iter().filter(plain) {
                 let l = repos_layout(&view, size);
                 let hit = |r: Rect| repos_hit(&l, centre(r));
+                assert_eq!(hit(l.branch), Some(ReposHit::BranchButton));
                 for (i, (line, check, expander)) in l.lines.iter().enumerate() {
                     assert_eq!(hit(*check), Some(ReposHit::Check(i)));
                     if let Some(e) = expander {
@@ -2129,6 +2447,55 @@ mod tests {
                 );
                 assert_eq!(repos_hit(&l, below.into()), None);
             }
+        }
+    }
+
+    #[test]
+    fn the_branch_menu_takes_every_click() {
+        for (w, h) in SIZES {
+            let size: Size<i32, Logical> = (w, h).into();
+            let view = with_menu();
+            let l = repos_layout(&view, size);
+            let (menu, rows) = l.branch_menu.clone().expect("a menu");
+            for (i, row) in rows.iter().enumerate() {
+                assert_eq!(repos_hit(&l, centre(*row)), Some(ReposHit::BranchRow(i)));
+            }
+            let pad = (menu.loc.x as f64 + 1.0, menu.loc.y as f64 + 1.0);
+            assert_eq!(repos_hit(&l, pad.into()), Some(ReposHit::BranchMenu));
+            assert_eq!(
+                repos_hit(&l, centre(l.branch)),
+                Some(ReposHit::BranchButton)
+            );
+            // The rest is the panel, which a click closes the menu on.
+            let mut others = vec![l.field, l.detail, l.header];
+            others.extend(l.lines.iter().map(|(line, _, _)| *line));
+            others.extend(l.buttons.iter().map(|(_, r)| *r));
+            for r in others {
+                if !menu.to_f64().contains(centre(r)) {
+                    assert_eq!(repos_hit(&l, centre(r)), Some(ReposHit::Panel), "{r:?}");
+                }
+            }
+            assert_eq!(repos_hit(&l, (1.0, 1.0).into()), None);
+        }
+    }
+
+    #[test]
+    fn the_branch_menu_shows_what_fits() {
+        let mut view = with_menu();
+        if let Some(menu) = &mut view.branch.menu {
+            menu.rows = (0..BRANCH_MENU_ROWS)
+                .map(|i| format!("feature/a-rather-long-branch-name-{i}"))
+                .collect();
+        }
+        for (w, h) in SIZES.into_iter().chain([(640, 480)]) {
+            let size: Size<i32, Logical> = (w, h).into();
+            let l = repos_layout(&view, size);
+            let (menu, rows) = l.branch_menu.expect("a menu");
+            assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
+            // As many as the tree's page, whatever the size.
+            let page = repos_page(size).0.min(BRANCH_MENU_ROWS);
+            assert!(rows.len() >= page, "{size:?}: {} < {page}", rows.len());
+            assert!(menu.size.w <= BRANCH_MENU_MAX.max(l.branch.size.w));
         }
     }
 
@@ -2241,7 +2608,16 @@ mod tests {
             }
             v
         };
-        for view in [empty(), full(), with_sheet(), disabled_hover, long_sheet] {
+        let views = [
+            empty(),
+            full(),
+            with_sheet(),
+            disabled_hover,
+            long_sheet,
+            with_menu(),
+            with_empty_menu(),
+        ];
+        for view in views {
             for (w, h) in SIZES {
                 for (theme, scale) in [(Theme::Dark, 1.0), (Theme::Light, 2.0)] {
                     let _ = painter.repos(&view, (w, h).into(), scale, theme.palette());
@@ -2272,6 +2648,8 @@ mod tests {
             ("sheet", with_sheet()),
             ("empty", empty()),
             ("hover", disabled_hover),
+            ("menu", with_menu()),
+            ("menu_empty", with_empty_menu()),
         ];
         for (theme, scale) in [(Theme::Dark, 1.0), (Theme::Light, 1.0), (Theme::Dark, 2.0)] {
             for (name, view) in &cases {

@@ -5131,7 +5131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| ListeningSocketSource::new_auto())?;
     let socket_name = socket.socket_name().to_os_string();
 
-    let (keymap, apps, ui) = config::load();
+    let (keymap, apps, ui, git_config) = config::load();
     let saved_theme = std::fs::read_to_string(theme_file())
         .ok()
         .and_then(|s| ThemeMode::from_name(&s));
@@ -5180,7 +5180,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         git_again: false,
         git_read: None,
         worktrees: worktrees::Worktrees::default(),
-        repos: repos::Repos::default(),
+        repos: repos::Repos {
+            same_branches: git_config.same_branches,
+            ..Default::default()
+        },
         web_pending: false,
         notifier: None,
         blocked_since: HashMap::new(),

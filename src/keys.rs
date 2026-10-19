@@ -649,7 +649,7 @@ mod tests {
     };
 
     fn from_config(text: &str) -> (Keymap, Vec<String>) {
-        let (keymap, _, _, problems) = config::from_text(text);
+        let (keymap, _, _, _, problems) = config::from_text(text);
         (keymap, problems)
     }
 
