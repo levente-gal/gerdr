@@ -19,7 +19,8 @@
 //! resolved, Ctrl+G continues (Ctrl+Shift+Delete aborts, twice), Alt+Z
 //! undoes the last batch (twice), Alt+R retries what failed, Ctrl+D and
 //! Ctrl+T show the diff and the log, Ctrl+S opens the branch picker; Esc
-//! closes.
+//! closes. On a repository's line, a click on the arrow up pushes it, on
+//! the arrow down pulls it, and on its stash count lists its stashes.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -35,7 +36,7 @@ use smithay::{
 use crate::{
     chrome::{
         BRANCH_MENU_ROWS, BranchMenuView, BranchPicker, Check, Chip, DetailLine, DetailTab,
-        DetailView, DiffTone, FileLine, Hint, LineState, RepoLine, ReposButton, ReposHit,
+        DetailView, DiffTone, FileLine, Hint, LineState, RepoLine, RepoMark, ReposButton, ReposHit,
         ReposView, ResultBar, SheetView, Tone, TreeLine,
     },
     git::{Change, GitStatus, InProgress},
@@ -467,7 +468,8 @@ impl RunState {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DetailKey {
     pub root: PathBuf,
-    /// The file whose diff it is; `None` for the repository's log.
+    /// The file whose diff it is; `None` for the repository's log or
+    /// stashes.
     pub file: Option<String>,
     pub tab: DetailTab,
 }
@@ -1774,13 +1776,19 @@ impl Panel {
         self.first = self.first.min(rows.len().saturating_sub(page));
         let at = |i: usize| (i < page && self.first + i < rows.len()).then_some(self.first + i);
         match hit {
-            ReposHit::Line(i) | ReposHit::Mark(i, _) => {
+            ReposHit::Line(i) | ReposHit::Mark(i, RepoMark::Dirty) => {
                 let k = at(i)?;
                 if self.selected_row(&rows, items) == Some(k) {
                     self.armed = armed;
                 }
                 self.select(&rows, k, items, page);
                 self.focus = Focus::Tree;
+            }
+            ReposHit::Mark(i, mark) => {
+                let k = at(i)?;
+                self.select(&rows, k, items, page);
+                self.focus = Focus::Tree;
+                return self.mark_press(mark, rows[k].item(), ctx);
             }
             ReposHit::Check(i) => {
                 let k = at(i)?;
@@ -1803,6 +1811,30 @@ impl Panel {
             ReposHit::Detail | ReposHit::Panel | ReposHit::BranchRow(_) | ReposHit::BranchMenu => {}
         }
         None
+    }
+
+    /// A click on a mark of repository `k`'s line: the arrows push or pull
+    /// it alone, whatever is checked; the stash count lists its stashes.
+    fn mark_press(&mut self, mark: RepoMark, k: usize, ctx: &Ctx) -> Option<Outcome> {
+        let kind = match mark {
+            RepoMark::Dirty => return None,
+            RepoMark::Stashes => {
+                self.set_tab(DetailTab::Stashes);
+                return None;
+            }
+            RepoMark::Ahead => BatchKind::Push { force: false },
+            RepoMark::Behind => BatchKind::Pull(Pull::FastForward),
+        };
+        if ctx.batch.is_some_and(|b| !b.finished()) {
+            self.error = Some("Wait for the batch to finish".into());
+            return None;
+        }
+        self.error = None;
+        let jobs = vec![Job {
+            root: ctx.items[k].root.clone(),
+            files: Vec::new(),
+        }];
+        Some(Outcome::Batch { kind, jobs })
     }
 
     /// The wheel turned `rows` rows (down positive), over the detail pane
@@ -2074,7 +2106,7 @@ impl Panel {
         let tab = self.tab_for(file.is_some());
         let file = match tab {
             DetailTab::Diff => Some(file?.clone()),
-            DetailTab::Log => None,
+            DetailTab::Log | DetailTab::Stashes => None,
         };
         Some(DetailKey {
             root: root.clone(),
@@ -2100,6 +2132,11 @@ impl Panel {
                 vec![detail_line("Select a file for its diff", DiffTone::Plain)]
             }
             DetailTab::Diff => text.map(|_| self.diff.clone()).unwrap_or_default(),
+            DetailTab::Stashes => text
+                .into_iter()
+                .flat_map(str::lines)
+                .map(|l| detail_line(l, DiffTone::Plain))
+                .collect(),
             DetailTab::Log => {
                 let mut lines: Vec<DetailLine> = text
                     .into_iter()
@@ -2330,7 +2367,7 @@ impl Panel {
         }
         self.diff = match key.tab {
             DetailTab::Diff => diff_lines(&text),
-            DetailTab::Log => Vec::new(),
+            DetailTab::Log | DetailTab::Stashes => Vec::new(),
         };
         self.detail = Some((key, text));
         self.detail_stale = false;
@@ -3440,6 +3477,53 @@ mod tests {
             panel.click(ReposHit::Button(ReposButton::OpenWorkspace), &ctx),
             Some(Outcome::OpenWorkspace("/src/zed2".into()))
         );
+    }
+
+    #[test]
+    fn a_lines_marks_push_pull_and_list_stashes() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        // gerdr is checked, but the arrows act on their own line alone.
+        panel.click(ReposHit::Check(0), &ctx);
+        assert_eq!(
+            panel.click(ReposHit::Mark(3, RepoMark::Ahead), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: false },
+                jobs: jobs(&["herdr"])
+            })
+        );
+        assert_eq!(panel.selected, Some(Selected::Repo(root("herdr"))));
+        assert_eq!(
+            panel.click(ReposHit::Mark(4, RepoMark::Behind), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Pull(Pull::FastForward),
+                jobs: jobs(&["zed"])
+            })
+        );
+        assert_eq!(panel.click(ReposHit::Mark(4, RepoMark::Dirty), &ctx), None);
+        assert_eq!(
+            panel.click(ReposHit::Mark(3, RepoMark::Stashes), &ctx),
+            None
+        );
+        assert_eq!(panel.tab, Some(DetailTab::Stashes));
+        let key = panel.detail_wanted(&ctx).unwrap();
+        assert_eq!((key.root.clone(), key.file.clone()), (root("herdr"), None));
+        panel.set_detail(key, "stash@{0} · 1 day ago · On main: wip\n".into());
+        let detail = panel.view("p", &ctx).detail;
+        assert_eq!(detail.tab, DetailTab::Stashes);
+        assert_eq!(detail.lines[0].text, "stash@{0} · 1 day ago · On main: wip");
+        // Not while a batch runs.
+        let b = batch(
+            BatchKind::Fetch,
+            vec![run("gerdr", RunState::Running("fetching…".into()))],
+        );
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx
+        };
+        assert_eq!(panel.click(ReposHit::Mark(3, RepoMark::Ahead), &ctx), None);
+        assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
     }
 
     #[test]

@@ -303,6 +303,8 @@ pub enum DetailTab {
     #[default]
     Diff,
     Log,
+    /// The repository's stashes.
+    Stashes,
 }
 
 /// A line of a diff or a log, in the monospace font.
@@ -437,6 +439,8 @@ pub enum RepoMark {
     Ahead,
     /// An arrow down and a count: commits to pull.
     Behind,
+    /// `2 stashed`, after the marks.
+    Stashes,
 }
 
 impl RepoMark {
@@ -448,8 +452,9 @@ impl RepoMark {
         };
         match self {
             RepoMark::Dirty => "Changes not committed".into(),
-            RepoMark::Ahead => format!("{} to push", commits(repo.ahead)),
-            RepoMark::Behind => format!("{} to pull", commits(repo.behind)),
+            RepoMark::Ahead => format!("{} to push: click to push", commits(repo.ahead)),
+            RepoMark::Behind => format!("{} to pull: click to pull", commits(repo.behind)),
+            RepoMark::Stashes => "Click to list the stashes".into(),
         }
     }
 }
@@ -465,8 +470,15 @@ struct LineSpans {
     /// Where the branch starts, when there is room for it.
     branch: Option<f32>,
     marks: Vec<MarkSpan>,
+    /// Where `no upstream` starts, when there is room for it.
+    no_upstream: Option<f32>,
     /// Where the notes start.
     pen: f32,
+}
+
+/// What a repository line says of its stashes.
+fn stash_note(repo: &RepoLine) -> String {
+    format!("{} stashed", repo.stashes)
 }
 
 /// A mark that fits: its shape from `x`, `w` wide, then its count up to
@@ -530,11 +542,29 @@ fn line_spans(
         });
         pen = mark_end;
     }
+    // The notes, as far as they fit: the stash count is a mark too.
+    let no_upstream = (repo.no_upstream && pen + gap < end).then(|| {
+        let nx = pen + gap;
+        pen = (nx + width("no upstream", SMALL_FONT_SIZE)).min(end);
+        nx
+    });
+    if repo.stashes > 0 && pen + gap < end {
+        let nx = pen + gap;
+        let note_end = (nx + width(&stash_note(repo), SMALL_FONT_SIZE)).min(end);
+        marks.push(MarkSpan {
+            mark: RepoMark::Stashes,
+            x: nx,
+            w: note_end - nx,
+            end: note_end,
+        });
+        pen = note_end;
+    }
     LineSpans {
         chip,
         end,
         branch,
         marks,
+        no_upstream,
         pen,
     }
 }
@@ -783,18 +813,18 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         ((w - tree_w).max(0), middle_h).into(),
     );
     let tab_y = middle_y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
-    let log_x = detail.loc.x + detail.size.w - HELP_PADDING - REPOS_TAB_WIDTH;
-    let diff_x = log_x - REPOS_TAB_GAP - REPOS_TAB_WIDTH;
-    let detail_tabs = vec![
-        (
-            DetailTab::Diff,
-            Rectangle::new((diff_x, tab_y).into(), (REPOS_TAB_WIDTH, ROW_BUTTON).into()),
-        ),
-        (
-            DetailTab::Log,
-            Rectangle::new((log_x, tab_y).into(), (REPOS_TAB_WIDTH, ROW_BUTTON).into()),
-        ),
-    ];
+    let tabs = [DetailTab::Diff, DetailTab::Log, DetailTab::Stashes];
+    let tabs_w = tabs.len() as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP) - REPOS_TAB_GAP;
+    let tabs_x = detail.loc.x + detail.size.w - HELP_PADDING - tabs_w;
+    let detail_tabs = tabs
+        .into_iter()
+        .enumerate()
+        .map(|(k, tab)| {
+            let tx = tabs_x + k as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP);
+            let size = (REPOS_TAB_WIDTH, ROW_BUTTON);
+            (tab, Rectangle::new((tx, tab_y).into(), size.into()))
+        })
+        .collect();
     let body = Rectangle::new(
         (
             detail.loc.x + HELP_PADDING,
@@ -1471,7 +1501,12 @@ impl Painter {
                     icon_sdf(c, rect, scale, color, |x, y| expander_mark(open, x, y, s));
                 }
                 let label_x = px(check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
-                self.repo_line(c, repo, (label_x, right), line_band, gap, scale, p);
+                let mark = match view.hover {
+                    Some(ReposHit::Mark(j, mark)) if j == i => Some(mark),
+                    _ => None,
+                };
+                let at = (label_x, right);
+                self.repo_line(c, repo, at, line_band, gap, mark, scale, p);
             }
             TreeLine::File(file) => {
                 self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
@@ -1520,6 +1555,7 @@ impl Painter {
         (x, right): (f32, f32),
         line_band: (i32, i32),
         gap: f32,
+        hovered: Option<RepoMark>,
         scale: f64,
         p: &Palette,
     ) {
@@ -1583,10 +1619,24 @@ impl Painter {
         let cy = top as f32 + height as f32 / 2.0;
         for m in &spans.marks {
             let cx = m.x + m.w / 2.0;
+            // The ones a click acts on light up under the pointer.
+            let lit = |color| {
+                if hovered == Some(m.mark) {
+                    p.text
+                } else {
+                    color
+                }
+            };
             let (color, count) = match m.mark {
                 RepoMark::Dirty => (p.warning, 0),
-                RepoMark::Ahead => (p.muted, repo.ahead),
-                RepoMark::Behind => (p.muted, repo.behind),
+                RepoMark::Ahead => (lit(p.muted), repo.ahead),
+                RepoMark::Behind => (lit(p.muted), repo.behind),
+                RepoMark::Stashes => {
+                    let note = stash_note(repo);
+                    let color = lit(p.placeholder);
+                    self.mixed_text(c, &note, SMALL_FONT_SIZE, m.x, end, line_band, scale, color);
+                    continue;
+                }
             };
             c.paint_in(m.x as i32, top, m.w as i32 + 1, height, color, |x, y| {
                 let (x, y) = (x - cx, y - cy);
@@ -1594,6 +1644,7 @@ impl Painter {
                     RepoMark::Dirty => x.hypot(y) - 2.5 * s,
                     RepoMark::Ahead => arrow(true, x, y, s),
                     RepoMark::Behind => arrow(false, x, y, s),
+                    RepoMark::Stashes => unreachable!(),
                 })
             });
             if count > 0 {
@@ -1605,18 +1656,25 @@ impl Painter {
                     end,
                     line_band,
                     scale,
-                    p.muted,
+                    color,
                 );
             }
         }
+        if let Some(nx) = spans.no_upstream {
+            let color = p.placeholder;
+            self.mixed_text(
+                c,
+                "no upstream",
+                SMALL_FONT_SIZE,
+                nx,
+                end,
+                line_band,
+                scale,
+                color,
+            );
+        }
         let mut pen = spans.pen;
         let mut notes: Vec<(String, Rgb)> = Vec::new();
-        if repo.no_upstream {
-            notes.push(("no upstream".into(), p.placeholder));
-        }
-        if repo.stashes > 0 {
-            notes.push((format!("{} stashed", repo.stashes), p.placeholder));
-        }
         match &repo.state {
             LineState::Busy(what) => notes.push((what.clone(), p.muted)),
             LineState::Armed(what) => notes.push((what.clone(), p.warning)),
@@ -1742,6 +1800,7 @@ impl Painter {
         let label = match tab {
             DetailTab::Diff => "Diff",
             DetailTab::Log => "Log",
+            DetailTab::Stashes => "Stashes",
         };
         let color = if on { p.text } else { p.muted };
         self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
@@ -2615,13 +2674,42 @@ mod tests {
         let TreeLine::Repo(repo) = &view.lines[6] else {
             panic!("a repository");
         };
-        assert_eq!(RepoMark::Behind.tip(repo), "1 commit to pull");
+        assert_eq!(
+            RepoMark::Behind.tip(repo),
+            "1 commit to pull: click to pull"
+        );
         assert_eq!(RepoMark::Dirty.tip(repo), "Changes not committed");
         let more = RepoLine {
             ahead: 3,
             ..repo.clone()
         };
-        assert_eq!(RepoMark::Ahead.tip(&more), "3 commits to push");
+        assert_eq!(
+            RepoMark::Ahead.tip(&more),
+            "3 commits to push: click to push"
+        );
+        // The stash count is a mark, after `no upstream`.
+        let stashed = view
+            .lines
+            .iter()
+            .position(|line| matches!(line, TreeLine::Repo(repo) if repo.stashes > 0));
+        let stashed = stashed.expect("a repository with stashes");
+        assert!(marks.contains(&(stashed, RepoMark::Stashes)), "{marks:?}");
+        let note = |repo: &RepoLine| {
+            let width = |text: &str, _: f32| text.chars().count() as f32 * 6.0;
+            let spans = line_spans(repo, (0.0, 1000.0), 8.0, 1.0, &width);
+            let mark = spans.marks.iter().find(|m| m.mark == RepoMark::Stashes);
+            (spans.no_upstream, mark.map(|m| (m.x, m.end)))
+        };
+        let lone = RepoLine {
+            no_upstream: true,
+            stashes: 2,
+            ..repo.clone()
+        };
+        let (upstream, stash) = note(&lone);
+        let (ux, (sx, send)) = (upstream.unwrap(), stash.unwrap());
+        assert!(ux + 11.0 * 6.0 < sx, "{ux} {sx}");
+        assert_eq!(send - sx, 9.0 * 6.0);
+        assert_eq!(note(&RepoLine { stashes: 0, ..lone }).1, None);
     }
 
     #[test]

@@ -524,6 +524,7 @@ impl Gerdr {
                 (DetailTab::Diff, Some(change)) => git_ops::diff(&key.root, change),
                 (DetailTab::Diff, None) => String::new(),
                 (DetailTab::Log, _) => git_ops::log_ahead(&key.root),
+                (DetailTab::Stashes, _) => git_ops::stash_list(&key.root),
             };
             let _ = tx.send(RepoEvent::Detail { key, text });
         });

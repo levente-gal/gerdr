@@ -1006,6 +1006,17 @@ pub fn log_ahead(dir: &Path) -> String {
     format!("To push:\n{ahead}")
 }
 
+/// The repository's stashes, newest first, one line each: `stash@{0} ·
+/// 2 hours ago · WIP on main: 1a2b3c4 msg`; else a line saying there are
+/// none.
+pub fn stash_list(dir: &Path) -> String {
+    let list = query(dir, &["stash", "list", "--format=%gd · %cr · %gs"]).unwrap_or_default();
+    if list.trim().is_empty() {
+        return "No stashes".into();
+    }
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1836,6 +1847,23 @@ mod tests {
         let log = log_ahead(dir);
         assert!(log.starts_with("No upstream yet."), "{log}");
         assert_eq!(log.lines().count(), 4);
+    }
+
+    #[test]
+    fn lists_stashes() {
+        let fx = Fx::new();
+        let dir = &fx.repo;
+        assert_eq!(stash_list(dir), "No stashes");
+        write(dir, "a", "changed\n");
+        git(dir, &["stash", "push", "-q", "-m", "first"]);
+        write(dir, "a", "changed again\n");
+        git(dir, &["stash", "push", "-q", "-m", "second"]);
+        let list = stash_list(dir);
+        let lines: Vec<&str> = list.lines().collect();
+        assert_eq!(lines.len(), 2, "{list}");
+        assert!(lines[0].starts_with("stash@{0} · "), "{list}");
+        assert!(lines[0].ends_with("On main: second"), "{list}");
+        assert!(lines[1].ends_with("On main: first"), "{list}");
     }
 
     #[test]
