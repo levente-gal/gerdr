@@ -26,6 +26,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use smithay::{
@@ -34,10 +35,13 @@ use smithay::{
 };
 
 use crate::{
-    chrome::{DetailTab, ReposHit, ReposView, Tone},
-    git::GitStatus,
+    chrome::{
+        Check, Chip, DetailLine, DetailTab, DetailView, DiffTone, FileLine, Hint, LineState,
+        RepoLine, ReposButton, ReposHit, ReposView, ResultBar, SheetView, Tone, TreeLine,
+    },
+    git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
-    text_field::TextField,
+    text_field::{self, Edit, TextField},
 };
 
 /// A repository changing this many files or more starts folded.
@@ -92,6 +96,8 @@ pub struct Ctx<'a> {
     pub feature: Option<&'a str>,
     /// How many tree lines and detail lines fit (`chrome::repos_page`).
     pub page: (usize, usize),
+    /// The time now, for how long ago the repositories fetched.
+    pub now: SystemTime,
 }
 
 /// Where the keyboard goes.
@@ -142,6 +148,16 @@ pub struct Panel {
     pub(crate) sheet: Option<Sheet>,
     /// Wheel rows not scrolled yet, over the tree and over the detail.
     pub(crate) wheel: (f64, f64),
+    /// Where the selected line was among the tree's lines: what is
+    /// selected once it is gone.
+    pub(crate) selected_at: usize,
+    /// The detail was read before the last Git status read: it is read
+    /// again, still shown meanwhile.
+    pub(crate) detail_stale: bool,
+    /// Repositories whose resume stopped on its stash's conflicts, until
+    /// continued or aborted: nothing in their git folder says so, and
+    /// the batch saying so gives way to the next (marking them resolved).
+    pub(crate) stash_conflicts: HashSet<PathBuf>,
 }
 
 /// What a second press confirms.
@@ -212,18 +228,67 @@ pub enum BatchKind {
 impl BatchKind {
     /// What it is called in the result bar and toasts: `Commit and push`.
     pub fn label(&self) -> String {
-        todo!()
+        match self {
+            BatchKind::Branch(_) => "Branch",
+            BatchKind::StartFeature(_) => "Start feature",
+            BatchKind::Join(_) => "Join feature",
+            BatchKind::Commit { push: false, .. } => "Commit",
+            BatchKind::Commit { push: true, .. } => "Commit and push",
+            BatchKind::Push { force: false } => "Push",
+            BatchKind::Push { force: true } => "Force push",
+            BatchKind::Fetch => "Fetch",
+            BatchKind::Pull(Pull::Rebase) => "Pull (rebase)",
+            BatchKind::Pull(_) => "Pull",
+            BatchKind::Integrate(Integrate::Merge) => "Merge base",
+            BatchKind::Integrate(Integrate::Rebase) => "Rebase on base",
+            BatchKind::Park(_) => "Park",
+            BatchKind::Resume(_) => "Resume",
+            BatchKind::MarkResolved => "Mark resolved",
+            BatchKind::Continue => "Continue",
+            BatchKind::Abort => "Abort",
+            BatchKind::Undo => "Undo",
+        }
+        .into()
     }
 
     /// Whether it is checked first (merge, rebase, pull; a branch switch
     /// with uncommitted changes), the result asked about on a sheet.
+    ///
+    /// The kind alone can't tell whether a switch carries changes, so the
+    /// switches all say yes: only their dirty repositories are checked. A
+    /// fast-forward pull isn't: it fails cleanly, and its diverged
+    /// repositories are asked about instead.
     pub fn checked_first(&self) -> bool {
-        todo!()
+        matches!(
+            self,
+            BatchKind::Branch(_)
+                | BatchKind::StartFeature(_)
+                | BatchKind::Join(_)
+                | BatchKind::Pull(Pull::Rebase | Pull::Merge)
+                | BatchKind::Integrate(_)
+        )
     }
 
     /// Whether it can be undone (it moved only local branches).
     pub fn undoable(&self) -> bool {
-        todo!()
+        matches!(
+            self,
+            BatchKind::Branch(_)
+                | BatchKind::StartFeature(_)
+                | BatchKind::Join(_)
+                | BatchKind::Commit { push: false, .. }
+                | BatchKind::Pull(_)
+                | BatchKind::Integrate(_)
+        )
+    }
+}
+
+/// `n` and `one`, or its plural with an `s`: `1 conflict`, `2 conflicts`.
+fn count(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {one}s")
     }
 }
 
@@ -238,13 +303,55 @@ pub struct Batch {
 impl Batch {
     /// Every repository is done with, one way or another.
     pub fn finished(&self) -> bool {
-        todo!()
+        self.runs.iter().all(|r| r.state.over())
     }
 
     /// The result bar's line: `Commit and push: 2 done · 1 conflict ·
     /// 1 failed`, and its colour.
     pub fn summary(&self) -> (String, Tone) {
-        todo!()
+        let (mut done, mut conflicts, mut failed, mut skipped, mut going) = (0, 0, 0, 0, 0);
+        for run in &self.runs {
+            match &run.state {
+                RunState::Queued | RunState::Running(_) => going += 1,
+                RunState::Done => done += 1,
+                RunState::Failed {
+                    failure: Failure::Conflict(_),
+                    ..
+                } => conflicts += 1,
+                RunState::Failed { .. } => failed += 1,
+                RunState::Skipped(_) => skipped += 1,
+            }
+        }
+        let label = self.kind.label();
+        if self.runs.is_empty() {
+            return (format!("{label}: nothing to do"), Tone::Muted);
+        }
+        let mut parts = Vec::new();
+        if done > 0 {
+            parts.push(format!("{done} done"));
+        }
+        if conflicts > 0 {
+            parts.push(count(conflicts, "conflict"));
+        }
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        if skipped > 0 {
+            parts.push(format!("{skipped} skipped"));
+        }
+        if going > 0 {
+            parts.push(format!("{going} of {} running", self.runs.len()));
+        }
+        let tone = if going > 0 {
+            Tone::Normal
+        } else if failed > 0 {
+            Tone::Error
+        } else if conflicts > 0 || skipped > 0 {
+            Tone::Warning
+        } else {
+            Tone::Success
+        };
+        (format!("{label}: {}", parts.join(" · ")), tone)
     }
 
     pub fn run(&self, root: &Path) -> Option<&RepoRun> {
@@ -273,9 +380,27 @@ pub enum RunState {
     Running(String),
     Done,
     /// Stopped: `Failure::Conflict` leaves it to resolve.
-    Failed { failure: Failure, why: String },
+    Failed {
+        failure: Failure,
+        why: String,
+    },
     /// Not tried: why (`nothing checked`, `blocked: detached HEAD`).
     Skipped(String),
+}
+
+impl RunState {
+    /// It is done with, one way or another.
+    fn over(&self) -> bool {
+        !matches!(self, RunState::Queued | RunState::Running(_))
+    }
+
+    /// It failed with `failure`.
+    fn failure(&self) -> Option<&Failure> {
+        match self {
+            RunState::Failed { failure, .. } => Some(failure),
+            _ => None,
+        }
+    }
 }
 
 /// What a detail read is for.
@@ -321,13 +446,22 @@ pub enum RepoEvent {
 pub enum Outcome {
     Close,
     /// Run `kind` over `jobs`, checking first if `kind.checked_first()`.
-    Batch { kind: BatchKind, jobs: Vec<Job> },
+    Batch {
+        kind: BatchKind,
+        jobs: Vec<Job>,
+    },
     /// Run `kind` over `jobs`, the check done (a sheet's answer).
-    Confirmed { kind: BatchKind, jobs: Vec<Job> },
+    Confirmed {
+        kind: BatchKind,
+        jobs: Vec<Job>,
+    },
     /// Run the last batch again over the repositories it failed in.
     RetryFailed,
     /// Open these files of the repository at `root` in its workspace's Zed.
-    OpenInZed { root: PathBuf, paths: Vec<String> },
+    OpenInZed {
+        root: PathBuf,
+        paths: Vec<String>,
+    },
     /// Run the command that failed in the repository at `root` in a new
     /// tab, for the user to answer its prompts.
     RunInTerminal(PathBuf),
@@ -336,20 +470,867 @@ pub enum Outcome {
     OpenWorkspace(PathBuf),
 }
 
+/// A tree line, by index: a repository of `Ctx::items`, or one of its
+/// changes, by index into its `GitStatus::changes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Row {
+    Repo(usize),
+    File(usize, usize),
+}
+
+impl Row {
+    /// The repository it is, or is under.
+    fn item(self) -> usize {
+        match self {
+            Row::Repo(k) | Row::File(k, _) => k,
+        }
+    }
+}
+
+/// Why an action wasn't done.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Why {
+    /// What is typed is the trouble (nothing, a bad name): the field gets
+    /// the keyboard, to fix it.
+    Field(String),
+    Other(String),
+}
+
+impl Why {
+    /// Not done for a reason other than the field.
+    fn other(why: impl Into<String>) -> Why {
+        Why::Other(why.into())
+    }
+}
+
+/// The action a key asks for, with either focus: before the field, as
+/// Ctrl+Shift+Delete would otherwise delete a word there.
+fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
+    use ReposButton as B;
+    if mods.logo {
+        return None;
+    }
+    let shift = mods.shift;
+    if mods.alt && !mods.ctrl {
+        return match sym {
+            Keysym::z | Keysym::Z => Some(B::Undo),
+            Keysym::r | Keysym::R => Some(B::RetryFailed),
+            _ => None,
+        };
+    }
+    if !mods.ctrl || mods.alt {
+        return None;
+    }
+    // Shift changes the symbol: match both cases.
+    let button = match sym {
+        Keysym::b | Keysym::B if shift => B::StartFeature,
+        Keysym::b | Keysym::B => B::Branch,
+        Keysym::j | Keysym::J => B::Join,
+        Keysym::Return | Keysym::KP_Enter if shift => B::CommitPush,
+        Keysym::Return | Keysym::KP_Enter => B::Commit,
+        Keysym::p | Keysym::P if shift => B::ForcePush,
+        Keysym::p | Keysym::P => B::Push,
+        Keysym::f | Keysym::F => B::Fetch,
+        Keysym::l | Keysym::L => B::Pull,
+        Keysym::m | Keysym::M if shift => B::Rebase,
+        Keysym::m | Keysym::M => B::Merge,
+        Keysym::k | Keysym::K if shift => B::Resume,
+        Keysym::k | Keysym::K => B::Park,
+        Keysym::e | Keysym::E => B::OpenInZed,
+        Keysym::r | Keysym::R => B::MarkResolved,
+        Keysym::g | Keysym::G => B::Continue,
+        Keysym::Delete | Keysym::KP_Delete if shift => B::Abort,
+        _ => return None,
+    };
+    Some(button)
+}
+
+/// `button`'s key, as the footer shows it; empty for those without one.
+fn key_name(button: ReposButton) -> &'static str {
+    use ReposButton as B;
+    match button {
+        B::Branch => "Ctrl+B",
+        B::StartFeature => "Ctrl+Shift+B",
+        B::Join => "Ctrl+J",
+        B::Commit => "Ctrl+Enter",
+        B::CommitPush => "Ctrl+Shift+Enter",
+        B::Push => "Ctrl+P",
+        B::ForcePush => "Ctrl+Shift+P",
+        B::Fetch => "Ctrl+F",
+        B::Pull => "Ctrl+L",
+        B::Merge => "Ctrl+M",
+        B::Rebase => "Ctrl+Shift+M",
+        B::Park => "Ctrl+K",
+        B::Resume => "Ctrl+Shift+K",
+        B::OpenInZed => "Ctrl+E",
+        B::MarkResolved => "Ctrl+R",
+        B::Continue => "Ctrl+G",
+        B::Abort => "Ctrl+Shift+Del",
+        B::Undo => "Alt+Z",
+        B::RetryFailed => "Alt+R",
+        B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
+        B::SkipDiverged | B::Cancel => "Esc",
+        B::RunInTerminal | B::OpenWorkspace => "",
+    }
+}
+
+/// Whether `button` answers a sheet.
+fn sheet_button(button: ReposButton) -> bool {
+    use ReposButton as B;
+    matches!(
+        button,
+        B::All | B::CleanOnly | B::Cancel | B::PullRebase | B::PullMerge | B::SkipDiverged
+    )
+}
+
+/// The buttons `sheet` has, in order.
+fn sheet_buttons(sheet: &Sheet) -> [ReposButton; 3] {
+    match sheet {
+        Sheet::Preflight { .. } => [
+            ReposButton::All,
+            ReposButton::CleanOnly,
+            ReposButton::Cancel,
+        ],
+        Sheet::Diverged { .. } => [
+            ReposButton::PullRebase,
+            ReposButton::PullMerge,
+            ReposButton::SkipDiverged,
+        ],
+    }
+}
+
+/// `n` repositories, in words.
+fn repos(n: usize) -> String {
+    if n == 1 {
+        "1 repository".into()
+    } else {
+        format!("{n} repositories")
+    }
+}
+
+/// The order `changes` are listed in, by index: conflicted ones first,
+/// then the rest as git lists them.
+fn file_order(changes: &[Change]) -> Vec<usize> {
+    let (mut order, mut rest): (Vec<usize>, Vec<usize>) =
+        (0..changes.len()).partition(|&c| changes[c].conflicted());
+    order.append(&mut rest);
+    order
+}
+
+/// The conflicted files of `item`.
+fn conflicted_files(item: &RepoItem) -> Vec<String> {
+    let changes = &item.status.changes;
+    changes
+        .iter()
+        .filter(|c| c.conflicted())
+        .map(|c| c.path.clone())
+        .collect()
+}
+
+/// How a change is shown: its path, a rename as `old → new`.
+fn change_text(change: &Change) -> String {
+    match &change.orig {
+        Some(orig) => format!("{orig} → {}", change.path),
+        None => change.path.clone(),
+    }
+}
+
+/// A detail line in `tone`.
+fn detail_line(text: &str, tone: DiffTone) -> DetailLine {
+    DetailLine {
+        text: text.into(),
+        tone,
+    }
+}
+
+/// A diff's lines, coloured by what they are. A file's header runs from
+/// its `diff --git` to its first hunk, so a removed line that starts with
+/// `--` isn't taken for one.
+fn diff_lines(text: &str) -> Vec<DetailLine> {
+    let mut head = false;
+    text.lines()
+        .map(|line| {
+            let tone = if line.starts_with("diff --git") {
+                head = true;
+                DiffTone::Header
+            } else if line.starts_with("@@") {
+                head = false;
+                DiffTone::Hunk
+            } else if head {
+                DiffTone::Header
+            } else if line.starts_with('+') {
+                DiffTone::Added
+            } else if line.starts_with('-') {
+                DiffTone::Removed
+            } else {
+                DiffTone::Plain
+            };
+            detail_line(line, tone)
+        })
+        .collect()
+}
+
+/// How long before `now` `then` was, in its largest unit: `2m`.
+fn ago(then: SystemTime, now: SystemTime) -> String {
+    let s = now.duration_since(then).map_or(0, |d| d.as_secs());
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        3600..86400 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86400),
+    }
+}
+
+/// Where `head` is, in words: `main at 1a2b3c4`.
+fn head_text(head: &Head) -> String {
+    let oid = head.oid.as_deref().map(|o| &o[..o.len().min(7)]);
+    match (&head.branch, oid) {
+        (Some(branch), Some(oid)) => format!("{branch} at {oid}"),
+        (Some(branch), None) => branch.clone(),
+        (None, Some(oid)) => oid.into(),
+        (None, None) => "nothing".into(),
+    }
+}
+
+/// The repositories `batch` can be undone in, as its jobs: those it was
+/// done in, where it was before and after is known. Else why not.
+fn undo_jobs(batch: Option<&Batch>) -> Result<Vec<Job>, String> {
+    let Some(batch) = batch else {
+        return Err("Nothing to undo".into());
+    };
+    if !batch.finished() {
+        return Err("Wait for the batch to finish".into());
+    }
+    if !batch.kind.undoable() {
+        return Err(format!("{} can't be undone", batch.kind.label()));
+    }
+    let jobs: Vec<Job> = batch
+        .runs
+        .iter()
+        .filter(|r| r.state == RunState::Done && r.before.is_some() && r.after.is_some())
+        .map(|r| Job {
+            root: r.root.clone(),
+            files: Vec::new(),
+        })
+        .collect();
+    if jobs.is_empty() {
+        return Err("Nothing to undo".into());
+    }
+    Ok(jobs)
+}
+
+/// Whether `batch` is over with something failed that trying again could
+/// fix: conflicts are resolved instead.
+fn retryable(batch: Option<&Batch>) -> bool {
+    batch.is_some_and(|b| {
+        b.finished()
+            && b.runs.iter().any(|r| {
+                r.state
+                    .failure()
+                    .is_some_and(|f| !matches!(f, Failure::Conflict(_)))
+            })
+    })
+}
+
 impl Panel {
     /// A panel over `items`, nothing checked: repositories with changes
     /// unfolded unless they have `FOLD_FILES` or more, the first selected.
     pub fn new(items: &[RepoItem]) -> Panel {
-        let _ = items;
-        todo!()
+        Panel {
+            selected: items.first().map(|i| Selected::Repo(i.root.clone())),
+            ..Panel::default()
+        }
+    }
+
+    /// Whether `item`'s files are shown.
+    fn open(&self, item: &RepoItem) -> bool {
+        let n = item.status.changes.len();
+        n > 0
+            && (self.unfolded.contains(&item.root)
+                || (!self.folded.contains(&item.root) && n < FOLD_FILES))
+    }
+
+    /// Show or hide `item`'s files.
+    fn set_open(&mut self, item: &RepoItem, open: bool) {
+        if item.status.changes.is_empty() {
+            return;
+        }
+        let root = item.root.clone();
+        if open {
+            self.folded.remove(&root);
+            self.unfolded.insert(root);
+        } else {
+            self.unfolded.remove(&root);
+            self.folded.insert(root);
+        }
+    }
+
+    /// The tree's lines, in `items`' order: each repository, then its
+    /// files when unfolded, conflicted ones first. Never sorted by state,
+    /// so that lines don't jump as a batch goes.
+    fn rows(&self, items: &[RepoItem]) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for (k, item) in items.iter().enumerate() {
+            rows.push(Row::Repo(k));
+            if self.open(item) {
+                let order = file_order(&item.status.changes);
+                rows.extend(order.into_iter().map(|c| Row::File(k, c)));
+            }
+        }
+        rows
+    }
+
+    /// Whether `row` is the selected line.
+    fn is_selected(&self, row: Row, items: &[RepoItem]) -> bool {
+        match (&self.selected, row) {
+            (Some(Selected::Repo(root)), Row::Repo(k)) => items[k].root == *root,
+            (Some(Selected::File(root, path)), Row::File(k, c)) => {
+                items[k].root == *root && items[k].status.changes[c].path == *path
+            }
+            _ => false,
+        }
+    }
+
+    /// The selected line, by index into `rows`.
+    fn selected_row(&self, rows: &[Row], items: &[RepoItem]) -> Option<usize> {
+        rows.iter().position(|&r| self.is_selected(r, items))
+    }
+
+    /// The selected repository, by index into `items`, and the selected
+    /// file, by index into its changes.
+    fn selection(&self, items: &[RepoItem]) -> Option<(usize, Option<usize>)> {
+        let (root, path) = match self.selected.as_ref()? {
+            Selected::Repo(root) => (root, None),
+            Selected::File(root, path) => (root, Some(path)),
+        };
+        let k = items.iter().position(|i| i.root == *root)?;
+        match path {
+            None => Some((k, None)),
+            Some(path) => {
+                let changes = &items[k].status.changes;
+                let c = changes.iter().position(|c| c.path == *path)?;
+                Some((k, Some(c)))
+            }
+        }
+    }
+
+    /// The selected repository.
+    fn selected_item<'a>(&self, items: &'a [RepoItem]) -> Option<&'a RepoItem> {
+        self.selection(items).map(|(k, _)| &items[k])
+    }
+
+    /// Select line `k` of `rows`, scrolling it into a view of `page`.
+    fn select(&mut self, rows: &[Row], k: usize, items: &[RepoItem], page: usize) {
+        let Some(&row) = rows.get(k) else { return };
+        let id = match row {
+            Row::Repo(k) => Selected::Repo(items[k].root.clone()),
+            Row::File(k, c) => {
+                let path = items[k].status.changes[c].path.clone();
+                Selected::File(items[k].root.clone(), path)
+            }
+        };
+        if self.selected.as_ref() != Some(&id) {
+            self.detail_first = 0;
+        }
+        self.selected = Some(id);
+        self.selected_at = k;
+        let page = page.max(1);
+        if k < self.first {
+            self.first = k;
+        } else if k >= self.first + page {
+            self.first = k + 1 - page;
+        }
+    }
+
+    /// The lines changed (a fold, a Git status read): the selection kept
+    /// on who it was, else near where it was, and the view within them.
+    fn settle(&mut self, items: &[RepoItem], page: usize) {
+        let rows = self.rows(items);
+        match self.selected_row(&rows, items) {
+            Some(k) => self.selected_at = k,
+            None if !rows.is_empty() => {
+                let k = self.selected_at.min(rows.len() - 1);
+                self.select(&rows, k, items, page);
+            }
+            None => self.selected = None,
+        }
+        self.first = self.first.min(rows.len().saturating_sub(page.max(1)));
+    }
+
+    /// Whether `change` of `item` is checked.
+    fn file_checked(&self, item: &RepoItem, change: &Change) -> bool {
+        let key = (item.root.clone(), change.path.clone());
+        self.checked_files.contains(&key)
+    }
+
+    /// `item`'s checkbox: on when checked with all its files, partly when
+    /// some are (or it is, but a file came since), else off.
+    fn check(&self, item: &RepoItem) -> Check {
+        let changes = &item.status.changes;
+        let n = changes
+            .iter()
+            .filter(|c| self.file_checked(item, c))
+            .count();
+        let whole = self.checked_repos.contains(&item.root);
+        if whole && n == changes.len() {
+            Check::On
+        } else if whole || n > 0 {
+            Check::Partial
+        } else {
+            Check::Off
+        }
+    }
+
+    /// Check `item` and all its files, or none of them.
+    fn set_checked(&mut self, item: &RepoItem, on: bool) {
+        for change in &item.status.changes {
+            let key = (item.root.clone(), change.path.clone());
+            if on {
+                self.checked_files.insert(key);
+            } else {
+                self.checked_files.remove(&key);
+            }
+        }
+        if on {
+            self.checked_repos.insert(item.root.clone());
+        } else {
+            self.checked_repos.remove(&item.root);
+        }
+    }
+
+    /// Check line `row`, or uncheck it: a repository partly checked is
+    /// unchecked.
+    fn toggle(&mut self, row: Row, items: &[RepoItem]) {
+        match row {
+            Row::Repo(k) => {
+                let on = self.check(&items[k]) == Check::Off;
+                self.set_checked(&items[k], on);
+            }
+            Row::File(k, c) => {
+                let item = &items[k];
+                let key = (item.root.clone(), item.status.changes[c].path.clone());
+                if !self.checked_files.remove(&key) {
+                    self.checked_files.insert(key);
+                }
+                // The repository is whole while all its files are.
+                let changes = &item.status.changes;
+                if changes.iter().all(|c| self.file_checked(item, c)) {
+                    self.checked_repos.insert(item.root.clone());
+                } else {
+                    self.checked_repos.remove(&item.root);
+                }
+            }
+        }
+    }
+
+    /// Check everything, or nothing when everything is.
+    fn toggle_all(&mut self, items: &[RepoItem]) {
+        let on = !items.iter().all(|i| self.check(i) == Check::On);
+        for item in items {
+            self.set_checked(item, on);
+        }
+    }
+
+    /// The repositories checked, or with a file checked, by index.
+    fn picked(&self, items: &[RepoItem]) -> Vec<usize> {
+        (0..items.len())
+            .filter(|&k| self.check(&items[k]) != Check::Off)
+            .collect()
+    }
+
+    /// What an action runs on: the picked repositories, else the selected
+    /// one.
+    fn targets(&self, items: &[RepoItem]) -> Vec<usize> {
+        let picked = self.picked(items);
+        if !picked.is_empty() {
+            return picked;
+        }
+        self.selection(items)
+            .map(|(k, _)| vec![k])
+            .unwrap_or_default()
+    }
+
+    /// Whether `item`'s resume stopped on its stash's conflicts: by
+    /// `batch`, the last one, else as remembered. A stopped operation
+    /// isn't one.
+    fn stash_conflict(&self, item: &RepoItem, batch: Option<&Batch>) -> bool {
+        if item.status.op.is_some() {
+            return false;
+        }
+        let run = batch.and_then(|b| Some((&b.kind, &b.run(&item.root)?.state)));
+        match run {
+            Some((
+                BatchKind::Resume(_),
+                RunState::Failed {
+                    failure: Failure::Conflict(_),
+                    ..
+                },
+            )) => true,
+            Some((BatchKind::Continue | BatchKind::Abort, RunState::Done)) => false,
+            _ => self.stash_conflicts.contains(&item.root),
+        }
+    }
+
+    /// Whether `item` is stopped on conflicts: an operation half-way,
+    /// conflicted files, or a stash's.
+    fn in_conflict(&self, item: &RepoItem, batch: Option<&Batch>) -> bool {
+        item.status.op.is_some()
+            || item.status.changes.iter().any(Change::conflicted)
+            || self.stash_conflict(item, batch)
+    }
+
+    /// Remember which repositories' stashes conflicted, past the batch
+    /// that says so.
+    fn note(&mut self, ctx: &Ctx) {
+        for item in ctx.items {
+            if self.stash_conflict(item, ctx.batch) {
+                self.stash_conflicts.insert(item.root.clone());
+            } else {
+                self.stash_conflicts.remove(&item.root);
+            }
+        }
     }
 
     /// The list changed (a Git status read): drop what is gone (checked
     /// files committed, repositories closed), keep the selection on who it
     /// was, or near where it was.
     pub fn refresh(&mut self, ctx: &Ctx) {
-        let _ = ctx;
-        todo!()
+        let items = ctx.items;
+        let roots: HashSet<&Path> = items.iter().map(|i| i.root.as_path()).collect();
+        self.checked_repos.retain(|r| roots.contains(r.as_path()));
+        self.unfolded.retain(|r| roots.contains(r.as_path()));
+        self.folded.retain(|r| roots.contains(r.as_path()));
+        self.stash_conflicts.retain(|r| roots.contains(r.as_path()));
+        self.checked_files.retain(|(root, path)| {
+            items
+                .iter()
+                .find(|i| i.root == *root)
+                .is_some_and(|i| i.status.changes.iter().any(|c| c.path == *path))
+        });
+        if let Some(Armed::Abort(root)) = &self.armed
+            && !roots.contains(root.as_path())
+        {
+            self.armed = None;
+        }
+        self.note(ctx);
+        self.settle(items, ctx.page.0);
+        // The diff or log may have changed with it.
+        self.detail_stale = true;
+    }
+
+    /// Whether `button` can be done now and what it asks for, else why
+    /// not. It changes nothing: the footer asks it too.
+    fn plan(&self, button: ReposButton, ctx: &Ctx) -> Result<Outcome, Why> {
+        use ReposButton as B;
+        let items = ctx.items;
+        let local = matches!(button, B::OpenInZed | B::RunInTerminal | B::OpenWorkspace);
+        if !local && ctx.batch.is_some_and(|b| !b.finished()) {
+            return Err(Why::other("Wait for the batch to finish"));
+        }
+        if items.is_empty() {
+            return Err(Why::other("No git repositories in this project"));
+        }
+        let job = |k: usize| Job {
+            root: items[k].root.clone(),
+            files: Vec::new(),
+        };
+        let run = |kind: BatchKind, ks: Vec<usize>| {
+            if ks.is_empty() {
+                return Err(Why::other("Select a repository first"));
+            }
+            let jobs = ks.into_iter().map(job).collect();
+            Ok(Outcome::Batch { kind, jobs })
+        };
+        let name = || {
+            let name = self.field.trim();
+            if name.is_empty() {
+                return Err(Why::Field("Type a branch name first".into()));
+            }
+            if let Some(why) = branch_name_problem(name) {
+                return Err(Why::Field(format!("Not a branch name: {why}")));
+            }
+            Ok(name.to_owned())
+        };
+        let feature = || {
+            ctx.feature
+                .map(str::to_owned)
+                .ok_or_else(|| Why::other("No feature yet: start one with Ctrl+Shift+B"))
+        };
+        let targets = self.targets(items);
+        let selected = self.selected_item(items);
+        let run_of = |item: &RepoItem| ctx.batch.and_then(|b| b.run(&item.root));
+        let failure = selected
+            .and_then(run_of)
+            .and_then(|r| r.state.failure().cloned());
+        // Fixing conflicts is for the selected repository alone.
+        let stopped = || {
+            let item = selected.ok_or_else(|| Why::other("Select a repository first"))?;
+            if !self.in_conflict(item, ctx.batch) {
+                return Err(Why::other(format!(
+                    "{} isn't stopped on conflicts",
+                    item.label
+                )));
+            }
+            Ok(item)
+        };
+        match button {
+            B::Branch => run(BatchKind::Branch(name()?), targets),
+            B::StartFeature => run(BatchKind::StartFeature(name()?), targets),
+            B::Join => {
+                let feature = feature()?;
+                let off = |&k: &usize| items[k].status.branch.as_deref() != Some(&*feature);
+                let picked = self.picked(items);
+                let ks: Vec<usize> = if picked.is_empty() {
+                    (0..items.len()).filter(off).collect()
+                } else {
+                    picked.into_iter().filter(off).collect()
+                };
+                if ks.is_empty() {
+                    return Err(Why::other(format!("Already on {feature}")));
+                }
+                run(BatchKind::Join(feature), ks)
+            }
+            B::Commit | B::CommitPush => {
+                let mut jobs = Vec::new();
+                for item in items {
+                    let mut files = Vec::new();
+                    for change in &item.status.changes {
+                        if self.file_checked(item, change) {
+                            files.push(change.path.clone());
+                            files.extend(change.orig.clone());
+                        }
+                    }
+                    if !files.is_empty() {
+                        let root = item.root.clone();
+                        jobs.push(Job { root, files });
+                    }
+                }
+                if jobs.is_empty() {
+                    return Err(Why::other("Check the files to commit"));
+                }
+                let msg = self.field.trim();
+                if msg.is_empty() {
+                    return Err(Why::Field("Type a commit message first".into()));
+                }
+                let push = button == B::CommitPush;
+                let msg = msg.to_owned();
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Commit { msg, push },
+                    jobs,
+                })
+            }
+            B::Push => run(BatchKind::Push { force: false }, targets),
+            B::ForcePush => run(BatchKind::Push { force: true }, targets),
+            B::Fetch => {
+                let picked = self.picked(items);
+                let all = if picked.is_empty() {
+                    (0..items.len()).collect()
+                } else {
+                    picked
+                };
+                run(BatchKind::Fetch, all)
+            }
+            B::Pull => run(BatchKind::Pull(Pull::FastForward), targets),
+            B::Merge => run(BatchKind::Integrate(Integrate::Merge), targets),
+            B::Rebase => run(BatchKind::Integrate(Integrate::Rebase), targets),
+            B::Park => run(BatchKind::Park(feature()?), targets),
+            B::Resume => run(BatchKind::Resume(feature()?), targets),
+            B::OpenInZed => {
+                let (k, c) = self
+                    .selection(items)
+                    .ok_or_else(|| Why::other("Select a repository first"))?;
+                let item = &items[k];
+                // A file opens whatever it is in; else the conflicts.
+                let paths = match c {
+                    Some(c) => vec![item.status.changes[c].path.clone()],
+                    None => conflicted_files(stopped()?),
+                };
+                let root = item.root.clone();
+                Ok(Outcome::OpenInZed { root, paths })
+            }
+            B::MarkResolved => {
+                let item = stopped()?;
+                let file = self
+                    .selection(items)
+                    .and_then(|(_, c)| c)
+                    .map(|c| &item.status.changes[c])
+                    .filter(|c| c.conflicted());
+                let files = match file {
+                    Some(change) => vec![change.path.clone()],
+                    None => conflicted_files(item),
+                };
+                if files.is_empty() {
+                    return Err(Why::other("No conflicted files here"));
+                }
+                let root = item.root.clone();
+                Ok(Outcome::Batch {
+                    kind: BatchKind::MarkResolved,
+                    jobs: vec![Job { root, files }],
+                })
+            }
+            B::Continue => {
+                let item = stopped()?;
+                let left = conflicted_files(item).len();
+                if left > 0 {
+                    let files = if left == 1 { "file" } else { "files" };
+                    return Err(Why::other(format!(
+                        "Resolve {left} conflicted {files} first (Ctrl+R)"
+                    )));
+                }
+                let k = items.iter().position(|i| i.root == item.root);
+                run(BatchKind::Continue, k.into_iter().collect())
+            }
+            B::Abort => {
+                let item = stopped()?;
+                let k = items.iter().position(|i| i.root == item.root);
+                run(BatchKind::Abort, k.into_iter().collect())
+            }
+            B::Undo => {
+                let jobs = undo_jobs(ctx.batch).map_err(Why::Other)?;
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Undo,
+                    jobs,
+                })
+            }
+            B::RetryFailed => match retryable(ctx.batch) {
+                true => Ok(Outcome::RetryFailed),
+                false => Err(Why::other("Nothing failed to retry")),
+            },
+            B::RunInTerminal => match (selected, failure) {
+                (Some(item), Some(Failure::Auth | Failure::Timeout | Failure::Other)) => {
+                    Ok(Outcome::RunInTerminal(item.root.clone()))
+                }
+                _ => Err(Why::other("Nothing to run in a terminal")),
+            },
+            B::OpenWorkspace => match failure {
+                Some(Failure::CheckedOut(path)) => Ok(Outcome::OpenWorkspace(path)),
+                _ => Err(Why::other("Not checked out elsewhere")),
+            },
+            B::All | B::CleanOnly | B::Cancel | B::PullRebase | B::PullMerge | B::SkipDiverged => {
+                Err(Why::other("Nothing to answer"))
+            }
+        }
+    }
+
+    /// Do `button`, the press before having armed `armed`: those that
+    /// can't be taken back (force push, abort, undo) only when pressed
+    /// twice.
+    fn act(&mut self, button: ReposButton, armed: Option<Armed>, ctx: &Ctx) -> Option<Outcome> {
+        if sheet_button(button) {
+            return self.sheet_press(button);
+        }
+        match self.plan(button, ctx) {
+            Err(Why::Field(why)) => {
+                self.error = Some(why);
+                self.focus = Focus::Field;
+                None
+            }
+            Err(Why::Other(why)) => {
+                self.error = Some(why);
+                None
+            }
+            Ok(outcome) => {
+                self.error = None;
+                let twice = match (button, &outcome) {
+                    (ReposButton::ForcePush, _) => Some(Armed::ForcePush),
+                    (ReposButton::Undo, _) => Some(Armed::Undo),
+                    (ReposButton::Abort, Outcome::Batch { jobs, .. }) => {
+                        jobs.first().map(|j| Armed::Abort(j.root.clone()))
+                    }
+                    _ => None,
+                };
+                if let Some(twice) = twice
+                    && armed.as_ref() != Some(&twice)
+                {
+                    self.armed = Some(twice);
+                    return None;
+                }
+                Some(outcome)
+            }
+        }
+    }
+
+    /// Answer the sheet with `button`; it closes, unless `button` isn't
+    /// one of its own.
+    fn sheet_press(&mut self, button: ReposButton) -> Option<Outcome> {
+        use ReposButton as B;
+        let sheet = self.sheet.take()?;
+        match (sheet, button) {
+            (
+                Sheet::Preflight {
+                    kind,
+                    jobs,
+                    verdicts,
+                    ..
+                },
+                B::All | B::CleanOnly,
+            ) => {
+                let verdict =
+                    |root: &Path| verdicts.iter().find(|(r, _)| r == root).map(|(_, v)| v);
+                // A repository not checked has nothing against it.
+                let keep = |job: &Job| match verdict(&job.root) {
+                    None | Some(Verdict::Clean) => true,
+                    Some(Verdict::Conflicts(_)) => button == B::All,
+                    Some(Verdict::Blocked(_)) => false,
+                };
+                let jobs: Vec<Job> = jobs.into_iter().filter(keep).collect();
+                (!jobs.is_empty()).then_some(Outcome::Confirmed { kind, jobs })
+            }
+            (Sheet::Diverged { roots, .. }, B::PullRebase | B::PullMerge) => {
+                let how = if button == B::PullRebase {
+                    Pull::Rebase
+                } else {
+                    Pull::Merge
+                };
+                let jobs: Vec<Job> = roots
+                    .into_iter()
+                    .map(|root| Job {
+                        root,
+                        files: Vec::new(),
+                    })
+                    .collect();
+                (!jobs.is_empty()).then_some(Outcome::Confirmed {
+                    kind: BatchKind::Pull(how),
+                    jobs,
+                })
+            }
+            (_, B::Cancel | B::SkipDiverged) => None,
+            (sheet, _) => {
+                self.sheet = Some(sheet);
+                None
+            }
+        }
+    }
+
+    /// A key for the sheet, which takes them all: Left/Right/Tab choose a
+    /// button, Enter presses it, Esc cancels.
+    fn sheet_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+        let sheet = self.sheet.as_mut()?;
+        let buttons = sheet_buttons(sheet);
+        let (Sheet::Preflight { choice, .. } | Sheet::Diverged { choice, .. }) = sheet;
+        let n = buttons.len();
+        match sym {
+            Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => {
+                *choice = (*choice + n - 1) % n
+            }
+            Keysym::Tab if mods.shift => *choice = (*choice + n - 1) % n,
+            Keysym::Right | Keysym::KP_Right | Keysym::Tab => *choice = (*choice + 1) % n,
+            Keysym::Return | Keysym::KP_Enter => {
+                let button = buttons[(*choice).min(n - 1)];
+                return self.sheet_press(button);
+            }
+            Keysym::Escape => self.sheet = None,
+            _ => {}
+        }
+        None
+    }
+
+    /// Show the detail's `tab`.
+    fn set_tab(&mut self, tab: DetailTab) {
+        if self.tab != Some(tab) {
+            self.tab = Some(tab);
+            self.detail_first = 0;
+        }
     }
 
     /// A key while the panel has the keyboard; what to do, if anything.
@@ -363,51 +1344,750 @@ impl Panel {
         typed: Keysym,
         ctx: &Ctx,
     ) -> Option<Outcome> {
-        let _ = (mods, sym, typed, ctx);
-        todo!()
+        if sym.is_modifier_key() {
+            return None;
+        }
+        self.note(ctx);
+        if self.sheet.is_some() {
+            return self.sheet_key(mods, sym);
+        }
+        // Any key but the one confirming it takes back what was armed.
+        let armed = self.armed.take();
+        let plain = !(mods.ctrl || mods.alt || mods.logo);
+        if sym == Keysym::Escape && plain {
+            if armed.is_none() {
+                match self.focus {
+                    Focus::Field => self.focus = Focus::Tree,
+                    Focus::Tree => return Some(Outcome::Close),
+                }
+            }
+            return None;
+        }
+        if let Some(button) = action_key(mods, sym) {
+            return self.act(button, armed, ctx);
+        }
+        if mods.ctrl && !mods.alt && !mods.logo {
+            match sym {
+                Keysym::d | Keysym::D => {
+                    self.set_tab(DetailTab::Diff);
+                    return None;
+                }
+                Keysym::t | Keysym::T => {
+                    self.set_tab(DetailTab::Log);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if plain && matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) {
+            self.focus = match self.focus {
+                Focus::Tree => Focus::Field,
+                Focus::Field => Focus::Tree,
+            };
+            return None;
+        }
+        if self.focus == Focus::Field {
+            match self.field.key(mods, sym, typed) {
+                Edit::Ignored => {}
+                Edit::Changed => {
+                    self.error = None;
+                    return None;
+                }
+                Edit::Moved => return None,
+            }
+        }
+        self.tree_key(mods, sym, typed, ctx);
+        None
+    }
+
+    /// A key for the tree: Up/Down and the pages move with either focus,
+    /// the rest only with the tree's; typing goes to the field.
+    fn tree_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, ctx: &Ctx) {
+        let items = ctx.items;
+        let page = ctx.page.0.max(1);
+        let rows = self.rows(items);
+        let at = self.selected_row(&rows, items);
+        let n = rows.len() as isize;
+        let step = |by: isize| match at {
+            _ if n == 0 => None,
+            Some(k) => Some((k as isize + by).clamp(0, n - 1) as usize),
+            None => Some(0),
+        };
+        let plain = !(mods.ctrl || mods.alt || mods.logo);
+        let tree = self.focus == Focus::Tree;
+        let row = at.map(|k| rows[k]);
+        let moved = match sym {
+            Keysym::Down | Keysym::KP_Down => step(1),
+            Keysym::Up | Keysym::KP_Up => step(-1),
+            Keysym::Page_Down | Keysym::KP_Page_Down => step(page as isize),
+            Keysym::Page_Up | Keysym::KP_Page_Up => step(-(page as isize)),
+            Keysym::Home | Keysym::KP_Home if tree => step(-n),
+            Keysym::End | Keysym::KP_End if tree => step(n),
+            _ => None,
+        };
+        if let Some(k) = moved {
+            return self.select(&rows, k, items, page);
+        }
+        if !tree {
+            return;
+        }
+        match sym {
+            Keysym::space if plain => {
+                if let Some(row) = row {
+                    self.toggle(row, items);
+                }
+            }
+            Keysym::a | Keysym::A if mods.ctrl && !mods.alt && !mods.logo => {
+                self.toggle_all(items);
+            }
+            Keysym::Right | Keysym::KP_Right if plain => {
+                if let Some(Row::Repo(k)) = row {
+                    self.set_open(&items[k], true);
+                }
+            }
+            Keysym::Left | Keysym::KP_Left if plain => match row {
+                Some(Row::Repo(k)) => {
+                    self.set_open(&items[k], false);
+                    self.settle(items, page);
+                }
+                Some(Row::File(k, _)) => {
+                    let repo = rows.iter().position(|&r| r == Row::Repo(k));
+                    if let Some(repo) = repo {
+                        self.select(&rows, repo, items, page);
+                    }
+                }
+                None => {}
+            },
+            Keysym::Return | Keysym::KP_Enter if plain => {
+                if let Some(Row::Repo(k)) = row {
+                    let open = !self.open(&items[k]);
+                    self.set_open(&items[k], open);
+                    self.settle(items, page);
+                }
+            }
+            _ => {
+                let printable = typed.key_char().is_some_and(|c| !c.is_control());
+                if sym == text_field::PASTE || (plain && printable) {
+                    self.focus = Focus::Field;
+                    if self.field.key(mods, sym, typed).changed() {
+                        self.error = None;
+                    }
+                }
+            }
+        }
     }
 
     /// A click on `hit`.
     pub fn click(&mut self, hit: ReposHit, ctx: &Ctx) -> Option<Outcome> {
-        let _ = (hit, ctx);
-        todo!()
+        self.note(ctx);
+        if self.sheet.is_some() {
+            return match hit {
+                ReposHit::Button(button) => self.sheet_press(button),
+                _ => None,
+            };
+        }
+        let armed = self.armed.take();
+        let items = ctx.items;
+        let page = ctx.page.0.max(1);
+        let rows = self.rows(items);
+        self.first = self.first.min(rows.len().saturating_sub(page));
+        let at = |i: usize| (i < page && self.first + i < rows.len()).then_some(self.first + i);
+        match hit {
+            ReposHit::Line(i) => {
+                let k = at(i)?;
+                if self.selected_row(&rows, items) == Some(k) {
+                    self.armed = armed;
+                }
+                self.select(&rows, k, items, page);
+                self.focus = Focus::Tree;
+            }
+            ReposHit::Check(i) => {
+                let k = at(i)?;
+                self.select(&rows, k, items, page);
+                self.toggle(rows[k], items);
+            }
+            ReposHit::Expander(i) => {
+                let k = at(i)?;
+                self.select(&rows, k, items, page);
+                if let Row::Repo(r) = rows[k] {
+                    let open = !self.open(&items[r]);
+                    self.set_open(&items[r], open);
+                    self.settle(items, page);
+                }
+            }
+            ReposHit::Field => self.focus = Focus::Field,
+            ReposHit::Button(button) => return self.act(button, armed, ctx),
+            ReposHit::DetailTab(tab) => self.set_tab(tab),
+            ReposHit::Detail | ReposHit::Panel => {}
+        }
+        None
     }
 
     /// The wheel turned `rows` rows (down positive), over the detail pane
     /// or else the tree.
     pub fn scroll(&mut self, rows: f64, over_detail: bool, ctx: &Ctx) {
-        let _ = (rows, over_detail, ctx);
-        todo!()
+        let wheel = if over_detail {
+            &mut self.wheel.1
+        } else {
+            &mut self.wheel.0
+        };
+        *wheel += rows;
+        let whole = wheel.trunc();
+        *wheel -= whole;
+        if whole == 0.0 {
+            return;
+        }
+        let (len, page, first) = if over_detail {
+            let len = self.detail_lines(ctx).len();
+            (len, ctx.page.1, &mut self.detail_first)
+        } else {
+            let len = self.rows(ctx.items).len();
+            (len, ctx.page.0, &mut self.first)
+        };
+        let last = len.saturating_sub(page.max(1)) as i64;
+        *first = ((*first).min(last as usize) as i64 + whole as i64).clamp(0, last) as usize;
+    }
+
+    /// `item`'s state chip: the operation it is stopped in, else what the
+    /// last batch did to it, else a detached HEAD.
+    fn chip(&self, item: &RepoItem, batch: Option<&Batch>) -> Option<Chip> {
+        let chip = |text: &str, tone: Tone| {
+            Some(Chip {
+                text: text.into(),
+                tone,
+            })
+        };
+        if let Some(op) = item.status.op {
+            let text = match op {
+                InProgress::Merge => "MERGING".into(),
+                InProgress::Rebase { step, total } => format!("REBASING {step}/{total}"),
+                InProgress::CherryPick => "CHERRY-PICKING".into(),
+                InProgress::Revert => "REVERTING".into(),
+            };
+            let conflicts = conflicted_files(item).len();
+            let text = match conflicts {
+                0 => text,
+                n => format!("{text} · {n}"),
+            };
+            return chip(&text, Tone::Error);
+        }
+        if self.stash_conflict(item, batch) {
+            return chip("STASH CONFLICT", Tone::Error);
+        }
+        if let Some(run) = batch.and_then(|b| b.run(&item.root)) {
+            match &run.state {
+                RunState::Done => return chip("done", Tone::Success),
+                RunState::Skipped(why) => return chip(why, Tone::Muted),
+                RunState::Failed { failure, .. } => {
+                    let (text, tone) = match failure {
+                        Failure::Conflict(_) => ("conflict", Tone::Error),
+                        Failure::Auth => ("login needed", Tone::Error),
+                        Failure::Rejected => ("rejected", Tone::Error),
+                        Failure::Diverged => ("diverged", Tone::Warning),
+                        Failure::CheckedOut(_) => ("checked out elsewhere", Tone::Warning),
+                        Failure::Locked => ("locked", Tone::Warning),
+                        Failure::Timeout => ("timed out", Tone::Error),
+                        Failure::Blocked(_) => ("blocked", Tone::Warning),
+                        Failure::Other => ("failed", Tone::Error),
+                    };
+                    return chip(text, tone);
+                }
+                RunState::Queued | RunState::Running(_) => {}
+            }
+        }
+        if item.status.branch.is_none() && item.status.head.is_some() {
+            return chip("detached", Tone::Warning);
+        }
+        None
+    }
+
+    /// What a second press would do, for the line under the field.
+    fn armed_warning(&self, ctx: &Ctx) -> Option<String> {
+        match self.armed.as_ref()? {
+            Armed::ForcePush => Some(format!(
+                "Ctrl+Shift+P again to force push {} (with lease)",
+                repos(self.targets(ctx.items).len())
+            )),
+            Armed::Undo => {
+                let batch = ctx.batch?;
+                let n = undo_jobs(Some(batch)).map_or(0, |j| j.len());
+                Some(format!(
+                    "Alt+Z again to undo {} in {}",
+                    batch.kind.label(),
+                    repos(n)
+                ))
+            }
+            Armed::Abort(root) => {
+                let item = ctx.items.iter().find(|i| i.root == *root)?;
+                Some(format!(
+                    "Ctrl+Shift+Delete again to abort in {}",
+                    item.label
+                ))
+            }
+        }
+    }
+
+    /// What a second press on `item` does, if anything is armed for it.
+    fn armed_for(&self, item: &RepoItem, ctx: &Ctx, forced: &HashSet<usize>) -> Option<String> {
+        match self.armed.as_ref()? {
+            Armed::Abort(root) if *root == item.root => {
+                let what = match item.status.op {
+                    Some(InProgress::Merge) => "abort the merge",
+                    Some(InProgress::Rebase { .. }) => "abort the rebase",
+                    Some(InProgress::CherryPick) => "abort the cherry-pick",
+                    Some(InProgress::Revert) => "abort the revert",
+                    None => "give up applying the stash",
+                };
+                Some(format!("Abort again to {what}"))
+            }
+            Armed::ForcePush => {
+                let k = ctx.items.iter().position(|i| i.root == item.root)?;
+                forced
+                    .contains(&k)
+                    .then(|| "Force push again to overwrite its remote branch".into())
+            }
+            Armed::Undo => {
+                let run = ctx.batch?.run(&item.root)?;
+                let ours = undo_jobs(ctx.batch)
+                    .ok()?
+                    .iter()
+                    .any(|j| j.root == item.root);
+                let before = run.before.as_ref().filter(|_| ours)?;
+                Some(format!("Undo again to go back to {}", head_text(before)))
+            }
+            Armed::Abort(_) => None,
+        }
+    }
+
+    /// Line `row` of the tree.
+    fn tree_line(&self, row: Row, ctx: &Ctx, forced: &HashSet<usize>) -> TreeLine {
+        let item = &ctx.items[row.item()];
+        let status = &item.status;
+        let Row::File(_, c) = row else {
+            let chip = self.chip(item, ctx.batch);
+            let run = ctx.batch.and_then(|b| b.run(&item.root));
+            let state = match run.map(|r| &r.state) {
+                Some(RunState::Running(what)) => LineState::Busy(what.clone()),
+                Some(RunState::Queued) => LineState::Busy("waiting…".into()),
+                _ => match self.armed_for(item, ctx, forced) {
+                    Some(warning) => LineState::Armed(warning),
+                    None if chip
+                        .as_ref()
+                        .is_some_and(|c| matches!(c.tone, Tone::Error | Tone::Warning)) =>
+                    {
+                        LineState::Attention
+                    }
+                    None => LineState::Settled,
+                },
+            };
+            return TreeLine::Repo(RepoLine {
+                check: self.check(item),
+                expanded: (!status.changes.is_empty()).then(|| self.open(item)),
+                label: item.label.clone(),
+                branch: status.branch.clone(),
+                off_feature: ctx
+                    .feature
+                    .is_some_and(|f| status.branch.as_deref() != Some(f)),
+                dirty: status.dirty,
+                ahead: status.ahead,
+                behind: status.behind,
+                no_upstream: status.branch.is_some() && status.upstream.is_none(),
+                stashes: status.stashes,
+                chip,
+                state,
+            });
+        };
+        let change = &status.changes[c];
+        TreeLine::File(FileLine {
+            check: if self.file_checked(item, change) {
+                Check::On
+            } else {
+                Check::Off
+            },
+            code: change.code,
+            path: change_text(change),
+            conflicted: change.conflicted(),
+        })
+    }
+
+    /// The header's line after the title: the feature and how many are on
+    /// it, how many are dirty and conflicted, and the latest fetch.
+    fn summary(&self, ctx: &Ctx) -> String {
+        let items = ctx.items;
+        if items.is_empty() {
+            return String::new();
+        }
+        let mut parts = Vec::new();
+        if let Some(feature) = ctx.feature {
+            let on = items
+                .iter()
+                .filter(|i| i.status.branch.as_deref() == Some(feature))
+                .count();
+            parts.push(feature.to_owned());
+            parts.push(format!("{on} of {} on it", items.len()));
+        }
+        let dirty = items.iter().filter(|i| i.status.dirty).count();
+        if dirty > 0 {
+            parts.push(format!("{dirty} dirty"));
+        }
+        let conflicts = items
+            .iter()
+            .filter(|i| self.in_conflict(i, ctx.batch))
+            .count();
+        if conflicts > 0 {
+            parts.push(count(conflicts, "conflict"));
+        }
+        parts.push(match items.iter().filter_map(|i| i.status.fetched).max() {
+            Some(at) => format!("fetched {} ago", ago(at, ctx.now)),
+            None => "never fetched".into(),
+        });
+        parts.join(" · ")
+    }
+
+    /// The footer's actions for what is selected: what fixes it first,
+    /// then the usual ones, each with why it can't be done now (but not
+    /// for want of text: pressed, it asks for it).
+    fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        use ReposButton as B;
+        let items = ctx.items;
+        if items.is_empty() {
+            return Vec::new();
+        }
+        let selected = self.selected_item(items);
+        let mut buttons = Vec::new();
+        if let Some(item) = selected {
+            let run = ctx.batch.and_then(|b| b.run(&item.root));
+            match run.and_then(|r| r.state.failure()) {
+                Some(Failure::Auth | Failure::Timeout | Failure::Other) => {
+                    buttons.push(B::RunInTerminal);
+                }
+                Some(Failure::CheckedOut(_)) => buttons.push(B::OpenWorkspace),
+                _ => {}
+            }
+        }
+        if selected.is_some_and(|i| self.in_conflict(i, ctx.batch)) {
+            buttons.extend([B::OpenInZed, B::MarkResolved, B::Continue, B::Abort]);
+        } else {
+            buttons.push(B::Branch);
+            match ctx.feature {
+                None => buttons.push(B::StartFeature),
+                Some(f) if items.iter().any(|i| i.status.branch.as_deref() != Some(f)) => {
+                    buttons.push(B::Join);
+                }
+                Some(_) => {}
+            }
+            buttons.extend([B::Commit, B::CommitPush, B::Push]);
+            // After a rebase the branch and its upstream both moved on.
+            if selected.is_some_and(|i| i.status.ahead > 0 && i.status.behind > 0) {
+                buttons.push(B::ForcePush);
+            }
+            buttons.extend([B::Fetch, B::Pull, B::Merge, B::Rebase]);
+            if ctx.feature.is_some() {
+                buttons.extend([B::Park, B::Resume]);
+            }
+        }
+        buttons
+            .into_iter()
+            .map(|button| Hint {
+                button,
+                key: key_name(button).into(),
+                disabled: match self.plan(button, ctx) {
+                    Err(Why::Other(why)) => Some(why),
+                    _ => None,
+                },
+            })
+            .collect()
+    }
+
+    /// The detail tab shown: the one asked for, else a file's diff or a
+    /// repository's log.
+    fn tab_for(&self, file: bool) -> DetailTab {
+        self.tab.unwrap_or(if file {
+            DetailTab::Diff
+        } else {
+            DetailTab::Log
+        })
+    }
+
+    /// The detail the selection shows, read or not: a file's diff, a
+    /// repository's log; none for a repository's diff.
+    fn detail_key(&self) -> Option<DetailKey> {
+        let (root, file) = match self.selected.as_ref()? {
+            Selected::Repo(root) => (root, None),
+            Selected::File(root, path) => (root, Some(path)),
+        };
+        let tab = self.tab_for(file.is_some());
+        let file = match tab {
+            DetailTab::Diff => Some(file?.clone()),
+            DetailTab::Log => None,
+        };
+        Some(DetailKey {
+            root: root.clone(),
+            file,
+            tab,
+        })
+    }
+
+    /// Every line of the detail: the diff read, or the log read with
+    /// every command the last batch ran there and what it printed.
+    fn detail_lines(&self, ctx: &Ctx) -> Vec<DetailLine> {
+        let Some((k, c)) = self.selection(ctx.items) else {
+            return Vec::new();
+        };
+        let key = self.detail_key();
+        let text = self
+            .detail
+            .as_ref()
+            .filter(|(k, _)| Some(k) == key.as_ref())
+            .map(|(_, text)| text.as_str());
+        match self.tab_for(c.is_some()) {
+            DetailTab::Diff if c.is_none() => {
+                vec![detail_line("Select a file for its diff", DiffTone::Plain)]
+            }
+            DetailTab::Diff => text.map(diff_lines).unwrap_or_default(),
+            DetailTab::Log => {
+                let mut lines: Vec<DetailLine> = text
+                    .into_iter()
+                    .flat_map(str::lines)
+                    .map(|l| detail_line(l, DiffTone::Plain))
+                    .collect();
+                let root = &ctx.items[k].root;
+                let Some(run) = ctx.batch.and_then(|b| b.run(root)) else {
+                    return lines;
+                };
+                let why = match &run.state {
+                    RunState::Failed { why, .. } => Some((why, DiffTone::Error)),
+                    RunState::Skipped(why) => Some((why, DiffTone::Plain)),
+                    _ => None,
+                };
+                if (!run.log.is_empty() || why.is_some()) && !lines.is_empty() {
+                    lines.push(detail_line("", DiffTone::Plain));
+                }
+                for ran in &run.log {
+                    lines.push(detail_line(&format!("$ {}", ran.command), DiffTone::Header));
+                    let tone = if ran.ok {
+                        DiffTone::Plain
+                    } else {
+                        DiffTone::Error
+                    };
+                    lines.extend(ran.output.lines().map(|l| detail_line(l, tone)));
+                }
+                // Nothing ran: what kept it from it.
+                if let Some((why, tone)) = why.filter(|_| run.log.is_empty()) {
+                    lines.push(detail_line(why, tone));
+                }
+                lines
+            }
+        }
+    }
+
+    /// The detail pane, scrolled.
+    fn detail_view(&self, ctx: &Ctx) -> DetailView {
+        let Some((k, c)) = self.selection(ctx.items) else {
+            return DetailView::default();
+        };
+        let item = &ctx.items[k];
+        let page = ctx.page.1.max(1);
+        let lines = self.detail_lines(ctx);
+        let first = self.detail_first.min(lines.len().saturating_sub(page));
+        DetailView {
+            tab: self.tab_for(c.is_some()),
+            title: match c {
+                Some(c) => change_text(&item.status.changes[c]),
+                None => item.label.clone(),
+            },
+            lines: lines.into_iter().skip(first).take(page).collect(),
+        }
+    }
+
+    /// The sheet, as shown.
+    fn sheet_view(&self, ctx: &Ctx) -> Option<SheetView> {
+        let sheet = self.sheet.as_ref()?;
+        let label = |root: &Path| {
+            ctx.items.iter().find(|i| i.root == root).map_or_else(
+                || {
+                    root.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into()
+                },
+                |i| i.label.clone(),
+            )
+        };
+        let (title, lines, choice) = match sheet {
+            Sheet::Preflight {
+                kind,
+                jobs,
+                verdicts,
+                choice,
+            } => {
+                let rebase = matches!(
+                    kind,
+                    BatchKind::Integrate(Integrate::Rebase) | BatchKind::Pull(Pull::Rebase)
+                );
+                let conflict = if rebase { "may conflict" } else { "conflicts" };
+                let (mut clean, mut conflicts, mut blocked) = (0, 0, 0);
+                let lines: Vec<(String, String, Tone)> = jobs
+                    .iter()
+                    .map(|job| {
+                        let verdict = verdicts.iter().find(|(r, _)| *r == job.root);
+                        let (text, tone) = match verdict.map(|(_, v)| v) {
+                            None | Some(Verdict::Clean) => {
+                                clean += 1;
+                                ("clean".to_owned(), Tone::Success)
+                            }
+                            Some(Verdict::Conflicts(files)) => {
+                                conflicts += 1;
+                                (format!("{conflict}: {}", files.join(", ")), Tone::Warning)
+                            }
+                            Some(Verdict::Blocked(why)) => {
+                                blocked += 1;
+                                (format!("blocked: {why}"), Tone::Error)
+                            }
+                        };
+                        (label(&job.root), text, tone)
+                    })
+                    .collect();
+                let mut found = Vec::new();
+                if clean > 0 {
+                    found.push(format!("{clean} clean"));
+                }
+                if conflicts > 0 {
+                    let would = if rebase {
+                        "may conflict"
+                    } else {
+                        "would conflict"
+                    };
+                    found.push(format!("{conflicts} {would}"));
+                }
+                if blocked > 0 {
+                    found.push(format!("{blocked} blocked"));
+                }
+                let title = format!("{}: {}", kind.label(), found.join(" · "));
+                (title, lines, *choice)
+            }
+            Sheet::Diverged { roots, choice } => {
+                let lines = roots
+                    .iter()
+                    .map(|root| {
+                        let item = ctx.items.iter().find(|i| i.root == *root);
+                        let text = item.map_or_else(
+                            || "diverged".into(),
+                            |i| format!("diverged: ↑{} ↓{}", i.status.ahead, i.status.behind),
+                        );
+                        (label(root), text, Tone::Warning)
+                    })
+                    .collect();
+                let title = format!(
+                    "Pull: {} diverged from upstream: rebase or merge?",
+                    repos(roots.len())
+                );
+                (title, lines, *choice)
+            }
+        };
+        Some(SheetView {
+            title,
+            lines,
+            buttons: sheet_buttons(sheet).to_vec(),
+            default: choice.min(2),
+        })
     }
 
     /// What the panel shows. `title` is the project's name.
     pub fn view(&self, title: &str, ctx: &Ctx) -> ReposView {
-        let _ = (title, ctx);
-        todo!()
+        let items = ctx.items;
+        let page = ctx.page.0.max(1);
+        let rows = self.rows(items);
+        let first = self.first.min(rows.len().saturating_sub(page));
+        let shown = &rows[first..(first + page).min(rows.len())];
+        let forced: HashSet<usize> = match self.armed {
+            Some(Armed::ForcePush) => self.targets(items).into_iter().collect(),
+            _ => HashSet::new(),
+        };
+        let result = ctx.batch.map(|batch| {
+            let (text, tone) = batch.summary();
+            let mut buttons = Vec::new();
+            if undo_jobs(Some(batch)).is_ok() {
+                buttons.push(ReposButton::Undo);
+            }
+            if retryable(Some(batch)) {
+                buttons.push(ReposButton::RetryFailed);
+            }
+            ResultBar {
+                text,
+                tone,
+                buttons,
+            }
+        });
+        ReposView {
+            title: title.into(),
+            summary: self.summary(ctx),
+            lines: shown
+                .iter()
+                .map(|&row| self.tree_line(row, ctx, &forced))
+                .collect(),
+            selected: self
+                .selected_row(&rows, items)
+                .filter(|k| (first..first + shown.len()).contains(k))
+                .map(|k| k - first),
+            hover: self.hover,
+            field: self.field.line(),
+            field_focused: self.focus == Focus::Field,
+            placeholder: "Branch name or commit message".into(),
+            error: self.armed_warning(ctx).or_else(|| self.error.clone()),
+            result,
+            hints: self.hints(ctx),
+            detail: self.detail_view(ctx),
+            sheet: self.sheet_view(ctx),
+            empty: "No git repositories in this project".into(),
+        }
     }
 
-    /// The detail the selection wants read, when it isn't read yet.
+    /// The detail the selection wants read, when it isn't read yet (or
+    /// was before the last Git status read).
     pub fn detail_wanted(&self, ctx: &Ctx) -> Option<DetailKey> {
-        let _ = ctx;
-        todo!()
+        self.selection(ctx.items)?;
+        let key = self.detail_key()?;
+        let read = self.detail.as_ref().is_some_and(|(k, _)| *k == key);
+        (!read || self.detail_stale).then_some(key)
     }
 
     /// A detail read came back; kept if it is still the one wanted.
     pub fn set_detail(&mut self, key: DetailKey, text: String) {
-        let _ = (key, text);
-        todo!()
+        if self.detail_key().as_ref() != Some(&key) {
+            return;
+        }
+        if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.detail_first = 0;
+        }
+        self.detail = Some((key, text));
+        self.detail_stale = false;
     }
 
-    /// Ask about what the check before `kind` found.
-    pub fn ask_preflight(&mut self, kind: BatchKind, jobs: Vec<Job>, verdicts: Vec<(PathBuf, Verdict)>) {
-        let _ = (kind, jobs, verdicts);
-        todo!()
+    /// Ask about what the check before `kind` found: Enter runs only the
+    /// clean ones when some would conflict, else all.
+    pub fn ask_preflight(
+        &mut self,
+        kind: BatchKind,
+        jobs: Vec<Job>,
+        verdicts: Vec<(PathBuf, Verdict)>,
+    ) {
+        let conflicts = verdicts
+            .iter()
+            .any(|(_, v)| matches!(v, Verdict::Conflicts(_)));
+        self.armed = None;
+        self.sheet = Some(Sheet::Preflight {
+            kind,
+            jobs,
+            verdicts,
+            choice: usize::from(conflicts),
+        });
     }
 
     /// Ask which way to pull the repositories at `roots`, which diverged.
     pub fn ask_diverged(&mut self, roots: Vec<PathBuf>) {
-        let _ = roots;
-        todo!()
+        self.armed = None;
+        self.sheet = Some(Sheet::Diverged { roots, choice: 0 });
     }
 
     /// A batch using the field's text (a branch, a commit) went through:
@@ -420,6 +2100,1345 @@ impl Panel {
 /// Whether `name` can be a branch's name, by `git check-ref-format
 /// --branch`'s rules, without running git: else why not.
 pub fn branch_name_problem(name: &str) -> Option<&'static str> {
-    let _ = name;
-    todo!()
+    if name.is_empty() {
+        return Some("it is empty");
+    }
+    if name == "@" {
+        return Some("it can't be @ alone");
+    }
+    if name == "HEAD" {
+        return Some("it can't be HEAD");
+    }
+    if name.contains(char::is_whitespace) {
+        return Some("it can't have spaces");
+    }
+    if name.contains(char::is_control) {
+        return Some("it can't have control characters");
+    }
+    if name.contains(['~', '^', ':', '?', '*', '[', '\\']) {
+        return Some(r"it can't have ~ ^ : ? * [ or \");
+    }
+    if name.contains("..") {
+        return Some("it can't have ..");
+    }
+    if name.contains("@{") {
+        return Some("it can't have @{");
+    }
+    if name.starts_with('-') {
+        return Some("it can't start with -");
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return Some("it can't start or end with /, or have //");
+    }
+    if name.ends_with('.') {
+        return Some("it can't end with .");
+    }
+    for part in name.split('/') {
+        if part.starts_with('.') {
+            return Some("no part of it can start with .");
+        }
+        if part.ends_with(".lock") {
+            return Some("no part of it can end with .lock");
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::*;
+
+    /// The time the tests take as now, in seconds after the epoch.
+    const NOW: u64 = 1_000_000;
+
+    fn change(path: &str, code: char) -> Change {
+        Change {
+            path: path.into(),
+            orig: None,
+            code,
+        }
+    }
+
+    fn root(name: &str) -> PathBuf {
+        format!("/src/{name}").into()
+    }
+
+    /// A repository at /src/`name` on `branch`, tracking its namesake.
+    fn repo(name: &str, branch: &str, changes: Vec<Change>) -> RepoItem {
+        RepoItem {
+            root: root(name),
+            label: name.into(),
+            workspace: 0,
+            status: GitStatus {
+                branch: Some(branch.into()),
+                dirty: !changes.is_empty(),
+                root: Some(root(name)),
+                head: Some("1a2b3c4d5e6f".into()),
+                upstream: Some(format!("origin/{branch}")),
+                changes,
+                ..GitStatus::default()
+            },
+        }
+    }
+
+    /// gerdr with two changes, herdr clean, zed with a rename: the lines
+    /// gerdr, src/git.rs, notes.md, herdr, zed, new.rs.
+    fn items() -> Vec<RepoItem> {
+        let rename = Change {
+            path: "new.rs".into(),
+            orig: Some("old.rs".into()),
+            code: 'R',
+        };
+        vec![
+            repo(
+                "gerdr",
+                "main",
+                vec![change("src/git.rs", 'M'), change("notes.md", '?')],
+            ),
+            repo("herdr", "main", vec![]),
+            repo("zed", "main", vec![rename]),
+        ]
+    }
+
+    /// herdr stopped merging, src/api.rs conflicted.
+    fn merging(mut items: Vec<RepoItem>) -> Vec<RepoItem> {
+        let herdr = &mut items[1].status;
+        herdr.op = Some(InProgress::Merge);
+        herdr.changes = vec![change("README.md", 'M'), change("src/api.rs", 'U')];
+        herdr.dirty = true;
+        items
+    }
+
+    fn ctx<'a>(
+        items: &'a [RepoItem],
+        batch: Option<&'a Batch>,
+        feature: Option<&'a str>,
+    ) -> Ctx<'a> {
+        Ctx {
+            items,
+            batch,
+            feature,
+            page: (20, 20),
+            now: UNIX_EPOCH + Duration::from_secs(NOW),
+        }
+    }
+
+    fn mods(ctrl: bool, shift: bool, alt: bool) -> ModifiersState {
+        ModifiersState {
+            ctrl,
+            shift,
+            alt,
+            ..ModifiersState::default()
+        }
+    }
+
+    fn none() -> ModifiersState {
+        mods(false, false, false)
+    }
+
+    fn ctrl() -> ModifiersState {
+        mods(true, false, false)
+    }
+
+    fn ctrl_shift() -> ModifiersState {
+        mods(true, true, false)
+    }
+
+    fn alt() -> ModifiersState {
+        mods(false, false, true)
+    }
+
+    fn press(panel: &mut Panel, m: ModifiersState, sym: Keysym, ctx: &Ctx) -> Option<Outcome> {
+        panel.key(&m, sym, sym, ctx)
+    }
+
+    fn type_text(panel: &mut Panel, text: &str, ctx: &Ctx) {
+        for c in text.chars() {
+            let sym = Keysym::from_char(c);
+            panel.key(&none(), sym, sym, ctx);
+        }
+    }
+
+    fn select(panel: &mut Panel, name: &str) {
+        panel.selected = Some(Selected::Repo(root(name)));
+    }
+
+    fn select_file(panel: &mut Panel, name: &str, path: &str) {
+        panel.selected = Some(Selected::File(root(name), path.into()));
+    }
+
+    fn job(name: &str, files: &[&str]) -> Job {
+        Job {
+            root: root(name),
+            files: files.iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
+    fn jobs(names: &[&str]) -> Vec<Job> {
+        names.iter().map(|n| job(n, &[])).collect()
+    }
+
+    fn run(name: &str, state: RunState) -> RepoRun {
+        RepoRun {
+            job: job(name, &[]),
+            root: root(name),
+            before: None,
+            after: None,
+            state,
+            log: Vec::new(),
+        }
+    }
+
+    fn failed(failure: Failure) -> RunState {
+        RunState::Failed {
+            failure,
+            why: "it went wrong".into(),
+        }
+    }
+
+    fn batch(kind: BatchKind, runs: Vec<RepoRun>) -> Batch {
+        Batch { id: 1, kind, runs }
+    }
+
+    /// The repository lines of `view`.
+    fn repo_lines(view: &ReposView) -> Vec<&RepoLine> {
+        view.lines
+            .iter()
+            .filter_map(|l| match l {
+                TreeLine::Repo(r) => Some(r),
+                TreeLine::File(_) => None,
+            })
+            .collect()
+    }
+
+    fn checks(panel: &Panel, ctx: &Ctx) -> Vec<Check> {
+        let view = panel.view("p", ctx);
+        repo_lines(&view).iter().map(|r| r.check).collect()
+    }
+
+    /// The tree's lines as text: a repository's label, a file's path.
+    fn texts(view: &ReposView) -> Vec<String> {
+        view.lines
+            .iter()
+            .map(|l| match l {
+                TreeLine::Repo(r) => r.label.clone(),
+                TreeLine::File(f) => f.path.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn labels_and_what_is_checked_first_or_undone() {
+        let commit = |push| BatchKind::Commit {
+            msg: "m".into(),
+            push,
+        };
+        assert_eq!(commit(true).label(), "Commit and push");
+        assert_eq!(BatchKind::Pull(Pull::Rebase).label(), "Pull (rebase)");
+        assert_eq!(BatchKind::Pull(Pull::FastForward).label(), "Pull");
+        assert_eq!(
+            BatchKind::Integrate(Integrate::Rebase).label(),
+            "Rebase on base"
+        );
+        assert_eq!(BatchKind::Push { force: true }.label(), "Force push");
+        assert!(BatchKind::Integrate(Integrate::Merge).checked_first());
+        assert!(BatchKind::Pull(Pull::Merge).checked_first());
+        assert!(BatchKind::Branch("x".into()).checked_first());
+        assert!(!BatchKind::Pull(Pull::FastForward).checked_first());
+        assert!(!BatchKind::Fetch.checked_first());
+        assert!(commit(false).undoable());
+        assert!(!commit(true).undoable());
+        assert!(BatchKind::Integrate(Integrate::Rebase).undoable());
+        assert!(!BatchKind::Push { force: false }.undoable());
+        assert!(!BatchKind::Park("x".into()).undoable());
+        assert!(!BatchKind::Resume("x".into()).undoable());
+    }
+
+    #[test]
+    fn the_summary_counts_each_end() {
+        let kind = BatchKind::Commit {
+            msg: "m".into(),
+            push: true,
+        };
+        let mut b = batch(
+            kind,
+            vec![
+                run("a", RunState::Done),
+                run("b", RunState::Done),
+                run("c", failed(Failure::Conflict(vec!["x".into()]))),
+                run("d", failed(Failure::Other)),
+                run("e", RunState::Skipped("nothing checked".into())),
+            ],
+        );
+        assert!(b.finished());
+        assert_eq!(
+            b.summary(),
+            (
+                "Commit and push: 2 done · 1 conflict · 1 failed · 1 skipped".into(),
+                Tone::Error
+            )
+        );
+        b.runs.remove(3);
+        assert_eq!(b.summary().1, Tone::Warning);
+        b.runs.truncate(2);
+        assert_eq!(
+            b.summary(),
+            ("Commit and push: 2 done".into(), Tone::Success)
+        );
+        b.runs.push(run("f", RunState::Running("pushing…".into())));
+        b.runs.push(run("g", RunState::Queued));
+        assert!(!b.finished());
+        assert_eq!(
+            b.summary(),
+            (
+                "Commit and push: 2 done · 2 of 4 running".into(),
+                Tone::Normal
+            )
+        );
+    }
+
+    #[test]
+    fn a_repository_is_checked_whole_partly_or_not() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        // Nothing is checked to start with.
+        assert_eq!(checks(&panel, &ctx), [Check::Off; 3]);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(checks(&panel, &ctx)[0], Check::On);
+        assert_eq!(panel.checked_files.len(), 2);
+        // A file unchecked leaves its repository partly checked.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(checks(&panel, &ctx)[0], Check::Partial);
+        let view = panel.view("p", &ctx);
+        assert!(matches!(&view.lines[1], TreeLine::File(f) if f.check == Check::Off));
+        assert!(matches!(&view.lines[2], TreeLine::File(f) if f.check == Check::On));
+        // Space on a partly checked repository unchecks it all.
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(checks(&panel, &ctx)[0], Check::Off);
+        assert!(panel.checked_files.is_empty());
+        // Both files checked one by one make it whole.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(checks(&panel, &ctx)[0], Check::On);
+        // A clean one checks on its own.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(checks(&panel, &ctx)[1], Check::On);
+        // Ctrl+A checks everything, then nothing.
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(checks(&panel, &ctx), [Check::On; 3]);
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(checks(&panel, &ctx), [Check::Off; 3]);
+        assert!(panel.checked_files.is_empty() && panel.checked_repos.is_empty());
+    }
+
+    #[test]
+    fn actions_run_on_the_checked_else_the_selected() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "herdr");
+        let push = |jobs| {
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: false },
+                jobs,
+            })
+        };
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::p, &ctx),
+            push(jobs(&["herdr"]))
+        );
+        // A file checked picks its repository.
+        select_file(&mut panel, "zed", "new.rs");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        select(&mut panel, "gerdr");
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::p, &ctx),
+            push(jobs(&["zed"]))
+        );
+        // Fetch with nothing checked fetches them all.
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::f, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Fetch,
+                jobs: jobs(&["gerdr", "herdr", "zed"])
+            })
+        );
+        // Shift changes the symbol, which still counts.
+        assert_eq!(
+            press(&mut panel, ctrl_shift(), Keysym::M, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Integrate(Integrate::Rebase),
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::l, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Pull(Pull::FastForward),
+                jobs: jobs(&["gerdr"])
+            })
+        );
+    }
+
+    #[test]
+    fn a_commit_takes_the_checked_files_and_both_paths_of_a_rename() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        // herdr, clean, has nothing to commit: left out.
+        select(&mut panel, "herdr");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        select(&mut panel, "zed");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        panel.field.set("Fix it");
+        let commit = |push| {
+            Some(Outcome::Batch {
+                kind: BatchKind::Commit {
+                    msg: "Fix it".into(),
+                    push,
+                },
+                jobs: vec![
+                    job("gerdr", &["src/git.rs"]),
+                    job("zed", &["new.rs", "old.rs"]),
+                ],
+            })
+        };
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::Return, &ctx),
+            commit(false)
+        );
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::KP_Enter, &ctx),
+            commit(false)
+        );
+        assert_eq!(
+            press(&mut panel, ctrl_shift(), Keysym::Return, &ctx),
+            commit(true)
+        );
+    }
+
+    #[test]
+    fn actions_say_why_they_are_not_done() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        let fails = |panel: &mut Panel, m, sym, ctx: &Ctx, why: &str| {
+            assert_eq!(press(panel, m, sym, ctx), None);
+            assert_eq!(panel.error.as_deref(), Some(why));
+        };
+        fails(
+            &mut panel,
+            ctrl(),
+            Keysym::Return,
+            &ctx,
+            "Check the files to commit",
+        );
+        assert_eq!(panel.focus, Focus::Tree);
+        press(&mut panel, none(), Keysym::space, &ctx);
+        fails(
+            &mut panel,
+            ctrl(),
+            Keysym::Return,
+            &ctx,
+            "Type a commit message first",
+        );
+        // What is wrong is in the field: it gets the keyboard.
+        assert_eq!(panel.focus, Focus::Field);
+        fails(
+            &mut panel,
+            ctrl(),
+            Keysym::b,
+            &ctx,
+            "Type a branch name first",
+        );
+        fails(
+            &mut panel,
+            ctrl_shift(),
+            Keysym::B,
+            &ctx,
+            "Type a branch name first",
+        );
+        type_text(&mut panel, "feat x", &ctx);
+        // Typing takes the message away.
+        assert_eq!(panel.error, None);
+        fails(
+            &mut panel,
+            ctrl(),
+            Keysym::b,
+            &ctx,
+            "Not a branch name: it can't have spaces",
+        );
+        let no_feature = "No feature yet: start one with Ctrl+Shift+B";
+        fails(&mut panel, ctrl(), Keysym::j, &ctx, no_feature);
+        fails(&mut panel, ctrl(), Keysym::k, &ctx, no_feature);
+        fails(&mut panel, ctrl_shift(), Keysym::K, &ctx, no_feature);
+        // Done, the message goes.
+        panel.field.set("feat/x");
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::b, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Branch("feat/x".into()),
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        assert_eq!(panel.error, None);
+        // Nothing to retry, nothing to undo.
+        fails(
+            &mut panel,
+            alt(),
+            Keysym::r,
+            &ctx,
+            "Nothing failed to retry",
+        );
+        fails(&mut panel, alt(), Keysym::z, &ctx, "Nothing to undo");
+    }
+
+    #[test]
+    fn a_running_batch_holds_the_next() {
+        let items = items();
+        let b = batch(
+            BatchKind::Fetch,
+            vec![
+                run("gerdr", RunState::Done),
+                run("herdr", RunState::Running("fetching…".into())),
+            ],
+        );
+        let ctx = ctx(&items, Some(&b), None);
+        let mut panel = Panel::new(&items);
+        for (m, sym) in [
+            (ctrl(), Keysym::p),
+            (ctrl(), Keysym::f),
+            (ctrl_shift(), Keysym::M),
+        ] {
+            assert_eq!(press(&mut panel, m, sym, &ctx), None);
+            assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+        }
+        let view = panel.view("p", &ctx);
+        let lines = repo_lines(&view);
+        assert_eq!(lines[1].state, LineState::Busy("fetching…".into()));
+        assert_eq!(lines[0].chip.as_ref().map(|c| c.tone), Some(Tone::Success));
+        let result = view.result.unwrap();
+        assert_eq!(result.text, "Fetch: 1 done · 1 of 2 running");
+        assert!(result.buttons.is_empty());
+        assert!(
+            view.hints
+                .iter()
+                .find(|h| h.button == ReposButton::Push)
+                .is_some_and(|h| h.disabled.as_deref() == Some("Wait for the batch to finish"))
+        );
+    }
+
+    #[test]
+    fn branch_names_follow_gits_rules() {
+        for good in ["feat/x", "fix-1", "a.b", "user/feat/x_y", "v1@2"] {
+            assert_eq!(branch_name_problem(good), None, "{good}");
+        }
+        for bad in [
+            "", "a b", "a\tb", "a\u{7f}b", "a..b", "a@{b", "-a", "/a", "a/", "a//b", "a.",
+            "a.lock", "a.lock/b", "a/.b", ".a", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b",
+            "@", "HEAD",
+        ] {
+            assert!(branch_name_problem(bad).is_some(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn force_push_abort_and_undo_need_a_second_press() {
+        let items = merging(items());
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        assert_eq!(press(&mut panel, ctrl_shift(), Keysym::P, &ctx), None);
+        assert_eq!(panel.armed, Some(Armed::ForcePush));
+        let view = panel.view("p", &ctx);
+        assert!(
+            view.error
+                .as_deref()
+                .unwrap()
+                .contains("again to force push")
+        );
+        assert!(matches!(&repo_lines(&view)[0].state, LineState::Armed(_)));
+        assert_eq!(
+            press(&mut panel, ctrl_shift(), Keysym::P, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: true },
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        // Any other key takes it back.
+        press(&mut panel, ctrl_shift(), Keysym::P, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.armed, None);
+        assert_eq!(panel.view("p", &ctx).error, None);
+        assert_eq!(press(&mut panel, ctrl_shift(), Keysym::P, &ctx), None);
+        // Abort, on the repository stopped merging.
+        select(&mut panel, "herdr");
+        assert_eq!(press(&mut panel, ctrl_shift(), Keysym::Delete, &ctx), None);
+        assert_eq!(panel.armed, Some(Armed::Abort(root("herdr"))));
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            repo_lines(&view)[1].state,
+            LineState::Armed("Abort again to abort the merge".into())
+        );
+        assert_eq!(
+            press(&mut panel, ctrl_shift(), Keysym::Delete, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Abort,
+                jobs: jobs(&["herdr"])
+            })
+        );
+        // Nothing to abort on a repository going well.
+        select(&mut panel, "zed");
+        assert_eq!(press(&mut panel, ctrl_shift(), Keysym::Delete, &ctx), None);
+        assert_eq!(panel.armed, None);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("zed isn't stopped on conflicts")
+        );
+        // Undo, over the batch done.
+        let head = |oid: &str| Head {
+            branch: Some("main".into()),
+            oid: Some(oid.into()),
+        };
+        let mut done = run("zed", RunState::Done);
+        (done.before, done.after) = (Some(head("1111111aaa")), Some(head("2222222bbb")));
+        let b = batch(BatchKind::Branch("x".into()), vec![done.clone()]);
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx
+        };
+        assert_eq!(press(&mut panel, alt(), Keysym::z, &ctx), None);
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            repo_lines(&view)[2].state,
+            LineState::Armed("Undo again to go back to main at 1111111".into())
+        );
+        assert_eq!(view.result.unwrap().buttons, vec![ReposButton::Undo]);
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::Z, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Undo,
+                jobs: jobs(&["zed"])
+            })
+        );
+        // A push can't be taken back.
+        let pushed = batch(BatchKind::Push { force: false }, vec![done]);
+        let ctx = super::Ctx {
+            batch: Some(&pushed),
+            ..ctx
+        };
+        assert_eq!(press(&mut panel, alt(), Keysym::z, &ctx), None);
+        assert_eq!(panel.error.as_deref(), Some("Push can't be undone"));
+        assert_eq!(panel.armed, None);
+    }
+
+    #[test]
+    fn sheets_take_the_keys_and_answer() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        let kind = BatchKind::Integrate(Integrate::Merge);
+        let verdicts = vec![
+            (root("gerdr"), Verdict::Clean),
+            (root("herdr"), Verdict::Conflicts(vec!["a.rs".into()])),
+            (root("zed"), Verdict::Blocked("detached HEAD".into())),
+        ];
+        let ask = |panel: &mut Panel| {
+            let all = jobs(&["gerdr", "herdr", "zed"]);
+            panel.ask_preflight(kind.clone(), all, verdicts.clone());
+        };
+        ask(&mut panel);
+        let sheet = panel.view("p", &ctx).sheet.unwrap();
+        assert_eq!(
+            sheet.title,
+            "Merge base: 1 clean · 1 would conflict · 1 blocked"
+        );
+        assert_eq!(
+            sheet.lines[1],
+            ("herdr".into(), "conflicts: a.rs".into(), Tone::Warning)
+        );
+        assert_eq!(
+            sheet.lines[2],
+            ("zed".into(), "blocked: detached HEAD".into(), Tone::Error)
+        );
+        // With conflicts found, Enter runs the clean ones.
+        assert_eq!(sheet.default, 1);
+        // The panel's keys wait.
+        assert_eq!(press(&mut panel, ctrl(), Keysym::p, &ctx), None);
+        assert!(panel.sheet.is_some());
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Confirmed {
+                kind: kind.clone(),
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        assert!(panel.sheet.is_none());
+        // All drops only the blocked.
+        ask(&mut panel);
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Confirmed {
+                kind: kind.clone(),
+                jobs: jobs(&["gerdr", "herdr"])
+            })
+        );
+        // Cancel, by Tab round to it or by Esc.
+        ask(&mut panel);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        ask(&mut panel);
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert!(panel.sheet.is_none());
+        // Nothing clean to run: it just closes.
+        panel.ask_preflight(
+            kind.clone(),
+            jobs(&["zed"]),
+            vec![(root("zed"), Verdict::Blocked("no".into()))],
+        );
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        // Diverged ones: rebase, merge or skip.
+        panel.ask_diverged(vec![root("zed")]);
+        let sheet = panel.view("p", &ctx).sheet.unwrap();
+        assert_eq!(
+            sheet.buttons,
+            [
+                ReposButton::PullRebase,
+                ReposButton::PullMerge,
+                ReposButton::SkipDiverged
+            ]
+        );
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Confirmed {
+                kind: BatchKind::Pull(Pull::Merge),
+                jobs: jobs(&["zed"])
+            })
+        );
+        panel.ask_diverged(vec![root("zed")]);
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::PullRebase), &ctx),
+            Some(Outcome::Confirmed {
+                kind: BatchKind::Pull(Pull::Rebase),
+                jobs: jobs(&["zed"])
+            })
+        );
+        panel.ask_diverged(vec![root("zed")]);
+        let skip = ReposHit::Button(ReposButton::SkipDiverged);
+        assert_eq!(panel.click(skip, &ctx), None);
+        assert!(panel.sheet.is_none());
+    }
+
+    #[test]
+    fn big_change_lists_start_folded() {
+        let many = |n: usize| (0..n).map(|i| change(&format!("f{i}"), 'M')).collect();
+        let items = vec![
+            repo("big", "main", many(FOLD_FILES)),
+            repo("small", "main", many(FOLD_FILES - 1)),
+            repo("clean", "main", vec![]),
+        ];
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        let view = panel.view("p", &ctx);
+        let lines = repo_lines(&view);
+        assert_eq!(lines[0].expanded, Some(false));
+        assert_eq!(lines[1].expanded, Some(true));
+        // small's files fill the rest of the page: clean isn't in view.
+        assert_eq!(view.lines.len(), 20);
+        // Space still checks every file of a folded one.
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(panel.checked_files.len(), FOLD_FILES);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(repo_lines(&panel.view("p", &ctx))[0].expanded, Some(true));
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        let view = panel.view("p", &ctx);
+        assert_eq!(texts(&view), ["big", "small", "clean"]);
+        assert_eq!(repo_lines(&view)[2].expanded, None);
+        // Left on a file selects its repository.
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("small"))));
+    }
+
+    #[test]
+    fn conflicted_files_come_first() {
+        let items = merging(items());
+        let ctx = ctx(&items, None, None);
+        let panel = Panel::new(&items);
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            texts(&view),
+            [
+                "gerdr",
+                "src/git.rs",
+                "notes.md",
+                "herdr",
+                "src/api.rs",
+                "README.md",
+                "zed",
+                "old.rs → new.rs"
+            ]
+        );
+        assert!(matches!(&view.lines[4], TreeLine::File(f) if f.conflicted && f.code == 'U'));
+    }
+
+    #[test]
+    fn typing_goes_to_the_field_and_esc_steps_back() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        type_text(&mut panel, "fix it", &ctx);
+        assert_eq!(panel.focus, Focus::Field);
+        assert_eq!(&*panel.field, "fix it");
+        // Up and Down still move the selection.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(
+            panel.selected,
+            Some(Selected::File(root("gerdr"), "src/git.rs".into()))
+        );
+        assert_eq!(panel.view("p", &ctx).selected, Some(1));
+        // Home is the field's here.
+        press(&mut panel, none(), Keysym::Home, &ctx);
+        assert_eq!(panel.field.line().caret, 0);
+        assert_eq!(panel.view("p", &ctx).selected, Some(1));
+        assert!(panel.view("p", &ctx).field_focused);
+        // Tab goes back and forth.
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(panel.focus, Focus::Tree);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(panel.focus, Focus::Field);
+        // Esc: first takes back what is armed, then leaves the field,
+        // then closes.
+        press(&mut panel, ctrl_shift(), Keysym::P, &ctx);
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert_eq!(panel.armed, None);
+        assert_eq!(panel.focus, Focus::Field);
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Escape, &ctx),
+            Some(Outcome::Close)
+        );
+        // Ctrl+A in the field selects its text instead of checking.
+        panel.focus = Focus::Field;
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(panel.field.line().selection(), 0..6);
+        assert!(panel.checked_repos.is_empty());
+    }
+
+    #[test]
+    fn a_status_read_drops_the_committed_and_keeps_the_selection() {
+        let mut items = items();
+        let mut panel = Panel::new(&items);
+        {
+            let ctx = ctx(&items, None, None);
+            select_file(&mut panel, "gerdr", "src/git.rs");
+            press(&mut panel, none(), Keysym::space, &ctx);
+            select_file(&mut panel, "gerdr", "notes.md");
+            press(&mut panel, none(), Keysym::Down, &ctx);
+            press(&mut panel, none(), Keysym::Up, &ctx);
+            select(&mut panel, "zed");
+            press(&mut panel, none(), Keysym::space, &ctx);
+            select_file(&mut panel, "gerdr", "notes.md");
+        }
+        // src/git.rs is committed, zed's workspace closed.
+        items[0].status.changes.remove(0);
+        items.pop();
+        let ctx = ctx(&items, None, None);
+        panel.refresh(&ctx);
+        assert!(panel.checked_files.is_empty());
+        assert!(panel.checked_repos.is_empty());
+        assert_eq!(
+            panel.selected,
+            Some(Selected::File(root("gerdr"), "notes.md".into()))
+        );
+        assert_eq!(panel.view("p", &ctx).selected, Some(1));
+        // Gone too, the line that took its place is selected.
+        let mut clean = items.clone();
+        clean[0].status.changes.clear();
+        let ctx = super::Ctx {
+            items: &clean,
+            ..ctx
+        };
+        panel.refresh(&ctx);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("herdr"))));
+    }
+
+    #[test]
+    fn the_header_says_where_they_all_stand() {
+        let mut items = items();
+        items[0].status.branch = Some("feat/x".into());
+        items[1].status.branch = Some("feat/x".into());
+        let at = |ago: u64| Some(UNIX_EPOCH + Duration::from_secs(NOW - ago));
+        items[1].status.fetched = at(3 * 3600);
+        items[2].status.fetched = at(125);
+        let ctx = ctx(&items, None, Some("feat/x"));
+        let panel = Panel::new(&items);
+        let view = panel.view("gerdr", &ctx);
+        assert_eq!(
+            view.summary,
+            "feat/x · 2 of 3 on it · 2 dirty · fetched 2m ago"
+        );
+        assert_eq!(view.placeholder, "Branch name or commit message");
+        let lines = repo_lines(&view);
+        assert!(!lines[0].off_feature);
+        assert!(lines[2].off_feature);
+        let ctx = super::Ctx {
+            feature: None,
+            ..ctx
+        };
+        let items = merging(vec![items[0].clone(), items[1].clone()]);
+        let mut items = items;
+        items[1].status.fetched = None;
+        let ctx = super::Ctx {
+            items: &items,
+            ..ctx
+        };
+        let view = panel.view("gerdr", &ctx);
+        assert_eq!(view.summary, "2 dirty · 1 conflict · never fetched");
+        assert_eq!(ago(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(5)), "5s");
+        assert_eq!(
+            ago(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(2 * 86400)),
+            "2d"
+        );
+        // The project without a repository.
+        let ctx = super::Ctx { items: &[], ..ctx };
+        let view = Panel::new(&[]).view("gerdr", &ctx);
+        assert!(view.lines.is_empty() && view.summary.is_empty());
+        assert_eq!(view.empty, "No git repositories in this project");
+    }
+
+    #[test]
+    fn chips_say_what_each_is_in_the_middle_of() {
+        let mut items = merging(items());
+        items[1].status.changes.push(change("b.rs", 'U'));
+        items.push(repo("rebasing", "feat", vec![]));
+        items[3].status.op = Some(InProgress::Rebase { step: 2, total: 5 });
+        for name in ["auth", "skipped", "done", "stash", "detached"] {
+            items.push(repo(name, "main", vec![]));
+        }
+        items[8].status.branch = None;
+        let b = batch(
+            BatchKind::Resume("feat".into()),
+            vec![
+                run("auth", failed(Failure::Auth)),
+                run("skipped", RunState::Skipped("nothing checked".into())),
+                run("done", RunState::Done),
+                run("stash", failed(Failure::Conflict(vec!["a.rs".into()]))),
+            ],
+        );
+        let ctx = ctx(&items, Some(&b), None);
+        let mut panel = Panel::new(&items);
+        // Folded, for every repository's line on the page.
+        for item in &items {
+            panel.set_open(item, false);
+        }
+        let view = panel.view("p", &ctx);
+        let chips: Vec<Option<(String, Tone)>> = repo_lines(&view)
+            .iter()
+            .map(|l| l.chip.as_ref().map(|c| (c.text.clone(), c.tone)))
+            .collect();
+        let chip = |text: &str, tone| Some((text.to_owned(), tone));
+        assert_eq!(
+            chips,
+            [
+                None,
+                chip("MERGING · 2", Tone::Error),
+                None,
+                chip("REBASING 2/5", Tone::Error),
+                chip("login needed", Tone::Error),
+                chip("nothing checked", Tone::Muted),
+                chip("done", Tone::Success),
+                chip("STASH CONFLICT", Tone::Error),
+                chip("detached", Tone::Warning),
+            ]
+        );
+        let lines = repo_lines(&view);
+        assert_eq!(lines[1].state, LineState::Attention);
+        assert_eq!(lines[6].state, LineState::Settled);
+        assert_eq!(lines[8].branch, None);
+        // The stash's conflict is remembered past the batch saying so.
+        panel.refresh(&ctx);
+        let next = batch(BatchKind::MarkResolved, vec![run("stash", RunState::Done)]);
+        let ctx = super::Ctx {
+            batch: Some(&next),
+            ..ctx
+        };
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            repo_lines(&view)[7].chip.as_ref().map(|c| c.text.as_str()),
+            Some("STASH CONFLICT")
+        );
+        // Ctrl+G there continues it.
+        select(&mut panel, "stash");
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::g, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Continue,
+                jobs: jobs(&["stash"])
+            })
+        );
+        // Login needed: run it in a terminal.
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx
+        };
+        select(&mut panel, "auth");
+        let hints = panel.view("p", &ctx).hints;
+        assert_eq!(hints[0].button, ReposButton::RunInTerminal);
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::RunInTerminal), &ctx),
+            Some(Outcome::RunInTerminal(root("auth")))
+        );
+    }
+
+    #[test]
+    fn the_tree_pages_and_keeps_the_selection_in_view() {
+        let items = items();
+        let ctx = super::Ctx {
+            page: (3, 2),
+            ..ctx(&items, None, None)
+        };
+        let mut panel = Panel::new(&items);
+        for _ in 0..4 {
+            press(&mut panel, none(), Keysym::Down, &ctx);
+        }
+        let view = panel.view("p", &ctx);
+        assert_eq!(texts(&view), ["notes.md", "herdr", "zed"]);
+        assert_eq!(view.selected, Some(2));
+        press(&mut panel, none(), Keysym::End, &ctx);
+        assert_eq!(panel.view("p", &ctx).selected, Some(2));
+        assert_eq!(panel.first, 3);
+        press(&mut panel, none(), Keysym::Page_Up, &ctx);
+        assert_eq!(panel.selected_at, 2);
+        press(&mut panel, none(), Keysym::Home, &ctx);
+        assert_eq!((panel.selected_at, panel.first), (0, 0));
+        // The wheel scrolls whole lines, the rest kept for the next turn.
+        panel.scroll(0.6, false, &ctx);
+        assert_eq!(panel.first, 0);
+        panel.scroll(0.6, false, &ctx);
+        assert_eq!(panel.first, 1);
+        panel.scroll(10.0, false, &ctx);
+        assert_eq!(panel.first, 3);
+        panel.scroll(-10.0, false, &ctx);
+        assert_eq!(panel.first, 0);
+        // Out of view, the selection isn't shown.
+        panel.scroll(3.0, false, &ctx);
+        assert_eq!(panel.view("p", &ctx).selected, None);
+    }
+
+    #[test]
+    fn clicks_do_what_the_keys_do() {
+        let items = items();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        panel.focus = Focus::Field;
+        assert_eq!(panel.click(ReposHit::Line(3), &ctx), None);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("herdr"))));
+        assert_eq!(panel.focus, Focus::Tree);
+        panel.click(ReposHit::Check(1), &ctx);
+        assert_eq!(checks(&panel, &ctx)[0], Check::Partial);
+        panel.click(ReposHit::Expander(0), &ctx);
+        assert_eq!(
+            texts(&panel.view("p", &ctx)),
+            ["gerdr", "herdr", "zed", "old.rs → new.rs"]
+        );
+        panel.click(ReposHit::Field, &ctx);
+        assert_eq!(panel.focus, Focus::Field);
+        panel.click(ReposHit::DetailTab(DetailTab::Log), &ctx);
+        assert_eq!(panel.tab, Some(DetailTab::Log));
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::Push), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: false },
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        // Twice for a force push, by click too.
+        let force = ReposHit::Button(ReposButton::ForcePush);
+        assert_eq!(panel.click(force, &ctx), None);
+        assert!(panel.click(force, &ctx).is_some());
+        // Checked out elsewhere: open that workspace.
+        let b = batch(
+            BatchKind::Branch("x".into()),
+            vec![run("zed", failed(Failure::CheckedOut("/src/zed2".into())))],
+        );
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx
+        };
+        select(&mut panel, "zed");
+        let chip = repo_lines(&panel.view("p", &ctx))[2].chip.clone();
+        assert_eq!(chip.unwrap().text, "checked out elsewhere");
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::OpenWorkspace), &ctx),
+            Some(Outcome::OpenWorkspace("/src/zed2".into()))
+        );
+    }
+
+    #[test]
+    fn the_detail_shows_the_diff_and_the_log() {
+        let items = items();
+        let mut ran = Ran {
+            command: "git push -u origin HEAD".into(),
+            output: "! [rejected] main -> main (fetch first)\n".into(),
+            ok: false,
+        };
+        let mut pushed = run("gerdr", failed(Failure::Rejected));
+        pushed.log.push(ran.clone());
+        ran.ok = true;
+        ran.command = "git fetch".into();
+        ran.output = "From origin\n".into();
+        pushed.log.insert(0, ran);
+        let b = batch(BatchKind::Push { force: false }, vec![pushed]);
+        let ctx = ctx(&items, Some(&b), None);
+        let mut panel = Panel::new(&items);
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        let diff = DetailKey {
+            root: root("gerdr"),
+            file: Some("src/git.rs".into()),
+            tab: DetailTab::Diff,
+        };
+        assert_eq!(panel.detail_wanted(&ctx), Some(diff.clone()));
+        // A read for what was selected before is dropped.
+        let log = DetailKey {
+            file: None,
+            tab: DetailTab::Log,
+            ..diff.clone()
+        };
+        panel.set_detail(log.clone(), "old".into());
+        assert_eq!(panel.detail, None);
+        let text = "diff --git a/src/git.rs b/src/git.rs\nindex 1..2 100644\n--- a/src/git.rs\n\
+                    +++ b/src/git.rs\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n--- not a header\n";
+        panel.set_detail(diff.clone(), text.into());
+        assert_eq!(panel.detail_wanted(&ctx), None);
+        let view = panel.view("p", &ctx);
+        assert_eq!(view.detail.title, "src/git.rs");
+        assert_eq!(view.detail.tab, DetailTab::Diff);
+        let tones: Vec<DiffTone> = view.detail.lines.iter().map(|l| l.tone).collect();
+        use DiffTone::*;
+        assert_eq!(
+            tones,
+            [
+                Header, Header, Header, Header, Hunk, Plain, Removed, Added, Removed
+            ]
+        );
+        // A status read has it read again, shown meanwhile.
+        panel.refresh(&ctx);
+        assert_eq!(panel.detail_wanted(&ctx), Some(diff.clone()));
+        assert_eq!(panel.view("p", &ctx).detail.lines.len(), 9);
+        // The detail scrolls within its lines.
+        let paged = super::Ctx {
+            page: (20, 4),
+            ..ctx
+        };
+        panel.scroll(100.0, true, &paged);
+        assert_eq!(panel.detail_first, 5);
+        assert_eq!(panel.view("p", &paged).detail.lines[0].text, " same");
+        // The repository's log, with what the batch ran there.
+        select(&mut panel, "gerdr");
+        assert_eq!(panel.detail_wanted(&ctx), Some(log.clone()));
+        panel.set_detail(log.clone(), "abc1234 Read the branch".into());
+        assert_eq!(panel.detail_first, 0);
+        let detail = panel.view("p", &ctx).detail;
+        assert_eq!(detail.title, "gerdr");
+        assert_eq!(detail.tab, DetailTab::Log);
+        let lines: Vec<(&str, DiffTone)> = detail
+            .lines
+            .iter()
+            .map(|l| (l.text.as_str(), l.tone))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("abc1234 Read the branch", Plain),
+                ("", Plain),
+                ("$ git fetch", Header),
+                ("From origin", Plain),
+                ("$ git push -u origin HEAD", Header),
+                ("! [rejected] main -> main (fetch first)", Error),
+            ]
+        );
+        // Ctrl+D asks for a diff: a repository has none.
+        press(&mut panel, ctrl(), Keysym::d, &ctx);
+        assert_eq!(panel.detail_wanted(&ctx), None);
+        let detail = panel.view("p", &ctx).detail;
+        assert_eq!(detail.lines[0].text, "Select a file for its diff");
+        // Ctrl+T, a file's repository's log.
+        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        assert_eq!(panel.detail_wanted(&ctx), None);
+    }
+
+    #[test]
+    fn hints_follow_the_selection() {
+        let items = merging(items());
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        let buttons = |panel: &Panel| -> Vec<ReposButton> {
+            panel
+                .view("p", &ctx)
+                .hints
+                .iter()
+                .map(|h| h.button)
+                .collect()
+        };
+        let usual = buttons(&panel);
+        assert_eq!(
+            usual[..3],
+            [
+                ReposButton::Branch,
+                ReposButton::StartFeature,
+                ReposButton::Commit
+            ]
+        );
+        assert!(usual.contains(&ReposButton::Fetch));
+        assert!(!usual.contains(&ReposButton::Park));
+        let hints = panel.view("p", &ctx).hints;
+        assert_eq!(hints[0].key, "Ctrl+B");
+        // Wanting text doesn't disable: pressed, it asks for it.
+        assert_eq!(hints[0].disabled, None);
+        assert_eq!(
+            hints[2].disabled.as_deref(),
+            Some("Check the files to commit")
+        );
+        select(&mut panel, "herdr");
+        assert_eq!(
+            buttons(&panel),
+            [
+                ReposButton::OpenInZed,
+                ReposButton::MarkResolved,
+                ReposButton::Continue,
+                ReposButton::Abort
+            ]
+        );
+        let hints = panel.view("p", &ctx).hints;
+        assert_eq!(
+            hints[2].disabled.as_deref(),
+            Some("Resolve 1 conflicted file first (Ctrl+R)")
+        );
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::e, &ctx),
+            Some(Outcome::OpenInZed {
+                root: root("herdr"),
+                paths: vec!["src/api.rs".into()]
+            })
+        );
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::r, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::MarkResolved,
+                jobs: vec![job("herdr", &["src/api.rs"])]
+            })
+        );
+        // On a file, that file.
+        select_file(&mut panel, "herdr", "README.md");
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::e, &ctx),
+            Some(Outcome::OpenInZed {
+                root: root("herdr"),
+                paths: vec!["README.md".into()]
+            })
+        );
+        // With a feature: park, resume, and join for those off it.
+        let ctx = super::Ctx {
+            feature: Some("main"),
+            ..ctx
+        };
+        select(&mut panel, "zed");
+        let hints: Vec<ReposButton> = panel
+            .view("p", &ctx)
+            .hints
+            .iter()
+            .map(|h| h.button)
+            .collect();
+        assert!(hints.contains(&ReposButton::Park) && hints.contains(&ReposButton::Resume));
+        assert!(!hints.contains(&ReposButton::Join) && !hints.contains(&ReposButton::StartFeature));
+    }
+
+    #[test]
+    fn join_brings_only_those_off_the_feature() {
+        let mut items = items();
+        items[0].status.branch = Some("feat/x".into());
+        let ctx = ctx(&items, None, Some("feat/x"));
+        let mut panel = Panel::new(&items);
+        let join = |names: &[&str]| {
+            Some(Outcome::Batch {
+                kind: BatchKind::Join("feat/x".into()),
+                jobs: jobs(names),
+            })
+        };
+        // Nothing checked: every one off it, not the selection.
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::j, &ctx),
+            join(&["herdr", "zed"])
+        );
+        press(&mut panel, none(), Keysym::space, &ctx);
+        select(&mut panel, "herdr");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(press(&mut panel, ctrl(), Keysym::j, &ctx), join(&["herdr"]));
+        let mut on = items.clone();
+        for item in &mut on {
+            item.status.branch = Some("feat/x".into());
+        }
+        let ctx = super::Ctx { items: &on, ..ctx };
+        assert_eq!(press(&mut panel, ctrl(), Keysym::j, &ctx), None);
+        assert_eq!(panel.error.as_deref(), Some("Already on feat/x"));
+        // Park and resume go by the feature.
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::k, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Park("feat/x".into()),
+                jobs: jobs(&["gerdr", "herdr"])
+            })
+        );
+    }
+
+    #[test]
+    fn retry_failed_is_offered_once_over() {
+        let items = items();
+        let b = batch(
+            BatchKind::Push { force: false },
+            vec![
+                run("gerdr", failed(Failure::Locked)),
+                run("herdr", failed(Failure::Conflict(Vec::new()))),
+            ],
+        );
+        let ctx = ctx(&items, Some(&b), None);
+        let mut panel = Panel::new(&items);
+        let view = panel.view("p", &ctx);
+        assert_eq!(view.result.unwrap().buttons, [ReposButton::RetryFailed]);
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::r, &ctx),
+            Some(Outcome::RetryFailed)
+        );
+        // Conflicts aren't retried: they are resolved.
+        let b = batch(
+            BatchKind::Push { force: false },
+            vec![run("herdr", failed(Failure::Conflict(Vec::new())))],
+        );
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx
+        };
+        assert_eq!(press(&mut panel, alt(), Keysym::r, &ctx), None);
+    }
 }
