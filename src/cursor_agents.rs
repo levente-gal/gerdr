@@ -8,9 +8,13 @@
 //! it is in. Cursor writes there lazily: a chat's wait for approval shows
 //! some seconds late, and a new chat only once its first run stops, so
 //! whether one runs goes by the hooks. No hook says that a chat waits.
+//!
+//! A chat that went idle stays as history (see `History`): those not in
+//! agent mode (asking, planning, debugging) until the user deletes them,
+//! the others while they are among the latest.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::Read,
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
@@ -37,6 +41,11 @@ pub const HOOK_HOLD_MS: i64 = 30_000;
 /// How long a hook's word that a chat runs holds: one tool can take long
 /// without a hook between, and a run that dies says nothing.
 pub const WORKING_HOLD_MS: i64 = 30 * 60_000;
+/// How many idle chats a workspace shows at most.
+pub const HISTORY_CARDS: usize = 5;
+/// The mode of a chat that works on its own, as the database has it; the
+/// others ask, plan or debug with the user.
+const AGENT_MODE: &str = "agent";
 /// The most of a prompt a chat the database doesn't know yet is named by.
 const PROMPT_CHARS: usize = 80;
 /// The subcommand Cursor's hooks run.
@@ -88,6 +97,8 @@ pub struct ChatRow {
     pub paths: Vec<PathBuf>,
     /// It runs in a worktree of its own.
     pub worktree: bool,
+    /// Its mode: `agent`, `chat` (asking), `plan`, `debug`, `multitask`.
+    pub mode: Option<String>,
 }
 
 impl ChatRow {
@@ -102,6 +113,19 @@ impl ChatRow {
         } else {
             AgentStatus::Idle
         }
+    }
+
+    /// Whether it works on its own (a chat of unknown mode is taken to),
+    /// rather than ask, plan or debug with the user.
+    pub fn agent_mode(&self) -> bool {
+        self.mode.as_deref().is_none_or(|m| m == AGENT_MODE)
+    }
+
+    /// Its mode as the user knows it from Cursor's picker, unless it is an
+    /// agent's.
+    pub fn mode_name(&self) -> Option<&str> {
+        let mode = self.mode.as_deref().filter(|_| !self.agent_mode())?;
+        Some(if mode == "chat" { "ask" } else { mode })
     }
 }
 
@@ -236,11 +260,10 @@ impl Chats {
         self.hooks.insert(event.chat.clone(), event);
     }
 
-    /// The chats doing something or with news at `now_ms`, the most
-    /// recently changed first: those of the database, and those only
-    /// hooks know of yet (a first run), named by their prompt. What hooks
-    /// said long ago is forgotten.
-    pub fn live(&mut self, now_ms: i64) -> Vec<CursorChat> {
+    /// The chats at `now_ms`, the most recently changed first: those of
+    /// the database, and those only hooks know of yet (a first run), named
+    /// by their prompt. What hooks said long ago is forgotten.
+    pub fn all(&mut self, now_ms: i64) -> Vec<CursorChat> {
         self.hooks.retain(|_, h| h.holds(now_ms));
         let unwritten = self
             .hooks
@@ -266,10 +289,80 @@ impl Chats {
                     row,
                 }
             })
-            .filter(|c| c.status != AgentStatus::Idle)
             .collect();
         chats.sort_by_key(|c| std::cmp::Reverse(c.row.updated_ms));
         chats
+    }
+}
+
+/// What gerdr remembers of Cursor's idle chats, in `state.json`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct History {
+    /// The chats last seen in a mode other than agent: kept until deleted,
+    /// and read whatever their age.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub kept: BTreeSet<String>,
+    /// The chats deleted from gerdr, each with when it had last changed
+    /// then: one that changes again is back.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deleted: BTreeMap<String, i64>,
+}
+
+impl History {
+    pub fn is_empty(&self) -> bool {
+        self.kept.is_empty() && self.deleted.is_empty()
+    }
+
+    /// Whether chat `row` was deleted since it last changed.
+    pub fn is_deleted(&self, row: &ChatRow) -> bool {
+        self.deleted
+            .get(&row.id)
+            .is_some_and(|at| *at >= row.updated_ms)
+    }
+
+    /// Take in the `rows` of a fresh read: keep those not in agent mode,
+    /// let go those back in it or gone, and forget deletions of chats no
+    /// longer read or changed since. Whether anything changed.
+    pub fn update(&mut self, rows: &HashMap<String, ChatRow>) -> bool {
+        let before = (self.kept.len(), self.deleted.len());
+        self.deleted
+            .retain(|id, at| rows.get(id).is_some_and(|row| row.updated_ms <= *at));
+        self.kept
+            .retain(|id| rows.get(id).is_some_and(|row| !row.agent_mode()));
+        let mut added = false;
+        for row in rows.values() {
+            if !row.agent_mode() && !self.is_deleted(row) {
+                added |= self.kept.insert(row.id.clone());
+            }
+        }
+        added || before != (self.kept.len(), self.deleted.len())
+    }
+
+    /// Delete chat `row` from gerdr, until it changes again.
+    pub fn delete(&mut self, row: &ChatRow) {
+        self.kept.remove(&row.id);
+        self.deleted.insert(row.id.clone(), row.updated_ms);
+    }
+
+    /// The chats to read whatever their age.
+    pub fn ids(&self) -> Vec<String> {
+        self.kept.iter().cloned().collect()
+    }
+
+    /// Out of a workspace's `idle` chats (the most recently changed
+    /// first), those it shows as history, `HISTORY_CARDS` at most: the
+    /// kept ones before the others, in the same order. Also the kept ones
+    /// that don't fit. Deleted ones are neither.
+    pub fn pick<'a>(&self, idle: &[&'a CursorChat]) -> (Vec<&'a CursorChat>, Vec<&'a CursorChat>) {
+        let (kept, others): (Vec<&CursorChat>, Vec<&CursorChat>) = idle
+            .iter()
+            .filter(|chat| !self.is_deleted(&chat.row))
+            .partition(|chat| self.kept.contains(&chat.row.id));
+        let fit = kept.len().min(HISTORY_CARDS);
+        let mut shown: Vec<&CursorChat> = kept[..fit].to_vec();
+        shown.extend(others.iter().take(HISTORY_CARDS - fit));
+        shown.sort_by_key(|chat| std::cmp::Reverse(chat.row.updated_ms));
+        (shown, kept[fit..].to_vec())
     }
 }
 
@@ -313,10 +406,12 @@ pub fn place(
 
 /// The chats read from the database at `conn`, given when each was read
 /// last and its run's state then (`known`, brought up to date): those
-/// changed in the last `RECENT_MS` before `now_ms`, waiting or with news.
+/// changed in the last `RECENT_MS` before `now_ms`, waiting, with news or
+/// in `keep`.
 pub fn read_rows(
     conn: &rusqlite::Connection,
     now_ms: i64,
+    keep: &[String],
     known: &mut HashMap<String, (i64, Option<String>)>,
 ) -> rusqlite::Result<Vec<ChatRow>> {
     let mut headers = conn.prepare_cached(
@@ -331,15 +426,18 @@ pub fn read_rows(
             json_extract(value, '$.agentLocation.type'),
             json_extract(value, '$.agentLocation.environment.uri.fsPath'),
             json_extract(value, '$.agentLocation.sourceRepoRootPath'),
-            json_extract(value, '$.trackedGitRepos')
+            json_extract(value, '$.trackedGitRepos'),
+            json_extract(value, '$.unifiedMode')
         FROM composerHeaders
         WHERE coalesce(isArchived, 0) = 0 AND coalesce(isSubagent, 0) = 0
           AND (lastUpdatedAt > ?1
                OR json_extract(value, '$.hasBlockingPendingActions')
-               OR json_extract(value, '$.hasUnreadMessages'))",
+               OR json_extract(value, '$.hasUnreadMessages')
+               OR composerId IN (SELECT value FROM json_each(?2)))",
     )?;
+    let keep = serde_json::to_string(keep).unwrap_or_else(|_| "[]".into());
     let mut rows: Vec<ChatRow> = headers
-        .query_map([now_ms - RECENT_MS], |r| {
+        .query_map(rusqlite::params![now_ms - RECENT_MS, keep], |r| {
             let flag = |i: usize| r.get::<_, Option<i64>>(i).map(|v| v.unwrap_or(0) != 0);
             let mut paths: Vec<PathBuf> = [r.get::<_, Option<String>>(11)?, r.get(12)?]
                 .into_iter()
@@ -361,6 +459,7 @@ pub fn read_rows(
                 added: r.get(8)?,
                 removed: r.get(9)?,
                 worktree: r.get::<_, Option<String>>(10)?.as_deref() == Some("worktree"),
+                mode: r.get(14)?,
                 paths,
             })
         })?
@@ -401,13 +500,15 @@ fn repo_paths(json: Option<&str>) -> Vec<PathBuf> {
 }
 
 /// Read the chats in the database at `db` every `DB_INTERVAL`, on a thread
-/// of its own, and hand them to `send` whenever they changed. A message on
-/// the returned sender asks for a read now. Stops once `send` returns false
-/// or the sender is dropped.
+/// of its own, those in `keep` among them whatever their age, and hand
+/// them to `send` whenever they changed. A message on the returned sender
+/// asks for a read now, and says which chats to keep reading from then on.
+/// Stops once `send` returns false or the sender is dropped.
 pub fn watch_db(
     db: PathBuf,
+    mut keep: Vec<String>,
     mut send: impl FnMut(Vec<ChatRow>) -> bool + Send + 'static,
-) -> mpsc::Sender<()> {
+) -> mpsc::Sender<Vec<String>> {
     let (poke, poked) = mpsc::channel();
     std::thread::spawn(move || {
         let mut conn: Option<rusqlite::Connection> = None;
@@ -424,7 +525,7 @@ pub fn watch_db(
             let wait = match &conn {
                 None => DB_RETRY,
                 Some(c) => {
-                    match read_if_changed(c, &mut version, &mut known) {
+                    match read_if_changed(c, &mut version, &keep, &mut known) {
                         Ok(Some(rows)) if last.as_ref() != Some(&rows) => {
                             if !send(rows.clone()) {
                                 return;
@@ -446,7 +547,16 @@ pub fn watch_db(
                 }
             };
             match poked.recv_timeout(wait) {
-                Ok(()) => while poked.try_recv().is_ok() {},
+                Ok(mut ids) => {
+                    while let Ok(newer) = poked.try_recv() {
+                        ids = newer;
+                    }
+                    if ids != keep {
+                        keep = ids;
+                        // Read again even if nothing was written.
+                        version = None;
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
@@ -468,6 +578,7 @@ fn open_read_only(db: &Path) -> rusqlite::Result<rusqlite::Connection> {
 fn read_if_changed(
     conn: &rusqlite::Connection,
     version: &mut Option<i64>,
+    keep: &[String],
     known: &mut HashMap<String, (i64, Option<String>)>,
 ) -> rusqlite::Result<Option<Vec<ChatRow>>> {
     let now: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
@@ -478,7 +589,7 @@ fn read_if_changed(
     if *version == Some(now) && !running {
         return Ok(None);
     }
-    let rows = read_rows(conn, now_ms(), known)?;
+    let rows = read_rows(conn, now_ms(), keep, known)?;
     *version = Some(now);
     Ok(Some(rows))
 }
@@ -679,13 +790,17 @@ impl crate::Gerdr {
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(rows) = event {
                 state.cursor.set_rows(rows);
+                if state.projects.cursor_history.update(&state.cursor.rows) {
+                    state.cursor_history_changed();
+                }
                 state.cursor_changed();
             }
         });
         if let Err(err) = inserted {
             return tracing::warn!("cursor's agents: {err}");
         }
-        self.cursor_poke = Some(watch_db(db, move |rows| tx.send(rows).is_ok()));
+        let keep = self.projects.cursor_history.ids();
+        self.cursor_poke = Some(watch_db(db, keep, move |rows| tx.send(rows).is_ok()));
         match hook_socket(&self.socket_name).map(|path| (bind_hook_socket(&path), path)) {
             Some((Ok(socket), path)) => {
                 let source = Generic::new(socket, Interest::READ, Mode::Level);
@@ -694,9 +809,7 @@ impl crate::Gerdr {
                         state.cursor.hear(event);
                     }
                     state.cursor_changed();
-                    if let Some(poke) = &state.cursor_poke {
-                        let _ = poke.send(());
-                    }
+                    state.read_cursor_db();
                     Ok(PostAction::Continue)
                 });
                 match inserted {
@@ -721,8 +834,42 @@ impl crate::Gerdr {
 
     /// Take in what Cursor's chats do now, and notify of what is news.
     fn cursor_changed(&mut self) {
-        self.cursor_chats = self.cursor.live(now_ms());
+        let (idle, live) = self
+            .cursor
+            .all(now_ms())
+            .into_iter()
+            .partition(|chat| chat.status == AgentStatus::Idle);
+        self.cursor_chats = live;
+        // A chat only hooks know of goes once idle: there is nothing to
+        // show it by.
+        self.cursor_idle = idle
+            .into_iter()
+            .filter(|chat| self.cursor.rows.contains_key(&chat.row.id))
+            .collect();
         self.notify_agents();
+    }
+
+    /// Ask for Cursor's database to be read now.
+    fn read_cursor_db(&self) {
+        if let Some(poke) = &self.cursor_poke {
+            let _ = poke.send(self.projects.cursor_history.ids());
+        }
+    }
+
+    /// Save what changed in the history and read the chats it keeps.
+    fn cursor_history_changed(&mut self) {
+        self.projects.save();
+        self.read_cursor_db();
+    }
+
+    /// Delete idle Cursor chat `id` from gerdr: its card goes, until the
+    /// chat changes again.
+    pub fn delete_cursor_chat(&mut self, id: &str) {
+        let Some(chat) = self.cursor_idle.iter().find(|chat| chat.row.id == id) else {
+            return;
+        };
+        self.projects.cursor_history.delete(&chat.row);
+        self.cursor_history_changed();
     }
 
     /// Stop hearing Cursor's hooks: gerdr quits.
@@ -755,13 +902,31 @@ impl crate::Gerdr {
         place(&chat.row.paths, &spots, &dirs, crate::home_dir().as_deref())
     }
 
-    /// The cards of the Cursor chats under workspace `w`.
-    pub fn cursor_cards(&self, w: usize) -> Vec<crate::chrome::AgentView> {
-        self.cursor_chats
+    /// The idle Cursor chats under workspace `w` as history (see
+    /// `History::pick`): those shown, and the kept ones that don't fit.
+    pub fn cursor_history(&self, w: usize) -> (Vec<&CursorChat>, Vec<&CursorChat>) {
+        let idle: Vec<&CursorChat> = self
+            .cursor_idle
             .iter()
             .filter(|chat| self.cursor_chat_place(chat) == Some(w))
-            .map(crate::chrome::AgentView::cursor)
-            .collect()
+            .collect();
+        self.projects.cursor_history.pick(&idle)
+    }
+
+    /// The cards of the Cursor chats under workspace `w`: those doing
+    /// something, then its history, which can be deleted.
+    pub fn cursor_cards(&self, w: usize) -> Vec<crate::chrome::AgentView> {
+        let live = self
+            .cursor_chats
+            .iter()
+            .filter(|chat| self.cursor_chat_place(chat) == Some(w))
+            .map(crate::chrome::AgentView::cursor);
+        let history = self.cursor_history(w).0.into_iter().map(|chat| {
+            let mut card = crate::chrome::AgentView::cursor(chat);
+            card.deletable = true;
+            card
+        });
+        live.chain(history).collect()
     }
 
     /// Cursor's chats as notifications see them: seen while gerdr's
@@ -807,6 +972,12 @@ fn is_cursor(command: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chats doing something or with news.
+    fn live(chats: &mut Chats, now_ms: i64) -> Vec<CursorChat> {
+        let all = chats.all(now_ms).into_iter();
+        all.filter(|c| c.status != AgentStatus::Idle).collect()
+    }
 
     fn row(id: &str) -> ChatRow {
         ChatRow {
@@ -877,16 +1048,19 @@ mod tests {
         let mut runs = row("runs");
         runs.status = Some("generating".into());
         chats.set_rows(vec![row("idle"), news, runs]);
-        let live: Vec<_> = chats.live(6_000).into_iter().map(|c| c.row.id).collect();
-        assert_eq!(live, ["news", "runs"]);
+        let ids: Vec<_> = live(&mut chats, 6_000)
+            .into_iter()
+            .map(|c| c.row.id)
+            .collect();
+        assert_eq!(ids, ["news", "runs"]);
         // A hook wakes an idle one; its session's end forgets it.
         let mut start = hook("preToolUse", None, 5_500);
         start.chat = "idle".into();
         chats.hear(start.clone());
-        assert_eq!(chats.live(6_000).len(), 3);
+        assert_eq!(live(&mut chats, 6_000).len(), 3);
         start.event = "sessionEnd".into();
         chats.hear(start);
-        assert_eq!(chats.live(6_000).len(), 2);
+        assert_eq!(live(&mut chats, 6_000).len(), 2);
         // One only hooks know of shows by its prompt, in its folders.
         let mut first = hook("beforeSubmitPrompt", None, 5_500);
         first.chat = "new".into();
@@ -897,8 +1071,7 @@ mod tests {
         let mut tool = hook("preToolUse", None, 5_600);
         tool.chat = "new".into();
         chats.hear(tool);
-        let new = chats
-            .live(6_000)
+        let new = live(&mut chats, 6_000)
             .into_iter()
             .find(|c| c.row.id == "new")
             .unwrap();
@@ -911,15 +1084,14 @@ mod tests {
         let mut row_new = row("new");
         row_new.name = Some("Tests".into());
         chats.rows.insert("new".into(), row_new);
-        let new = chats
-            .live(6_000)
+        let new = live(&mut chats, 6_000)
             .into_iter()
             .find(|c| c.row.id == "new")
             .unwrap();
         assert_eq!(new.row.name.as_deref(), Some("Tests"));
         assert_eq!(new.row.paths, [PathBuf::from("/src/app")]);
         // What hooks said long ago goes.
-        chats.live(5_600 + WORKING_HOLD_MS + 1);
+        live(&mut chats, 5_600 + WORKING_HOLD_MS + 1);
         assert!(chats.hooks.is_empty());
     }
 
@@ -1116,7 +1288,7 @@ mod tests {
         )
         .unwrap();
         let mut known = HashMap::new();
-        let mut rows = read_rows(&conn, now, &mut known).unwrap();
+        let mut rows = read_rows(&conn, now, &[], &mut known).unwrap();
         rows.sort_by(|x, y| x.id.cmp(&y.id));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["a", "unread"]);
@@ -1128,5 +1300,107 @@ mod tests {
         assert_eq!(paths, ["/wt/a", "/src/app", "/src/lib"]);
         assert!(rows[1].unread);
         assert_eq!(known.len(), 2);
+        assert_eq!(a.mode, None);
+        // A kept chat is read whatever its age, with its mode.
+        conn.execute(
+            "UPDATE composerHeaders SET value = '{\"unifiedMode\":\"plan\"}' WHERE composerId = 'old'",
+            [],
+        )
+        .unwrap();
+        let rows = read_rows(&conn, now, &["old".into(), "gone".into()], &mut known).unwrap();
+        let old = rows.iter().find(|r| r.id == "old").unwrap();
+        assert_eq!(old.mode.as_deref(), Some("plan"));
+        assert_eq!(old.mode_name(), Some("plan"));
+        // An archived one isn't.
+        assert!(rows.iter().all(|r| r.id != "gone"));
+    }
+
+    fn moded(id: &str, mode: &str, updated_ms: i64) -> ChatRow {
+        ChatRow {
+            mode: Some(mode.into()),
+            updated_ms,
+            ..row(id)
+        }
+    }
+
+    fn idle(row: ChatRow) -> CursorChat {
+        CursorChat {
+            row,
+            status: AgentStatus::Idle,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn chats_not_in_agent_mode_are_kept_until_deleted() {
+        let mut history = History::default();
+        let rows: HashMap<String, ChatRow> = [
+            moded("plan", "plan", 3_000),
+            moded("ask", "chat", 2_000),
+            moded("agent", "agent", 1_000),
+            row("unknown"),
+        ]
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect();
+        assert!(history.update(&rows));
+        assert_eq!(history.ids(), ["ask", "plan"]);
+        assert!(!history.update(&rows));
+        // Deleted: no longer kept, until it changes again.
+        history.delete(&rows["plan"]);
+        assert!(history.is_deleted(&rows["plan"]));
+        assert!(!history.update(&rows));
+        assert_eq!(history.ids(), ["ask"]);
+        let mut changed = rows.clone();
+        changed.insert("plan".into(), moded("plan", "plan", 3_001));
+        assert!(history.update(&changed));
+        assert_eq!(history.ids(), ["ask", "plan"]);
+        assert!(history.deleted.is_empty());
+        // Back in agent mode, or gone from the database: let go.
+        changed.insert("ask".into(), moded("ask", "agent", 2_001));
+        changed.remove("plan");
+        assert!(history.update(&changed));
+        assert!(history.is_empty());
+        // Survives state.json.
+        history.delete(&rows["agent"]);
+        let json = serde_json::to_string(&history).unwrap();
+        assert_eq!(serde_json::from_str::<History>(&json).unwrap(), history);
+    }
+
+    #[test]
+    fn history_shows_kept_chats_first_and_counts_the_rest() {
+        let chats: Vec<CursorChat> = (0..9)
+            .map(|n| {
+                let mode = if n % 2 == 0 { "agent" } else { "plan" };
+                idle(moded(&format!("c{n}"), mode, 10_000 - n))
+            })
+            .collect();
+        let idle: Vec<&CursorChat> = chats.iter().collect();
+        let ids = |chats: &[&CursorChat]| -> Vec<String> {
+            chats.iter().map(|c| c.row.id.clone()).collect()
+        };
+        let mut history = History::default();
+        // Nothing kept: the latest five.
+        let (shown, more) = history.pick(&idle);
+        assert_eq!(ids(&shown), ["c0", "c1", "c2", "c3", "c4"]);
+        assert!(more.is_empty());
+        // Four kept: those, and the latest other, newest first.
+        let rows = chats
+            .iter()
+            .map(|c| (c.row.id.clone(), c.row.clone()))
+            .collect();
+        history.update(&rows);
+        let (shown, more) = history.pick(&idle);
+        assert_eq!(ids(&shown), ["c0", "c1", "c3", "c5", "c7"]);
+        assert!(more.is_empty());
+        // Seven kept: five shown, two more; deleted ones neither.
+        for n in [2, 4, 6] {
+            history.kept.insert(format!("c{n}"));
+        }
+        history.delete(&chats[0].row);
+        history.kept.insert("c0".into());
+        let (shown, more) = history.pick(&idle);
+        assert_eq!(ids(&shown), ["c1", "c2", "c3", "c4", "c5"]);
+        assert_eq!(ids(&more), ["c6", "c7"]);
     }
 }

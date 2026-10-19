@@ -48,6 +48,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             place: "gerdr, gerdr/src".into(),
             activity: "2 tabs · claude working, zsh".into(),
             icon: None,
+            more_agents: Vec::new(),
         },
         WorkspaceView {
             name: "~".into(),
@@ -58,6 +59,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             place: String::new(),
             activity: String::new(),
             icon: None,
+            more_agents: Vec::new(),
         },
     ]
 }
@@ -76,6 +78,7 @@ fn agents() -> Vec<Vec<AgentView>> {
                 AgentLine::Field("cwd".into(), "gerdr/src".into()),
                 AgentLine::Field("tokens".into(), "12k".into()),
             ],
+            deletable: false,
         }],
         vec![],
     ]

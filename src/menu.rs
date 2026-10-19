@@ -50,6 +50,8 @@ pub enum MenuAction {
     StopPane(u32),
     /// Show the agent.
     FocusAgent(crate::agents::AgentKey),
+    /// Delete idle Cursor chat (by id) from gerdr's history.
+    DeleteCursorChat(String),
     CopyPath(PathBuf),
     Theme(ThemeMode),
     /// Start again what pane `id` of the active tab waits for, after it
@@ -292,6 +294,7 @@ impl Gerdr {
                 self.stop_focused_pane();
             }
             MenuAction::FocusAgent(key) => self.focus_agent(&key),
+            MenuAction::DeleteCursorChat(id) => self.delete_cursor_chat(&id),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),

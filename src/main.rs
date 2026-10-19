@@ -1053,8 +1053,11 @@ pub struct Gerdr {
     pub cursor: cursor_agents::Chats,
     /// Those doing something or with news, shown as cards.
     pub cursor_chats: Vec<cursor_agents::CursorChat>,
-    /// Asks for Cursor's database to be read now.
-    cursor_poke: Option<std::sync::mpsc::Sender<()>>,
+    /// Those idle that the database has, some shown as history (see
+    /// `cursor_agents::History`).
+    pub cursor_idle: Vec<cursor_agents::CursorChat>,
+    /// Asks for Cursor's database to be read now, keeping the chats given.
+    cursor_poke: Option<std::sync::mpsc::Sender<Vec<String>>>,
     /// Where Cursor's hooks reach this gerdr.
     cursor_socket: Option<PathBuf>,
     /// The Cursor chat last shown from its card, whose card is filled
@@ -4208,6 +4211,12 @@ impl Gerdr {
                 if ws.kind == WorkspaceKind::Cursor {
                     view.icon = self.cursor_icon();
                 }
+                view.more_agents = self
+                    .cursor_history(w)
+                    .1
+                    .into_iter()
+                    .map(|chat| chrome::AgentView::cursor(chat).label())
+                    .collect();
                 // Cursor's chats under it count as its tabs' agents do.
                 view.status = self
                     .cursor_chats
@@ -5218,6 +5227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_statuses: HashMap::new(),
         cursor: Default::default(),
         cursor_chats: Vec::new(),
+        cursor_idle: Vec::new(),
         cursor_poke: None,
         cursor_socket: None,
         cursor_opened: None,

@@ -72,6 +72,8 @@ const BLOCKED_TINT: f32 = 0.15;
 /// How much of the tint a blocked card's header keeps at the bottom of its
 /// breathing; the rest comes and goes with the pulse.
 const BLOCKED_REST: f32 = 0.4;
+/// The width of a card's "×", at the right end of its header.
+const CARD_CLOSE: i32 = 22;
 
 /// The header band of a blocked agent card at `card`, as `agent_card`
 /// tints it: the part the pulse breathes over.
@@ -117,6 +119,9 @@ pub struct AgentView {
     /// The model it runs, as its status line reports it to herdr.
     pub model: Option<String>,
     pub lines: Vec<AgentLine>,
+    /// Whether it is history (a Cursor chat gone idle) that a "×" on the
+    /// card deletes from gerdr.
+    pub deletable: bool,
 }
 
 impl AgentView {
@@ -188,6 +193,7 @@ impl AgentView {
             name: info.name.clone(),
             model,
             lines,
+            deletable: false,
         }
     }
 
@@ -222,14 +228,20 @@ impl AgentView {
             lines.push(field("worktree", "yes".into()));
         }
         lines.push(field("chat", row.id.clone()));
+        // A chat not in agent mode says which it is in.
+        let kind = match row.mode_name() {
+            Some(mode) => format!("cursor {mode}"),
+            None => "cursor".into(),
+        };
         Self {
             key: AgentKey::Cursor(row.id.clone()),
             dir,
             status: chat.status,
-            kind: "cursor".into(),
+            kind,
             name: row.name.clone().filter(|n| !n.trim().is_empty()),
             model: chat.model.clone(),
             lines,
+            deletable: false,
         }
     }
 
@@ -331,6 +343,9 @@ pub struct WorkspaceView {
     pub activity: String,
     /// The app icon its row shows in place of its kind's, if any.
     pub icon: Option<AppIcon>,
+    /// What the agents kept under it that its cards leave out are called:
+    /// a "+N more" line after the cards counts them.
+    pub more_agents: Vec<String>,
 }
 
 impl WorkspaceView {
@@ -374,6 +389,7 @@ impl WorkspaceView {
             place,
             activity,
             icon: None,
+            more_agents: Vec::new(),
         }
     }
 
@@ -465,11 +481,12 @@ pub struct RowState {
 /// (0 to 16). A blocked card's pulse is not here: it is composed over the
 /// sidebar as its own part (see `blocked_band`), so it never redraws it.
 /// Also whether its agent is open: its pane has the keyboard in the shown
-/// tab.
+/// tab, and whether the pointer is on its "×".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CardState {
     pub hover: u8,
     pub open: bool,
+    pub close: bool,
 }
 
 /// What the sidebar shows beyond its data: the density, the hover and
@@ -568,8 +585,25 @@ pub struct SidebarLayout {
     /// each with its index among the workspace's cards as the data lists
     /// them.
     pub cards: Vec<Vec<(usize, Rect)>>,
+    /// Per workspace, the "×" of each card that has one, by its index.
+    pub card_closes: Vec<Vec<(usize, Rect)>>,
+    /// Per workspace, the "+N more" line after its cards, if it has one.
+    pub more: Vec<Option<Rect>>,
     /// Per workspace, all it takes: its row, its cards and the gap after them.
     pub blocks: Vec<Rect>,
+}
+
+/// Where the "×" of a card at `card` sits: at the right end of its header,
+/// where the status pill shows while the pointer is off the card.
+pub fn card_close(card: Rect, density: Density) -> Rect {
+    Rectangle::new(
+        (
+            card.loc.x + card.size.w - CARD_PAD / 2 - CARD_CLOSE,
+            card.loc.y + card_pad(density),
+        )
+            .into(),
+        (CARD_CLOSE, CARD_HEADER).into(),
+    )
 }
 
 /// What is under a point of the sidebar.
@@ -591,8 +625,11 @@ pub enum SidebarHit {
     /// Line `k` of workspace `i`'s worktrees needing a look: the worktree
     /// `k` of `WorkspaceView::needing_attention`, or the "+N more" line.
     Attention(usize, usize),
-    /// Card `k` (as the data lists it) of workspace `i`.
+    /// Card `k` (as the data lists it) of workspace `i`, and its "×".
     Card(usize, usize),
+    CardClose(usize, usize),
+    /// The "+N more" line after workspace `i`'s cards.
+    More(usize),
 }
 
 impl SidebarHit {
@@ -609,11 +646,13 @@ impl SidebarHit {
         }
     }
 
-    /// What lights up under this hit: a row for any part of it.
+    /// What lights up under this hit: a row for any part of it, a card
+    /// for its "×".
     pub fn pill(self) -> Self {
-        match self.row() {
-            Some(i) => Self::Row(i),
-            None => self,
+        match (self.row(), self) {
+            (Some(i), _) => Self::Row(i),
+            (None, Self::CardClose(i, k)) => Self::Card(i, k),
+            (None, _) => self,
         }
     }
 }
@@ -631,10 +670,18 @@ impl SidebarLayout {
         if inside(self.header) {
             return Some(SidebarHit::Header);
         }
+        for (i, closes) in self.card_closes.iter().enumerate() {
+            if let Some((k, _)) = closes.iter().find(|(_, rect)| inside(*rect)) {
+                return Some(SidebarHit::CardClose(i, *k));
+            }
+        }
         for (i, cards) in self.cards.iter().enumerate() {
             if let Some((k, _)) = cards.iter().find(|(_, rect)| inside(*rect)) {
                 return Some(SidebarHit::Card(i, *k));
             }
+        }
+        if let Some(i) = self.more.iter().position(|m| m.is_some_and(inside)) {
+            return Some(SidebarHit::More(i));
         }
         let (i, row) = self.rows.iter().enumerate().find(|(_, r)| inside(r.rect))?;
         Some(if inside(row.close) {
@@ -692,6 +739,7 @@ pub fn sidebar_layout_at(
             .into(),
     );
     let (mut rows, mut card_rects, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut card_closes, mut more) = (Vec::new(), Vec::new());
     let mut y = ROWS_TOP;
     let name_x = ROW_INSET + PADDING as i32 + ROW_ICON_WIDTH + ROW_ICON_GAP;
     let card_x = ROW_INSET + CARD_INDENT;
@@ -739,7 +787,7 @@ pub fn sidebar_layout_at(
         });
         y += h;
         let cards = agents.get(i).unwrap_or(&none);
-        let ws_cards = card_order(cards)
+        let ws_cards: Vec<(usize, Rect)> = card_order(cards)
             .into_iter()
             .map(|k| {
                 let card = Rectangle::new(
@@ -750,8 +798,21 @@ pub fn sidebar_layout_at(
                 (k, card)
             })
             .collect();
+        card_closes.push(
+            ws_cards
+                .iter()
+                .filter(|(k, _)| cards[*k].deletable)
+                .map(|(k, card)| (*k, card_close(*card, density)))
+                .collect(),
+        );
         card_rects.push(ws_cards);
-        if !cards.is_empty() {
+        let ws_more = (!ws.more_agents.is_empty()).then(|| {
+            let line = Rectangle::new((card_x, y).into(), (card_w, CARD_LINE).into());
+            y += CARD_LINE + CARD_GAP;
+            line
+        });
+        more.push(ws_more);
+        if !cards.is_empty() || ws_more.is_some() {
             y += CARD_GAP;
         }
         blocks.push(Rectangle::new(
@@ -765,6 +826,8 @@ pub fn sidebar_layout_at(
         repos,
         rows,
         cards: card_rects,
+        card_closes,
+        more,
         blocks,
     }
 }
@@ -1107,6 +1170,21 @@ impl Painter {
                 );
             }
         }
+        for (line, ws) in layout.more.iter().zip(&view.workspaces) {
+            if let Some(line) = line {
+                let n = ws.more_agents.len();
+                self.text(
+                    &mut c,
+                    &format!("+{n} more"),
+                    DETAIL_FONT_SIZE,
+                    px(line.loc.x + CARD_PAD) as f32,
+                    px(line.loc.x + line.size.w) as f32,
+                    band(*line, scale),
+                    scale,
+                    p.placeholder,
+                );
+            }
+        }
         c.into_buffer(true)
     }
 
@@ -1353,31 +1431,45 @@ impl Painter {
         icon_sdf(c, mark, scale, status, |x, y| {
             status_mark(card.status, x, y, s)
         });
-        let label = status_label(card.status);
-        let pill_w = self.text_width(label, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
-        let pill_x = (right - pill_w).round();
-        let pill_y = (band.0 as f32 + (band.1 - px(PILL_HEIGHT)) as f32 / 2.0).round();
-        let pill_h = px(PILL_HEIGHT) as f32;
-        c.rounded(
-            pill_x,
-            pill_y,
-            pill_w.round(),
-            pill_h,
-            pill_h / 2.0,
-            mix(fill, status, 0.2),
-        );
-        self.text(
-            c,
-            label,
-            TINY_FONT_SIZE,
-            pill_x + PILL_PADDING as f32 * s,
-            f32::MAX,
-            (pill_y as i32, pill_h as i32),
-            scale,
-            status,
-        );
+        // A deletable card's "×" takes the status pill's place under the
+        // pointer.
+        let heading_end = if card.deletable && hover > 0.0 {
+            let close = card_close(rect, density);
+            let color = if state.close {
+                p.text
+            } else {
+                mix(fill, p.placeholder, hover)
+            };
+            icon_sdf(c, close, scale, color, |x, y| cross(x, y, 0.8 * s));
+            px(close.loc.x) as f32
+        } else {
+            let label = status_label(card.status);
+            let pill_w =
+                self.text_width(label, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
+            let pill_x = (right - pill_w).round();
+            let pill_y = (band.0 as f32 + (band.1 - px(PILL_HEIGHT)) as f32 / 2.0).round();
+            let pill_h = px(PILL_HEIGHT) as f32;
+            c.rounded(
+                pill_x,
+                pill_y,
+                pill_w.round(),
+                pill_h,
+                pill_h / 2.0,
+                mix(fill, status, 0.2),
+            );
+            self.text(
+                c,
+                label,
+                TINY_FONT_SIZE,
+                pill_x + PILL_PADDING as f32 * s,
+                f32::MAX,
+                (pill_y as i32, pill_h as i32),
+                scale,
+                status,
+            );
+            pill_x - px(6) as f32
+        };
         let kind_x = px(inner_x + STATUS_WIDTH + STATUS_GAP) as f32;
-        let heading_end = pill_x - px(6) as f32;
         let after = self.text(
             c,
             &card.kind,
@@ -1524,6 +1616,7 @@ mod tests {
             place: String::new(),
             activity: String::new(),
             icon: None,
+            more_agents: Vec::new(),
         }
     }
 
@@ -1543,7 +1636,14 @@ mod tests {
             project: None,
             header_lit: false,
             state: SidebarState {
-                cards: vec![open.map(|open| CardState { hover: 0, open }).to_vec()],
+                cards: vec![
+                    open.map(|open| CardState {
+                        hover: 0,
+                        open,
+                        close: false,
+                    })
+                    .to_vec(),
+                ],
                 ..SidebarState::default()
             },
         };
@@ -1583,6 +1683,7 @@ mod tests {
                 .map(|cwd| AgentLine::Field("cwd".into(), cwd.into()))
                 .into_iter()
                 .collect(),
+            deletable: false,
         }
     }
 
@@ -1769,6 +1870,38 @@ mod tests {
         assert_eq!(layout.hit((100.0, 10_000.0).into()), None);
         assert_eq!(SidebarHit::Close(3).pill(), SidebarHit::Row(3));
         assert_eq!(SidebarHit::Card(1, 2).pill(), SidebarHit::Card(1, 2));
+    }
+
+    #[test]
+    fn history_cards_have_a_close_and_the_rest_a_count() {
+        let mut gerdr = workspace("gerdr", None, None);
+        gerdr.more_agents = vec!["cursor plan · A".into(), "cursor ask · B".into()];
+        let workspaces = vec![gerdr, workspace("~", None, None)];
+        let mut history = agent("p2", AgentStatus::Idle, None);
+        history.deletable = true;
+        let agents = vec![vec![agent("p1", AgentStatus::Working, None), history]];
+        let layout = sidebar_layout(&workspaces, &agents, 200);
+        let at = |r: crate::chrome::Rect| {
+            (
+                r.loc.x as f64 + r.size.w as f64 / 2.0,
+                r.loc.y as f64 + r.size.h as f64 / 2.0,
+            )
+                .into()
+        };
+        // Only the deletable card has a "×", in its header's right end.
+        assert_eq!(layout.card_closes[0].len(), 1);
+        let (k, close) = layout.card_closes[0][0];
+        let card = layout.cards[0].iter().find(|(c, _)| *c == k).unwrap().1;
+        assert_eq!(k, 1);
+        assert!(card.contains(close.loc) && close.loc.x > card.loc.x + card.size.w / 2);
+        assert_eq!(layout.hit(at(close)), Some(SidebarHit::CardClose(0, 1)));
+        assert_eq!(SidebarHit::CardClose(0, 1).pill(), SidebarHit::Card(0, 1));
+        // The count goes after the cards, before the next row.
+        let more = layout.more[0].unwrap();
+        assert!(more.loc.y >= card.loc.y + card.size.h);
+        assert!(more.loc.y + more.size.h <= layout.rows[1].rect.loc.y);
+        assert_eq!(layout.hit(at(more)), Some(SidebarHit::More(0)));
+        assert_eq!(layout.more[1], None);
     }
 
     #[test]
