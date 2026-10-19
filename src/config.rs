@@ -15,6 +15,11 @@
 //! [ui]
 //! density = "compact"   # or "comfortable", the default
 //! theme = "light"       # or "dark" or "system"; else the last choice
+//!
+//! [git]
+//! # Branch names that are one branch across repositories, in the
+//! # repositories panel's branch picker. By default main and master.
+//! same_branches = [["main", "master"], ["production", "prod"]]
 //! ```
 //!
 //! Mistakes are logged, and the defaults stand in for what they spoil.
@@ -40,6 +45,7 @@ struct Config {
     /// Commands by name.
     apps: BTreeMap<String, String>,
     ui: UiConfig,
+    git: GitConfig,
 }
 
 /// The `[ui]` table, as written.
@@ -50,6 +56,29 @@ struct UiConfig {
     theme: Option<String>,
 }
 
+/// The `[git]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GitConfig {
+    same_branches: Option<Vec<Vec<String>>>,
+}
+
+/// How git branches are seen, from the `[git]` table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Git {
+    /// Groups of branch names that are one branch: a repository's `master`
+    /// is another's `main`.
+    pub same_branches: Vec<Vec<String>>,
+}
+
+impl Default for Git {
+    fn default() -> Self {
+        Git {
+            same_branches: vec![vec!["main".into(), "master".into()]],
+        }
+    }
+}
+
 /// How the chrome looks, from the `[ui]` table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Ui {
@@ -58,8 +87,8 @@ pub struct Ui {
     pub theme: Option<ThemeMode>,
 }
 
-/// The shortcuts, apps and look in the config file.
-pub fn load() -> (Keymap, Vec<App>, Ui) {
+/// The shortcuts, apps, look and git settings in the config file.
+pub fn load() -> (Keymap, Vec<App>, Ui, Git) {
     let path = config_file();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -70,15 +99,16 @@ pub fn load() -> (Keymap, Vec<App>, Ui) {
             String::new()
         }
     };
-    let (keymap, apps, ui, problems) = from_text(&text);
+    let (keymap, apps, ui, git, problems) = from_text(&text);
     for problem in problems {
         tracing::warn!("{}: {problem}", path.display());
     }
-    (keymap, apps, ui)
+    (keymap, apps, ui, git)
 }
 
-/// The shortcuts, apps and look `text` describes, and what's wrong with it.
-pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Vec<String>) {
+/// The shortcuts, apps, look and git settings `text` describes, and what's
+/// wrong with it.
+pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, Vec<String>) {
     let mut problems = Vec::new();
     let config: Config = toml::from_str(text).unwrap_or_else(|err| {
         problems.push(err.to_string());
@@ -110,7 +140,42 @@ pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Vec<String>) {
             None => problems.push(format!("unknown theme `{theme}`")),
         }
     }
-    (keymap, apps, ui, problems)
+    let git = match config.git.same_branches {
+        None => Git::default(),
+        Some(groups) => Git {
+            same_branches: same_branches(groups, &mut problems),
+        },
+    };
+    (keymap, apps, ui, git, problems)
+}
+
+/// The groups of branch names as written, without the blank names, the
+/// names already in a group and the groups left with fewer than two.
+fn same_branches(groups: Vec<Vec<String>>, problems: &mut Vec<String>) -> Vec<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    for group in groups {
+        let mut names = Vec::new();
+        for name in group {
+            let name = name.trim().to_owned();
+            if name.is_empty() {
+                problems.push("a blank branch name in `same_branches`".into());
+            } else if !seen.insert(name.clone()) {
+                problems.push(format!("branch `{name}` is in two `same_branches` groups"));
+            } else {
+                names.push(name);
+            }
+        }
+        match names.len() {
+            0 => {}
+            1 => problems.push(format!(
+                "branch `{}` has no other name in `same_branches`",
+                names[0]
+            )),
+            _ => kept.push(names),
+        }
+    }
+    kept
 }
 
 /// What a config file made for the user to edit starts with: all of it
@@ -129,6 +194,11 @@ const TEMPLATE: &str = "\
 # [ui]
 # density = \"compact\"   # or \"comfortable\", the default
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
+#
+# [git]
+# # Branch names that are one branch across repositories, in the
+# # repositories panel's branch picker. By default main and master.
+# same_branches = [[\"main\", \"master\"], [\"production\", \"prod\"]]
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -160,14 +230,15 @@ pub fn config_file() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Density, TEMPLATE, ThemeMode, Ui, from_text};
+    use super::{Density, Git, TEMPLATE, ThemeMode, Ui, from_text};
 
     #[test]
     fn the_template_changes_nothing() {
-        let (_, apps, ui, problems) = from_text(TEMPLATE);
+        let (_, apps, ui, git, problems) = from_text(TEMPLATE);
         assert!(problems.is_empty(), "{problems:?}");
         assert!(apps.is_empty());
         assert_eq!(ui, Ui::default());
+        assert_eq!(git, Git::default());
         // Each example, uncommented, is understood.
         let examples: String = TEMPLATE
             .lines()
@@ -176,15 +247,16 @@ mod tests {
             .filter(|line| !line.starts_with('#'))
             .map(|line| format!("{line}\n"))
             .collect();
-        let (_, apps, ui, problems) = from_text(&examples);
+        let (_, apps, ui, git, problems) = from_text(&examples);
         assert!(problems.is_empty(), "{problems:?}\n{examples}");
         assert_eq!(apps.len(), 2);
         assert_eq!(ui.density, Density::Compact);
+        assert_eq!(git.same_branches.len(), 2);
     }
 
     #[test]
     fn apps() {
-        let (_, apps, _, problems) =
+        let (_, apps, _, _, problems) =
             from_text("[apps]\nfiles = \"nautilus .\"\nbrowser = \" firefox \"\nnone = \"\"\n");
         let apps: Vec<_> = apps
             .iter()
@@ -196,13 +268,47 @@ mod tests {
 
     #[test]
     fn mistakes() {
-        assert_eq!(from_text("[key]\n").3.len(), 1);
-        assert_eq!(from_text("[apps]\nbrowser = 1\n").3.len(), 1);
+        assert_eq!(from_text("[key]\n").4.len(), 1);
+        assert_eq!(from_text("[apps]\nbrowser = 1\n").4.len(), 1);
     }
 
     fn ui(text: &str) -> (Ui, Vec<String>) {
-        let (_, _, ui, problems) = from_text(text);
+        let (_, _, ui, _, problems) = from_text(text);
         (ui, problems)
+    }
+
+    fn same(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
+        let (_, _, _, git, problems) = from_text(text);
+        (git.same_branches, problems)
+    }
+
+    #[test]
+    fn main_and_master_are_one_branch_unless_the_file_says_otherwise() {
+        let main = vec![vec!["main".to_owned(), "master".to_owned()]];
+        assert_eq!(same(""), (main.clone(), vec![]));
+        assert_eq!(same("[git]\n"), (main, vec![]));
+        let (groups, problems) = same("[git]\nsame_branches = [[\"production\", \" prod \"]]\n");
+        assert_eq!(groups, [["production", "prod"]]);
+        assert!(problems.is_empty());
+        // None at all, if the file says so.
+        assert_eq!(same("[git]\nsame_branches = []\n"), (vec![], vec![]));
+    }
+
+    #[test]
+    fn a_wrong_branch_group_is_reported_and_left_out() {
+        let (groups, problems) = same(
+            "[git]\nsame_branches = [[\"main\", \"master\", \"\"], [\"master\", \"trunk\"], [\"dev\"]]\n",
+        );
+        assert_eq!(groups, [["main", "master"]]);
+        assert_eq!(
+            problems,
+            [
+                "a blank branch name in `same_branches`",
+                "branch `master` is in two `same_branches` groups",
+                "branch `trunk` has no other name in `same_branches`",
+                "branch `dev` has no other name in `same_branches`",
+            ]
+        );
     }
 
     #[test]

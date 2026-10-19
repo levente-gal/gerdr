@@ -777,6 +777,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(layout.buttons.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_tabs.into_iter().map(|(_, rect)| rect));
         rects.push(layout.field);
+        rects.push(layout.branch);
+        if let Some((menu, rows)) = layout.branch_menu {
+            rects.push(menu);
+            rects.extend(rows);
+        }
     }
     if view.quit.is_some() {
         let quit = quit_layout(output);

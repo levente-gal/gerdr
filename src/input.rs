@@ -771,7 +771,9 @@ impl Gerdr {
                 .iter()
                 .map(|(line, ..)| *line)
                 .chain(layout.buttons.iter().map(|(_, r)| *r))
-                .chain(layout.detail_tabs.iter().map(|(_, r)| *r));
+                .chain(layout.detail_tabs.iter().map(|(_, r)| *r))
+                .chain([layout.branch])
+                .chain(layout.branch_menu.iter().flat_map(|(_, rows)| rows.clone()));
             return if controls.any(|r| r.to_f64().contains(pos)) {
                 RegionHit::Control
             } else {

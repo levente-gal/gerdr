@@ -147,6 +147,12 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("switching…");
             git_ops::switch_or_create(dir, name)
         }
+        BatchKind::Switch(names) => {
+            let name = git_ops::branch_named(dir, names, task.remote.as_deref())
+                .ok_or_else(|| blocked("no such branch here"))?;
+            step("switching…");
+            git_ops::switch_or_create(dir, &name)
+        }
         BatchKind::StartFeature(name) => {
             let base = need(&task.base, "no default branch")?;
             step("starting…");
@@ -247,6 +253,12 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
         return Verdict::Blocked(format!("in the middle of {}", op_name(op)));
     }
     match kind {
+        BatchKind::Switch(names) => {
+            match git_ops::branch_named(root, names, status.remote.as_deref()) {
+                Some(name) => verdict(&BatchKind::Branch(name), root, status),
+                None => Verdict::Blocked("no such branch here".into()),
+            }
+        }
         BatchKind::Integrate(_) => {
             let Some(base) = base_of(status) else {
                 return Verdict::Blocked("no default branch".into());
@@ -483,6 +495,7 @@ impl Gerdr {
             panel,
             batch,
             items,
+            same_branches,
             ..
         } = &mut self.repos;
         if let Some(panel) = panel.as_mut() {
@@ -492,6 +505,7 @@ impl Gerdr {
                 feature: feature.as_deref(),
                 page,
                 now: SystemTime::now(),
+                same: same_branches,
             };
             panel.refresh(&ctx);
         }
@@ -521,6 +535,7 @@ impl Gerdr {
             feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
+            same: &self.repos.same_branches,
         };
         let Some(key) = panel.detail_wanted(&ctx) else {
             return;
@@ -564,6 +579,7 @@ impl Gerdr {
             panel,
             batch,
             items,
+            same_branches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -572,6 +588,7 @@ impl Gerdr {
             feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
+            same: same_branches,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
@@ -593,6 +610,7 @@ impl Gerdr {
             panel,
             batch,
             items,
+            same_branches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -601,6 +619,7 @@ impl Gerdr {
             feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
+            same: same_branches,
         };
         let outcome = panel.as_mut().and_then(|p| p.click(hit, &ctx));
         self.repos_detail();
@@ -630,12 +649,17 @@ impl Gerdr {
         let layout = chrome::repos_layout(&view, self.output_size());
         let pos = self.seat.get_pointer().unwrap().current_location();
         let over_detail = layout.detail.to_f64().contains(pos);
+        let over_menu = layout
+            .branch_menu
+            .as_ref()
+            .is_some_and(|(menu, _)| menu.to_f64().contains(pos));
         let feature = self.repos_feature();
         let page = self.repos_page();
         let Repos {
             panel,
             batch,
             items,
+            same_branches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -644,9 +668,12 @@ impl Gerdr {
             feature: feature.as_deref(),
             page,
             now: SystemTime::now(),
+            same: same_branches,
         };
-        if let Some(panel) = panel.as_mut() {
-            panel.scroll(rows, over_detail, &ctx);
+        match panel.as_mut() {
+            Some(panel) if over_menu => panel.scroll_branches(rows, &ctx),
+            Some(panel) => panel.scroll(rows, over_detail, &ctx),
+            None => {}
         }
     }
 
@@ -660,6 +687,7 @@ impl Gerdr {
             feature: feature.as_deref(),
             page: self.repos_page(),
             now: SystemTime::now(),
+            same: &self.repos.same_branches,
         };
         let title = self
             .project
@@ -754,7 +782,10 @@ impl Gerdr {
     fn repos_check(&mut self, kind: BatchKind, jobs: Vec<Job>) {
         let switching = matches!(
             kind,
-            BatchKind::Branch(_) | BatchKind::Join(_) | BatchKind::StartFeature(_)
+            BatchKind::Branch(_)
+                | BatchKind::Switch(_)
+                | BatchKind::Join(_)
+                | BatchKind::StartFeature(_)
         );
         // A branch can be out in only one worktree of a repository.
         let mut found = Vec::new();

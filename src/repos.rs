@@ -7,6 +7,8 @@
 //! line, and the ones that need a hand keep what fixes them: conflicts open
 //! in Zed, then are marked resolved and continued, or aborted; a login runs
 //! in a terminal; the whole batch can be undone while nothing moved since.
+//! The header's branch picker switches them all to a branch they all have,
+//! names that are one branch (`main`, `master`) taken as one.
 //!
 //! The project remembers its feature, the branch its repositories should
 //! be on; those on another get a badge, and Join brings them over.
@@ -20,10 +22,11 @@
 //! (Ctrl+Shift+K resumes), Ctrl+E opens the conflicts in Zed, Ctrl+R marks
 //! a file resolved, Ctrl+G continues (Ctrl+Shift+Delete aborts, twice),
 //! Alt+Z undoes the last batch (twice), Alt+R retries what failed, Ctrl+D
-//! and Ctrl+T show the diff and the log; Esc closes.
+//! and Ctrl+T show the diff and the log, Ctrl+S opens the branch picker;
+//! Esc closes.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -35,8 +38,9 @@ use smithay::{
 
 use crate::{
     chrome::{
-        Check, Chip, DetailLine, DetailTab, DetailView, DiffTone, FileLine, Hint, LineState,
-        RepoLine, ReposButton, ReposHit, ReposView, ResultBar, SheetView, Tone, TreeLine,
+        BRANCH_MENU_ROWS, BranchMenuView, BranchPicker, Check, Chip, DetailLine, DetailTab,
+        DetailView, DiffTone, FileLine, Hint, LineState, RepoLine, ReposButton, ReposHit,
+        ReposView, ResultBar, SheetView, Tone, TreeLine,
     },
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
@@ -69,6 +73,9 @@ pub struct Repos {
     pub(crate) feature_set: Option<(u64, Option<String>)>,
     /// The batch an undo under way undoes, by id.
     pub(crate) undoing: Option<u64>,
+    /// Groups of branch names that are one branch (`main`, `master`), from
+    /// the config.
+    pub(crate) same_branches: Vec<Vec<String>>,
 }
 
 impl Repos {
@@ -113,6 +120,8 @@ pub struct Ctx<'a> {
     pub page: (usize, usize),
     /// The time now, for how long ago the repositories fetched.
     pub now: SystemTime,
+    /// Groups of branch names that are one branch (`main`, `master`).
+    pub same: &'a [Vec<String>],
 }
 
 /// Where the keyboard goes.
@@ -175,6 +184,52 @@ pub struct Panel {
     /// continued or aborted: nothing in their git folder says so, and
     /// the batch saying so gives way to the next (marking them resolved).
     pub(crate) stash_conflicts: HashSet<PathBuf>,
+    /// The branch picker's menu, while open.
+    pub(crate) branch_menu: Option<BranchMenu>,
+}
+
+/// The branch picker's menu: the first branch in view, and the one Enter
+/// picks, by index into `Panel::branches`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BranchMenu {
+    pub first: usize,
+    pub picked: usize,
+}
+
+/// A branch the picker offers: its names (more than one for a group of
+/// `Ctx::same`) and what it is called.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Branch {
+    names: Vec<String>,
+    /// The name each repository has it by, if they all have the same;
+    /// else the names joined: `main / master`.
+    label: String,
+}
+
+/// The names of the branch `name` is, by `same`: its group, else itself.
+fn names_of(name: &str, same: &[Vec<String>]) -> Vec<String> {
+    same.iter()
+        .find(|group| group.iter().any(|n| n == name))
+        .cloned()
+        .unwrap_or_else(|| vec![name.to_owned()])
+}
+
+/// Who the branch `name` is across repositories: its names joined, as
+/// `main / master`. Git allows no spaces in a name, so no branch is called
+/// that.
+pub fn branch_key(name: &str, same: &[Vec<String>]) -> String {
+    names_of(name, same).join(" / ")
+}
+
+/// The first of `names` that `status` has as a local branch, else the
+/// first its remote has: what a switch to them goes to.
+fn name_in<'a>(status: &GitStatus, names: &'a [String]) -> Option<&'a str> {
+    let has = |list: &[String], name: &String| list.contains(name);
+    names
+        .iter()
+        .find(|n| has(&status.local_branches, n))
+        .or_else(|| names.iter().find(|n| has(&status.remote_branches, n)))
+        .map(String::as_str)
 }
 
 /// What a second press confirms.
@@ -215,6 +270,10 @@ pub struct Job {
 pub enum BatchKind {
     /// Switch to the branch, or make it from HEAD.
     Branch(String),
+    /// Switch to the first of these names (one branch, as `main` and
+    /// `master`) the repository has as a branch, else the first its remote
+    /// has.
+    Switch(Vec<String>),
     /// Make the branch from the freshly fetched default branch.
     StartFeature(String),
     /// Bring the repositories off the feature onto it.
@@ -247,6 +306,7 @@ impl BatchKind {
     pub fn label(&self) -> String {
         match self {
             BatchKind::Branch(_) => "Branch",
+            BatchKind::Switch(_) => "Switch branch",
             BatchKind::StartFeature(_) => "Start feature",
             BatchKind::Join(_) => "Join feature",
             BatchKind::Commit { push: false, .. } => "Commit",
@@ -279,6 +339,7 @@ impl BatchKind {
         matches!(
             self,
             BatchKind::Branch(_)
+                | BatchKind::Switch(_)
                 | BatchKind::StartFeature(_)
                 | BatchKind::Join(_)
                 | BatchKind::Pull(Pull::Rebase | Pull::Merge)
@@ -291,6 +352,7 @@ impl BatchKind {
         matches!(
             self,
             BatchKind::Branch(_)
+                | BatchKind::Switch(_)
                 | BatchKind::StartFeature(_)
                 | BatchKind::Join(_)
                 | BatchKind::Commit { push: false, .. }
@@ -298,6 +360,11 @@ impl BatchKind {
                 | BatchKind::Integrate(_)
         )
     }
+}
+
+/// How many of the branch menu's rows are in view: no more than the tree's.
+fn branch_page(ctx: &Ctx) -> usize {
+    BRANCH_MENU_ROWS.min(ctx.page.0).max(1)
 }
 
 /// `n` and `one`, or its plural with an `s`: `1 conflict`, `2 conflicts`.
@@ -976,6 +1043,212 @@ impl Panel {
             .unwrap_or_default()
     }
 
+    /// The branches every repository acted on has, local or on its remote:
+    /// their default branch first, then by name.
+    fn branches(&self, ctx: &Ctx) -> Vec<Branch> {
+        let items = ctx.items;
+        let targets = self.targets(items);
+        let of = |k: usize| -> BTreeMap<String, Vec<String>> {
+            let status = &items[k].status;
+            let all = status.local_branches.iter().chain(&status.remote_branches);
+            all.map(|b| (branch_key(b, ctx.same), names_of(b, ctx.same)))
+                .collect()
+        };
+        let Some((&first, rest)) = targets.split_first() else {
+            return Vec::new();
+        };
+        let mut common = of(first);
+        for &k in rest {
+            let theirs = of(k);
+            common.retain(|key, _| theirs.contains_key(key));
+        }
+        let defaults: HashSet<String> = targets
+            .iter()
+            .filter_map(|&k| items[k].status.default_branch.as_deref())
+            .map(|b| branch_key(b, ctx.same))
+            .collect();
+        let mut branches: Vec<(bool, Branch)> = common
+            .into_iter()
+            .map(|(key, names)| {
+                let used: HashSet<&str> = targets
+                    .iter()
+                    .filter_map(|&k| name_in(&items[k].status, &names))
+                    .collect();
+                let label = match used.into_iter().collect::<Vec<_>>()[..] {
+                    [one] => one.to_owned(),
+                    _ => key.clone(),
+                };
+                (!defaults.contains(&key), Branch { names, label })
+            })
+            .collect();
+        branches.sort_by_key(|(later, _)| *later);
+        branches.into_iter().map(|(_, b)| b).collect()
+    }
+
+    /// The branch every repository acted on is on, by `branch_key`; `None`
+    /// when they are on different ones, or there are none.
+    fn current_branch(&self, ctx: &Ctx) -> Option<String> {
+        let items = ctx.items;
+        let mut keys = self.targets(items).into_iter().map(|k| {
+            items[k]
+                .status
+                .branch
+                .as_deref()
+                .map(|b| branch_key(b, ctx.same))
+        });
+        let first = keys.next()??;
+        keys.all(|k| k.as_ref() == Some(&first)).then_some(first)
+    }
+
+    /// The picker's button: the branch the repositories acted on are on
+    /// (as they name it, if all the same), else that they differ.
+    fn branch_picker(&self, ctx: &Ctx) -> BranchPicker {
+        let items = ctx.items;
+        let targets = self.targets(items);
+        let running = ctx.batch.is_some_and(|b| !b.finished());
+        let branch = |k: usize| items[k].status.branch.as_deref();
+        let (label, mixed) = if targets.is_empty() {
+            ("No repository".to_owned(), true)
+        } else if targets.iter().all(|&k| branch(k).is_none()) {
+            ("detached".to_owned(), false)
+        } else if let Some(key) = self.current_branch(ctx) {
+            let names: HashSet<&str> = targets.iter().filter_map(|&k| branch(k)).collect();
+            match names.into_iter().collect::<Vec<_>>()[..] {
+                [one] => (one.to_owned(), false),
+                _ => (key, false),
+            }
+        } else {
+            ("mixed branches".to_owned(), true)
+        };
+        let menu = self.branch_menu.map(|menu| {
+            let branches = self.branches(ctx);
+            let page = branch_page(ctx);
+            let first = menu.first.min(branches.len().saturating_sub(page));
+            let shown = &branches[first..(first + page).min(branches.len())];
+            let current = self.current_branch(ctx);
+            let in_view = |k: usize| (first..first + shown.len()).contains(&k).then(|| k - first);
+            BranchMenuView {
+                rows: shown.iter().map(|b| b.label.clone()).collect(),
+                current: current
+                    .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
+                    .and_then(in_view),
+                picked: in_view(menu.picked.min(branches.len().saturating_sub(1))),
+                empty: "No branch they all have".into(),
+            }
+        });
+        BranchPicker {
+            label,
+            mixed,
+            enabled: !targets.is_empty() && !running,
+            menu,
+        }
+    }
+
+    /// Open the branch picker's menu on the branch they are on, if it can.
+    fn open_branch_menu(&mut self, ctx: &Ctx) {
+        if ctx.batch.is_some_and(|b| !b.finished()) {
+            self.error = Some("Wait for the batch to finish".into());
+            return;
+        }
+        if self.targets(ctx.items).is_empty() {
+            self.error = Some("Select a repository first".into());
+            return;
+        }
+        let branches = self.branches(ctx);
+        let current = self.current_branch(ctx);
+        let picked = current
+            .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
+            .unwrap_or(0);
+        let page = branch_page(ctx);
+        self.error = None;
+        self.branch_menu = Some(BranchMenu {
+            first: picked.saturating_sub(page - 1),
+            picked,
+        });
+    }
+
+    /// A key while the branch menu is open, which takes them all:
+    /// Up/Down and the pages choose, Enter picks, Esc closes.
+    fn branch_menu_key(&mut self, sym: Keysym, ctx: &Ctx) -> Option<Outcome> {
+        let len = self.branches(ctx).len();
+        let page = branch_page(ctx);
+        let menu = self.branch_menu.as_mut()?;
+        let at = menu.picked.min(len.saturating_sub(1)) as isize;
+        let to = match sym {
+            Keysym::Down | Keysym::KP_Down => at + 1,
+            Keysym::Up | Keysym::KP_Up => at - 1,
+            Keysym::Page_Down | Keysym::KP_Page_Down => at + page as isize,
+            Keysym::Page_Up | Keysym::KP_Page_Up => at - page as isize,
+            Keysym::Home | Keysym::KP_Home => 0,
+            Keysym::End | Keysym::KP_End => len as isize,
+            Keysym::Return | Keysym::KP_Enter => {
+                let picked = menu.picked;
+                return self.pick_branch(picked, ctx);
+            }
+            Keysym::Escape => {
+                self.branch_menu = None;
+                return None;
+            }
+            _ => return None,
+        };
+        let to = to.clamp(0, len.saturating_sub(1) as isize) as usize;
+        menu.picked = to;
+        if to < menu.first {
+            menu.first = to;
+        } else if to >= menu.first + page {
+            menu.first = to + 1 - page;
+        }
+        None
+    }
+
+    /// Switch the repositories acted on to branch `k` of `branches`, but
+    /// those already on it; the menu closes.
+    fn pick_branch(&mut self, k: usize, ctx: &Ctx) -> Option<Outcome> {
+        self.branch_menu = None;
+        if ctx.batch.is_some_and(|b| !b.finished()) {
+            self.error = Some("Wait for the batch to finish".into());
+            return None;
+        }
+        let branch = self.branches(ctx).into_iter().nth(k)?;
+        let key = branch.names.join(" / ");
+        let items = ctx.items;
+        let jobs: Vec<Job> = self
+            .targets(items)
+            .into_iter()
+            .filter(|&k| {
+                let on = items[k].status.branch.as_deref();
+                on.map(|b| branch_key(b, ctx.same)).as_ref() != Some(&key)
+            })
+            .map(|k| Job {
+                root: items[k].root.clone(),
+                files: Vec::new(),
+            })
+            .collect();
+        if jobs.is_empty() {
+            self.error = Some(format!("Already on {}", branch.label));
+            return None;
+        }
+        self.error = None;
+        Some(Outcome::Batch {
+            kind: BatchKind::Switch(branch.names),
+            jobs,
+        })
+    }
+
+    /// The wheel turned `rows` rows (down positive) over the branch menu.
+    pub fn scroll_branches(&mut self, rows: f64, ctx: &Ctx) {
+        let len = self.branches(ctx).len();
+        let page = branch_page(ctx);
+        let Some(menu) = self.branch_menu.as_mut() else {
+            return;
+        };
+        self.wheel.0 += rows;
+        let whole = self.wheel.0.trunc();
+        self.wheel.0 -= whole;
+        let last = len.saturating_sub(page) as i64;
+        menu.first = (menu.first.min(last as usize) as i64 + whole as i64).clamp(0, last) as usize;
+    }
+
     /// Whether `item`'s resume stopped on its stash's conflicts: by
     /// `batch`, the last one, else as remembered. A stopped operation
     /// isn't one.
@@ -1391,6 +1664,15 @@ impl Panel {
         if self.sheet.is_some() {
             return self.sheet_key(mods, sym);
         }
+        if self.branch_menu.is_some() {
+            return self.branch_menu_key(sym, ctx);
+        }
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
+        if only_ctrl && matches!(sym, Keysym::s | Keysym::S) {
+            self.armed = None;
+            self.open_branch_menu(ctx);
+            return None;
+        }
         // Any key but the one confirming it takes back what was armed.
         let armed = self.armed.take();
         let plain = !(mods.ctrl || mods.alt || mods.logo);
@@ -1526,6 +1808,22 @@ impl Panel {
                 _ => None,
             };
         }
+        // The open menu takes the click: elsewhere, it closes.
+        if let Some(menu) = self.branch_menu {
+            return match hit {
+                ReposHit::BranchRow(i) => {
+                    let page = branch_page(ctx);
+                    let len = self.branches(ctx).len();
+                    let first = menu.first.min(len.saturating_sub(page));
+                    self.pick_branch(first + i, ctx)
+                }
+                ReposHit::BranchMenu => None,
+                _ => {
+                    self.branch_menu = None;
+                    None
+                }
+            };
+        }
         let armed = self.armed.take();
         let items = ctx.items;
         let page = ctx.page.0.max(1);
@@ -1558,7 +1856,8 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, armed, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
-            ReposHit::Detail | ReposHit::Panel => {}
+            ReposHit::BranchButton => self.open_branch_menu(ctx),
+            ReposHit::Detail | ReposHit::Panel | ReposHit::BranchRow(_) | ReposHit::BranchMenu => {}
         }
         None
     }
@@ -2074,6 +2373,7 @@ impl Panel {
         ReposView {
             title: title.into(),
             summary: self.summary(ctx),
+            branch: self.branch_picker(ctx),
             lines: shown
                 .iter()
                 .map(|&row| self.tree_line(row, ctx, &forced))
@@ -2132,6 +2432,7 @@ impl Panel {
             .iter()
             .any(|(_, v)| matches!(v, Verdict::Conflicts(_)));
         self.armed = None;
+        self.branch_menu = None;
         self.sheet = Some(Sheet::Preflight {
             kind,
             jobs,
@@ -2143,6 +2444,7 @@ impl Panel {
     /// Ask which way to pull the repositories at `roots`, which diverged.
     pub fn ask_diverged(&mut self, roots: Vec<PathBuf>) {
         self.armed = None;
+        self.branch_menu = None;
         self.sheet = Some(Sheet::Diverged { roots, choice: 0 });
     }
 
@@ -2202,12 +2504,19 @@ pub fn branch_name_problem(name: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::{
+        sync::LazyLock,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     use super::*;
 
     /// The time the tests take as now, in seconds after the epoch.
     const NOW: u64 = 1_000_000;
+
+    /// The branch names that are one branch, as by default.
+    static SAME: LazyLock<Vec<Vec<String>>> =
+        LazyLock::new(|| vec![vec!["main".into(), "master".into()]]);
 
     fn change(path: &str, code: char) -> Change {
         Change {
@@ -2278,6 +2587,7 @@ mod tests {
             feature,
             page: (20, 20),
             now: UNIX_EPOCH + Duration::from_secs(NOW),
+            same: &SAME,
         }
     }
 
@@ -3508,5 +3818,185 @@ mod tests {
             ..ctx
         };
         assert_eq!(press(&mut panel, alt(), Keysym::r, &ctx), None);
+    }
+
+    /// `items` with branches: gerdr on main, herdr on master (the same
+    /// branch), zed on feat/x; all have feat/x, gerdr production, herdr's
+    /// remote release.
+    fn branched() -> Vec<RepoItem> {
+        let mut items = items();
+        let set = |item: &mut RepoItem, on: &str, local: &[&str], remote: &[&str]| {
+            let names = |l: &[&str]| l.iter().map(|b| b.to_string()).collect();
+            item.status.branch = Some(on.into());
+            item.status.local_branches = names(local);
+            item.status.remote_branches = names(remote);
+            item.status.default_branch =
+                Some(if on == "master" { "master" } else { "main" }.into());
+        };
+        set(
+            &mut items[0],
+            "main",
+            &["feat/x", "main", "production"],
+            &["feat/x", "main"],
+        );
+        set(
+            &mut items[1],
+            "master",
+            &["feat/x", "master"],
+            &["master", "release"],
+        );
+        set(&mut items[2], "feat/x", &["feat/x", "main"], &[]);
+        items
+    }
+
+    /// The branch menu's rows as `panel` shows them.
+    fn menu_rows(panel: &Panel, ctx: &Ctx) -> Vec<String> {
+        let view = panel.view("p", ctx);
+        view.branch.menu.map(|m| m.rows).unwrap_or_default()
+    }
+
+    fn check_repo(panel: &mut Panel, name: &str, ctx: &Ctx) {
+        select(panel, name);
+        press(panel, none(), Keysym::space, ctx);
+    }
+
+    #[test]
+    fn names_in_a_group_are_one_branch() {
+        let same = &*SAME;
+        assert_eq!(branch_key("master", same), "main / master");
+        assert_eq!(branch_key("main", same), "main / master");
+        assert_eq!(branch_key("feat/x", same), "feat/x");
+        assert_eq!(branch_key("master", &[]), "master");
+        let prod = vec![vec!["production".to_owned(), "prod".to_owned()]];
+        assert_eq!(branch_key("prod", &prod), "production / prod");
+    }
+
+    #[test]
+    fn the_picker_offers_the_branches_they_all_have() {
+        let items = branched();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        // The selected one alone, its default branch first.
+        let picker = panel.view("p", &ctx).branch;
+        assert_eq!((picker.label.as_str(), picker.mixed), ("main", false));
+        assert!(picker.enabled);
+        assert_eq!(press(&mut panel, ctrl(), Keysym::s, &ctx), None);
+        assert_eq!(menu_rows(&panel, &ctx), ["main", "feat/x", "production"]);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!((menu.current, menu.picked), (Some(0), Some(0)));
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert_eq!(panel.branch_menu, None);
+        // main and master are one branch, called by both names.
+        check_repo(&mut panel, "gerdr", &ctx);
+        check_repo(&mut panel, "herdr", &ctx);
+        let picker = panel.view("p", &ctx).branch;
+        assert_eq!(
+            (picker.label.as_str(), picker.mixed),
+            ("main / master", false)
+        );
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["main / master", "feat/x"]);
+        // On different branches.
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        check_repo(&mut panel, "zed", &ctx);
+        let picker = panel.view("p", &ctx).branch;
+        assert_eq!(
+            (picker.label.as_str(), picker.mixed),
+            ("mixed branches", true)
+        );
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["main / master", "feat/x"]);
+        assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().current, None);
+    }
+
+    #[test]
+    fn picking_a_branch_switches_those_not_on_it() {
+        let items = branched();
+        let ctx = ctx(&items, None, None);
+        let mut panel = Panel::new(&items);
+        for name in ["gerdr", "herdr", "zed"] {
+            check_repo(&mut panel, name, &ctx);
+        }
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        // Keys go to the menu alone.
+        assert_eq!(press(&mut panel, ctrl(), Keysym::p, &ctx), None);
+        assert!(panel.branch_menu.is_some());
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Switch(vec!["main".into(), "master".into()]),
+                jobs: jobs(&["zed"]),
+            })
+        );
+        assert_eq!(panel.branch_menu, None);
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Switch(vec!["feat/x".into()]),
+                jobs: jobs(&["gerdr", "herdr"]),
+            })
+        );
+        // A click on a row picks it; one beside the menu only closes it.
+        panel.click(ReposHit::BranchButton, &ctx);
+        assert!(panel.branch_menu.is_some());
+        assert_eq!(panel.click(ReposHit::Line(0), &ctx), None);
+        assert_eq!(panel.branch_menu, None);
+        panel.click(ReposHit::BranchButton, &ctx);
+        assert_eq!(
+            panel.click(ReposHit::BranchRow(1), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Switch(vec!["feat/x".into()]),
+                jobs: jobs(&["gerdr", "herdr"]),
+            })
+        );
+        // All on it already: nothing to do.
+        let mut one = Panel::new(&items);
+        press(&mut one, ctrl(), Keysym::s, &ctx);
+        assert_eq!(press(&mut one, none(), Keysym::Return, &ctx), None);
+        assert_eq!(one.error.as_deref(), Some("Already on main"));
+    }
+
+    #[test]
+    fn the_picker_waits_for_the_batch() {
+        let items = branched();
+        let b = batch(BatchKind::Fetch, vec![run("gerdr", RunState::Queued)]);
+        let ctx = ctx(&items, Some(&b), None);
+        let mut panel = Panel::new(&items);
+        assert!(!panel.view("p", &ctx).branch.enabled);
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        assert_eq!(panel.branch_menu, None);
+        assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+        // With nothing selected, there is nothing to switch.
+        let mut none_selected = Panel::new(&items);
+        none_selected.selected = None;
+        let free = super::Ctx { batch: None, ..ctx };
+        let picker = none_selected.view("p", &free).branch;
+        assert!(!picker.enabled && picker.mixed);
+    }
+
+    #[test]
+    fn a_long_branch_menu_scrolls_with_the_pick() {
+        let mut items = branched();
+        items[0].status.local_branches = (0..30).map(|i| format!("b{i:02}")).collect();
+        let ctx = super::Ctx {
+            page: (5, 5),
+            ..ctx(&items, None, None)
+        };
+        let mut panel = Panel::new(&items);
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        // On main, which is first, of 30 and main/feat/x on the remote.
+        assert_eq!(menu_rows(&panel, &ctx).len(), 5);
+        for _ in 0..7 {
+            press(&mut panel, none(), Keysym::Down, &ctx);
+        }
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.picked, Some(4));
+        assert_eq!(menu.rows[4], "b06");
+        press(&mut panel, none(), Keysym::End, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx).last().unwrap(), "feat/x");
+        panel.scroll_branches(-100.0, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx)[0], "main");
     }
 }
