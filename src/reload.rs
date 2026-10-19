@@ -1,5 +1,5 @@
-//! Reloading the projects file after it was edited by hand: reading it
-//! back, and telling a running herdr session about what moved. Inside a
+//! Reloading the project files after one was edited by hand: reading them
+//! back, and telling each running herdr session about what moved. Inside a
 //! tab, gerdr's saved tree is what is shown once the project is attached
 //! again; herdr needs to hear only which tab each pane is in, the order of
 //! the tabs and workspaces, and the workspaces' names.
@@ -10,7 +10,7 @@ use crate::{
     Gerdr,
     herdr::{self, Herdr},
     layout::{Dir, SavedLeaf, SavedNode},
-    projects::{self, Project},
+    projects::{Project, Reread},
     toast::Level,
 };
 
@@ -327,31 +327,25 @@ fn order_workspaces(
 }
 
 impl Gerdr {
-    /// Read the projects file again, after it was edited outside gerdr, and
-    /// make the running sessions match it. The project shown is let go of
-    /// and shown again, from the file.
+    /// Read the project files again, after one was edited outside gerdr,
+    /// and make the running sessions match them. The project shown is let
+    /// go of and shown again, from its file, only if that file was edited;
+    /// a file that can't be read keeps its project as it was.
     pub fn reload_projects(&mut self) {
-        // A file that can't be read changes nothing, the project shown stays.
-        if let Err(err) = projects::Store::read() {
-            return self.toast(format!("projects.json: {err}"), Level::Error);
-        }
-        let shown = self.project.clone();
-        if shown.is_some() {
+        let pre = self.projects.reread();
+        let shown_edited = self
+            .project
+            .clone()
+            .filter(|id| pre.store.project(id) != self.projects.project(id));
+        if shown_edited.is_some() {
             self.detach_project();
             self.project = None;
+        } else if self.record_tabs() {
+            self.projects.save();
         }
         // Read again: letting go saves what changed on screen, unless the
         // file was edited.
-        let mut store = match projects::Store::read() {
-            Ok(store) => store,
-            Err(err) => {
-                self.toast(format!("projects.json: {err}"), Level::Error);
-                if let Some(id) = shown {
-                    self.show_project(&id, false);
-                }
-                return;
-            }
-        };
+        let Reread { mut store, errors } = self.projects.reread();
         let mut problems = Vec::new();
         for project in &mut store.projects {
             // Only what was edited: the rest is as gerdr left it.
@@ -371,23 +365,33 @@ impl Gerdr {
                     .map(|problem| format!("{}: {problem}", project.name)),
             );
         }
-        for problem in &problems {
-            tracing::warn!("reloading projects.json: {problem}");
+        for problem in errors.iter().chain(&problems) {
+            tracing::warn!("reloading the project files: {problem}");
         }
+        // A project whose file is gone has no order left to take.
+        self.order_pending.retain(|id| store.project(id).is_some());
         self.projects = store;
         self.projects.save();
-        match shown {
+        match shown_edited {
             Some(id) if self.projects.project(&id).is_some() => self.show_project(&id, false),
             Some(_) => self.open_welcome(false),
             None => {}
         }
         self.refresh_project_menu();
         self.refresh_switcher();
-        match problems.as_slice() {
-            [] => self.toast("Reloaded projects.json".into(), Level::Info),
-            [one] => self.toast(format!("Reloaded projects.json; {one}"), Level::Warning),
-            [first, rest @ ..] => self.toast(
-                format!("Reloaded projects.json; {first} (and {} more)", rest.len()),
+        // What couldn't be read is told before what couldn't be done.
+        match (errors.as_slice(), problems.as_slice()) {
+            ([one], _) => self.toast(one.clone(), Level::Error),
+            ([first, rest @ ..], _) => {
+                self.toast(format!("{first} (and {} more)", rest.len()), Level::Error)
+            }
+            ([], []) => self.toast("Reloaded the project files".into(), Level::Info),
+            ([], [one]) => self.toast(format!("Reloaded the project files; {one}"), Level::Warning),
+            ([], [first, rest @ ..]) => self.toast(
+                format!(
+                    "Reloaded the project files; {first} (and {} more)",
+                    rest.len()
+                ),
                 Level::Warning,
             ),
         }
