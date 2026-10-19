@@ -666,12 +666,6 @@ pub fn project_file(id: &str) -> PathBuf {
     projects_dir().join(format!("{id}.json"))
 }
 
-/// The old single file of the store, before a file per project: split up
-/// on the first load that finds it.
-pub fn store_file() -> PathBuf {
-    data_dir().join("projects.json")
-}
-
 /// Whether `id` can be a project's, and so a file's name: lowercase
 /// `[a-z0-9-]`, not starting with a dash, as `slugify` makes them.
 fn valid_id(id: &str) -> bool {
