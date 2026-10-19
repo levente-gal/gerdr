@@ -1437,16 +1437,6 @@ impl Painter {
                 if let Some((why, rect)) = reason {
                     self.reason_tip(&mut c, why, shift(rect), shift(panel), scale, p);
                 }
-                // What the mark under the pointer means, over it.
-                let mark = layout.marks.iter().find_map(|&(i, mark, rect)| {
-                    let TreeLine::Repo(repo) = view.lines.get(i)? else {
-                        return None;
-                    };
-                    (view.hover == Some(ReposHit::Mark(i, mark))).then(|| (mark.tip(repo), rect))
-                });
-                if let Some((tip, rect)) = mark {
-                    self.reason_tip(&mut c, &tip, shift(rect), shift(panel), scale, p);
-                }
             }
         }
         c.into_buffer(false)

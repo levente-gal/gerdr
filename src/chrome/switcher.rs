@@ -110,6 +110,14 @@ pub struct SwitcherLayout {
     pub footer: Rect,
 }
 
+/// Where the icon of the switcher row in `row` goes.
+pub fn switcher_icon(row: Rect) -> Rect {
+    Rectangle::new(
+        (row.loc.x + PADDING as i32, row.loc.y).into(),
+        (ROW_ICON_WIDTH, row.size.h).into(),
+    )
+}
+
 /// The switcher showing `view` in the app `area` (window coordinates).
 pub fn switcher_geometry(view: &SwitcherView, area: Rect) -> SwitcherLayout {
     switcher_parts(view, panel_origin(area), panel_width(area))
@@ -367,10 +375,7 @@ impl Painter {
                     fill,
                 );
             }
-            let icon = Rectangle::new(
-                (slot.loc.x + PADDING as i32, slot.loc.y).into(),
-                (ROW_ICON_WIDTH, slot.size.h).into(),
-            );
+            let icon = switcher_icon(*slot);
             let small = 0.8 * s;
             match &row.icon {
                 ItemIcon::Workspace(WorkspaceKind::Project) => {

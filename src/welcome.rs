@@ -27,6 +27,7 @@ use crate::{
     project_list::{self, scrolled},
     projects,
     text_field::{Edit, TextField},
+    tooltip::Tooltip,
 };
 
 /// The welcome screen's state, while it is shown.
@@ -417,13 +418,31 @@ impl Gerdr {
     }
 
     /// The pointer moved while the welcome screen is shown.
-    pub fn welcome_hover(&mut self, pos: Point<f64, Logical>) {
+    pub fn welcome_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let page = self.welcome_page();
         let size = self.output_size();
-        if let Some(welcome) = self.welcome.as_mut() {
-            let hit = welcome_hit(welcome, size, page, pos);
-            welcome.set_hover(hit, Instant::now());
+        let welcome = self.welcome.as_mut()?;
+        let hit = welcome_hit(welcome, size, page, pos);
+        welcome.set_hover(hit, Instant::now());
+        // A project's mark says whether it runs.
+        let Some(WelcomeHit::Row(i)) = hit else {
+            return None;
+        };
+        let view = self.welcome_view()?;
+        if view.confirm_forget == Some(i) {
+            return None;
         }
+        let layout = chrome::welcome_layout(
+            size,
+            view.rows.len(),
+            view.naming.is_some(),
+            view.note.is_some(),
+        );
+        let mark = chrome::welcome_mark(*layout.rows.get(i)?);
+        let running = view.rows.get(i)?.running;
+        mark.to_f64()
+            .contains(pos)
+            .then(|| Tooltip::new(chrome::running_label(running), mark))
     }
 
     pub fn welcome_view(&self) -> Option<WelcomeView> {

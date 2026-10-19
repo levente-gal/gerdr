@@ -5,11 +5,13 @@
 
 use super::{
     BUTTON_RADIUS, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW,
-    FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, LABEL_FONT_SIZE, MENU_MARK_GAP,
-    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
-    PROJECT_MENU_ROW, PROJECT_MENU_SECTION, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect,
-    SHADOW, SMALL_FONT_SIZE, band, footer_height, footer_rows, git_branch, icon_sdf, magnifier,
-    mix, phys, physical, project_menu::menu_query_text, rect_px,
+    FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS,
+    LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_INPUT,
+    PROJECT_MENU_PADDING, PROJECT_MENU_ROW, PROJECT_MENU_SECTION, Painter, Palette, ROW_BUTTON,
+    ROW_BUTTON_INSET, Rect, SHADOW, SMALL_FONT_SIZE, band, footer_height, footer_rows, git_branch,
+    icon_sdf, magnifier, measure, mix, phys, physical,
+    project_menu::{menu_mark, menu_query_text},
+    rect_px,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
@@ -259,6 +261,38 @@ fn button_rects(buttons: &[WorktreeButton], rect: Rect) -> Vec<(WorktreeButton, 
     rects
 }
 
+/// The marks on worktree row `rect`, its `buttons` at its right, showing
+/// `line`: its branch icon, then its dirty dot (where the painter puts it
+/// after the name, a gap either side to aim at), with what each says.
+pub fn worktree_marks(
+    line: &WorktreeLine,
+    rect: Rect,
+    buttons: &[(WorktreeButton, Rect)],
+) -> Vec<(Rect, &'static str)> {
+    let mark = menu_mark(rect);
+    let kind = if line.tag == "main worktree" {
+        "Main worktree"
+    } else {
+        "Linked worktree"
+    };
+    let mut marks = vec![(mark, kind)];
+    if line.dirty {
+        let end = match buttons.first() {
+            Some((_, first)) => first.loc.x - FIELD_GAP,
+            None => rect.loc.x + rect.size.w - PADDING as i32,
+        };
+        let name_x = mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP;
+        let name_w = measure(&line.name, FONT_SIZE).unwrap_or(0.0).ceil() as i32;
+        let x = (name_x + name_w).min(end);
+        let w = 2 * GIT_MARK_GAP + GIT_MARK_WIDTH;
+        if x + w <= end + GIT_MARK_GAP {
+            let dot = Rectangle::new((x, rect.loc.y).into(), (w, rect.size.h).into());
+            marks.push((dot, "Changes not committed"));
+        }
+    }
+    marks
+}
+
 /// What `pos` (output coordinates) is over in the worktrees popup; `None`
 /// outside it.
 pub fn worktrees_hit(layout: &WorktreesLayout, pos: Point<f64, Logical>) -> Option<WorktreesHit> {
@@ -441,10 +475,7 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let row_band = band(rect, scale);
-        let mark = Rectangle::new(
-            (rect.loc.x + PADDING as i32, rect.loc.y).into(),
-            (MENU_MARK_WIDTH, rect.size.h).into(),
-        );
+        let mark = menu_mark(rect);
         let (x, y, w, h) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let gap = (FIELD_GAP as f32 * s).round();
@@ -627,6 +658,35 @@ mod tests {
             repo: Some("gerdr".into()),
             empty: "No worktrees match".into(),
         }
+    }
+
+    #[test]
+    fn a_rows_marks_lie_on_it_clear_of_its_buttons() {
+        let size: Size<i32, Logical> = (1920, 1080).into();
+        let v = view();
+        let l = worktrees_layout(&v, size);
+        let (rect, buttons) = &l.entries[2];
+        let WorktreeEntry::Worktree(clean) = &v.entries[2] else {
+            panic!("a worktree");
+        };
+        let marks = worktree_marks(clean, *rect, buttons);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].1, "Linked worktree");
+        let dirty = WorktreeLine {
+            dirty: true,
+            tag: "main worktree".into(),
+            ..clean.clone()
+        };
+        let marks = worktree_marks(&dirty, *rect, buttons);
+        let texts: Vec<_> = marks.iter().map(|(_, t)| *t).collect();
+        assert_eq!(texts, ["Main worktree", "Changes not committed"]);
+        let (dot, _) = marks[1];
+        assert!(inside(*rect, dot) && dot.loc.x > marks[0].0.loc.x);
+        assert!(
+            buttons
+                .iter()
+                .all(|(_, b)| dot.loc.x + dot.size.w <= b.loc.x)
+        );
     }
 
     #[test]

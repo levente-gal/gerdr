@@ -50,6 +50,7 @@ use crate::{
     projects::Project,
     text_field::{Edit, TextField},
     toast::Level,
+    tooltip::Tooltip,
 };
 
 /// How long a path in a row's detail may get.
@@ -776,10 +777,8 @@ impl Gerdr {
 
     /// The pointer moved to `pos` while the switcher is open: the row under
     /// it lights up.
-    pub fn switcher_motion(&mut self, pos: Point<f64, Logical>) {
-        let Some(view) = self.switcher_view() else {
-            return;
-        };
+    pub fn switcher_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let view = self.switcher_view()?;
         let layout = chrome::switcher_geometry(&view, self.content_rect());
         let hover = layout
             .rows
@@ -793,6 +792,16 @@ impl Gerdr {
             switcher.hover = hover;
             switcher.chip_hover = chip;
         }
+        // An agent's mark says how it is doing.
+        let i = hover?;
+        let ItemIcon::Agent(status) = view.rows.get(i)?.icon else {
+            return None;
+        };
+        let icon = chrome::switcher_icon(layout.rows[i]);
+        icon.to_f64().contains(pos).then(|| {
+            let text = format!("Agent {}", status_label(status));
+            Tooltip::new(&text, icon)
+        })
     }
 
     /// The installed apps' icons, by the program each starts.

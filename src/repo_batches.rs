@@ -20,13 +20,14 @@ use smithay::{
 
 use crate::{
     Gerdr,
-    chrome::{self, DetailTab, ReposView, Tone},
+    chrome::{self, DetailTab, ReposHit, ReposView, Tone, TreeLine},
     git::{GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
     repos::{
         Batch, BatchKind, Ctx, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos, RunState,
     },
     toast::Level,
+    tooltip::Tooltip,
 };
 
 /// How many repositories a batch works in at once.
@@ -629,14 +630,41 @@ impl Gerdr {
     }
 
     /// The pointer moved while the panel is open.
-    pub fn repos_hover(&mut self, pos: Point<f64, Logical>) {
-        let Some(view) = self.repos_view() else {
-            return;
-        };
+    pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let view = self.repos_view()?;
         let layout = chrome::repos_layout(&view, self.output_size());
         let hit = chrome::repos_hit(&layout, pos);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.hover = hit;
+        }
+        // Icons say what they are; not over a question or an open menu.
+        if view.sheet.is_some() {
+            return None;
+        }
+        let repo = |i: usize| match view.lines.get(i) {
+            Some(TreeLine::Repo(repo)) => Some(repo),
+            _ => None,
+        };
+        match hit? {
+            ReposHit::Mark(i, mark) => {
+                let (.., rect) = layout
+                    .marks
+                    .iter()
+                    .find(|(j, m, _)| (*j, *m) == (i, mark))?;
+                Some(Tooltip::new(&mark.tip(repo(i)?), *rect))
+            }
+            ReposHit::Expander(i) => {
+                let rect = layout.lines.get(i)?.2?;
+                let text = match repo(i)?.expanded? {
+                    true => "Hide its changed files",
+                    false => "Show its changed files",
+                };
+                Some(Tooltip::new(text, rect))
+            }
+            ReposHit::BranchButton if view.branch.menu.is_none() => Some(
+                Tooltip::new("Switch them to a branch they all have", layout.branch).key("Ctrl+S"),
+            ),
+            _ => None,
         }
     }
 
