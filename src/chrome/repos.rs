@@ -11,11 +11,10 @@
 use super::{
     BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, FIELD_GAP, FieldSpot,
     GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, LineState,
-    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, band, check,
+    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, arrow, band, check,
     chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
     rect_px, rounded_rect, segment,
 };
-use crate::git::GitStatus;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -193,6 +192,9 @@ pub struct BranchMenuView {
     pub picked: Option<usize>,
     /// What it says without rows.
     pub empty: String,
+    /// What is typed to find a branch, and what it says while empty.
+    pub query: Line,
+    pub placeholder: String,
 }
 
 /// A line of the tree.
@@ -212,8 +214,8 @@ pub struct RepoLine {
     pub label: String,
     /// Its branch; `None` on a detached HEAD.
     pub branch: Option<String>,
-    /// The project has a feature and this isn't on it: a `≠` badge.
-    pub off_feature: bool,
+    /// The project's feature, when this isn't on it: a `≠` badge.
+    pub off_feature: Option<String>,
     pub dirty: bool,
     pub ahead: u32,
     pub behind: u32,
@@ -429,8 +431,134 @@ pub enum ReposHit {
     BranchRow(usize),
     /// The branch menu, on no row (for the wheel).
     BranchMenu,
+    /// A mark on a repository's line, by index into `ReposView::lines`:
+    /// it says what it means.
+    Mark(usize, RepoMark),
     /// Inside the panel, on nothing.
     Panel,
+}
+
+/// A mark after a repository's branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoMark {
+    /// `≠`: not on the project's feature.
+    OffFeature,
+    /// A dot: changes not committed.
+    Dirty,
+    /// An arrow up and a count: commits to push.
+    Ahead,
+    /// An arrow down and a count: commits to pull.
+    Behind,
+}
+
+impl RepoMark {
+    /// What the mark says of `repo`, over it while the pointer is on it.
+    pub fn tip(self, repo: &RepoLine) -> String {
+        let commits = |n: u32| match n {
+            1 => "1 commit".to_owned(),
+            n => format!("{n} commits"),
+        };
+        match self {
+            RepoMark::OffFeature => match &repo.off_feature {
+                Some(feature) => format!("Not on the feature, {feature}"),
+                None => "Not on the feature".into(),
+            },
+            RepoMark::Dirty => "Changes not committed".into(),
+            RepoMark::Ahead => format!("{} to push", commits(repo.ahead)),
+            RepoMark::Behind => format!("{} to pull", commits(repo.behind)),
+        }
+    }
+}
+
+/// Where a repository line's parts go, between `x` and `right` at `s`
+/// pixels a logical pixel, its text measured by `width(text, size)`:
+/// the painter and the hit test work it out alike.
+struct LineSpans {
+    /// The chip's left edge and width.
+    chip: Option<(f32, f32)>,
+    /// Where the label, branch and marks end at the latest.
+    end: f32,
+    /// Where the branch starts, when there is room for it.
+    branch: Option<f32>,
+    marks: Vec<MarkSpan>,
+    /// Where the notes start.
+    pen: f32,
+}
+
+/// A mark that fits: its shape from `x`, `w` wide, then its count up to
+/// `end`.
+struct MarkSpan {
+    mark: RepoMark,
+    x: f32,
+    w: f32,
+    end: f32,
+}
+
+fn line_spans(
+    repo: &RepoLine,
+    (x, right): (f32, f32),
+    gap: f32,
+    s: f32,
+    width: &dyn Fn(&str, f32) -> f32,
+) -> LineSpans {
+    let mut end = right;
+    let chip = repo.chip.as_ref().map(|chip| {
+        let pad = (CHIP_PAD as f32 * s).round();
+        let cw = (width(&chip.text, DETAIL_FONT_SIZE) + 2.0 * pad).round();
+        let cx = (right - cw).max(x);
+        end = cx - gap;
+        (cx, cw)
+    });
+    let mut pen = (x + width(&repo.label, FONT_SIZE)).min(end).max(x);
+    let branch = (pen + gap < end).then(|| {
+        let bx = pen + gap;
+        let text = repo.branch.as_deref().unwrap_or("detached");
+        pen = (bx + width(text, SMALL_FONT_SIZE)).min(end);
+        bx
+    });
+    let (w, mark_gap) = (
+        (GIT_MARK_WIDTH as f32 * s).round(),
+        (GIT_MARK_GAP as f32 * s).round(),
+    );
+    let wanted = [
+        (
+            RepoMark::OffFeature,
+            repo.off_feature.is_some(),
+            w + 2.0 * s,
+            0,
+        ),
+        (RepoMark::Dirty, repo.dirty, w, 0),
+        (RepoMark::Ahead, repo.ahead > 0, w, repo.ahead),
+        (RepoMark::Behind, repo.behind > 0, w, repo.behind),
+    ];
+    let mut marks = Vec::new();
+    for (mark, on, w, count) in wanted {
+        if !on {
+            continue;
+        }
+        let mx = pen + mark_gap;
+        if mx + w > end {
+            break;
+        }
+        let mut mark_end = mx + w;
+        if count > 0 {
+            mark_end = (mark_end + s + width(&count.to_string(), DETAIL_FONT_SIZE)).min(end);
+        }
+        marks.push(MarkSpan {
+            mark,
+            x: mx,
+            w,
+            end: mark_end,
+        });
+        pen = mark_end;
+    }
+    LineSpans {
+        chip,
+        end,
+        branch,
+        marks,
+        pen,
+    }
 }
 
 /// Where the repositories panel's parts go, in output coordinates.
@@ -443,6 +571,8 @@ pub struct ReposLayout {
     /// Per tree line: its rect, its checkbox's, and a repository line's
     /// expander's.
     pub lines: Vec<(Rect, Rect, Option<Rect>)>,
+    /// The marks on repository lines, by index into `lines`.
+    pub marks: Vec<(usize, RepoMark, Rect)>,
     pub detail: Rect,
     pub detail_tabs: Vec<(DetailTab, Rect)>,
     pub field: Rect,
@@ -455,6 +585,8 @@ pub struct ReposLayout {
     /// open.
     pub branch: Rect,
     pub branch_menu: Option<(Rect, Vec<Rect>)>,
+    /// The branch menu's search, at its top.
+    pub branch_search: Option<Rect>,
 }
 
 /// Inside the panel's parts: what the painter needs besides `ReposLayout`.
@@ -631,7 +763,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let tree = Rectangle::new((x, middle_y).into(), (tree_w, middle_h).into());
     let (line_x, line_w) = (x + REPOS_PAD, (tree_w - 2 * REPOS_PAD).max(0));
     let tree_end = middle_y + middle_h - REPOS_PAD;
-    let mut lines = Vec::new();
+    let (mut lines, mut marks) = (Vec::new(), Vec::new());
     for (i, line) in view.lines.iter().enumerate() {
         let ly = middle_y + REPOS_PAD + i as i32 * REPOS_ROW;
         if ly + REPOS_ROW > tree_end {
@@ -651,6 +783,19 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             )),
             _ => None,
         };
+        if let TreeLine::Repo(repo) = line {
+            // Measured as the painter measures, at one pixel a pixel.
+            let width = |text: &str, size: f32| measure(text, size).unwrap_or(0.0);
+            let x = (check_x + REPOS_CHECK + REPOS_EXPANDER) as f32;
+            let right = (line_x + line_w) as f32 - PADDING;
+            let spans = line_spans(repo, (x, right), FIELD_GAP as f32, 1.0, &width);
+            for m in spans.marks {
+                let mx = m.x.floor() as i32;
+                let mw = (m.end.ceil() as i32 - mx).max(1);
+                let rect = Rectangle::new((mx, ly).into(), (mw, REPOS_ROW).into());
+                marks.push((i, m.mark, rect));
+            }
+        }
         lines.push((rect, check, expander));
     }
 
@@ -761,13 +906,14 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         sheet = Some(card);
     }
 
-    // The branch menu under the button, its right edge on the button's,
-    // as many rows as fit above the field.
+    // The branch menu under the button, its right edge on the button's:
+    // its search, then as many rows as fit above the field.
+    let mut branch_search = None;
     let branch_menu = view.branch.menu.as_ref().map(|menu| {
         let widest = menu
             .rows
             .iter()
-            .chain([&menu.empty])
+            .chain([&menu.empty, &menu.placeholder, &menu.query.text])
             .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
             .max()
             .unwrap_or(0);
@@ -775,19 +921,21 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .clamp(pw, BRANCH_MENU_MAX.max(pw))
             .min(inner_w);
         let my = branch.loc.y + branch.size.h + BRANCH_MENU_GAP;
-        let room = (field.loc.y - REPOS_PAD - my - 2 * BRANCH_MENU_PAD).max(0) / REPOS_ROW;
+        let rows_y = my + 2 * BRANCH_MENU_PAD + REPOS_ROW;
+        let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / REPOS_ROW;
         let shown = menu.rows.len().max(1).min(room.max(1) as usize);
-        let mh = 2 * BRANCH_MENU_PAD + shown as i32 * REPOS_ROW;
+        let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * REPOS_ROW;
         let mx = branch.loc.x + branch.size.w - mw;
         let card = Rectangle::new((mx, my).into(), (mw, mh).into());
+        let inner = (mw - 2 * BRANCH_MENU_PAD).max(0);
+        branch_search = Some(Rectangle::new(
+            (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
+            (inner, REPOS_ROW).into(),
+        ));
         let rows = (0..shown.min(menu.rows.len()))
             .map(|i| {
                 Rectangle::new(
-                    (
-                        mx + BRANCH_MENU_PAD,
-                        my + BRANCH_MENU_PAD + i as i32 * REPOS_ROW,
-                    )
-                        .into(),
+                    (mx + BRANCH_MENU_PAD, rows_y + i as i32 * REPOS_ROW).into(),
                     ((mw - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
                 )
             })
@@ -806,6 +954,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             header,
             tree,
             lines,
+            marks,
             detail,
             detail_tabs,
             field,
@@ -815,6 +964,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             sheet,
             branch,
             branch_menu,
+            branch_search,
         },
         error,
         body,
@@ -903,6 +1053,10 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
         if expander.as_ref().is_some_and(at) {
             return Some(ReposHit::Expander(i));
         }
+        let mark = layout.marks.iter().find(|(j, _, r)| *j == i && at(r));
+        if let Some(&(_, mark, _)) = mark {
+            return Some(ReposHit::Mark(i, mark));
+        }
         if at(line) {
             return Some(ReposHit::Line(i));
         }
@@ -924,12 +1078,17 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
 
 /// The panel's field, for the caret and selection, on an output of `size`.
 pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
-    let area = repos_layout(view, size).field;
+    let layout = repos_layout(view, size);
+    // The open branch menu's search has the keyboard.
+    let (area, line) = match (&view.branch.menu, layout.branch_search) {
+        (Some(menu), Some(search)) => (search, &menu.query),
+        _ => (layout.field, &view.field),
+    };
     FieldSpot {
         size: FONT_SIZE,
         area,
         text: field_text(area, scale),
-        line: view.field.clone(),
+        line: line.clone(),
     }
 }
 
@@ -1256,9 +1415,12 @@ impl Painter {
             self.hint_button(&mut c, view, &view.hints[i], shift(rect), scale, p);
         }
 
-        if let (Some(menu), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) {
+        if let (Some(menu), Some((card, rows)), Some(search)) =
+            (&view.branch.menu, &layout.branch_menu, layout.branch_search)
+        {
             let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
-            self.branch_menu(&mut c, view, menu, shift(*card), &rows, scale, p);
+            let parts = (shift(*card), shift(search), &rows[..]);
+            self.branch_menu(&mut c, view, menu, parts, scale, p);
         }
         match &view.sheet {
             Some(sheet) => self.sheet(&mut c, view, sheet, &parts, shift, scale, p),
@@ -1274,6 +1436,16 @@ impl Painter {
                 });
                 if let Some((why, rect)) = reason {
                     self.reason_tip(&mut c, why, shift(rect), shift(panel), scale, p);
+                }
+                // What the mark under the pointer means, over it.
+                let mark = layout.marks.iter().find_map(|&(i, mark, rect)| {
+                    let TreeLine::Repo(repo) = view.lines.get(i)? else {
+                        return None;
+                    };
+                    (view.hover == Some(ReposHit::Mark(i, mark))).then(|| (mark.tip(repo), rect))
+                });
+                if let Some((tip, rect)) = mark {
+                    self.reason_tip(&mut c, &tip, shift(rect), shift(panel), scale, p);
                 }
             }
         }
@@ -1301,7 +1473,7 @@ impl Painter {
         let r = (MENU_RADIUS - 2.0) * s;
         let hovered = matches!(
             view.hover,
-            Some(ReposHit::Line(j) | ReposHit::Check(j) | ReposHit::Expander(j)) if j == i
+            Some(ReposHit::Line(j) | ReposHit::Check(j) | ReposHit::Expander(j) | ReposHit::Mark(j, _)) if j == i
         );
         let state = match line {
             TreeLine::Repo(repo) => Some(&repo.state),
@@ -1399,14 +1571,14 @@ impl Painter {
         p: &Palette,
     ) {
         let s = scale as f32;
-        let mut end = right;
-        if let Some(chip) = &repo.chip {
+        let width = |text: &str, size: f32| self.mixed_width(text, size, scale);
+        let spans = line_spans(repo, (x, right), gap, s, &width);
+        let end = spans.end;
+        if let (Some(chip), Some((cx, cw))) = (&repo.chip, spans.chip) {
             let color = tone_color(chip.tone, p);
             let (top, height) = line_band;
             let pad = (CHIP_PAD as f32 * s).round();
-            let cw = (self.mixed_width(&chip.text, DETAIL_FONT_SIZE, scale) + 2.0 * pad).round();
             let ch = (CHIP_HEIGHT as f32 * s).round();
-            let cx = (right - cw).max(x);
             let cy = (top as f32 + (height as f32 - ch) / 2.0).round();
             let fill = match chip.tone {
                 Tone::Normal | Tone::Muted => p.element,
@@ -1423,13 +1595,12 @@ impl Painter {
                 scale,
                 color,
             );
-            end = cx - gap;
         }
         let label_color = match repo.state {
             LineState::Busy(_) => p.muted,
             _ => p.text,
         };
-        let mut pen = self.mixed_text(
+        self.mixed_text(
             c,
             &repo.label,
             FONT_SIZE,
@@ -1443,42 +1614,51 @@ impl Painter {
             Some(branch) => (branch.as_str(), p.muted),
             None => ("detached", p.placeholder),
         };
-        if pen + gap < end {
-            pen = self.mixed_text(
+        if let Some(bx) = spans.branch {
+            self.mixed_text(
                 c,
                 branch,
                 SMALL_FONT_SIZE,
-                pen + gap,
+                bx,
                 end,
                 line_band,
                 scale,
                 branch_color,
             );
         }
-        if repo.off_feature {
-            let mark_w = (GIT_MARK_WIDTH as f32 * s).round() + 2.0 * s;
-            let bx = pen + (GIT_MARK_GAP as f32 * s).round();
-            if bx + mark_w <= end {
-                let (top, height) = line_band;
-                let (cx, cy) = (bx + mark_w / 2.0, top as f32 + height as f32 / 2.0);
-                c.paint_in(
-                    bx as i32,
-                    top,
-                    mark_w as i32 + 1,
-                    height,
-                    p.warning,
-                    |x, y| coverage(not_equal(x - cx, y - cy, s)),
+        let (top, height) = line_band;
+        let cy = top as f32 + height as f32 / 2.0;
+        for m in &spans.marks {
+            let cx = m.x + m.w / 2.0;
+            let (color, count) = match m.mark {
+                RepoMark::OffFeature => (p.warning, 0),
+                RepoMark::Dirty => (p.warning, 0),
+                RepoMark::Ahead => (p.muted, repo.ahead),
+                RepoMark::Behind => (p.muted, repo.behind),
+            };
+            c.paint_in(m.x as i32, top, m.w as i32 + 1, height, color, |x, y| {
+                let (x, y) = (x - cx, y - cy);
+                coverage(match m.mark {
+                    RepoMark::OffFeature => not_equal(x, y, s),
+                    RepoMark::Dirty => x.hypot(y) - 2.5 * s,
+                    RepoMark::Ahead => arrow(true, x, y, s),
+                    RepoMark::Behind => arrow(false, x, y, s),
+                })
+            });
+            if count > 0 {
+                self.text(
+                    c,
+                    &count.to_string(),
+                    DETAIL_FONT_SIZE,
+                    m.x + m.w + s,
+                    end,
+                    line_band,
+                    scale,
+                    p.muted,
                 );
-                pen = bx + mark_w;
             }
         }
-        let git = GitStatus {
-            dirty: repo.dirty,
-            ahead: repo.ahead,
-            behind: repo.behind,
-            ..GitStatus::default()
-        };
-        pen = self.git_marks(c, &git, pen, end, line_band, scale, p);
+        let mut pen = spans.pen;
         let mut notes: Vec<(String, Rgb)> = Vec::new();
         if repo.no_upstream {
             notes.push(("no upstream".into(), p.placeholder));
@@ -1891,24 +2071,42 @@ impl Painter {
         );
     }
 
-    /// The branch menu, a card in `card` with a row per branch in `rows`:
-    /// the one Enter picks lit, the one they are all on checked.
-    #[allow(clippy::too_many_arguments)]
+    /// The branch menu, a card in `card` with its search in `search`, then
+    /// a row per branch in `rows`: the one Enter picks lit, the one they
+    /// are all on checked.
     fn branch_menu(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         menu: &BranchMenuView,
-        card: Rect,
-        rows: &[Rect],
+        (card, search, rows): (Rect, Rect, &[Rect]),
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
         card_over(c, card, MENU_RADIUS, scale, p);
+        let (x, y, w, h) = rect_px(search, scale);
+        let (b, r) = ((scale.round() as i32).max(1) as f32, BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.accent);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        self.edit_line(
+            c,
+            &menu.query,
+            &menu.placeholder,
+            field_text(search, scale),
+            band(search, scale),
+            true,
+            FONT_SIZE,
+            scale,
+            p,
+        );
         if menu.rows.is_empty() {
             let row = Rectangle::new(
-                (card.loc.x + BRANCH_MENU_PAD, card.loc.y + BRANCH_MENU_PAD).into(),
+                (
+                    card.loc.x + BRANCH_MENU_PAD,
+                    search.loc.y + search.size.h + BRANCH_MENU_PAD,
+                )
+                    .into(),
                 ((card.size.w - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
             );
             let (x, end) = phys(row, scale);
@@ -2060,7 +2258,7 @@ mod tests {
             expanded: None,
             label: label.into(),
             branch: branch.map(Into::into),
-            off_feature: false,
+            off_feature: None,
             dirty: false,
             ahead: 0,
             behind: 0,
@@ -2126,7 +2324,7 @@ mod tests {
             TreeLine::Repo(RepoLine {
                 check: Check::On,
                 expanded: Some(false),
-                off_feature: true,
+                off_feature: Some("feat/x".into()),
                 behind: 1,
                 ..repo("zed-ext", Some("main"))
             }),
@@ -2234,6 +2432,8 @@ mod tests {
                     current: Some(1),
                     picked: Some(0),
                     empty: "No branch they all have".into(),
+                    query: Line::default(),
+                    placeholder: "Find a branch".into(),
                 }),
                 ..full().branch
             },
@@ -2249,7 +2449,9 @@ mod tests {
         view.branch.mixed = false;
         if let Some(menu) = &mut view.branch.menu {
             *menu = BranchMenuView {
-                empty: menu.empty.clone(),
+                empty: "No branch matches".into(),
+                query: "zzz".into(),
+                placeholder: menu.placeholder.clone(),
                 ..BranchMenuView::default()
             };
         }
@@ -2429,7 +2631,16 @@ mod tests {
                     if let Some(e) = expander {
                         assert_eq!(hit(*e), Some(ReposHit::Expander(i)));
                     }
-                    assert_eq!(hit(*line), Some(ReposHit::Line(i)));
+                    // Its middle may be on a mark on a narrow panel.
+                    let on_it = matches!(
+                        hit(*line),
+                        Some(ReposHit::Line(j) | ReposHit::Mark(j, _)) if j == i
+                    );
+                    assert!(on_it, "line {i}");
+                }
+                for &(i, mark, r) in &l.marks {
+                    assert!(within(l.lines[i].0, r), "{mark:?} on line {i}");
+                    assert_eq!(hit(r), Some(ReposHit::Mark(i, mark)));
                 }
                 for (b, r) in &l.buttons {
                     assert_eq!(hit(*r), Some(ReposHit::Button(*b)));
@@ -2451,6 +2662,26 @@ mod tests {
     }
 
     #[test]
+    fn marks_say_what_they_mean() {
+        let view = full();
+        let l = repos_layout(&view, (1600, 1000).into());
+        let marks: Vec<_> = l.marks.iter().map(|&(i, m, _)| (i, m)).collect();
+        assert!(marks.contains(&(6, RepoMark::OffFeature)), "{marks:?}");
+        assert!(marks.contains(&(6, RepoMark::Behind)), "{marks:?}");
+        let TreeLine::Repo(repo) = &view.lines[6] else {
+            panic!("a repository");
+        };
+        assert_eq!(RepoMark::OffFeature.tip(repo), "Not on the feature, feat/x");
+        assert_eq!(RepoMark::Behind.tip(repo), "1 commit to pull");
+        assert_eq!(RepoMark::Dirty.tip(repo), "Changes not committed");
+        let more = RepoLine {
+            ahead: 3,
+            ..repo.clone()
+        };
+        assert_eq!(RepoMark::Ahead.tip(&more), "3 commits to push");
+    }
+
+    #[test]
     fn the_branch_menu_takes_every_click() {
         for (w, h) in SIZES {
             let size: Size<i32, Logical> = (w, h).into();
@@ -2460,6 +2691,16 @@ mod tests {
             for (i, row) in rows.iter().enumerate() {
                 assert_eq!(repos_hit(&l, centre(*row)), Some(ReposHit::BranchRow(i)));
             }
+            // Its search at the top has the keyboard.
+            let search = l.branch_search.expect("a search");
+            assert!(within(menu, search) && search.loc.y + search.size.h <= rows[0].loc.y);
+            assert_eq!(repos_hit(&l, centre(search)), Some(ReposHit::BranchMenu));
+            assert_eq!(repos_field(&view, size, 1.0).area, search);
+            let closed = ReposView {
+                branch: full().branch,
+                ..view.clone()
+            };
+            assert_eq!(repos_field(&closed, size, 1.0).area, l.field);
             let pad = (menu.loc.x as f64 + 1.0, menu.loc.y as f64 + 1.0);
             assert_eq!(repos_hit(&l, pad.into()), Some(ReposHit::BranchMenu));
             assert_eq!(
@@ -2492,8 +2733,8 @@ mod tests {
             let l = repos_layout(&view, size);
             let (menu, rows) = l.branch_menu.expect("a menu");
             assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
-            // As many as the tree's page, whatever the size.
-            let page = repos_page(size).0.min(BRANCH_MENU_ROWS);
+            // As many as the tree's page less the search, whatever the size.
+            let page = (repos_page(size).0 - 1).min(BRANCH_MENU_ROWS);
             assert!(rows.len() >= page, "{size:?}: {} < {page}", rows.len());
             assert!(menu.size.w <= BRANCH_MENU_MAX.max(l.branch.size.w));
         }
@@ -2650,6 +2891,13 @@ mod tests {
             ("hover", disabled_hover),
             ("menu", with_menu()),
             ("menu_empty", with_empty_menu()),
+            (
+                "mark",
+                ReposView {
+                    hover: Some(ReposHit::Mark(6, RepoMark::OffFeature)),
+                    ..full()
+                },
+            ),
         ];
         for (theme, scale) in [(Theme::Dark, 1.0), (Theme::Light, 1.0), (Theme::Dark, 2.0)] {
             for (name, view) in &cases {
