@@ -252,6 +252,7 @@ pub(super) fn switcher_text(input: Rect, scale: f64) -> (f32, f32) {
 pub fn switcher_field(view: &SwitcherView, area: Rect, scale: f64) -> FieldSpot {
     let input = switcher_geometry(view, area).input;
     FieldSpot {
+        size: FONT_SIZE,
         area: input,
         text: switcher_text(input, scale),
         line: view.query.clone(),
@@ -286,6 +287,7 @@ impl Painter {
             switcher_text(input, scale),
             band,
             true,
+            FONT_SIZE,
             scale,
             p,
         );

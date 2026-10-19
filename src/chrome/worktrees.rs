@@ -287,6 +287,7 @@ pub fn worktrees_hit(layout: &WorktreesLayout, pos: Point<f64, Logical>) -> Opti
 pub fn worktrees_field(view: &WorktreesView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
     let area = worktrees_layout(view, size).query;
     FieldSpot {
+        size: FONT_SIZE,
         area,
         text: menu_query_text(area, scale),
         line: view.query.clone(),
@@ -367,6 +368,7 @@ impl Painter {
             menu_query_text(query, scale),
             band(query, scale),
             true,
+            FONT_SIZE,
             scale,
             p,
         );

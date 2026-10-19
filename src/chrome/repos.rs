@@ -7,12 +7,10 @@
 //! A sheet over it asks before a batch that could conflict.
 
 use super::{
-    BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
-    FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
-    HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
-    PROJECT_MENU_INPUT, Painter, Palette, QUIT_BUTTON, QUIT_BUTTON_GAP, ROW_BUTTON, Rect, Rgb,
-    SHADOW, SMALL_FONT_SIZE, band, chevron_down, coverage, field_text, icon_sdf, measure, mix,
-    phys, physical, rect_px, rounded_rect, segment,
+    BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, FIELD_GAP, FieldSpot,
+    GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, LineState,
+    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, band, chevron_down,
+    coverage, field_text, icon_sdf, measure, mix, phys, physical, rect_px, rounded_rect, segment,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
@@ -21,11 +19,23 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The panel: at most this wide and high, a margin in from the output's
 /// edges.
-const REPOS_MAX_WIDTH: i32 = 1400;
-const REPOS_MAX_HEIGHT: i32 = 1100;
+const REPOS_MAX_WIDTH: i32 = 1600;
+const REPOS_MAX_HEIGHT: i32 = 1200;
+/// The panel's text, a size up from the rest of the chrome's to be read
+/// at a glance: its labels, the header's title, paths and actions, chips,
+/// and keys on keycaps.
+const FONT_SIZE: f32 = 18.0;
+const LABEL_FONT_SIZE: f32 = 21.0;
+const SMALL_FONT_SIZE: f32 = 16.0;
+const DETAIL_FONT_SIZE: f32 = 15.0;
+const KEY_FONT_SIZE: f32 = 15.0;
+/// A button's height and the error line's height, to go with the bigger
+/// text.
+const ROW_BUTTON: i32 = 32;
+const ERROR_HEIGHT: i32 = 24;
 /// The header row with the title and the summary, and the gap between
 /// them.
-const REPOS_HEADER: i32 = 44;
+const REPOS_HEADER: i32 = 48;
 const HEADER_GAP: i32 = 14;
 /// The tree's share of the panel's width, and the narrowest it gets
 /// (unless that is more than half).
@@ -36,65 +46,65 @@ const REPOS_TREE_MIN: i32 = 300;
 const REPOS_PAD: i32 = 6;
 /// A tree line, the room before its checkbox, and how far a file's line
 /// is indented under its repository's.
-pub const REPOS_ROW: i32 = 28;
+pub const REPOS_ROW: i32 = 34;
 const REPOS_LINE_INSET: i32 = 4;
-const REPOS_INDENT: i32 = 22;
+const REPOS_INDENT: i32 = 24;
 /// A checkbox's clickable room, a repository's expander's, and a file's
 /// status letter column with the gap before it.
-const REPOS_CHECK: i32 = 24;
-const REPOS_EXPANDER: i32 = 18;
-const REPOS_CODE: i32 = 14;
+const REPOS_CHECK: i32 = 28;
+const REPOS_EXPANDER: i32 = 20;
+const REPOS_CODE: i32 = 16;
 const REPOS_CODE_GAP: i32 = 2;
 /// A repository's chip: its height, the room either side of its text and
 /// its corners.
-const CHIP_HEIGHT: i32 = 18;
-const CHIP_PAD: i32 = 6;
+const CHIP_HEIGHT: i32 = 24;
+const CHIP_PAD: i32 = 7;
 const CHIP_RADIUS: f32 = 4.0;
 /// The detail pane: its title row, a line of a diff or log, and the size
 /// of the monospace font they are in.
-const REPOS_DETAIL_TITLE: i32 = 36;
-pub const REPOS_DETAIL_LINE: i32 = 18;
-const REPOS_MONO_SIZE: f32 = 12.5;
+const REPOS_DETAIL_TITLE: i32 = 44;
+pub const REPOS_DETAIL_LINE: i32 = 24;
+const REPOS_MONO_SIZE: f32 = 16.0;
 /// The Diff and Log tabs: each this wide, this far apart.
-const REPOS_TAB_WIDTH: i32 = 52;
+const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
 /// The field's row, and the field in it.
-const REPOS_FIELD_ROW: i32 = PROJECT_MENU_INPUT;
-const REPOS_FIELD: i32 = 32;
+const REPOS_FIELD_ROW: i32 = 48;
+const REPOS_FIELD: i32 = 40;
 /// The result bar, and the gap between its buttons and the room either
 /// side of their labels.
-const REPOS_RESULT: i32 = 34;
+const REPOS_RESULT: i32 = 40;
 const REPOS_BUTTON_GAP: i32 = 6;
 const PILL_PAD: i32 = 12;
 /// The footer: the room above and below its rows of actions, a row, the
 /// most rows, the gap between actions and the room inside either end of
 /// one.
 const REPOS_FOOTER_PAD: i32 = 4;
-const REPOS_HINT_ROW: i32 = 30;
+const REPOS_HINT_ROW: i32 = 36;
 const REPOS_FOOTER_ROWS: usize = 3;
 const HINT_GAP: i32 = 4;
 const HINT_PAD: i32 = 6;
 /// Without a font to measure with, how wide a character is guessed to be
 /// (logical pixels): of a label in the small font, of a key on a keycap,
 /// and of a sheet button's label; and what is added for a whole text.
-const SMALL_CHAR: f64 = 5.4;
-const KEY_CHAR: f64 = 4.8;
-const BUTTON_CHAR: f64 = 6.4;
+const SMALL_CHAR: f64 = 6.6;
+const KEY_CHAR: f64 = 5.6;
+const BUTTON_CHAR: f64 = 7.7;
 const GUESS_SLACK: f64 = 4.0;
 /// The card saying why an action can't be done: its height and its gap to
 /// the action.
-const TIP_HEIGHT: i32 = 24;
+const TIP_HEIGHT: i32 = 30;
 const TIP_GAP: i32 = 4;
 /// The sheet: at most this wide; the room inside it, its title row, a
 /// line, the gap after the title and before the buttons, the buttons and
 /// the room either side of their labels, and the share of a line its
 /// repository's name takes.
-const SHEET_WIDTH: i32 = 560;
+const SHEET_WIDTH: i32 = 640;
 const SHEET_PAD: i32 = 18;
-const SHEET_TITLE: i32 = 26;
-const SHEET_LINE: i32 = 26;
+const SHEET_TITLE: i32 = 32;
+const SHEET_LINE: i32 = 32;
 const SHEET_GAP: i32 = 10;
-const SHEET_BUTTON: i32 = QUIT_BUTTON;
+const SHEET_BUTTON: i32 = 38;
 const SHEET_BUTTON_GAP: i32 = QUIT_BUTTON_GAP;
 const SHEET_BUTTON_PAD: i32 = 16;
 const SHEET_BUTTON_MIN: i32 = 84;
@@ -757,6 +767,7 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
 pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
     let area = repos_layout(view, size).field;
     FieldSpot {
+        size: FONT_SIZE,
         area,
         text: field_text(area, scale),
         line: view.field.clone(),
@@ -1469,6 +1480,7 @@ impl Painter {
             field_text(rect, scale),
             band(rect, scale),
             view.field_focused,
+            FONT_SIZE,
             scale,
             p,
         );
@@ -2049,8 +2061,9 @@ mod tests {
                 for (_, tab) in &l.detail_tabs {
                     assert!(inside(l.detail, *tab));
                 }
-                // Every line fits.
-                assert_eq!(l.lines.len(), view.lines.len(), "{size:?}");
+                // Every line of a page fits (the panel is given no more).
+                let page = view.lines.len().min(repos_page(size).0);
+                assert!(l.lines.len() >= page, "{size:?}");
                 // The footer's actions stay in the footer and the result
                 // bar's in it.
                 let n_result = view.result.as_ref().map_or(0, |r| r.buttons.len());

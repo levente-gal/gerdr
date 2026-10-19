@@ -197,6 +197,7 @@ pub fn welcome_field(
     let line = view.naming.clone()?;
     let area = welcome_layout(size, view.rows.len(), true, view.note.is_some()).button;
     Some(FieldSpot {
+        size: FONT_SIZE,
         area,
         text: field_text(area, scale),
         line,
@@ -283,6 +284,7 @@ impl Painter {
                 (start, end),
                 band(layout.label, scale),
                 true,
+                FONT_SIZE,
                 scale,
                 p,
             );

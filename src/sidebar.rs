@@ -142,6 +142,8 @@ impl Gerdr {
             .context_menu
             .as_ref()
             .is_some_and(|menu| menu.spec.anchor == layout.plus);
+        let repos = quantize(hover.alpha(SidebarHit::Repos, now));
+        let repos_open = self.repos.panel.is_some();
         let rename = self.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Workspace(w) => Some((w, r.field.line())),
             RenameTarget::Tab(..) => None,
@@ -152,6 +154,8 @@ impl Gerdr {
             cards,
             plus,
             plus_open,
+            repos,
+            repos_open,
             rename,
         }
     }
@@ -160,8 +164,9 @@ impl Gerdr {
     /// (a second one right after renames it: see `input`), "×" or middle
     /// click closes it; a left click on an agent card shows its pane. A
     /// row held with the left button can be dragged to another place. The
-    /// "+" opens the menu of what to add; the project's name left of it
-    /// opens the project menu (the welcome screen while no project is
+    /// "+" opens the menu of what to add, the button left of it the
+    /// repositories panel; the project's name left of them opens the
+    /// project menu (the welcome screen while no project is
     /// shown).
     pub(crate) fn sidebar_press(&mut self, x: i32, y: i32, button: u32) {
         let pos = Point::from((x as f64 + 0.5, y as f64 + 0.5));
@@ -171,6 +176,7 @@ impl Gerdr {
         };
         match (hit, button) {
             (SidebarHit::Plus, BTN_LEFT) => self.open_menu(self.sidebar_plus_menu(&layout)),
+            (SidebarHit::Repos, BTN_LEFT) => self.open_repos(),
             (SidebarHit::Header, BTN_LEFT) => {
                 if self.project.is_some() {
                     self.toggle_project_menu();
@@ -238,6 +244,13 @@ impl Gerdr {
                     tip
                 } else {
                     tip.key(&keys.join(" / "))
+                })
+            }
+            SidebarHit::Repos => {
+                let tip = Tooltip::new("Repositories", layout.repos);
+                Some(match self.keymap.help().key_for("repositories", 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
                 })
             }
             SidebarHit::Close(i) => {

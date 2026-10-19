@@ -537,6 +537,7 @@ pub fn project_menu_field(
 ) -> Option<FieldSpot> {
     let layout = project_menu_layout(view, size);
     let boxed = |area: Rect, line: &Line| FieldSpot {
+        size: FONT_SIZE,
         area,
         text: field_text(area, scale),
         line: line.clone(),
@@ -568,6 +569,7 @@ pub fn project_menu_field(
         });
     renamed.or_else(|| {
         Some(FieldSpot {
+            size: FONT_SIZE,
             area: layout.query,
             text: menu_query_text(layout.query, scale),
             line: view.query.clone(),
@@ -782,6 +784,7 @@ impl Painter {
             menu_query_text(rect, scale),
             query_band,
             focused,
+            FONT_SIZE,
             scale,
             p,
         );

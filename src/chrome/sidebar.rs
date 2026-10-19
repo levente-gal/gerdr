@@ -7,9 +7,10 @@
 //! right how many other worktrees its repository has; then a line per
 //! worktree that needs a look (a few at most). Under it, a
 //! compact card per agent: a header line and a detail line, the most
-//! pressing first. The header holds the project's name and one "+" button
-//! opening the menu of what to add. What moves (hover pills, the pulse on
-//! a blocked card, a name being renamed) comes in through `SidebarState`.
+//! pressing first. The header holds the project's name, a button opening
+//! the repositories panel and a "+" button opening the menu of what to
+//! add. What moves (hover pills, the pulse on a blocked card, a name being
+//! renamed) comes in through `SidebarState`.
 
 use super::{
     BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_GAP, CARD_HEADER, CARD_INDENT, CARD_LINE,
@@ -53,8 +54,10 @@ const COUNT_PILL_PAD: i32 = 4;
 const WORKTREE_LINES: usize = 3;
 const CHIP_DOT: i32 = 8;
 const CHIP_GAP: i32 = 4;
-/// The gap between the header's name pill and its "+" button.
+/// The gap between the header's name pill and its repositories button,
+/// and between that and the "+".
 const HEADER_GAP: i32 = 4;
+const HEADER_BUTTON_GAP: i32 = 2;
 /// A row in compact density: just the name line.
 const ROW_COMPACT: i32 = 28;
 /// Card padding in compact density: half the comfortable one.
@@ -483,6 +486,10 @@ pub struct SidebarState {
     /// The "+" button's hover alpha, and whether its menu is open.
     pub plus: u8,
     pub plus_open: bool,
+    /// The repositories button's hover alpha, and whether the panel is
+    /// open.
+    pub repos: u8,
+    pub repos_open: bool,
     /// The workspace being renamed, and the name typed so far.
     pub rename: Option<(usize, Line)>,
 }
@@ -553,6 +560,8 @@ pub struct SidebarLayout {
     /// The "+" button at the right of the header, opening the menu of what
     /// to add.
     pub plus: Rect,
+    /// The button left of the "+", opening the repositories panel.
+    pub repos: Rect,
     /// One per workspace.
     pub rows: Vec<RowLayout>,
     /// Per workspace, its agent cards as drawn (the most pressing first):
@@ -570,6 +579,8 @@ pub enum SidebarHit {
     Header,
     /// The "+" button.
     Plus,
+    /// The repositories button.
+    Repos,
     /// Workspace `i`: its row off any part below, its name, its status
     /// chip, its "×", the count of its other worktrees.
     Row(usize),
@@ -613,6 +624,9 @@ impl SidebarLayout {
         let inside = |r: Rect| r.to_f64().contains(pos);
         if inside(self.plus) {
             return Some(SidebarHit::Plus);
+        }
+        if inside(self.repos) {
+            return Some(SidebarHit::Repos);
         }
         if inside(self.header) {
             return Some(SidebarHit::Header);
@@ -665,10 +679,14 @@ pub fn sidebar_layout_at(
             .into(),
         (HEADER_BUTTON, HEADER_BUTTON).into(),
     );
+    let repos = Rectangle::new(
+        (plus.loc.x - HEADER_BUTTON_GAP - HEADER_BUTTON, plus.loc.y).into(),
+        plus.size,
+    );
     let header = Rectangle::new(
         (ROW_INSET, 5).into(),
         (
-            (plus.loc.x - HEADER_GAP - ROW_INSET).max(0),
+            (repos.loc.x - HEADER_GAP - ROW_INSET).max(0),
             BAR_HEIGHT - 10,
         )
             .into(),
@@ -744,6 +762,7 @@ pub fn sidebar_layout_at(
     SidebarLayout {
         header,
         plus,
+        repos,
         rows,
         cards: card_rects,
         blocks,
@@ -820,7 +839,14 @@ impl Painter {
                 );
             }
         }
-        self.plus_button(&mut c, layout.plus, state, scale, p);
+        let plus = (alpha(state.plus), state.plus_open);
+        self.header_button(&mut c, layout.plus, plus, scale, p, |x, y| {
+            new_tab(x, y, 0.9 * s)
+        });
+        let repos = (alpha(state.repos), state.repos_open);
+        self.header_button(&mut c, layout.repos, repos, scale, p, |x, y| {
+            git_branch(x, y, 1.05 * s)
+        });
 
         for (i, (row, ws)) in layout.rows.iter().zip(&view.workspaces).enumerate() {
             let is_active = Some(i) == view.active;
@@ -1123,19 +1149,19 @@ impl Painter {
         icon_sdf(c, chevron, scale, p.muted, |x, y| chevron_down(x, y, s));
     }
 
-    /// The header's "+" button: on a pill when hovered (fading in) or its
-    /// menu is open.
-    fn plus_button(
+    /// A header button showing `shape`: on a pill when hovered (`hover`,
+    /// fading in) or what it opens is `open`.
+    fn header_button(
         &self,
         c: &mut Canvas,
         rect: Rect,
-        state: &SidebarState,
+        (hover, open): (f32, bool),
         scale: f64,
         p: &Palette,
+        shape: impl Fn(f32, f32) -> f32,
     ) {
         let s = scale as f32;
-        let hover = alpha(state.plus);
-        let fill = if state.plus_open {
+        let fill = if open {
             Some(p.selected)
         } else if hover > 0.0 {
             Some(mix(p.panel, p.element, hover))
@@ -1146,12 +1172,12 @@ impl Painter {
             let (x, y, w, h) = rect_px(rect, scale);
             c.rounded(x, y, w, h, 6.0 * s, fill);
         }
-        let color = if state.plus_open || hover > 0.0 {
-            mix(p.muted, p.text, hover.max(state.plus_open as u8 as f32))
+        let color = if open || hover > 0.0 {
+            mix(p.muted, p.text, hover.max(open as u8 as f32))
         } else {
             p.muted
         };
-        icon_sdf(c, rect, scale, color, |x, y| new_tab(x, y, 0.9 * s));
+        icon_sdf(c, rect, scale, color, shape);
     }
 
     /// The status chip at the right of a row's name line: a dot and a word
@@ -1242,6 +1268,7 @@ impl Painter {
             (x + pad, x + w - pad),
             band(rect, scale),
             true,
+            FONT_SIZE,
             scale,
             p,
         );
@@ -1433,6 +1460,7 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
     let (x, _, w, _) = rect_px(area, scale);
     let pad = (RENAME_INSET as f32 * scale as f32).round();
     FieldSpot {
+        size: FONT_SIZE,
         area,
         text: (x + pad, x + w - pad),
         line: line.clone(),
@@ -1659,7 +1687,9 @@ mod tests {
             assert_eq!(layout.plus.size, (HEADER_BUTTON, HEADER_BUTTON).into());
             assert_eq!(layout.plus.loc.y, (BAR_HEIGHT - HEADER_BUTTON) / 2);
             assert_eq!(layout.header.loc.x, ROW_INSET);
-            assert!(layout.header.loc.x + layout.header.size.w < layout.plus.loc.x);
+            assert_eq!(layout.repos.size, layout.plus.size);
+            assert!(layout.repos.loc.x + layout.repos.size.w < layout.plus.loc.x);
+            assert!(layout.header.loc.x + layout.header.size.w < layout.repos.loc.x);
             assert_eq!(layout.header.size.h, BAR_HEIGHT - 10);
 
             let row0 = layout.rows[0];
@@ -1716,6 +1746,7 @@ mod tests {
                 .into()
         };
         assert_eq!(layout.hit(at(layout.plus)), Some(SidebarHit::Plus));
+        assert_eq!(layout.hit(at(layout.repos)), Some(SidebarHit::Repos));
         assert_eq!(layout.hit(at(layout.header)), Some(SidebarHit::Header));
         let row = layout.rows[0];
         assert_eq!(layout.hit(at(row.name)), Some(SidebarHit::Name(0)));
