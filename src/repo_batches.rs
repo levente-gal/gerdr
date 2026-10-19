@@ -105,6 +105,11 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("starting…");
             git_ops::start_from(dir, name, &base)
         }
+        // A checked repository with nothing to commit is only pushed.
+        BatchKind::Commit { push: true, .. } if task.job.files.is_empty() => {
+            step("pushing…");
+            git_ops::push(dir, task.remote.as_deref(), false)
+        }
         BatchKind::Commit { msg, push } => {
             step("committing…");
             let log = git_ops::commit_paths(dir, &task.job.files, msg)?;
@@ -719,6 +724,10 @@ impl Gerdr {
         self.repos.next_id += 1;
         let feature = self.repos_feature();
         let previous = self.repos.batch.take();
+        self.repos.undoing = match kind {
+            BatchKind::Undo => previous.as_ref().map(|b| b.id),
+            _ => None,
+        };
         let mut tasks = VecDeque::new();
         let mut runs = Vec::new();
         for job in jobs {
@@ -901,15 +910,27 @@ impl Gerdr {
             .map(|r| r.root.clone())
             .collect();
         let (summary, tone) = batch.summary();
-        let kind = batch.kind.clone();
+        let (id, kind) = (batch.id, batch.kind.clone());
         match &kind {
+            // A branch made with no feature yet is the feature.
             BatchKind::Branch(name) | BatchKind::StartFeature(name) if done => {
-                if let Some(project) = self.project.clone() {
-                    self.projects.features.insert(project, name.clone());
-                    self.projects.save();
+                let previous = self.repos_feature();
+                if matches!(kind, BatchKind::StartFeature(_)) || previous.is_none() {
+                    self.repos.feature_set = Some((id, previous));
+                    self.set_feature(Some(name.clone()));
                 }
                 if let Some(panel) = self.repos.panel.as_mut() {
                     panel.clear_field();
+                }
+            }
+            BatchKind::Undo if done => {
+                let undone = self.repos.undoing.take();
+                if let Some((set_by, previous)) = self.repos.feature_set.take() {
+                    if Some(set_by) == undone {
+                        self.set_feature(previous);
+                    } else {
+                        self.repos.feature_set = Some((set_by, previous));
+                    }
                 }
             }
             BatchKind::Commit { .. } if done => {
@@ -927,6 +948,18 @@ impl Gerdr {
         if self.repos.panel.is_none() {
             self.toast(summary, level(tone));
         }
+    }
+
+    /// Make `feature` the shown project's feature, or forget it.
+    fn set_feature(&mut self, feature: Option<String>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        match feature {
+            Some(name) => self.projects.features.insert(project, name),
+            None => self.projects.features.remove(&project),
+        };
+        self.projects.save();
     }
 
     /// Open `paths` of the repository at `root` in its workspace's Zed; in

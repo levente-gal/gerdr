@@ -64,6 +64,11 @@ pub struct Repos {
     pub(crate) reading: Option<DetailKey>,
     /// The check under way, by id: an older one's answer is stale.
     pub(crate) checking: Option<u64>,
+    /// The batch that last set the project's feature, by id, and the
+    /// feature before it: an undo of that batch puts it back.
+    pub(crate) feature_set: Option<(u64, Option<String>)>,
+    /// The batch an undo under way undoes, by id.
+    pub(crate) undoing: Option<u64>,
 }
 
 impl Repos {
@@ -1126,6 +1131,20 @@ impl Panel {
                     return Err(Why::Field("Type a commit message first".into()));
                 }
                 let push = button == B::CommitPush;
+                // The other checked repositories have nothing to commit,
+                // but their branches go up with the rest.
+                if push {
+                    for k in self.picked(items) {
+                        let root = &items[k].root;
+                        if !jobs.iter().any(|j| &j.root == root) {
+                            let root = root.clone();
+                            jobs.push(Job {
+                                root,
+                                files: Vec::new(),
+                            });
+                        }
+                    }
+                }
                 let msg = msg.to_owned();
                 Ok(Outcome::Batch {
                     kind: BatchKind::Commit { msg, push },
@@ -2510,22 +2529,26 @@ mod tests {
         let mut panel = Panel::new(&items);
         select_file(&mut panel, "gerdr", "src/git.rs");
         press(&mut panel, none(), Keysym::space, &ctx);
-        // herdr, clean, has nothing to commit: left out.
+        // herdr, clean, has nothing to commit: left out, but pushed.
         select(&mut panel, "herdr");
         press(&mut panel, none(), Keysym::space, &ctx);
         select(&mut panel, "zed");
         press(&mut panel, none(), Keysym::space, &ctx);
         panel.field.set("Fix it");
         let commit = |push| {
+            let mut jobs = vec![
+                job("gerdr", &["src/git.rs"]),
+                job("zed", &["new.rs", "old.rs"]),
+            ];
+            if push {
+                jobs.push(job("herdr", &[]));
+            }
             Some(Outcome::Batch {
                 kind: BatchKind::Commit {
                     msg: "Fix it".into(),
                     push,
                 },
-                jobs: vec![
-                    job("gerdr", &["src/git.rs"]),
-                    job("zed", &["new.rs", "old.rs"]),
-                ],
+                jobs,
             })
         };
         assert_eq!(

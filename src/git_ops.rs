@@ -1137,15 +1137,19 @@ pub fn diff(dir: &Path, change: &Change) -> String {
 }
 
 /// The commits the upstream doesn't have yet, one line each (`log
-/// --oneline @{u}..`); without an upstream, the last few.
+/// --oneline @{u}..`), under a line saying so; without an upstream, or
+/// with nothing to push, the last few.
 pub fn log_ahead(dir: &Path) -> String {
     let base = ["log", "--oneline", "--decorate=short", "--no-color"];
-    let out = if query(dir, &["rev-parse", "-q", "--verify", "@{upstream}"]).is_some() {
-        query(dir, &[&base[..], &["@{upstream}.."]].concat())
-    } else {
-        query(dir, &[&base[..], &["-n", LOG_LAST]].concat())
-    };
-    out.unwrap_or_default()
+    let last = || query(dir, &[&base[..], &["-n", LOG_LAST]].concat()).unwrap_or_default();
+    if query(dir, &["rev-parse", "-q", "--verify", "@{upstream}"]).is_none() {
+        return format!("No upstream yet. The last commits:\n{}", last());
+    }
+    let ahead = query(dir, &[&base[..], &["@{upstream}.."]].concat()).unwrap_or_default();
+    if ahead.trim().is_empty() {
+        return format!("Nothing to push. The last commits:\n{}", last());
+    }
+    format!("To push:\n{ahead}")
 }
 
 #[cfg(test)]
@@ -2045,14 +2049,18 @@ mod tests {
     fn logs_ahead() {
         let fx = Fx::new();
         let dir = &fx.repo;
-        assert_eq!(log_ahead(dir), "");
+        let log = log_ahead(dir);
+        assert!(log.starts_with("Nothing to push."), "{log}");
+        assert_eq!(log.lines().count(), 2);
         commit(dir, "b", "second");
         commit(dir, "c", "third");
         let log = log_ahead(dir);
-        assert_eq!(log.lines().count(), 2);
-        assert!(log.lines().next().unwrap().ends_with("third"), "{log}");
+        assert_eq!(log.lines().count(), 3);
+        assert!(log.lines().nth(1).unwrap().ends_with("third"), "{log}");
         switch_or_create(dir, "lonely").unwrap();
-        assert_eq!(log_ahead(dir).lines().count(), 3);
+        let log = log_ahead(dir);
+        assert!(log.starts_with("No upstream yet."), "{log}");
+        assert_eq!(log.lines().count(), 4);
     }
 
     #[test]

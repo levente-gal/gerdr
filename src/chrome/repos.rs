@@ -427,8 +427,13 @@ fn text_extent(text: &str, size: f32, per_char: f64) -> i32 {
     }
 }
 
-/// How wide a footer action is: its key on a keycap, then its label.
+/// How wide a footer action is: its key on a keycap, then its label; one
+/// without a key, its label on a button.
 fn hint_width(hint: &Hint) -> i32 {
+    if hint.key.is_empty() {
+        let label = text_extent(hint.button.label(), SMALL_FONT_SIZE, SMALL_CHAR);
+        return 2 * HINT_PAD + 2 * CAP_PADDING + label;
+    }
     2 * HINT_PAD
         + 2 * CAP_PADDING
         + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR)
@@ -1557,6 +1562,32 @@ impl Painter {
             (p.border, p.muted, p.text)
         };
         let right = x + w;
+        if hint.key.is_empty() {
+            // No key: the label on a button of its own.
+            let (bx, bw) = (cap_x, w - 2.0 * (HINT_PAD as f32 * s).round());
+            let cr = CAP_RADIUS * s;
+            c.rounded(bx, cap_y, bw, cap_h, cr, edge);
+            let inner = if disabled { p.elevated } else { p.element };
+            c.rounded(
+                bx + b,
+                cap_y + b,
+                bw - 2.0 * b,
+                cap_h - 2.0 * b,
+                cr - b,
+                inner,
+            );
+            self.mixed_text(
+                c,
+                hint.button.label(),
+                SMALL_FONT_SIZE,
+                bx + pad,
+                right,
+                hint_band,
+                scale,
+                label_color,
+            );
+            return;
+        }
         if cap_x + cap_w <= right {
             let cr = CAP_RADIUS * s;
             c.rounded(cap_x, cap_y, cap_w, cap_h, cr, edge);
