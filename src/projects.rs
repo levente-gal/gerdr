@@ -4,7 +4,8 @@
 //! folders by itself; what ran in the panes, the venvs and the apps gerdr
 //! launched outside herdr are remembered here, a file per project in
 //! `~/.local/share/gerdr/projects/<id>.json`; the rest (the project shown
-//! last, the quit choice) in `~/.local/share/gerdr/state.json`.
+//! last, the quit choice, which of Cursor's idle chats stay shown) in
+//! `~/.local/share/gerdr/state.json`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -16,7 +17,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{desktop::shell_quote, herdr, home_dir, layout::SavedNode};
+use crate::{cursor_agents::History, desktop::shell_quote, herdr, home_dir, layout::SavedNode};
 
 /// The store's format.
 const VERSION: u32 = 1;
@@ -40,6 +41,9 @@ pub struct Store {
     pub quit_choice: Option<QuitChoice>,
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Which of Cursor's idle chats stay shown and which were deleted.
+    #[serde(default, skip_serializing_if = "History::is_empty")]
+    pub cursor_history: History,
     #[serde(skip)]
     books: Books,
 }
@@ -52,6 +56,8 @@ struct State {
     last_active: Option<String>,
     #[serde(default)]
     quit_choice: Option<QuitChoice>,
+    #[serde(default, skip_serializing_if = "History::is_empty")]
+    cursor_history: History,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -323,6 +329,7 @@ impl Store {
         self.version = state.version;
         self.last_active = state.last_active;
         self.quit_choice = state.quit_choice;
+        self.cursor_history = state.cursor_history;
     }
 
     fn state(&self) -> State {
@@ -330,6 +337,7 @@ impl Store {
             version: self.version,
             last_active: self.last_active.clone(),
             quit_choice: self.quit_choice,
+            cursor_history: self.cursor_history.clone(),
         }
     }
 
@@ -1386,6 +1394,7 @@ mod tests {
             version: VERSION,
             last_active: Some("api".into()),
             quit_choice: Some(QuitChoice::Keep),
+            cursor_history: History::default(),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

@@ -132,6 +132,7 @@ impl Gerdr {
                         CardState {
                             hover: quantize(hover.alpha(SidebarHit::Card(i, k), now)),
                             open,
+                            close: hit == Some(SidebarHit::CardClose(i, k)),
                         }
                     })
                     .collect()
@@ -162,7 +163,8 @@ impl Gerdr {
 
     /// A press at `(x, y)` in the sidebar. Left click selects a workspace
     /// (a second one right after renames it: see `input`), "×" or middle
-    /// click closes it; a left click on an agent card shows its pane. A
+    /// click closes it; a left click on an agent card shows its pane, on
+    /// a history card's "×" deletes it from gerdr. A
     /// row held with the left button can be dragged to another place. The
     /// "+" opens the menu of what to add, the button left of it the
     /// repositories panel; the project's name left of them opens the
@@ -188,6 +190,12 @@ impl Gerdr {
                 if let Some(card) = self.agent_views().get(i).and_then(|c| c.get(k)) {
                     let key = card.key.clone();
                     self.focus_agent(&key);
+                }
+            }
+            (SidebarHit::CardClose(i, k), BTN_LEFT) => {
+                let card = self.agent_views().get(i).and_then(|c| c.get(k)).cloned();
+                if let Some(AgentKey::Cursor(chat)) = card.map(|c| c.key) {
+                    self.delete_cursor_chat(&chat);
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
@@ -282,6 +290,15 @@ impl Gerdr {
                 let rect = layout.cards[i].iter().find(|(c, _)| *c == k)?.1;
                 Some(Tooltip::new(&card.label(), rect).fields(card.tooltip_fields()))
             }
+            SidebarHit::CardClose(i, k) => {
+                let rect = layout.card_closes[i].iter().find(|(c, _)| *c == k)?.1;
+                Some(Tooltip::new("Delete from gerdr", rect))
+            }
+            SidebarHit::More(i) => {
+                let names = &workspaces.get(i)?.0.more_agents;
+                let text = format!("Also kept: {}", names.join(" · "));
+                Some(Tooltip::new(&text, layout.more[i]?))
+            }
             SidebarHit::Worktrees(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
                 let root = ws.0.git.as_ref().and_then(|g| g.root.as_deref());
@@ -317,13 +334,20 @@ impl Gerdr {
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
-            SidebarHit::Card(i, k) => {
+            SidebarHit::Card(i, k) | SidebarHit::CardClose(i, k) => {
                 let card = self.agent_views().get(i)?.get(k)?.clone();
-                let mut items = vec![MenuItem::new("Focus", MenuAction::FocusAgent(card.key))];
+                let mut items = vec![MenuItem::new(
+                    "Focus",
+                    MenuAction::FocusAgent(card.key.clone()),
+                )];
                 items.push(match card.dir {
                     Some(cwd) => MenuItem::new("Copy path", MenuAction::CopyPath(cwd)),
                     None => MenuItem::new("Copy path", MenuAction::NewTerminal).enabled(false),
                 });
+                if let (true, AgentKey::Cursor(chat)) = (card.deletable, card.key) {
+                    let delete = MenuAction::DeleteCursorChat(chat);
+                    items.push(MenuItem::new("Delete from gerdr", delete));
+                }
                 Some(MenuSpec { anchor: at, items })
             }
             hit => {
