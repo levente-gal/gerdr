@@ -187,14 +187,24 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("pulling…");
             git_ops::pull(dir, *how)
         }
-        BatchKind::Integrate(how) => {
-            let base = need(&task.base, "no default branch")?;
+        BatchKind::Integrate { how, from } => {
+            if from.is_none() {
+                need(&task.base, "no default branch")?;
+            }
             let log = match task.remote {
                 Some(_) => {
                     step("fetching…");
                     git_ops::fetch_all(dir)?
                 }
                 None => Vec::new(),
+            };
+            // A branch picked is found after the fetch, which may bring it.
+            let base = match from {
+                None => task.base.clone(),
+                Some(names) => git_ops::source_of(dir, names, task.remote.as_deref()),
+            };
+            let Some(base) = base else {
+                return chain(log, Err(blocked("no such branch here")));
             };
             step(match how {
                 Integrate::Merge => "merging…",
@@ -247,14 +257,20 @@ fn verdict(kind: &BatchKind, root: &Path, status: &GitStatus) -> Verdict {
                 None => Verdict::Blocked("no such branch here".into()),
             }
         }
-        BatchKind::Integrate(_) => {
-            let Some(base) = base_of(status) else {
-                return Verdict::Blocked("no default branch".into());
+        BatchKind::Integrate { how, from } => {
+            let base = match from {
+                None => base_of(status).ok_or("no default branch"),
+                Some(names) => git_ops::source_of(root, names, status.remote.as_deref())
+                    .ok_or("no such branch here"),
+            };
+            let base = match base {
+                Ok(base) => base,
+                Err(why) => return Verdict::Blocked(why.into()),
             };
             if status.head.is_none() {
                 return Verdict::Blocked("no commits yet".into());
             }
-            if *kind == BatchKind::Integrate(Integrate::Rebase) && tracked_changes(status) {
+            if *how == Integrate::Rebase && tracked_changes(status) {
                 return Verdict::Blocked(UNCOMMITTED.into());
             }
             git_ops::predict_merge(root, "HEAD", &base)
@@ -335,7 +351,7 @@ fn tracked_changes(status: &GitStatus) -> bool {
 /// Whether the check before `kind` fetches first, to judge against what
 /// the batch will bring in.
 fn fetches_first(kind: &BatchKind) -> bool {
-    matches!(kind, BatchKind::Integrate(_) | BatchKind::Pull(_))
+    matches!(kind, BatchKind::Integrate { .. } | BatchKind::Pull(_))
 }
 
 /// Of `roots` with their shared git folders, one per repository.
@@ -501,6 +517,7 @@ impl Gerdr {
             batch,
             items,
             same_branches,
+            top_branches,
             ..
         } = &mut self.repos;
         if let Some(panel) = panel.as_mut() {
@@ -510,6 +527,7 @@ impl Gerdr {
                 page,
                 now: SystemTime::now(),
                 same: same_branches,
+                top: top_branches,
             };
             panel.refresh(&ctx);
         }
@@ -538,6 +556,7 @@ impl Gerdr {
             page,
             now: SystemTime::now(),
             same: &self.repos.same_branches,
+            top: &self.repos.top_branches,
         };
         let Some(key) = panel.detail_wanted(&ctx) else {
             return;
@@ -582,6 +601,7 @@ impl Gerdr {
             batch,
             items,
             same_branches,
+            top_branches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -590,6 +610,7 @@ impl Gerdr {
             page,
             now: SystemTime::now(),
             same: same_branches,
+            top: top_branches,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
@@ -611,6 +632,7 @@ impl Gerdr {
             batch,
             items,
             same_branches,
+            top_branches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -619,6 +641,7 @@ impl Gerdr {
             page,
             now: SystemTime::now(),
             same: same_branches,
+            top: top_branches,
         };
         let outcome = panel.as_mut().and_then(|p| p.click(hit, &ctx));
         self.repos_detail();
@@ -693,6 +716,7 @@ impl Gerdr {
             batch,
             items,
             same_branches,
+            top_branches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -701,6 +725,7 @@ impl Gerdr {
             page,
             now: SystemTime::now(),
             same: same_branches,
+            top: top_branches,
         };
         match panel.as_mut() {
             Some(panel) if over_menu => panel.scroll_branches(rows, &ctx),
@@ -718,6 +743,7 @@ impl Gerdr {
             page: self.repos_page(),
             now: SystemTime::now(),
             same: &self.repos.same_branches,
+            top: &self.repos.top_branches,
         };
         let title = self
             .project

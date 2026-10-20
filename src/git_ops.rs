@@ -931,6 +931,32 @@ pub fn branch_named(dir: &Path, names: &[String], remote: Option<&str>) -> Optio
     local.or_else(theirs).cloned()
 }
 
+/// What a merge or rebase from the branch `names` (one branch, as `main`
+/// and `master`) brings in at `dir`: the first of them it has as a branch,
+/// else the first `remote` has (`origin/dev`). With both, the remote's when
+/// it is ahead (fetched, not pulled yet), else the local one, which may
+/// have commits not pushed.
+pub fn source_of(dir: &Path, names: &[String], remote: Option<&str>) -> Option<String> {
+    let local = names
+        .iter()
+        .find(|name| has_ref(dir, &format!("refs/heads/{name}")));
+    let theirs = remote.and_then(|remote| {
+        names
+            .iter()
+            .map(|name| format!("{remote}/{name}"))
+            .find(|t| has_ref(dir, &format!("refs/remotes/{t}")))
+    });
+    match (local, theirs) {
+        (Some(local), Some(theirs)) => {
+            let within =
+                |a: &str, b: &str| query(dir, &["merge-base", "--is-ancestor", a, b]).is_some();
+            let behind = within(local, &theirs) && !within(&theirs, local);
+            Some(if behind { theirs } else { local.clone() })
+        }
+        (local, theirs) => local.cloned().or(theirs),
+    }
+}
+
 /// Whether ref `name` (`refs/heads/x`, `refs/remotes/origin/x`) exists;
 /// any other name, whether it names a commit.
 pub fn has_ref(dir: &Path, name: &str) -> bool {
@@ -1385,6 +1411,32 @@ mod tests {
         git(&fx.repo, &["branch", "-q", "-m", "main", "trunk"]);
         assert_eq!(found(&["master", "main"]).as_deref(), Some("master"));
         assert_eq!(branch_named(&fx.repo, &names(&["master"]), None), None);
+    }
+
+    #[test]
+    fn a_merge_from_takes_the_newer_of_a_branch_and_its_remote() {
+        let fx = Fx::new();
+        let dir = &fx.repo;
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let source = |n: &[&str]| source_of(dir, &names(n), Some("origin"));
+        // The same commit: the local one.
+        assert_eq!(source(&["master", "main"]).as_deref(), Some("main"));
+        assert_eq!(source(&["dev"]), None);
+        // Only on the remote.
+        git(dir, &["push", "-q", "origin", "main:dev"]);
+        git(dir, &["fetch", "-q"]);
+        assert_eq!(source(&["dev"]).as_deref(), Some("origin/dev"));
+        assert_eq!(source_of(dir, &names(&["dev"]), None), None);
+        // Fetched, not pulled: the remote's.
+        let other = fx.clone("other");
+        commit(&other, "o", "theirs");
+        git(&other, &["push", "-q"]);
+        git(dir, &["fetch", "-q"]);
+        assert_eq!(source(&["main"]).as_deref(), Some("origin/main"));
+        // Not pushed yet: the local one.
+        git(dir, &["merge", "-q", "--ff-only", "origin/main"]);
+        commit(dir, "m", "mine");
+        assert_eq!(source(&["main"]).as_deref(), Some("main"));
     }
 
     #[test]

@@ -60,6 +60,9 @@ pub struct GitStatus {
     /// The remote's branches, by name without the remote (`feat/x`), in
     /// git's order, its `HEAD` left out.
     pub remote_branches: Vec<String>,
+    /// When each branch was last committed to, by name: the newer of its
+    /// local and remote tips' commit times, in seconds since the epoch.
+    pub branch_times: HashMap<String, i64>,
 }
 
 /// A file `git status` lists.
@@ -196,7 +199,11 @@ pub fn status(dir: &Path) -> Option<GitStatus> {
     let remotes = git(dir, &["remote"]).unwrap_or_default();
     let remotes: Vec<&str> = remotes.lines().filter(|r| !r.is_empty()).collect();
     status.remote = pick_remote(&remotes, status.upstream.as_deref());
-    (status.local_branches, status.remote_branches) = branches(dir, status.remote.as_deref());
+    (
+        status.local_branches,
+        status.remote_branches,
+        status.branch_times,
+    ) = branches(dir, status.remote.as_deref());
     status.default_branch = default_branch(
         dir,
         status.common_dir.as_deref(),
@@ -282,10 +289,14 @@ fn pick_remote(remotes: &[&str], upstream: Option<&str>) -> Option<String> {
 }
 
 /// The local branches of the repository `dir` is in, and `remote`'s, by
-/// name.
-fn branches(dir: &Path, remote: Option<&str>) -> (Vec<String>, Vec<String>) {
+/// name, and when each was last committed to.
+fn branches(dir: &Path, remote: Option<&str>) -> (Vec<String>, Vec<String>, HashMap<String, i64>) {
     let theirs = remote.map(|remote| format!("refs/remotes/{remote}/"));
-    let mut args = vec!["for-each-ref", "--format=%(refname)", "refs/heads"];
+    let mut args = vec![
+        "for-each-ref",
+        "--format=%(refname) %(committerdate:unix)",
+        "refs/heads",
+    ];
     // The pattern matches whole folders: `origin` isn't `origin-x`.
     if let Some(theirs) = &theirs {
         args.push(theirs.trim_end_matches('/'));
@@ -293,16 +304,27 @@ fn branches(dir: &Path, remote: Option<&str>) -> (Vec<String>, Vec<String>) {
     let out = git(dir, &args).unwrap_or_default();
     let mut local = Vec::new();
     let mut remote = Vec::new();
+    let mut times = HashMap::new();
     for line in out.lines() {
-        if let Some(name) = line.strip_prefix("refs/heads/") {
+        // Git allows no spaces in a ref's name.
+        let (line, time) = line.split_once(' ').unwrap_or((line, ""));
+        let name = if let Some(name) = line.strip_prefix("refs/heads/") {
             local.push(name.to_owned());
+            name
         } else if let Some(name) = theirs.as_deref().and_then(|t| line.strip_prefix(t))
             && name != "HEAD"
         {
             remote.push(name.to_owned());
+            name
+        } else {
+            continue;
+        };
+        if let Ok(time) = time.parse::<i64>() {
+            let newest = times.entry(name.to_owned()).or_insert(time);
+            *newest = time.max(*newest);
         }
     }
-    (local, remote)
+    (local, remote, times)
 }
 
 /// The default branch of the repository `dir` is in, whose shared git
@@ -1212,6 +1234,11 @@ mod tests {
         assert_eq!(both.remote.as_deref(), Some("origin"));
         assert_eq!(both.local_branches, ["main", "work"]);
         assert_eq!(both.remote_branches, ["feat/x", "main"]);
+        // Each has the time of its last commit.
+        let mut timed: Vec<&str> = both.branch_times.keys().map(String::as_str).collect();
+        timed.sort_unstable();
+        assert_eq!(timed, ["feat/x", "main", "work"]);
+        assert!(both.branch_times.values().all(|&t| t > 0));
     }
 
     #[test]

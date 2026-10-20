@@ -5219,6 +5219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         worktrees: worktrees::Worktrees::default(),
         repos: repos::Repos {
             same_branches: git_config.same_branches,
+            top_branches: git_config.top_branches,
             ..Default::default()
         },
         web_pending: false,

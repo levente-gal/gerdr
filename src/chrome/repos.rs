@@ -360,6 +360,9 @@ pub enum ReposButton {
     Pull,
     Merge,
     Rebase,
+    /// Merge a branch picked in the branch menu, or rebase onto it.
+    MergeFrom,
+    RebaseFrom,
     OpenInZed,
     MarkResolved,
     Continue,
@@ -391,6 +394,8 @@ impl ReposButton {
             ReposButton::Pull => "Pull",
             ReposButton::Merge => "Merge base",
             ReposButton::Rebase => "Rebase on base",
+            ReposButton::MergeFrom => "Merge from…",
+            ReposButton::RebaseFrom => "Rebase onto…",
             ReposButton::OpenInZed => "Open in Zed",
             ReposButton::MarkResolved => "Resolved",
             ReposButton::Continue => "Continue",

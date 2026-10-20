@@ -8,14 +8,17 @@
 //! in a terminal; the whole batch can be undone while nothing moved since.
 //! The header's branch picker switches them all to a branch they all have,
 //! names that are one branch (`main`, `master`) taken as one; typing in
-//! its menu finds one.
+//! its menu finds one. The same menu picks a branch to merge in, or to
+//! rebase onto. Its branches come default branch first, then the config's
+//! `top_branches`, then the newest.
 //!
 //! Keys: Tab moves between the tree and the field. In the tree Up/Down
 //! select, Space checks, Left/Right fold, and typing goes to the field.
 //! Ctrl+N branches, Ctrl+Enter commits (Ctrl+Shift+Enter then pushes),
 //! Ctrl+P pushes (Ctrl+Shift+P force pushes, twice), Ctrl+F fetches,
 //! Ctrl+L pulls, Ctrl+M merges the default branch in (Ctrl+Shift+M rebases
-//! on it), Ctrl+E opens the conflicts in Zed, Ctrl+R marks a file
+//! on it), Alt+M merges a branch picked in (Alt+Shift+M rebases on it),
+//! Ctrl+E opens the conflicts in Zed, Ctrl+R marks a file
 //! resolved, Ctrl+G continues (Ctrl+Shift+Delete aborts, twice), Alt+Z
 //! undoes the last batch (twice), Alt+R retries what failed, Ctrl+D and
 //! Ctrl+T show the diff and the log, Ctrl+S opens the branch picker; Esc
@@ -23,6 +26,7 @@
 //! the arrow down pulls it, and on its stash count lists its stashes.
 
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
@@ -68,6 +72,8 @@ pub struct Repos {
     /// Groups of branch names that are one branch (`main`, `master`), from
     /// the config.
     pub(crate) same_branches: Vec<Vec<String>>,
+    /// Branches the branch lists show first, after the default branch.
+    pub(crate) top_branches: Vec<String>,
 }
 
 impl Repos {
@@ -116,6 +122,9 @@ pub struct Ctx<'a> {
     pub now: SystemTime,
     /// Groups of branch names that are one branch (`main`, `master`).
     pub same: &'a [Vec<String>],
+    /// Branches the branch lists show first, in this order, after the
+    /// default branch.
+    pub top: &'a [String],
 }
 
 /// Where the keyboard goes.
@@ -188,6 +197,17 @@ pub struct BranchMenu {
     pub query: TextField,
     /// The branch a second Ctrl+D or click deletes, by `branch_key`.
     pub armed: Option<String>,
+    pub action: MenuAction,
+}
+
+/// What picking a branch in the branch menu does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuAction {
+    /// Switch to it.
+    #[default]
+    Switch,
+    /// Merge it into the branch checked out, or rebase that onto it.
+    Integrate(Integrate),
 }
 
 /// A branch the picker offers: its names (more than one for a group of
@@ -300,8 +320,12 @@ pub enum BatchKind {
     },
     Fetch,
     Pull(Pull),
-    /// Bring the default branch in.
-    Integrate(Integrate),
+    /// Bring the branch `from` in (one branch, as `main` and `master`),
+    /// else the default branch.
+    Integrate {
+        how: Integrate,
+        from: Option<Vec<String>>,
+    },
     MarkResolved,
     /// Carry on with the operation stopped on conflicts.
     Continue,
@@ -324,8 +348,15 @@ impl BatchKind {
             BatchKind::Fetch => "Fetch",
             BatchKind::Pull(Pull::Rebase) => "Pull (rebase)",
             BatchKind::Pull(_) => "Pull",
-            BatchKind::Integrate(Integrate::Merge) => "Merge base",
-            BatchKind::Integrate(Integrate::Rebase) => "Rebase on base",
+            BatchKind::Integrate { how, from } => {
+                let from = from.as_ref().map(|names| names.join(" / "));
+                return match (how, from) {
+                    (Integrate::Merge, None) => "Merge base".into(),
+                    (Integrate::Rebase, None) => "Rebase on base".into(),
+                    (Integrate::Merge, Some(from)) => format!("Merge {from}"),
+                    (Integrate::Rebase, Some(from)) => format!("Rebase onto {from}"),
+                };
+            }
             BatchKind::MarkResolved => "Mark resolved",
             BatchKind::Continue => "Continue",
             BatchKind::Abort => "Abort",
@@ -348,7 +379,7 @@ impl BatchKind {
                 | BatchKind::Switch(_)
                 | BatchKind::DeleteBranch { .. }
                 | BatchKind::Pull(Pull::Rebase | Pull::Merge)
-                | BatchKind::Integrate(_)
+                | BatchKind::Integrate { .. }
         )
     }
 
@@ -360,7 +391,7 @@ impl BatchKind {
                 | BatchKind::Switch(_)
                 | BatchKind::Commit { push: false, .. }
                 | BatchKind::Pull(_)
-                | BatchKind::Integrate(_)
+                | BatchKind::Integrate { .. }
         )
     }
 }
@@ -607,6 +638,8 @@ fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
         return match sym {
             Keysym::z | Keysym::Z => Some(B::Undo),
             Keysym::r | Keysym::R => Some(B::RetryFailed),
+            Keysym::m | Keysym::M if shift => Some(B::RebaseFrom),
+            Keysym::m | Keysym::M => Some(B::MergeFrom),
             _ => None,
         };
     }
@@ -652,6 +685,8 @@ fn key_name(button: ReposButton) -> &'static str {
         B::Pull => "Ctrl+L",
         B::Merge => "Ctrl+M",
         B::Rebase => "Ctrl+Shift+M",
+        B::MergeFrom => "Alt+M",
+        B::RebaseFrom => "Alt+Shift+M",
         B::OpenInZed => "Ctrl+E",
         B::MarkResolved => "Ctrl+R",
         B::Continue => "Ctrl+G",
@@ -661,6 +696,16 @@ fn key_name(button: ReposButton) -> &'static str {
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel => "Esc",
         B::RunInTerminal | B::OpenWorkspace => "",
+    }
+}
+
+/// How `button` brings in a branch picked in the branch menu, if it opens
+/// that menu.
+fn menu_integrate(button: ReposButton) -> Option<Integrate> {
+    match button {
+        ReposButton::MergeFrom => Some(Integrate::Merge),
+        ReposButton::RebaseFrom => Some(Integrate::Rebase),
+        _ => None,
     }
 }
 
@@ -1051,24 +1096,39 @@ impl Panel {
     /// the one checked out (`Merge main into feat/x`, `Rebase feat/x onto
     /// main`); see `one_name` for several repositories.
     fn button_label(&self, button: ReposButton, ctx: &Ctx) -> String {
-        if !matches!(button, ReposButton::Merge | ReposButton::Rebase) {
+        use ReposButton as B;
+        if !matches!(button, B::Merge | B::Rebase | B::MergeFrom | B::RebaseFrom) {
             return button.label().into();
         }
-        let targets = self.targets(ctx.items);
-        let name = |of: fn(&GitStatus) -> Option<&str>| {
-            let names = targets.iter().map(|&k| of(&ctx.items[k].status));
-            one_name(names, ctx.same)
-        };
-        let base = name(|s| s.default_branch.as_deref()).unwrap_or_else(|| "base".into());
-        let current = name(|s| s.branch.as_deref()).unwrap_or_else(|| "current branch".into());
+        let base = self.one_name(ctx, |s| s.default_branch.as_deref());
+        let base = base.unwrap_or_else(|| "base".into());
+        let current = self.current_name(ctx);
         match button {
-            ReposButton::Merge => format!("Merge {base} into {current}"),
-            _ => format!("Rebase {current} onto {base}"),
+            B::Merge => format!("Merge {base} into {current}"),
+            B::Rebase => format!("Rebase {current} onto {base}"),
+            B::MergeFrom => format!("Merge into {current}…"),
+            _ => format!("Rebase {current} onto…"),
         }
     }
 
+    /// The one branch `of` names in each repository acted on: see
+    /// `one_name`.
+    fn one_name(&self, ctx: &Ctx, of: fn(&GitStatus) -> Option<&str>) -> Option<String> {
+        let targets = self.targets(ctx.items);
+        let names = targets.iter().map(|&k| of(&ctx.items[k].status));
+        one_name(names, ctx.same)
+    }
+
+    /// The branch checked out in the repositories acted on, as a merge or
+    /// rebase names it: `feat/x`, else `current branch`.
+    fn current_name(&self, ctx: &Ctx) -> String {
+        let current = self.one_name(ctx, |s| s.branch.as_deref());
+        current.unwrap_or_else(|| "current branch".into())
+    }
+
     /// The branches every repository acted on has, local or on its remote:
-    /// their default branch first, then by name.
+    /// their default branch first, then those of `Ctx::top` in its order,
+    /// then the last committed to first, then by name.
     fn branches(&self, ctx: &Ctx) -> Vec<Branch> {
         let items = ctx.items;
         let targets = self.targets(items);
@@ -1091,7 +1151,10 @@ impl Panel {
             .filter_map(|&k| items[k].status.default_branch.as_deref())
             .map(|b| branch_key(b, ctx.same))
             .collect();
-        let mut branches: Vec<(bool, Branch)> = common
+        /// Where a branch goes: its rank (default, top, the rest), then
+        /// the newest first.
+        type Order = (usize, Reverse<Option<i64>>);
+        let mut branches: Vec<(Order, Branch)> = common
             .into_iter()
             .map(|(key, names)| {
                 let used: HashSet<&str> = targets
@@ -1102,17 +1165,37 @@ impl Panel {
                     [one] => one.to_owned(),
                     _ => key.clone(),
                 };
-                (!defaults.contains(&key), Branch { names, label })
+                let rank = if defaults.contains(&key) {
+                    0
+                } else {
+                    let top = ctx.top.iter().position(|t| names.contains(t));
+                    top.map_or(ctx.top.len() + 1, |k| k + 1)
+                };
+                let time = targets
+                    .iter()
+                    .flat_map(|&k| {
+                        let times = &items[k].status.branch_times;
+                        names.iter().filter_map(|n| times.get(n).copied())
+                    })
+                    .max();
+                ((rank, Reverse(time)), Branch { names, label })
             })
             .collect();
-        branches.sort_by_key(|(later, _)| *later);
+        // Stable: those alike stay by name.
+        branches.sort_by_key(|(order, _)| *order);
         branches.into_iter().map(|(_, b)| b).collect()
     }
 
     /// The branches the menu shows: those with every word typed in its
-    /// search in their name, whatever the case.
+    /// search in their name, whatever the case; to merge or rebase, not
+    /// the one they are all on.
     fn shown_branches(&self, ctx: &Ctx) -> Vec<Branch> {
         let mut branches = self.branches(ctx);
+        if self.menu_action() != MenuAction::Switch
+            && let Some(current) = self.current_branch(ctx)
+        {
+            branches.retain(|b| b.names.join(" / ") != current);
+        }
         let query = self.branch_menu.as_ref().map(|m| m.query.to_lowercase());
         let words: Vec<&str> = query.as_deref().unwrap_or("").split_whitespace().collect();
         branches.retain(|b| {
@@ -1161,6 +1244,7 @@ impl Panel {
             ("mixed branches".to_owned(), true)
         };
         let menu = self.branch_menu.as_ref().map(|menu| {
+            let switch = menu.action == MenuAction::Switch;
             let branches = self.shown_branches(ctx);
             let page = branch_page(ctx);
             let first = menu.first.min(branches.len().saturating_sub(page));
@@ -1175,20 +1259,30 @@ impl Panel {
                 rows: shown.iter().map(|b| b.label.clone()).collect(),
                 deletable: shown
                     .iter()
-                    .map(|b| self.delete_jobs(b, ctx).is_ok())
+                    .map(|b| switch && self.delete_jobs(b, ctx).is_ok())
                     .collect(),
                 armed,
                 current: current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
                     .and_then(in_view),
                 picked: in_view(menu.picked.min(branches.len().saturating_sub(1))),
-                empty: if menu.query.trim().is_empty() {
+                empty: if !menu.query.trim().is_empty() {
+                    "No branch matches".into()
+                } else if switch {
                     "No branch they all have".into()
                 } else {
-                    "No branch matches".into()
+                    "No other branch they all have".into()
                 },
                 query: menu.query.line(),
-                placeholder: "Find a branch".into(),
+                placeholder: match menu.action {
+                    MenuAction::Switch => "Find a branch".into(),
+                    MenuAction::Integrate(Integrate::Merge) => {
+                        format!("Find a branch to merge into {}", self.current_name(ctx))
+                    }
+                    MenuAction::Integrate(Integrate::Rebase) => {
+                        format!("Find a branch to rebase {} onto", self.current_name(ctx))
+                    }
+                },
             }
         });
         BranchPicker {
@@ -1199,21 +1293,42 @@ impl Panel {
         }
     }
 
-    /// Open the branch picker's menu on the branch they are on, if it can.
-    fn open_branch_menu(&mut self, ctx: &Ctx) {
+    /// Why the branch menu can't open, if it can't.
+    fn menu_blocked(&self, ctx: &Ctx) -> Option<&'static str> {
         if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return;
+            return Some("Wait for the batch to finish");
         }
         if self.targets(ctx.items).is_empty() {
-            self.error = Some("Select a repository first".into());
+            return Some("Select a repository first");
+        }
+        None
+    }
+
+    /// What picking a branch in the menu does, while it is open.
+    fn menu_action(&self) -> MenuAction {
+        self.branch_menu
+            .as_ref()
+            .map(|m| m.action)
+            .unwrap_or_default()
+    }
+
+    /// Open the branch menu for `action`, if it can: to switch, on the
+    /// branch they are on; else on the first.
+    fn open_branch_menu(&mut self, action: MenuAction, ctx: &Ctx) {
+        if let Some(why) = self.menu_blocked(ctx) {
+            self.error = Some(why.into());
             return;
         }
-        let branches = self.branches(ctx);
-        let current = self.current_branch(ctx);
-        let picked = current
-            .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
-            .unwrap_or(0);
+        let picked = match action {
+            MenuAction::Switch => {
+                let branches = self.branches(ctx);
+                let current = self.current_branch(ctx);
+                current
+                    .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
+                    .unwrap_or(0)
+            }
+            MenuAction::Integrate(_) => 0,
+        };
         let page = branch_page(ctx);
         self.error = None;
         self.branch_menu = Some(BranchMenu {
@@ -1221,12 +1336,13 @@ impl Panel {
             picked,
             query: TextField::default(),
             armed: None,
+            action,
         });
     }
 
     /// A key while the branch menu is open, which takes them all:
     /// Up/Down, the pages and Ctrl+Home/End choose, Enter picks, Ctrl+D
-    /// deletes (pressed twice), Esc closes; the rest edit its search, which
+    /// deletes (pressed twice, in the menu to switch), Esc closes; the rest edit its search, which
     /// starts over at the top.
     fn branch_menu_key(
         &mut self,
@@ -1238,7 +1354,8 @@ impl Panel {
         let len = self.shown_branches(ctx).len();
         let page = branch_page(ctx);
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
-        if only_ctrl && matches!(sym, Keysym::d | Keysym::D) {
+        let switch = self.menu_action() == MenuAction::Switch;
+        if switch && only_ctrl && matches!(sym, Keysym::d | Keysym::D) {
             let picked = self.branch_menu.as_ref()?.picked;
             return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
         }
@@ -1278,11 +1395,13 @@ impl Panel {
         None
     }
 
-    /// Switch the repositories acted on to branch `k` of `branches`, but
-    /// those already on it; the menu closes.
+    /// Switch the repositories acted on to branch `k` of `shown_branches`,
+    /// or merge it into them or rebase them onto it, but those already on
+    /// it; the menu closes.
     fn pick_branch(&mut self, k: usize, ctx: &Ctx) -> Option<Outcome> {
         // None found: the menu stays for another search.
         let branch = self.shown_branches(ctx).into_iter().nth(k)?;
+        let action = self.menu_action();
         self.branch_menu = None;
         if ctx.batch.is_some_and(|b| !b.finished()) {
             self.error = Some("Wait for the batch to finish".into());
@@ -1307,10 +1426,14 @@ impl Panel {
             return None;
         }
         self.error = None;
-        Some(Outcome::Batch {
-            kind: BatchKind::Switch(branch.names),
-            jobs,
-        })
+        let kind = match action {
+            MenuAction::Switch => BatchKind::Switch(branch.names),
+            MenuAction::Integrate(how) => BatchKind::Integrate {
+                how,
+                from: Some(branch.names),
+            },
+        };
+        Some(Outcome::Batch { kind, jobs })
     }
 
     /// The jobs deleting local branch `branch` in the repositories acted on
@@ -1543,8 +1666,18 @@ impl Panel {
                 run(BatchKind::Fetch, all)
             }
             B::Pull => run(BatchKind::Pull(Pull::FastForward), targets),
-            B::Merge => run(BatchKind::Integrate(Integrate::Merge), targets),
-            B::Rebase => run(BatchKind::Integrate(Integrate::Rebase), targets),
+            B::Merge | B::Rebase => {
+                let how = match button {
+                    B::Merge => Integrate::Merge,
+                    _ => Integrate::Rebase,
+                };
+                run(BatchKind::Integrate { how, from: None }, targets)
+            }
+            // They open the branch menu (see `act`), when it can.
+            B::MergeFrom | B::RebaseFrom => Err(Why::other(
+                self.menu_blocked(ctx)
+                    .unwrap_or("Pick the branch in the menu"),
+            )),
             B::OpenInZed => {
                 let (k, c) = self
                     .selection(items)
@@ -1628,6 +1761,10 @@ impl Panel {
     fn act(&mut self, button: ReposButton, armed: Option<Armed>, ctx: &Ctx) -> Option<Outcome> {
         if sheet_button(button) {
             return self.sheet_press(button);
+        }
+        if let Some(how) = menu_integrate(button) {
+            self.open_branch_menu(MenuAction::Integrate(how), ctx);
+            return None;
         }
         match self.plan(button, ctx) {
             Err(Why::Field(why)) => {
@@ -1770,7 +1907,7 @@ impl Panel {
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         if only_ctrl && matches!(sym, Keysym::s | Keysym::S) {
             self.armed = None;
-            self.open_branch_menu(ctx);
+            self.open_branch_menu(MenuAction::Switch, ctx);
             return None;
         }
         // Any key but the one confirming it takes back what was armed.
@@ -1917,7 +2054,9 @@ impl Panel {
             }
             return match hit {
                 ReposHit::BranchRow(i) => self.pick_branch(first + i, ctx),
-                ReposHit::BranchDelete(i) => self.delete_branch(first + i, ctx),
+                ReposHit::BranchDelete(i) if self.menu_action() == MenuAction::Switch => {
+                    self.delete_branch(first + i, ctx)
+                }
                 ReposHit::BranchMenu => None,
                 _ => {
                     self.branch_menu = None;
@@ -1963,7 +2102,7 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, armed, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
-            ReposHit::BranchButton => self.open_branch_menu(ctx),
+            ReposHit::BranchButton => self.open_branch_menu(MenuAction::Switch, ctx),
             ReposHit::Detail
             | ReposHit::Panel
             | ReposHit::BranchRow(_)
@@ -2231,7 +2370,14 @@ impl Panel {
             if selected.is_some_and(|i| i.status.ahead > 0 && i.status.behind > 0) {
                 buttons.push(B::ForcePush);
             }
-            buttons.extend([B::Fetch, B::Pull, B::Merge, B::Rebase]);
+            buttons.extend([
+                B::Fetch,
+                B::Pull,
+                B::Merge,
+                B::Rebase,
+                B::MergeFrom,
+                B::RebaseFrom,
+            ]);
         }
         buttons
             .into_iter()
@@ -2240,6 +2386,9 @@ impl Panel {
                 label: self.button_label(button, ctx),
                 key: key_name(button).into(),
                 disabled: match self.plan(button, ctx) {
+                    _ if menu_integrate(button).is_some() => {
+                        self.menu_blocked(ctx).map(String::from)
+                    }
                     Err(Why::Other(why)) => Some(why),
                     _ => None,
                 },
@@ -2388,7 +2537,10 @@ impl Panel {
             } => {
                 let rebase = matches!(
                     kind,
-                    BatchKind::Integrate(Integrate::Rebase) | BatchKind::Pull(Pull::Rebase)
+                    BatchKind::Integrate {
+                        how: Integrate::Rebase,
+                        ..
+                    } | BatchKind::Pull(Pull::Rebase)
                 );
                 let conflict = if rebase { "may conflict" } else { "conflicts" };
                 let (mut clean, mut conflicts, mut unmerged, mut blocked) = (0, 0, 0, 0);
@@ -2639,6 +2791,8 @@ mod tests {
     /// The branch names that are one branch, as by default.
     static SAME: LazyLock<Vec<Vec<String>>> =
         LazyLock::new(|| vec![vec!["main".into(), "master".into()]]);
+    static TOP: LazyLock<Vec<String>> =
+        LazyLock::new(|| crate::config::Git::default().top_branches);
 
     fn change(path: &str, code: char) -> Change {
         Change {
@@ -2705,6 +2859,7 @@ mod tests {
             page: (20, 20),
             now: UNIX_EPOCH + Duration::from_secs(NOW),
             same: &SAME,
+            top: &TOP,
         }
     }
 
@@ -2822,18 +2977,34 @@ mod tests {
         assert_eq!(BatchKind::Pull(Pull::Rebase).label(), "Pull (rebase)");
         assert_eq!(BatchKind::Pull(Pull::FastForward).label(), "Pull");
         assert_eq!(
-            BatchKind::Integrate(Integrate::Rebase).label(),
+            BatchKind::Integrate {
+                how: Integrate::Rebase,
+                from: None
+            }
+            .label(),
             "Rebase on base"
         );
         assert_eq!(BatchKind::Push { force: true }.label(), "Force push");
-        assert!(BatchKind::Integrate(Integrate::Merge).checked_first());
+        assert!(
+            BatchKind::Integrate {
+                how: Integrate::Merge,
+                from: None
+            }
+            .checked_first()
+        );
         assert!(BatchKind::Pull(Pull::Merge).checked_first());
         assert!(BatchKind::Branch("x".into()).checked_first());
         assert!(!BatchKind::Pull(Pull::FastForward).checked_first());
         assert!(!BatchKind::Fetch.checked_first());
         assert!(commit(false).undoable());
         assert!(!commit(true).undoable());
-        assert!(BatchKind::Integrate(Integrate::Rebase).undoable());
+        assert!(
+            BatchKind::Integrate {
+                how: Integrate::Rebase,
+                from: None
+            }
+            .undoable()
+        );
         assert!(!BatchKind::Push { force: false }.undoable());
     }
 
@@ -2958,7 +3129,10 @@ mod tests {
         assert_eq!(
             press(&mut panel, ctrl_shift(), Keysym::M, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::Integrate(Integrate::Rebase),
+                kind: BatchKind::Integrate {
+                    how: Integrate::Rebase,
+                    from: None
+                },
                 jobs: jobs(&["gerdr"])
             })
         );
@@ -3237,7 +3411,10 @@ mod tests {
         let items = items();
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
-        let kind = BatchKind::Integrate(Integrate::Merge);
+        let kind = BatchKind::Integrate {
+            how: Integrate::Merge,
+            from: None,
+        };
         let verdicts = vec![
             (root("gerdr"), Verdict::Clean),
             (root("herdr"), Verdict::Conflicts(vec!["a.rs".into()])),
@@ -3964,6 +4141,96 @@ mod tests {
         items[2].status.default_branch = None;
         items[2].status.branch = None;
         assert_eq!(label(&items, &[], merge), "Merge base into current branch");
+    }
+
+    #[test]
+    fn branches_go_default_then_top_then_newest() {
+        let mut items = branched();
+        let zed = &mut items[2].status;
+        zed.local_branches = ["a-old", "b-new", "dev", "feat/x", "main", "zz"]
+            .map(String::from)
+            .into();
+        let times = [
+            ("a-old", 100),
+            ("b-new", 300),
+            ("zz", 300),
+            ("feat/x", 200),
+            ("dev", 50),
+            ("main", 10),
+        ];
+        zed.branch_times = times.map(|(n, t)| (n.to_owned(), t)).into();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "zed");
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        assert_eq!(
+            menu_rows(&panel, &ctx),
+            ["main", "dev", "b-new", "zz", "feat/x", "a-old"]
+        );
+    }
+
+    #[test]
+    fn merge_or_rebase_a_branch_picked_in_the_menu() {
+        let mut items = branched();
+        items[2].status.local_branches.push("dev".into());
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "zed");
+        assert_eq!(
+            panel.button_label(ReposButton::MergeFrom, &ctx),
+            "Merge into feat/x…"
+        );
+        assert_eq!(
+            panel.button_label(ReposButton::RebaseFrom, &ctx),
+            "Rebase feat/x onto…"
+        );
+        press(&mut panel, alt(), Keysym::m, &ctx);
+        // The branch they are on isn't offered, nor deleted from here.
+        assert_eq!(menu_rows(&panel, &ctx), ["main", "dev"]);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.deletable, [false, false]);
+        assert_eq!(menu.placeholder, "Find a branch to merge into feat/x");
+        assert_eq!(press(&mut panel, ctrl(), Keysym::d, &ctx), None);
+        assert!(panel.branch_menu.as_ref().unwrap().armed.is_none());
+        let merge = BatchKind::Integrate {
+            how: Integrate::Merge,
+            from: Some(vec!["main".into(), "master".into()]),
+        };
+        assert_eq!(merge.label(), "Merge main / master");
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: merge,
+                jobs: vec![job("zed", &[])]
+            })
+        );
+        assert!(panel.branch_menu.is_none());
+
+        press(&mut panel, mods(false, true, true), Keysym::M, &ctx);
+        type_text(&mut panel, "dev", &ctx);
+        let rebase = BatchKind::Integrate {
+            how: Integrate::Rebase,
+            from: Some(vec!["dev".into()]),
+        };
+        assert_eq!(rebase.label(), "Rebase onto dev");
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: rebase,
+                jobs: vec![job("zed", &[])]
+            })
+        );
+
+        // Those already on the branch picked are left out.
+        check_repo(&mut panel, "gerdr", &ctx);
+        check_repo(&mut panel, "zed", &ctx);
+        press(&mut panel, alt(), Keysym::m, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["main", "feat/x"]);
+        let Some(Outcome::Batch { jobs, .. }) = press(&mut panel, none(), Keysym::Return, &ctx)
+        else {
+            panic!("no batch");
+        };
+        assert_eq!(jobs, [job("zed", &[])]);
     }
 
     #[test]
