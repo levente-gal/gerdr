@@ -2,12 +2,13 @@
 //! as the output. On the left a tree, a row per repository (a checkbox,
 //! its branch, where it stands, what is being done to it) with its changed
 //! files under it, each with a checkbox; on the right the selected file's
-//! diff or the selected repository's log; under both a field (a branch
-//! name or a commit message), the last batch's result and the actions.
+//! diff or the selected repository's log; under both a field (a commit
+//! message), the last batch's result and the actions.
 //! A sheet over it asks before a batch that could conflict, or that can't
 //! be taken back, and lists the keys. At the left of the header, a
 //! branch picker: the branch the repositories acted on are on, and a menu
-//! of the ones they all have to switch them to. The line between the tree
+//! of the ones they all have to switch them to, with a row creating the
+//! branch typed in its search. The line between the tree
 //! and the detail can be dragged; both scroll, with a bar saying where.
 //! Actions the footer has no room for go behind a "more" button.
 
@@ -16,7 +17,7 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
-    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
+    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical, plus,
     rect_px, rounded_rect, trash,
 };
 use crate::text_field::Line;
@@ -158,14 +159,14 @@ pub struct ReposView {
     /// The selected line, by index into `lines`.
     pub selected: Option<usize>,
     pub hover: Option<ReposHit>,
-    /// The field: the branch name or commit message being typed.
+    /// The field: the commit message being typed.
     pub field: Line,
     /// The field has the keyboard (else the tree has).
     pub field_focused: bool,
     /// What the field says while empty.
     pub placeholder: String,
     /// Under the field, in the error colour: why the last action wasn't
-    /// done (an empty message, a bad branch name).
+    /// done (an empty message, a bad branch name typed in the menu).
     pub error: Option<String>,
     /// The last batch's result.
     pub result: Option<ResultBar>,
@@ -213,6 +214,19 @@ pub struct BranchMenuView {
     /// What is typed to find a branch, and what it says while empty.
     pub query: Line,
     pub placeholder: String,
+    /// The row creating the branch typed, under the search.
+    pub create: Option<BranchCreate>,
+}
+
+/// The branch menu's row creating the branch typed in its search.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchCreate {
+    /// `Create feat/x from main`, or why it can't be.
+    pub label: String,
+    /// Why the name typed can't be a branch's: the row is muted.
+    pub problem: Option<String>,
+    /// Enter creates it.
+    pub picked: bool,
 }
 
 /// A line of the tree.
@@ -371,7 +385,6 @@ pub struct SheetView {
 /// Everything the panel can be asked to do with a click.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReposButton {
-    Branch,
     Commit,
     CommitPush,
     Push,
@@ -409,13 +422,17 @@ pub enum ReposButton {
     Cancel,
     /// On the keys sheet.
     Close,
+    /// On the sheet saying the branch to create exists already: switch
+    /// to it, create it where it is missing, or edit its name.
+    SwitchExisting,
+    CreateMissing,
+    EditName,
 }
 
 impl ReposButton {
     /// What it says.
     pub fn label(self) -> &'static str {
         match self {
-            ReposButton::Branch => "Branch",
             ReposButton::Commit => "Commit",
             ReposButton::CommitPush => "Commit and push",
             ReposButton::Push => "Push",
@@ -446,6 +463,9 @@ impl ReposButton {
             ReposButton::SkipDiverged => "Skip those",
             ReposButton::Cancel => "Cancel",
             ReposButton::Close => "Close",
+            ReposButton::SwitchExisting => "Switch to it",
+            ReposButton::CreateMissing => "Create where missing",
+            ReposButton::EditName => "Edit name",
         }
     }
 }
@@ -473,6 +493,8 @@ pub enum ReposHit {
     BranchRow(usize),
     /// A branch menu row's delete button, by the same index.
     BranchDelete(usize),
+    /// The branch menu's row creating the branch typed.
+    BranchCreate,
     /// The branch menu, on no row (for the wheel).
     BranchMenu,
     /// A mark on a repository's line, by index into `ReposView::lines`:
@@ -658,8 +680,10 @@ pub struct ReposLayout {
     /// open.
     pub branch: Rect,
     pub branch_menu: Option<(Rect, Vec<Rect>)>,
-    /// The branch menu's search, at its top.
+    /// The branch menu's search, at its top, and the row under it creating
+    /// the branch typed.
     pub branch_search: Option<Rect>,
+    pub branch_create: Option<Rect>,
     /// The delete buttons of the menu's rows that have one, by row.
     pub branch_deletes: Vec<(usize, Rect)>,
 }
@@ -1030,13 +1054,17 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     }
 
     // The branch menu under the button, its left edge on the button's:
-    // its search, then as many rows as fit above the field.
+    // its search, the row creating the branch typed, then as many rows as
+    // fit above the field (one saying none is found, unless it creates).
     let mut branch_search = None;
+    let mut branch_create = None;
     let branch_menu = view.branch.menu.as_ref().map(|menu| {
+        let create = menu.create.as_ref().map(|c| &c.label);
         let widest = menu
             .rows
             .iter()
             .chain([&menu.empty, &menu.placeholder, &menu.query.text])
+            .chain(create)
             .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
             .max()
             .unwrap_or(0);
@@ -1044,13 +1072,23 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .clamp(pw, BRANCH_MENU_MAX.max(pw))
             .min(inner_w);
         let my = branch.loc.y + branch.size.h + BRANCH_MENU_GAP;
-        let rows_y = my + 2 * BRANCH_MENU_PAD + row_h;
-        let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / row_h;
-        let shown = menu.rows.len().max(1).min(room.max(1) as usize);
-        let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * row_h;
         let mx = branch.loc.x;
-        let card = Rectangle::new((mx, my).into(), (mw, mh).into());
         let inner = (mw - 2 * BRANCH_MENU_PAD).max(0);
+        let mut rows_y = my + 2 * BRANCH_MENU_PAD + row_h;
+        if create.is_some() {
+            branch_create = Some(Rectangle::new(
+                (mx + BRANCH_MENU_PAD, rows_y).into(),
+                (inner, row_h).into(),
+            ));
+            rows_y += row_h;
+        }
+        let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / row_h;
+        let shown = match (menu.rows.len(), create) {
+            (0, Some(_)) => 0,
+            (n, _) => n.max(1).min(room.max(1) as usize),
+        };
+        let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * row_h;
+        let card = Rectangle::new((mx, my).into(), (mw, mh).into());
         branch_search = Some(Rectangle::new(
             (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
             (inner, row_h).into(),
@@ -1109,6 +1147,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             branch,
             branch_menu,
             branch_search,
+            branch_create,
             branch_deletes,
         },
         error,
@@ -1199,6 +1238,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     }
     // The open menu is over the rest, which it closes on a click.
     if let Some((menu, rows)) = &layout.branch_menu {
+        if layout.branch_create.as_ref().is_some_and(at) {
+            return Some(ReposHit::BranchCreate);
+        }
         if let Some((i, _)) = layout.branch_deletes.iter().find(|(_, r)| at(r)) {
             return Some(ReposHit::BranchDelete(*i));
         }
@@ -1643,7 +1685,8 @@ impl Painter {
             (&view.branch.menu, &layout.branch_menu, layout.branch_search)
         {
             let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
-            let parts = (shift(*card), shift(search), &rows[..]);
+            let create = layout.branch_create.map(shift);
+            let parts = (shift(*card), shift(search), create, &rows[..]);
             self.branch_menu(&mut c, view, menu, parts, scale, p);
         }
         if let Some(sheet) = &view.sheet {
@@ -2275,15 +2318,15 @@ impl Painter {
         );
     }
 
-    /// The branch menu, a card in `card` with its search in `search`, then
-    /// a row per branch in `rows`: the one Enter picks lit, the one they
-    /// are all on checked.
+    /// The branch menu, a card in `card` with its search in `search`, the
+    /// row creating the branch typed in `create`, then a row per branch in
+    /// `rows`: the one Enter picks lit, the one they are all on checked.
     fn branch_menu(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         menu: &BranchMenuView,
-        (card, search, rows): (Rect, Rect, &[Rect]),
+        (card, search, create, rows): (Rect, Rect, Option<Rect>, &[Rect]),
         scale: f64,
         p: &Palette,
     ) {
@@ -2304,6 +2347,45 @@ impl Painter {
             scale,
             p,
         );
+        if let (Some(rect), Some(row)) = (create, &menu.create) {
+            let (x, y, w, h) = rect_px(rect, scale);
+            let r = (MENU_RADIUS - 2.0) * s;
+            if row.picked {
+                c.rounded(x, y, w, h, r, p.selected);
+            } else if view.hover == Some(ReposHit::BranchCreate) {
+                c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
+            }
+            let color = if row.problem.is_some() {
+                p.placeholder
+            } else {
+                p.text
+            };
+            let mark = branch_check(rect);
+            let icon = if row.problem.is_some() {
+                p.placeholder
+            } else {
+                p.accent
+            };
+            icon_sdf(c, mark, scale, icon, |x, y| {
+                plus(x, y, 0.0, 0.0, 5.0 * s, s)
+            });
+            let pad = BRANCH_ROW_PAD as f32 * s;
+            let end = (mark.loc.x as f64 * scale) as f32;
+            let row_band = band(rect, scale);
+            self.mixed_text(
+                c,
+                &row.label,
+                FONT_SIZE,
+                x + pad,
+                end,
+                row_band,
+                scale,
+                color,
+            );
+            if menu.rows.is_empty() {
+                return;
+            }
+        }
         if menu.rows.is_empty() {
             let row = Rectangle::new(
                 (
@@ -2571,7 +2653,7 @@ mod tests {
             hover: Some(ReposHit::Line(6)),
             field: Line::from("Add multi-repo panel"),
             field_focused: true,
-            placeholder: "Commit message or branch name".into(),
+            placeholder: "Commit message".into(),
             error: Some("Type a commit message first".into()),
             result: Some(ResultBar {
                 text: "Commit and push: 2 done · 1 conflict".into(),
@@ -2579,7 +2661,6 @@ mod tests {
                 buttons: vec![hint(Undo, "Alt+Z", None), hint(RetryFailed, "Alt+R", None)],
             }),
             hints: vec![
-                hint(Branch, "Ctrl+N", None),
                 hint(Commit, "Ctrl+Enter", None),
                 hint(CommitPush, "Ctrl+Shift+Enter", None),
                 hint(Push, "Ctrl+P", None),
@@ -2653,7 +2734,8 @@ mod tests {
                     picked: Some(0),
                     empty: "No branch they all have".into(),
                     query: Line::default(),
-                    placeholder: "Find a branch".into(),
+                    placeholder: "Find or create a branch".into(),
+                    create: None,
                 }),
                 ..full().branch
             },
@@ -2674,6 +2756,37 @@ mod tests {
                 placeholder: menu.placeholder.clone(),
                 ..BranchMenuView::default()
             };
+        }
+        view
+    }
+
+    /// `with_menu` with a name typed that no branch shown has: a row
+    /// creating it under the search, picked.
+    fn with_create_menu() -> ReposView {
+        let mut view = with_menu();
+        if let Some(menu) = &mut view.branch.menu {
+            menu.query = "feat/new-login-flow".into();
+            menu.picked = None;
+            menu.create = Some(BranchCreate {
+                label: "Create feat/new-login-flow from main".into(),
+                problem: None,
+                picked: true,
+            });
+        }
+        view.hover = Some(ReposHit::BranchCreate);
+        view
+    }
+
+    /// A name typed that can't be a branch's, and nothing found.
+    fn with_bad_name_menu() -> ReposView {
+        let mut view = with_empty_menu();
+        if let Some(menu) = &mut view.branch.menu {
+            menu.query = "a..b".into();
+            menu.create = Some(BranchCreate {
+                label: "Can't create a..b: it can't have ..".into(),
+                problem: Some("it can't have ..".into()),
+                picked: true,
+            });
         }
         view
     }
@@ -2738,6 +2851,8 @@ mod tests {
             with_sheet(),
             with_menu(),
             with_empty_menu(),
+            with_create_menu(),
+            with_bad_name_menu(),
         ]
     }
 
@@ -2776,6 +2891,14 @@ mod tests {
                     assert!(rows.len() <= m.rows.len());
                     for row in rows {
                         assert!(inside(*menu, *row));
+                    }
+                    // The row creating the branch typed: under the search,
+                    // over the branches.
+                    assert_eq!(l.branch_create.is_some(), m.create.is_some());
+                    if let (Some(create), Some(search)) = (l.branch_create, l.branch_search) {
+                        assert!(inside(*menu, create));
+                        assert!(create.loc.y >= search.loc.y + search.size.h);
+                        assert!(rows.iter().all(|r| r.loc.y >= create.loc.y + create.size.h));
                     }
                 }
                 parts.extend(l.result);
@@ -3029,6 +3152,10 @@ mod tests {
                 }
             }
             assert_eq!(repos_hit(&l, (1.0, 1.0).into()), None);
+            // The row creating the branch typed.
+            let l = repos_layout(&with_create_menu(), size);
+            let create = l.branch_create.expect("a row to create");
+            assert_eq!(repos_hit(&l, centre(create)), Some(ReposHit::BranchCreate));
         }
     }
 
@@ -3178,6 +3305,8 @@ mod tests {
             long_sheet,
             with_menu(),
             with_empty_menu(),
+            with_create_menu(),
+            with_bad_name_menu(),
         ];
         for view in views {
             for (w, h) in SIZES {
@@ -3212,6 +3341,8 @@ mod tests {
             ("hover", disabled_hover),
             ("menu", with_menu()),
             ("menu_empty", with_empty_menu()),
+            ("menu_create", with_create_menu()),
+            ("menu_bad_name", with_bad_name_menu()),
             (
                 "menu_delete",
                 ReposView {
