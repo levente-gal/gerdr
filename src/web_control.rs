@@ -216,9 +216,10 @@ pub fn install(profile: &Path, socket: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Run as the native messaging host: pass what the browser writes to
-/// gerdr's `socket`, and back, until either end closes. While the socket
-/// isn't there, it is tried again.
+/// Run as the native messaging host: pass each message the browser writes
+/// to gerdr's `socket`, and back, until either end closes. While the
+/// socket isn't there, it is tried again. Message by message, not by
+/// `io::copy`: what it splices to the browser's pipe never reaches it.
 pub fn run_host(socket: &Path) {
     let stream = loop {
         match UnixStream::connect(socket) {
@@ -230,7 +231,7 @@ pub fn run_host(socket: &Path) {
         return;
     };
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut to_gerdr);
+        pass_messages(&mut std::io::stdin().lock(), &mut to_gerdr);
         std::process::exit(0);
     });
     // Unbuffered: the browser waits for each message whole.
@@ -238,7 +239,16 @@ pub fn run_host(socket: &Path) {
     let Ok(stdout) = std::io::stdout().as_fd().try_clone_to_owned() else {
         return;
     };
-    let _ = std::io::copy(&mut &stream, &mut std::fs::File::from(stdout));
+    pass_messages(&mut &stream, &mut std::fs::File::from(stdout));
+}
+
+/// Pass the messages read from `from` on to `to`, until either ends.
+fn pass_messages(from: &mut impl Read, to: &mut impl Write) {
+    while let Some(message) = read_message(from) {
+        if to.write_all(&framed(&message)).is_err() {
+            return;
+        }
+    }
 }
 
 /// The next message on `stream`: its size in four bytes (in the machine's
@@ -443,6 +453,14 @@ mod tests {
         let mut bytes: &[u8] = &framed(b"{}");
         assert_eq!(read_message(&mut bytes).as_deref(), Some(&b"{}"[..]));
         assert_eq!(read_message(&mut bytes), None);
+    }
+
+    #[test]
+    fn the_host_passes_messages_whole() {
+        let input = [framed(b"{\"a\":1}"), framed(b"{}")].concat();
+        let mut output = Vec::new();
+        pass_messages(&mut &input[..], &mut output);
+        assert_eq!(output, input);
     }
 
     #[test]
