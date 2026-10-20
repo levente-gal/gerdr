@@ -63,6 +63,15 @@ impl Gerdr {
             .map(|(ws, _)| ws)
             .collect();
         chrome::sidebar_layout_at(&workspaces, &agents, self.sidebar_width, self.density)
+            .scrolled(self.sidebar_scroll.round() as i32, self.output_size().h)
+    }
+
+    /// Scroll the sidebar's rows by `dy` logical pixels (down when
+    /// positive), as far as they go.
+    pub(crate) fn sidebar_scroll_by(&mut self, dy: f64) {
+        let layout = self.sidebar_layout();
+        let max = layout.max_scroll(self.output_size().h) as f64;
+        self.sidebar_scroll = (self.sidebar_scroll + dy).clamp(0.0, max);
     }
 
     /// Whether something covers the sidebar, taking the pointer from it.
@@ -108,8 +117,20 @@ impl Gerdr {
         workspaces: &[WorkspaceView],
         agents: &[Vec<AgentView>],
     ) -> SidebarState {
+        let height = self.output_size().h;
         let layout =
             chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density);
+        // Held to what the rows now take, and moved to show the active
+        // workspace when another becomes it.
+        let mut scroll = (self.sidebar_scroll.round() as i32).clamp(0, layout.max_scroll(height));
+        if self.sidebar_shown != Some(self.active_workspace) {
+            self.sidebar_shown = Some(self.active_workspace);
+            scroll = layout.showing(self.active_workspace, scroll, height);
+        }
+        if scroll != self.sidebar_scroll.round() as i32 {
+            self.sidebar_scroll = scroll as f64;
+        }
+        let layout = layout.scrolled(scroll, height);
         let hit = self.sidebar_hit(&layout, self.pointer);
         self.sidebar_hover.track(hit.map(SidebarHit::pill), now);
         let hover = &self.sidebar_hover;
@@ -172,6 +193,7 @@ impl Gerdr {
             repos,
             repos_open,
             rename,
+            scroll: layout.scroll,
         }
     }
 

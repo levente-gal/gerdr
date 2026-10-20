@@ -503,7 +503,8 @@ impl Chrome {
                 &view.sidebar.agents,
                 sidebar_w,
                 view.density,
-            );
+            )
+            .scrolled(view.sidebar.state.scroll, output.h);
             for (i, cards) in view.sidebar.agents.iter().enumerate() {
                 for (k, card) in cards.iter().enumerate() {
                     if card.status != crate::herdr::AgentStatus::Blocked {
@@ -515,7 +516,9 @@ impl Chrome {
                         .and_then(|cards| cards.iter().find(|(c, _)| *c == k))
                         .map(|(_, rect)| *rect);
                     let band = rect.map(|rect| blocked_band(rect, view.density));
-                    if let Some(band) = band.filter(|b| b.size.w > 0 && b.size.h > 0) {
+                    // Not on a card scrolled under the header.
+                    let shows = |b: &Rect| b.size.w > 0 && b.size.h > 0 && b.loc.y >= BAR_HEIGHT;
+                    if let Some(band) = band.filter(shows) {
                         bands.push(band);
                     }
                 }
@@ -718,7 +721,8 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         &view.sidebar.agents,
         view.sidebar_width,
         view.density,
-    );
+    )
+    .scrolled(view.sidebar.state.scroll, output.h);
     rects.extend([sidebar.header, sidebar.plus, sidebar.repos]);
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);

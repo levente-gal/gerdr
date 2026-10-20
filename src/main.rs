@@ -1009,6 +1009,10 @@ pub struct Gerdr {
     pub tab_hover: anim::Hover<chrome::TabHit>,
     /// What the pointer is over in the sidebar, with its fades.
     pub sidebar_hover: anim::Hover<chrome::SidebarHit>,
+    /// How far the sidebar's rows are scrolled up, in logical pixels, and
+    /// the active workspace they were last scrolled to show.
+    pub sidebar_scroll: f64,
+    pub sidebar_shown: Option<usize>,
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
@@ -5240,6 +5244,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rename: None,
         tab_hover: anim::Hover::default(),
         sidebar_hover: anim::Hover::default(),
+        sidebar_scroll: 0.0,
+        sidebar_shown: None,
         frecency: Frecency::load(),
         bar_states: pane_control::BarStates::default(),
         pending_place: HashMap::new(),

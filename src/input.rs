@@ -115,6 +115,9 @@ pub enum Overlay {
 /// a row, in pixels.
 const MENU_SCROLL_ROW: f64 = 40.0;
 
+/// How far a notch of the wheel scrolls the sidebar, in pixels.
+const SIDEBAR_NOTCH: f64 = 48.0;
+
 /// Whether `action`, picked with the prefix, works over the welcome screen:
 /// only what acts on gerdr itself rather than on the project behind (the
 /// welcome screen is already open).
@@ -555,6 +558,19 @@ impl Gerdr {
                     return;
                 }
                 if self.quit.is_some() || self.welcome.is_some() {
+                    return;
+                }
+                // Over the sidebar, its rows scroll: a notch of the wheel
+                // by `SIDEBAR_NOTCH`, a touchpad by what it moved.
+                if self.pointer.x < self.sidebar_width as f64 {
+                    let dy = event
+                        .amount_v120(Axis::Vertical)
+                        .map(|v120| v120 / 120.0 * SIDEBAR_NOTCH)
+                        .or_else(|| event.amount(Axis::Vertical))
+                        .unwrap_or(0.0);
+                    if dy != 0.0 {
+                        self.sidebar_scroll_by(dy);
+                    }
                     return;
                 }
                 let source = event.source();
