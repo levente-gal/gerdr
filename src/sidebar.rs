@@ -323,6 +323,7 @@ impl Gerdr {
                     .then(|| worktrees_tooltip(worktrees, root, row.rect))
             }
             SidebarHit::Header => None,
+            SidebarHit::Ci(_) | SidebarHit::CiChip(..) | SidebarHit::CiOthers(_) => None,
         }
     }
 

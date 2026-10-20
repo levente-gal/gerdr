@@ -271,6 +271,14 @@ impl Gerdr {
         self.show_active();
     }
 
+    /// Show the repository's GitHub page `url` (else the shown workspace's
+    /// repository's home page) in a new tab of the GitHub workspace of
+    /// that repository, made for it if there is none; a tab already
+    /// showing that page is shown instead.
+    pub fn open_github(&mut self, url: Option<String>) {
+        let _ = url;
+    }
+
     /// Show Cursor chat `id`: the project's Cursor, started if it isn't
     /// running, and in a running one the chat, by a link Cursor opens (see
     /// `CHAT_LINK`).

@@ -11,6 +11,7 @@ mod agents;
 mod anim;
 mod app_icons;
 mod chrome;
+mod ci;
 mod clipboard;
 mod config;
 mod cursor_agents;
@@ -775,13 +776,15 @@ pub enum PickFor {
     Venv { project: String, workspace: String },
 }
 
-/// What a workspace opens with: Zed over a terminal, just a terminal, or
-/// the project's Cursor (see `Gerdr::open_cursor`).
+/// What a workspace opens with: Zed over a terminal, just a terminal, the
+/// project's Cursor (see `Gerdr::open_cursor`), or its repository's GitHub
+/// pages (see `Gerdr::open_github`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceKind {
     Project,
     Terminal,
     Cursor,
+    GitHub,
 }
 
 impl WorkspaceKind {
@@ -790,6 +793,7 @@ impl WorkspaceKind {
             projects::Kind::Project => Self::Project,
             projects::Kind::Terminal => Self::Terminal,
             projects::Kind::Cursor => Self::Cursor,
+            projects::Kind::Github => Self::GitHub,
         }
     }
 
@@ -798,6 +802,7 @@ impl WorkspaceKind {
             Self::Project => projects::Kind::Project,
             Self::Terminal => projects::Kind::Terminal,
             Self::Cursor => projects::Kind::Cursor,
+            Self::GitHub => projects::Kind::Github,
         }
     }
 }
@@ -3114,7 +3119,9 @@ impl Gerdr {
             .or_else(home_dir);
         let title = match kind {
             WorkspaceKind::Project => "Open project folder",
-            WorkspaceKind::Terminal | WorkspaceKind::Cursor => "Open terminal folder",
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor | WorkspaceKind::GitHub => {
+                "Open terminal folder"
+            }
         };
         self.pick_folder(title, start, PickFor::Workspace(kind));
     }
@@ -3182,6 +3189,7 @@ impl Gerdr {
                     self.open_terminal(PathBuf::from(path))
                 }
                 PickFor::Workspace(WorkspaceKind::Cursor) => self.open_cursor(None),
+                PickFor::Workspace(WorkspaceKind::GitHub) => self.open_github(None),
                 PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
                 PickFor::Venv { project, workspace } => {
                     self.set_venv(&project, &workspace, PathBuf::from(path))
@@ -4556,6 +4564,7 @@ impl Gerdr {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
             (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
             (_, WorkspaceKind::Cursor) => self.open_cursor(None),
+            (_, WorkspaceKind::GitHub) => self.open_github(None),
             (None, _) => {}
         }
         // After the switch's notice, so it wins.

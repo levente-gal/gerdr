@@ -288,6 +288,9 @@ pub enum TabHit {
     Prefix,
     /// The theme switch.
     Toggle,
+    /// The button watching (or no longer watching) the CI of the pull
+    /// request the focused pane shows.
+    Watch,
 }
 
 /// Everything the tab strip is drawn from.
@@ -308,6 +311,9 @@ pub struct TabStripView {
     pub renaming: Option<(usize, Line)>,
     /// The workspaces not shown, and how many of them have a blocked agent.
     pub elsewhere: (usize, usize),
+    /// Whether the CI of the pull request the focused pane shows is
+    /// watched; `None` hides the watch button (not a pull request's page).
+    pub watch: Option<bool>,
 }
 
 impl TabStripView {
@@ -323,6 +329,7 @@ impl TabStripView {
             hover_alpha: 0,
             renaming: None,
             elsewhere: (0, 0),
+            watch: None,
         }
     }
 
@@ -371,6 +378,8 @@ pub struct TabLayout {
     pub plus: Rect,
     pub overflow: Option<Rect>,
     pub prefix: Option<Rect>,
+    /// The watch button, when shown.
+    pub watch: Option<Rect>,
     pub toggle: Rect,
 }
 
@@ -416,7 +425,9 @@ pub fn tab_layout(
     size: Size<i32, Logical>,
     prefix: bool,
     overflow: bool,
+    watch: bool,
 ) -> TabLayout {
+    let _ = watch;
     let (width, height) = (size.w, size.h);
     let top = (height - PILL) / 2;
     let toggle = Rectangle::new((width - EDGE - PILL, top).into(), (PILL, PILL).into());
@@ -465,6 +476,7 @@ pub fn tab_layout(
         plus,
         overflow,
         prefix,
+        watch: None,
         toggle,
     }
 }
@@ -483,7 +495,13 @@ pub fn tab_slot(layout: &TabLayout, x: f64) -> usize {
 /// strip sits in the window.
 pub fn tab_rename_field(view: &TabStripView, strip: Rect, scale: f64) -> Option<FieldSpot> {
     let (t, line) = view.renaming.as_ref()?;
-    let layout = tab_layout(view.tabs.len(), strip.size, view.prefix, view.overflow());
+    let layout = tab_layout(
+        view.tabs.len(),
+        strip.size,
+        view.prefix,
+        view.overflow(),
+        view.watch.is_some(),
+    );
     let mut area = layout.rename_field(*t)?;
     area.loc += strip.loc;
     Some(FieldSpot {
@@ -546,7 +564,13 @@ impl Painter {
         c.fill(0, 0, c.w, c.h, p.tab_bar);
         c.fill(0, c.h - line, c.w, line, p.border);
 
-        let layout = tab_layout(view.tabs.len(), size, view.prefix, view.overflow());
+        let layout = tab_layout(
+            view.tabs.len(),
+            size,
+            view.prefix,
+            view.overflow(),
+            view.watch.is_some(),
+        );
         let band = (0, c.h);
         for (i, (rect, tab)) in layout.tabs.iter().zip(&view.tabs).enumerate() {
             let (x, w) = (
@@ -713,7 +737,14 @@ pub fn tab_strip_hit(
     size: Size<i32, Logical>,
     pos: Point<i32, Logical>,
 ) -> Option<TabHit> {
-    tab_layout(view.tabs.len(), size, view.prefix, view.overflow()).hit(pos.x, pos.y)
+    tab_layout(
+        view.tabs.len(),
+        size,
+        view.prefix,
+        view.overflow(),
+        view.watch.is_some(),
+    )
+    .hit(pos.x, pos.y)
 }
 
 #[cfg(test)]
@@ -904,7 +935,7 @@ mod tests {
     fn the_layout_tiles_the_strip_without_gaps_at_both_densities() {
         for density in [Density::Comfortable, Density::Compact] {
             let size = strip(density);
-            let l = tab_layout(3, size, true, true);
+            let l = tab_layout(3, size, true, true, false);
             let h = size.h;
             // Tabs run from the left edge, each straight after the last,
             // the full height of the strip.
@@ -945,20 +976,20 @@ mod tests {
     #[test]
     fn squeezed_tabs_make_room_for_the_chips_and_lose_their_close() {
         let size = strip(Density::Comfortable);
-        let free = tab_layout(8, size, false, false);
-        let chips = tab_layout(8, size, true, true);
+        let free = tab_layout(8, size, false, false, false);
+        let chips = tab_layout(8, size, true, true, false);
         assert!(chips.tabs[0].size.w < free.tabs[0].size.w);
         let last = chips.tabs[7];
         assert!(chips.plus.loc.x + PILL < chips.overflow.unwrap().loc.x);
         assert_eq!(chips.plus.loc.x, last.loc.x + last.size.w + PLUS_GAP);
-        let narrow = tab_layout(20, (400, 36).into(), false, false);
+        let narrow = tab_layout(20, (400, 36).into(), false, false, false);
         assert!(narrow.closes.iter().all(|c| c.size.w == 0));
         assert!(matches!(
             narrow.hit(narrow.tabs[3].loc.x + 2, 10),
             Some(TabHit::Tab(3))
         ));
         // Nothing to hit at all without tabs, but the switch.
-        let none = tab_layout(0, size, false, false);
+        let none = tab_layout(0, size, false, false, false);
         assert!(none.tabs.is_empty());
         assert_eq!(none.hit(none.plus.loc.x + 2, none.plus.loc.y + 2), None);
         assert_eq!(none.hit(size.w - EDGE - 2, 10), Some(TabHit::Toggle));
@@ -967,7 +998,7 @@ mod tests {
     #[test]
     fn hits_map_every_part_of_the_strip() {
         let size = strip(Density::Comfortable);
-        let l = tab_layout(2, size, true, true);
+        let l = tab_layout(2, size, true, true, false);
         let mid = |r: Rect| (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2);
         let at = |(x, y)| l.hit(x, y);
         assert_eq!(at(mid(l.tabs[0])), Some(TabHit::Tab(0)));
@@ -986,7 +1017,7 @@ mod tests {
 
     #[test]
     fn a_drag_finds_the_slot_under_the_pointer() {
-        let strip = |count| tab_layout(count, (900, PILL).into(), false, false);
+        let strip = |count| tab_layout(count, (900, PILL).into(), false, false, false);
         assert_eq!(tab_slot(&strip(3), -5.0), 0);
         assert_eq!(tab_slot(&strip(3), 10.0), 0);
         assert_eq!(tab_slot(&strip(3), 300.0), 1);
@@ -1014,7 +1045,7 @@ mod tests {
         let mut view = TabStripView::plain(tabs, 0, false, ThemeMode::System);
         view.elsewhere = (2, 1);
         view.hover_alpha = 16;
-        let l = tab_layout(2, size, false, true);
+        let l = tab_layout(2, size, false, true, false);
         let paint = |view: &TabStripView| painter.tab_strip_view(view, Theme::Dark, size, 1.0);
         let at = |view: &TabStripView, x, y| pixel(paint(view), size.w, x, y);
 
@@ -1070,7 +1101,7 @@ mod tests {
         let size = strip(Density::Compact);
         let tabs = vec![TabView::default(); 4];
         let mut view = TabStripView::plain(tabs, 1, true, ThemeMode::Light);
-        let l = tab_layout(4, size, true, false);
+        let l = tab_layout(4, size, true, false, false);
         let badge = l.prefix.unwrap();
         let buffer = painter.tab_strip_view(&view, Theme::Light, size, 1.0);
         let at = |x, y| pixel(buffer.clone(), size.w, x, y);

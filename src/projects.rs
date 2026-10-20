@@ -207,6 +207,8 @@ pub enum Kind {
     Terminal,
     /// The project's Cursor.
     Cursor,
+    /// Its repository's GitHub pages.
+    Github,
 }
 
 /// Which Python venv the workspace's shells activate.

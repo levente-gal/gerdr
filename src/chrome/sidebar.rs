@@ -25,6 +25,7 @@ use super::{
 use crate::WorkspaceKind;
 use crate::agents::AgentKey;
 use crate::app_icons::AppIcon;
+use crate::ci::CiState;
 use crate::cursor_agents::CursorChat;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
@@ -385,6 +386,29 @@ pub struct WorkspaceView {
     /// What the agents kept under it that its cards leave out are called:
     /// a "+N more" line after the cards counts them.
     pub more_agents: Vec<String>,
+    /// The CI of its folder's repository, as a card after its agents'.
+    pub ci: Option<CiView>,
+}
+
+/// What a CI card shows: a chip per branch or pull request, and how many
+/// other runs are going on (a count that opens the Actions page).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CiView {
+    pub chips: Vec<CiChip>,
+    pub others_running: usize,
+}
+
+/// A chip of the CI card: a status mark and a label, `main` or `#42`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CiChip {
+    pub label: String,
+    pub state: CiState,
+    /// A pull request's title, for the tooltip.
+    pub title: Option<String>,
+    /// Watched by the user, so it can be unwatched.
+    pub watched: bool,
+    /// Its checks, by name, for the tooltip.
+    pub checks: Vec<(String, CiState)>,
 }
 
 impl WorkspaceView {
@@ -429,6 +453,7 @@ impl WorkspaceView {
             activity,
             icon: None,
             more_agents: Vec::new(),
+            ci: None,
         }
     }
 
@@ -628,8 +653,20 @@ pub struct SidebarLayout {
     pub card_closes: Vec<Vec<(usize, Rect)>>,
     /// Per workspace, the "+N more" line after its cards, if it has one.
     pub more: Vec<Option<Rect>>,
+    /// Per workspace, its CI card, if it has one.
+    pub ci: Vec<Option<CiLayout>>,
     /// Per workspace, all it takes: its row, its cards and the gap after them.
     pub blocks: Vec<Rect>,
+}
+
+/// Where the parts of a CI card sit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CiLayout {
+    pub card: Rect,
+    /// One per chip, as `CiView::chips` lists them.
+    pub chips: Vec<Rect>,
+    /// The count of other runs, when there are any.
+    pub others: Option<Rect>,
 }
 
 /// Where the "×" of a card at `card` sits: at the right end of its header,
@@ -669,6 +706,11 @@ pub enum SidebarHit {
     CardClose(usize, usize),
     /// The "+N more" line after workspace `i`'s cards.
     More(usize),
+    /// Workspace `i`'s CI card off its chips and count, chip `k` of it
+    /// (as `CiView::chips` lists them), and its count of other runs.
+    Ci(usize),
+    CiChip(usize, usize),
+    CiOthers(usize),
 }
 
 impl SidebarHit {
@@ -867,6 +909,7 @@ pub fn sidebar_layout_at(
         cards: card_rects,
         card_closes,
         more,
+        ci: vec![None; workspaces.len()],
         blocks,
     }
 }
@@ -985,7 +1028,7 @@ impl Painter {
                 WorkspaceKind::Terminal => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
                     terminal(x, y, small)
                 }),
-                WorkspaceKind::Cursor => match &ws.icon {
+                WorkspaceKind::Cursor | WorkspaceKind::GitHub => match &ws.icon {
                     Some(picture) => {
                         c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
                     }
@@ -1656,6 +1699,7 @@ mod tests {
             activity: String::new(),
             icon: None,
             more_agents: Vec::new(),
+            ci: None,
         }
     }
 

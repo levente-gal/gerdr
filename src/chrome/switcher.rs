@@ -388,7 +388,7 @@ impl Painter {
                         terminal(x, y, small)
                     })
                 }
-                ItemIcon::Workspace(WorkspaceKind::Cursor) => {
+                ItemIcon::Workspace(WorkspaceKind::Cursor | WorkspaceKind::GitHub) => {
                     icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small))
                 }
                 ItemIcon::Tab => {

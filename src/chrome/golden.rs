@@ -49,6 +49,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             activity: "2 tabs · claude working, zsh".into(),
             icon: None,
             more_agents: Vec::new(),
+            ci: None,
         },
         WorkspaceView {
             name: "~".into(),
@@ -60,6 +61,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             activity: String::new(),
             icon: None,
             more_agents: Vec::new(),
+            ci: None,
         },
     ]
 }

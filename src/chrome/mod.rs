@@ -734,7 +734,13 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     };
     let strip = &view.tab_strip;
     let strip_size = (strip_w, tab_strip_height(view.density)).into();
-    let layout = tab_layout(strip.tabs.len(), strip_size, strip.prefix, strip.overflow());
+    let layout = tab_layout(
+        strip.tabs.len(),
+        strip_size,
+        strip.prefix,
+        strip.overflow(),
+        strip.watch.is_some(),
+    );
     rects.extend(layout.tabs.iter().chain(&layout.closes).map(|r| shift(*r)));
     if !layout.tabs.is_empty() {
         rects.push(shift(layout.plus));
