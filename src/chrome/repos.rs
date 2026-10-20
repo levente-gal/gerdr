@@ -5,7 +5,7 @@
 //! diff or the selected repository's log; under both a field (a branch
 //! name or a commit message), the last batch's result and the actions.
 //! A sheet over it asks before a batch that could conflict, or that can't
-//! be taken back, and lists the keys. At the right of the header, a
+//! be taken back, and lists the keys. At the left of the header, a
 //! branch picker: the branch the repositories acted on are on, and a menu
 //! of the ones they all have to switch them to. The line between the tree
 //! and the detail can be dragged; both scroll, with a bar saying where.
@@ -833,14 +833,10 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let inner_x = x + HELP_PADDING;
     let inner_w = (w - 2 * HELP_PADDING).max(0);
     let header = Rectangle::new((x, top).into(), (w, REPOS_HEADER).into());
-    // The branch picker at the header's right, no more than a third of it.
+    // The branch picker at the header's left, no more than a third of it.
     let pw = picker_width(&view.branch.label).min(inner_w / 3).max(1);
     let branch = Rectangle::new(
-        (
-            inner_x + inner_w - pw,
-            top + (REPOS_HEADER - ROW_BUTTON) / 2,
-        )
-            .into(),
+        (inner_x, top + (REPOS_HEADER - ROW_BUTTON) / 2).into(),
         (pw, ROW_BUTTON).into(),
     );
 
@@ -1033,7 +1029,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         sheet = Some(card);
     }
 
-    // The branch menu under the button, its right edge on the button's:
+    // The branch menu under the button, its left edge on the button's:
     // its search, then as many rows as fit above the field.
     let mut branch_search = None;
     let branch_menu = view.branch.menu.as_ref().map(|menu| {
@@ -1052,7 +1048,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / row_h;
         let shown = menu.rows.len().max(1).min(room.max(1) as usize);
         let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * row_h;
-        let mx = branch.loc.x + branch.size.w - mw;
+        let mx = branch.loc.x;
         let card = Rectangle::new((mx, my).into(), (mw, mh).into());
         let inner = (mw - 2 * BRANCH_MENU_PAD).max(0);
         branch_search = Some(Rectangle::new(
@@ -1498,12 +1494,13 @@ impl Painter {
             );
         };
 
-        // The header: the title, then where the repositories stand.
+        // The header: the branch picker, the title, then where the
+        // repositories stand.
         let header = shift(layout.header);
         let picker = shift(layout.branch);
-        let (hx, _) = phys(header, scale);
-        let hx = hx + px(HELP_PADDING) as f32;
-        let hend = px(picker.loc.x - HEADER_GAP) as f32;
+        let (_, hend) = phys(header, scale);
+        let hx = px(picker.loc.x + picker.size.w + HEADER_GAP) as f32;
+        let hend = hend - px(HELP_PADDING) as f32;
         let heading = if view.title.is_empty() {
             "Repositories".to_owned()
         } else {
@@ -2762,8 +2759,10 @@ mod tests {
                 assert!(inside(output, l.panel), "{size:?}");
                 assert_eq!(l.panel.loc.x, w - (l.panel.loc.x + l.panel.size.w));
                 let mut parts = vec![l.header, l.tree, l.detail, l.field, l.footer];
-                // The branch picker in the header, its menu above the field.
+                // The branch picker at the header's left, its menu under it
+                // from its left edge, above the field.
                 assert!(inside(l.header, l.branch), "{size:?}");
+                assert_eq!(l.branch.loc.x, l.header.loc.x + HELP_PADDING);
                 parts.push(l.branch);
                 assert_eq!(l.branch_menu.is_some(), view.branch.menu.is_some());
                 if let (Some((menu, rows)), Some(m)) = (&l.branch_menu, &view.branch.menu) {
@@ -2771,6 +2770,8 @@ mod tests {
                     assert!(menu.loc.y >= l.branch.loc.y + l.branch.size.h);
                     assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
                     assert!(menu.size.w >= l.branch.size.w);
+                    assert_eq!(menu.loc.x, l.branch.loc.x);
+                    assert!(menu.loc.x + menu.size.w <= l.header.loc.x + l.header.size.w);
                     assert!(!rows.is_empty() || m.rows.is_empty());
                     assert!(rows.len() <= m.rows.len());
                     for row in rows {
