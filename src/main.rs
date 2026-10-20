@@ -4247,7 +4247,7 @@ impl Gerdr {
                 let mut view = WorkspaceView::new(ws.name.clone(), ws.kind, &tabs);
                 match ws.kind {
                     WorkspaceKind::Cursor => view.icon = self.cursor_icon(),
-                    WorkspaceKind::GitHub => view.icon = None, // GITHUB_ICON_PENDING
+                    WorkspaceKind::GitHub => view.icon = app_icons::github_icon(),
                     WorkspaceKind::Project | WorkspaceKind::Terminal => {}
                 }
                 view.ci = self.ci_view(ws);

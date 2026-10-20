@@ -12,8 +12,8 @@ use crate::{
     agents::AgentKey,
     anim::quantize,
     chrome::{
-        self, AgentView, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState,
-        TooltipRow, WorkspaceView,
+        self, AgentView, CardState, CiCardState, Rect, RowState, SidebarHit, SidebarLayout,
+        SidebarState, TooltipRow, WorkspaceView,
     },
     ci::{self, Subject},
     ci_watch::ci_state_word,
@@ -140,6 +140,17 @@ impl Gerdr {
                     .collect()
             })
             .collect();
+        let ci = workspaces
+            .iter()
+            .enumerate()
+            .map(|(i, ws)| CiCardState {
+                hover: quantize(hover.alpha(SidebarHit::Ci(i), now)),
+                chips: (0..ws.ci.as_ref().map_or(0, |ci| ci.chips.len()))
+                    .map(|k| quantize(hover.alpha(SidebarHit::CiChip(i, k), now)))
+                    .collect(),
+                others: quantize(hover.alpha(SidebarHit::CiOthers(i), now)),
+            })
+            .collect();
         let plus = quantize(hover.alpha(SidebarHit::Plus, now));
         let plus_open = self
             .context_menu
@@ -155,6 +166,7 @@ impl Gerdr {
             density: self.density,
             rows,
             cards,
+            ci,
             plus,
             plus_open,
             repos,
