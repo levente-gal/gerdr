@@ -10,13 +10,13 @@
 use super::{
     BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
-    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder,
-    folder_plus, footer_height, footer_rows, icon_sdf, mix, pencil, physical, prompt, rect_px,
-    status_mark, tab, terminal,
+    ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_PICTURE_SIZE, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT,
+    SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH,
+    TINY_FONT_SIZE, app, folder, folder_plus, footer_height, footer_rows, icon_sdf, mix, pencil,
+    physical, prompt, rect_px, status_mark, tab, terminal,
 };
 use crate::WorkspaceKind;
-use crate::app_icons::AppIcon;
+use crate::app_icons::{AppIcon, github_icon};
 use crate::herdr::AgentStatus;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -388,8 +388,17 @@ impl Painter {
                         terminal(x, y, small)
                     })
                 }
-                ItemIcon::Workspace(WorkspaceKind::Cursor | WorkspaceKind::GitHub) => {
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small))
+                ItemIcon::Workspace(kind @ (WorkspaceKind::Cursor | WorkspaceKind::GitHub)) => {
+                    // GitHub's mark for its workspaces, as the sidebar shows them.
+                    let mark = github_icon().filter(|_| *kind == WorkspaceKind::GitHub);
+                    match mark {
+                        Some(mark) => {
+                            c.picture_sized(&mark, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
+                        }
+                        None => {
+                            icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small))
+                        }
+                    }
                 }
                 ItemIcon::Tab => {
                     icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| tab(x, y, small))
