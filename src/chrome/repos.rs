@@ -4,14 +4,18 @@
 //! files under it, each with a checkbox; on the right the selected file's
 //! diff or the selected repository's log; under both a field (a branch
 //! name or a commit message), the last batch's result and the actions.
-//! A sheet over it asks before a batch that could conflict. At the right
-//! of the header, a branch picker: the branch the repositories acted on
-//! are on, and a menu of the ones they all have to switch them to.
+//! A sheet over it asks before a batch that could conflict, or that can't
+//! be taken back, and lists the keys. At the right of the header, a
+//! branch picker: the branch the repositories acted on are on, and a menu
+//! of the ones they all have to switch them to. The line between the tree
+//! and the detail can be dragged; both scroll, with a bar saying where.
+//! Actions the footer has no room for go behind a "more" button.
 
 use super::{
-    BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, FIELD_GAP, FieldSpot,
-    GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, LineState,
-    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, arrow, band, check,
+    BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE, Density,
+    FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
+    HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
+    Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
     chevron_down, coverage, cross, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
     rect_px, rounded_rect,
 };
@@ -23,34 +27,39 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 /// edges.
 const REPOS_MAX_WIDTH: i32 = 1600;
 const REPOS_MAX_HEIGHT: i32 = 1200;
-/// The panel's text, a size up from the rest of the chrome's to be read
-/// at a glance: its labels, the header's title, paths and actions, chips,
-/// and keys on keycaps.
-const FONT_SIZE: f32 = 18.0;
-const LABEL_FONT_SIZE: f32 = 21.0;
-const SMALL_FONT_SIZE: f32 = 16.0;
-const DETAIL_FONT_SIZE: f32 = 15.0;
-const KEY_FONT_SIZE: f32 = 15.0;
-/// A button's height and the error line's height, to go with the bigger
-/// text.
-const ROW_BUTTON: i32 = 32;
-const ERROR_HEIGHT: i32 = 24;
+/// A button's height and the error line's height.
+const ROW_BUTTON: i32 = 28;
+const ERROR_HEIGHT: i32 = 22;
 /// The header row with the title and the summary, and the gap between
 /// them.
-const REPOS_HEADER: i32 = 48;
-const HEADER_GAP: i32 = 14;
-/// The tree's share of the panel's width, and the narrowest it gets
-/// (unless that is more than half).
-const REPOS_TREE_SHARE: f64 = 0.42;
+const REPOS_HEADER: i32 = 44;
+const HEADER_GAP: i32 = 12;
+/// The tree's share of the panel's width unless dragged, the least and
+/// most it can be dragged to, the narrowest it gets (unless that is more
+/// than half), and how far either side of the line between the tree and
+/// the detail a press takes hold of it.
+pub const REPOS_TREE_SHARE: f64 = 0.42;
+pub const REPOS_TREE_SHARE_MIN: f64 = 0.2;
+pub const REPOS_TREE_SHARE_MAX: f64 = 0.8;
 const REPOS_TREE_MIN: i32 = 300;
+pub const SPLITTER_GRAB: i32 = 5;
 /// The room above and below the tree's lines and the detail's, and beside
 /// the tree's.
 const REPOS_PAD: i32 = 6;
-/// A tree line, the room before its checkbox, and how far a file's line
-/// is indented under its repository's.
-pub const REPOS_ROW: i32 = 34;
+/// A tree line at each density, the room before its checkbox, and how
+/// far a file's line is indented under its repository's.
+pub fn repos_row(density: Density) -> i32 {
+    match density {
+        Density::Comfortable => 30,
+        Density::Compact => 26,
+    }
+}
 const REPOS_LINE_INSET: i32 = 4;
 const REPOS_INDENT: i32 = 24;
+/// The scrollbar at the right of the tree and of the detail: its width,
+/// and the shortest its thumb gets.
+const SCROLLBAR: i32 = 6;
+const SCROLLBAR_MIN: i32 = 24;
 /// A checkbox's clickable room, a repository's expander's, and a file's
 /// status letter column with the gap before it.
 const REPOS_CHECK: i32 = 28;
@@ -59,54 +68,53 @@ const REPOS_CODE: i32 = 16;
 const REPOS_CODE_GAP: i32 = 2;
 /// A repository's chip: its height, the room either side of its text and
 /// its corners.
-const CHIP_HEIGHT: i32 = 24;
-const CHIP_PAD: i32 = 7;
+const CHIP_HEIGHT: i32 = 20;
+const CHIP_PAD: i32 = 6;
 const CHIP_RADIUS: f32 = 4.0;
-/// The detail pane: its title row, a line of a diff or log, and the size
-/// of the monospace font they are in.
-const REPOS_DETAIL_TITLE: i32 = 44;
-pub const REPOS_DETAIL_LINE: i32 = 24;
-const REPOS_MONO_SIZE: f32 = 16.0;
+/// The detail pane: its title row, a line of a diff or log at each
+/// density, and the size of the monospace font they are in.
+const REPOS_DETAIL_TITLE: i32 = 40;
+pub fn repos_detail_line(density: Density) -> i32 {
+    match density {
+        Density::Comfortable => 22,
+        Density::Compact => 19,
+    }
+}
+const REPOS_MONO_SIZE: f32 = 14.0;
 /// The Diff and Log tabs: each this wide, this far apart.
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
 /// The field's row, and the field in it.
-const REPOS_FIELD_ROW: i32 = 48;
-const REPOS_FIELD: i32 = 40;
-/// The result bar, and the gap between its buttons and the room either
-/// side of their labels.
-const REPOS_RESULT: i32 = 40;
+const REPOS_FIELD_ROW: i32 = 44;
+const REPOS_FIELD: i32 = 32;
+/// The result bar, and the gap between its buttons.
+const REPOS_RESULT: i32 = 36;
 const REPOS_BUTTON_GAP: i32 = 6;
-const PILL_PAD: i32 = 12;
 /// The footer: the room above and below its rows of actions, a row, the
-/// most rows, the gap between actions and the room inside either end of
-/// one.
+/// most rows (the rest go behind the "more" button), the gap between
+/// actions and the room inside either end of one.
 const REPOS_FOOTER_PAD: i32 = 4;
-const REPOS_HINT_ROW: i32 = 36;
-const REPOS_FOOTER_ROWS: usize = 3;
+const REPOS_HINT_ROW: i32 = 32;
+const REPOS_FOOTER_ROWS: usize = 2;
 const HINT_GAP: i32 = 4;
 const HINT_PAD: i32 = 6;
 /// Without a font to measure with, how wide a character is guessed to be
 /// (logical pixels): of a label in the small font, of a key on a keycap,
 /// and of a sheet button's label; and what is added for a whole text.
-const SMALL_CHAR: f64 = 6.6;
-const KEY_CHAR: f64 = 5.6;
-const BUTTON_CHAR: f64 = 7.7;
+const SMALL_CHAR: f64 = 5.4;
+const KEY_CHAR: f64 = 4.9;
+const BUTTON_CHAR: f64 = 6.6;
 const GUESS_SLACK: f64 = 4.0;
-/// The card saying why an action can't be done: its height and its gap to
-/// the action.
-const TIP_HEIGHT: i32 = 30;
-const TIP_GAP: i32 = 4;
 /// The sheet: at most this wide; the room inside it, its title row, a
 /// line, the gap after the title and before the buttons, the buttons and
 /// the room either side of their labels, and the share of a line its
 /// repository's name takes.
 const SHEET_WIDTH: i32 = 640;
 const SHEET_PAD: i32 = 18;
-const SHEET_TITLE: i32 = 32;
-const SHEET_LINE: i32 = 32;
+const SHEET_TITLE: i32 = 28;
+const SHEET_LINE: i32 = 28;
 const SHEET_GAP: i32 = 10;
-const SHEET_BUTTON: i32 = 38;
+const SHEET_BUTTON: i32 = 34;
 const SHEET_BUTTON_GAP: i32 = QUIT_BUTTON_GAP;
 const SHEET_BUTTON_PAD: i32 = 16;
 const SHEET_BUTTON_MIN: i32 = 84;
@@ -143,6 +151,10 @@ pub struct ReposView {
     pub summary: String,
     /// The tree's lines in view, scrolled.
     pub lines: Vec<TreeLine>,
+    /// Where `lines` start among all the tree's lines, and how many there
+    /// are: where the tree's scrollbar stands.
+    pub first: usize,
+    pub total: usize,
     /// The selected line, by index into `lines`.
     pub selected: Option<usize>,
     pub hover: Option<ReposHit>,
@@ -166,6 +178,10 @@ pub struct ReposView {
     pub empty: String,
     /// The header's branch picker.
     pub branch: BranchPicker,
+    /// How much room the chrome takes.
+    pub density: Density,
+    /// The tree's share of the panel's width.
+    pub tree_share: f64,
 }
 
 /// The header's branch picker: the branch the repositories acted on are
@@ -188,8 +204,6 @@ pub struct BranchMenuView {
     pub rows: Vec<String>,
     /// Per row: whether it has a local branch to delete, with a button.
     pub deletable: Vec<bool>,
-    /// The row whose delete a second press confirms.
-    pub armed: Option<usize>,
     /// The row of the branch they are all on, by index into `rows`.
     pub current: Option<usize>,
     /// The row Enter picks, by index into `rows`.
@@ -257,6 +271,8 @@ pub enum Check {
 pub struct Chip {
     pub text: String,
     pub tone: Tone,
+    /// What it means, over it while the pointer is on it.
+    pub tip: String,
 }
 
 /// What colour something is drawn in.
@@ -276,8 +292,8 @@ pub enum Tone {
 pub struct ResultBar {
     pub text: String,
     pub tone: Tone,
-    /// `Undo`, `RetryFailed`.
-    pub buttons: Vec<ReposButton>,
+    /// `Undo`, `RetryFailed`, with their keys.
+    pub buttons: Vec<Hint>,
 }
 
 /// An action in the footer: a button with its key.
@@ -303,6 +319,10 @@ pub struct DetailView {
     pub title: String,
     /// The lines in view, scrolled.
     pub lines: Vec<DetailLine>,
+    /// Where `lines` start among them all, and how many there are: where
+    /// the scrollbar stands.
+    pub first: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -371,6 +391,14 @@ pub enum ReposButton {
     RetryFailed,
     RunInTerminal,
     OpenWorkspace,
+    /// The selected repository's stashes.
+    Stash,
+    StashPop,
+    StashDrop,
+    /// The panel's keys, on a sheet.
+    Help,
+    /// On a confirm sheet, for a branch picked in the menu.
+    DeleteBranch,
     /// On the preflight sheet.
     All,
     CleanOnly,
@@ -404,6 +432,11 @@ impl ReposButton {
             ReposButton::RetryFailed => "Retry failed",
             ReposButton::RunInTerminal => "Run in terminal",
             ReposButton::OpenWorkspace => "Open workspace",
+            ReposButton::Stash => "Stash",
+            ReposButton::StashPop => "Pop stash",
+            ReposButton::StashDrop => "Drop stash",
+            ReposButton::Help => "Keys",
+            ReposButton::DeleteBranch => "Delete",
             ReposButton::All => "All",
             ReposButton::CleanOnly => "Clean only",
             ReposButton::PullRebase => "Rebase",
@@ -423,6 +456,8 @@ pub enum ReposHit {
     Check(usize),
     /// A repository line's expander.
     Expander(usize),
+    /// A repository line's chip: it says what it means.
+    Chip(usize),
     Field,
     /// A footer action, a result bar button or a sheet button.
     Button(ReposButton),
@@ -440,6 +475,10 @@ pub enum ReposHit {
     /// A mark on a repository's line, by index into `ReposView::lines`:
     /// it says what it means.
     Mark(usize, RepoMark),
+    /// The footer's "more" button, for the actions it has no room for.
+    More,
+    /// The line between the tree and the detail, to drag.
+    Splitter,
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -595,6 +634,11 @@ pub struct ReposLayout {
     pub lines: Vec<(Rect, Rect, Option<Rect>)>,
     /// The marks on repository lines, by index into `lines`.
     pub marks: Vec<(usize, RepoMark, Rect)>,
+    /// The chips on repository lines, by index into `lines`.
+    pub chips: Vec<(usize, Rect)>,
+    /// The line between the tree and the detail, as wide as a press takes
+    /// hold of it.
+    pub splitter: Rect,
     pub detail: Rect,
     pub detail_tabs: Vec<(DetailTab, Rect)>,
     pub field: Rect,
@@ -602,6 +646,10 @@ pub struct ReposLayout {
     /// The result bar's buttons, the footer's, and the sheet's.
     pub buttons: Vec<(ReposButton, Rect)>,
     pub footer: Rect,
+    /// The footer's "more" button, when it has no room for every action,
+    /// and the actions behind it, by index into `ReposView::hints`.
+    pub more: Option<Rect>,
+    pub overflow: Vec<usize>,
     pub sheet: Option<Rect>,
     /// The branch picker's button, and its menu with a rect per row while
     /// open.
@@ -620,8 +668,8 @@ struct Parts {
     error: Option<Rect>,
     /// Where the detail pane's lines go, under its title row.
     body: Rect,
-    /// The result bar's buttons.
-    result_buttons: Vec<(ReposButton, Rect)>,
+    /// The result bar's buttons, by index into `ResultBar::buttons`.
+    result_buttons: Vec<(usize, Rect)>,
     /// The footer's buttons, by index into `ReposView::hints`.
     hints: Vec<(usize, Rect)>,
     /// The sheet's title, a rect per line shown, and its buttons by index
@@ -666,9 +714,14 @@ fn hint_width(hint: &Hint) -> i32 {
         + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
-/// How wide a pill button in the result bar is.
-fn pill_width(button: ReposButton) -> i32 {
-    text_extent(button.label(), SMALL_FONT_SIZE, SMALL_CHAR) + 2 * PILL_PAD
+/// What the footer's "more" button says with `n` actions behind it.
+fn more_label(n: usize) -> String {
+    format!("{n} more…")
+}
+
+/// How wide the "more" button is with `n` actions behind it.
+fn more_width(n: usize) -> i32 {
+    2 * HINT_PAD + 2 * CAP_PADDING + text_extent(&more_label(n), SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
 /// How wide a sheet's button is.
@@ -678,30 +731,48 @@ fn sheet_button_width(button: ReposButton) -> i32 {
 }
 
 /// The footer's actions split into rows of at most `w` logical pixels, as
-/// many rows as `REPOS_FOOTER_ROWS`: per row, (index into `hints`, width).
-/// What doesn't fit the last row is left out.
-fn hint_rows(hints: &[Hint], w: i32) -> Vec<Vec<(usize, i32)>> {
-    let mut rows: Vec<Vec<(usize, i32)>> = vec![Vec::new()];
-    let mut used = 0;
-    for (i, hint) in hints.iter().enumerate() {
-        let width = hint_width(hint).min(w);
-        let row = rows.last_mut().expect("a row");
-        let more = if row.is_empty() {
-            width
-        } else {
-            HINT_GAP + width
-        };
-        if used + more <= w {
-            row.push((i, width));
-            used += more;
-        } else if rows.len() < REPOS_FOOTER_ROWS {
-            rows.push(vec![(i, width)]);
-            used = width;
-        } else {
-            break;
+/// many rows as `REPOS_FOOTER_ROWS`: per row, (index into `hints`, width);
+/// then those that don't fit, which go behind the "more" button, for
+/// which the last row keeps room.
+fn hint_rows(hints: &[Hint], w: i32) -> (Vec<Vec<(usize, i32)>>, Vec<usize>) {
+    let fit = |reserve: i32| {
+        let mut rows: Vec<Vec<(usize, i32)>> = vec![Vec::new()];
+        let mut used = 0;
+        let mut rest = Vec::new();
+        for (i, hint) in hints.iter().enumerate() {
+            if !rest.is_empty() {
+                rest.push(i);
+                continue;
+            }
+            let width = hint_width(hint).min(w);
+            let last = rows.len() == REPOS_FOOTER_ROWS;
+            let room = if last { w - reserve } else { w };
+            let row = rows.last_mut().expect("a row");
+            let more = if row.is_empty() {
+                width
+            } else {
+                HINT_GAP + width
+            };
+            if used + more <= room {
+                row.push((i, width));
+                used += more;
+            } else if !last {
+                rows.push(vec![(i, width)]);
+                used = width;
+            } else {
+                rest.push(i);
+            }
         }
+        (rows, rest)
+    };
+    let (rows, rest) = fit(0);
+    if rest.is_empty() {
+        return (rows, rest);
     }
-    rows
+    // With a "more" button on the last row, a few less may fit, and the
+    // button then says so.
+    let (_, rest) = fit(HINT_GAP + more_width(rest.len()));
+    fit(HINT_GAP + more_width(rest.len()))
 }
 
 /// How high the footer is with `rows` rows of actions.
@@ -709,11 +780,21 @@ fn footer_h(rows: usize) -> i32 {
     2 * REPOS_FOOTER_PAD + rows.max(1) as i32 * REPOS_HINT_ROW
 }
 
-/// The tree's width in a panel `w` wide.
-fn tree_width(w: i32) -> i32 {
-    ((w as f64 * REPOS_TREE_SHARE).round() as i32)
+/// The tree's width in a panel `w` wide, with `share` of it.
+fn tree_width(w: i32, share: f64) -> i32 {
+    let share = share.clamp(REPOS_TREE_SHARE_MIN, REPOS_TREE_SHARE_MAX);
+    ((w as f64 * share).round() as i32)
         .max(REPOS_TREE_MIN.min(w / 2))
         .min(w)
+}
+
+/// The tree's share of the panel for a press dragging the line between
+/// the tree and the detail to `x` (output coordinates), on an output of
+/// `size`.
+pub fn repos_share_at(x: f64, size: Size<i32, Logical>) -> f64 {
+    let panel = panel_rect(size);
+    let share = (x - panel.loc.x as f64) / panel.size.w.max(1) as f64;
+    share.clamp(REPOS_TREE_SHARE_MIN, REPOS_TREE_SHARE_MAX)
 }
 
 /// How wide the branch picker's button is for `label`.
@@ -725,12 +806,12 @@ fn picker_width(label: &str) -> i32 {
 /// How many tree lines and detail lines the panel shows at once on an
 /// output of `size`: with the error line, the result bar and the footer's
 /// rows all there, so that the page doesn't change as they come and go.
-pub fn repos_page(size: Size<i32, Logical>) -> (usize, usize) {
+pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) {
     let panel = panel_rect(size);
     let bottom = REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS);
     let middle = panel.size.h - REPOS_HEADER - bottom;
-    let tree = (middle - 2 * REPOS_PAD) / REPOS_ROW;
-    let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / REPOS_DETAIL_LINE;
+    let tree = (middle - 2 * REPOS_PAD) / repos_row(density);
+    let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
     (tree.max(1) as usize, detail.max(1) as usize)
 }
 
@@ -760,8 +841,11 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         (pw, ROW_BUTTON).into(),
     );
 
+    let row_h = repos_row(view.density);
+    let line_h = repos_detail_line(view.density);
+
     // From the bottom up: the footer, the result bar, the error, the field.
-    let rows = hint_rows(&view.hints, inner_w);
+    let (rows, overflow) = hint_rows(&view.hints, inner_w);
     let footer_height = footer_h(rows.len());
     let footer_y = bottom_edge - footer_height;
     let footer = Rectangle::new((x, footer_y).into(), (w, footer_height).into());
@@ -782,28 +866,28 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let middle_y = top + REPOS_HEADER;
     let middle_h = (y - middle_y).max(0);
 
-    // The tree and its lines.
-    let tree_w = tree_width(w);
+    // The tree and its lines, short of its scrollbar.
+    let tree_w = tree_width(w, view.tree_share);
     let tree = Rectangle::new((x, middle_y).into(), (tree_w, middle_h).into());
-    let (line_x, line_w) = (x + REPOS_PAD, (tree_w - 2 * REPOS_PAD).max(0));
+    let (line_x, line_w) = (x + REPOS_PAD, (tree_w - 2 * REPOS_PAD - SCROLLBAR).max(0));
     let tree_end = middle_y + middle_h - REPOS_PAD;
-    let (mut lines, mut marks) = (Vec::new(), Vec::new());
+    let (mut lines, mut marks, mut chips) = (Vec::new(), Vec::new(), Vec::new());
     for (i, line) in view.lines.iter().enumerate() {
-        let ly = middle_y + REPOS_PAD + i as i32 * REPOS_ROW;
-        if ly + REPOS_ROW > tree_end {
+        let ly = middle_y + REPOS_PAD + i as i32 * row_h;
+        if ly + row_h > tree_end {
             break;
         }
-        let rect = Rectangle::new((line_x, ly).into(), (line_w, REPOS_ROW).into());
+        let rect = Rectangle::new((line_x, ly).into(), (line_w, row_h).into());
         let indent = match line {
             TreeLine::Repo(_) => 0,
             TreeLine::File(_) => REPOS_INDENT,
         };
         let check_x = line_x + REPOS_LINE_INSET + indent;
-        let check = Rectangle::new((check_x, ly).into(), (REPOS_CHECK, REPOS_ROW).into());
+        let check = Rectangle::new((check_x, ly).into(), (REPOS_CHECK, row_h).into());
         let expander = match line {
             TreeLine::Repo(repo) if repo.expanded.is_some() => Some(Rectangle::new(
                 (check_x + REPOS_CHECK, ly).into(),
-                (REPOS_EXPANDER, REPOS_ROW).into(),
+                (REPOS_EXPANDER, row_h).into(),
             )),
             _ => None,
         };
@@ -816,17 +900,27 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             for m in spans.marks {
                 let mx = m.x.floor() as i32;
                 let mw = (m.end.ceil() as i32 - mx).max(1);
-                let rect = Rectangle::new((mx, ly).into(), (mw, REPOS_ROW).into());
+                let rect = Rectangle::new((mx, ly).into(), (mw, row_h).into());
                 marks.push((i, m.mark, rect));
+            }
+            if let Some((cx, cw)) = spans.chip {
+                let cx = cx.floor() as i32;
+                let cw = (cw.ceil() as i32).max(1);
+                chips.push((i, Rectangle::new((cx, ly).into(), (cw, row_h).into())));
             }
         }
         lines.push((rect, check, expander));
     }
 
-    // The detail pane, its tabs at the right of its title row.
+    // The detail pane, its tabs at the right of its title row; the line
+    // between it and the tree can be dragged.
     let detail = Rectangle::new(
         (x + tree_w, middle_y).into(),
         ((w - tree_w).max(0), middle_h).into(),
+    );
+    let splitter = Rectangle::new(
+        (x + tree_w - SPLITTER_GRAB, middle_y).into(),
+        (2 * SPLITTER_GRAB, middle_h).into(),
     );
     let tab_y = middle_y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
     let tabs = [DetailTab::Diff, DetailTab::Log, DetailTab::Stashes];
@@ -848,7 +942,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         )
             .into(),
         (
-            (detail.size.w - 2 * HELP_PADDING).max(0),
+            (detail.size.w - 2 * HELP_PADDING - SCROLLBAR).max(0),
             (middle_h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
         )
             .into(),
@@ -859,14 +953,14 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     if let (Some(bar), Some(rect)) = (&view.result, result) {
         let mut right = inner_x + inner_w;
         let by = rect.loc.y + (REPOS_RESULT - ROW_BUTTON) / 2;
-        for &button in bar.buttons.iter().rev() {
-            let bw = pill_width(button);
+        for (i, hint) in bar.buttons.iter().enumerate().rev() {
+            let bw = hint_width(hint);
             right -= bw;
             if right < inner_x + inner_w / 2 {
                 break;
             }
             result_buttons.push((
-                button,
+                i,
                 Rectangle::new((right, by).into(), (bw, ROW_BUTTON).into()),
             ));
             right -= REPOS_BUTTON_GAP;
@@ -874,8 +968,10 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         result_buttons.reverse();
     }
 
-    // The footer's actions, row by row from the left.
+    // The footer's actions, row by row from the left; the "more" button
+    // after the last row's.
     let mut hints = Vec::new();
+    let mut more = None;
     for (r, row) in rows.iter().enumerate() {
         let ry = footer_y + REPOS_FOOTER_PAD + r as i32 * REPOS_HINT_ROW;
         let by = ry + (REPOS_HINT_ROW - ROW_BUTTON) / 2;
@@ -883,6 +979,10 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         for &(i, hw) in row {
             hints.push((i, Rectangle::new((hx, by).into(), (hw, ROW_BUTTON).into())));
             hx += hw + HINT_GAP;
+        }
+        if r + 1 == rows.len() && !overflow.is_empty() {
+            let mw = more_width(overflow.len()).min((inner_x + inner_w - hx).max(1));
+            more = Some(Rectangle::new((hx, by).into(), (mw, ROW_BUTTON).into()));
         }
     }
 
@@ -945,22 +1045,22 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .clamp(pw, BRANCH_MENU_MAX.max(pw))
             .min(inner_w);
         let my = branch.loc.y + branch.size.h + BRANCH_MENU_GAP;
-        let rows_y = my + 2 * BRANCH_MENU_PAD + REPOS_ROW;
-        let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / REPOS_ROW;
+        let rows_y = my + 2 * BRANCH_MENU_PAD + row_h;
+        let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / row_h;
         let shown = menu.rows.len().max(1).min(room.max(1) as usize);
-        let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * REPOS_ROW;
+        let mh = rows_y - my + BRANCH_MENU_PAD + shown as i32 * row_h;
         let mx = branch.loc.x + branch.size.w - mw;
         let card = Rectangle::new((mx, my).into(), (mw, mh).into());
         let inner = (mw - 2 * BRANCH_MENU_PAD).max(0);
         branch_search = Some(Rectangle::new(
             (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
-            (inner, REPOS_ROW).into(),
+            (inner, row_h).into(),
         ));
         let rows: Vec<Rect> = (0..shown.min(menu.rows.len()))
             .map(|i| {
                 Rectangle::new(
-                    (mx + BRANCH_MENU_PAD, rows_y + i as i32 * REPOS_ROW).into(),
-                    ((mw - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
+                    (mx + BRANCH_MENU_PAD, rows_y + i as i32 * row_h).into(),
+                    ((mw - 2 * BRANCH_MENU_PAD).max(0), row_h).into(),
                 )
             })
             .collect();
@@ -976,11 +1076,19 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         _ => Vec::new(),
     };
 
-    let mut buttons = result_buttons.clone();
+    let mut buttons: Vec<(ReposButton, Rect)> = Vec::new();
+    if let Some(bar) = &view.result {
+        buttons.extend(
+            result_buttons
+                .iter()
+                .map(|&(i, r)| (bar.buttons[i].button, r)),
+        );
+    }
     buttons.extend(hints.iter().map(|&(i, r)| (view.hints[i].button, r)));
     if let Some(s) = &view.sheet {
         buttons.extend(sheet_buttons.iter().map(|&(i, r)| (s.buttons[i], r)));
     }
+    let _ = line_h;
     Parts {
         layout: ReposLayout {
             panel,
@@ -988,12 +1096,16 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             tree,
             lines,
             marks,
+            chips,
+            splitter,
             detail,
             detail_tabs,
             field,
             result,
             buttons,
             footer,
+            more,
+            overflow,
             sheet,
             branch,
             branch_menu,
@@ -1115,9 +1227,15 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
         if let Some(&(_, mark, _)) = mark {
             return Some(ReposHit::Mark(i, mark));
         }
+        if layout.chips.iter().any(|(j, r)| *j == i && at(r)) {
+            return Some(ReposHit::Chip(i));
+        }
         if at(line) {
             return Some(ReposHit::Line(i));
         }
+    }
+    if at(&layout.splitter) {
+        return Some(ReposHit::Splitter);
     }
     if let Some((tab, _)) = layout.detail_tabs.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::DetailTab(*tab));
@@ -1130,6 +1248,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     }
     if let Some((button, _)) = layout.buttons.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::Button(*button));
+    }
+    if layout.more.as_ref().is_some_and(at) {
+        return Some(ReposHit::More);
     }
     Some(ReposHit::Panel)
 }
@@ -1158,6 +1279,35 @@ fn expander_mark(open: bool, x: f32, y: f32, s: f32) -> f32 {
     } else {
         chevron_down(y, x, s)
     }
+}
+
+/// A scrollbar in `track` (buffer coordinates) for a list of `total`
+/// lines showing `shown` from `first`: its thumb where they are, nothing
+/// when they all fit.
+fn scrollbar(
+    c: &mut Canvas,
+    track: Rect,
+    (first, shown, total): (usize, usize, usize),
+    scale: f64,
+    p: &Palette,
+) {
+    if total <= shown || shown == 0 {
+        return;
+    }
+    let s = scale as f32;
+    let (x, y, w, h) = rect_px(track, scale);
+    let min = (SCROLLBAR_MIN as f32 * s).min(h);
+    let thumb_h = (h * shown as f32 / total as f32).max(min).min(h);
+    let first = first.min(total - shown) as f32;
+    let thumb_y = y + ((h - thumb_h) * first / (total - shown) as f32).round();
+    c.rounded(
+        x,
+        thumb_y,
+        w,
+        thumb_h,
+        w / 2.0,
+        mix(p.elevated, p.muted, 0.45),
+    );
 }
 
 /// The colour of `tone` in `p`.
@@ -1389,7 +1539,11 @@ impl Painter {
                     tree.loc.y + REPOS_PAD,
                 )
                     .into(),
-                ((tree.size.w - 2 * REPOS_PAD).max(0), REPOS_ROW).into(),
+                (
+                    (tree.size.w - 2 * REPOS_PAD).max(0),
+                    repos_row(view.density),
+                )
+                    .into(),
             );
             let (x, right) = phys(first, scale);
             self.mixed_text(
@@ -1408,6 +1562,22 @@ impl Painter {
             let rects = (shift(*rect), shift(*check), expander.map(shift));
             self.tree_line(&mut c, view, i, line, rects, scale, p);
         }
+        let tree_track = Rectangle::new(
+            (
+                tree.loc.x + tree.size.w - REPOS_PAD - SCROLLBAR,
+                tree.loc.y + REPOS_PAD,
+            )
+                .into(),
+            (SCROLLBAR, (tree.size.h - 2 * REPOS_PAD).max(0)).into(),
+        );
+        let shown = layout.lines.len();
+        scrollbar(
+            &mut c,
+            tree_track,
+            (view.first, shown, view.total),
+            scale,
+            p,
+        );
         let detail = shift(layout.detail);
         c.fill(
             px(detail.loc.x),
@@ -1448,14 +1618,25 @@ impl Painter {
             let buttons: Vec<_> = parts
                 .result_buttons
                 .iter()
-                .map(|(b, r)| (*b, shift(*r)))
+                .map(|&(i, r)| (i, shift(r)))
                 .collect();
             self.result_bar(&mut c, view, bar, shift(rect), &buttons, scale, p);
         }
         let footer = shift(layout.footer);
         across(&mut c, px(footer.loc.y));
         for &(i, rect) in &parts.hints {
-            self.hint_button(&mut c, view, &view.hints[i], shift(rect), scale, p);
+            let hint = &view.hints[i];
+            let hit = ReposHit::Button(hint.button);
+            self.hint_button(&mut c, view, hint, hit, shift(rect), scale, p);
+        }
+        if let Some(rect) = layout.more {
+            let more = Hint {
+                button: ReposButton::Help,
+                label: more_label(layout.overflow.len()),
+                key: String::new(),
+                disabled: None,
+            };
+            self.hint_button(&mut c, view, &more, ReposHit::More, shift(rect), scale, p);
         }
 
         if let (Some(menu), Some((card, rows)), Some(search)) =
@@ -1465,22 +1646,8 @@ impl Painter {
             let parts = (shift(*card), shift(search), &rows[..]);
             self.branch_menu(&mut c, view, menu, parts, scale, p);
         }
-        match &view.sheet {
-            Some(sheet) => self.sheet(&mut c, view, sheet, &parts, shift, scale, p),
-            None => {
-                // Why a disabled action can't be done, over it.
-                let reason = parts.hints.iter().find_map(|&(i, rect)| {
-                    let hint = &view.hints[i];
-                    let hovered = view.hover == Some(ReposHit::Button(hint.button));
-                    hint.disabled
-                        .as_ref()
-                        .filter(|_| hovered)
-                        .map(|why| (why, rect))
-                });
-                if let Some((why, rect)) = reason {
-                    self.reason_tip(&mut c, why, shift(rect), shift(panel), scale, p);
-                }
-            }
+        if let Some(sheet) = &view.sheet {
+            self.sheet(&mut c, view, sheet, &parts, shift, scale, p);
         }
         c.into_buffer(false)
     }
@@ -1506,15 +1673,19 @@ impl Painter {
         let r = (MENU_RADIUS - 2.0) * s;
         let hovered = matches!(
             view.hover,
-            Some(ReposHit::Line(j) | ReposHit::Check(j) | ReposHit::Expander(j) | ReposHit::Mark(j, _)) if j == i
+            Some(
+                ReposHit::Line(j)
+                    | ReposHit::Check(j)
+                    | ReposHit::Expander(j)
+                    | ReposHit::Chip(j)
+                    | ReposHit::Mark(j, _)
+            ) if j == i
         );
         let state = match line {
             TreeLine::Repo(repo) => Some(&repo.state),
             TreeLine::File(_) => None,
         };
-        if matches!(state, Some(LineState::Armed(_))) {
-            c.rounded(x, hy, w, hh, r, mix(p.elevated, p.warning, 0.15));
-        } else if view.selected == Some(i) {
+        if view.selected == Some(i) {
             let fill = if view.field_focused {
                 mix(p.elevated, p.selected, 0.6)
             } else {
@@ -1555,8 +1726,9 @@ impl Painter {
                     Some(ReposHit::Mark(j, mark)) if j == i => Some(mark),
                     _ => None,
                 };
+                let on_chip = view.hover == Some(ReposHit::Chip(i));
                 let at = (label_x, right);
-                self.repo_line(c, repo, at, line_band, gap, mark, scale, p);
+                self.repo_line(c, repo, at, line_band, gap, (mark, on_chip), scale, p);
             }
             TreeLine::File(file) => {
                 self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
@@ -1605,7 +1777,7 @@ impl Painter {
         (x, right): (f32, f32),
         line_band: (i32, i32),
         gap: f32,
-        hovered: Option<RepoMark>,
+        (hovered, on_chip): (Option<RepoMark>, bool),
         scale: f64,
         p: &Palette,
     ) {
@@ -1619,9 +1791,12 @@ impl Painter {
             let pad = (CHIP_PAD as f32 * s).round();
             let ch = (CHIP_HEIGHT as f32 * s).round();
             let cy = (top as f32 + (height as f32 - ch) / 2.0).round();
+            // Lit under the pointer: it has something to say.
+            let strength = if on_chip { 0.3 } else { 0.18 };
             let fill = match chip.tone {
+                Tone::Normal | Tone::Muted if on_chip => mix(p.element, p.selected, 0.5),
                 Tone::Normal | Tone::Muted => p.element,
-                _ => mix(p.elevated, color, 0.18),
+                _ => mix(p.elevated, color, strength),
             };
             c.rounded(cx, cy, cw, ch, CHIP_RADIUS * s, fill);
             self.mixed_text(
@@ -1791,20 +1966,20 @@ impl Painter {
         );
 
         let (bx, bend) = phys(body, scale);
+        let line_h = repos_detail_line(view.density);
         // Tints reach across the pane, short of its edges.
         let (tint_x, tint_end) = (
             px(rect.loc.x) + border,
             px(rect.loc.x + rect.size.w) - border,
         );
+        let mut shown = 0;
         for (i, line) in view.detail.lines.iter().enumerate() {
-            let ly = body.loc.y + i as i32 * REPOS_DETAIL_LINE;
-            if ly + REPOS_DETAIL_LINE > body.loc.y + body.size.h {
+            let ly = body.loc.y + i as i32 * line_h;
+            if ly + line_h > body.loc.y + body.size.h {
                 break;
             }
-            let row = Rectangle::new(
-                (body.loc.x, ly).into(),
-                (body.size.w, REPOS_DETAIL_LINE).into(),
-            );
+            shown += 1;
+            let row = Rectangle::new((body.loc.x, ly).into(), (body.size.w, line_h).into());
             let row_band = band(row, scale);
             let (color, tint) = match line.tone {
                 DiffTone::Plain => (p.text, None),
@@ -1820,6 +1995,16 @@ impl Painter {
             let text = line.text.replace('\t', "    ");
             self.mono_text(c, &text, REPOS_MONO_SIZE, bx, bend, row_band, scale, color);
         }
+        let track = Rectangle::new(
+            (
+                rect.loc.x + rect.size.w - HELP_PADDING / 2 - SCROLLBAR,
+                body.loc.y,
+            )
+                .into(),
+            (SCROLLBAR, body.size.h).into(),
+        );
+        let (first, total) = (view.detail.first, view.detail.total);
+        scrollbar(c, track, (first, shown.max(1), total), scale, p);
     }
 
     /// The detail pane's `tab` segment in `rect`: an outlined pill, filled
@@ -1901,7 +2086,7 @@ impl Painter {
         view: &ReposView,
         bar: &ResultBar,
         rect: Rect,
-        buttons: &[(ReposButton, Rect)],
+        buttons: &[(usize, Rect)],
         scale: f64,
         p: &Palette,
     ) {
@@ -1933,25 +2118,24 @@ impl Painter {
             scale,
             color,
         );
-        for &(button, rect) in buttons {
-            let (bx, by, bw, bh) = rect_px(rect, scale);
-            let b = ((scale.round() as i32).max(1)) as f32;
-            let r = BUTTON_RADIUS * s;
-            let hot = view.hover == Some(ReposHit::Button(button));
-            let fill = if hot { p.selected } else { p.element };
-            c.rounded(bx, by, bw, bh, r, p.border);
-            c.rounded(bx + b, by + b, bw - 2.0 * b, bh - 2.0 * b, r - b, fill);
-            self.centered(c, button.label(), SMALL_FONT_SIZE, rect, scale, p.text);
+        for &(i, rect) in buttons {
+            let hint = &bar.buttons[i];
+            let hit = ReposHit::Button(hint.button);
+            self.hint_button(c, view, hint, hit, rect, scale, p);
         }
     }
 
-    /// A footer action in `rect`: its key on a keycap, then what it does;
-    /// lighter under the pointer, dimmed when it can't be done now.
+    /// An action in `rect` (the footer's, the result bar's, the "more"
+    /// button), the pointer on it as `hit`: its key on a keycap, then
+    /// what it does; lighter under the pointer, dimmed when it can't be
+    /// done now.
+    #[allow(clippy::too_many_arguments)]
     fn hint_button(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         hint: &Hint,
+        hit: ReposHit,
         rect: Rect,
         scale: f64,
         p: &Palette,
@@ -1960,7 +2144,7 @@ impl Painter {
         let (x, y, w, h) = rect_px(rect, scale);
         let r = BUTTON_RADIUS * s;
         let disabled = hint.disabled.is_some();
-        if view.hover == Some(ReposHit::Button(hint.button)) {
+        if view.hover == Some(hit) {
             let fill = if disabled {
                 mix(p.elevated, p.selected, 0.5)
             } else {
@@ -2038,46 +2222,6 @@ impl Painter {
             hint_band,
             scale,
             label_color,
-        );
-    }
-
-    /// `why` an action in `rect` can't be done, on a small card over it,
-    /// kept in `panel` (buffer coordinates).
-    fn reason_tip(
-        &self,
-        c: &mut Canvas,
-        why: &str,
-        rect: Rect,
-        panel: Rect,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
-        let pad = (PADDING * s).round();
-        let w = (self.mixed_width(why, SMALL_FONT_SIZE, scale) + 2.0 * pad).round();
-        let (_, panel_y, panel_w, _) = rect_px(panel, scale);
-        let (panel_x, edge) = phys(panel, scale);
-        let max_w = panel_w - 2.0 * px(HELP_PADDING) as f32;
-        let w = w.min(max_w);
-        let h = px(TIP_HEIGHT) as f32;
-        let x = (px(rect.loc.x) as f32)
-            .min(edge - px(HELP_PADDING) as f32 - w)
-            .max(panel_x + px(HELP_PADDING) as f32);
-        let y = (px(rect.loc.y) as f32 - px(TIP_GAP) as f32 - h).max(panel_y);
-        let b = px(1).max(1) as f32;
-        let r = BUTTON_RADIUS * s;
-        c.rounded(x, y, w, h, r, p.border);
-        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
-        self.mixed_text(
-            c,
-            why,
-            SMALL_FONT_SIZE,
-            x + pad,
-            x + w - pad / 2.0,
-            (y as i32, h as i32),
-            scale,
-            p.muted,
         );
     }
 
@@ -2167,7 +2311,11 @@ impl Painter {
                     search.loc.y + search.size.h + BRANCH_MENU_PAD,
                 )
                     .into(),
-                ((card.size.w - 2 * BRANCH_MENU_PAD).max(0), REPOS_ROW).into(),
+                (
+                    (card.size.w - 2 * BRANCH_MENU_PAD).max(0),
+                    repos_row(view.density),
+                )
+                    .into(),
             );
             let (x, end) = phys(row, scale);
             let pad = BRANCH_ROW_PAD as f32 * s;
@@ -2189,10 +2337,7 @@ impl Painter {
             let r = (MENU_RADIUS - 2.0) * s;
             let on_delete = view.hover == Some(ReposHit::BranchDelete(i));
             let hovered = on_delete || view.hover == Some(ReposHit::BranchRow(i));
-            let armed = menu.armed == Some(i);
-            if armed {
-                c.rounded(x, y, w, h, r, mix(p.elevated, p.error, 0.25));
-            } else if menu.picked == Some(i) {
+            if menu.picked == Some(i) {
                 c.rounded(x, y, w, h, r, p.selected);
             } else if hovered {
                 c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
@@ -2201,16 +2346,11 @@ impl Painter {
             if menu.current == Some(i) {
                 icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
             }
-            // The delete button shows on the row pointed at, picked or
-            // armed.
+            // The delete button shows on the row pointed at or picked.
             let delete = branch_delete(*rect);
             let deletable = menu.deletable.get(i) == Some(&true);
-            if deletable && (armed || hovered || menu.picked == Some(i)) {
-                let color = if armed || on_delete {
-                    p.error
-                } else {
-                    p.placeholder
-                };
+            if deletable && (hovered || menu.picked == Some(i)) {
+                let color = if on_delete { p.error } else { p.placeholder };
                 icon_sdf(c, delete, scale, color, |x, y| cross(x, y, 0.8 * s));
             }
             let pad = BRANCH_ROW_PAD as f32 * s;
@@ -2350,11 +2490,13 @@ mod tests {
     fn hint(button: ReposButton, key: &str, disabled: Option<&str>) -> Hint {
         Hint {
             button,
-            label: button.label().into(),
+            label: button.label().to_lowercase(),
             key: key.into(),
             disabled: disabled.map(Into::into),
         }
     }
+
+    const DENSITY: Density = Density::Comfortable;
 
     fn detail_line(text: &str, tone: DiffTone) -> DetailLine {
         DetailLine {
@@ -2386,6 +2528,7 @@ mod tests {
                 chip: Some(Chip {
                     text: "MERGING · 2".into(),
                     tone: Tone::Error,
+                    tip: "A merge stopped on 2 conflicted files".into(),
                 }),
                 state: LineState::Attention,
                 ..repo("herdr", Some("feat/x"))
@@ -2407,20 +2550,23 @@ mod tests {
                 chip: Some(Chip {
                     text: "detached".into(),
                     tone: Tone::Muted,
+                    tip: "Not on a branch".into(),
                 }),
                 ..repo("scratch", None)
             }),
             TreeLine::Repo(RepoLine {
-                state: LineState::Armed("Force push again to overwrite origin".into()),
                 ahead: 1,
                 behind: 3,
                 ..repo("infra", Some("feat/x"))
             }),
         ];
+        let total = lines.len() + 12;
         ReposView {
             title: "gerdr".into(),
             summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
             lines,
+            first: 0,
+            total,
             selected: Some(1),
             hover: Some(ReposHit::Line(6)),
             field: Line::from("Add multi-repo panel"),
@@ -2430,7 +2576,7 @@ mod tests {
             result: Some(ResultBar {
                 text: "Commit and push: 2 done · 1 conflict".into(),
                 tone: Tone::Warning,
-                buttons: vec![Undo, RetryFailed],
+                buttons: vec![hint(Undo, "Alt+Z", None), hint(RetryFailed, "Alt+R", None)],
             }),
             hints: vec![
                 hint(Branch, "Ctrl+N", None),
@@ -2442,10 +2588,14 @@ mod tests {
                 hint(Pull, "Ctrl+L", None),
                 hint(Merge, "Ctrl+M", None),
                 hint(Rebase, "Ctrl+Shift+M", None),
+                hint(MergeFrom, "Alt+M", None),
+                hint(RebaseFrom, "Alt+Shift+M", None),
                 hint(OpenInZed, "Ctrl+E", None),
                 hint(MarkResolved, "Ctrl+R", None),
                 hint(Continue, "Ctrl+G", None),
-                hint(Abort, "Ctrl+Shift+Delete", None),
+                hint(Abort, "Ctrl+Shift+Del", None),
+                hint(Stash, "Alt+S", None),
+                hint(Help, "F1", None),
             ],
             detail: DetailView {
                 tab: DetailTab::Diff,
@@ -2475,6 +2625,8 @@ mod tests {
                     ),
                     detail_line("error: hook pre-commit failed", DiffTone::Error),
                 ],
+                first: 3,
+                total: 40,
             },
             sheet: None,
             empty: "No repositories in this project".into(),
@@ -2484,6 +2636,8 @@ mod tests {
                 enabled: true,
                 menu: None,
             },
+            density: DENSITY,
+            tree_share: REPOS_TREE_SHARE,
         }
     }
 
@@ -2495,7 +2649,6 @@ mod tests {
                 menu: Some(BranchMenuView {
                     rows: rows.map(String::from).to_vec(),
                     deletable: vec![false, true, true, false],
-                    armed: Some(2),
                     current: Some(1),
                     picked: Some(0),
                     empty: "No branch they all have".into(),
@@ -2529,6 +2682,8 @@ mod tests {
     fn empty() -> ReposView {
         ReposView {
             lines: Vec::new(),
+            first: 0,
+            total: 0,
             selected: None,
             hover: None,
             field: Line::default(),
@@ -2647,10 +2802,11 @@ mod tests {
                     assert!(inside(l.detail, *tab));
                 }
                 // Every line of a page fits (the panel is given no more).
-                let page = view.lines.len().min(repos_page(size).0);
+                let page = view.lines.len().min(repos_page(size, DENSITY).0);
                 assert!(l.lines.len() >= page, "{size:?}");
                 // The footer's actions stay in the footer and the result
-                // bar's in it.
+                // bar's in it; the "more" button in the footer too, with
+                // the rest of the actions behind it.
                 let n_result = view.result.as_ref().map_or(0, |r| r.buttons.len());
                 for (i, (_, rect)) in l.buttons.iter().enumerate() {
                     if i < n_result {
@@ -2659,6 +2815,23 @@ mod tests {
                         assert!(inside(l.footer, *rect), "{size:?}: {rect:?}");
                     }
                 }
+                if let Some(more) = l.more {
+                    assert!(inside(l.footer, more), "{size:?}");
+                    assert!(!l.overflow.is_empty());
+                }
+                let n_sheet = view.sheet.as_ref().map_or(0, |s| s.buttons.len());
+                let in_footer = l.buttons.len() - n_result - n_sheet;
+                assert_eq!(in_footer + l.overflow.len(), view.hints.len(), "{size:?}");
+                for &i in &l.overflow {
+                    assert!(!l.buttons.iter().any(|(b, _)| *b == view.hints[i].button));
+                }
+                // The chips are on their lines, and the splitter between
+                // the tree and the detail.
+                for (i, chip) in &l.chips {
+                    assert!(inside(l.lines[*i].0, *chip));
+                }
+                assert!(l.splitter.loc.x < l.detail.loc.x);
+                assert!(l.splitter.loc.x + l.splitter.size.w > l.detail.loc.x);
                 // No two buttons overlap.
                 for (i, (_, a)) in l.buttons.iter().enumerate() {
                     for (_, b) in &l.buttons[i + 1..] {
@@ -2670,7 +2843,7 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_wraps_and_keeps_every_action_on_a_wide_output() {
+    fn the_footer_wraps_and_puts_what_does_not_fit_behind_more() {
         let view = full();
         let l = repos_layout(&view, (2560, 1440).into());
         let hints = l
@@ -2679,9 +2852,39 @@ mod tests {
             .filter(|(b, _)| view.hints.iter().any(|h| h.button == *b))
             .count();
         assert_eq!(hints, view.hints.len());
+        assert_eq!(l.more, None);
+        assert!(l.overflow.is_empty());
         let narrow = repos_layout(&view, (800, 600).into());
         assert!(narrow.footer.size.h > footer_h(1));
         assert!(narrow.footer.size.h <= footer_h(REPOS_FOOTER_ROWS));
+        let more = narrow.more.expect("a more button");
+        assert!(!narrow.overflow.is_empty());
+        // The last ones go behind it, in order.
+        let n = view.hints.len();
+        let behind: Vec<usize> = (n - narrow.overflow.len()..n).collect();
+        assert_eq!(narrow.overflow, behind);
+        assert_eq!(repos_hit(&narrow, centre(more)), Some(ReposHit::More));
+        // No button is under it.
+        for (_, r) in &narrow.buttons {
+            assert!(!r.overlaps(more), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn the_tree_share_is_dragged_within_bounds() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let panel = panel_rect(size);
+        let at = |share: f64| panel.loc.x as f64 + panel.size.w as f64 * share;
+        assert!((repos_share_at(at(0.5), size) - 0.5).abs() < 0.01);
+        assert_eq!(repos_share_at(at(0.05), size), REPOS_TREE_SHARE_MIN);
+        assert_eq!(repos_share_at(at(0.95), size), REPOS_TREE_SHARE_MAX);
+        let wide = ReposView {
+            tree_share: 0.7,
+            ..full()
+        };
+        let l = repos_layout(&wide, size);
+        assert!(l.tree.size.w > repos_layout(&full(), size).tree.size.w);
+        assert_eq!(repos_hit(&l, centre(l.splitter)), Some(ReposHit::Splitter));
     }
 
     #[test]
@@ -2708,6 +2911,9 @@ mod tests {
                 for &(i, mark, r) in &l.marks {
                     assert!(within(l.lines[i].0, r), "{mark:?} on line {i}");
                     assert_eq!(hit(r), Some(ReposHit::Mark(i, mark)));
+                }
+                for &(i, r) in &l.chips {
+                    assert_eq!(hit(r), Some(ReposHit::Chip(i)));
                 }
                 for (b, r) in &l.buttons {
                     assert_eq!(hit(*r), Some(ReposHit::Button(*b)));
@@ -2836,7 +3042,7 @@ mod tests {
             let (menu, rows) = l.branch_menu.expect("a menu");
             assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
             // As many as the tree's page less the search, whatever the size.
-            let page = (repos_page(size).0 - 1).min(BRANCH_MENU_ROWS);
+            let page = (repos_page(size, DENSITY).0 - 1).min(BRANCH_MENU_ROWS);
             assert!(rows.len() >= page, "{size:?}: {} < {page}", rows.len());
             assert!(menu.size.w <= BRANCH_MENU_MAX.max(l.branch.size.w));
         }
@@ -2889,13 +3095,16 @@ mod tests {
     fn the_page_fits_whatever_shows_and_stays_put() {
         for (w, h) in SIZES.into_iter().chain([(640, 480), (3840, 2160)]) {
             let size: Size<i32, Logical> = (w, h).into();
-            let (tree_rows, detail_rows) = repos_page(size);
+            let (tree_rows, detail_rows) = repos_page(size, DENSITY);
             assert!(tree_rows >= 1 && detail_rows >= 1);
             if h >= 600 {
                 assert!(tree_rows >= 8, "{size:?}: {tree_rows}");
                 assert!(detail_rows >= 8, "{size:?}: {detail_rows}");
             }
-            assert_eq!(repos_page(size), (tree_rows, detail_rows));
+            assert_eq!(repos_page(size, DENSITY), (tree_rows, detail_rows));
+            // Compact rows are shorter: more of them fit.
+            let compact = repos_page(size, Density::Compact);
+            assert!(compact.0 >= tree_rows && compact.1 >= detail_rows);
             // A page of lines fits with or without the error and result.
             let filled = |v: ReposView| ReposView {
                 lines: (0..tree_rows)
@@ -2907,7 +3116,7 @@ mod tests {
                 let parts = parts(&view, size);
                 if h >= 600 {
                     assert_eq!(parts.layout.lines.len(), tree_rows, "{size:?}");
-                    assert!(parts.body.size.h >= detail_rows as i32 * REPOS_DETAIL_LINE);
+                    assert!(parts.body.size.h >= detail_rows as i32 * repos_detail_line(DENSITY));
                 }
             }
         }
@@ -2942,6 +3151,11 @@ mod tests {
             field_focused: false,
             ..full()
         };
+        let compact = ReposView {
+            density: Density::Compact,
+            hover: Some(ReposHit::Chip(4)),
+            ..full()
+        };
         let long_sheet = {
             let mut v = with_sheet();
             if let Some(sheet) = &mut v.sheet {
@@ -2956,6 +3170,7 @@ mod tests {
             full(),
             with_sheet(),
             disabled_hover,
+            compact,
             long_sheet,
             with_menu(),
             with_empty_menu(),
@@ -3007,9 +3222,69 @@ mod tests {
                     ..full()
                 },
             ),
+            (
+                "chip",
+                ReposView {
+                    hover: Some(ReposHit::Chip(4)),
+                    ..full()
+                },
+            ),
+            (
+                "confirm",
+                ReposView {
+                    sheet: Some(SheetView {
+                        title: "Force push in 2 repositories?".into(),
+                        lines: vec![
+                            (
+                                "gerdr".into(),
+                                "overwrite origin/feat/x with feat/x, with lease".into(),
+                                Tone::Warning,
+                            ),
+                            (
+                                "infra".into(),
+                                "overwrite origin/feat/x with feat/x, with lease".into(),
+                                Tone::Warning,
+                            ),
+                        ],
+                        buttons: vec![ReposButton::ForcePush, ReposButton::Cancel],
+                        default: 0,
+                    }),
+                    ..full()
+                },
+            ),
+            (
+                "help",
+                ReposView {
+                    sheet: Some(SheetView {
+                        title: "Keys in the repositories panel".into(),
+                        lines: vec![
+                            ("Tab".into(), "the field, or the tree".into(), Tone::Normal),
+                            ("Up / Down".into(), "select a line".into(), Tone::Normal),
+                            ("Space".into(), "check the line".into(), Tone::Normal),
+                            ("Esc".into(), "close".into(), Tone::Normal),
+                        ],
+                        buttons: vec![ReposButton::Cancel],
+                        default: 0,
+                    }),
+                    ..full()
+                },
+            ),
+            (
+                "compact",
+                ReposView {
+                    density: Density::Compact,
+                    ..full()
+                },
+            ),
         ];
         for (theme, scale) in [(Theme::Dark, 1.0), (Theme::Light, 1.0), (Theme::Dark, 2.0)] {
-            for (name, view) in &cases {
+            // The narrow one has the footer's "more" button.
+            let narrow = (("narrow", full()), Size::from((800, 600)));
+            let cases = cases
+                .iter()
+                .map(|c| (c, size))
+                .chain([(&narrow.0, narrow.1)]);
+            for ((name, view), size) in cases {
                 let panel = repos_layout(view, size).panel;
                 let w = ((panel.size.w + 2 * SHADOW) as f64 * scale).round() as usize;
                 let mut buffer = painter.repos(view, size, scale, theme.palette());

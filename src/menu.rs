@@ -13,7 +13,7 @@ use smithay::{
 
 use crate::{
     Action, Gerdr, WorkspaceKind,
-    chrome::{self, MenuRow, MenuView, Rect, ThemeMode},
+    chrome::{self, MenuRow, MenuView, Rect, ReposButton, ThemeMode},
     layout::{Dir, Side},
     rename::RenameTarget,
 };
@@ -22,6 +22,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
     NewTerminal,
+    /// An action of the repositories panel, as its footer offers it.
+    ReposAction(ReposButton),
     /// The project's Cursor workspace (see `Gerdr::open_cursor`).
     NewCursor,
     OpenFolder,
@@ -296,6 +298,7 @@ impl Gerdr {
             MenuAction::FocusAgent(key) => self.focus_agent(&key),
             MenuAction::DeleteCursorChat(id) => self.delete_cursor_chat(&id),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
+            MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
             MenuAction::CloseExpected(pane) => self.close_expected(pane),

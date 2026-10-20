@@ -929,6 +929,8 @@ pub enum Action {
 pub enum Drag {
     /// The sidebar's right edge.
     Sidebar,
+    /// The line between the repositories panel's tree and its detail.
+    ReposSplit,
     /// The gap between two panes of the shown tab: the split at `path`.
     Split { path: Vec<bool>, dir: Dir },
 }
@@ -1272,6 +1274,7 @@ impl Gerdr {
                 let max = SIDEBAR_MAX_WIDTH.min(size.w - MIN_PANE);
                 self.sidebar_width = (pos.x.round() as i32).min(max).max(SIDEBAR_MIN_WIDTH);
             }
+            Drag::ReposSplit => self.repos_drag_to(pos),
             Drag::Split { path, dir } => {
                 let area = self.content_rect();
                 let ws = &mut self.workspaces[self.active_workspace];

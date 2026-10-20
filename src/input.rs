@@ -134,6 +134,7 @@ fn over_project_menu(action: &Action) -> bool {
 fn drag_cursor(drag: &Drag) -> CursorIcon {
     match drag {
         Drag::Sidebar
+        | Drag::ReposSplit
         | Drag::Split {
             dir: Dir::Right, ..
         } => CursorIcon::ColResize,
@@ -187,6 +188,15 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             let out = state.quit_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Quit));
+                        }
+                        // A menu over the repositories panel takes its
+                        // keys; any other closes it and goes on.
+                        if state.repos.is_open()
+                            && state.context_menu.is_some()
+                            && state.menu_key(sym)
+                        {
+                            state.suppressed_keys.push(code);
+                            return FilterResult::Intercept(None);
                         }
                         // A name being typed takes every key, repeating
                         // what its field takes while held.
@@ -375,10 +385,10 @@ impl Gerdr {
                     overlay_tip = self.project_menu_hover(pos);
                 } else if self.worktrees.is_open() {
                     overlay_tip = self.worktrees_hover(pos);
-                } else if self.repos.is_open() {
-                    overlay_tip = self.repos_hover(pos);
                 } else if self.context_menu.is_some() {
                     self.menu_motion(pos);
+                } else if self.repos.is_open() {
+                    overlay_tip = self.repos_hover(pos);
                 } else if self.switcher.is_some() {
                     overlay_tip = self.switcher_motion(pos);
                 }
@@ -618,9 +628,17 @@ impl Gerdr {
             return true;
         }
         if self.repos.is_open() {
-            if button == BTN_LEFT {
-                self.repos_click(location);
-                self.press_field(location);
+            if self.context_menu.is_some() {
+                self.menu_press(location);
+                return true;
+            }
+            match button {
+                BTN_LEFT => {
+                    self.repos_click(location);
+                    self.press_field(location);
+                }
+                BTN_RIGHT => self.repos_right_click(location),
+                _ => {}
             }
             return true;
         }
@@ -775,6 +793,13 @@ impl Gerdr {
             return RegionHit::Nothing;
         }
         if let Some(view) = self.repos_view() {
+            if let Some(menu) = &self.context_menu {
+                return if menu.item_at(pos).is_some() {
+                    RegionHit::Control
+                } else {
+                    RegionHit::Nothing
+                };
+            }
             let layout = chrome::repos_layout(&view, output);
             let mut controls = layout
                 .lines
@@ -783,6 +808,7 @@ impl Gerdr {
                 .chain(layout.buttons.iter().map(|(_, r)| *r))
                 .chain(layout.detail_tabs.iter().map(|(_, r)| *r))
                 .chain([layout.branch])
+                .chain(layout.more)
                 .chain(layout.branch_menu.iter().flat_map(|(_, rows)| rows.clone()));
             return if controls.any(|r| r.to_f64().contains(pos)) {
                 RegionHit::Control

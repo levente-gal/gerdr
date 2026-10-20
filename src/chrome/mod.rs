@@ -65,6 +65,7 @@ pub use pane_bar::*;
 pub use placeholder::*;
 pub use project_menu::*;
 pub use quit::*;
+pub use repos::*;
 use shapes::*;
 pub use sidebar::*;
 pub use switcher::*;
@@ -73,7 +74,6 @@ pub use theme::*;
 pub use toast::*;
 pub use tooltip::*;
 pub use welcome::*;
-pub use repos::*;
 pub use worktrees::*;
 
 pub(crate) type Rect = Rectangle<i32, Logical>;
@@ -316,6 +316,17 @@ impl Chrome {
             return render_parts(renderer, parts, scale);
         }
 
+        // The context menu, under its anchor: over the popups it may open
+        // on.
+        let menu = view.context_menu.map(|menu| {
+            let (panel, _) = menu_layout(menu.anchor, &menu.rows, output);
+            let (loc, size) = shadowed(panel);
+            ((menu, theme, scale), loc, size)
+        });
+        parts.extend(self.menu.part(menu, now, true, |(menu, ..)| {
+            painter.menu(menu, scale, theme.palette())
+        }));
+
         // The worktrees popup, over the sidebar and the apps.
         let worktrees = view.worktrees.map(|popup| {
             let (loc, size) = shadowed(worktrees_layout(&popup, output).panel);
@@ -333,12 +344,9 @@ impl Chrome {
             let (loc, size) = shadowed(repos_layout(&panel, output).panel);
             ((panel, output, theme, scale), loc, size)
         });
-        parts.extend(
-            self.repos
-                .part(repos, now, true, |(panel, output, ..)| {
-                    painter.repos(panel, *output, scale, theme.palette())
-                }),
-        );
+        parts.extend(self.repos.part(repos, now, true, |(panel, output, ..)| {
+            painter.repos(panel, *output, scale, theme.palette())
+        }));
 
         // The project menu reaches over the sidebar and the apps.
         let project_menu = view.project_menu.map(|menu| {
@@ -364,16 +372,6 @@ impl Chrome {
                     painter.switcher(switcher, *w, scale, theme.palette())
                 }),
         );
-
-        // The context menu, under its anchor.
-        let menu = view.context_menu.map(|menu| {
-            let (panel, _) = menu_layout(menu.anchor, &menu.rows, output);
-            let (loc, size) = shadowed(panel);
-            ((menu, theme, scale), loc, size)
-        });
-        parts.extend(self.menu.part(menu, now, true, |(menu, ..)| {
-            painter.menu(menu, scale, theme.palette())
-        }));
 
         // The help panel, centred at the bottom of the app area.
         let pinned = view.help_pinned;
@@ -777,6 +775,9 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         }
         rects.extend(layout.buttons.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_tabs.into_iter().map(|(_, rect)| rect));
+        rects.extend(layout.chips.into_iter().map(|(_, rect)| rect));
+        rects.extend(layout.more);
+        rects.push(layout.splitter);
         rects.push(layout.field);
         rects.push(layout.branch);
         if let Some((menu, rows)) = layout.branch_menu {

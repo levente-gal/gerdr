@@ -1077,6 +1077,27 @@ pub fn stash_list(dir: &Path) -> String {
     list
 }
 
+/// Stash the uncommitted changes, untracked files too.
+pub fn stash_push(dir: &Path) -> OpResult {
+    let mut op = Op::new(dir);
+    op.run(&["stash", "push", "--include-untracked"])?;
+    op.done()
+}
+
+/// Bring the newest stash back and drop it; a conflict keeps the stash.
+pub fn stash_pop(dir: &Path) -> OpResult {
+    let mut op = Op::new(dir);
+    op.run(&["stash", "pop"])?;
+    op.done()
+}
+
+/// Drop the newest stash.
+pub fn stash_drop(dir: &Path) -> OpResult {
+    let mut op = Op::new(dir);
+    op.run(&["stash", "drop"])?;
+    op.done()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

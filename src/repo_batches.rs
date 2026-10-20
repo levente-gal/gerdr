@@ -18,9 +18,10 @@ use smithay::{
     utils::{Logical, Point},
 };
 
+use crate::menu::{MenuAction, MenuItem, MenuSpec};
 use crate::{
-    Gerdr,
-    chrome::{self, DetailTab, ReposHit, ReposView, Tone, TreeLine},
+    Drag, Gerdr,
+    chrome::{self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, Tone, TreeLine},
     git::{GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
     repos::{
@@ -242,6 +243,18 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("undoing…");
             git_ops::undo(dir, before, after, *soft)
         }
+        BatchKind::Stash => {
+            step("stashing…");
+            git_ops::stash_push(dir)
+        }
+        BatchKind::StashPop => {
+            step("popping the stash…");
+            git_ops::stash_pop(dir)
+        }
+        BatchKind::StashDrop => {
+            step("dropping the stash…");
+            git_ops::stash_drop(dir)
+        }
     }
 }
 
@@ -418,7 +431,14 @@ impl Gerdr {
     }
 
     fn repos_page(&self) -> (usize, usize) {
-        chrome::repos_page(self.output_size())
+        chrome::repos_page(self.output_size(), self.density)
+    }
+
+    /// What the panel's views and keys need of the chrome: the density,
+    /// and the tree's share of the panel.
+    fn repos_env(&self) -> (Density, f64) {
+        let share = self.repos.tree_share.unwrap_or(chrome::REPOS_TREE_SHARE);
+        (self.density, share)
     }
 
     /// Open the repositories panel: as it was left, for the same project.
@@ -512,6 +532,7 @@ impl Gerdr {
     /// and the detail it wants read.
     fn repos_refresh(&mut self) {
         let page = self.repos_page();
+        let (density, tree_share) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -528,6 +549,8 @@ impl Gerdr {
                 now: SystemTime::now(),
                 same: same_branches,
                 top: top_branches,
+                density,
+                tree_share,
             };
             panel.refresh(&ctx);
         }
@@ -547,6 +570,7 @@ impl Gerdr {
     /// it is being read.
     fn repos_detail(&mut self) {
         let page = self.repos_page();
+        let (density, tree_share) = self.repos_env();
         let Some(panel) = self.repos.panel.as_ref() else {
             return;
         };
@@ -557,6 +581,8 @@ impl Gerdr {
             now: SystemTime::now(),
             same: &self.repos.same_branches,
             top: &self.repos.top_branches,
+            density,
+            tree_share,
         };
         let Some(key) = panel.detail_wanted(&ctx) else {
             return;
@@ -596,6 +622,7 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let page = self.repos_page();
+        let (density, tree_share) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -611,13 +638,18 @@ impl Gerdr {
             now: SystemTime::now(),
             same: same_branches,
             top: top_branches,
+            density,
+            tree_share,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
         outcome
     }
 
-    /// A left click while the panel is open: outside it closes it.
+    /// A left click while the panel is open: outside it closes it. On the
+    /// "more" button, a menu of the actions the footer has no room for;
+    /// on the line between the tree and the detail, a drag; twice on a
+    /// file, it opens in Zed.
     pub fn repos_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.repos_view() else {
             return;
@@ -626,7 +658,31 @@ impl Gerdr {
         let Some(hit) = chrome::repos_hit(&layout, pos) else {
             return self.close_repos();
         };
+        match hit {
+            ReposHit::More => {
+                if let Some(anchor) = layout.more {
+                    let hints: Vec<&Hint> =
+                        layout.overflow.iter().map(|&i| &view.hints[i]).collect();
+                    let spec = repos_menu_spec(&hints, None, anchor);
+                    self.open_menu(spec);
+                }
+                return;
+            }
+            ReposHit::Splitter => {
+                self.drag = Some(Drag::ReposSplit);
+                return;
+            }
+            _ => {}
+        }
+        let double = self.is_double(pos);
+        self.repos_hit(hit, double);
+    }
+
+    /// A click on `hit` in the panel, the second of a double click when
+    /// `double`.
+    fn repos_hit(&mut self, hit: ReposHit, double: bool) {
         let page = self.repos_page();
+        let (density, tree_share) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -642,12 +698,104 @@ impl Gerdr {
             now: SystemTime::now(),
             same: same_branches,
             top: top_branches,
+            density,
+            tree_share,
         };
-        let outcome = panel.as_mut().and_then(|p| p.click(hit, &ctx));
+        let outcome = panel.as_mut().and_then(|p| {
+            let outcome = p.click(hit, &ctx);
+            match hit {
+                ReposHit::Line(i) if double && p.is_file_line(i, &ctx) => {
+                    p.press(ReposButton::OpenInZed, &ctx)
+                }
+                _ => outcome,
+            }
+        });
         self.repos_detail();
         if let Some(outcome) = outcome {
             self.apply_repos(outcome);
         }
+    }
+
+    /// A right click while the panel is open: on a line, it is selected
+    /// and a menu of the actions opens; elsewhere in the panel, the menu
+    /// alone.
+    pub fn repos_right_click(&mut self, pos: Point<f64, Logical>) {
+        let Some(view) = self.repos_view() else {
+            return;
+        };
+        let output = self.output_size();
+        let layout = chrome::repos_layout(&view, output);
+        let Some(hit) = chrome::repos_hit(&layout, pos) else {
+            return;
+        };
+        if view.sheet.is_some() || view.branch.menu.is_some() {
+            return;
+        }
+        let line = match hit {
+            ReposHit::Line(i)
+            | ReposHit::Check(i)
+            | ReposHit::Expander(i)
+            | ReposHit::Chip(i)
+            | ReposHit::Mark(i, _) => Some(i),
+            _ => None,
+        };
+        if let Some(i) = line {
+            self.repos_hit(ReposHit::Line(i), false);
+        }
+        // The actions for what is selected now.
+        let Some(view) = self.repos_view() else {
+            return;
+        };
+        let layout = chrome::repos_layout(&view, output);
+        let anchor = line.and_then(|i| layout.lines.get(i)).map_or_else(
+            || chrome::Rect::new((pos.x as i32, pos.y as i32).into(), (1, 1).into()),
+            |(rect, ..)| *rect,
+        );
+        let path = view.selected.and_then(|i| match view.lines.get(i)? {
+            TreeLine::File(file) => {
+                let root = self.repos.panel.as_ref()?.selected_root()?;
+                Some(root.join(file.path.split(" → ").last().unwrap_or(&file.path)))
+            }
+            TreeLine::Repo(_) => self.repos.panel.as_ref()?.selected_root(),
+        });
+        let hints: Vec<&Hint> = view.hints.iter().collect();
+        let spec = repos_menu_spec(&hints, path, anchor);
+        self.open_menu(spec);
+    }
+
+    /// Do `button`, as a menu asks.
+    pub fn repos_press(&mut self, button: ReposButton) {
+        let page = self.repos_page();
+        let (density, tree_share) = self.repos_env();
+        let Repos {
+            panel,
+            batch,
+            items,
+            same_branches,
+            top_branches,
+            ..
+        } = &mut self.repos;
+        let ctx = Ctx {
+            items,
+            batch: batch.as_ref(),
+            page,
+            now: SystemTime::now(),
+            same: same_branches,
+            top: top_branches,
+            density,
+            tree_share,
+        };
+        let outcome = panel.as_mut().and_then(|p| p.press(button, &ctx));
+        self.repos_detail();
+        if let Some(outcome) = outcome {
+            self.apply_repos(outcome);
+        }
+    }
+
+    /// The line between the tree and the detail dragged to `pos`.
+    pub fn repos_drag_to(&mut self, pos: Point<f64, Logical>) {
+        let share = chrome::repos_share_at(pos.x, self.output_size());
+        self.repos.tree_share = Some(share);
     }
 
     /// The pointer moved while the panel is open.
@@ -682,13 +830,34 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(text, rect))
             }
+            ReposHit::Chip(i) => {
+                let (_, rect) = layout.chips.iter().find(|(j, _)| *j == i)?;
+                let chip = repo(i)?.chip.as_ref()?;
+                Some(Tooltip::new(&chip.tip, *rect))
+            }
+            // Why an action can't be done now.
+            ReposHit::Button(button) if view.branch.menu.is_none() => {
+                let hint = view
+                    .hints
+                    .iter()
+                    .chain(view.result.iter().flat_map(|r| &r.buttons))
+                    .find(|h| h.button == button)?;
+                let why = hint.disabled.as_ref()?;
+                let (_, rect) = layout.buttons.iter().find(|(b, _)| *b == button)?;
+                Some(Tooltip::new(why, *rect))
+            }
+            ReposHit::More => {
+                let n = layout.overflow.len();
+                let text = format!("{n} more actions, with their keys");
+                Some(Tooltip::new(&text, layout.more?))
+            }
+            ReposHit::Splitter => Some(Tooltip::new(
+                "Drag to give the tree or the diff more room",
+                layout.splitter,
+            )),
             ReposHit::BranchDelete(i) => {
                 let (_, rect) = layout.branch_deletes.iter().find(|(j, _)| *j == i)?;
-                let armed = view.branch.menu.as_ref()?.armed == Some(i);
-                Some(match armed {
-                    true => Tooltip::new("Click again to delete it", *rect),
-                    false => Tooltip::new("Delete this local branch", *rect).key("Ctrl+D"),
-                })
+                Some(Tooltip::new("Delete this local branch", *rect).key("Del"))
             }
             ReposHit::BranchButton if view.branch.menu.is_none() => Some(
                 Tooltip::new("Switch them to a branch they all have", layout.branch).key("Ctrl+S"),
@@ -711,6 +880,7 @@ impl Gerdr {
             .as_ref()
             .is_some_and(|(menu, _)| menu.to_f64().contains(pos));
         let page = self.repos_page();
+        let (density, tree_share) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -726,6 +896,8 @@ impl Gerdr {
             now: SystemTime::now(),
             same: same_branches,
             top: top_branches,
+            density,
+            tree_share,
         };
         match panel.as_mut() {
             Some(panel) if over_menu => panel.scroll_branches(rows, &ctx),
@@ -737,6 +909,7 @@ impl Gerdr {
     /// What the panel shows, while it is open.
     pub fn repos_view(&self) -> Option<ReposView> {
         let panel = self.repos.panel.as_ref()?;
+        let (density, tree_share) = self.repos_env();
         let ctx = Ctx {
             items: &self.repos.items,
             batch: self.repos.batch.as_ref(),
@@ -744,6 +917,8 @@ impl Gerdr {
             now: SystemTime::now(),
             same: &self.repos.same_branches,
             top: &self.repos.top_branches,
+            density,
+            tree_share,
         };
         let title = self
             .project
@@ -1183,4 +1358,24 @@ impl Gerdr {
             self.toast("Zed didn't open the files".into(), Level::Error);
         }
     }
+}
+
+/// A menu of `hints`, each with its key and dimmed when it can't be done
+/// now, and a line to copy `path`, under `anchor`.
+fn repos_menu_spec(hints: &[&Hint], path: Option<PathBuf>, anchor: chrome::Rect) -> MenuSpec {
+    let mut items: Vec<MenuItem> = hints
+        .iter()
+        .map(|hint| {
+            let mut item = MenuItem::new(&hint.label, MenuAction::ReposAction(hint.button))
+                .enabled(hint.disabled.is_none());
+            if !hint.key.is_empty() {
+                item = item.hint(&hint.key);
+            }
+            item
+        })
+        .collect();
+    if let Some(path) = path {
+        items.push(MenuItem::new("Copy path", MenuAction::CopyPath(path)));
+    }
+    MenuSpec { anchor, items }
 }
