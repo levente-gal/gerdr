@@ -33,6 +33,9 @@ pub struct TabView {
     /// Whether its focused terminal's command runs again after a restart:
     /// `None` when nothing runs in it.
     pub restart: Option<bool>,
+    /// Whether its focused pane shows a GitHub page: its tab carries
+    /// GitHub's mark.
+    pub github: bool,
 }
 
 impl TabView {
@@ -114,6 +117,7 @@ impl TabView {
             place,
             activity: activity.join("  |  "),
             restart: None,
+            github: false,
         }
     }
 

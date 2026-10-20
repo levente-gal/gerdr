@@ -47,6 +47,16 @@ pub enum CiState {
     Unknown,
 }
 
+/// The line of the card a row shows on: a long-lived branch's CI, the
+/// user's own pull requests and the ones they watch, or the pull requests
+/// asking for their review or assigned to them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Group {
+    Branch,
+    Mine,
+    Review,
+}
+
 /// What a row of the card is about.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Subject {
@@ -76,10 +86,11 @@ pub struct CiRow {
     /// any runs, else `Passed`; `Unknown` without checks.
     pub state: CiState,
     pub checks: Vec<Check>,
-    /// The page a click opens: the first failed check's when one failed,
-    /// else a pull request's checks page, else the branch's runs on the
-    /// Actions page.
+    /// The page a click opens: a branch's run (its first failed one, else
+    /// one running, else the newest), a pull request's own page.
     pub link: String,
+    /// The line it shows on.
+    pub group: Group,
     /// Shown because the user watches it (not one of theirs, nor a
     /// long-lived branch).
     pub watched: bool,
@@ -96,8 +107,8 @@ pub struct RepoCi {
     /// branch where it falls), then pull requests by number. Branches
     /// without a run among the recent ones are left out.
     pub rows: Vec<CiRow>,
-    /// How many runs not about a row are queued or in progress.
-    pub others_running: usize,
+    /// How many open pull requests the card doesn't show.
+    pub other_prs: usize,
     /// Watched pull requests found merged or closed: no longer watched.
     pub closed: Vec<u64>,
 }
@@ -108,15 +119,15 @@ impl RepoCi {
         format!("https://{}/{}", self.host, self.slug)
     }
 
-    /// Its Actions page.
-    pub fn actions_url(&self) -> String {
-        format!("{}/actions", self.web_url())
+    /// Its pull requests page.
+    pub fn pulls_url(&self) -> String {
+        format!("{}/pulls", self.web_url())
     }
 
-    /// Whether some row, or another run, is still running: the CI is then
-    /// read every `BUSY_INTERVAL`.
+    /// Whether some row is still running: the CI is then read every
+    /// `BUSY_INTERVAL`.
     pub fn busy(&self) -> bool {
-        self.others_running > 0 || self.rows.iter().any(|r| r.state == CiState::Running)
+        self.rows.iter().any(|r| r.state == CiState::Running)
     }
 }
 
@@ -532,7 +543,7 @@ fn repo_ci(
             Subject::Pr(_) => row.head.as_deref(),
         })
         .collect();
-    let others_running = runs
+    let other_prs = runs
         .iter()
         .filter(|run| running(&run.status) && !shown.contains(run.head_branch.as_str()))
         .map(|run| run.database_id)
@@ -542,7 +553,7 @@ fn repo_ci(
         slug: slug.to_owned(),
         host: host.to_owned(),
         rows,
-        others_running,
+        other_prs,
         closed,
     }
 }
@@ -596,6 +607,7 @@ fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
         link: row_link(&checks, || format!("{web}/actions?query=branch%3A{name}")),
         checks,
         watched: false,
+        group: Group::Branch,
     })
 }
 
@@ -619,6 +631,7 @@ fn pull_row(pull: &Pull, web: &str, watched: bool) -> CiRow {
         link: row_link(&checks, || format!("{web}/pull/{}/checks", pull.number)),
         checks,
         watched,
+        group: Group::Mine,
     }
 }
 
@@ -1030,7 +1043,7 @@ mod tests {
         ]);
         let own: Vec<Pull> = serde_json::from_str(ROLLUP).unwrap();
         let ci = repo_ci("github.com", "o/r", "main", &runs, &own, &[]);
-        assert_eq!(ci.others_running, 2);
+        assert_eq!(ci.other_prs, 2);
         assert!(ci.busy());
     }
 
@@ -1132,7 +1145,7 @@ mod tests {
             slug: "o/r".into(),
             host: "github.com".into(),
             rows,
-            others_running: 0,
+            other_prs: 0,
             closed: Vec::new(),
         }
     }
@@ -1153,6 +1166,7 @@ mod tests {
                 .collect(),
             link: "https://example.com/link".into(),
             watched: false,
+            group: Group::Branch,
         }
     }
 

@@ -27,7 +27,7 @@ use super::{
 use crate::WorkspaceKind;
 use crate::agents::AgentKey;
 use crate::app_icons::{AppIcon, github_icon};
-use crate::ci::CiState;
+use crate::ci::{CiState, Group};
 use crate::cursor_agents::CursorChat;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
@@ -408,7 +408,7 @@ pub struct WorkspaceView {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CiView {
     pub chips: Vec<CiChip>,
-    pub others_running: usize,
+    pub other_prs: usize,
 }
 
 /// A chip of the CI card: a status mark and a label, `main` or `#42`.
@@ -422,12 +422,14 @@ pub struct CiChip {
     pub watched: bool,
     /// Its checks, by name, for the tooltip.
     pub checks: Vec<(String, CiState)>,
+    /// The line it shows on; a view's chips come line by line.
+    pub group: Group,
 }
 
 impl CiView {
     /// Whether it has anything to show: no card shows otherwise.
     pub fn is_empty(&self) -> bool {
-        self.chips.is_empty() && self.others_running == 0
+        self.chips.is_empty() && self.other_prs == 0
     }
 }
 
@@ -783,7 +785,7 @@ pub enum SidebarHit {
     /// (as `CiView::chips` lists them), and its count of other runs.
     Ci(usize),
     CiChip(usize, usize),
-    CiOthers(usize),
+    CiPrs(usize),
 }
 
 impl SidebarHit {
@@ -842,7 +844,7 @@ impl SidebarLayout {
                 continue;
             };
             return Some(if ci.others.is_some_and(inside) {
-                SidebarHit::CiOthers(i)
+                SidebarHit::CiPrs(i)
             } else if let Some(k) = ci.chips.iter().position(|r| inside(*r)) {
                 SidebarHit::CiChip(i, k)
             } else {
@@ -1013,8 +1015,8 @@ pub fn sidebar_layout_at(
 /// header's; a chip wider than the card is cut to fit.
 fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32, density: Density) -> CiLayout {
     let header_y = y + card_pad(density);
-    let others = (view.others_running > 0).then(|| {
-        let w = text_extent(&others_label(view.others_running), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+    let others = (view.other_prs > 0).then(|| {
+        let w = text_extent(&others_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
         Rectangle::new(
             (
                 x + width - CARD_PAD - w,
@@ -1814,7 +1816,7 @@ impl Painter {
             );
             self.text(
                 c,
-                &others_label(view.others_running),
+                &others_label(view.other_prs),
                 TINY_FONT_SIZE,
                 ox + PILL_PADDING as f32 * s,
                 ox + ow,
@@ -1919,6 +1921,7 @@ mod tests {
             place: place.into(),
             activity: activity.into(),
             restart: None,
+            github: false,
         };
         let tabs = [
             tab(
@@ -2336,9 +2339,10 @@ mod tests {
                     title: None,
                     watched: false,
                     checks: Vec::new(),
+                    group: crate::ci::Group::Branch,
                 })
                 .collect(),
-            others_running: others,
+            other_prs: others,
         }
     }
 
@@ -2460,7 +2464,7 @@ mod tests {
         // The count at the header's right end, the chips under it.
         assert!(others.loc.x + others.size.w <= ci.card.loc.x + ci.card.size.w - CARD_PAD);
         assert!(others.loc.y + others.size.h <= ci.chips[0].loc.y);
-        assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiOthers(1)));
+        assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiPrs(1)));
         assert_eq!(layout.hit(mid(ci.chips[0])), Some(SidebarHit::CiChip(1, 0)));
         assert_eq!(layout.hit(mid(ci.chips[1])), Some(SidebarHit::CiChip(1, 1)));
         // Between the chips, and the header's left, are the card.
@@ -2479,7 +2483,7 @@ mod tests {
         for hit in [
             SidebarHit::Ci(1),
             SidebarHit::CiChip(1, 1),
-            SidebarHit::CiOthers(1),
+            SidebarHit::CiPrs(1),
         ] {
             assert_eq!(hit.row(), None);
             assert_eq!(hit.pill(), hit);

@@ -148,7 +148,7 @@ impl Gerdr {
                 chips: (0..ws.ci.as_ref().map_or(0, |ci| ci.chips.len()))
                     .map(|k| quantize(hover.alpha(SidebarHit::CiChip(i, k), now)))
                     .collect(),
-                others: quantize(hover.alpha(SidebarHit::CiOthers(i), now)),
+                others: quantize(hover.alpha(SidebarHit::CiPrs(i), now)),
             })
             .collect();
         let plus = quantize(hover.alpha(SidebarHit::Plus, now));
@@ -218,9 +218,9 @@ impl Gerdr {
                     self.open_github(Some(link));
                 }
             }
-            (SidebarHit::CiOthers(i), BTN_LEFT) => {
+            (SidebarHit::CiPrs(i), BTN_LEFT) => {
                 if let Some(repo) = self.ci_repo(i) {
-                    let link = repo.actions_url();
+                    let link = repo.pulls_url();
                     self.open_github(Some(link));
                 }
             }
@@ -378,8 +378,8 @@ impl Gerdr {
                     tip
                 })
             }
-            SidebarHit::CiOthers(i) => {
-                let n = self.ci_repo(i)?.others_running;
+            SidebarHit::CiPrs(i) => {
+                let n = self.ci_repo(i)?.other_prs;
                 let rect = layout.ci.get(i)?.as_ref()?.others?;
                 let runs = if n == 1 { "run" } else { "runs" };
                 let text = format!("{n} other {runs} going on · open the Actions page");
@@ -396,10 +396,10 @@ impl Gerdr {
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
-            SidebarHit::Ci(i) | SidebarHit::CiOthers(i) => {
+            SidebarHit::Ci(i) | SidebarHit::CiPrs(i) => {
                 let repo = self.ci_repo(i)?;
                 let items = vec![
-                    MenuItem::new("Open Actions", MenuAction::OpenGitHub(repo.actions_url())),
+                    MenuItem::new("Open Actions", MenuAction::OpenGitHub(repo.pulls_url())),
                     MenuItem::new("Open repository", MenuAction::OpenGitHub(repo.web_url())),
                 ];
                 Some(MenuSpec { anchor: at, items })
@@ -416,7 +416,7 @@ impl Gerdr {
                 }
                 items.push(MenuItem::new(
                     "Open Actions",
-                    MenuAction::OpenGitHub(repo.actions_url()),
+                    MenuAction::OpenGitHub(repo.pulls_url()),
                 ));
                 Some(MenuSpec { anchor: at, items })
             }

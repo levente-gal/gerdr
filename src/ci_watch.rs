@@ -185,6 +185,7 @@ impl Gerdr {
                 state: row.state,
                 title: row.title.clone(),
                 watched: row.watched,
+                group: row.group,
                 checks: row
                     .checks
                     .iter()
@@ -192,9 +193,9 @@ impl Gerdr {
                     .collect(),
             })
             .collect();
-        (!chips.is_empty() || repo.others_running > 0).then_some(CiView {
+        (!chips.is_empty() || repo.other_prs > 0).then_some(CiView {
             chips,
-            others_running: repo.others_running,
+            other_prs: repo.other_prs,
         })
     }
 
