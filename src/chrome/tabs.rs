@@ -9,6 +9,7 @@ use super::{
     ThemeMode, cross, eye, field_text, icon_sdf, mix, moon, new_tab, no_restart, physical,
     rounded_rect, segment, status_label, status_mark, sun, tab_strip_height,
 };
+use crate::app_icons::github_icon;
 use crate::herdr::{AgentInfo, AgentStatus, PaneState, Process, TabDetail};
 use crate::paths::{repo_root, short_path, tidy_title};
 use crate::prepare::is_interactive_shell;
@@ -374,6 +375,9 @@ const CLOSE_INSET: i32 = 5;
 const CLOSE_MIN_TAB: i32 = 2 * PADDING as i32 + CLOSE + 40;
 /// The rename field inside a tab: this far in from the tab's edges.
 const RENAME_INSET: i32 = 4;
+/// How big GitHub's mark is on a tab showing a GitHub page, as in the
+/// sidebar's GitHub card.
+const GITHUB_ICON_SIZE: i32 = 12;
 
 /// Where everything in a strip sits (strip coordinates): the tabs (each
 /// one's rect runs up to and including its 1 px border on the right, so
@@ -556,8 +560,9 @@ fn mode_icon(mode: ThemeMode) -> fn(f32, f32, f32) -> f32 {
 }
 
 impl Painter {
-    /// The tab strip: one line per tab (status mark, number, title, "×" on
-    /// the active tab and under the pointer), the "+" pill after them, and
+    /// The tab strip: one line per tab (status mark, or GitHub's on a tab
+    /// showing a GitHub page; number, title, "×" on the active tab and
+    /// under the pointer), the "+" pill after them, and
     /// at the right end the watch button, the overflow chip, the PREFIX
     /// badge and the theme switch. A strip lower than the comfortable height is compact.
     pub(super) fn tab_strip_view(
@@ -632,20 +637,29 @@ impl Painter {
                 });
                 right = px(mark.loc.x) as f32 - px(STATUS_GAP) as f32;
             }
+            // Before the number, a mark: its agents' status when it says
+            // something, else GitHub's when the tab shows a GitHub page.
             let mut text_x = x as f32 + pad;
-            if let Some(status) = tab.status.filter(|s| {
+            let mark = Rectangle::new(
+                (rect.loc.x + PADDING as i32, 0).into(),
+                (STATUS_WIDTH, size.h).into(),
+            );
+            let status = tab.status.filter(|s| {
                 matches!(
                     s,
                     AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done
                 )
-            }) {
-                let mark = Rectangle::new(
-                    (rect.loc.x + PADDING as i32, 0).into(),
-                    (STATUS_WIDTH, size.h).into(),
-                );
+            });
+            let github = tab.github.then(github_icon).flatten();
+            if let Some(status) = status {
                 icon_sdf(&mut c, mark, scale, p.status(status), |x, y| {
                     status_mark(status, x, y, s)
                 });
+            } else if let Some(icon) = &github {
+                let tint = if is_active { p.muted } else { p.placeholder };
+                c.picture_sized(icon, mark, scale, tint, GITHUB_ICON_SIZE);
+            }
+            if status.is_some() || github.is_some() {
                 text_x += ((STATUS_WIDTH + STATUS_GAP) as f32 * s).round();
             }
             let number = (i + 1).to_string();
@@ -1284,6 +1298,51 @@ mod tests {
         // Hidden: nothing there.
         view.watch = None;
         assert_eq!(at(&view, w.loc.x + 3, y), p.tab_bar);
+        painter.tab_strip_view(&view, Theme::Light, size, 2.0);
+    }
+
+    #[test]
+    fn a_github_tab_carries_githubs_mark_unless_its_status_shows() {
+        use crate::chrome::{PADDING, STATUS_WIDTH};
+        let painter = Painter::new();
+        let p = Theme::Dark.palette();
+        let size = strip(Density::Comfortable);
+        let l = tab_layout(2, size, false, false, false);
+        // The mark's slot of tab `i`, before its number, off the strip's
+        // bottom border.
+        let slot = |tabs: Vec<TabView>, i: usize| -> Vec<Rgb> {
+            let view = TabStripView::plain(tabs, 0, false, ThemeMode::Dark);
+            let buffer = painter.tab_strip_view(&view, Theme::Dark, size, 1.0);
+            let x = l.tabs[i].loc.x + PADDING as i32;
+            (x..x + STATUS_WIDTH)
+                .flat_map(|x| (1..size.h - 1).map(move |y| (x, y)))
+                .map(|(x, y)| pixel(buffer.clone(), size.w, x, y))
+                .collect()
+        };
+        let github = TabView {
+            title: "PR #42".into(),
+            github: true,
+            ..TabView::default()
+        };
+        // Active and not: the mark shows, the number moves past it.
+        let tabs = vec![github.clone(), github.clone()];
+        assert!(slot(tabs.clone(), 0).iter().any(|c| *c != p.tab_active));
+        assert!(slot(tabs, 1).iter().any(|c| *c != p.tab_bar));
+        // An agent's status takes the slot.
+        let working = TabView {
+            status: Some(AgentStatus::Working),
+            ..github.clone()
+        };
+        let plain = TabView {
+            github: false,
+            ..working.clone()
+        };
+        assert_eq!(
+            slot(vec![working.clone(), working.clone()], 1),
+            slot(vec![plain.clone(), plain], 1)
+        );
+        // Painted at twice the scale and in the light look too.
+        let view = TabStripView::plain(vec![github, working], 1, false, ThemeMode::Light);
         painter.tab_strip_view(&view, Theme::Light, size, 2.0);
     }
 }
