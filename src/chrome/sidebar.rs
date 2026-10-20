@@ -131,8 +131,8 @@ pub enum AgentLine {
 }
 
 /// What an agent card shows: everything herdr (or Cursor) reports about
-/// the agent. The card draws its header and one detail line; the rest is
-/// for its tooltip.
+/// the agent. The card draws its header, one detail line and a line per
+/// subagent that runs; the rest is for its tooltip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentView {
     /// Which agent; a click on the card shows it.
@@ -290,32 +290,27 @@ impl AgentView {
             .join(" · ")
     }
 
-    /// The card's detail line: the folder it is in (its last component),
-    /// how many subagents of its run, and what it is on.
+    /// The card's detail line: the folder it is in (its last component)
+    /// and what it is on.
     pub fn detail(&self) -> String {
         let cwd = self.lines.iter().find_map(|l| match l {
             AgentLine::Field(label, value) if label == FOLDER => Some(basename(value)),
             _ => None,
         });
-        let subagents = self
-            .lines
-            .iter()
-            .filter(|l| matches!(l, AgentLine::Field(label, _) if label == SUBAGENT))
-            .count();
-        let subagents = match subagents {
-            0 => None,
-            1 => Some("1 subagent".to_owned()),
-            n => Some(format!("{n} subagents")),
-        };
-        [
-            cwd.map(str::to_owned),
-            subagents,
-            self.title().map(str::to_owned),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
+        [cwd, self.title()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// What each of its subagents that run is on, a line each below the
+    /// detail line.
+    pub fn subagents(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().filter_map(|l| match l {
+            AgentLine::Field(label, value) if label == SUBAGENT => Some(value.as_str()),
+            _ => None,
+        })
     }
 
     /// Everything the card knows, for its tooltip under `label`: a line
@@ -336,7 +331,8 @@ impl AgentView {
         } else {
             CARD_LINE
         };
-        2 * card_pad(density) + CARD_HEADER + detail
+        let subagents = self.subagents().count() as i32 * CARD_LINE;
+        2 * card_pad(density) + CARD_HEADER + detail + subagents
     }
 }
 
@@ -1878,9 +1874,10 @@ impl Painter {
         }
 
         // The detail line: where it is and what it is on.
+        let mut line_y = header_y + CARD_HEADER;
         let detail = card.detail();
         if !detail.is_empty() {
-            let band = (px(header_y + CARD_HEADER), px(CARD_LINE));
+            let band = (px(line_y), px(CARD_LINE));
             self.text(
                 c,
                 &detail,
@@ -1891,6 +1888,22 @@ impl Painter {
                 scale,
                 p.muted,
             );
+            line_y += CARD_LINE;
+        }
+        // A line per subagent that runs: what it is on.
+        for task in card.subagents() {
+            let band = (px(line_y), px(CARD_LINE));
+            self.text(
+                c,
+                &format!("↳ {task}"),
+                DETAIL_FONT_SIZE,
+                kind_x,
+                right,
+                band,
+                scale,
+                p.muted,
+            );
+            line_y += CARD_LINE;
         }
     }
 }
@@ -2308,17 +2321,20 @@ mod tests {
             subagents: vec![Some("Audit the plan".into()), None],
         };
         let card = AgentView::cursor(&chat);
-        assert_eq!(card.detail(), "gerdr · 2 subagents · Read main.rs");
+        assert_eq!(card.detail(), "gerdr · Read main.rs");
+        assert_eq!(
+            card.subagents().collect::<Vec<_>>(),
+            ["Audit the plan", "Working"]
+        );
         let fields = card.tooltip_fields();
         assert!(fields.contains(&("Subagent".into(), "Audit the plan".into())));
         assert!(fields.contains(&("Subagent".into(), "Working".into())));
-        chat.subagents.pop();
-        assert_eq!(
-            AgentView::cursor(&chat).detail(),
-            "gerdr · 1 subagent · Read main.rs"
-        );
+        let one_line = 2 * CARD_PAD + CARD_HEADER + CARD_LINE;
+        assert_eq!(card.height(Density::Comfortable), one_line + 2 * CARD_LINE);
         chat.subagents.clear();
-        assert_eq!(AgentView::cursor(&chat).detail(), "gerdr · Read main.rs");
+        let card = AgentView::cursor(&chat);
+        assert_eq!(card.subagents().count(), 0);
+        assert_eq!(card.height(Density::Comfortable), one_line);
     }
 
     #[test]
