@@ -45,8 +45,9 @@ pub const WORKING_HOLD_MS: i64 = 30 * 60_000;
 /// How long a subagent left running in the background counts as running
 /// after its last hook: none says when one stops.
 pub const BACKGROUND_HOLD_MS: i64 = 2 * 60_000;
-/// The tool through which a chat runs a subagent.
-const SUBAGENT_TOOL: &str = "Subagent";
+/// The tool through which a chat runs a subagent, by the names Cursor
+/// 3.16 has given it.
+const SUBAGENT_TOOLS: [&str; 2] = ["Subagent", "Task"];
 /// How many idle chats a workspace shows at most.
 pub const HISTORY_CARDS: usize = 5;
 /// The mode of a chat that works on its own, as the database has it; the
@@ -202,7 +203,8 @@ impl HookEvent {
                 Some((cut, _)) => format!("{}…", &line[..cut]),
                 None => line,
             });
-        let call = (text("tool_name").as_deref() == Some(SUBAGENT_TOOL))
+        let call = text("tool_name")
+            .is_some_and(|tool| SUBAGENT_TOOLS.contains(&tool.as_str()))
             .then(|| text("tool_use_id"))
             .flatten()
             .map(|id| {
@@ -1392,6 +1394,11 @@ mod tests {
         });
         let call = HookEvent::from_payload(&ended, 7).unwrap().call.unwrap();
         assert_eq!((call.chat.as_deref(), call.background), (Some("s1"), false));
+        // Or by its other name.
+        let mut task = started.clone();
+        task["tool_name"] = "Task".into();
+        let event = HookEvent::from_payload(&task, 7).unwrap();
+        assert_eq!(event.call.map(|c| c.task), Some(Some("Audit deck".into())));
         // Another tool's say nothing of subagents; a subagent's have no
         // transcript.
         let other = serde_json::json!({
