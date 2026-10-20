@@ -1207,7 +1207,7 @@ impl Painter {
                 WorkspaceKind::Terminal => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
                     terminal(x, y, small)
                 }),
-                WorkspaceKind::Cursor | WorkspaceKind::GitHub => match &ws.icon {
+                WorkspaceKind::Cursor => match &ws.icon {
                     Some(picture) => {
                         c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
                     }
