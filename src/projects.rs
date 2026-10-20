@@ -207,13 +207,13 @@ pub struct WorkspaceRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    /// Zed over a terminal.
+    /// Zed over a terminal. GitHub workspaces, which were once a kind of
+    /// their own, open as one.
+    #[serde(alias = "github")]
     Project,
     Terminal,
     /// The project's Cursor.
     Cursor,
-    /// Its repository's GitHub pages.
-    Github,
 }
 
 /// Which Python venv the workspace's shells activate.
@@ -1364,6 +1364,18 @@ mod tests {
 
     // Above the kernel's pid limit, so `/proc` has nothing for them.
     const NO_PID: i32 = 2_000_000_000;
+
+    #[test]
+    fn a_saved_github_workspace_opens_as_a_project() {
+        assert_eq!(
+            serde_json::from_value::<Kind>(json!("github")).unwrap(),
+            Kind::Project
+        );
+        assert_eq!(
+            serde_json::to_value(Kind::Project).unwrap(),
+            json!("project")
+        );
+    }
 
     fn process(pid: i32, name: &str, argv: &[&str], cmdline: &str, cwd: &str) -> herdr::Process {
         herdr::Process {

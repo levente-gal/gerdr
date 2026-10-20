@@ -1090,9 +1090,7 @@ impl Form {
     fn toggle_kind(&mut self) {
         self.kind = match self.kind {
             WorkspaceKind::Project => WorkspaceKind::Terminal,
-            WorkspaceKind::Terminal | WorkspaceKind::Cursor | WorkspaceKind::GitHub => {
-                WorkspaceKind::Project
-            }
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor => WorkspaceKind::Project,
         };
     }
 

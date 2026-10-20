@@ -777,15 +777,13 @@ pub enum PickFor {
     Venv { project: String, workspace: String },
 }
 
-/// What a workspace opens with: Zed over a terminal, just a terminal, the
-/// project's Cursor (see `Gerdr::open_cursor`), or its repository's GitHub
-/// pages (see `Gerdr::open_github`).
+/// What a workspace opens with: Zed over a terminal, just a terminal, or
+/// the project's Cursor (see `Gerdr::open_cursor`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceKind {
     Project,
     Terminal,
     Cursor,
-    GitHub,
 }
 
 impl WorkspaceKind {
@@ -794,7 +792,6 @@ impl WorkspaceKind {
             projects::Kind::Project => Self::Project,
             projects::Kind::Terminal => Self::Terminal,
             projects::Kind::Cursor => Self::Cursor,
-            projects::Kind::Github => Self::GitHub,
         }
     }
 
@@ -803,7 +800,6 @@ impl WorkspaceKind {
             Self::Project => projects::Kind::Project,
             Self::Terminal => projects::Kind::Terminal,
             Self::Cursor => projects::Kind::Cursor,
-            Self::GitHub => projects::Kind::Github,
         }
     }
 }
@@ -2508,7 +2504,7 @@ impl Gerdr {
         match key {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
-            agents::AgentKey::Ci(link) => self.open_github(Some(link.clone())),
+            agents::AgentKey::Ci(link) => self.open_ci_link(link.clone()),
         }
     }
 
@@ -3135,9 +3131,7 @@ impl Gerdr {
             .or_else(home_dir);
         let title = match kind {
             WorkspaceKind::Project => "Open project folder",
-            WorkspaceKind::Terminal | WorkspaceKind::Cursor | WorkspaceKind::GitHub => {
-                "Open terminal folder"
-            }
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor => "Open terminal folder",
         };
         self.pick_folder(title, start, PickFor::Workspace(kind));
     }
@@ -3205,7 +3199,6 @@ impl Gerdr {
                     self.open_terminal(PathBuf::from(path))
                 }
                 PickFor::Workspace(WorkspaceKind::Cursor) => self.open_cursor(None),
-                PickFor::Workspace(WorkspaceKind::GitHub) => self.open_github(None),
                 PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
                 PickFor::Venv { project, workspace } => {
                     self.set_venv(&project, &workspace, PathBuf::from(path))
@@ -4232,6 +4225,11 @@ impl Gerdr {
                     let command = r.command.as_ref()?;
                     Some(!r.skip.contains(command))
                 });
+                let focused = tab.focused_id().or_else(|| tab.shown().first().copied());
+                view.github = focused
+                    .and_then(|id| tab.panes.iter().find(|p| p.id == id))
+                    .and_then(|p| p.app_command.as_deref())
+                    .is_some_and(ci::is_github_page);
                 view
             })
             .collect()
@@ -4247,7 +4245,6 @@ impl Gerdr {
                 let mut view = WorkspaceView::new(ws.name.clone(), ws.kind, &tabs);
                 match ws.kind {
                     WorkspaceKind::Cursor => view.icon = self.cursor_icon(),
-                    WorkspaceKind::GitHub => view.icon = app_icons::github_icon(),
                     WorkspaceKind::Project | WorkspaceKind::Terminal => {}
                 }
                 view.ci = self.ci_view(ws);
@@ -4583,7 +4580,6 @@ impl Gerdr {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
             (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
             (_, WorkspaceKind::Cursor) => self.open_cursor(None),
-            (_, WorkspaceKind::GitHub) => self.open_github(None),
             (None, _) => {}
         }
         // After the switch's notice, so it wins.

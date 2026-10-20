@@ -1,8 +1,9 @@
 //! The CI of the shown project's repositories, in gerdr: read now and
 //! then (see `ci`), shown as a card under each workspace of a repository,
-//! notified of when a row finishes, and the GitHub workspace its pages
-//! open in (see `Gerdr::open_github`). A pull request is watched from the
-//! tab strip's button while the focused pane shows it.
+//! notified of when a row finishes. Its pages open in tabs of the
+//! workspace whose card was clicked (see `Gerdr::open_page`). A pull
+//! request is watched from the tab strip's button while the focused pane
+//! shows it.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +17,7 @@ use smithay::reexports::calloop::{
 };
 
 use crate::{
-    Gerdr, Tab, Workspace, WorkspaceKind,
+    Gerdr, Tab, Workspace,
     agents::AgentKey,
     chrome::{CiChip, CiView},
     ci::{self, CiState, RepoCi, Subject},
@@ -26,10 +27,6 @@ use crate::{
 /// What a round of reading the CI hands to the event loop: per repository
 /// root, its CI or why it couldn't be read.
 pub type CiRead = Vec<(PathBuf, Result<RepoCi, String>)>;
-
-/// The name of a repository's GitHub workspace; with its folder's name
-/// after it when the project has another.
-const GITHUB_WORKSPACE: &str = "GitHub";
 
 impl Gerdr {
     /// Read the CI of the shown project's repositories now and then, off
@@ -284,83 +281,97 @@ impl Gerdr {
         was
     }
 
-    /// Show GitHub page `url` (else the shown workspace's repository's own
-    /// page) in the GitHub workspace of its repository: the tab already
-    /// showing it, else a new one; the workspace is made when there is
-    /// none. It takes splits and tabs like any other.
-    pub fn open_github(&mut self, url: Option<String>) {
-        let of_url = url.as_deref().and_then(|url| {
-            self.ci
-                .iter()
-                .find(|(_, repo)| url.starts_with(&repo.web_url()))
-                .map(|(root, _)| root.clone())
-        });
-        let shown = self.workspace().map(|ws| {
-            self.git
-                .get(&ws.dir)
-                .and_then(|g| g.root.clone())
-                .unwrap_or_else(|| ws.dir.clone())
-        });
-        let Some(root) = of_url.or(shown) else {
+    /// Show page `url` in workspace `w`: the tab already showing it, else
+    /// a new tab of its own, the workspace shown either way.
+    pub fn open_page(&mut self, w: usize, url: String) {
+        let Some(ws) = self.workspaces.get(w) else {
             return;
         };
-        let url = url.or_else(|| {
-            self.repo_pages
-                .entry(root.clone())
-                .or_insert_with_key(|dir| git::web_url(dir))
-                .clone()
-        });
-        let Some(url) = url else {
-            self.show_notice("No GitHub page: the repository has no remote".into());
-            return;
-        };
-        let existing = self
-            .workspaces
-            .iter()
-            .position(|ws| ws.kind == WorkspaceKind::GitHub && ws.dir == root);
-        if let Some(w) = existing
-            && let Some((t, leaf)) = showing(&self.workspaces[w], &url)
-        {
+        let wanted = url.trim_end_matches('/');
+        if let Some((t, leaf)) = showing(ws, |page| page == wanted) {
             return self.show_leaf(w, t, leaf);
         }
-        let w = existing.unwrap_or_else(|| {
-            let others = self
-                .workspaces
-                .iter()
-                .any(|ws| ws.kind == WorkspaceKind::GitHub);
-            let mut ws = Workspace::new(root.clone(), WorkspaceKind::GitHub);
-            ws.name = if others {
-                format!("{GITHUB_WORKSPACE} · {}", ws.name)
-            } else {
-                GITHUB_WORKSPACE.to_owned()
-            };
-            ws.record = self.remember_workspace(&ws.name, ws.kind, &ws.dir, None);
-            self.workspaces.push(ws);
-            self.workspaces.len() - 1
-        });
-        let record = self.workspaces[w].record.clone();
+        let before = (self.active_workspace, ws.active_tab);
         let ws = &mut self.workspaces[w];
         ws.tabs.push(Tab::default());
         ws.active_tab = ws.tabs.len() - 1;
-        self.active_workspace = w;
         let t = ws.active_tab;
-        if self.launch_into(w, t, None, &url).is_none()
-            && existing.is_none()
-            && self.workspaces.iter().all(|ws| ws.record != record)
-        {
-            self.forget_workspace(&record);
+        self.active_workspace = w;
+        if self.launch_into(w, t, None, &url).is_none() {
+            // The new tab is gone again: back to what was shown.
+            self.active_workspace = before.0;
+            if let Some(ws) = self.workspaces.get_mut(w) {
+                ws.active_tab = before.1.min(ws.tabs.len().saturating_sub(1));
+            }
         }
         self.show_active();
     }
+
+    /// Show the first tab of workspace `w` showing a page of its
+    /// repository's, else open the repository's page in a new one.
+    pub fn focus_repo_tab(&mut self, w: usize) {
+        let Some(web) = self.repo_page(w) else {
+            self.show_notice("No GitHub page: the repository has no remote".into());
+            return;
+        };
+        let home = web.trim_end_matches('/').to_ascii_lowercase();
+        let of_repo = |page: &str| {
+            let page = page.to_ascii_lowercase();
+            page.strip_prefix(&home)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+        };
+        if let Some((t, leaf)) = self.workspaces.get(w).and_then(|ws| showing(ws, of_repo)) {
+            return self.show_leaf(w, t, leaf);
+        }
+        self.open_page(w, web);
+    }
+
+    /// The web page of the repository workspace `w` is in: as its CI was
+    /// read, else from its remote (remembered).
+    fn repo_page(&mut self, w: usize) -> Option<String> {
+        let ws = self.workspaces.get(w)?;
+        if let Some((_, repo)) = self.ci_of(ws) {
+            return Some(repo.web_url());
+        }
+        let root = self
+            .git
+            .get(&ws.dir)
+            .and_then(|g| g.root.clone())
+            .unwrap_or_else(|| ws.dir.clone());
+        self.repo_pages
+            .entry(root)
+            .or_insert_with_key(|dir| git::web_url(dir))
+            .clone()
+    }
+
+    /// Show the page a CI notification links to, in a workspace of its
+    /// repository: the shown one if it is, else the first.
+    pub fn open_ci_link(&mut self, link: String) {
+        let of_link = |w: usize| {
+            self.workspaces
+                .get(w)
+                .and_then(|ws| self.ci_of(ws))
+                .is_some_and(|(_, repo)| link.starts_with(&repo.web_url()))
+        };
+        let w = if of_link(self.active_workspace) {
+            Some(self.active_workspace)
+        } else {
+            (0..self.workspaces.len()).find(|&w| of_link(w))
+        };
+        match w {
+            Some(w) => self.open_page(w, link),
+            None => self.show_notice("No workspace of that repository is open".into()),
+        }
+    }
 }
 
-/// The tab of `ws` and the leaf in it showing `url` (or waiting for it),
-/// if any; a trailing "/" doesn't count.
-fn showing(ws: &Workspace, url: &str) -> Option<(usize, u32)> {
+/// The tab of `ws` and the leaf in it showing a page `wanted` takes (or
+/// waiting for one), if any; the page is given without a trailing "/".
+fn showing(ws: &Workspace, wanted: impl Fn(&str) -> bool) -> Option<(usize, u32)> {
     let same = |command: &Option<String>| {
         command
             .as_deref()
-            .is_some_and(|c| c.trim_end_matches('/') == url.trim_end_matches('/'))
+            .is_some_and(|c| wanted(c.trim().trim_end_matches('/')))
     };
     ws.tabs.iter().enumerate().find_map(|(t, tab)| {
         let shown = tab

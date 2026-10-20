@@ -85,8 +85,8 @@ pub enum Target {
     /// A command typed in the run prompt (now or before), to launch and
     /// remember.
     Command(String),
-    /// The repository's page, to show in its GitHub workspace (see
-    /// `Gerdr::open_github`).
+    /// The repository's page, to show in a tab of the shown workspace (see
+    /// `Gerdr::open_page`).
     RepoPage(String),
 }
 
@@ -943,7 +943,7 @@ impl Gerdr {
                 launch::remember(&command);
                 self.launch(&command, place);
             }
-            Target::RepoPage(url) => self.open_github(Some(url)),
+            Target::RepoPage(url) => self.open_page(self.active_workspace, url),
         }
     }
 

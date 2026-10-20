@@ -212,16 +212,17 @@ impl Gerdr {
                     self.delete_cursor_chat(&chat);
                 }
             }
+            (SidebarHit::Ci(i), BTN_LEFT) => self.focus_repo_tab(i),
             (SidebarHit::CiChip(i, k), BTN_LEFT) => {
                 if let Some((_, row)) = self.ci_row(i, k) {
                     let link = row.link.clone();
-                    self.open_github(Some(link));
+                    self.open_page(i, link);
                 }
             }
             (SidebarHit::CiPrs(i), BTN_LEFT) => {
                 if let Some(repo) = self.ci_repo(i) {
                     let link = repo.pulls_url();
-                    self.open_github(Some(link));
+                    self.open_page(i, link);
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
@@ -355,7 +356,8 @@ impl Gerdr {
             SidebarHit::Ci(i) => {
                 let repo = self.ci_repo(i)?;
                 let card = layout.ci.get(i)?.as_ref()?.card;
-                Some(Tooltip::new(&format!("CI of {}", repo.slug), card))
+                let text = format!("GitHub · {}", repo.slug);
+                Some(Tooltip::new(&text, card).key("click to show its page"))
             }
             SidebarHit::CiChip(i, k) => {
                 let (_, row) = self.ci_row(i, k)?;
@@ -372,17 +374,21 @@ impl Gerdr {
                         .map(|check| (check.name.clone(), ci_state_word(check.state).to_owned())),
                 );
                 let tip = Tooltip::new(&text, rect).fields(fields);
-                Some(if row.watched {
-                    tip.key("right click to unwatch")
-                } else {
-                    tip
+                Some(match (row.group, row.watched) {
+                    (_, true) => tip.key("right click to unwatch"),
+                    (ci::Group::Review, _) => tip.key("asks for your review, or assigned to you"),
+                    _ => tip,
                 })
             }
             SidebarHit::CiPrs(i) => {
                 let n = self.ci_repo(i)?.other_prs;
                 let rect = layout.ci.get(i)?.as_ref()?.others?;
-                let runs = if n == 1 { "run" } else { "runs" };
-                let text = format!("{n} other {runs} going on · open the Actions page");
+                let prs = if n == 1 {
+                    "pull request"
+                } else {
+                    "pull requests"
+                };
+                let text = format!("{n} other open {prs} · open the Pull requests page");
                 Some(Tooltip::new(&text, rect))
             }
         }
@@ -399,8 +405,11 @@ impl Gerdr {
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) => {
                 let repo = self.ci_repo(i)?;
                 let items = vec![
-                    MenuItem::new("Open Actions", MenuAction::OpenGitHub(repo.pulls_url())),
-                    MenuItem::new("Open repository", MenuAction::OpenGitHub(repo.web_url())),
+                    MenuItem::new(
+                        "Open pull requests",
+                        MenuAction::OpenPage(i, repo.pulls_url()),
+                    ),
+                    MenuItem::new("Open repository", MenuAction::OpenPage(i, repo.web_url())),
                 ];
                 Some(MenuSpec { anchor: at, items })
             }
@@ -408,16 +417,12 @@ impl Gerdr {
                 let (repo, row) = self.ci_row(i, k)?;
                 let mut items = vec![MenuItem::new(
                     "Open",
-                    MenuAction::OpenGitHub(row.link.clone()),
+                    MenuAction::OpenPage(i, row.link.clone()),
                 )];
                 if let (true, Subject::Pr(n)) = (row.watched, &row.subject) {
                     let key = ci::key(&repo.host, &repo.slug);
                     items.push(MenuItem::new("Unwatch", MenuAction::Unwatch(key, *n)));
                 }
-                items.push(MenuItem::new(
-                    "Open Actions",
-                    MenuAction::OpenGitHub(repo.pulls_url()),
-                ));
                 Some(MenuSpec { anchor: at, items })
             }
             SidebarHit::Card(i, k) | SidebarHit::CardClose(i, k) => {
@@ -488,7 +493,6 @@ impl Gerdr {
                     "open project",
                 ),
                 MenuItem::new("New Cursor", MenuAction::NewCursor),
-                MenuItem::new("GitHub page", MenuAction::NewGitHub),
             ],
         }
     }
