@@ -77,7 +77,8 @@ pub struct CiRow {
     pub state: CiState,
     pub checks: Vec<Check>,
     /// The page a click opens: the first failed check's when one failed,
-    /// else a pull request's checks page, else the branch's newest run.
+    /// else a pull request's checks page, else the branch's runs on the
+    /// Actions page.
     pub link: String,
     /// Shown because the user watches it (not one of theirs, nor a
     /// long-lived branch).
@@ -508,7 +509,7 @@ fn repo_ci(
     let web = format!("https://{host}/{slug}");
     let mut rows: Vec<CiRow> = branches(default_branch)
         .into_iter()
-        .filter_map(|name| branch_row(name, runs))
+        .filter_map(|name| branch_row(name, runs, &web))
         .collect();
     let mut pulls: Vec<CiRow> = own.iter().map(|pull| pull_row(pull, &web, false)).collect();
     let mut closed = Vec::new();
@@ -558,8 +559,10 @@ fn branches(default_branch: &str) -> Vec<&str> {
 
 /// The row of branch `name`: the runs of its newest commit among `runs`,
 /// the newest of each workflow; `None` when none ran. Runs of pull
-/// requests from it are left out, as they show on the pull request.
-fn branch_row(name: &str, runs: &[Run]) -> Option<CiRow> {
+/// requests from it are left out, as they show on the pull request. Its
+/// link is its first failed run's, else the branch's runs on the Actions
+/// page of `web`.
+fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
     let mut ran: Vec<&Run> = runs
         .iter()
         .filter(|run| run.head_branch == name)
@@ -590,7 +593,7 @@ fn branch_row(name: &str, runs: &[Run]) -> Option<CiRow> {
         title: None,
         head: None,
         state: row_state(&checks),
-        link: row_link(&checks, || newest.url.clone()),
+        link: row_link(&checks, || format!("{web}/actions?query=branch%3A{name}")),
         checks,
         watched: false,
     })
@@ -835,7 +838,10 @@ mod tests {
         let dev = row(&ci, &branch("dev"));
         assert_eq!(dev.state, CiState::Passed);
         assert_eq!(dev.checks.len(), 1);
-        assert_eq!(dev.link, "https://github.com/o/r/actions/runs/4");
+        assert_eq!(
+            dev.link,
+            "https://github.com/o/r/actions?query=branch%3Adev"
+        );
     }
 
     #[test]
