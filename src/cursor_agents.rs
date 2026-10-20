@@ -106,6 +106,18 @@ pub struct ChatRow {
     pub worktree: bool,
     /// Its mode: `agent`, `chat` (asking), `plan`, `debug`, `multitask`.
     pub mode: Option<String>,
+    /// For a subagent's chat, the call that started it.
+    pub spawn: Option<Spawn>,
+}
+
+/// The subagent call a subagent's chat was started by, as the database
+/// has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spawn {
+    /// The parent's chat.
+    pub parent: String,
+    /// The call's id, as its hooks have it.
+    pub call: String,
 }
 
 impl ChatRow {
@@ -286,8 +298,17 @@ pub struct CursorChat {
     pub row: ChatRow,
     pub status: AgentStatus,
     pub model: Option<String>,
-    /// What each of its subagents that run is to do, if known.
-    pub subagents: Vec<Option<String>>,
+    /// Its subagents that run.
+    pub subagents: Vec<SubagentRun>,
+}
+
+/// A subagent that runs, as its parent's card shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubagentRun {
+    /// Its chat, once known.
+    pub chat: Option<String>,
+    /// What it is to do, if known.
+    pub task: Option<String>,
 }
 
 /// A subagent heard of: whose it is and whether it still runs.
@@ -301,7 +322,9 @@ pub struct Subagent {
     pub background: bool,
     /// It is over: its call returned, or its parent stopped.
     pub ended: bool,
-    /// When it was last heard of, in milliseconds since the epoch.
+    /// When it was first and last heard of, in milliseconds since the
+    /// epoch.
+    pub since_ms: i64,
     pub at_ms: i64,
 }
 
@@ -310,7 +333,11 @@ pub struct Subagent {
 /// cards show rather than cards of their own.
 #[derive(Default)]
 pub struct Chats {
+    /// The database's rows but its subagents'.
     pub rows: HashMap<String, ChatRow>,
+    /// The calls that started the subagents the database has, by their
+    /// chats.
+    pub spawns: HashMap<String, Spawn>,
     pub hooks: HashMap<String, HookEvent>,
     /// The subagent calls each chat has open, the oldest first.
     pub calls: HashMap<String, Vec<SubagentCall>>,
@@ -321,6 +348,11 @@ pub struct Chats {
 impl Chats {
     /// Take in the rows of a fresh read.
     pub fn set_rows(&mut self, rows: Vec<ChatRow>) {
+        let (spawned, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.spawn.is_some());
+        self.spawns = spawned
+            .into_iter()
+            .filter_map(|r| Some((r.id, r.spawn?)))
+            .collect();
         self.rows = rows.into_iter().map(|r| (r.id.clone(), r)).collect();
     }
 
@@ -359,16 +391,19 @@ impl Chats {
     }
 
     /// Take in `event` if it is a subagent's, and say whether it was. A
-    /// chat is taken for one when a tool's hook without a transcript is
-    /// the first heard of it while another chat has a subagent call open.
-    /// While it runs, so does its parent, which hears nothing meanwhile.
+    /// chat is one the database says is, or taken for one when a tool's
+    /// hook without a transcript is the first heard of it while another
+    /// chat has a subagent call open. While it runs, so does its parent,
+    /// which hears nothing meanwhile.
     fn hear_subagent(&mut self, event: &HookEvent) -> bool {
         if !self.subagents.contains_key(&event.chat) {
             let first = event.is_tool()
                 && !event.transcript
                 && !self.hooks.contains_key(&event.chat)
                 && !self.rows.contains_key(&event.chat);
-            let Some(parent) = first.then(|| self.calling(&event.roots)).flatten() else {
+            let spawned = self.spawns.get(&event.chat).map(|s| s.parent.clone());
+            let Some(parent) = spawned.or_else(|| first.then(|| self.calling(&event.roots))?)
+            else {
                 return false;
             };
             let subagent = Subagent {
@@ -376,6 +411,7 @@ impl Chats {
                 task: None,
                 background: false,
                 ended: false,
+                since_ms: event.at_ms,
                 at_ms: event.at_ms,
             };
             self.subagents.insert(event.chat.clone(), subagent);
@@ -421,11 +457,13 @@ impl Chats {
             .or(call.task);
         let none_open = open.is_empty();
         if let Some(chat) = call.chat {
+            let since_ms = self.subagents.get(&chat).map_or(at_ms, |s| s.since_ms);
             let subagent = Subagent {
                 parent: parent.to_owned(),
                 task,
                 background: call.background,
                 ended: !call.background,
+                since_ms,
                 at_ms,
             };
             self.subagents.insert(chat, subagent);
@@ -446,17 +484,43 @@ impl Chats {
         }
     }
 
-    /// What each subagent of `parent` running at `now_ms` is to do: those
-    /// its open calls run, and those it left in the background that were
-    /// heard of in the last `BACKGROUND_HOLD_MS`.
-    fn running_subagents(&self, parent: &str, now_ms: i64) -> Vec<Option<String>> {
+    /// The subagents of `parent` running at `now_ms`: those its open
+    /// calls run, and those it left in the background that were heard of
+    /// in the last `BACKGROUND_HOLD_MS`. A call's chat is the one the
+    /// database says it started, else the next of those heard of running
+    /// for it that the database doesn't place, in the order they started.
+    fn running_subagents(&self, parent: &str, now_ms: i64) -> Vec<SubagentRun> {
+        let spawned = |call: &str| {
+            self.spawns
+                .iter()
+                .find(|(_, s)| s.parent == parent && s.call == call)
+                .map(|(chat, _)| chat.clone())
+        };
+        let mut heard: Vec<(&String, &Subagent)> = self
+            .subagents
+            .iter()
+            .filter(|(chat, s)| {
+                s.parent == parent && !s.background && !s.ended && !self.spawns.contains_key(*chat)
+            })
+            .collect();
+        heard.sort_by_key(|(chat, s)| (s.since_ms, *chat));
+        let mut heard = heard.into_iter().map(|(chat, _)| chat.clone());
         let called = self.calls.get(parent).into_iter().flatten();
-        let background = self.subagents.values().filter(|s| {
+        let called: Vec<SubagentRun> = called
+            .map(|c| SubagentRun {
+                chat: spawned(&c.id).or_else(|| heard.next()),
+                task: c.task.clone(),
+            })
+            .collect();
+        let background = self.subagents.iter().filter(|(_, s)| {
             s.parent == parent && s.background && !s.ended && now_ms - s.at_ms <= BACKGROUND_HOLD_MS
         });
         called
-            .map(|c| c.task.clone())
-            .chain(background.map(|s| s.task.clone()))
+            .into_iter()
+            .chain(background.map(|(chat, s)| SubagentRun {
+                chat: Some(chat.clone()),
+                task: s.task.clone(),
+            }))
             .collect()
     }
 
@@ -652,13 +716,17 @@ pub fn read_rows(
             json_extract(value, '$.agentLocation.environment.uri.fsPath'),
             json_extract(value, '$.agentLocation.sourceRepoRootPath'),
             json_extract(value, '$.trackedGitRepos'),
-            json_extract(value, '$.unifiedMode')
+            json_extract(value, '$.unifiedMode'),
+            json_extract(value, '$.subagentInfo.parentComposerId'),
+            json_extract(value, '$.subagentInfo.toolCallId')
         FROM composerHeaders
-        WHERE coalesce(isArchived, 0) = 0 AND coalesce(isSubagent, 0) = 0
-          AND (lastUpdatedAt > ?1
-               OR json_extract(value, '$.hasBlockingPendingActions')
-               OR json_extract(value, '$.hasUnreadMessages')
-               OR composerId IN (SELECT value FROM json_each(?2)))",
+        WHERE coalesce(isArchived, 0) = 0
+          AND (coalesce(isSubagent, 0) = 0
+               AND (lastUpdatedAt > ?1
+                    OR json_extract(value, '$.hasBlockingPendingActions')
+                    OR json_extract(value, '$.hasUnreadMessages')
+                    OR composerId IN (SELECT value FROM json_each(?2)))
+               OR isSubagent AND createdAt > ?1)",
     )?;
     let keep = serde_json::to_string(keep).unwrap_or_else(|_| "[]".into());
     let mut rows: Vec<ChatRow> = headers
@@ -685,6 +753,10 @@ pub fn read_rows(
                 removed: r.get(9)?,
                 worktree: r.get::<_, Option<String>>(10)?.as_deref() == Some("worktree"),
                 mode: r.get(14)?,
+                spawn: match (r.get(15)?, r.get(16)?) {
+                    (Some(parent), Some(call)) => Some(Spawn { parent, call }),
+                    _ => None,
+                },
                 paths,
             })
         })?
@@ -692,7 +764,8 @@ pub fn read_rows(
     let mut status = conn.prepare_cached(
         "SELECT json_extract(value, '$.status') FROM cursorDiskKV WHERE key = ?1",
     )?;
-    for row in &mut rows {
+    // A subagent's state is its parent's call's.
+    for row in rows.iter_mut().filter(|r| r.spawn.is_none()) {
         // A run's state is read again only once its chat changed, or while
         // it runs.
         let cached = known
@@ -1425,9 +1498,10 @@ mod tests {
         assert_eq!(shown.len(), 1, "no cards of their own");
         assert_eq!(shown[0].row.id, "c1");
         assert_eq!(shown[0].status, AgentStatus::Working);
+        // Their chats, in the order they started.
         assert_eq!(
             shown[0].subagents,
-            [Some("Audit".into()), Some("Review".into())]
+            [run(Some("sub1"), "Audit"), run(Some("sub2"), "Review")]
         );
         // Their hooks keep the parent running, which hears nothing itself.
         assert_eq!(chats.hooks["c1"].at_ms, 1_500);
@@ -1441,7 +1515,7 @@ mod tests {
         chats.hear(tool("postToolUse", "sub1", None, 2_150));
         let shown = live(&mut chats, 2_200);
         assert_eq!(shown.len(), 1);
-        assert_eq!(shown[0].subagents, [Some("Review".into())]);
+        assert_eq!(shown[0].subagents, [run(Some("sub2"), "Review")]);
         // The parent stops: none runs, and the subagents never stopped.
         chats.hear(hook("stop", Some("completed"), 3_000));
         let shown = live(&mut chats, 3_100);
@@ -1451,6 +1525,54 @@ mod tests {
         chats.hear(tool("postToolUse", "sub2", None, 3_200));
         assert_eq!(live(&mut chats, 3_300).len(), 1);
         assert!(chats.calls.is_empty());
+    }
+
+    /// A subagent running chat `chat`, to do `task`.
+    fn run(chat: Option<&str>, task: &str) -> SubagentRun {
+        SubagentRun {
+            chat: chat.map(str::to_owned),
+            task: Some(task.into()),
+        }
+    }
+
+    #[test]
+    fn the_database_says_which_call_started_a_subagent() {
+        let mut chats = Chats::default();
+        chats.hear(hook("beforeSubmitPrompt", None, 1_000));
+        chats.hear(tool("preToolUse", "c1", Some(call("t1", "Audit")), 1_100));
+        chats.hear(tool("preToolUse", "c1", Some(call("t2", "Review")), 1_200));
+        // The second call's subagent is heard first.
+        chats.hear(tool("preToolUse", "sub2", None, 1_300));
+        chats.hear(tool("preToolUse", "sub1", None, 1_400));
+        let spawned = |id: &str, call: &str| {
+            let mut row = row(id);
+            row.spawn = Some(Spawn {
+                parent: "c1".into(),
+                call: call.into(),
+            });
+            row
+        };
+        chats.set_rows(vec![spawned("sub1", "t1"), spawned("sub2", "t2")]);
+        let shown = live(&mut chats, 2_000);
+        assert_eq!(shown.len(), 1, "no cards of their own");
+        assert_eq!(
+            shown[0].subagents,
+            [run(Some("sub1"), "Audit"), run(Some("sub2"), "Review")]
+        );
+        // A call none is heard of for yet has none.
+        chats.hear(tool("preToolUse", "c1", Some(call("t3", "Plan")), 2_100));
+        let shown = live(&mut chats, 2_200);
+        assert_eq!(shown[0].subagents[2], run(None, "Plan"));
+        // One the database knows is its subagent whatever its hooks say.
+        chats.hear(tool("preToolUse", "c1", Some(call("t4", "Test")), 2_300));
+        let rows = [("sub1", "t1"), ("sub2", "t2"), ("sub4", "t4")];
+        chats.set_rows(rows.map(|(id, call)| spawned(id, call)).to_vec());
+        let mut first = tool("preToolUse", "sub4", None, 2_400);
+        first.transcript = true;
+        chats.hear(first);
+        let shown = live(&mut chats, 2_500);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].subagents[3], run(Some("sub4"), "Test"));
     }
 
     #[test]
@@ -1473,7 +1595,7 @@ mod tests {
         let shown = live(&mut chats, 1_500);
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].status, AgentStatus::Working);
-        assert_eq!(shown[0].subagents, [Some("Watch".into())]);
+        assert_eq!(shown[0].subagents, [run(Some("sub1"), "Watch")]);
         assert!(chats.ageing());
         let quiet = live(&mut chats, 1_400 + BACKGROUND_HOLD_MS + 1);
         assert_eq!(quiet[0].status, AgentStatus::Done);
@@ -1728,6 +1850,33 @@ mod tests {
         assert_eq!(old.mode_name(), Some("plan"));
         // An archived one isn't.
         assert!(rows.iter().all(|r| r.id != "gone"));
+        // A subagent's, started lately, with the call that started it.
+        let subagent = |id: &str, created: i64| {
+            conn.execute(
+                "INSERT INTO composerHeaders (composerId, createdAt, isSubagent, value)
+                 VALUES (?1, ?2, 1, ?3)",
+                rusqlite::params![
+                    id,
+                    created,
+                    r#"{"subagentInfo":{"parentComposerId":"a","toolCallId":"t1\nfc_1"}}"#
+                ],
+            )
+            .unwrap();
+        };
+        subagent("sub", now - 10);
+        subagent("sub-old", now - 2 * RECENT_MS);
+        let rows = read_rows(&conn, now, &[], &mut known).unwrap();
+        let spawned: Vec<_> = rows.iter().filter(|r| r.spawn.is_some()).collect();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].id, "sub");
+        assert_eq!(
+            spawned[0].spawn,
+            Some(Spawn {
+                parent: "a".into(),
+                call: "t1\nfc_1".into(),
+            })
+        );
+        assert_eq!(spawned[0].status, None);
     }
 
     fn moded(id: &str, mode: &str, updated_ms: i64) -> ChatRow {

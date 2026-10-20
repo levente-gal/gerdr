@@ -156,6 +156,9 @@ impl Gerdr {
                             hover: quantize(hover.alpha(SidebarHit::Card(i, k), now)),
                             open,
                             close: hit == Some(SidebarHit::CardClose(i, k)),
+                            subagents: std::array::from_fn(|j| {
+                                quantize(hover.alpha(SidebarHit::Subagent(i, k, j), now))
+                            }),
                         }
                     })
                     .collect()
@@ -225,6 +228,13 @@ impl Gerdr {
             (SidebarHit::Card(i, k), BTN_LEFT) => {
                 if let Some(card) = self.agent_views().get(i).and_then(|c| c.get(k)) {
                     let key = card.key.clone();
+                    self.focus_agent(&key);
+                }
+            }
+            (SidebarHit::Subagent(i, k, j), BTN_LEFT) => {
+                let card = self.agent_views().get(i).and_then(|c| c.get(k)).cloned();
+                let sub = card.and_then(|c| c.subagents.get(j)?.key.clone());
+                if let Some(key) = sub {
                     self.focus_agent(&key);
                 }
             }
@@ -346,6 +356,11 @@ impl Gerdr {
                 let rect = layout.card_closes[i].iter().find(|(c, _)| *c == k)?.1;
                 Some(Tooltip::new("Delete from gerdr", rect))
             }
+            SidebarHit::Subagent(i, k, j) => {
+                let task = &agents.get(i)?.get(k)?.subagents.get(j)?.task;
+                let rect = layout.subagents[i].iter().find(|l| (l.0, l.1) == (k, j))?.2;
+                Some(Tooltip::new(task, rect))
+            }
             SidebarHit::More(i) => {
                 let names = &workspaces.get(i)?.0.more_agents;
                 let text = format!("Also kept: {}", names.join(" · "));
@@ -447,7 +462,9 @@ impl Gerdr {
                 }
                 Some(MenuSpec { anchor: at, items })
             }
-            SidebarHit::Card(i, k) | SidebarHit::CardClose(i, k) => {
+            SidebarHit::Card(i, k)
+            | SidebarHit::CardClose(i, k)
+            | SidebarHit::Subagent(i, k, _) => {
                 let card = self.agent_views().get(i)?.get(k)?.clone();
                 let mut items = vec![MenuItem::new(
                     "Focus",
