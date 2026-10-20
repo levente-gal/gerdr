@@ -95,11 +95,13 @@ fn tabs() -> Vec<TabView> {
             place: "gerdr".into(),
             activity: "claude working · cargo build".into(),
             restart: Some(true),
+            github: false,
         },
         TabView {
             title: "zsh".into(),
             activity: "cargo watch".into(),
             restart: Some(false),
+            github: false,
             ..Default::default()
         },
         TabView::default(),

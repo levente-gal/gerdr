@@ -26,11 +26,8 @@ pub enum MenuAction {
     ReposAction(ReposButton),
     /// The project's Cursor workspace (see `Gerdr::open_cursor`).
     NewCursor,
-    /// The shown workspace's repository's page in its GitHub workspace
-    /// (see `Gerdr::open_github`).
-    NewGitHub,
-    /// A GitHub page in the GitHub workspace of its repository.
-    OpenGitHub(String),
+    /// A GitHub page in a tab of workspace `.0` (see `Gerdr::open_page`).
+    OpenPage(usize, String),
     /// Stop watching the CI of a pull request, by repository key and
     /// number (see `ci_watch`).
     Unwatch(String, u64),
@@ -270,8 +267,7 @@ impl Gerdr {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
             MenuAction::NewCursor => self.open_cursor(None),
-            MenuAction::NewGitHub => self.open_github(None),
-            MenuAction::OpenGitHub(url) => self.open_github(Some(url)),
+            MenuAction::OpenPage(w, url) => self.open_page(w, url),
             MenuAction::Unwatch(key, n) => self.unwatch(&key, n),
             MenuAction::OpenFolder => self.pick_workspace(WorkspaceKind::Terminal),
             MenuAction::NewProject => self.run_action(Action::NewProject),

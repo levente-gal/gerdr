@@ -11,8 +11,10 @@
 //! the repositories panel and a "+" button opening the menu of what to
 //! add. What moves (hover pills, the pulse on a blocked card, a name being
 //! renamed) comes in through `SidebarState`. After a workspace's agent
-//! cards, a card shows the CI of its folder's repository: a chip per
-//! branch or pull request, and a count of the other runs going on.
+//! cards, a GitHub card shows the CI and pull requests of its folder's
+//! repository: a line per group (its branches' CI, the user's pull
+//! requests, the ones asking for their review), each a label and a chip
+//! per branch or pull request, and a count of the other pull requests.
 
 use super::{
     BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_GAP, CARD_HEADER, CARD_INDENT, CARD_LINE,
@@ -27,7 +29,7 @@ use super::{
 use crate::WorkspaceKind;
 use crate::agents::AgentKey;
 use crate::app_icons::{AppIcon, github_icon};
-use crate::ci::CiState;
+use crate::ci::{CiState, Group};
 use crate::cursor_agents::CursorChat;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
@@ -77,14 +79,19 @@ const BLOCKED_TINT: f32 = 0.15;
 const BLOCKED_REST: f32 = 0.4;
 /// The width of a card's "×", at the right end of its header.
 const CARD_CLOSE: i32 = 22;
-/// A CI card's chip: the room around its mark and label, and the gap
+/// A GitHub card's chip: the room around its mark and label, and the gap
 /// between them; the gap between chips.
 const CI_CHIP_PAD: i32 = 4;
 const CI_MARK_GAP: i32 = 4;
 const CI_CHIP_GAP: i32 = 4;
 const CI_PILL_RADIUS: f32 = 4.0;
-/// How big GitHub's mark is in a CI card's header.
+/// How big GitHub's mark is in a GitHub card's header.
 const CI_ICON_SIZE: i32 = 12;
+/// The gap between the GitHub card's widest line label and its chips.
+const CI_LABEL_GAP: i32 = 8;
+/// How far the GitHub card's count of other pull requests tints its pill
+/// toward the muted text colour at rest; under the pointer, twice as far.
+const CI_COUNT_TINT: f32 = 0.15;
 /// Without a font, how wide a character is guessed to be, as a part of
 /// its size.
 const GUESS_CHAR: f32 = 0.55;
@@ -399,19 +406,21 @@ pub struct WorkspaceView {
     /// What the agents kept under it that its cards leave out are called:
     /// a "+N more" line after the cards counts them.
     pub more_agents: Vec<String>,
-    /// The CI of its folder's repository, as a card after its agents'.
+    /// The CI and pull requests of its folder's repository, as a GitHub
+    /// card after its agents'.
     pub ci: Option<CiView>,
 }
 
-/// What a CI card shows: a chip per branch or pull request, and how many
-/// other runs are going on (a count that opens the Actions page).
+/// What a GitHub card shows: a chip per branch or pull request, a line per
+/// group of them, and how many other pull requests the repository has (a
+/// count that opens its pull requests page).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CiView {
     pub chips: Vec<CiChip>,
-    pub others_running: usize,
+    pub other_prs: usize,
 }
 
-/// A chip of the CI card: a status mark and a label, `main` or `#42`.
+/// A chip of the GitHub card: a status mark and a label, `main` or `#42`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CiChip {
     pub label: String,
@@ -422,18 +431,30 @@ pub struct CiChip {
     pub watched: bool,
     /// Its checks, by name, for the tooltip.
     pub checks: Vec<(String, CiState)>,
+    /// The line it shows on; a view's chips come line by line.
+    pub group: Group,
 }
 
 impl CiView {
-    /// Whether it has anything to show: no card shows otherwise.
+    /// Whether it has anything to show, neither a chip nor another pull
+    /// request: no card shows otherwise.
     pub fn is_empty(&self) -> bool {
-        self.chips.is_empty() && self.others_running == 0
+        self.chips.is_empty() && self.other_prs == 0
     }
 }
 
-/// The count of `n` other runs, as the CI card says it.
-fn others_label(n: usize) -> String {
-    format!("+{n} running")
+/// The count of `n` other pull requests, as the GitHub card says it.
+fn prs_label(n: usize) -> String {
+    format!("+{n} PRs")
+}
+
+/// The word the GitHub card's lines of `group` start with.
+fn group_label(group: Group) -> &'static str {
+    match group {
+        Group::Branch => "CI",
+        Group::Mine => "Mine",
+        Group::Review => "Review",
+    }
 }
 
 /// How wide `text` is at `size` in logical pixels, measured with the UI
@@ -443,7 +464,7 @@ fn text_extent(text: &str, size: f32) -> i32 {
     measure(text, size).unwrap_or_else(guess).ceil() as i32
 }
 
-/// How wide the CI card's chip labelled `label` is: its mark and its
+/// How wide the GitHub card's chip labelled `label` is: its mark and its
 /// label, with room around them.
 fn ci_chip_width(label: &str) -> i32 {
     2 * CI_CHIP_PAD + STATUS_WIDTH + CI_MARK_GAP + text_extent(label, DETAIL_FONT_SIZE)
@@ -603,9 +624,9 @@ pub struct CardState {
     pub close: bool,
 }
 
-/// What moves in a CI card: the hover alphas (0 to 16) of the card off
+/// What moves in a GitHub card: the hover alphas (0 to 16) of the card off
 /// its chips and count, of each chip (as `CiView::chips` lists them) and
-/// of its count of other runs. A part lights alone: the card fades while
+/// of its count of other pull requests. A part lights alone: the card fades while
 /// the pointer is on a chip, as `SidebarHit::pill` has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CiCardState {
@@ -631,7 +652,7 @@ pub struct SidebarState {
     pub rows: Vec<RowState>,
     /// Per workspace, per card as the data lists them (not as drawn).
     pub cards: Vec<Vec<CardState>>,
-    /// Per workspace, its CI card.
+    /// Per workspace, its GitHub card.
     pub ci: Vec<CiCardState>,
     /// The "+" button's hover alpha, and whether its menu is open.
     pub plus: u8,
@@ -726,19 +747,22 @@ pub struct SidebarLayout {
     pub card_closes: Vec<Vec<(usize, Rect)>>,
     /// Per workspace, the "+N more" line after its cards, if it has one.
     pub more: Vec<Option<Rect>>,
-    /// Per workspace, its CI card, if it has one.
+    /// Per workspace, its GitHub card, if it has one.
     pub ci: Vec<Option<CiLayout>>,
     /// Per workspace, all it takes: its row, its cards and the gap after them.
     pub blocks: Vec<Rect>,
 }
 
-/// Where the parts of a CI card sit.
+/// Where the parts of a GitHub card sit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CiLayout {
     pub card: Rect,
     /// One per chip, as `CiView::chips` lists them.
     pub chips: Vec<Rect>,
-    /// The count of other runs, when there are any.
+    /// The label starting each line of chips, by the group it names, in
+    /// the band of that line's chips.
+    pub labels: Vec<(Group, Rect)>,
+    /// The count of other pull requests, when there are any.
     pub others: Option<Rect>,
 }
 
@@ -779,11 +803,12 @@ pub enum SidebarHit {
     CardClose(usize, usize),
     /// The "+N more" line after workspace `i`'s cards.
     More(usize),
-    /// Workspace `i`'s CI card off its chips and count, chip `k` of it
-    /// (as `CiView::chips` lists them), and its count of other runs.
+    /// Workspace `i`'s GitHub card off its chips and count (its header,
+    /// its line labels, the gaps), chip `k` of it (as `CiView::chips` lists
+    /// them), and its count of other pull requests.
     Ci(usize),
     CiChip(usize, usize),
-    CiOthers(usize),
+    CiPrs(usize),
 }
 
 impl SidebarHit {
@@ -801,7 +826,7 @@ impl SidebarHit {
     }
 
     /// What lights up under this hit: a row for any part of it, a card
-    /// for its "×"; anything else (a CI card's chip, its count) itself.
+    /// for its "×"; anything else (a GitHub card's chip, its count) itself.
     pub fn pill(self) -> Self {
         match (self.row(), self) {
             (Some(i), _) => Self::Row(i),
@@ -842,7 +867,7 @@ impl SidebarLayout {
                 continue;
             };
             return Some(if ci.others.is_some_and(inside) {
-                SidebarHit::CiOthers(i)
+                SidebarHit::CiPrs(i)
             } else if let Some(k) = ci.chips.iter().position(|r| inside(*r)) {
                 SidebarHit::CiChip(i, k)
             } else {
@@ -867,7 +892,7 @@ impl SidebarLayout {
 }
 
 /// Where the header's parts, the rows of `workspaces`, their `agents`
-/// cards and their CI cards sit in a sidebar `width` wide, in comfortable
+/// cards and their GitHub cards sit in a sidebar `width` wide, in comfortable
 /// density.
 #[cfg(test)]
 pub fn sidebar_layout(
@@ -1006,15 +1031,17 @@ pub fn sidebar_layout_at(
     }
 }
 
-/// Where the parts of the CI card showing `view` sit, its top left corner
-/// at `(x, y)` and `width` wide: a header band holding at its right end
-/// the count of other runs, then the chips left to right, a line under
-/// it when the next one does not fit. A chip's mark lines up with the
-/// header's; a chip wider than the card is cut to fit.
+/// Where the parts of the GitHub card showing `view` sit, its top left
+/// corner at `(x, y)` and `width` wide: a header band holding at its right
+/// end the count of other pull requests, then a line per group of chips.
+/// Each line starts with its group's label; the chips follow in a column
+/// as wide as the widest label present and a gap, left to right, on a
+/// line under it (in the same column) when the next one does not fit. An
+/// empty group takes no line. A chip wider than the room is cut to fit.
 fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32, density: Density) -> CiLayout {
     let header_y = y + card_pad(density);
-    let others = (view.others_running > 0).then(|| {
-        let w = text_extent(&others_label(view.others_running), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+    let others = (view.other_prs > 0).then(|| {
+        let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
         Rectangle::new(
             (
                 x + width - CARD_PAD - w,
@@ -1024,30 +1051,43 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32, density: Density) ->
             (w, PILL_HEIGHT).into(),
         )
     });
+    let label_x = x + CARD_PAD;
+    let label_w = view
+        .chips
+        .iter()
+        .map(|chip| text_extent(group_label(chip.group), DETAIL_FONT_SIZE))
+        .max()
+        .unwrap_or(0);
     let (left, right) = (
-        x + CARD_PAD - CI_CHIP_PAD,
+        label_x + label_w + CI_LABEL_GAP - CI_CHIP_PAD,
         x + width - CARD_PAD + CI_CHIP_PAD,
     );
-    let (mut chip_x, mut line) = (left, 0);
+    let line_y = |line: i32| header_y + CARD_HEADER + line * CARD_LINE;
+    let (mut chip_x, mut line, mut group) = (left, -1, None);
+    let mut labels = Vec::new();
     let chips = view
         .chips
         .iter()
         .map(|chip| {
             let w = ci_chip_width(&chip.label).min((right - left).max(0));
-            if chip_x > left && chip_x + w > right {
+            if group != Some(chip.group) {
+                (chip_x, line, group) = (left, line + 1, Some(chip.group));
+                let label =
+                    Rectangle::new((label_x, line_y(line)).into(), (label_w, CARD_LINE).into());
+                labels.push((chip.group, label));
+            } else if chip_x > left && chip_x + w > right {
                 (chip_x, line) = (left, line + 1);
             }
-            let chip_y = header_y + CARD_HEADER + line * CARD_LINE;
-            let rect = Rectangle::new((chip_x, chip_y).into(), (w, CARD_LINE).into());
+            let rect = Rectangle::new((chip_x, line_y(line)).into(), (w, CARD_LINE).into());
             chip_x += w + CI_CHIP_GAP;
             rect
         })
         .collect();
-    let lines = if view.chips.is_empty() { 0 } else { line + 1 };
-    let height = 2 * card_pad(density) + CARD_HEADER + lines * CARD_LINE;
+    let height = 2 * card_pad(density) + CARD_HEADER + (line + 1) * CARD_LINE;
     CiLayout {
         card: Rectangle::new((x, y).into(), (width, height).into()),
         chips,
+        labels,
         others,
     }
 }
@@ -1088,7 +1128,7 @@ fn alpha(step: u8) -> f32 {
 
 impl Painter {
     /// The sidebar: the header (project name and "+"), a row per workspace
-    /// and the agent and CI cards under it, with what moves in
+    /// and the agent and GitHub cards under it, with what moves in
     /// `view.state`.
     pub(super) fn sidebar_view(
         &self,
@@ -1167,7 +1207,7 @@ impl Painter {
                 WorkspaceKind::Terminal => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
                     terminal(x, y, small)
                 }),
-                WorkspaceKind::Cursor | WorkspaceKind::GitHub => match &ws.icon {
+                WorkspaceKind::Cursor => match &ws.icon {
                     Some(picture) => {
                         c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
                     }
@@ -1751,11 +1791,12 @@ impl Painter {
 }
 
 impl Painter {
-    /// A CI card laid out as `layout`: a header with GitHub's mark, "CI"
-    /// and the count of other runs on a pill in the working colour, then a
-    /// chip per branch or pull request, its status mark and label. The
-    /// card lightens under the pointer as an agent card does; a chip under
-    /// it gets a pill, exactly its rect, and its count a stronger tint.
+    /// A GitHub card laid out as `layout`: a header with GitHub's mark,
+    /// "GitHub" and the count of other pull requests on a quiet pill, then
+    /// a line per group, its label and a chip per branch or pull request
+    /// (its status mark and label). The card lightens under the pointer as
+    /// an agent card does; a chip under it gets a pill, exactly its rect,
+    /// and its count a stronger tint.
     #[allow(clippy::too_many_arguments)]
     fn ci_card(
         &self,
@@ -1777,7 +1818,7 @@ impl Painter {
         c.rounded(x, y, w, h, r, mix(p.border_variant, p.border, hover));
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
 
-        // Header: GitHub's mark, "CI", the count of other runs.
+        // Header: GitHub's mark, "GitHub", the count of other PRs.
         let header_y = rect.loc.y + card_pad(density);
         let inner_x = rect.loc.x + CARD_PAD;
         let mark = Rectangle::new(
@@ -1793,7 +1834,7 @@ impl Painter {
         };
         self.text(
             c,
-            "CI",
+            "GitHub",
             FONT_SIZE,
             px(inner_x + STATUS_WIDTH + STATUS_GAP) as f32,
             heading_end as f32,
@@ -1810,17 +1851,31 @@ impl Painter {
                 ow,
                 oh,
                 oh / 2.0,
-                mix(fill, p.accent, 0.2 + 0.2 * lit),
+                mix(fill, p.muted, CI_COUNT_TINT * (1.0 + lit)),
             );
             self.text(
                 c,
-                &others_label(view.others_running),
+                &prs_label(view.other_prs),
                 TINY_FONT_SIZE,
                 ox + PILL_PADDING as f32 * s,
                 ox + ow,
                 (oy as i32, oh as i32),
                 scale,
-                p.accent,
+                mix(p.muted, p.text, lit),
+            );
+        }
+
+        // The lines' labels, in the band of their chips.
+        for (group, rect) in &layout.labels {
+            self.text(
+                c,
+                group_label(*group),
+                DETAIL_FONT_SIZE,
+                px(rect.loc.x) as f32,
+                px(rect.loc.x + rect.size.w) as f32 + 1.0,
+                band(*rect, scale),
+                scale,
+                p.placeholder,
             );
         }
 
@@ -1903,12 +1958,16 @@ mod tests {
         ROW_HEIGHT, ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SidebarHit, TAB_LINE, WorkspaceView,
         card_order, sentence_case, sidebar_layout, sidebar_layout_at, workspace_slot,
     };
-    use super::{CI_CHIP_GAP, CiChip, CiView, ci_chip_width};
+    use super::{
+        CI_CHIP_GAP, CI_LABEL_GAP, CiChip, CiLayout, CiView, DETAIL_FONT_SIZE, SidebarLayout,
+        ci_chip_width, text_extent,
+    };
     use crate::WorkspaceKind;
     use crate::chrome::{BAR_HEIGHT, TabView};
-    use crate::ci::CiState;
+    use crate::ci::{CiState, Group};
     use crate::git::{GitStatus, Worktree};
     use crate::herdr::AgentStatus;
+    use smithay::utils::Rectangle;
 
     #[test]
     fn workspace_puts_its_tabs_together() {
@@ -1919,6 +1978,7 @@ mod tests {
             place: place.into(),
             activity: activity.into(),
             restart: None,
+            github: false,
         };
         let tabs = [
             tab(
@@ -2318,8 +2378,16 @@ mod tests {
         assert_eq!(workspace_slot(blocks, 0, last as f64 + 50.0), 2);
     }
 
-    /// A CI card of chips labelled `labels`, with `others` other runs.
+    /// A GitHub card of branch chips labelled `labels`, with `others`
+    /// other pull requests.
     fn ci_view(labels: &[&str], others: usize) -> CiView {
+        let chips: Vec<_> = labels.iter().map(|l| (Group::Branch, *l)).collect();
+        grouped_ci_view(&chips, others)
+    }
+
+    /// A GitHub card of `chips`, each its group and label, with `others`
+    /// other pull requests.
+    fn grouped_ci_view(chips: &[(Group, &str)], others: usize) -> CiView {
         let states = [
             CiState::Passed,
             CiState::Failed,
@@ -2327,18 +2395,19 @@ mod tests {
             CiState::Unknown,
         ];
         CiView {
-            chips: labels
+            chips: chips
                 .iter()
                 .zip(states.into_iter().cycle())
-                .map(|(label, state)| CiChip {
+                .map(|((group, label), state)| CiChip {
                     label: (*label).into(),
                     state,
                     title: None,
                     watched: false,
                     checks: Vec::new(),
+                    group: *group,
                 })
                 .collect(),
-            others_running: others,
+            other_prs: others,
         }
     }
 
@@ -2418,6 +2487,17 @@ mod tests {
         let (card, chips) = (ci.card, &ci.chips);
         let first_line = card.loc.y + CARD_PAD + CARD_HEADER;
         assert_eq!(chips[0].loc.y, first_line);
+        // One label, "CI", on the first line; the chips in a column after it.
+        let label_w = text_extent("CI", DETAIL_FONT_SIZE);
+        let label = Rectangle::new(
+            (card.loc.x + CARD_PAD, first_line).into(),
+            (label_w, CARD_LINE).into(),
+        );
+        assert_eq!(ci.labels, [(Group::Branch, label)]);
+        assert_eq!(
+            chips[0].loc.x,
+            card.loc.x + CARD_PAD + label_w + CI_LABEL_GAP - 4
+        );
         let mut lines = 1;
         for (pair, label) in chips.windows(2).zip(&labels[1..]) {
             let (a, b) = (pair[0], pair[1]);
@@ -2426,7 +2506,7 @@ mod tests {
                 // Straight after the last on its line.
                 assert_eq!(b.loc.x, a.loc.x + a.size.w + CI_CHIP_GAP);
             } else {
-                // A line down, at the left, as the next did not fit.
+                // A line down, in the column, as the next did not fit.
                 lines += 1;
                 assert_eq!(b.loc.y, a.loc.y + CARD_LINE);
                 assert_eq!(b.loc.x, chips[0].loc.x);
@@ -2439,12 +2519,13 @@ mod tests {
             assert!(crate::chrome::inside(card, *chip));
         }
 
-        // A label longer than the card is cut to it.
+        // A label longer than the room after the column is cut to it.
         let mut long = workspace("gerdr", None, None);
         long.ci = Some(ci_view(&["a-branch-with-a-name-far-too-long-for-it"], 0));
         let layout = sidebar_layout(&[long], &[], 200);
         let ci = layout.ci[0].as_ref().unwrap();
-        assert_eq!(ci.chips[0].size.w, ci.card.size.w - 2 * CARD_PAD + 2 * 4);
+        let card_end = ci.card.loc.x + ci.card.size.w - CARD_PAD + 4;
+        assert_eq!(ci.chips[0].loc.x + ci.chips[0].size.w, card_end);
         assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + CARD_LINE);
     }
 
@@ -2460,7 +2541,7 @@ mod tests {
         // The count at the header's right end, the chips under it.
         assert!(others.loc.x + others.size.w <= ci.card.loc.x + ci.card.size.w - CARD_PAD);
         assert!(others.loc.y + others.size.h <= ci.chips[0].loc.y);
-        assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiOthers(1)));
+        assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiPrs(1)));
         assert_eq!(layout.hit(mid(ci.chips[0])), Some(SidebarHit::CiChip(1, 0)));
         assert_eq!(layout.hit(mid(ci.chips[1])), Some(SidebarHit::CiChip(1, 1)));
         // Between the chips, and the header's left, are the card.
@@ -2471,6 +2552,9 @@ mod tests {
         assert_eq!(layout.hit(between.into()), Some(SidebarHit::Ci(1)));
         let header = (ci.card.loc.x as f64 + 10.0, ci.card.loc.y as f64 + 6.0);
         assert_eq!(layout.hit(header.into()), Some(SidebarHit::Ci(1)));
+        // So is a line's label.
+        let (_, label) = ci.labels[0];
+        assert_eq!(layout.hit(mid(label)), Some(SidebarHit::Ci(1)));
         assert_eq!(
             layout.hit(mid(layout.cards[1][0].1)),
             Some(SidebarHit::Card(1, 0))
@@ -2479,7 +2563,7 @@ mod tests {
         for hit in [
             SidebarHit::Ci(1),
             SidebarHit::CiChip(1, 1),
-            SidebarHit::CiOthers(1),
+            SidebarHit::CiPrs(1),
         ] {
             assert_eq!(hit.row(), None);
             assert_eq!(hit.pill(), hit);
@@ -2504,7 +2588,7 @@ mod tests {
 
     #[test]
     fn ci_hover_pills_are_painted_exactly_on_the_hit_rects() {
-        use super::{CiCardState, Painter, SidebarState, SidebarView};
+        use super::{CI_COUNT_TINT, CiCardState, Painter, SidebarState, SidebarView};
         use crate::chrome::{Theme, mix};
         let painter = Painter::new();
         let p = Theme::Dark.palette();
@@ -2545,18 +2629,118 @@ mod tests {
         // The first chip stays unlit.
         let first = ci.chips[0];
         assert_eq!(at(&view, first.loc.x + 1, y), card);
-        // The count's pill tints more under the pointer, inside its rect.
+        // The count's quiet pill tints more under the pointer, inside its
+        // rect.
         let others = ci.others.unwrap();
         let oy = others.loc.y + others.size.h / 2;
         let ox = others.loc.x + 2;
-        assert_eq!(at(&view, ox, oy), mix(card, p.accent, 0.2));
+        assert_eq!(at(&view, ox, oy), mix(card, p.muted, CI_COUNT_TINT));
         view.state.ci = vec![CiCardState {
             others: 16,
             ..CiCardState::default()
         }];
-        assert_eq!(at(&view, ox, oy), mix(card, p.accent, 0.4));
+        assert_eq!(at(&view, ox, oy), mix(card, p.muted, 2.0 * CI_COUNT_TINT));
         assert_eq!(at(&view, others.loc.x - 1, oy), card);
         // Painted at twice the scale and in the light look too.
         painter.sidebar_view(&view, size, 2.0, Theme::Light.palette());
+    }
+
+    /// The layout of a lone workspace's GitHub card of `chips`, `width`
+    /// wide, and the card itself.
+    fn ci_card_of(chips: &[(Group, &str)], width: i32) -> (SidebarLayout, CiLayout) {
+        let mut ws = workspace("gerdr", None, None);
+        ws.ci = Some(grouped_ci_view(chips, 0));
+        let layout = sidebar_layout(&[ws], &[], width);
+        let ci = layout.ci[0].clone().expect("a GitHub card");
+        (layout, ci)
+    }
+
+    #[test]
+    fn each_group_starts_a_line_with_its_label() {
+        let chips = [
+            (Group::Branch, "main"),
+            (Group::Branch, "dev"),
+            (Group::Mine, "#42"),
+            (Group::Review, "#70"),
+        ];
+        let (_, ci) = ci_card_of(&chips, 240);
+        let first_line = ci.card.loc.y + CARD_PAD + CARD_HEADER;
+        let ys: Vec<_> = ci.chips.iter().map(|c| c.loc.y).collect();
+        assert_eq!(
+            ys,
+            [
+                first_line,
+                first_line,
+                first_line + CARD_LINE,
+                first_line + 2 * CARD_LINE
+            ]
+        );
+        // A label per line, in its chips' band, as wide as the widest.
+        let widest = ["CI", "Mine", "Review"]
+            .map(|l| text_extent(l, DETAIL_FONT_SIZE))
+            .into_iter()
+            .max()
+            .unwrap();
+        let groups: Vec<_> = ci.labels.iter().map(|(g, _)| *g).collect();
+        assert_eq!(groups, [Group::Branch, Group::Mine, Group::Review]);
+        for ((_, label), chip) in ci.labels.iter().zip([0, 2, 3]) {
+            assert_eq!(label.loc.x, ci.card.loc.x + CARD_PAD);
+            assert_eq!(label.size, (widest, CARD_LINE).into());
+            assert_eq!(label.loc.y, ci.chips[chip].loc.y);
+            assert!(label.loc.x + label.size.w < ci.chips[chip].loc.x);
+        }
+        // The first chip of each line in the same column.
+        assert_eq!(ci.chips[2].loc.x, ci.chips[0].loc.x);
+        assert_eq!(ci.chips[3].loc.x, ci.chips[0].loc.x);
+        assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + 3 * CARD_LINE);
+    }
+
+    #[test]
+    fn a_wrapped_chip_stays_in_the_label_column() {
+        let chips = [
+            (Group::Branch, "main"),
+            (Group::Mine, "#101"),
+            (Group::Mine, "#102"),
+            (Group::Mine, "#103"),
+            (Group::Mine, "#104"),
+            (Group::Mine, "#105"),
+            (Group::Mine, "#106"),
+        ];
+        let (_, ci) = ci_card_of(&chips, 200);
+        let mine = &ci.chips[1..];
+        let wrapped = mine
+            .iter()
+            .find(|c| c.loc.y > mine[0].loc.y)
+            .expect("six chips take more than a line at 200 px");
+        assert_eq!(wrapped.loc.y, mine[0].loc.y + CARD_LINE);
+        assert_eq!(wrapped.loc.x, mine[0].loc.x);
+        assert_eq!(wrapped.loc.x, ci.chips[0].loc.x);
+        // No label on the wrapped line: one per group.
+        assert_eq!(ci.labels.len(), 2);
+        let lines = 1 + (mine[mine.len() - 1].loc.y - mine[0].loc.y) / CARD_LINE + 1;
+        assert_eq!(
+            ci.card.size.h,
+            2 * CARD_PAD + CARD_HEADER + lines * CARD_LINE
+        );
+    }
+
+    #[test]
+    fn an_empty_group_takes_no_line() {
+        let (_, ci) = ci_card_of(&[(Group::Branch, "main"), (Group::Review, "#70")], 240);
+        let groups: Vec<_> = ci.labels.iter().map(|(g, _)| *g).collect();
+        assert_eq!(groups, [Group::Branch, Group::Review]);
+        assert_eq!(ci.chips[1].loc.y, ci.chips[0].loc.y + CARD_LINE);
+        assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + 2 * CARD_LINE);
+        // The column fits the labels present only.
+        let (_, mine) = ci_card_of(&[(Group::Mine, "#42")], 240);
+        let column = |w: i32| ci.card.loc.x + CARD_PAD + w + CI_LABEL_GAP - 4;
+        assert_eq!(
+            mine.chips[0].loc.x,
+            column(text_extent("Mine", DETAIL_FONT_SIZE))
+        );
+        assert_eq!(
+            ci.chips[0].loc.x,
+            column(text_extent("Review", DETAIL_FONT_SIZE))
+        );
     }
 }
