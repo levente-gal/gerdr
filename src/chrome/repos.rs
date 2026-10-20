@@ -16,8 +16,8 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
-    chevron_down, coverage, cross, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
-    rect_px, rounded_rect,
+    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical,
+    rect_px, rounded_rect, trash,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -2354,7 +2354,7 @@ impl Painter {
             let deletable = menu.deletable.get(i) == Some(&true);
             if deletable && (hovered || menu.picked == Some(i)) {
                 let color = if on_delete { p.error } else { p.placeholder };
-                icon_sdf(c, delete, scale, color, |x, y| cross(x, y, 0.8 * s));
+                icon_sdf(c, delete, scale, color, |x, y| trash(x, y, s));
             }
             let pad = BRANCH_ROW_PAD as f32 * s;
             let end = (delete.loc.x as f64 * scale) as f32;

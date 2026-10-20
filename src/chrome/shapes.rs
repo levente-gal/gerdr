@@ -266,6 +266,19 @@ pub(super) fn cross(x: f32, y: f32, s: f32) -> f32 {
     segment(x, y, -arm, -arm, arm, arm).min(segment(x, y, -arm, arm, arm, -arm)) - STROKE * s
 }
 
+/// Signed distance to a trash can centred on the origin: delete. A lid
+/// with its handle over a body with two ribs.
+pub(super) fn trash(x: f32, y: f32, s: f32) -> f32 {
+    let lid = segment(x, y, -4.6 * s, -3.6 * s, 4.6 * s, -3.6 * s);
+    let handle = segment(x, y, -1.6 * s, -5.4 * s, 1.6 * s, -5.4 * s)
+        .min(segment(x, y, -1.6 * s, -5.4 * s, -1.6 * s, -3.6 * s))
+        .min(segment(x, y, 1.6 * s, -5.4 * s, 1.6 * s, -3.6 * s));
+    let body = rounded_rect(x, y, -3.6 * s, -3.6 * s, 7.2 * s, 9.2 * s, 1.2 * s).abs();
+    let rib = |rx: f32| segment(x, y, rx, -1.2 * s, rx, 3.2 * s);
+    let ribs = rib(-1.2 * s).min(rib(1.2 * s));
+    lid.min(handle).min(body).min(ribs) - STROKE * 0.75 * s
+}
+
 /// Signed distance to a spinner centred on the origin: the working
 /// agent's open ring, turned `turn` of a full circle clockwise.
 pub(super) fn spinner(turn: f32, x: f32, y: f32, s: f32) -> f32 {
