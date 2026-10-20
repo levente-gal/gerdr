@@ -16,6 +16,7 @@
 //! requests, the ones asking for their review), each a label and a chip
 //! per branch or pull request, and a count of the other pull requests.
 
+use super::repos::scrollbar;
 use super::{
     BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_GAP, CARD_HEADER, CARD_INDENT, CARD_LINE,
     CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, Density,
@@ -92,6 +93,11 @@ const CI_LABEL_GAP: i32 = 8;
 /// How far the GitHub card's count of other pull requests tints its pill
 /// toward the muted text colour at rest; under the pointer, twice as far.
 const CI_COUNT_TINT: f32 = 0.15;
+/// The room left under the last workspace when the sidebar is scrolled to
+/// its end, and the scrollbar's width and its gap from the right edge.
+const SCROLL_END: i32 = 8;
+const SCROLLBAR_WIDTH: i32 = 4;
+const SCROLLBAR_INSET: i32 = 1;
 /// Without a font, how wide a character is guessed to be, as a part of
 /// its size.
 const GUESS_CHAR: f32 = 0.55;
@@ -663,6 +669,9 @@ pub struct SidebarState {
     pub repos_open: bool,
     /// The workspace being renamed, and the name typed so far.
     pub rename: Option<(usize, Line)>,
+    /// How far the rows are scrolled up under the header, in logical
+    /// pixels.
+    pub scroll: i32,
 }
 
 impl SidebarState {
@@ -751,6 +760,8 @@ pub struct SidebarLayout {
     pub ci: Vec<Option<CiLayout>>,
     /// Per workspace, all it takes: its row, its cards and the gap after them.
     pub blocks: Vec<Rect>,
+    /// How far everything under the header is scrolled up (see `scrolled`).
+    pub scroll: i32,
 }
 
 /// Where the parts of a GitHub card sit.
@@ -837,7 +848,7 @@ impl SidebarHit {
 }
 
 impl SidebarLayout {
-    /// What is at `pos`.
+    /// What is at `pos`. Rows scrolled under the header are not.
     pub fn hit(&self, pos: Point<f64, Logical>) -> Option<SidebarHit> {
         let inside = |r: Rect| r.to_f64().contains(pos);
         if inside(self.plus) {
@@ -848,6 +859,9 @@ impl SidebarLayout {
         }
         if inside(self.header) {
             return Some(SidebarHit::Header);
+        }
+        if pos.y < BAR_HEIGHT as f64 {
+            return None;
         }
         for (i, closes) in self.card_closes.iter().enumerate() {
             if let Some((k, _)) = closes.iter().find(|(_, rect)| inside(*rect)) {
@@ -888,6 +902,66 @@ impl SidebarLayout {
         } else {
             SidebarHit::Row(i)
         })
+    }
+}
+
+impl SidebarLayout {
+    /// How far the rows can scroll in a sidebar `height` tall: what of
+    /// them (and the room after the last) does not fit under the header.
+    pub fn max_scroll(&self, height: i32) -> i32 {
+        let end = self
+            .blocks
+            .last()
+            .map_or(ROWS_TOP, |b| b.loc.y + b.size.h + self.scroll);
+        (end + SCROLL_END - height).max(0)
+    }
+
+    /// The scroll nearest `scroll` showing all of workspace `i`'s block (its
+    /// top when it is taller than the room) in a sidebar `height` tall.
+    pub fn showing(&self, i: usize, scroll: i32, height: i32) -> i32 {
+        let Some(block) = self.blocks.get(i) else {
+            return scroll;
+        };
+        let top = block.loc.y + self.scroll;
+        let (first, last) = (top - ROWS_TOP, top + block.size.h + SCROLL_END - height);
+        scroll
+            .max(last)
+            .min(first)
+            .clamp(0, self.max_scroll(height))
+    }
+
+    /// This layout with everything under the header moved up by `scroll`,
+    /// held to what a sidebar `height` tall can scroll (`max_scroll`).
+    pub fn scrolled(mut self, scroll: i32, height: i32) -> Self {
+        let by = scroll.clamp(0, self.max_scroll(height)) - self.scroll;
+        if by == 0 {
+            return self;
+        }
+        let up = |r: &mut Rect| r.loc.y -= by;
+        for row in &mut self.rows {
+            for r in [&mut row.rect, &mut row.title, &mut row.name, &mut row.close] {
+                up(r);
+            }
+            for r in [&mut row.chip, &mut row.worktrees, &mut row.attention]
+                .into_iter()
+                .flatten()
+            {
+                up(r);
+            }
+        }
+        for (_, r) in self.cards.iter_mut().chain(&mut self.card_closes).flatten() {
+            up(r);
+        }
+        self.more.iter_mut().flatten().for_each(up);
+        for ci in self.ci.iter_mut().flatten() {
+            up(&mut ci.card);
+            ci.chips.iter_mut().for_each(up);
+            ci.labels.iter_mut().for_each(|(_, r)| up(r));
+            ci.others.iter_mut().for_each(up);
+        }
+        self.blocks.iter_mut().for_each(up);
+        self.scroll += by;
+        self
     }
 }
 
@@ -1028,6 +1102,7 @@ pub fn sidebar_layout_at(
         more,
         ci,
         blocks,
+        scroll: 0,
     }
 }
 
@@ -1142,12 +1217,16 @@ impl Painter {
         let s = scale as f32;
         let line = px(1).max(1);
         c.fill(0, 0, c.w, c.h, p.panel);
-        c.fill(0, px(BAR_HEIGHT) - line, c.w, line, p.border);
-        c.fill(c.w - px(GAP).max(1), 0, px(GAP).max(1), c.h, p.border);
 
         let state = &view.state;
         let density = state.density;
-        let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density);
+        let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
+            .scrolled(state.scroll, size.h);
+        self.sidebar_rows(&mut c, view, &layout, scale, p);
+
+        // The header over the rows scrolled under it.
+        c.fill(0, 0, c.w, px(BAR_HEIGHT), p.panel);
+        c.fill(0, px(BAR_HEIGHT) - line, c.w, line, p.border);
         match &view.project {
             Some(name) => self.header_name(&mut c, name, view.header_lit, layout.header, scale, p),
             None => {
@@ -1172,6 +1251,43 @@ impl Painter {
             git_branch(x, y, 1.05 * s)
         });
 
+        // Where the rows are scrolled to, when they do not all fit.
+        let shown = size.h - BAR_HEIGHT;
+        let total = shown + layout.max_scroll(size.h);
+        let track = Rectangle::new(
+            (
+                size.w - GAP - SCROLLBAR_INSET - SCROLLBAR_WIDTH,
+                BAR_HEIGHT + SCROLLBAR_INSET,
+            )
+                .into(),
+            (SCROLLBAR_WIDTH, shown - 2 * SCROLLBAR_INSET).into(),
+        );
+        let first = layout.scroll as usize;
+        scrollbar(
+            &mut c,
+            track,
+            (first, shown.max(0) as usize, total.max(0) as usize),
+            scale,
+            p,
+        );
+        c.fill(c.w - px(GAP).max(1), 0, px(GAP).max(1), c.h, p.border);
+        c.into_buffer(true)
+    }
+
+    /// The sidebar's workspace rows and their agent and GitHub cards, where
+    /// `layout` has them.
+    fn sidebar_rows(
+        &self,
+        c: &mut Canvas,
+        view: &SidebarView,
+        layout: &SidebarLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let state = &view.state;
+        let density = state.density;
         for (i, (row, ws)) in layout.rows.iter().zip(&view.workspaces).enumerate() {
             let is_active = Some(i) == view.active;
             let row_state = state.row(i);
@@ -1201,28 +1317,28 @@ impl Painter {
             );
             let small = 0.8 * s;
             match ws.kind {
-                WorkspaceKind::Project => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                    folder(x, y, small)
-                }),
-                WorkspaceKind::Terminal => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                    terminal(x, y, small)
-                }),
+                WorkspaceKind::Project => {
+                    icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, small))
+                }
+                WorkspaceKind::Terminal => {
+                    icon_sdf(c, icon, scale, p.placeholder, |x, y| terminal(x, y, small))
+                }
                 WorkspaceKind::Cursor => match &ws.icon {
                     Some(picture) => {
                         c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
                     }
-                    None => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
+                    None => icon_sdf(c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
                 },
             }
             let name_x = px(row.name.loc.x) as f32;
             let name_end = px(row.name.loc.x + row.name.size.w) as f32;
             match state.rename.as_ref().filter(|(w, _)| *w == i) {
                 Some((_, typed)) => {
-                    self.rename_field(&mut c, typed, row.rename_field(), scale, p);
+                    self.rename_field(c, typed, row.rename_field(), scale, p);
                 }
                 None => {
                     self.text(
-                        &mut c,
+                        c,
                         &ws.name,
                         LABEL_FONT_SIZE,
                         name_x,
@@ -1244,7 +1360,7 @@ impl Painter {
                         (chip.size.w + row.close.size.w, chip.size.h).into(),
                     )
                 };
-                self.status_chip(&mut c, status, blocked, room, hover == 0.0, scale, p);
+                self.status_chip(c, status, blocked, room, hover == 0.0, scale, p);
             }
             if hover > 0.0 {
                 let color = if row_state.close {
@@ -1252,7 +1368,7 @@ impl Painter {
                 } else {
                     mix(p.panel, p.placeholder, hover)
                 };
-                icon_sdf(&mut c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
+                icon_sdf(c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
             }
 
             // The count of its other worktrees at the right end of line 2;
@@ -1280,11 +1396,11 @@ impl Painter {
                 } else {
                     (p.placeholder, p.muted)
                 };
-                icon_sdf(&mut c, icon, scale, icon_color, |x, y| {
+                icon_sdf(c, icon, scale, icon_color, |x, y| {
                     git_branch(x, y, 0.75 * s)
                 });
                 self.text(
-                    &mut c,
+                    c,
                     &n,
                     DETAIL_FONT_SIZE,
                     px(end - n_w) as f32,
@@ -1307,7 +1423,7 @@ impl Painter {
                     let Some(wt) = needing.get(k).filter(|_| k < WORKTREE_LINES) else {
                         let more = format!("+{} more", needing.len() - WORKTREE_LINES);
                         self.text(
-                            &mut c,
+                            c,
                             &more,
                             DETAIL_FONT_SIZE,
                             text_x,
@@ -1322,11 +1438,11 @@ impl Painter {
                         (row.name.loc.x, line_y).into(),
                         (BRANCH_ICON_WIDTH, TAB_LINE).into(),
                     );
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
+                    icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                         git_branch(x, y, 0.75 * s)
                     });
                     let x = self.text(
-                        &mut c,
+                        c,
                         &wt.name(),
                         DETAIL_FONT_SIZE,
                         text_x,
@@ -1339,10 +1455,10 @@ impl Painter {
                         dirty: wt.dirty,
                         ..GitStatus::default()
                     };
-                    let x = self.git_marks(&mut c, &dirty, x, right, band, scale, p);
+                    let x = self.git_marks(c, &dirty, x, right, band, scale, p);
                     if let Some(tag) = wt.attention_tag() {
                         self.text(
-                            &mut c,
+                            c,
                             &format!("  {tag}"),
                             DETAIL_FONT_SIZE,
                             x,
@@ -1369,13 +1485,11 @@ impl Painter {
                         (row.name.loc.x, line_y).into(),
                         (BRANCH_ICON_WIDTH, TAB_LINE).into(),
                     );
-                    icon_sdf(&mut c, icon, scale, p.accent, |x, y| {
-                        git_branch(x, y, 0.75 * s)
-                    });
+                    icon_sdf(c, icon, scale, p.accent, |x, y| git_branch(x, y, 0.75 * s));
                     let branch_x =
                         name_x + ((BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32 * s).round();
                     place_x = self.text(
-                        &mut c,
+                        c,
                         branch,
                         DETAIL_FONT_SIZE,
                         branch_x,
@@ -1385,7 +1499,7 @@ impl Painter {
                         p.accent,
                     );
                     if let Some(git) = &ws.git {
-                        place_x = self.git_marks(&mut c, git, place_x, right, band, scale, p);
+                        place_x = self.git_marks(c, git, place_x, right, band, scale, p);
                     }
                     if !ws.place.is_empty() {
                         // The separator only where a bit of the place fits after it.
@@ -1395,7 +1509,7 @@ impl Painter {
                             continue;
                         }
                         place_x = self.text(
-                            &mut c,
+                            c,
                             " · ",
                             DETAIL_FONT_SIZE,
                             place_x,
@@ -1407,7 +1521,7 @@ impl Painter {
                     }
                 }
                 self.text(
-                    &mut c,
+                    c,
                     &ws.place,
                     DETAIL_FONT_SIZE,
                     place_x,
@@ -1420,22 +1534,14 @@ impl Painter {
         }
         for (i, (rects, cards)) in layout.cards.iter().zip(&view.agents).enumerate() {
             for (k, rect) in rects {
-                self.agent_card(
-                    &mut c,
-                    &cards[*k],
-                    *rect,
-                    state.card(i, *k),
-                    density,
-                    scale,
-                    p,
-                );
+                self.agent_card(c, &cards[*k], *rect, state.card(i, *k), density, scale, p);
             }
         }
         for (line, ws) in layout.more.iter().zip(&view.workspaces) {
             if let Some(line) = line {
                 let n = ws.more_agents.len();
                 self.text(
-                    &mut c,
+                    c,
                     &format!("+{n} more"),
                     DETAIL_FONT_SIZE,
                     px(line.loc.x + CARD_PAD) as f32,
@@ -1448,10 +1554,9 @@ impl Painter {
         }
         for (i, (ci, ws)) in layout.ci.iter().zip(&view.workspaces).enumerate() {
             if let (Some(ci), Some(ci_view)) = (ci, &ws.ci) {
-                self.ci_card(&mut c, ci_view, ci, &state.ci(i), density, scale, p);
+                self.ci_card(c, ci_view, ci, &state.ci(i), density, scale, p);
             }
         }
-        c.into_buffer(true)
     }
 
     /// The project's `name` in the sidebar `header` pill, cut to fit, with
@@ -1955,8 +2060,9 @@ mod tests {
     use super::{
         AgentLine, AgentView, CARD_GAP, CARD_HEADER, CARD_LINE, CARD_PAD, CARD_PAD_COMPACT,
         CHIP_SLOT, CLOSE_WIDTH, Density, FOLDER, GAP, HEADER_BUTTON, ROW_BOTTOM, ROW_COMPACT,
-        ROW_HEIGHT, ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SidebarHit, TAB_LINE, WorkspaceView,
-        card_order, sentence_case, sidebar_layout, sidebar_layout_at, workspace_slot,
+        ROW_HEIGHT, ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SCROLL_END, SidebarHit, TAB_LINE,
+        WorkspaceView, card_order, sentence_case, sidebar_layout, sidebar_layout_at,
+        workspace_slot,
     };
     use super::{
         CI_CHIP_GAP, CI_LABEL_GAP, CiChip, CiLayout, CiView, DETAIL_FONT_SIZE, SidebarLayout,
@@ -2017,6 +2123,60 @@ mod tests {
             more_agents: Vec::new(),
             ci: None,
         }
+    }
+
+    #[test]
+    fn rows_scroll_under_the_header() {
+        let workspaces: Vec<_> = (0..10)
+            .map(|i| workspace(&format!("w{i}"), None, Some("main")))
+            .collect();
+        let layout = sidebar_layout(&workspaces, &[], 240);
+        let end = layout.blocks.last().map(|b| b.loc.y + b.size.h).unwrap();
+        let height = 200;
+        let max = layout.max_scroll(height);
+        assert_eq!(max, end + SCROLL_END - height);
+        assert_eq!(sidebar_layout(&workspaces, &[], 240).max_scroll(end * 2), 0);
+
+        // Held to what it can scroll, the header staying put.
+        let scrolled = sidebar_layout(&workspaces, &[], 240).scrolled(max + 100, height);
+        assert_eq!(scrolled.scroll, max);
+        assert_eq!(scrolled.max_scroll(height), max);
+        assert_eq!(scrolled.header, layout.header);
+        assert_eq!(scrolled.rows[3].rect.loc.y, layout.rows[3].rect.loc.y - max);
+        assert_eq!(scrolled.blocks[3].loc.y, layout.blocks[3].loc.y - max);
+        let back = scrolled.scrolled(10, height);
+        assert_eq!(back.rows[0].rect.loc.y, layout.rows[0].rect.loc.y - 10);
+
+        // A row scrolled under the header is not hit there.
+        let under = sidebar_layout(&workspaces, &[], 240).scrolled(ROWS_TOP, height);
+        assert!(under.rows[0].rect.loc.y < BAR_HEIGHT);
+        let pos = (100.0, (BAR_HEIGHT - 1) as f64).into();
+        assert_eq!(under.hit(pos), None);
+        assert_eq!(
+            layout.hit((100.0, ROWS_TOP as f64 + 1.0).into()),
+            Some(SidebarHit::Name(0))
+        );
+    }
+
+    #[test]
+    fn scrolling_shows_a_workspace() {
+        let workspaces: Vec<_> = (0..10)
+            .map(|i| workspace(&format!("w{i}"), None, Some("main")))
+            .collect();
+        let height = 200;
+        let layout = sidebar_layout(&workspaces, &[], 240);
+        // Already in view: no move.
+        assert_eq!(layout.showing(0, 0, height), 0);
+        // Below: scrolled until its bottom fits; above: until its top does.
+        let last = layout.blocks[9];
+        let to = layout.showing(9, 0, height);
+        assert_eq!(to, layout.max_scroll(height));
+        assert_eq!(last.loc.y + last.size.h + SCROLL_END - to, height);
+        let scrolled = sidebar_layout(&workspaces, &[], 240).scrolled(to, height);
+        assert_eq!(
+            scrolled.showing(2, to, height),
+            layout.blocks[2].loc.y - ROWS_TOP
+        );
     }
 
     /// The sidebar with one workspace of three agents, their cards open
