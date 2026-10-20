@@ -2,11 +2,13 @@
 //! `gh` CLI off the event loop, for the CI card under each workspace of a
 //! repository (see `chrome::CiView`).
 //!
-//! A repository's card shows, unasked, its long-lived branches (`main`,
-//! `master`, `dev`, `develop` and its default branch) and the user's own
-//! open pull requests; any other pull request only once watched, from the
-//! tab strip's button while a GitHub tab shows it. The runs of anything
-//! else are only counted, for the card to point at the Actions page.
+//! A repository's card shows three lines. The first is the CI of its
+//! long-lived branches (`main`, `master`, `dev`, `develop` and its default
+//! branch). The second is the user's own open pull requests, with any
+//! other one they watch (from the tab strip's button while a GitHub tab
+//! shows it). The third is the open pull requests asking for their review
+//! or assigned to them. Every other open pull request is only counted, for
+//! the card to point at the pull requests page.
 //!
 //! A branch's state is that of the GitHub Actions runs of its newest
 //! commit (`gh run list`); a pull request's is its checks' rollup
@@ -140,8 +142,11 @@ pub fn key(host: &str, slug: &str) -> String {
 }
 
 /// Read the CI of the repository at `root`, its pull requests in
-/// `watched` included: blocking, it runs `git` and `gh`. An error says why
-/// it can't be read (not a GitHub repository, `gh` missing or signed out).
+/// `watched` and those that involve the user included: blocking, it runs
+/// `git` and `gh`. An error says why it can't be read (not a GitHub
+/// repository, `gh` missing or signed out); the pull requests that involve
+/// the user, and the count of all open ones, only go missing when they
+/// can't be read.
 pub fn fetch(root: &Path, watched: &Watched) -> Result<RepoCi, String> {
     let (host, slug) = crate::git::web_url(root)
         .as_deref()
@@ -165,9 +170,15 @@ pub fn fetch(root: &Path, watched: &Watched) -> Result<RepoCi, String> {
         OWN_PULL_FIELDS,
     )?;
     let default_branch = default_branch(root, &repo)?;
+    let involved = involved_pulls(root, &repo);
+    let open_total = open_pulls(root, &host, &slug).unwrap_or_else(|err| {
+        tracing::debug!("open pull requests of {repo}: {err}");
+        0
+    });
     let mut others = Vec::new();
     for number in watched_of(watched, &host, &slug) {
-        if own.iter().any(|pull| pull.number == number) {
+        let known = |pull: &Pull| pull.number == number;
+        if own.iter().any(known) || involved.iter().any(known) {
             continue;
         }
         let number = number.to_string();
@@ -177,7 +188,59 @@ pub fn fetch(root: &Path, watched: &Watched) -> Result<RepoCi, String> {
             Err(err) => tracing::debug!("pull request {number} of {repo}: {err}"),
         }
     }
-    Ok(repo_ci(&host, &slug, &default_branch, &runs, &own, &others))
+    Ok(repo_ci(
+        &host,
+        &slug,
+        &default_branch,
+        &runs,
+        &own,
+        &others,
+        &involved,
+        open_total,
+    ))
+}
+
+/// The open pull requests of `repo` that ask for the user's review or are
+/// assigned to them, but aren't theirs, each once. One list that can't be
+/// read is left out.
+fn involved_pulls(root: &Path, repo: &str) -> Vec<Pull> {
+    let mut pulls: Vec<Pull> = Vec::new();
+    for search in [
+        "review-requested:@me -author:@me",
+        "assignee:@me -author:@me",
+    ] {
+        let args = [
+            "pr", "list", "--repo", repo, "--state", "open", "--search", search, "-L", "50",
+        ];
+        match gh::<Vec<Pull>>(root, &args, PULL_FIELDS) {
+            Ok(found) => {
+                for pull in found {
+                    if !pulls.iter().any(|seen| seen.number == pull.number) {
+                        pulls.push(pull);
+                    }
+                }
+            }
+            Err(err) => tracing::debug!("pull requests of {repo} ({search}): {err}"),
+        }
+    }
+    pulls
+}
+
+/// How many pull requests of `slug` on `host` are open, all of them, in
+/// one GraphQL call.
+fn open_pulls(root: &Path, host: &str, slug: &str) -> Result<usize, String> {
+    const QUERY: &str = "query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN){totalCount}}}";
+    let (owner, name) = slug
+        .split_once('/')
+        .ok_or_else(|| format!("not a repository: {slug}"))?;
+    let (owner, name) = (format!("owner={owner}"), format!("name={name}"));
+    // `-f`, not `-F`: the names stay text whatever they look like.
+    let mut args = vec!["graphql", "-f", QUERY, "-f", &owner, "-f", &name];
+    if host != "github.com" {
+        args.extend(["--hostname", host]);
+    }
+    let reply: Graphql = gh_api(root, &args)?;
+    Ok(reply.data.repository.pull_requests.total_count)
 }
 
 /// `fetch` each of `roots` off the event loop, on one thread, and `send`
@@ -227,15 +290,34 @@ pub fn pull_request_of(url: &str) -> Option<(String, String, u64)> {
     Some((host.to_ascii_lowercase(), format!("{owner}/{repo}"), number))
 }
 
+/// Whether `url` is a page of GitHub (or of a GitHub Enterprise host): an
+/// http(s) address whose host has "github" in it, as for a repository.
+pub fn is_github_page(url: &str) -> bool {
+    let Some((scheme, rest)) = url.trim().split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    host.to_ascii_lowercase().contains("github")
+}
+
 /// What of `now` is news, given how each row was `before` (keyed by
 /// repository `key` and subject): a row that ran and now passed or
 /// failed. A summary and a body per notification, with the link it opens.
-/// A row seen for the first time isn't news.
+/// A row seen for the first time isn't news, nor is a pull request of
+/// someone else's that only asks for the user's review or is assigned to
+/// them.
 pub fn ci_news(before: &HashMap<(String, Subject), CiState>, now: &[&RepoCi]) -> Vec<CiNews> {
     let mut news = Vec::new();
     for repo in now {
         let repo_key = key(&repo.host, &repo.slug);
         for row in &repo.rows {
+            if row.group == Group::Review {
+                continue;
+            }
             if before.get(&(repo_key.clone(), row.subject.clone())) != Some(&CiState::Running) {
                 continue;
             }
@@ -303,8 +385,9 @@ pub fn subject_label(subject: &Subject) -> String {
 }
 
 /// What `gh` is asked for: the fields of a workflow run, of one of the
-/// user's pull requests and of a watched one.
-const RUN_FIELDS: &str = "databaseId,name,workflowName,displayTitle,headBranch,headSha,event,status,conclusion,url,createdAt";
+/// user's pull requests and of anyone else's.
+const RUN_FIELDS: &str =
+    "name,workflowName,displayTitle,headBranch,headSha,event,status,conclusion,url,createdAt";
 const OWN_PULL_FIELDS: &str = "number,title,headRefName,url,statusCheckRollup";
 const PULL_FIELDS: &str = "number,title,state,headRefName,url,statusCheckRollup";
 
@@ -312,8 +395,6 @@ const PULL_FIELDS: &str = "number,title,state,headRefName,url,statusCheckRollup"
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Run {
-    #[serde(deserialize_with = "or_default")]
-    database_id: u64,
     #[serde(deserialize_with = "or_default")]
     name: String,
     #[serde(deserialize_with = "or_default")]
@@ -344,7 +425,7 @@ struct Pull {
     number: u64,
     #[serde(deserialize_with = "or_default")]
     title: String,
-    /// `OPEN`, `MERGED` or `CLOSED`; only asked of watched ones.
+    /// `OPEN`, `MERGED` or `CLOSED`; not asked of the user's own.
     #[serde(deserialize_with = "or_default")]
     state: String,
     #[serde(deserialize_with = "or_default")]
@@ -425,6 +506,35 @@ struct BranchRef {
     name: String,
 }
 
+/// What the GraphQL query of `open_pulls` gives, down to its count.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Graphql {
+    #[serde(deserialize_with = "or_default")]
+    data: GraphqlData,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct GraphqlData {
+    #[serde(deserialize_with = "or_default")]
+    repository: GraphqlRepository,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct GraphqlRepository {
+    #[serde(deserialize_with = "or_default")]
+    pull_requests: GraphqlCount,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct GraphqlCount {
+    #[serde(deserialize_with = "or_default")]
+    total_count: usize,
+}
+
 /// A field's value, its default when null.
 fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -485,10 +595,25 @@ fn default_branch(root: &Path, repo: &str) -> Result<String, String> {
 /// What `gh args`, run in `root`, prints of `fields` as JSON, or what it
 /// says went wrong.
 fn gh<T: DeserializeOwned>(root: &Path, args: &[&str], fields: &str) -> Result<T, String> {
+    let mut all = args.to_vec();
+    all.extend(["--json", fields]);
+    gh_json(root, &all)
+}
+
+/// What `gh api args`, run in `root`, prints as JSON, or what it says
+/// went wrong.
+fn gh_api<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> {
+    let mut all = vec!["api"];
+    all.extend_from_slice(args);
+    gh_json(root, &all)
+}
+
+/// What `gh args`, run in `root`, prints, read as JSON, or what it says
+/// went wrong.
+fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> {
     let what = args.get(..2).unwrap_or(args).join(" ");
     let out = Command::new("gh")
         .args(args)
-        .args(["--json", fields])
         .current_dir(root)
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
@@ -507,8 +632,14 @@ fn gh<T: DeserializeOwned>(root: &Path, args: &[&str], fields: &str) -> Result<T
 }
 
 /// The CI of the repository `slug` on `host` out of what `gh` gave: its
-/// recent `runs`, the user's `own` open pull requests and the `watched`
-/// others.
+/// recent `runs`, the user's `own` open pull requests, the `watched`
+/// others, the open ones that `involved` the user and how many are open in
+/// all, `open_total`.
+///
+/// Each pull request shows once, the first way it comes: as the user's
+/// own, else as one that involves them (on the review line, even when
+/// watched too), else as watched.
+#[allow(clippy::too_many_arguments)]
 fn repo_ci(
     host: &str,
     slug: &str,
@@ -516,39 +647,45 @@ fn repo_ci(
     runs: &[Run],
     own: &[Pull],
     watched: &[Pull],
+    involved: &[Pull],
+    open_total: usize,
 ) -> RepoCi {
     let web = format!("https://{host}/{slug}");
     let mut rows: Vec<CiRow> = branches(default_branch)
         .into_iter()
         .filter_map(|name| branch_row(name, runs, &web))
         .collect();
-    let mut pulls: Vec<CiRow> = own.iter().map(|pull| pull_row(pull, &web, false)).collect();
+    let mut shown: BTreeSet<u64> = BTreeSet::new();
+    let mut mine: Vec<CiRow> = Vec::new();
+    for pull in own {
+        if shown.insert(pull.number) {
+            mine.push(pull_row(pull, &web, Group::Mine, false));
+        }
+    }
+    let mut review: Vec<CiRow> = Vec::new();
+    for pull in involved {
+        if shown.insert(pull.number) {
+            review.push(pull_row(pull, &web, Group::Review, false));
+        }
+    }
     let mut closed = Vec::new();
     for pull in watched {
-        if own.iter().any(|o| o.number == pull.number) {
+        if shown.contains(&pull.number) {
             continue;
         }
         if pull.state.eq_ignore_ascii_case("merged") || pull.state.eq_ignore_ascii_case("closed") {
-            closed.push(pull.number);
-        } else {
-            pulls.push(pull_row(pull, &web, true));
+            if !closed.contains(&pull.number) {
+                closed.push(pull.number);
+            }
+        } else if shown.insert(pull.number) {
+            mine.push(pull_row(pull, &web, Group::Mine, true));
         }
     }
-    pulls.sort_by(|a, b| a.subject.cmp(&b.subject));
-    rows.extend(pulls);
-    let shown: BTreeSet<&str> = rows
-        .iter()
-        .filter_map(|row| match &row.subject {
-            Subject::Branch(name) => Some(name.as_str()),
-            Subject::Pr(_) => row.head.as_deref(),
-        })
-        .collect();
-    let other_prs = runs
-        .iter()
-        .filter(|run| running(&run.status) && !shown.contains(run.head_branch.as_str()))
-        .map(|run| run.database_id)
-        .collect::<BTreeSet<_>>()
-        .len();
+    mine.sort_by(|a, b| a.subject.cmp(&b.subject));
+    review.sort_by(|a, b| a.subject.cmp(&b.subject));
+    rows.extend(mine);
+    rows.extend(review);
+    let other_prs = open_total.saturating_sub(shown.len());
     RepoCi {
         slug: slug.to_owned(),
         host: host.to_owned(),
@@ -571,8 +708,9 @@ fn branches(default_branch: &str) -> Vec<&str> {
 /// The row of branch `name`: the runs of its newest commit among `runs`,
 /// the newest of each workflow; `None` when none ran. Runs of pull
 /// requests from it are left out, as they show on the pull request. Its
-/// link is its first failed run's, else the branch's runs on the Actions
-/// page of `web`.
+/// link is its first failed run's, else one running, else its newest
+/// run's; the branch's runs on the Actions page of `web` only when none of
+/// them has a page.
 fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
     let mut ran: Vec<&Run> = runs
         .iter()
@@ -599,21 +737,26 @@ fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
         });
     }
     checks.sort_by(|a, b| a.name.cmp(&b.name));
+    let link = link_of(&checks, CiState::Failed)
+        .or_else(|| link_of(&checks, CiState::Running))
+        .or_else(|| some_text(&newest.url))
+        .unwrap_or_else(|| format!("{web}/actions?query=branch%3A{name}"));
     Some(CiRow {
         subject: Subject::Branch(name.to_owned()),
         title: None,
         head: None,
         state: row_state(&checks),
-        link: row_link(&checks, || format!("{web}/actions?query=branch%3A{name}")),
+        link,
         checks,
         watched: false,
         group: Group::Branch,
     })
 }
 
-/// The row of `pull`, whose repository's page is `web`: its checks'
-/// rollup, a check run again in place of the one before it.
-fn pull_row(pull: &Pull, web: &str, watched: bool) -> CiRow {
+/// The row of `pull` on the line of `group`, whose repository's page is
+/// `web`: its checks' rollup, a check run again in place of the one before
+/// it. Its link is the pull request's own page.
+fn pull_row(pull: &Pull, web: &str, group: Group, watched: bool) -> CiRow {
     let mut checks: Vec<((String, String), Check)> = Vec::new();
     for context in &pull.status_check_rollup {
         let (which, check) = context.check();
@@ -628,10 +771,10 @@ fn pull_row(pull: &Pull, web: &str, watched: bool) -> CiRow {
         title: Some(pull.title.clone()),
         head: Some(pull.head_ref_name.clone()),
         state: row_state(&checks),
-        link: row_link(&checks, || format!("{web}/pull/{}/checks", pull.number)),
+        link: format!("{web}/pull/{}", pull.number),
         checks,
         watched,
-        group: Group::Mine,
+        group,
     }
 }
 
@@ -669,14 +812,12 @@ fn row_state(checks: &[Check]) -> CiState {
     }
 }
 
-/// The page a row with `checks` opens: the first failed check's, else
-/// `otherwise`.
-fn row_link(checks: &[Check], otherwise: impl FnOnce() -> String) -> String {
+/// The page of the first of `checks` at `state` that has one.
+fn link_of(checks: &[Check], state: CiState) -> Option<String> {
     checks
         .iter()
-        .filter(|check| check.state == CiState::Failed)
+        .filter(|check| check.state == state)
         .find_map(|check| check.link.clone())
-        .unwrap_or_else(otherwise)
 }
 
 #[cfg(test)]
@@ -819,7 +960,7 @@ mod tests {
                 "2026-10-19T08:00:00Z",
             ),
         ]);
-        let ci = repo_ci("github.com", "o/r", "main", &runs, &[], &[]);
+        let ci = repo_ci("github.com", "o/r", "main", &runs, &[], &[], &[], 0);
         assert_eq!(
             ci.rows
                 .iter()
@@ -851,10 +992,7 @@ mod tests {
         let dev = row(&ci, &branch("dev"));
         assert_eq!(dev.state, CiState::Passed);
         assert_eq!(dev.checks.len(), 1);
-        assert_eq!(
-            dev.link,
-            "https://github.com/o/r/actions?query=branch%3Adev"
-        );
+        assert_eq!(dev.link, "https://github.com/o/r/actions/runs/4");
     }
 
     #[test]
@@ -895,7 +1033,7 @@ mod tests {
                 "2026-10-20T10:00:00Z",
             ),
         ]);
-        let ci = repo_ci("github.com", "o/r", "trunk", &runs, &[], &[]);
+        let ci = repo_ci("github.com", "o/r", "trunk", &runs, &[], &[], &[], 0);
         assert_eq!(
             ci.rows
                 .iter()
@@ -938,7 +1076,7 @@ mod tests {
     #[test]
     fn a_pull_request_stands_by_its_checks_rollup() {
         let own: Vec<Pull> = serde_json::from_str(ROLLUP).unwrap();
-        let ci = repo_ci("github.com", "o/r", "main", &[], &own, &[]);
+        let ci = repo_ci("github.com", "o/r", "main", &[], &own, &[], &[], 0);
         // Pull requests by number.
         assert_eq!(
             ci.rows
@@ -964,87 +1102,208 @@ mod tests {
             ]
         );
         assert_eq!(tabs.state, CiState::Running);
-        assert_eq!(tabs.link, "https://github.com/o/r/pull/42/checks");
+        assert_eq!(tabs.link, "https://github.com/o/r/pull/42");
+        assert_eq!(tabs.group, Group::Mine);
         assert_eq!(tabs.title.as_deref(), Some("Fix tabs"));
         assert_eq!(tabs.head.as_deref(), Some("fix-tabs"));
         assert!(!tabs.watched);
 
-        // A failed status without a page: the next failed one's opens.
         let red = row(&ci, &Subject::Pr(7));
         assert_eq!(
             red.checks.iter().map(|c| c.state).collect::<Vec<_>>(),
             [CiState::Failed, CiState::Failed, CiState::Running]
         );
         assert_eq!(red.state, CiState::Failed);
-        assert_eq!(red.link, "https://circleci.com/gh/o/r/2");
+        // A failed pull request opens its own page too.
+        assert_eq!(red.link, "https://github.com/o/r/pull/7");
 
         let quiet = row(&ci, &Subject::Pr(9));
         assert_eq!(quiet.state, CiState::Unknown);
         assert!(quiet.checks.is_empty());
     }
 
+    /// Pull requests of someone else's as `gh pr list` and `gh pr view`
+    /// give them, open unless `state` says otherwise.
+    fn pulls(pulls: &[(u64, &str)]) -> Vec<Pull> {
+        let pulls: Vec<String> = pulls
+            .iter()
+            .map(|(number, state)| {
+                format!(
+                    r#"{{"number":{number},"title":"PR {number}","state":"{state}","headRefName":"b{number}","statusCheckRollup":[]}}"#
+                )
+            })
+            .collect();
+        serde_json::from_str(&format!("[{}]", pulls.join(","))).unwrap()
+    }
+
     #[test]
-    fn runs_about_no_row_are_counted() {
-        let runs = runs(&[
-            run(
-                1,
-                "Tests",
-                "main",
-                "a",
-                "push",
-                "in_progress",
-                "2026-10-20T10:00:00Z",
-            ),
-            run(
-                2,
-                "Tests",
-                "fix-tabs",
-                "b",
-                "pull_request",
-                "queued",
-                "2026-10-20T10:00:00Z",
-            ),
-            run(
-                3,
-                "Tests",
-                "feature",
-                "c",
-                "push",
-                "in_progress",
-                "2026-10-20T10:00:00Z",
-            ),
-            run(
-                4,
-                "Lint",
-                "feature",
-                "c",
-                "push",
-                "queued",
-                "2026-10-20T10:00:00Z",
-            ),
-            run(
-                4,
-                "Lint",
-                "feature",
-                "c",
-                "push",
-                "queued",
-                "2026-10-20T10:00:00Z",
-            ),
-            run(
-                5,
-                "Tests",
-                "other",
-                "d",
-                "push",
-                "success",
-                "2026-10-20T10:00:00Z",
-            ),
-        ]);
+    fn pull_requests_show_once_on_their_line() {
         let own: Vec<Pull> = serde_json::from_str(ROLLUP).unwrap();
-        let ci = repo_ci("github.com", "o/r", "main", &runs, &own, &[]);
-        assert_eq!(ci.other_prs, 2);
-        assert!(ci.busy());
+        // 42 is the user's own; 3 is watched too; 10 is both asked for
+        // review and assigned.
+        let involved = pulls(&[(42, "OPEN"), (10, "OPEN"), (3, "OPEN"), (10, "OPEN")]);
+        let watched = pulls(&[(3, "OPEN"), (5, "OPEN"), (2, "MERGED"), (9, "OPEN")]);
+        let runs = runs(&[run(
+            1,
+            "Tests",
+            "main",
+            "a",
+            "push",
+            "success",
+            "2026-10-20T10:00:00Z",
+        )]);
+        let ci = repo_ci(
+            "github.com",
+            "o/r",
+            "main",
+            &runs,
+            &own,
+            &watched,
+            &involved,
+            10,
+        );
+        assert_eq!(
+            ci.rows
+                .iter()
+                .map(|row| (row.subject.clone(), row.group, row.watched))
+                .collect::<Vec<_>>(),
+            [
+                (branch("main"), Group::Branch, false),
+                (Subject::Pr(5), Group::Mine, true),
+                (Subject::Pr(7), Group::Mine, false),
+                (Subject::Pr(9), Group::Mine, false),
+                (Subject::Pr(42), Group::Mine, false),
+                (Subject::Pr(3), Group::Review, false),
+                (Subject::Pr(10), Group::Review, false),
+            ]
+        );
+        assert_eq!(ci.closed, [2]);
+        // 6 of the 10 open ones show.
+        assert_eq!(ci.other_prs, 4);
+    }
+
+    #[test]
+    fn the_other_open_pull_requests_are_counted() {
+        let own: Vec<Pull> = serde_json::from_str(ROLLUP).unwrap();
+        let involved = pulls(&[(10, "OPEN")]);
+        let watched = pulls(&[(4, "CLOSED"), (5, "OPEN")]);
+        let other_prs = |open_total| {
+            repo_ci(
+                "github.com",
+                "o/r",
+                "main",
+                &[],
+                &own,
+                &watched,
+                &involved,
+                open_total,
+            )
+            .other_prs
+        };
+        // 7, 9, 42, 10 and 5 show; the closed 4 doesn't count.
+        assert_eq!(other_prs(12), 7);
+        assert_eq!(other_prs(5), 0);
+        // A count that couldn't be read, or lags behind, is no less than 0.
+        assert_eq!(other_prs(0), 0);
+        assert_eq!(other_prs(3), 0);
+        assert_eq!(
+            repo_ci("github.com", "o/r", "main", &[], &[], &[], &[], 3).other_prs,
+            3
+        );
+    }
+
+    #[test]
+    fn a_branch_opens_its_failed_then_running_then_newest_run() {
+        let link = |runs: &[String]| {
+            repo_ci(
+                "github.com",
+                "o/r",
+                "main",
+                &self::runs(runs),
+                &[],
+                &[],
+                &[],
+                0,
+            )
+            .rows[0]
+                .link
+                .clone()
+        };
+        let failed = run(
+            1,
+            "B",
+            "main",
+            "a",
+            "push",
+            "failure",
+            "2026-10-20T10:00:00Z",
+        );
+        let running = run(
+            2,
+            "C",
+            "main",
+            "a",
+            "push",
+            "in_progress",
+            "2026-10-20T10:01:00Z",
+        );
+        let passed = run(
+            3,
+            "A",
+            "main",
+            "a",
+            "push",
+            "success",
+            "2026-10-20T10:02:00Z",
+        );
+        let older = run(
+            4,
+            "D",
+            "main",
+            "a",
+            "push",
+            "success",
+            "2026-10-20T09:00:00Z",
+        );
+        let runs_url = |id| format!("https://github.com/o/r/actions/runs/{id}");
+        assert_eq!(
+            link(&[passed.clone(), running.clone(), failed.clone()]),
+            runs_url(1)
+        );
+        assert_eq!(link(&[passed.clone(), running.clone()]), runs_url(2));
+        // The newest run, not the first check by name.
+        assert_eq!(link(&[older.clone(), passed.clone()]), runs_url(3));
+        assert_eq!(link(&[passed.clone(), older]), runs_url(3));
+        // No run with a page: the branch's runs.
+        let pageless = passed.replace(&runs_url(3), "");
+        assert_eq!(
+            link(&[pageless]),
+            "https://github.com/o/r/actions?query=branch%3Amain"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_opens_its_own_page() {
+        let involved = pulls(&[(12, "OPEN")]);
+        let watched = pulls(&[(13, "OPEN")]);
+        let ci = repo_ci(
+            "ghe.example.com",
+            "o/r",
+            "main",
+            &[],
+            &[],
+            &watched,
+            &involved,
+            0,
+        );
+        assert_eq!(
+            row(&ci, &Subject::Pr(12)).link,
+            "https://ghe.example.com/o/r/pull/12"
+        );
+        assert_eq!(
+            row(&ci, &Subject::Pr(13)).link,
+            "https://ghe.example.com/o/r/pull/13"
+        );
     }
 
     #[test]
@@ -1059,7 +1318,7 @@ mod tests {
         )
         .unwrap();
         let own: Vec<Pull> = serde_json::from_str(ROLLUP).unwrap();
-        let ci = repo_ci("github.com", "o/r", "main", &[], &own, &watched);
+        let ci = repo_ci("github.com", "o/r", "main", &[], &own, &watched, &[], 0);
         assert_eq!(ci.closed, [4, 5]);
         assert_eq!(
             ci.rows
@@ -1216,5 +1475,47 @@ mod tests {
             ]
         );
         assert_eq!(listed(&["a", "b"]), "a, b");
+    }
+
+    #[test]
+    fn a_pull_request_to_review_is_no_news() {
+        let was = |subject: Subject| (("github.com/o/r".to_owned(), subject), CiState::Running);
+        let before: HashMap<_, _> = [was(Subject::Pr(3)), was(Subject::Pr(4))].into();
+        let mut review = ci_row(Subject::Pr(3), Some("Theirs"), CiState::Passed, &[]);
+        review.group = Group::Review;
+        let mut mine = ci_row(Subject::Pr(4), Some("Mine"), CiState::Passed, &[]);
+        mine.group = Group::Mine;
+        assert_eq!(
+            ci_news(&before, &[&repo(vec![review, mine])]),
+            [CiNews {
+                summary: "CI passed: #4 Mine".into(),
+                body: "o/r".into(),
+                link: "https://example.com/link".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn github_pages_are_told_from_others() {
+        for page in [
+            "https://github.com/o/r/pull/42",
+            "HTTP://GitHub.com",
+            "https://github.example.com/o/r?tab=readme#top",
+            "https://gist.github.com/o/1",
+            "https://user@github.com:443/o/r",
+        ] {
+            assert!(is_github_page(page), "{page}");
+        }
+        for not in [
+            "https://gitlab.com/o/r",
+            "https://example.com/github/o/r",
+            "https://example.com?q=github",
+            "https://github@example.com/o/r",
+            "ftp://github.com/o/r",
+            "github.com/o/r",
+            "",
+        ] {
+            assert!(!is_github_page(not), "{not}");
+        }
     }
 }
