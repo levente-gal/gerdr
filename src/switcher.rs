@@ -85,6 +85,9 @@ pub enum Target {
     /// A command typed in the run prompt (now or before), to launch and
     /// remember.
     Command(String),
+    /// The repository's page, to show in its GitHub workspace (see
+    /// `Gerdr::open_github`).
+    RepoPage(String),
 }
 
 impl Target {
@@ -102,7 +105,8 @@ impl Target {
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
-            | Target::Command(_) => Section::Commands,
+            | Target::Command(_)
+            | Target::RepoPage(_) => Section::Commands,
         }
     }
 
@@ -120,7 +124,8 @@ impl Target {
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
-            | Target::Command(_) => "command",
+            | Target::Command(_)
+            | Target::RepoPage(_) => "command",
         }
     }
 }
@@ -616,7 +621,9 @@ fn frecency_key(
         Target::Agent(key) => format!("agent:{key}"),
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
-        Target::App(command) | Target::Command(command) => format!("app:{command}"),
+        Target::App(command) | Target::Command(command) | Target::RepoPage(command) => {
+            format!("app:{command}")
+        }
         Target::Welcome
         | Target::Shortcuts
         | Target::Settings
@@ -735,7 +742,7 @@ impl Gerdr {
                     ItemIcon::App,
                     "Repo page",
                     shown,
-                    Target::Command(url.clone()),
+                    Target::RepoPage(url.clone()),
                 )
             })
             .collect();
@@ -936,6 +943,7 @@ impl Gerdr {
                 launch::remember(&command);
                 self.launch(&command, place);
             }
+            Target::RepoPage(url) => self.open_github(Some(url)),
         }
     }
 

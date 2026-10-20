@@ -184,7 +184,7 @@ impl Gerdr {
             hover_alpha: 0,
             renaming,
             elsewhere,
-            watch: None,
+            watch: self.focused_pull_request().map(|(_, _, watched)| watched),
         };
         view.hover = self.tab_hover.over();
         view.hover_alpha = self.tab_hover.alpha_over(Instant::now());
@@ -302,6 +302,7 @@ impl Gerdr {
                 self.hold(Reorderable::Tab);
             }
             (BTN_LEFT, Some(TabHit::Plus)) => self.new_tab(),
+            (BTN_LEFT, Some(TabHit::Watch)) => self.toggle_watch(),
             _ => {}
         }
     }
@@ -353,7 +354,15 @@ impl Gerdr {
                 &mode_tooltip(view.mode, self.theme() == chrome::Theme::Dark),
                 anchor(layout.toggle),
             ),
-            TabHit::Watch => return None,
+            TabHit::Watch => {
+                let (_, n, watched) = self.focused_pull_request()?;
+                let text = if watched {
+                    format!("Stop watching the CI of #{n}")
+                } else {
+                    format!("Watch the CI of #{n}")
+                };
+                Tooltip::new(&text, anchor(layout.watch?))
+            }
         })
     }
 

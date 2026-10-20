@@ -10,22 +10,28 @@ use std::{
 
 use crate::herdr::AgentStatus;
 
-/// Which agent: the herdr pane it runs in, or the Cursor chat it is.
+/// Which agent: the herdr pane it runs in, or the Cursor chat it is. Or,
+/// for a notification about the CI (see `ci_watch`), the GitHub page it
+/// opens.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AgentKey {
     Herdr(String),
     Cursor(String),
+    Ci(String),
 }
 
 /// What a Cursor key's text starts with; a herdr key is its bare pane id,
 /// as notifications and the switcher's frecency have long named it.
 const CURSOR_PREFIX: &str = "cursor:";
+/// What a CI key's text starts with.
+const CI_PREFIX: &str = "ci:";
 
 impl fmt::Display for AgentKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AgentKey::Herdr(pane_id) => f.write_str(pane_id),
             AgentKey::Cursor(chat) => write!(f, "{CURSOR_PREFIX}{chat}"),
+            AgentKey::Ci(link) => write!(f, "{CI_PREFIX}{link}"),
         }
     }
 }
@@ -33,6 +39,9 @@ impl fmt::Display for AgentKey {
 impl AgentKey {
     /// The key `text` names, as `Display` writes it.
     pub fn parse(text: &str) -> Self {
+        if let Some(link) = text.strip_prefix(CI_PREFIX) {
+            return AgentKey::Ci(link.to_owned());
+        }
         match text.strip_prefix(CURSOR_PREFIX) {
             Some(chat) => AgentKey::Cursor(chat.to_owned()),
             None => AgentKey::Herdr(text.to_owned()),

@@ -12,6 +12,7 @@ mod anim;
 mod app_icons;
 mod chrome;
 mod ci;
+mod ci_watch;
 mod clipboard;
 mod config;
 mod cursor_agents;
@@ -1038,6 +1039,19 @@ pub struct Gerdr {
     pub git: HashMap<PathBuf, git::GitStatus>,
     /// A read of where the web pages are is under way (see `watch_web_pages`).
     pub web_pending: bool,
+    /// The CI of the shown project's repositories, by root (see
+    /// `ci_watch`).
+    pub ci: HashMap<PathBuf, ci::RepoCi>,
+    /// The repositories the last round of reading the CI was asked about.
+    pub ci_asked: Vec<PathBuf>,
+    /// Where each row of the CI stood, for telling what finished.
+    pub ci_states: HashMap<(String, ci::Subject), ci::CiState>,
+    /// A round of reading the CI is still running, and another is wanted
+    /// once it is done.
+    pub ci_pending: bool,
+    pub ci_again: bool,
+    /// Hands a round's CI to the event loop (see `watch_ci`).
+    ci_sender: Option<channel::Sender<ci_watch::CiRead>>,
     /// A round of reading the Git status is still running.
     pub git_pending: bool,
     /// Another round is wanted once it is done.
@@ -2229,6 +2243,7 @@ impl Gerdr {
                 state.git_pending = false;
                 state.worktrees_read();
                 state.repos_read();
+                state.ci_roots_changed();
                 if std::mem::take(&mut state.git_again) {
                     state.refresh_git();
                 }
@@ -2493,6 +2508,7 @@ impl Gerdr {
         match key {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
+            agents::AgentKey::Ci(link) => self.open_github(Some(link.clone())),
         }
     }
 
@@ -4229,9 +4245,12 @@ impl Gerdr {
             .map(|(w, ws)| {
                 let tabs = self.tab_views(ws);
                 let mut view = WorkspaceView::new(ws.name.clone(), ws.kind, &tabs);
-                if ws.kind == WorkspaceKind::Cursor {
-                    view.icon = self.cursor_icon();
+                match ws.kind {
+                    WorkspaceKind::Cursor => view.icon = self.cursor_icon(),
+                    WorkspaceKind::GitHub => view.icon = None, // GITHUB_ICON_PENDING
+                    WorkspaceKind::Project | WorkspaceKind::Terminal => {}
                 }
+                view.ci = self.ci_view(ws);
                 view.more_agents = self
                     .cursor_history(w)
                     .1
@@ -5235,6 +5254,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agents: Vec::new(),
         herdr_tabs: HashMap::new(),
         git: HashMap::new(),
+        ci: HashMap::new(),
+        ci_asked: Vec::new(),
+        ci_states: HashMap::new(),
+        ci_pending: false,
+        ci_again: false,
+        ci_sender: None,
         git_pending: false,
         git_again: false,
         git_read: None,
@@ -5447,6 +5472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_records();
     state.watch_cursor_agents();
     state.watch_web_pages();
+    state.watch_ci();
     state.connect_notifier();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
