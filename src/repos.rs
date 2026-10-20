@@ -245,6 +245,51 @@ struct Branch {
     /// The name each repository has it by, if they all have the same;
     /// else the names joined: `main / master`.
     label: String,
+    /// Whether a repository acted on has it as a local branch; else it is
+    /// only on their remotes.
+    local: bool,
+}
+
+/// A line of the branch menu's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuLine {
+    /// The heading over a group: the local branches, or those only on a
+    /// remote.
+    Heading { local: bool },
+    /// Branch `k` of `Panel::shown_branches`.
+    Branch(usize),
+}
+
+/// The lines of the menu listing `branches`, which come local first: each
+/// group under its heading.
+fn menu_lines(branches: &[Branch]) -> Vec<MenuLine> {
+    let mut lines = Vec::with_capacity(branches.len() + 2);
+    for (k, b) in branches.iter().enumerate() {
+        if k == 0 || branches[k - 1].local != b.local {
+            lines.push(MenuLine::Heading { local: b.local });
+        }
+        lines.push(MenuLine::Branch(k));
+    }
+    lines
+}
+
+/// The menu's top line `first`, moved the least to show branch `k` of
+/// `lines` in a page of `page`, with its group's heading when it is the
+/// group's first branch.
+fn scroll_to(lines: &[MenuLine], k: usize, first: usize, page: usize) -> usize {
+    let at = lines
+        .iter()
+        .position(|l| *l == MenuLine::Branch(k))
+        .unwrap_or(0);
+    let headed = at > 0 && matches!(lines[at - 1], MenuLine::Heading { .. });
+    let top = if headed && page > 1 { at - 1 } else { at };
+    if top < first {
+        top
+    } else if at >= first + page {
+        at + 1 - page
+    } else {
+        first
+    }
 }
 
 /// The names of the branch `name` is, by `same`: its group, else itself.
@@ -1298,8 +1343,9 @@ impl Panel {
     }
 
     /// The branches every repository acted on has, local or on its remote:
-    /// their default branch first, then those of `Ctx::top` in its order,
-    /// then the last committed to first, then by name.
+    /// those one has as a local branch first; in each group their default
+    /// branch first, then those of `Ctx::top` in its order, then the last
+    /// committed to first, then by name.
     fn branches(&self, ctx: &Ctx) -> Vec<Branch> {
         let items = ctx.items;
         let targets = self.targets(items);
@@ -1322,9 +1368,9 @@ impl Panel {
             .filter_map(|&k| items[k].status.default_branch.as_deref())
             .map(|b| branch_key(b, ctx.same))
             .collect();
-        /// Where a branch goes: its rank (default, top, the rest), then
-        /// the newest first.
-        type Order = (usize, Reverse<Option<i64>>);
+        /// Where a branch goes: remote only after local, its rank
+        /// (default, top, the rest), then the newest first.
+        type Order = (bool, usize, Reverse<Option<i64>>);
         let mut branches: Vec<(Order, Branch)> = common
             .into_iter()
             .map(|(key, names)| {
@@ -1349,7 +1395,19 @@ impl Panel {
                         names.iter().filter_map(|n| times.get(n).copied())
                     })
                     .max();
-                ((rank, Reverse(time)), Branch { names, label })
+                let local = targets.iter().any(|&k| {
+                    let local = &items[k].status.local_branches;
+                    names.iter().any(|n| local.contains(n))
+                });
+                let order = (!local, rank, Reverse(time));
+                (
+                    order,
+                    Branch {
+                        names,
+                        label,
+                        local,
+                    },
+                )
             })
             .collect();
         // Stable: those alike stay by name.
@@ -1418,15 +1476,27 @@ impl Panel {
             let switch = menu.action == MenuAction::Switch;
             let branches = self.shown_branches(ctx);
             let page = self.menu_page(ctx);
-            let first = menu.first.min(branches.len().saturating_sub(page));
-            let shown = &branches[first..(first + page).min(branches.len())];
+            let lines = self.menu_window(&branches, page);
+            let mut headings = Vec::new();
+            let mut in_window = Vec::new();
+            for line in lines {
+                match line {
+                    MenuLine::Heading { local } => {
+                        let label = if local { "Local" } else { "Remote" };
+                        headings.push((in_window.len(), label.to_owned()));
+                    }
+                    MenuLine::Branch(k) => in_window.push(k),
+                }
+            }
+            let shown: Vec<&Branch> = in_window.iter().map(|&k| &branches[k]).collect();
             let current = self.current_branch(ctx);
-            let in_view = |k: usize| (first..first + shown.len()).contains(&k).then(|| k - first);
+            let in_view = |k: usize| in_window.iter().position(|&w| w == k);
             BranchMenuView {
+                headings,
                 rows: shown.iter().map(|b| b.label.clone()).collect(),
                 deletable: shown
                     .iter()
-                    .map(|b| switch && self.delete_jobs(b, ctx).is_ok())
+                    .map(|&b| switch && self.delete_jobs(b, ctx).is_ok())
                     .collect(),
                 current: current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
@@ -1500,20 +1570,21 @@ impl Panel {
             self.error = Some(why.into());
             return;
         }
-        let picked = match action {
+        let page = self.menu_page(ctx);
+        let (first, picked) = match action {
             MenuAction::Switch => {
                 let branches = self.branches(ctx);
                 let current = self.current_branch(ctx);
-                current
+                let picked = current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                (scroll_to(&menu_lines(&branches), picked, 0, page), picked)
             }
-            MenuAction::Integrate(_) => 0,
+            MenuAction::Integrate(_) => (0, 0),
         };
-        let page = self.menu_page(ctx);
         self.error = None;
         self.branch_menu = Some(BranchMenu {
-            first: picked.saturating_sub(page - 1),
+            first,
             picked,
             query: TextField::default(),
             action,
@@ -1552,6 +1623,15 @@ impl Panel {
         branch_page(ctx, self.create_row(ctx).is_some())
     }
 
+    /// The menu's lines in view, listing `branches` (those it shows) in a
+    /// page of `page`.
+    fn menu_window(&self, branches: &[Branch], page: usize) -> Vec<MenuLine> {
+        let lines = menu_lines(branches);
+        let first = self.branch_menu.as_ref().map_or(0, |m| m.first);
+        let first = first.min(lines.len().saturating_sub(page));
+        lines[first..(first + page).min(lines.len())].to_vec()
+    }
+
     /// A key while the branch menu is open, which takes them all:
     /// Up/Down, the pages and Ctrl+Home/End choose (Up from the first
     /// branch goes to the row creating the branch typed), Enter picks,
@@ -1566,7 +1646,12 @@ impl Panel {
         typed: Keysym,
         ctx: &Ctx,
     ) -> Option<Outcome> {
-        let len = self.shown_branches(ctx).len();
+        let lines = menu_lines(&self.shown_branches(ctx));
+        let len = lines.len()
+            - lines
+                .iter()
+                .filter(|l| matches!(l, MenuLine::Heading { .. }))
+                .count();
         let page = self.menu_page(ctx);
         let create = self.create_row(ctx).is_some();
         let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
@@ -1634,11 +1719,8 @@ impl Panel {
         let to = to.clamp(0, len.saturating_sub(1) as isize) as usize;
         menu.on_create = false;
         menu.picked = to;
-        if to < menu.first {
-            menu.first = to;
-        } else if to >= menu.first + page {
-            menu.first = to + 1 - page;
-        }
+        let first = menu.first.min(lines.len().saturating_sub(page));
+        menu.first = scroll_to(&lines, to, first, page);
         None
     }
 
@@ -1794,7 +1876,7 @@ impl Panel {
 
     /// The wheel turned `rows` rows (down positive) over the branch menu.
     pub fn scroll_branches(&mut self, rows: f64, ctx: &Ctx) {
-        let len = self.shown_branches(ctx).len();
+        let len = menu_lines(&self.shown_branches(ctx)).len();
         let page = self.menu_page(ctx);
         let Some(menu) = self.branch_menu.as_mut() else {
             return;
@@ -2474,15 +2556,22 @@ impl Panel {
             };
         }
         // The open menu takes the click: elsewhere, it closes.
-        if let Some(first) = self.branch_menu.as_ref().map(|m| m.first) {
+        if self.branch_menu.is_some() {
             let page = self.menu_page(ctx);
-            let len = self.shown_branches(ctx).len();
-            let first = first.min(len.saturating_sub(page));
+            let lines = self.menu_window(&self.shown_branches(ctx), page);
+            // Row `i` in view: the branch of the `i`th line not a heading.
+            let branch = |i: usize| {
+                let mut ks = lines.iter().filter_map(|l| match l {
+                    MenuLine::Branch(k) => Some(*k),
+                    MenuLine::Heading { .. } => None,
+                });
+                ks.nth(i)
+            };
             return match hit {
                 ReposHit::BranchCreate => self.create_branch(ctx),
-                ReposHit::BranchRow(i) => self.pick_branch(first + i, ctx),
+                ReposHit::BranchRow(i) => self.pick_branch(branch(i)?, ctx),
                 ReposHit::BranchDelete(i) if self.menu_action() == MenuAction::Switch => {
-                    self.delete_branch(first + i, ctx)
+                    self.delete_branch(branch(i)?, ctx)
                 }
                 ReposHit::BranchMenu => None,
                 _ => {
@@ -5207,6 +5296,7 @@ mod tests {
     fn a_long_branch_menu_scrolls_with_the_pick() {
         let mut items = branched();
         items[0].status.local_branches = (0..30).map(|i| format!("b{i:02}")).collect();
+        items[0].status.local_branches.push("main".into());
         // Five rows: the tree's six, less the search's.
         let ctx = super::Ctx {
             page: (6, 6),
@@ -5214,8 +5304,11 @@ mod tests {
         };
         let mut panel = Panel::new(&items);
         press(&mut panel, ctrl(), Keysym::s, &ctx);
-        // On main, which is first, of 30 and main/feat/x on the remote.
-        assert_eq!(menu_rows(&panel, &ctx).len(), 5);
+        // On main, which is first, of 31 and main/feat/x on the remote:
+        // under the heading of the local ones, which takes a row.
+        assert_eq!(menu_rows(&panel, &ctx).len(), 4);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.headings, [(0, "Local".to_owned())]);
         for _ in 0..7 {
             press(&mut panel, none(), Keysym::Down, &ctx);
         }
@@ -5223,7 +5316,25 @@ mod tests {
         assert_eq!(menu.picked, Some(4));
         assert_eq!(menu.rows[4], "b06");
         press(&mut panel, ctrl(), Keysym::End, &ctx);
-        assert_eq!(menu_rows(&panel, &ctx).last().unwrap(), "feat/x");
+        // The one only on the remote last, under its heading.
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.rows.last().unwrap(), "feat/x");
+        let last = menu.rows.len() - 1;
+        assert_eq!(menu.headings, [(last, "Remote".to_owned())]);
+        assert_eq!(menu.picked, Some(last));
+        // A click on it picks it, not the heading's line.
+        assert_eq!(
+            panel.click(ReposHit::BranchRow(last), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Switch(vec!["feat/x".into()]),
+                jobs: vec![Job {
+                    root: items[0].root.clone(),
+                    files: Vec::new(),
+                }],
+            })
+        );
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        press(&mut panel, ctrl(), Keysym::End, &ctx);
         panel.scroll_branches(-100.0, &ctx);
         assert_eq!(menu_rows(&panel, &ctx)[0], "main");
     }

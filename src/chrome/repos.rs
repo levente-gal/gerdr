@@ -216,6 +216,9 @@ pub struct BranchMenuView {
     pub placeholder: String,
     /// The row creating the branch typed, under the search.
     pub create: Option<BranchCreate>,
+    /// The groups' headings (`Local`, `Remote`), each over the row of its
+    /// index; `rows.len()` puts one under them all.
+    pub headings: Vec<(usize, String)>,
 }
 
 /// The branch menu's row creating the branch typed in its search.
@@ -686,6 +689,9 @@ pub struct ReposLayout {
     pub branch_create: Option<Rect>,
     /// The delete buttons of the menu's rows that have one, by row.
     pub branch_deletes: Vec<(usize, Rect)>,
+    /// The menu's group headings in view, by index into
+    /// `BranchMenuView::headings`.
+    pub branch_headings: Vec<(usize, Rect)>,
 }
 
 /// Inside the panel's parts: what the painter needs besides `ReposLayout`.
@@ -1054,10 +1060,12 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     }
 
     // The branch menu under the button, its left edge on the button's:
-    // its search, the row creating the branch typed, then as many rows as
-    // fit above the field (one saying none is found, unless it creates).
+    // its search, the row creating the branch typed, then as many lines as
+    // fit above the field, each a group's heading or a branch (one saying
+    // none is found, unless it creates).
     let mut branch_search = None;
     let mut branch_create = None;
+    let mut branch_headings = Vec::new();
     let branch_menu = view.branch.menu.as_ref().map(|menu| {
         let create = menu.create.as_ref().map(|c| &c.label);
         let widest = menu
@@ -1083,7 +1091,8 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             rows_y += row_h;
         }
         let room = (field.loc.y - REPOS_PAD - rows_y - BRANCH_MENU_PAD).max(0) / row_h;
-        let shown = match (menu.rows.len(), create) {
+        let lines = menu.rows.len() + menu.headings.len();
+        let shown = match (lines, create) {
             (0, Some(_)) => 0,
             (n, _) => n.max(1).min(room.max(1) as usize),
         };
@@ -1093,14 +1102,25 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
             (inner, row_h).into(),
         ));
-        let rows: Vec<Rect> = (0..shown.min(menu.rows.len()))
-            .map(|i| {
-                Rectangle::new(
-                    (mx + BRANCH_MENU_PAD, rows_y + i as i32 * row_h).into(),
-                    ((mw - 2 * BRANCH_MENU_PAD).max(0), row_h).into(),
-                )
-            })
-            .collect();
+        let line = |j: usize| {
+            Rectangle::new(
+                (mx + BRANCH_MENU_PAD, rows_y + j as i32 * row_h).into(),
+                (inner, row_h).into(),
+            )
+        };
+        let mut rows: Vec<Rect> = Vec::new();
+        for j in 0..shown {
+            let next = branch_headings.len();
+            if menu
+                .headings
+                .get(next)
+                .is_some_and(|&(at, _)| at == rows.len())
+            {
+                branch_headings.push((next, line(j)));
+            } else if rows.len() < menu.rows.len() {
+                rows.push(line(j));
+            }
+        }
         (card, rows)
     });
     let branch_deletes = match (&view.branch.menu, &branch_menu) {
@@ -1149,6 +1169,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             branch_search,
             branch_create,
             branch_deletes,
+            branch_headings,
         },
         error,
         body,
@@ -1686,7 +1707,18 @@ impl Painter {
         {
             let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
             let create = layout.branch_create.map(shift);
-            let parts = (shift(*card), shift(search), create, &rows[..]);
+            let headings: Vec<(usize, Rect)> = layout
+                .branch_headings
+                .iter()
+                .map(|&(i, r)| (i, shift(r)))
+                .collect();
+            let parts = (
+                shift(*card),
+                shift(search),
+                create,
+                &rows[..],
+                &headings[..],
+            );
             self.branch_menu(&mut c, view, menu, parts, scale, p);
         }
         if let Some(sheet) = &view.sheet {
@@ -2320,13 +2352,21 @@ impl Painter {
 
     /// The branch menu, a card in `card` with its search in `search`, the
     /// row creating the branch typed in `create`, then a row per branch in
-    /// `rows`: the one Enter picks lit, the one they are all on checked.
+    /// `rows`: the one Enter picks lit, the one they are all on checked;
+    /// the groups' headings in `headings`, muted.
+    #[allow(clippy::type_complexity)]
     fn branch_menu(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         menu: &BranchMenuView,
-        (card, search, create, rows): (Rect, Rect, Option<Rect>, &[Rect]),
+        (card, search, create, rows, headings): (
+            Rect,
+            Rect,
+            Option<Rect>,
+            &[Rect],
+            &[(usize, Rect)],
+        ),
         scale: f64,
         p: &Palette,
     ) {
@@ -2413,6 +2453,24 @@ impl Painter {
                 p.placeholder,
             );
             return;
+        }
+        for &(i, rect) in headings {
+            let Some((_, label)) = menu.headings.get(i) else {
+                continue;
+            };
+            let (x, end) = phys(rect, scale);
+            let pad = BRANCH_ROW_PAD as f32 * s;
+            let row_band = band(rect, scale);
+            self.text(
+                c,
+                label,
+                FONT_SIZE,
+                x + pad,
+                end - pad,
+                row_band,
+                scale,
+                p.placeholder,
+            );
         }
         for (i, (rect, label)) in rows.iter().zip(&menu.rows).enumerate() {
             let (x, y, w, h) = rect_px(*rect, scale);
@@ -2736,6 +2794,7 @@ mod tests {
                     query: Line::default(),
                     placeholder: "Find or create a branch".into(),
                     create: None,
+                    headings: vec![(0, "Local".into()), (3, "Remote".into())],
                 }),
                 ..full().branch
             },
@@ -2891,6 +2950,12 @@ mod tests {
                     assert!(rows.len() <= m.rows.len());
                     for row in rows {
                         assert!(inside(*menu, *row));
+                    }
+                    // The headings: in it, apart from the rows.
+                    for (i, heading) in &l.branch_headings {
+                        assert!(*i < m.headings.len());
+                        assert!(inside(*menu, *heading));
+                        assert!(rows.iter().all(|r| !r.overlaps(*heading)));
                     }
                     // The row creating the branch typed: under the search,
                     // over the branches.
@@ -3118,6 +3183,18 @@ mod tests {
             for (i, row) in rows.iter().enumerate() {
                 assert_eq!(repos_hit(&l, centre(*row)), Some(ReposHit::BranchRow(i)));
             }
+            // A heading over each group, which picks nothing.
+            let first = l.branch_headings.first().expect("a heading");
+            assert_eq!(*first, (0, first.1));
+            assert!(first.1.loc.y + first.1.size.h <= rows[0].loc.y);
+            for (_, r) in &l.branch_headings {
+                assert_eq!(repos_hit(&l, centre(*r)), Some(ReposHit::BranchMenu));
+            }
+            if rows.len() == 4 {
+                let (_, remote) = l.branch_headings[1];
+                assert!(remote.loc.y >= rows[2].loc.y + rows[2].size.h);
+                assert!(remote.loc.y + remote.size.h <= rows[3].loc.y);
+            }
             // Rows with a local branch have a delete button, in them.
             let deletes: Vec<usize> = l.branch_deletes.iter().map(|(i, _)| *i).collect();
             let shown: Vec<usize> = [1, 2].into_iter().filter(|&i| i < rows.len()).collect();
@@ -3174,7 +3251,8 @@ mod tests {
             assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
             // As many as the tree's page less the search, whatever the size.
             let page = (repos_page(size, DENSITY).0 - 1).min(BRANCH_MENU_ROWS);
-            assert!(rows.len() >= page, "{size:?}: {} < {page}", rows.len());
+            let lines = rows.len() + l.branch_headings.len();
+            assert!(lines >= page, "{size:?}: {lines} < {page}");
             assert!(menu.size.w <= BRANCH_MENU_MAX.max(l.branch.size.w));
         }
     }
