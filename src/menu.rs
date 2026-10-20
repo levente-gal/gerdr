@@ -52,7 +52,7 @@ pub enum MenuAction {
     StopPane(u32),
     /// Show the agent.
     FocusAgent(crate::agents::AgentKey),
-    /// Delete idle Cursor chat (by id) from gerdr's history.
+    /// Delete idle or done Cursor chat (by id) from gerdr.
     DeleteCursorChat(String),
     CopyPath(PathBuf),
     Theme(ThemeMode),

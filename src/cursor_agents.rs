@@ -11,7 +11,8 @@
 //!
 //! A chat that went idle stays as history (see `History`): those not in
 //! agent mode (asking, planning, debugging) until the user deletes them,
-//! the others while they are among the latest.
+//! the others while they are among the latest. A chat done with news can
+//! be deleted too: Cursor may never mark it read.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -551,6 +552,15 @@ impl History {
         added || before != (self.kept.len(), self.deleted.len())
     }
 
+    /// Whether chat `chat`, done, was deleted since it last changed;
+    /// `hook` is what a hook said of it last, which may tell of a run
+    /// ended since that the database doesn't know yet.
+    pub fn hides(&self, chat: &CursorChat, hook: Option<&HookEvent>) -> bool {
+        chat.status == AgentStatus::Done
+            && self.is_deleted(&chat.row)
+            && hook.is_none_or(|h| h.at_ms <= chat.row.updated_ms)
+    }
+
     /// Delete chat `row` from gerdr, until it changes again.
     pub fn delete(&mut self, row: &ChatRow) {
         self.kept.remove(&row.id);
@@ -1047,12 +1057,16 @@ impl crate::Gerdr {
 
     /// Take in what Cursor's chats do now, and notify of what is news.
     fn cursor_changed(&mut self) {
-        let (idle, live) = self
+        let (idle, live): (Vec<CursorChat>, Vec<CursorChat>) = self
             .cursor
             .all(now_ms())
             .into_iter()
             .partition(|chat| chat.status == AgentStatus::Idle);
-        self.cursor_chats = live;
+        let (history, hooks) = (&self.projects.cursor_history, &self.cursor.hooks);
+        self.cursor_chats = live
+            .into_iter()
+            .filter(|chat| !history.hides(chat, hooks.get(&chat.row.id)))
+            .collect();
         // A chat only hooks know of goes once idle: there is nothing to
         // show it by.
         self.cursor_idle = idle
@@ -1075,14 +1089,20 @@ impl crate::Gerdr {
         self.read_cursor_db();
     }
 
-    /// Delete idle Cursor chat `id` from gerdr: its card goes, until the
-    /// chat changes again.
+    /// Delete idle or done Cursor chat `id` from gerdr: its card goes,
+    /// until the chat changes again.
     pub fn delete_cursor_chat(&mut self, id: &str) {
-        let Some(chat) = self.cursor_idle.iter().find(|chat| chat.row.id == id) else {
+        let Some(chat) = self
+            .cursor_idle
+            .iter()
+            .chain(self.cursor_chats.iter().filter(|chat| deletable(chat)))
+            .find(|chat| chat.row.id == id && self.cursor.rows.contains_key(id))
+        else {
             return;
         };
         self.projects.cursor_history.delete(&chat.row);
         self.cursor_history_changed();
+        self.cursor_changed();
     }
 
     /// Stop hearing Cursor's hooks: gerdr quits.
@@ -1127,13 +1147,18 @@ impl crate::Gerdr {
     }
 
     /// The cards of the Cursor chats under workspace `w`: those doing
-    /// something, then its history, which can be deleted.
+    /// something, then its history; the done ones and history can be
+    /// deleted.
     pub fn cursor_cards(&self, w: usize) -> Vec<crate::chrome::AgentView> {
         let live = self
             .cursor_chats
             .iter()
             .filter(|chat| self.cursor_chat_place(chat) == Some(w))
-            .map(crate::chrome::AgentView::cursor);
+            .map(|chat| {
+                let mut card = crate::chrome::AgentView::cursor(chat);
+                card.deletable = deletable(chat) && self.cursor.rows.contains_key(&chat.row.id);
+                card
+            });
         let history = self.cursor_history(w).0.into_iter().map(|chat| {
             let mut card = crate::chrome::AgentView::cursor(chat);
             card.deletable = true;
@@ -1173,6 +1198,12 @@ impl crate::Gerdr {
             })
             .collect()
     }
+}
+
+/// Whether live chat `chat` can be deleted from gerdr: it is done, so
+/// only the user's reading it in Cursor would end its card.
+fn deletable(chat: &CursorChat) -> bool {
+    chat.status == AgentStatus::Done
 }
 
 /// Whether app `command` starts Cursor.
@@ -1780,5 +1811,36 @@ mod tests {
         let (shown, more) = history.pick(&idle);
         assert_eq!(ids(&shown), ["c1", "c2", "c3", "c4", "c5"]);
         assert_eq!(ids(&more), ["c6", "c7"]);
+    }
+
+    #[test]
+    fn a_done_chat_deleted_is_hidden_until_it_changes() {
+        let mut history = History::default();
+        let mut news = moded("ask", "chat", 1_000);
+        news.unread = true;
+        let done = CursorChat {
+            status: AgentStatus::Done,
+            ..idle(news.clone())
+        };
+        assert!(!history.hides(&done, None));
+        history.delete(&news);
+        assert!(history.hides(&done, None));
+        // Not while a hook tells of a run ended since, nor once working.
+        let ended = hook("stop", Some("completed"), 2_000);
+        assert!(!history.hides(&done, Some(&ended)));
+        let working = CursorChat {
+            status: AgentStatus::Working,
+            ..done.clone()
+        };
+        assert!(!history.hides(&working, None));
+        // A change brings it back.
+        let changed = CursorChat {
+            row: ChatRow {
+                updated_ms: 3_000,
+                ..news
+            },
+            ..done
+        };
+        assert!(!history.hides(&changed, None));
     }
 }
