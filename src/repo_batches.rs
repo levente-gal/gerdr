@@ -25,7 +25,8 @@ use crate::{
     git::{GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
     repos::{
-        Batch, BatchKind, Ctx, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos, RunState,
+        Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
+        RunState,
     },
     toast::Level,
     tooltip::Tooltip,
@@ -866,8 +867,17 @@ impl Gerdr {
                 Some(Tooltip::new("Delete this local branch", *rect).key("Del"))
             }
             ReposHit::BranchButton if view.branch.menu.is_none() => Some(
-                Tooltip::new("Switch them to a branch they all have", layout.branch).key("Ctrl+S"),
+                Tooltip::new("Switch them to a branch, or create one", layout.branch).key("Ctrl+S"),
             ),
+            ReposHit::BranchCreate => {
+                let rect = layout.branch_create?;
+                let create = view.branch.menu.as_ref()?.create.as_ref()?;
+                let tip = match &create.problem {
+                    Some(_) => "Fix the name to create the branch",
+                    None => "Fetch, then create it; asks first if some have it",
+                };
+                Some(Tooltip::new(tip, rect).key("Ctrl+Enter"))
+            }
             _ => None,
         }
     }
@@ -938,11 +948,15 @@ impl Gerdr {
     pub fn apply_repos(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Close => self.close_repos(),
-            Outcome::Batch { .. } | Outcome::Confirmed { .. } | Outcome::RetryFailed
+            Outcome::Batch { .. }
+            | Outcome::Confirmed { .. }
+            | Outcome::CreateBranch { .. }
+            | Outcome::RetryFailed
                 if self.repos.checking.is_some() =>
             {
                 self.repos_refuse("Wait for the check to finish")
             }
+            Outcome::CreateBranch { name, jobs } => self.repos_look_for(name, jobs),
             Outcome::Batch { kind, jobs } if kind.checked_first() => self.repos_check(kind, jobs),
             Outcome::Batch { kind, jobs } | Outcome::Confirmed { kind, jobs } => {
                 self.start_batch(kind, jobs)
@@ -1090,6 +1104,69 @@ impl Gerdr {
                 kind,
                 jobs,
                 verdicts,
+            });
+        });
+    }
+
+    /// Before creating branch `name` in `jobs`, off the event loop: fetch
+    /// (once per repository), then look for a branch by that name in each,
+    /// local or on its remote. None has it: it is created; else the panel
+    /// asks what to do.
+    fn repos_look_for(&mut self, name: String, jobs: Vec<Job>) {
+        let probes: Vec<(PathBuf, Option<String>, Option<String>)> = jobs
+            .iter()
+            .filter_map(|job| {
+                let item = self.repos.items.iter().find(|i| i.root == job.root)?;
+                let status = &item.status;
+                Some((
+                    job.root.clone(),
+                    status.remote.clone(),
+                    status.branch.clone(),
+                ))
+            })
+            .collect();
+        let fetches = one_per_repository(
+            jobs.iter()
+                .filter_map(|job| self.repos.items.iter().find(|i| i.root == job.root))
+                .filter(|i| i.status.remote.is_some())
+                .map(|i| (i.root.clone(), i.status.common_dir.clone()))
+                .collect(),
+        );
+        let Some(tx) = self.repos_sender() else {
+            return;
+        };
+        let id = self.repos.next_id;
+        self.repos.next_id += 1;
+        self.repos.checking = Some(id);
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.error = Some(format!("Fetching to look for {name}…"));
+        }
+        std::thread::spawn(move || {
+            std::thread::scope(|scope| {
+                for root in &fetches {
+                    scope.spawn(move || git_ops::fetch_all(root));
+                }
+            });
+            let have = probes
+                .iter()
+                .filter_map(|(root, remote, on)| {
+                    let found = if on.as_deref() == Some(name.as_str()) {
+                        Found::On
+                    } else if git_ops::has_ref(root, &format!("refs/heads/{name}")) {
+                        Found::Local
+                    } else {
+                        let remote = remote.as_ref()?;
+                        let at = format!("refs/remotes/{remote}/{name}");
+                        git_ops::has_ref(root, &at).then(|| Found::Remote(remote.clone()))?
+                    };
+                    Some((root.clone(), found))
+                })
+                .collect();
+            let _ = tx.send(RepoEvent::Found {
+                id,
+                name,
+                jobs,
+                have,
             });
         });
     }
@@ -1264,6 +1341,28 @@ impl Gerdr {
                     panel.ask_preflight(kind, jobs, verdicts);
                 }
             }
+            RepoEvent::Found {
+                id,
+                name,
+                jobs,
+                have,
+            } => {
+                if self.repos.checking != Some(id) {
+                    return;
+                }
+                self.repos.checking = None;
+                if let Some(panel) = self.repos.panel.as_mut() {
+                    panel.error = None;
+                }
+                // The fetch may have brought branches the panel lists.
+                self.refresh_git();
+                if have.is_empty() {
+                    let kind = BatchKind::Branch(name);
+                    self.apply_repos(Outcome::Batch { kind, jobs });
+                } else if let Some(panel) = self.repos.panel.as_mut() {
+                    panel.ask_exists(name, jobs, have);
+                }
+            }
             RepoEvent::Detail { key, text } => {
                 if self.repos.reading.as_ref() == Some(&key) {
                     self.repos.reading = None;
@@ -1302,7 +1401,7 @@ impl Gerdr {
             .collect();
         let (summary, tone) = batch.summary();
         match batch.kind {
-            BatchKind::Branch(_) | BatchKind::Commit { .. } if done => {
+            BatchKind::Commit { .. } if done => {
                 if let Some(panel) = self.repos.panel.as_mut() {
                     panel.clear_field();
                 }

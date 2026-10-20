@@ -1,22 +1,26 @@
 //! The repositories panel (prefix, g; or a workspace's "Repositories…"):
 //! the project's repositories as one. Check repositories, or single
-//! changed files under them, then branch them all with one name, commit
-//! the checked files with one message, push, fetch, pull, merge or rebase
-//! onto the default branch; each repository's result shows on its line,
-//! and the ones that need a hand keep what fixes them: conflicts open in
-//! Zed, then are marked resolved and continued, or aborted; a login runs
-//! in a terminal; the whole batch can be undone while nothing moved since.
+//! changed files under them, then commit the checked files with one
+//! message, push, fetch, pull, merge or rebase onto the default branch;
+//! each repository's result shows on its line, and the ones that need a
+//! hand keep what fixes them: conflicts open in Zed, then are marked
+//! resolved and continued, or aborted; a login runs in a terminal; the
+//! whole batch can be undone while nothing moved since.
 //! The header's branch picker switches them all to a branch they all have,
 //! names that are one branch (`main`, `master`) taken as one; typing in
-//! its menu finds one. The same menu picks a branch to merge in, or to
+//! its menu finds one, or offers to create a branch by that name. Before
+//! creating it they fetch, and if some have a branch by that name already
+//! a sheet asks whether to switch to it, create it where it is missing,
+//! or edit the name. The same menu picks a branch to merge in, or to
 //! rebase onto. Its branches come default branch first, then the config's
 //! `top_branches`, then the newest.
 //!
 //! Keys: Tab moves between the tree and the field. In the tree Up/Down
 //! select, Space checks, Left/Right fold, Enter opens a file in Zed or
 //! folds a repository, and typing goes to the field; Shift with Up/Down
-//! or the pages scrolls the detail. Ctrl+N branches, Ctrl+Enter commits
-//! (Ctrl+Shift+Enter then pushes), Ctrl+P pushes (Ctrl+Shift+P force
+//! or the pages scrolls the detail. Ctrl+N opens the branch picker to
+//! create a branch (in it, Ctrl+Enter creates the one typed), Ctrl+Enter
+//! commits (Ctrl+Shift+Enter then pushes), Ctrl+P pushes (Ctrl+Shift+P force
 //! pushes), Ctrl+F fetches, Ctrl+L pulls, Ctrl+M merges the default
 //! branch in (Ctrl+Shift+M rebases on it), Alt+M merges a branch picked
 //! in (Alt+Shift+M rebases on it), Ctrl+E opens the conflicts in Zed,
@@ -43,8 +47,8 @@ use smithay::{
 
 use crate::{
     chrome::{
-        BRANCH_MENU_ROWS, BranchMenuView, BranchPicker, Check, Chip, Density, DetailLine,
-        DetailTab, DetailView, DiffTone, FileLine, Hint, LineState, RepoLine, RepoMark,
+        BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, Density,
+        DetailLine, DetailTab, DetailView, DiffTone, FileLine, Hint, LineState, RepoLine, RepoMark,
         ReposButton, ReposHit, ReposView, ResultBar, SheetView, Tone, TreeLine,
     },
     git::{Change, GitStatus, InProgress},
@@ -206,6 +210,21 @@ pub struct BranchMenu {
     pub picked: usize,
     pub query: TextField,
     pub action: MenuAction,
+    /// Opened to create a branch (Ctrl+N): Enter creates the one typed,
+    /// not the first branch found.
+    pub create_first: bool,
+    /// Enter creates the branch typed rather than picking `picked`.
+    pub on_create: bool,
+}
+
+/// Where a repository has the branch about to be created.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// It is the branch checked out.
+    On,
+    Local,
+    /// Only on the remote of this name.
+    Remote(String),
 }
 
 /// What picking a branch in the branch menu does.
@@ -296,6 +315,15 @@ pub enum Sheet {
     /// These repositories' branches and upstreams both moved: rebase,
     /// merge or skip them.
     Diverged { roots: Vec<PathBuf>, choice: usize },
+    /// Branch `name`, about to be created in `jobs`, is in some of them
+    /// already (`have`): switch to it, create it where it is missing, or
+    /// edit the name.
+    Exists {
+        name: String,
+        jobs: Vec<Job>,
+        have: Vec<(PathBuf, Found)>,
+        choice: usize,
+    },
 }
 
 /// A repository in a batch, and what it does there.
@@ -430,9 +458,13 @@ impl BatchKind {
 }
 
 /// How many of the branch menu's rows are in view: no more than the tree's,
-/// less one for its search.
-fn branch_page(ctx: &Ctx) -> usize {
-    BRANCH_MENU_ROWS.min(ctx.page.0.saturating_sub(1)).max(1)
+/// less one for its search, and one for its row to create a branch when
+/// `create` shows it.
+fn branch_page(ctx: &Ctx, create: bool) -> usize {
+    let above = 1 + usize::from(create);
+    BRANCH_MENU_ROWS
+        .min(ctx.page.0.saturating_sub(above))
+        .max(1)
 }
 
 /// `n` and `one`, or its plural with an `s`: `1 conflict`, `2 conflicts`.
@@ -591,6 +623,14 @@ pub enum RepoEvent {
         jobs: Vec<Job>,
         verdicts: Vec<(PathBuf, Verdict)>,
     },
+    /// The look, after a fetch, for branch `name` before creating it in
+    /// `jobs`: the repositories that have it.
+    Found {
+        id: u64,
+        name: String,
+        jobs: Vec<Job>,
+        have: Vec<(PathBuf, Found)>,
+    },
     Detail {
         key: DetailKey,
         text: String,
@@ -609,6 +649,12 @@ pub enum Outcome {
     /// Run `kind` over `jobs`, the check done (a sheet's answer).
     Confirmed {
         kind: BatchKind,
+        jobs: Vec<Job>,
+    },
+    /// Fetch, then create branch `name` in `jobs` unless some have it
+    /// already: then ask what to do.
+    CreateBranch {
+        name: String,
         jobs: Vec<Job>,
     },
     /// Run the last batch again over the repositories it failed in.
@@ -686,7 +732,6 @@ fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
     }
     // Shift changes the symbol: match both cases.
     let button = match sym {
-        Keysym::n | Keysym::N => B::Branch,
         Keysym::Return | Keysym::KP_Enter if shift => B::CommitPush,
         Keysym::Return | Keysym::KP_Enter => B::Commit,
         Keysym::p | Keysym::P if shift => B::ForcePush,
@@ -714,7 +759,6 @@ fn in_conflict(item: &RepoItem) -> bool {
 fn key_name(button: ReposButton) -> &'static str {
     use ReposButton as B;
     match button {
-        B::Branch => "Ctrl+N",
         B::Commit => "Ctrl+Enter",
         B::CommitPush => "Ctrl+Shift+Enter",
         B::Push => "Ctrl+P",
@@ -735,8 +779,13 @@ fn key_name(button: ReposButton) -> &'static str {
         B::StashPop => "Alt+Shift+S",
         B::Help => "F1",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
-        B::SkipDiverged | B::Cancel | B::Close => "Esc",
-        B::RunInTerminal | B::OpenWorkspace | B::StashDrop | B::DeleteBranch => "",
+        B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
+        B::RunInTerminal
+        | B::OpenWorkspace
+        | B::StashDrop
+        | B::DeleteBranch
+        | B::SwitchExisting
+        | B::CreateMissing => "",
     }
 }
 
@@ -787,7 +836,24 @@ fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
         ],
         Sheet::Confirm { kind, .. } => vec![confirm_button(kind), ReposButton::Cancel],
         Sheet::Help { .. } => vec![ReposButton::Close],
+        // Created where missing only when some are.
+        Sheet::Exists { jobs, have, .. } => {
+            let mut buttons = vec![ReposButton::SwitchExisting];
+            if !missing(jobs, have).is_empty() {
+                buttons.push(ReposButton::CreateMissing);
+            }
+            buttons.push(ReposButton::EditName);
+            buttons
+        }
     }
+}
+
+/// Those of `jobs` without the branch `have` lists.
+fn missing(jobs: &[Job], have: &[(PathBuf, Found)]) -> Vec<Job> {
+    jobs.iter()
+        .filter(|j| !have.iter().any(|(root, _)| *root == j.root))
+        .cloned()
+        .collect()
 }
 
 /// The panel's keys, as the help sheet lists them: the key, what it does.
@@ -802,6 +868,8 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Enter", "open the file in Zed; fold a repository"),
     ("Ctrl+D / Ctrl+T", "the diff, the log"),
     ("Ctrl+S", "switch them all to a branch"),
+    ("Ctrl+N", "create a branch: type its name"),
+    ("Ctrl+Enter", "in the branch menu, create the branch typed"),
     ("Del", "delete the branch picked in the menu"),
     ("Alt+Z / Alt+R", "undo the last batch, retry what failed"),
     ("Right click", "the actions, on a line or anywhere"),
@@ -1190,7 +1258,6 @@ impl Panel {
             .filter(|i| i.status.changes.iter().any(|c| self.file_checked(i, c)))
             .count();
         match button {
-            B::Branch => over("branch", targets),
             B::Push => over("push", targets),
             B::ForcePush => over("force push", targets),
             B::Pull => over("pull", targets),
@@ -1350,7 +1417,7 @@ impl Panel {
         let menu = self.branch_menu.as_ref().map(|menu| {
             let switch = menu.action == MenuAction::Switch;
             let branches = self.shown_branches(ctx);
-            let page = branch_page(ctx);
+            let page = self.menu_page(ctx);
             let first = menu.first.min(branches.len().saturating_sub(page));
             let shown = &branches[first..(first + page).min(branches.len())];
             let current = self.current_branch(ctx);
@@ -1364,7 +1431,21 @@ impl Panel {
                 current: current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
                     .and_then(in_view),
-                picked: in_view(menu.picked.min(branches.len().saturating_sub(1))),
+                picked: (!menu.on_create)
+                    .then(|| in_view(menu.picked.min(branches.len().saturating_sub(1))))
+                    .flatten(),
+                create: self.create_row(ctx).map(|(name, problem)| BranchCreate {
+                    label: match problem {
+                        Some(why) => format!("Can't create {name}: {why}"),
+                        None => {
+                            let from = self.one_name(ctx, |s| s.branch.as_deref());
+                            let from = from.unwrap_or_else(|| "HEAD".into());
+                            format!("Create {name} from {from}")
+                        }
+                    },
+                    problem: problem.map(str::to_owned),
+                    picked: menu.on_create,
+                }),
                 empty: if !menu.query.trim().is_empty() {
                     "No branch matches".into()
                 } else if switch {
@@ -1374,7 +1455,8 @@ impl Panel {
                 },
                 query: menu.query.line(),
                 placeholder: match menu.action {
-                    MenuAction::Switch => "Find a branch".into(),
+                    MenuAction::Switch if menu.create_first => "Name the new branch".into(),
+                    MenuAction::Switch => "Find or create a branch".into(),
                     MenuAction::Integrate(Integrate::Merge) => {
                         format!("Find a branch to merge into {}", self.current_name(ctx))
                     }
@@ -1428,20 +1510,55 @@ impl Panel {
             }
             MenuAction::Integrate(_) => 0,
         };
-        let page = branch_page(ctx);
+        let page = self.menu_page(ctx);
         self.error = None;
         self.branch_menu = Some(BranchMenu {
             first: picked.saturating_sub(page - 1),
             picked,
             query: TextField::default(),
             action,
+            create_first: false,
+            on_create: false,
         });
     }
 
+    /// Open the branch menu to create a branch: Enter creates the one
+    /// typed, Up/Down go to those found instead.
+    fn open_create_menu(&mut self, ctx: &Ctx) {
+        self.open_branch_menu(MenuAction::Switch, ctx);
+        if let Some(menu) = self.branch_menu.as_mut() {
+            menu.create_first = true;
+        }
+    }
+
+    /// The branch typed in the menu's search, when the menu offers to
+    /// create it: in the menu to switch, while no branch shown is called
+    /// that. Why it can't be a branch's name, if it can't.
+    fn create_row(&self, ctx: &Ctx) -> Option<(String, Option<&'static str>)> {
+        let menu = self.branch_menu.as_ref()?;
+        let name = menu.query.trim();
+        if menu.action != MenuAction::Switch || name.is_empty() {
+            return None;
+        }
+        let named = |b: &Branch| b.label == name || b.names.iter().any(|n| n == name);
+        if self.shown_branches(ctx).iter().any(named) {
+            return None;
+        }
+        Some((name.to_owned(), branch_name_problem(name)))
+    }
+
+    /// How many of the menu's branches are in view.
+    fn menu_page(&self, ctx: &Ctx) -> usize {
+        branch_page(ctx, self.create_row(ctx).is_some())
+    }
+
     /// A key while the branch menu is open, which takes them all:
-    /// Up/Down, the pages and Ctrl+Home/End choose, Enter picks, Delete
-    /// asks to delete (in the menu to switch), Esc closes; the rest edit
-    /// its search, which starts over at the top.
+    /// Up/Down, the pages and Ctrl+Home/End choose (Up from the first
+    /// branch goes to the row creating the branch typed), Enter picks,
+    /// Ctrl+Enter creates the branch typed, Ctrl+N makes Enter create it,
+    /// Delete asks to delete (in the menu to switch), Esc closes; the rest
+    /// edit its search, which starts over at the top: on the row creating
+    /// the branch typed when opened to create one, or when none is found.
     fn branch_menu_key(
         &mut self,
         mods: &ModifiersState,
@@ -1450,22 +1567,49 @@ impl Panel {
         ctx: &Ctx,
     ) -> Option<Outcome> {
         let len = self.shown_branches(ctx).len();
-        let page = branch_page(ctx);
+        let page = self.menu_page(ctx);
+        let create = self.create_row(ctx).is_some();
         let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         let switch = self.menu_action() == MenuAction::Switch;
-        if switch && plain && matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
+        let on_create = self.branch_menu.as_ref()?.on_create;
+        if switch && plain && !on_create && matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
             let picked = self.branch_menu.as_ref()?.picked;
             return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
+        }
+        if only_ctrl && matches!(sym, Keysym::Return | Keysym::KP_Enter) {
+            return self.create_branch(ctx);
+        }
+        if only_ctrl && matches!(sym, Keysym::n | Keysym::N) {
+            let menu = self.branch_menu.as_mut()?;
+            menu.action = MenuAction::Switch;
+            menu.create_first = true;
+            let create = self.create_row(ctx).is_some();
+            self.branch_menu.as_mut()?.on_create = create;
+            return None;
         }
         let menu = self.branch_menu.as_mut()?;
         let at = menu.picked.min(len.saturating_sub(1)) as isize;
         let to = match sym {
+            // Down from the row creating the branch: the first branch.
+            Keysym::Down | Keysym::KP_Down if menu.on_create => {
+                menu.on_create = len == 0;
+                (menu.first, menu.picked) = (0, 0);
+                return None;
+            }
+            Keysym::Up | Keysym::KP_Up if create && at == 0 => {
+                menu.on_create = true;
+                return None;
+            }
             Keysym::Down | Keysym::KP_Down => at + 1,
             Keysym::Up | Keysym::KP_Up => at - 1,
             Keysym::Page_Down | Keysym::KP_Page_Down => at + page as isize,
             Keysym::Page_Up | Keysym::KP_Page_Up => at - page as isize,
             Keysym::Home | Keysym::KP_Home if mods.ctrl => 0,
             Keysym::End | Keysym::KP_End if mods.ctrl => len as isize,
+            Keysym::Return | Keysym::KP_Enter if menu.on_create => {
+                return self.create_branch(ctx);
+            }
             Keysym::Return | Keysym::KP_Enter => {
                 let picked = menu.picked;
                 return self.pick_branch(picked, ctx);
@@ -1477,11 +1621,18 @@ impl Panel {
             _ => {
                 if menu.query.key(mods, sym, typed).changed() {
                     (menu.first, menu.picked) = (0, 0);
+                    let create_first = menu.create_first;
+                    let found = !self.shown_branches(ctx).is_empty();
+                    let create = self.create_row(ctx).is_some();
+                    if let Some(menu) = self.branch_menu.as_mut() {
+                        menu.on_create = create && (create_first || !found);
+                    }
                 }
                 return None;
             }
         };
         let to = to.clamp(0, len.saturating_sub(1) as isize) as usize;
+        menu.on_create = false;
         menu.picked = to;
         if to < menu.first {
             menu.first = to;
@@ -1489,6 +1640,54 @@ impl Panel {
             menu.first = to + 1 - page;
         }
         None
+    }
+
+    /// Create the branch typed in the menu's search in the repositories
+    /// acted on, from where each is: asked of the event loop, which
+    /// fetches and looks for it first. The menu closes, unless the name
+    /// can't be a branch's.
+    fn create_branch(&mut self, ctx: &Ctx) -> Option<Outcome> {
+        let menu = self.branch_menu.as_ref()?;
+        let name = menu.query.trim().to_owned();
+        if name.is_empty() {
+            self.error = Some("Type the new branch's name first".into());
+            return None;
+        }
+        if let Some(why) = branch_name_problem(&name) {
+            self.error = Some(format!("Not a branch name: {why}"));
+            return None;
+        }
+        if ctx.batch.is_some_and(|b| !b.finished()) {
+            self.error = Some("Wait for the batch to finish".into());
+            return None;
+        }
+        let items = ctx.items;
+        let jobs: Vec<Job> = self
+            .targets(items)
+            .into_iter()
+            .map(|k| Job {
+                root: items[k].root.clone(),
+                files: Vec::new(),
+            })
+            .collect();
+        if jobs.is_empty() {
+            self.error = Some("Select a repository first".into());
+            return None;
+        }
+        self.branch_menu = None;
+        self.error = None;
+        Some(Outcome::CreateBranch { name, jobs })
+    }
+
+    /// Back to the branch menu, `name` in its search, to edit it and
+    /// create it again.
+    fn edit_branch_name(&mut self, name: &str) {
+        self.branch_menu = Some(BranchMenu {
+            query: TextField::from(name),
+            create_first: true,
+            on_create: true,
+            ..BranchMenu::default()
+        });
     }
 
     /// Switch the repositories acted on to branch `k` of `shown_branches`,
@@ -1596,7 +1795,7 @@ impl Panel {
     /// The wheel turned `rows` rows (down positive) over the branch menu.
     pub fn scroll_branches(&mut self, rows: f64, ctx: &Ctx) {
         let len = self.shown_branches(ctx).len();
-        let page = branch_page(ctx);
+        let page = self.menu_page(ctx);
         let Some(menu) = self.branch_menu.as_mut() else {
             return;
         };
@@ -1650,16 +1849,6 @@ impl Panel {
             let jobs = ks.into_iter().map(job).collect();
             Ok(Outcome::Batch { kind, jobs })
         };
-        let name = || {
-            let name = self.field.trim();
-            if name.is_empty() {
-                return Err(Why::Field("Type a branch name first".into()));
-            }
-            if let Some(why) = branch_name_problem(name) {
-                return Err(Why::Field(format!("Not a branch name: {why}")));
-            }
-            Ok(name.to_owned())
-        };
         let targets = self.targets(items);
         let selected = self.selected_item(items);
         let run_of = |item: &RepoItem| ctx.batch.and_then(|b| b.run(&item.root));
@@ -1678,7 +1867,6 @@ impl Panel {
             Ok(item)
         };
         match button {
-            B::Branch => run(BatchKind::Branch(name()?), targets),
             B::Commit | B::CommitPush => {
                 let mut jobs = Vec::new();
                 for item in items {
@@ -1848,7 +2036,10 @@ impl Panel {
             | B::PullMerge
             | B::SkipDiverged
             | B::Close
-            | B::DeleteBranch => Err(Why::other("Nothing to answer")),
+            | B::DeleteBranch
+            | B::SwitchExisting
+            | B::CreateMissing
+            | B::EditName => Err(Why::other("Nothing to answer")),
         }
     }
 
@@ -2023,6 +2214,41 @@ impl Panel {
                     jobs,
                 })
             }
+            // Switched where they have it (but where it is out already),
+            // created where they don't.
+            (
+                Sheet::Exists {
+                    name, jobs, have, ..
+                },
+                B::SwitchExisting,
+            ) => {
+                let on = |job: &Job| have.iter().any(|(r, f)| *r == job.root && *f == Found::On);
+                let jobs: Vec<Job> = jobs.into_iter().filter(|j| !on(j)).collect();
+                if jobs.is_empty() {
+                    self.error = Some(format!("Already on {name}"));
+                    return None;
+                }
+                Some(Outcome::Batch {
+                    kind: BatchKind::Branch(name),
+                    jobs,
+                })
+            }
+            (
+                Sheet::Exists {
+                    name, jobs, have, ..
+                },
+                B::CreateMissing,
+            ) => {
+                let jobs = missing(&jobs, &have);
+                (!jobs.is_empty()).then_some(Outcome::Batch {
+                    kind: BatchKind::Branch(name),
+                    jobs,
+                })
+            }
+            (Sheet::Exists { name, .. }, B::EditName | B::Cancel) => {
+                self.edit_branch_name(&name);
+                None
+            }
             (_, B::Cancel | B::SkipDiverged) => None,
             (sheet, _) => {
                 self.sheet = Some(sheet);
@@ -2039,7 +2265,8 @@ impl Panel {
         let (Sheet::Preflight { choice, .. }
         | Sheet::Diverged { choice, .. }
         | Sheet::Confirm { choice, .. }
-        | Sheet::Help { choice, .. }) = sheet;
+        | Sheet::Help { choice, .. }
+        | Sheet::Exists { choice, .. }) = sheet;
         let n = buttons.len();
         match sym {
             Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => {
@@ -2051,7 +2278,7 @@ impl Panel {
                 let button = buttons[(*choice).min(n - 1)];
                 return self.sheet_press(button);
             }
-            Keysym::Escape => self.sheet = None,
+            Keysym::Escape => return self.sheet_press(ReposButton::Cancel),
             _ => {}
         }
         None
@@ -2088,6 +2315,10 @@ impl Panel {
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         if only_ctrl && matches!(sym, Keysym::s | Keysym::S) {
             self.open_branch_menu(MenuAction::Switch, ctx);
+            return None;
+        }
+        if only_ctrl && matches!(sym, Keysym::n | Keysym::N) {
+            self.open_create_menu(ctx);
             return None;
         }
         let plain = !(mods.ctrl || mods.alt || mods.logo);
@@ -2244,10 +2475,11 @@ impl Panel {
         }
         // The open menu takes the click: elsewhere, it closes.
         if let Some(first) = self.branch_menu.as_ref().map(|m| m.first) {
-            let page = branch_page(ctx);
+            let page = self.menu_page(ctx);
             let len = self.shown_branches(ctx).len();
             let first = first.min(len.saturating_sub(page));
             return match hit {
+                ReposHit::BranchCreate => self.create_branch(ctx),
                 ReposHit::BranchRow(i) => self.pick_branch(first + i, ctx),
                 ReposHit::BranchDelete(i) if self.menu_action() == MenuAction::Switch => {
                     self.delete_branch(first + i, ctx)
@@ -2300,6 +2532,7 @@ impl Panel {
             | ReposHit::Splitter
             | ReposHit::BranchRow(_)
             | ReposHit::BranchDelete(_)
+            | ReposHit::BranchCreate
             | ReposHit::BranchMenu => {}
         }
         None
@@ -2592,7 +2825,6 @@ impl Panel {
         if selected.is_some_and(in_conflict) {
             buttons.extend([B::OpenInZed, B::MarkResolved, B::Continue, B::Abort]);
         } else {
-            buttons.push(B::Branch);
             buttons.extend([B::Commit, B::CommitPush, B::Push]);
             // After a rebase the branch and its upstream both moved on.
             if selected.is_some_and(|i| i.status.ahead > 0 && i.status.behind > 0) {
@@ -2880,6 +3112,34 @@ impl Panel {
                 let title = format!("{what} in {}?", repos(jobs.len()));
                 (title, lines.clone(), *choice)
             }
+            Sheet::Exists {
+                name,
+                jobs,
+                have,
+                choice,
+            } => {
+                let lines = jobs
+                    .iter()
+                    .map(|job| {
+                        let found = have.iter().find(|(r, _)| *r == job.root);
+                        let (text, tone) = match found.map(|(_, f)| f) {
+                            Some(Found::On) => ("on it already".to_owned(), Tone::Success),
+                            Some(Found::Local) => ("has it".to_owned(), Tone::Warning),
+                            Some(Found::Remote(remote)) => {
+                                (format!("has it on {remote}"), Tone::Warning)
+                            }
+                            None => ("doesn't have it".to_owned(), Tone::Normal),
+                        };
+                        (label(&job.root), text, tone)
+                    })
+                    .collect();
+                let title = if have.len() == jobs.len() {
+                    format!("{name} exists in all of them: switch to it?")
+                } else {
+                    format!("{name} exists in {} of {}", have.len(), repos(jobs.len()))
+                };
+                (title, lines, *choice)
+            }
             Sheet::Help { choice } => {
                 let lines = HELP_KEYS
                     .iter()
@@ -2942,7 +3202,7 @@ impl Panel {
             field: self.field.line(),
             field_focused: self.focus == Focus::Field && self.branch_menu.is_none(),
             placeholder: if self.checked_files.is_empty() {
-                "Branch name (check files to commit them)".into()
+                "Commit message (check files to commit them)".into()
             } else {
                 "Commit message".into()
             },
@@ -3002,14 +3262,31 @@ impl Panel {
         });
     }
 
+    /// Ask what to do with branch `name`, about to be created in `jobs`,
+    /// which those in `have` have already: Enter edits the name.
+    pub fn ask_exists(&mut self, name: String, jobs: Vec<Job>, have: Vec<(PathBuf, Found)>) {
+        self.branch_menu = None;
+        let mut sheet = Sheet::Exists {
+            name,
+            jobs,
+            have,
+            choice: 0,
+        };
+        let edit = sheet_buttons(&sheet).len() - 1;
+        if let Sheet::Exists { choice, .. } = &mut sheet {
+            *choice = edit;
+        }
+        self.sheet = Some(sheet);
+    }
+
     /// Ask which way to pull the repositories at `roots`, which diverged.
     pub fn ask_diverged(&mut self, roots: Vec<PathBuf>) {
         self.branch_menu = None;
         self.sheet = Some(Sheet::Diverged { roots, choice: 0 });
     }
 
-    /// A batch using the field's text (a branch, a commit) went through:
-    /// empty it for what comes next.
+    /// A batch using the field's text (a commit) went through: empty it
+    /// for what comes next.
     pub fn clear_field(&mut self) {
         self.field.clear();
     }
@@ -3511,39 +3788,8 @@ mod tests {
         );
         // What is wrong is in the field: it gets the keyboard.
         assert_eq!(panel.focus, Focus::Field);
-        fails(
-            &mut panel,
-            ctrl(),
-            Keysym::n,
-            &ctx,
-            "Type a branch name first",
-        );
-        fails(
-            &mut panel,
-            ctrl_shift(),
-            Keysym::N,
-            &ctx,
-            "Type a branch name first",
-        );
-        type_text(&mut panel, "feat x", &ctx);
+        type_text(&mut panel, "Fix", &ctx);
         // Typing takes the message away.
-        assert_eq!(panel.error, None);
-        fails(
-            &mut panel,
-            ctrl(),
-            Keysym::n,
-            &ctx,
-            "Not a branch name: it can't have spaces",
-        );
-        // Done, the message goes.
-        panel.field.set("feat/x");
-        assert_eq!(
-            press(&mut panel, ctrl(), Keysym::n, &ctx),
-            Some(Outcome::Batch {
-                kind: BatchKind::Branch("feat/x".into()),
-                jobs: jobs(&["gerdr"])
-            })
-        );
         assert_eq!(panel.error, None);
         // Nothing to retry, nothing to undo.
         fails(
@@ -3829,7 +4075,6 @@ mod tests {
         check_repo(&mut panel, "gerdr", &ctx);
         check_repo(&mut panel, "herdr", &ctx);
         assert_eq!(label(&panel, ReposButton::Push), "push 2");
-        assert_eq!(label(&panel, ReposButton::Branch), "branch 2");
         assert_eq!(label(&panel, ReposButton::Fetch), "fetch 2");
         // Only gerdr has files checked; herdr is pushed with it.
         assert_eq!(label(&panel, ReposButton::Commit), "commit 1");
@@ -4131,7 +4376,10 @@ mod tests {
         let panel = Panel::new(&items);
         let view = panel.view("gerdr", &ctx);
         assert_eq!(view.summary, "2 dirty · fetched 2m ago");
-        assert_eq!(view.placeholder, "Branch name (check files to commit them)");
+        assert_eq!(
+            view.placeholder,
+            "Commit message (check files to commit them)"
+        );
         let mut checked = Panel::new(&items);
         select_file(&mut checked, "gerdr", "src/git.rs");
         press(&mut checked, none(), Keysym::space, &ctx);
@@ -4461,18 +4709,16 @@ mod tests {
         assert_eq!(
             usual[..3],
             [
-                ReposButton::Branch,
                 ReposButton::Commit,
-                ReposButton::CommitPush
+                ReposButton::CommitPush,
+                ReposButton::Push
             ]
         );
         assert!(usual.contains(&ReposButton::Fetch));
         let hints = panel.view("p", &ctx).hints;
-        assert_eq!(hints[0].key, "Ctrl+N");
-        // Wanting text doesn't disable: pressed, it asks for it.
-        assert_eq!(hints[0].disabled, None);
+        assert_eq!(hints[0].key, "Ctrl+Enter");
         assert_eq!(
-            hints[1].disabled.as_deref(),
+            hints[0].disabled.as_deref(),
             Some("Check the files to commit")
         );
         select(&mut panel, "herdr");
@@ -4992,7 +5238,10 @@ mod tests {
         press(&mut panel, ctrl(), Keysym::s, &ctx);
         let view = panel.view("p", &ctx);
         assert!(!view.field_focused);
-        assert_eq!(view.branch.menu.unwrap().placeholder, "Find a branch");
+        assert_eq!(
+            view.branch.menu.unwrap().placeholder,
+            "Find or create a branch"
+        );
         // Whatever the case, each word somewhere in the name.
         type_text(&mut panel, "FEAT", &ctx);
         assert_eq!(menu_rows(&panel, &ctx), ["Feature/Login", "feat/x"]);
@@ -5007,13 +5256,20 @@ mod tests {
         }
         type_text(&mut panel, "mast", &ctx);
         assert_eq!(menu_rows(&panel, &ctx), ["main"]);
-        // Nothing found: Enter leaves the menu for another try.
-        type_text(&mut panel, "zz", &ctx);
+        // Nothing found: Enter leaves the menu for another try, unless
+        // the name could be a branch's, which it creates.
+        type_text(&mut panel, "z z", &ctx);
         assert!(menu_rows(&panel, &ctx).is_empty());
-        let empty = panel.view("p", &ctx).branch.menu.unwrap().empty;
-        assert_eq!(empty, "No branch matches");
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.empty, "No branch matches");
+        let create = menu.create.unwrap();
+        assert_eq!(create.label, "Can't create mastz z: it can't have spaces");
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.branch_menu.is_some());
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Not a branch name: it can't have spaces")
+        );
         // Enter picks what was found; Down moves among it.
         press(&mut panel, ctrl(), Keysym::a, &ctx);
         type_text(&mut panel, "b2", &ctx);
@@ -5031,6 +5287,155 @@ mod tests {
         assert_eq!(
             panel.view("p", &ctx).branch.menu.unwrap().query.as_str(),
             ""
+        );
+    }
+
+    #[test]
+    fn ctrl_n_opens_the_menu_to_create_a_branch() {
+        let items = branched();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, ctrl(), Keysym::n, &ctx);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.placeholder, "Name the new branch");
+        assert_eq!(menu.create, None);
+        // Enter creates the branch typed, though some are found.
+        type_text(&mut panel, "feat", &ctx);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.rows, ["feat/x"]);
+        assert_eq!(menu.picked, None);
+        let create = menu.create.unwrap();
+        assert_eq!(create.label, "Create feat from main");
+        assert!(create.picked);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::CreateBranch {
+                name: "feat".into(),
+                jobs: jobs(&["gerdr"]),
+            })
+        );
+        assert!(panel.branch_menu.is_none());
+        // The field is for commit messages alone.
+        assert_eq!(&*panel.field, "");
+    }
+
+    #[test]
+    fn the_switch_menu_offers_to_create_what_it_does_not_find() {
+        let items = branched();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        type_text(&mut panel, "feat", &ctx);
+        // Enter picks what was found; Up from it goes to creating.
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.picked, Some(0));
+        assert!(!menu.create.unwrap().picked);
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.picked, None);
+        assert!(menu.create.unwrap().picked);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.picked, Some(0));
+        // Ctrl+Enter creates, wherever the pick is.
+        let create = Some(Outcome::CreateBranch {
+            name: "feat".into(),
+            jobs: jobs(&["gerdr"]),
+        });
+        assert_eq!(press(&mut panel, ctrl(), Keysym::Return, &ctx), create);
+        // A branch shown by that name is picked, not created.
+        press(&mut panel, ctrl(), Keysym::s, &ctx);
+        type_text(&mut panel, "feat/x", &ctx);
+        assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().create, None);
+        // Nothing found: Enter creates it.
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        type_text(&mut panel, "fix/y", &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::CreateBranch {
+                name: "fix/y".into(),
+                jobs: jobs(&["gerdr"]),
+            })
+        );
+        // The menu to merge from creates nothing.
+        press(&mut panel, alt(), Keysym::m, &ctx);
+        type_text(&mut panel, "fix/y", &ctx);
+        assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().create, None);
+        // Ctrl+N there turns it into the menu to create.
+        press(&mut panel, ctrl(), Keysym::n, &ctx);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert!(menu.create.unwrap().picked);
+    }
+
+    #[test]
+    fn creating_a_branch_some_have_asks_first() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let all = || jobs(&["gerdr", "herdr", "zed"]);
+        let have = vec![
+            (root("gerdr"), Found::On),
+            (root("herdr"), Found::Remote("origin".into())),
+        ];
+        let mut panel = Panel::new(&items);
+        panel.ask_exists("feat/x".into(), all(), have.clone());
+        let sheet = panel.view("p", &ctx).sheet.unwrap();
+        assert_eq!(sheet.title, "feat/x exists in 2 of 3 repositories");
+        let lines: Vec<&str> = sheet.lines.iter().map(|(_, t, _)| t.as_str()).collect();
+        assert_eq!(
+            lines,
+            ["on it already", "has it on origin", "doesn't have it"]
+        );
+        assert_eq!(
+            sheet.buttons,
+            [
+                ReposButton::SwitchExisting,
+                ReposButton::CreateMissing,
+                ReposButton::EditName
+            ]
+        );
+        // Enter edits the name: back in the menu, to create it again.
+        assert_eq!(sheet.default, 2);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.query.as_str(), "feat/x");
+        assert_eq!(menu.placeholder, "Name the new branch");
+        // Esc does too.
+        panel.ask_exists("feat/x".into(), all(), have.clone());
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert!(panel.sheet.is_none() && panel.branch_menu.is_some());
+        // Switched where they have it but are not on it, made elsewhere.
+        panel.ask_exists("feat/x".into(), all(), have.clone());
+        let switch = ReposHit::Button(ReposButton::SwitchExisting);
+        assert_eq!(
+            panel.click(switch, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Branch("feat/x".into()),
+                jobs: jobs(&["herdr", "zed"]),
+            })
+        );
+        // Made only where it is missing.
+        panel.ask_exists("feat/x".into(), all(), have.clone());
+        let create = ReposHit::Button(ReposButton::CreateMissing);
+        assert_eq!(
+            panel.click(create, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Branch("feat/x".into()),
+                jobs: jobs(&["zed"]),
+            })
+        );
+        // All have it: nowhere to create it.
+        let have = vec![
+            (root("gerdr"), Found::Local),
+            (root("herdr"), Found::Local),
+            (root("zed"), Found::Local),
+        ];
+        panel.ask_exists("feat/x".into(), all(), have);
+        let sheet = panel.view("p", &ctx).sheet.unwrap();
+        assert_eq!(sheet.title, "feat/x exists in all of them: switch to it?");
+        assert_eq!(
+            sheet.buttons,
+            [ReposButton::SwitchExisting, ReposButton::EditName]
         );
     }
 }
