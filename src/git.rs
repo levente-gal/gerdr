@@ -110,8 +110,9 @@ pub struct Worktree {
     pub main: bool,
     /// Some file in it is changed, staged or untracked.
     pub dirty: bool,
-    /// Its branch is merged into the main worktree's HEAD, or merging it
-    /// would change nothing there (it was squashed in): likely done with.
+    /// Its branch's changes are all in the main worktree's HEAD or a
+    /// default branch, merged, squashed or picked (see `merged`): likely
+    /// done with.
     pub merged: bool,
     /// Its folder is gone; `git worktree prune` would drop it.
     pub gone: bool,
@@ -423,18 +424,13 @@ fn worktrees(dir: &Path, here: Option<&Path>) -> (Option<Worktree>, Vec<Worktree
     // The first is the main worktree: what the others' branches merge into.
     all[0].main = true;
     let main_head = all[0].head.clone();
-    let merged = main_head.as_deref().map_or_else(Vec::new, |head| {
-        let out = git(
-            dir,
-            &["branch", "--format=%(refname:short)", "--merged", head],
-        );
-        out.unwrap_or_default().lines().map(str::to_owned).collect()
-    });
+    let also: Vec<&str> = main_head.as_deref().into_iter().collect();
     for w in &mut all {
         w.merged = !w.main
-            && w.branch.as_ref().is_some_and(|b| {
-                merged.contains(b) || main_head.as_deref().is_some_and(|m| squashed(dir, m, w))
-            });
+            && w.branch.is_some()
+            && w.head
+                .as_deref()
+                .is_some_and(|head| merged(dir, head, &also));
         w.dirty =
             !w.gone && git(&w.path, &["status", "--porcelain"]).is_some_and(|o| !o.is_empty());
     }
@@ -442,27 +438,121 @@ fn worktrees(dir: &Path, here: Option<&Path>) -> (Option<Worktree>, Vec<Worktree
     (at.map(|i| all.remove(i)), all)
 }
 
-/// Whether merging `w`'s branch into `main_head` would change nothing:
-/// it is in already, squashed or picked. What `git merge-tree` says is
-/// kept per pair of commits, as those don't change.
-fn squashed(dir: &Path, main_head: &str, w: &Worktree) -> bool {
+/// Whether commit `rev`'s changes are all in a default branch (see
+/// `merge_targets`) or in one of commits `also`: it is in one, or merging
+/// it there would change nothing (it was squashed, rebased or picked in),
+/// or a commit there makes the very changes it makes, not undone since (it
+/// was squashed in, then changed again). One that changes nothing at all
+/// isn't. What git says is kept per pair of commits, as those don't change.
+pub fn merged(dir: &Path, rev: &str, also: &[&str]) -> bool {
     static SEEN: OnceLock<Mutex<HashMap<(String, String), bool>>> = OnceLock::new();
-    let Some(head) = w.head.clone() else {
+    let seen = SEEN.get_or_init(Default::default);
+    let rev = format!("{rev}^{{commit}}");
+    let Some(rev) = git(dir, &["rev-parse", "-q", "--verify", &rev]) else {
         return false;
     };
-    let key = (main_head.to_owned(), head);
-    let seen = SEEN.get_or_init(Default::default);
-    if let Some(&known) = seen.lock().unwrap().get(&key) {
-        return known;
+    let rev = rev.trim();
+    let mut targets = merge_targets(dir);
+    targets.extend(also.iter().map(|t| t.to_string()));
+    targets.iter().filter(|t| t.as_str() != rev).any(|target| {
+        let key = (target.clone(), rev.to_owned());
+        if let Some(&known) = seen.lock().unwrap().get(&key) {
+            return known;
+        }
+        let merged = merged_into(dir, target, rev);
+        seen.lock().unwrap().insert(key, merged);
+        merged
+    })
+}
+
+/// Whether commit `rev`'s changes are all in commit `target` (see `merged`).
+fn merged_into(dir: &Path, target: &str, rev: &str) -> bool {
+    if git(dir, &["merge-base", "--is-ancestor", rev, target]).is_some() {
+        return true;
     }
-    let merge = git(dir, &["merge-tree", "--write-tree", &key.0, &key.1]);
-    let tree = git(dir, &["rev-parse", &format!("{}^{{tree}}", key.0)]);
-    let squashed = match (merge, tree) {
-        (Some(merge), Some(tree)) => merge.lines().next() == tree.lines().next(),
-        _ => false,
+    let tree = |rev: &str| git(dir, &["rev-parse", &format!("{}^{{tree}}", rev.trim())]);
+    let Some(base) = git(dir, &["merge-base", target, rev]) else {
+        return false;
     };
-    seen.lock().unwrap().insert(key, squashed);
-    squashed
+    let base = base.trim();
+    if tree(base) == tree(rev) {
+        return false;
+    }
+    // Exit 1 on a conflict: no answer then.
+    let merge = git(dir, &["merge-tree", "--write-tree", target, rev]);
+    if merge.is_some_and(|m| m.lines().next() == tree(target).as_deref().map(str::trim)) {
+        return true;
+    }
+    picked(dir, target, base, rev)
+}
+
+/// Whether a commit of `target`'s since `base` makes the very changes
+/// `rev` makes since then, as a squash of it does, and none undoes them:
+/// their patch ids, which leave line numbers out, match.
+fn picked(dir: &Path, target: &str, base: &str, rev: &str) -> bool {
+    // A commit of `rev`'s changes on `base`, and one undoing them on top.
+    let commit = |tree: &str, parent: &str| {
+        let tree = format!("{tree}^{{tree}}");
+        let args = [
+            "-c",
+            "user.name=gerdr",
+            "-c",
+            "user.email=gerdr@localhost",
+            "commit-tree",
+            "--no-gpg-sign",
+            &tree,
+            "-p",
+            parent,
+            "-m",
+            "gerdr",
+        ];
+        git(dir, &args).map(|c| c.trim().to_owned())
+    };
+    let Some(does) = commit(rev, base) else {
+        return false;
+    };
+    let Some(undoes) = commit(base, &does) else {
+        return false;
+    };
+    // `=` marks one of them a commit of `target`'s matches.
+    let range = format!("{target}...{undoes}");
+    let args = [
+        "rev-list",
+        "--right-only",
+        "--cherry-mark",
+        "--no-merges",
+        &range,
+    ];
+    let Some(marks) = git(dir, &args) else {
+        return false;
+    };
+    let marked = |commit: &str| marks.lines().any(|l| l.strip_prefix('=') == Some(commit));
+    marked(&does) && !marked(&undoes)
+}
+
+/// The default branches others merge into, as commits: what each remote's
+/// HEAD points at, and any local or remote `main` or `master`.
+fn merge_targets(dir: &Path) -> Vec<String> {
+    let args = [
+        "for-each-ref",
+        "--format=%(objectname) %(refname) %(symref)",
+        "refs/remotes",
+        "refs/heads/main",
+        "refs/heads/master",
+    ];
+    let mut targets: Vec<String> = Vec::new();
+    for line in git(dir, &args).unwrap_or_default().lines() {
+        let mut fields = line.split(' ');
+        let (Some(commit), Some(name)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let symref = fields.next().unwrap_or("");
+        let default = !symref.is_empty() || name.ends_with("/main") || name.ends_with("/master");
+        if default && !targets.iter().any(|t| t == commit) {
+            targets.push(commit.to_owned());
+        }
+    }
+    targets
 }
 
 /// Remove worktree `w` of the repository whose main worktree is at `main`,
@@ -808,6 +898,9 @@ mod tests {
         assert!(topic.merged);
         assert!(!topic.needs_attention());
         assert!(squash_check(&repo.0, &topic).is_err());
+        // Still when its lines are changed again since.
+        repo.commit(&repo.0, "topic", "changed since");
+        assert!(repo.find("topic").merged);
         // And it goes, branch and all.
         assert_eq!(remove_worktree(&repo.0, &topic, false), Ok(()));
         assert!(!topic.path.exists());

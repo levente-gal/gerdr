@@ -21,7 +21,7 @@ use std::{
 
 use crate::{
     desktop::shell_quote,
-    git::{Change, InProgress},
+    git::{self, Change, InProgress},
 };
 
 /// How long a command that talks to a remote may take before it is killed.
@@ -804,7 +804,7 @@ pub fn undo(dir: &Path, before: &Head, after: &Head, soft: bool) -> OpResult {
 
 /// How many commits of local branch `name` no other branch, remote branch
 /// or tag has: what deleting it loses. Zero when its changes are all in a
-/// default branch already, squashed or rebased there (see `squash_merged`).
+/// default branch already, squashed or rebased there (see `git::merged`).
 /// `None` when git can't tell.
 pub fn unmerged_commits(dir: &Path, name: &str) -> Option<usize> {
     let exclude = format!("--exclude={name}");
@@ -819,61 +819,10 @@ pub fn unmerged_commits(dir: &Path, name: &str) -> Option<usize> {
         "--tags",
     ];
     let count = query(dir, &args)?.trim().parse().ok()?;
-    if count > 0 && squash_merged(dir, name) {
+    if count > 0 && git::merged(dir, &format!("refs/heads/{name}"), &[]) {
         return Some(0);
     }
     Some(count)
-}
-
-/// Whether merging local branch `name` into a default branch would change
-/// nothing, as after a squash or rebase merge of it: every change it makes
-/// is there. One that changes nothing at all isn't, nor is one whose merge
-/// conflicts (as when its lines were changed again since).
-fn squash_merged(dir: &Path, name: &str) -> bool {
-    let branch = format!("refs/heads/{name}");
-    let tree = |rev: &str| {
-        let rev = format!("{}^{{tree}}", rev.trim());
-        query(dir, &["rev-parse", "-q", "--verify", &rev]).map(|t| t.trim().to_owned())
-    };
-    merge_targets(dir, &branch).iter().any(|target| {
-        let Some(base) = query(dir, &["merge-base", target, &branch]) else {
-            return false;
-        };
-        // Exit 1 on a conflict: no answer then.
-        let Some(merged) = query(dir, &["merge-tree", "--write-tree", target, &branch]) else {
-            return false;
-        };
-        let merged = merged.lines().next().map(str::to_owned);
-        tree(&base) != tree(&branch) && merged.is_some() && merged == tree(target)
-    })
-}
-
-/// The default branches a branch is merged into, as refs, but `branch`:
-/// what each remote's HEAD points at, and any local or remote `main` or
-/// `master`.
-fn merge_targets(dir: &Path, branch: &str) -> Vec<String> {
-    let args = [
-        "for-each-ref",
-        "--format=%(refname) %(symref)",
-        "refs/remotes",
-        "refs/heads/main",
-        "refs/heads/master",
-    ];
-    let mut targets: Vec<String> = Vec::new();
-    for line in query(dir, &args).unwrap_or_default().lines() {
-        let (name, symref) = line.split_once(' ').unwrap_or((line, ""));
-        let target = if !symref.is_empty() {
-            symref
-        } else if name.ends_with("/main") || name.ends_with("/master") {
-            name
-        } else {
-            continue;
-        };
-        if target != branch && !targets.iter().any(|t| t == target) {
-            targets.push(target.to_owned());
-        }
-    }
-    targets
 }
 
 /// Delete local branch `name`; unless `force`, only when that loses no
@@ -1603,11 +1552,11 @@ mod tests {
         squash("reverted", "main");
         git(r, &["revert", "--no-edit", "HEAD"]);
         assert_eq!(unmerged_commits(r, "reverted"), Some(1));
-        // Nor when changed again since: that merge conflicts.
+        // Still when changed again since, though that merge conflicts.
         branch("changed", &["one"]);
         squash("changed", "main");
         commit(r, "changed", "other");
-        assert_eq!(unmerged_commits(r, "changed"), Some(1));
+        assert_eq!(unmerged_commits(r, "changed"), Some(0));
         // A branch that changes nothing loses its commits.
         branch("undone", &["one"]);
         git(r, &["rm", "-q", "undone"]);
