@@ -309,7 +309,7 @@ impl Gerdr {
 
     /// Show tab `t` of workspace `w` with the pane in `leaf` focused, or
     /// its placeholder while the window is on its way.
-    fn show_leaf(&mut self, w: usize, t: usize, leaf: u32) {
+    pub(crate) fn show_leaf(&mut self, w: usize, t: usize, leaf: u32) {
         self.active_workspace = w;
         let ws = &mut self.workspaces[w];
         ws.active_tab = t;

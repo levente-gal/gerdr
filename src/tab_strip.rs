@@ -184,6 +184,7 @@ impl Gerdr {
             hover_alpha: 0,
             renaming,
             elsewhere,
+            watch: self.focused_pull_request().map(|(_, _, watched)| watched),
         };
         view.hover = self.tab_hover.over();
         view.hover_alpha = self.tab_hover.alpha_over(Instant::now());
@@ -243,7 +244,13 @@ impl Gerdr {
     /// The strip's layout, for presses: from what it shows now.
     fn tab_strip_layout(&self, view: &TabStripView) -> TabLayout {
         let strip = self.tab_strip_rect();
-        chrome::tab_layout(view.tabs.len(), strip.size, view.prefix, view.overflow())
+        chrome::tab_layout(
+            view.tabs.len(),
+            strip.size,
+            view.prefix,
+            view.overflow(),
+            view.watch.is_some(),
+        )
     }
 
     /// The keys the strip's menus and tooltips name, from the help.
@@ -295,6 +302,7 @@ impl Gerdr {
                 self.hold(Reorderable::Tab);
             }
             (BTN_LEFT, Some(TabHit::Plus)) => self.new_tab(),
+            (BTN_LEFT, Some(TabHit::Watch)) => self.toggle_watch(),
             _ => {}
         }
     }
@@ -346,6 +354,15 @@ impl Gerdr {
                 &mode_tooltip(view.mode, self.theme() == chrome::Theme::Dark),
                 anchor(layout.toggle),
             ),
+            TabHit::Watch => {
+                let (_, n, watched) = self.focused_pull_request()?;
+                let text = if watched {
+                    format!("Stop watching the CI of #{n}")
+                } else {
+                    format!("Watch the CI of #{n}")
+                };
+                Tooltip::new(&text, anchor(layout.watch?))
+            }
         })
     }
 
@@ -381,7 +398,7 @@ impl Gerdr {
                 anchor: anchor(layout.toggle),
                 items: theme_items(view.mode),
             }),
-            TabHit::Overflow | TabHit::Prefix => None,
+            TabHit::Overflow | TabHit::Prefix | TabHit::Watch => None,
         }
     }
 }

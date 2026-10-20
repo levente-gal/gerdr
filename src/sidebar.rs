@@ -12,9 +12,11 @@ use crate::{
     agents::AgentKey,
     anim::quantize,
     chrome::{
-        self, AgentView, CardState, Rect, RowState, SidebarHit, SidebarLayout, SidebarState,
-        TooltipRow, WorkspaceView,
+        self, AgentView, CardState, CiCardState, Rect, RowState, SidebarHit, SidebarLayout,
+        SidebarState, TooltipRow, WorkspaceView,
     },
+    ci::{self, Subject},
+    ci_watch::ci_state_word,
     git::Worktree,
     home_dir,
     input::{BTN_LEFT, BTN_MIDDLE},
@@ -138,6 +140,17 @@ impl Gerdr {
                     .collect()
             })
             .collect();
+        let ci = workspaces
+            .iter()
+            .enumerate()
+            .map(|(i, ws)| CiCardState {
+                hover: quantize(hover.alpha(SidebarHit::Ci(i), now)),
+                chips: (0..ws.ci.as_ref().map_or(0, |ci| ci.chips.len()))
+                    .map(|k| quantize(hover.alpha(SidebarHit::CiChip(i, k), now)))
+                    .collect(),
+                others: quantize(hover.alpha(SidebarHit::CiOthers(i), now)),
+            })
+            .collect();
         let plus = quantize(hover.alpha(SidebarHit::Plus, now));
         let plus_open = self
             .context_menu
@@ -153,6 +166,7 @@ impl Gerdr {
             density: self.density,
             rows,
             cards,
+            ci,
             plus,
             plus_open,
             repos,
@@ -196,6 +210,18 @@ impl Gerdr {
                 let card = self.agent_views().get(i).and_then(|c| c.get(k)).cloned();
                 if let Some(AgentKey::Cursor(chat)) = card.map(|c| c.key) {
                     self.delete_cursor_chat(&chat);
+                }
+            }
+            (SidebarHit::CiChip(i, k), BTN_LEFT) => {
+                if let Some((_, row)) = self.ci_row(i, k) {
+                    let link = row.link.clone();
+                    self.open_github(Some(link));
+                }
+            }
+            (SidebarHit::CiOthers(i), BTN_LEFT) => {
+                if let Some(repo) = self.ci_repo(i) {
+                    let link = repo.actions_url();
+                    self.open_github(Some(link));
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
@@ -242,7 +268,10 @@ impl Gerdr {
         let agents = self.agent_views();
         match hit? {
             SidebarHit::Plus => {
-                let tip = Tooltip::new("New terminal, folder, project or Cursor", layout.plus);
+                let tip = Tooltip::new(
+                    "New terminal, folder, project, Cursor or GitHub",
+                    layout.plus,
+                );
                 let help = self.keymap.help();
                 let keys: Vec<_> = ["terminal workspace in home", "open project"]
                     .into_iter()
@@ -323,6 +352,39 @@ impl Gerdr {
                     .then(|| worktrees_tooltip(worktrees, root, row.rect))
             }
             SidebarHit::Header => None,
+            SidebarHit::Ci(i) => {
+                let repo = self.ci_repo(i)?;
+                let card = layout.ci.get(i)?.as_ref()?.card;
+                Some(Tooltip::new(&format!("CI of {}", repo.slug), card))
+            }
+            SidebarHit::CiChip(i, k) => {
+                let (_, row) = self.ci_row(i, k)?;
+                let rect = *layout.ci.get(i)?.as_ref()?.chips.get(k)?;
+                let label = ci::subject_label(&row.subject);
+                let text = match &row.title {
+                    Some(title) => format!("{label} {title}"),
+                    None => label,
+                };
+                let mut fields = vec![("Status".to_owned(), ci_state_word(row.state).to_owned())];
+                fields.extend(
+                    row.checks
+                        .iter()
+                        .map(|check| (check.name.clone(), ci_state_word(check.state).to_owned())),
+                );
+                let tip = Tooltip::new(&text, rect).fields(fields);
+                Some(if row.watched {
+                    tip.key("right click to unwatch")
+                } else {
+                    tip
+                })
+            }
+            SidebarHit::CiOthers(i) => {
+                let n = self.ci_repo(i)?.others_running;
+                let rect = layout.ci.get(i)?.as_ref()?.others?;
+                let runs = if n == 1 { "run" } else { "runs" };
+                let text = format!("{n} other {runs} going on · open the Actions page");
+                Some(Tooltip::new(&text, rect))
+            }
         }
     }
 
@@ -334,6 +396,30 @@ impl Gerdr {
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
+            SidebarHit::Ci(i) | SidebarHit::CiOthers(i) => {
+                let repo = self.ci_repo(i)?;
+                let items = vec![
+                    MenuItem::new("Open Actions", MenuAction::OpenGitHub(repo.actions_url())),
+                    MenuItem::new("Open repository", MenuAction::OpenGitHub(repo.web_url())),
+                ];
+                Some(MenuSpec { anchor: at, items })
+            }
+            SidebarHit::CiChip(i, k) => {
+                let (repo, row) = self.ci_row(i, k)?;
+                let mut items = vec![MenuItem::new(
+                    "Open",
+                    MenuAction::OpenGitHub(row.link.clone()),
+                )];
+                if let (true, Subject::Pr(n)) = (row.watched, &row.subject) {
+                    let key = ci::key(&repo.host, &repo.slug);
+                    items.push(MenuItem::new("Unwatch", MenuAction::Unwatch(key, *n)));
+                }
+                items.push(MenuItem::new(
+                    "Open Actions",
+                    MenuAction::OpenGitHub(repo.actions_url()),
+                ));
+                Some(MenuSpec { anchor: at, items })
+            }
             SidebarHit::Card(i, k) | SidebarHit::CardClose(i, k) => {
                 let card = self.agent_views().get(i)?.get(k)?.clone();
                 let mut items = vec![MenuItem::new(
@@ -402,6 +488,7 @@ impl Gerdr {
                     "open project",
                 ),
                 MenuItem::new("New Cursor", MenuAction::NewCursor),
+                MenuItem::new("GitHub page", MenuAction::NewGitHub),
             ],
         }
     }

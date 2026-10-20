@@ -1,13 +1,13 @@
 //! The tab strip: what each tab shows, where the tabs, the "+" button, the
-//! chips at the right end and the theme switch go, and how the strip is
-//! drawn. Every rect the layout hands out is the rect the painter draws,
+//! chips and the watch button at the right end and the theme switch go,
+//! and how the strip is drawn. Every rect the layout hands out is the rect the painter draws,
 //! so a click lands where the pill is.
 
 use super::{
     Canvas, Density, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING, Painter,
-    Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH, Theme, ThemeMode,
-    cross, field_text, icon_sdf, mix, moon, new_tab, no_restart, physical, rounded_rect, segment,
-    status_label, status_mark, sun, tab_strip_height,
+    Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH, Theme,
+    ThemeMode, cross, eye, field_text, icon_sdf, mix, moon, new_tab, no_restart, physical,
+    rounded_rect, segment, status_label, status_mark, sun, tab_strip_height,
 };
 use crate::herdr::{AgentInfo, AgentStatus, PaneState, Process, TabDetail};
 use crate::paths::{repo_root, short_path, tidy_title};
@@ -288,6 +288,9 @@ pub enum TabHit {
     Prefix,
     /// The theme switch.
     Toggle,
+    /// The button watching (or no longer watching) the CI of the pull
+    /// request the focused pane shows.
+    Watch,
 }
 
 /// Everything the tab strip is drawn from.
@@ -308,6 +311,9 @@ pub struct TabStripView {
     pub renaming: Option<(usize, Line)>,
     /// The workspaces not shown, and how many of them have a blocked agent.
     pub elsewhere: (usize, usize),
+    /// Whether the CI of the pull request the focused pane shows is
+    /// watched; `None` hides the watch button (not a pull request's page).
+    pub watch: Option<bool>,
 }
 
 impl TabStripView {
@@ -323,6 +329,7 @@ impl TabStripView {
             hover_alpha: 0,
             renaming: None,
             elsewhere: (0, 0),
+            watch: None,
         }
     }
 
@@ -351,6 +358,11 @@ const EDGE: i32 = 4;
 const OVERFLOW_WIDTH: i32 = 44;
 const PREFIX_WIDTH: i32 = 64;
 const PREFIX_HEIGHT: i32 = 20;
+/// The watch button: an eye and "Watch CI" (or "Watching"), and the gap
+/// between them.
+const WATCH_WIDTH: i32 = 96;
+const WATCH_ICON: i32 = 16;
+const WATCH_GAP: i32 = 5;
 /// The "×" of a tab: its square, and its inset from the tab's right edge.
 const CLOSE: i32 = 22;
 const CLOSE_INSET: i32 = 5;
@@ -362,8 +374,8 @@ const RENAME_INSET: i32 = 4;
 /// Where everything in a strip sits (strip coordinates): the tabs (each
 /// one's rect runs up to and including its 1 px border on the right, so
 /// the strip has no dead gaps), their "×" buttons (empty rects on tabs too
-/// narrow for one), the "+" pill, the overflow chip and the PREFIX badge
-/// when shown, and the theme switch at the right end.
+/// narrow for one), the "+" pill, the overflow chip, the PREFIX badge and
+/// the watch button when shown, and the theme switch at the right end.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabLayout {
     pub tabs: Vec<Rect>,
@@ -371,6 +383,8 @@ pub struct TabLayout {
     pub plus: Rect,
     pub overflow: Option<Rect>,
     pub prefix: Option<Rect>,
+    /// The watch button, when shown.
+    pub watch: Option<Rect>,
     pub toggle: Rect,
 }
 
@@ -387,6 +401,9 @@ impl TabLayout {
         }
         if self.prefix.as_ref().is_some_and(inside) {
             return Some(TabHit::Prefix);
+        }
+        if self.watch.as_ref().is_some_and(inside) {
+            return Some(TabHit::Watch);
         }
         if let Some(i) = self.closes.iter().position(inside) {
             return Some(TabHit::Close(i));
@@ -408,14 +425,16 @@ impl TabLayout {
 }
 
 /// The layout of a strip of `size` holding `count` tabs, with the PREFIX
-/// badge when `prefix` and the overflow chip when `overflow`. The chips
-/// and the switch keep the right end; the tabs share what is left of the
-/// "+", at most `TAB_MAX_WIDTH` each.
+/// badge when `prefix`, the overflow chip when `overflow` and the watch
+/// button when `watch`. The chips, the button and the switch keep the
+/// right end; the tabs share what is left of the "+", at most
+/// `TAB_MAX_WIDTH` each.
 pub fn tab_layout(
     count: usize,
     size: Size<i32, Logical>,
     prefix: bool,
     overflow: bool,
+    watch: bool,
 ) -> TabLayout {
     let (width, height) = (size.w, size.h);
     let top = (height - PILL) / 2;
@@ -431,6 +450,10 @@ pub fn tab_layout(
     let overflow = overflow.then(|| {
         right -= CHIP_GAP + OVERFLOW_WIDTH;
         Rectangle::new((right, top).into(), (OVERFLOW_WIDTH, PILL).into())
+    });
+    let watch = watch.then(|| {
+        right -= CHIP_GAP + WATCH_WIDTH;
+        Rectangle::new((right, top).into(), (WATCH_WIDTH, PILL).into())
     });
     let room = (right - CHIP_GAP - PILL - PLUS_GAP).max(0);
     let tab_w = if count == 0 {
@@ -465,6 +488,7 @@ pub fn tab_layout(
         plus,
         overflow,
         prefix,
+        watch,
         toggle,
     }
 }
@@ -483,7 +507,13 @@ pub fn tab_slot(layout: &TabLayout, x: f64) -> usize {
 /// strip sits in the window.
 pub fn tab_rename_field(view: &TabStripView, strip: Rect, scale: f64) -> Option<FieldSpot> {
     let (t, line) = view.renaming.as_ref()?;
-    let layout = tab_layout(view.tabs.len(), strip.size, view.prefix, view.overflow());
+    let layout = tab_layout(
+        view.tabs.len(),
+        strip.size,
+        view.prefix,
+        view.overflow(),
+        view.watch.is_some(),
+    );
     let mut area = layout.rename_field(*t)?;
     area.loc += strip.loc;
     Some(FieldSpot {
@@ -524,8 +554,8 @@ fn mode_icon(mode: ThemeMode) -> fn(f32, f32, f32) -> f32 {
 impl Painter {
     /// The tab strip: one line per tab (status mark, number, title, "×" on
     /// the active tab and under the pointer), the "+" pill after them, and
-    /// at the right end the overflow chip, the PREFIX badge and the theme
-    /// switch. A strip lower than the comfortable height is compact.
+    /// at the right end the watch button, the overflow chip, the PREFIX
+    /// badge and the theme switch. A strip lower than the comfortable height is compact.
     pub(super) fn tab_strip_view(
         &self,
         view: &TabStripView,
@@ -546,7 +576,13 @@ impl Painter {
         c.fill(0, 0, c.w, c.h, p.tab_bar);
         c.fill(0, c.h - line, c.w, line, p.border);
 
-        let layout = tab_layout(view.tabs.len(), size, view.prefix, view.overflow());
+        let layout = tab_layout(
+            view.tabs.len(),
+            size,
+            view.prefix,
+            view.overflow(),
+            view.watch.is_some(),
+        );
         let band = (0, c.h);
         for (i, (rect, tab)) in layout.tabs.iter().zip(&view.tabs).enumerate() {
             let (x, w) = (
@@ -682,6 +718,18 @@ impl Painter {
             icon_sdf(&mut c, badge, scale, p.warning, |x, y| x.hypot(y) - 3.2 * s);
         }
 
+        if let (Some(button), Some(watching)) = (layout.watch, view.watch) {
+            self.watch_button(
+                &mut c,
+                button,
+                watching,
+                lit(TabHit::Watch),
+                alpha,
+                scale,
+                p,
+            );
+        }
+
         if let Some(badge) = layout.prefix {
             let (bx, by, bw, bh) = super::rect_px(badge, scale);
             c.rounded(bx, by, bw, bh, bh / 2.0, p.accent);
@@ -699,6 +747,61 @@ impl Painter {
         c.into_buffer(true)
     }
 
+    /// The button watching the CI of the pull request shown, at `rect`: an
+    /// outlined pill saying "Watch CI", or while `watching` a filled one
+    /// saying "Watching"; lighter while `lit` (fading in by `alpha`).
+    #[allow(clippy::too_many_arguments)]
+    fn watch_button(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        watching: bool,
+        lit: bool,
+        alpha: f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (label, content) = if watching {
+            let fill = if lit {
+                mix(p.accent, p.text, 0.15 * alpha)
+            } else {
+                p.accent
+            };
+            self.pill(c, rect, PILL_RADIUS, fill, scale);
+            ("Watching", p.on_accent)
+        } else {
+            let b = px(1).max(1) as f32;
+            let fill = if lit {
+                mix(p.tab_bar, p.element, alpha)
+            } else {
+                p.tab_bar
+            };
+            let (x, y, w, h) = super::rect_px(rect, scale);
+            let r = PILL_RADIUS * s;
+            c.rounded(x, y, w, h, r, p.border);
+            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+            ("Watch CI", if lit { p.text } else { p.muted })
+        };
+        // The eye and the label, centred together.
+        let text_w = self.text_width(label, SMALL_FONT_SIZE, scale) / s;
+        let content_w = (WATCH_ICON + WATCH_GAP) as f32 + text_w;
+        let start = rect.loc.x + ((rect.size.w as f32 - content_w) / 2.0).round() as i32;
+        let icon = Rectangle::new((start, rect.loc.y).into(), (WATCH_ICON, rect.size.h).into());
+        icon_sdf(c, icon, scale, content, |x, y| eye(x, y, s));
+        self.text(
+            c,
+            label,
+            SMALL_FONT_SIZE,
+            px(start + WATCH_ICON + WATCH_GAP) as f32,
+            px(rect.loc.x + rect.size.w) as f32,
+            (px(rect.loc.y), px(rect.size.h)),
+            scale,
+            content,
+        );
+    }
+
     /// A rounded pill filling `rect` (logical) with corners of `radius`.
     fn pill(&self, c: &mut Canvas, rect: Rect, radius: f32, color: Rgb, scale: f64) {
         let (x, y, w, h) = super::rect_px(rect, scale);
@@ -713,14 +816,21 @@ pub fn tab_strip_hit(
     size: Size<i32, Logical>,
     pos: Point<i32, Logical>,
 ) -> Option<TabHit> {
-    tab_layout(view.tabs.len(), size, view.prefix, view.overflow()).hit(pos.x, pos.y)
+    tab_layout(
+        view.tabs.len(),
+        size,
+        view.prefix,
+        view.overflow(),
+        view.watch.is_some(),
+    )
+    .hit(pos.x, pos.y)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CLOSE, EDGE, PILL, PLUS_GAP, TAB_MAX_WIDTH, TabHit, TabStripView, TabView, tab_layout,
-        tab_rename_field, tab_slot,
+        CHIP_GAP, CLOSE, EDGE, PILL, PLUS_GAP, TAB_MAX_WIDTH, TabHit, TabStripView, TabView,
+        WATCH_WIDTH, tab_layout, tab_rename_field, tab_slot,
     };
     use crate::chrome::{
         Density, Painter, Rect, Rgb, Theme, ThemeMode, inside, mix, tab_strip_height,
@@ -904,7 +1014,7 @@ mod tests {
     fn the_layout_tiles_the_strip_without_gaps_at_both_densities() {
         for density in [Density::Comfortable, Density::Compact] {
             let size = strip(density);
-            let l = tab_layout(3, size, true, true);
+            let l = tab_layout(3, size, true, true, false);
             let h = size.h;
             // Tabs run from the left edge, each straight after the last,
             // the full height of the strip.
@@ -945,20 +1055,20 @@ mod tests {
     #[test]
     fn squeezed_tabs_make_room_for_the_chips_and_lose_their_close() {
         let size = strip(Density::Comfortable);
-        let free = tab_layout(8, size, false, false);
-        let chips = tab_layout(8, size, true, true);
+        let free = tab_layout(8, size, false, false, false);
+        let chips = tab_layout(8, size, true, true, false);
         assert!(chips.tabs[0].size.w < free.tabs[0].size.w);
         let last = chips.tabs[7];
         assert!(chips.plus.loc.x + PILL < chips.overflow.unwrap().loc.x);
         assert_eq!(chips.plus.loc.x, last.loc.x + last.size.w + PLUS_GAP);
-        let narrow = tab_layout(20, (400, 36).into(), false, false);
+        let narrow = tab_layout(20, (400, 36).into(), false, false, false);
         assert!(narrow.closes.iter().all(|c| c.size.w == 0));
         assert!(matches!(
             narrow.hit(narrow.tabs[3].loc.x + 2, 10),
             Some(TabHit::Tab(3))
         ));
         // Nothing to hit at all without tabs, but the switch.
-        let none = tab_layout(0, size, false, false);
+        let none = tab_layout(0, size, false, false, false);
         assert!(none.tabs.is_empty());
         assert_eq!(none.hit(none.plus.loc.x + 2, none.plus.loc.y + 2), None);
         assert_eq!(none.hit(size.w - EDGE - 2, 10), Some(TabHit::Toggle));
@@ -967,7 +1077,7 @@ mod tests {
     #[test]
     fn hits_map_every_part_of_the_strip() {
         let size = strip(Density::Comfortable);
-        let l = tab_layout(2, size, true, true);
+        let l = tab_layout(2, size, true, true, false);
         let mid = |r: Rect| (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2);
         let at = |(x, y)| l.hit(x, y);
         assert_eq!(at(mid(l.tabs[0])), Some(TabHit::Tab(0)));
@@ -986,7 +1096,7 @@ mod tests {
 
     #[test]
     fn a_drag_finds_the_slot_under_the_pointer() {
-        let strip = |count| tab_layout(count, (900, PILL).into(), false, false);
+        let strip = |count| tab_layout(count, (900, PILL).into(), false, false, false);
         assert_eq!(tab_slot(&strip(3), -5.0), 0);
         assert_eq!(tab_slot(&strip(3), 10.0), 0);
         assert_eq!(tab_slot(&strip(3), 300.0), 1);
@@ -1014,7 +1124,7 @@ mod tests {
         let mut view = TabStripView::plain(tabs, 0, false, ThemeMode::System);
         view.elsewhere = (2, 1);
         view.hover_alpha = 16;
-        let l = tab_layout(2, size, false, true);
+        let l = tab_layout(2, size, false, true, false);
         let paint = |view: &TabStripView| painter.tab_strip_view(view, Theme::Dark, size, 1.0);
         let at = |view: &TabStripView, x, y| pixel(paint(view), size.w, x, y);
 
@@ -1070,7 +1180,7 @@ mod tests {
         let size = strip(Density::Compact);
         let tabs = vec![TabView::default(); 4];
         let mut view = TabStripView::plain(tabs, 1, true, ThemeMode::Light);
-        let l = tab_layout(4, size, true, false);
+        let l = tab_layout(4, size, true, false, false);
         let badge = l.prefix.unwrap();
         let buffer = painter.tab_strip_view(&view, Theme::Light, size, 1.0);
         let at = |x, y| pixel(buffer.clone(), size.w, x, y);
@@ -1105,5 +1215,71 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn the_watch_button_takes_room_left_of_the_chips_off_the_tabs() {
+        let size = strip(Density::Comfortable);
+        let l = tab_layout(8, size, true, true, true);
+        let without = tab_layout(8, size, true, true, false);
+        assert_eq!(without.watch, None);
+        let watch = l.watch.expect("a watch button");
+        assert_eq!(watch.size, (WATCH_WIDTH, PILL).into());
+        assert_eq!(watch.loc.y, l.plus.loc.y);
+        assert_eq!(
+            watch.loc.x + watch.size.w + CHIP_GAP,
+            l.overflow.unwrap().loc.x
+        );
+        // The tabs and the "+" make room for it.
+        assert!(l.tabs[0].size.w < without.tabs[0].size.w);
+        assert!(l.plus.loc.x + PILL < watch.loc.x);
+        let last = l.tabs[7];
+        assert!(last.loc.x + last.size.w < watch.loc.x);
+        let mid = |r: Rect| (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2);
+        let (x, y) = mid(watch);
+        assert_eq!(l.hit(x, y), Some(TabHit::Watch));
+        assert_eq!(l.hit(watch.loc.x, y), Some(TabHit::Watch));
+        assert_eq!(l.hit(watch.loc.x - 1, y), None);
+        assert_eq!(l.hit(x, watch.loc.y - 1), None);
+        let (x, y) = mid(l.overflow.unwrap());
+        assert_eq!(l.hit(x, y), Some(TabHit::Overflow));
+    }
+
+    #[test]
+    fn the_watch_button_lights_on_its_hit_rect_and_fills_while_watching() {
+        let painter = Painter::new();
+        let p = Theme::Dark.palette();
+        let size = strip(Density::Comfortable);
+        let mut view = TabStripView::plain(vec![TabView::default()], 0, false, ThemeMode::System);
+        view.watch = Some(false);
+        view.hover_alpha = 16;
+        let w = tab_layout(1, size, false, false, true).watch.unwrap();
+        let at = |view: &TabStripView, x, y| {
+            pixel(
+                painter.tab_strip_view(view, Theme::Dark, size, 1.0),
+                size.w,
+                x,
+                y,
+            )
+        };
+        let y = w.loc.y + w.size.h / 2;
+        // Not watching: an outline around the strip's colour, the
+        // element's under the pointer, inside the rect only.
+        assert_eq!(at(&view, w.loc.x + 3, y), p.tab_bar);
+        assert_eq!(at(&view, w.loc.x, y), p.border);
+        view.hover = Some(TabHit::Watch);
+        assert_eq!(at(&view, w.loc.x + 3, y), p.element);
+        assert_eq!(at(&view, w.loc.x + w.size.w - 3, y), p.element);
+        assert_eq!(at(&view, w.loc.x - 1, y), p.tab_bar);
+        assert_eq!(at(&view, w.loc.x + w.size.w, y), p.tab_bar);
+        // Watching: filled with the accent.
+        view.watch = Some(true);
+        view.hover = None;
+        assert_eq!(at(&view, w.loc.x + 3, y), p.accent);
+        assert_eq!(at(&view, w.loc.x - 1, y), p.tab_bar);
+        // Hidden: nothing there.
+        view.watch = None;
+        assert_eq!(at(&view, w.loc.x + 3, y), p.tab_bar);
+        painter.tab_strip_view(&view, Theme::Light, size, 2.0);
     }
 }

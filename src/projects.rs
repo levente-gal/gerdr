@@ -44,6 +44,9 @@ pub struct Store {
     /// Which of Cursor's idle chats stay shown and which were deleted.
     #[serde(default, skip_serializing_if = "History::is_empty")]
     pub cursor_history: History,
+    /// The pull requests whose CI is watched, by repository.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ci_watched: crate::ci::Watched,
     #[serde(skip)]
     books: Books,
 }
@@ -58,6 +61,8 @@ struct State {
     quit_choice: Option<QuitChoice>,
     #[serde(default, skip_serializing_if = "History::is_empty")]
     cursor_history: History,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ci_watched: crate::ci::Watched,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -207,6 +212,8 @@ pub enum Kind {
     Terminal,
     /// The project's Cursor.
     Cursor,
+    /// Its repository's GitHub pages.
+    Github,
 }
 
 /// Which Python venv the workspace's shells activate.
@@ -330,6 +337,7 @@ impl Store {
         self.last_active = state.last_active;
         self.quit_choice = state.quit_choice;
         self.cursor_history = state.cursor_history;
+        self.ci_watched = state.ci_watched;
     }
 
     fn state(&self) -> State {
@@ -338,6 +346,7 @@ impl Store {
             last_active: self.last_active.clone(),
             quit_choice: self.quit_choice,
             cursor_history: self.cursor_history.clone(),
+            ci_watched: self.ci_watched.clone(),
         }
     }
 
@@ -1395,6 +1404,7 @@ mod tests {
             last_active: Some("api".into()),
             quit_choice: Some(QuitChoice::Keep),
             cursor_history: History::default(),
+            ci_watched: Default::default(),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

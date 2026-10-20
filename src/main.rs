@@ -11,6 +11,8 @@ mod agents;
 mod anim;
 mod app_icons;
 mod chrome;
+mod ci;
+mod ci_watch;
 mod clipboard;
 mod config;
 mod cursor_agents;
@@ -775,13 +777,15 @@ pub enum PickFor {
     Venv { project: String, workspace: String },
 }
 
-/// What a workspace opens with: Zed over a terminal, just a terminal, or
-/// the project's Cursor (see `Gerdr::open_cursor`).
+/// What a workspace opens with: Zed over a terminal, just a terminal, the
+/// project's Cursor (see `Gerdr::open_cursor`), or its repository's GitHub
+/// pages (see `Gerdr::open_github`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceKind {
     Project,
     Terminal,
     Cursor,
+    GitHub,
 }
 
 impl WorkspaceKind {
@@ -790,6 +794,7 @@ impl WorkspaceKind {
             projects::Kind::Project => Self::Project,
             projects::Kind::Terminal => Self::Terminal,
             projects::Kind::Cursor => Self::Cursor,
+            projects::Kind::Github => Self::GitHub,
         }
     }
 
@@ -798,6 +803,7 @@ impl WorkspaceKind {
             Self::Project => projects::Kind::Project,
             Self::Terminal => projects::Kind::Terminal,
             Self::Cursor => projects::Kind::Cursor,
+            Self::GitHub => projects::Kind::Github,
         }
     }
 }
@@ -1033,6 +1039,19 @@ pub struct Gerdr {
     pub git: HashMap<PathBuf, git::GitStatus>,
     /// A read of where the web pages are is under way (see `watch_web_pages`).
     pub web_pending: bool,
+    /// The CI of the shown project's repositories, by root (see
+    /// `ci_watch`).
+    pub ci: HashMap<PathBuf, ci::RepoCi>,
+    /// The repositories the last round of reading the CI was asked about.
+    pub ci_asked: Vec<PathBuf>,
+    /// Where each row of the CI stood, for telling what finished.
+    pub ci_states: HashMap<(String, ci::Subject), ci::CiState>,
+    /// A round of reading the CI is still running, and another is wanted
+    /// once it is done.
+    pub ci_pending: bool,
+    pub ci_again: bool,
+    /// Hands a round's CI to the event loop (see `watch_ci`).
+    ci_sender: Option<channel::Sender<ci_watch::CiRead>>,
     /// A round of reading the Git status is still running.
     pub git_pending: bool,
     /// Another round is wanted once it is done.
@@ -2224,6 +2243,7 @@ impl Gerdr {
                 state.git_pending = false;
                 state.worktrees_read();
                 state.repos_read();
+                state.ci_roots_changed();
                 if std::mem::take(&mut state.git_again) {
                     state.refresh_git();
                 }
@@ -2488,6 +2508,7 @@ impl Gerdr {
         match key {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
+            agents::AgentKey::Ci(link) => self.open_github(Some(link.clone())),
         }
     }
 
@@ -3114,7 +3135,9 @@ impl Gerdr {
             .or_else(home_dir);
         let title = match kind {
             WorkspaceKind::Project => "Open project folder",
-            WorkspaceKind::Terminal | WorkspaceKind::Cursor => "Open terminal folder",
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor | WorkspaceKind::GitHub => {
+                "Open terminal folder"
+            }
         };
         self.pick_folder(title, start, PickFor::Workspace(kind));
     }
@@ -3182,6 +3205,7 @@ impl Gerdr {
                     self.open_terminal(PathBuf::from(path))
                 }
                 PickFor::Workspace(WorkspaceKind::Cursor) => self.open_cursor(None),
+                PickFor::Workspace(WorkspaceKind::GitHub) => self.open_github(None),
                 PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
                 PickFor::Venv { project, workspace } => {
                     self.set_venv(&project, &workspace, PathBuf::from(path))
@@ -4221,9 +4245,12 @@ impl Gerdr {
             .map(|(w, ws)| {
                 let tabs = self.tab_views(ws);
                 let mut view = WorkspaceView::new(ws.name.clone(), ws.kind, &tabs);
-                if ws.kind == WorkspaceKind::Cursor {
-                    view.icon = self.cursor_icon();
+                match ws.kind {
+                    WorkspaceKind::Cursor => view.icon = self.cursor_icon(),
+                    WorkspaceKind::GitHub => view.icon = app_icons::github_icon(),
+                    WorkspaceKind::Project | WorkspaceKind::Terminal => {}
                 }
+                view.ci = self.ci_view(ws);
                 view.more_agents = self
                     .cursor_history(w)
                     .1
@@ -4556,6 +4583,7 @@ impl Gerdr {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
             (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
             (_, WorkspaceKind::Cursor) => self.open_cursor(None),
+            (_, WorkspaceKind::GitHub) => self.open_github(None),
             (None, _) => {}
         }
         // After the switch's notice, so it wins.
@@ -5226,6 +5254,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agents: Vec::new(),
         herdr_tabs: HashMap::new(),
         git: HashMap::new(),
+        ci: HashMap::new(),
+        ci_asked: Vec::new(),
+        ci_states: HashMap::new(),
+        ci_pending: false,
+        ci_again: false,
+        ci_sender: None,
         git_pending: false,
         git_again: false,
         git_read: None,
@@ -5438,6 +5472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_records();
     state.watch_cursor_agents();
     state.watch_web_pages();
+    state.watch_ci();
     state.connect_notifier();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();

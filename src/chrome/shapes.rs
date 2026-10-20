@@ -1,6 +1,7 @@
 //! The icons, as signed distance fields painted at any scale.
 
 use super::{Canvas, Rect, Rgb};
+use crate::ci::CiState;
 use crate::herdr::AgentStatus;
 
 /// Signed distance from (x, y) to a rounded rectangle: negative inside.
@@ -277,6 +278,31 @@ pub(super) fn trash(x: f32, y: f32, s: f32) -> f32 {
     let rib = |rx: f32| segment(x, y, rx, -1.2 * s, rx, 3.2 * s);
     let ribs = rib(-1.2 * s).min(rib(1.2 * s));
     lid.min(handle).min(body).min(ribs) - STROKE * 0.75 * s
+}
+
+/// Signed distance to the mark for where a CI run stands, centred on the
+/// origin: a check when it passed, a "×" when it failed, the working
+/// agent's open ring while it runs, a small ring when nothing is known.
+pub(super) fn ci_mark(state: CiState, x: f32, y: f32, s: f32) -> f32 {
+    match state {
+        CiState::Passed => check(x, y, 0.8 * s),
+        CiState::Failed => cross(x, y, 0.75 * s) - 0.3 * s,
+        CiState::Running => status_mark(AgentStatus::Working, x, y, 0.85 * s),
+        CiState::Unknown => status_mark(AgentStatus::Unknown, x, y, s),
+    }
+}
+
+/// Signed distance to an eye centred on the origin: an almond outline,
+/// where two circles overlap, around a round pupil. Watch.
+pub(super) fn eye(x: f32, y: f32, s: f32) -> f32 {
+    // Circles through the almond's corners at (±7, 0) and its top and
+    // bottom at (0, ±4.2).
+    let (half_w, half_h) = (7.0 * s, 4.2 * s);
+    let c = (half_w * half_w - half_h * half_h) / (2.0 * half_h);
+    let r = c + half_h;
+    let almond = (x.hypot(y - c) - r).max(x.hypot(y + c) - r);
+    let pupil = x.hypot(y) - 2.2 * s;
+    (almond.abs() - STROKE * s).min(pupil)
 }
 
 /// Signed distance to a spinner centred on the origin: the working
