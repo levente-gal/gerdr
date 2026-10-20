@@ -50,6 +50,7 @@ mod tab_strip;
 mod text_field;
 mod toast;
 mod tooltip;
+mod web_control;
 mod web_pages;
 mod welcome;
 mod worktrees;
@@ -1035,6 +1036,9 @@ pub struct Gerdr {
     pub git: HashMap<PathBuf, git::GitStatus>,
     /// A read of where the web pages are is under way (see `watch_web_pages`).
     pub web_pending: bool,
+    /// The browsers following and steering the web pages (see
+    /// `web_control`).
+    pub web_control: web_control::WebControl,
     /// The CI of the shown project's repositories, by root (see
     /// `ci_watch`).
     pub ci: HashMap<PathBuf, ci::RepoCi>,
@@ -2316,7 +2320,8 @@ impl Gerdr {
     }
 
     /// The panes showing a web page launched by its link, with their
-    /// windows' titles.
+    /// windows' titles, but those gerdr's extension follows (see
+    /// `web_control`).
     fn web_panes(&self) -> Vec<web_pages::WebPane> {
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
@@ -2325,7 +2330,7 @@ impl Gerdr {
                     let Some(command) = pane.app_command.as_deref() else {
                         continue;
                     };
-                    if !is_web_link(command) {
+                    if !is_web_link(command) || self.web_control.follows(pane.id) {
                         continue;
                     }
                     let Some(title) = window_title(&pane.window) else {
@@ -3029,7 +3034,7 @@ impl Gerdr {
             let dir = gerdr.workspaces[w].dir.clone();
             let command = gerdr.workspaces[w].tabs[t].expected[i].app_command.clone();
             let pid = match command {
-                Some(command) => gerdr.start_app(w, t, &command)?,
+                Some(command) => gerdr.start_app(w, t, &command, None)?,
                 None => {
                     // `-n`: a new Zed window, handed to the running editor if there is one.
                     let mut zed = Command::new("zed");
@@ -3775,7 +3780,7 @@ impl Gerdr {
                 dropped = self.launch_next_apps();
                 true
             }
-            (_, Some(command), _) => match self.start_app(w, t, &command) {
+            (_, Some(command), _) => match self.start_app(w, t, &command, None) {
                 Some(pid) => {
                     self.workspaces[w].tabs[t].expected[i].pid = Some(pid);
                     true
@@ -4742,6 +4747,7 @@ impl Gerdr {
     pub fn quit_app(&mut self, stop: bool) {
         self.take_web_urls(web_pages::read_now(self.web_panes()));
         self.record_tabs();
+        self.close_web_control();
         let stopped = stop && self.stop_session();
         if stopped
             && let Some(project) = self
@@ -5112,6 +5118,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_agents::run_hook();
         return Ok(());
     }
+    // Run by the browser, for gerdr's extension in it: nothing may go to
+    // stdout but its messages.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(web_control::HOST_COMMAND.as_ref()) {
+        if let Some(socket) = args.next() {
+            web_control::run_host(Path::new(&socket));
+        }
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -5266,6 +5281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
         web_pending: false,
+        web_control: web_control::WebControl::default(),
         notifier: None,
         blocked_since: HashMap::new(),
         agent_statuses: HashMap::new(),
@@ -5467,6 +5483,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_git();
     state.watch_records();
     state.watch_cursor_agents();
+    state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();
     state.connect_notifier();

@@ -282,7 +282,9 @@ impl Gerdr {
     }
 
     /// Show page `url` in workspace `w`: the tab already showing it, else
-    /// a new tab of its own, the workspace shown either way.
+    /// one gerdr steers showing a page of the same repository, sent there
+    /// (see `web_control`), else a new tab of its own, the workspace shown
+    /// either way.
     pub fn open_page(&mut self, w: usize, url: String) {
         let Some(ws) = self.workspaces.get(w) else {
             return;
@@ -291,6 +293,14 @@ impl Gerdr {
         if let Some((t, leaf)) = showing(ws, |page| page == wanted) {
             return self.show_leaf(w, t, leaf);
         }
+        if let Some(home) = repo_home(wanted)
+            && let Some((t, leaf)) =
+                self.steered_page(w, |page| repo_home(page).as_deref() == Some(home.as_str()))
+            && self.navigate_web_pane(leaf, &url)
+        {
+            return self.show_leaf(w, t, leaf);
+        }
+        let ws = &self.workspaces[w];
         let before = (self.active_workspace, ws.active_tab);
         let ws = &mut self.workspaces[w];
         ws.tabs.push(Tab::default());
@@ -305,6 +315,20 @@ impl Gerdr {
             }
         }
         self.show_active();
+    }
+
+    /// The tab of workspace `w` and the pane in it showing a page `wanted`
+    /// takes whose tab gerdr's extension follows (see `web_control`), the
+    /// shown tab's first; the page is given without a trailing "/".
+    fn steered_page(&self, w: usize, wanted: impl Fn(&str) -> bool) -> Option<(usize, u32)> {
+        let ws = self.workspaces.get(w)?;
+        let in_tab = |t: usize| {
+            ws.tabs.get(t)?.panes.iter().find_map(|p| {
+                let page = p.app_command.as_deref()?.trim().trim_end_matches('/');
+                (self.web_control.follows(p.id) && wanted(page)).then_some((t, p.id))
+            })
+        };
+        in_tab(ws.active_tab).or_else(|| (0..ws.tabs.len()).find_map(in_tab))
     }
 
     /// Show the first tab of workspace `w` showing a page of its
@@ -365,6 +389,19 @@ impl Gerdr {
     }
 }
 
+/// The repository page `url` is of, lowercase: its scheme, host, owner and
+/// name (`https://github.com/cli/cli` of `https://github.com/cli/cli/pull/1`).
+fn repo_home(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let path = rest.split(['?', '#']).next()?;
+    let mut parts = path.split('/');
+    let (host, owner, name) = (parts.next()?, parts.next()?, parts.next()?);
+    if [host, owner, name].iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    Some(format!("{scheme}://{host}/{owner}/{name}").to_ascii_lowercase())
+}
+
 /// The tab of `ws` and the leaf in it showing a page `wanted` takes (or
 /// waiting for one), if any; the page is given without a trailing "/".
 fn showing(ws: &Workspace, wanted: impl Fn(&str) -> bool) -> Option<(usize, u32)> {
@@ -396,5 +433,20 @@ pub fn ci_state_word(state: CiState) -> &'static str {
         CiState::Passed => "Passed",
         CiState::Failed => "Failed",
         CiState::Unknown => "No runs",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repo_home;
+
+    #[test]
+    fn a_page_is_of_the_repository_its_path_starts_with() {
+        let home = Some("https://github.com/cli/cli".to_owned());
+        assert_eq!(repo_home("https://github.com/Cli/cli/pull/3"), home);
+        assert_eq!(repo_home("https://github.com/cli/cli?tab=x"), home);
+        assert_eq!(repo_home("https://github.com/cli/cli"), home);
+        assert_eq!(repo_home("https://github.com/cli"), None);
+        assert_eq!(repo_home("https://github.com/cli/"), None);
     }
 }
