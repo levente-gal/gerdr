@@ -223,10 +223,9 @@ impl Gerdr {
             .app_command
             .as_deref()?;
         let (host, slug, n) = ci::pull_request_of(url)?;
-        let repo = self
-            .ci
-            .values()
-            .find(|repo| repo.host.eq_ignore_ascii_case(&host) && repo.slug == slug)?;
+        let repo = self.ci.values().find(|repo| {
+            repo.host.eq_ignore_ascii_case(&host) && repo.slug.eq_ignore_ascii_case(&slug)
+        })?;
         let own = repo
             .rows
             .iter()
