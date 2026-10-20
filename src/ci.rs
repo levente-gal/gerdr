@@ -157,37 +157,58 @@ pub fn fetch(root: &Path, watched: &Watched) -> Result<RepoCi, String> {
     } else {
         key(&host, &slug)
     };
-    let runs: Vec<Run> = gh(
-        root,
-        &["run", "list", "--repo", &repo, "-L", "100"],
-        RUN_FIELDS,
-    )?;
-    let own: Vec<Pull> = gh(
-        root,
-        &[
-            "pr", "list", "--repo", &repo, "--author", "@me", "--state", "open",
-        ],
-        OWN_PULL_FIELDS,
-    )?;
-    let default_branch = default_branch(root, &repo)?;
-    let involved = involved_pulls(root, &repo);
-    let open_total = open_pulls(root, &host, &slug).unwrap_or_else(|err| {
-        tracing::debug!("open pull requests of {repo}: {err}");
-        0
+    let repo = &repo;
+    // Each `gh` call waits a second or more on GitHub, so they run side by
+    // side. A watched pull request is read even when it shows as the
+    // user's or as involving them: `repo_ci` keeps it once.
+    let (runs, own, default_branch, involved, open_total, others) = std::thread::scope(|scope| {
+        let runs = scope.spawn(|| {
+            gh::<Vec<Run>>(
+                root,
+                &["run", "list", "--repo", repo, "-L", "100"],
+                RUN_FIELDS,
+            )
+        });
+        let own = scope.spawn(|| {
+            gh::<Vec<Pull>>(
+                root,
+                &[
+                    "pr", "list", "--repo", repo, "--author", "@me", "--state", "open",
+                ],
+                OWN_PULL_FIELDS,
+            )
+        });
+        let default_branch = scope.spawn(|| default_branch(root, repo));
+        let involved = scope.spawn(|| involved_pulls(root, repo));
+        let open_total = scope.spawn(|| {
+            open_pulls(root, &host, &slug).unwrap_or_else(|err| {
+                tracing::debug!("open pull requests of {repo}: {err}");
+                0
+            })
+        });
+        let others: Vec<_> = watched_of(watched, &host, &slug)
+            .into_iter()
+            .map(|number| {
+                scope.spawn(move || {
+                    let number = number.to_string();
+                    // One gone or unreadable doesn't keep the others from
+                    // showing.
+                    gh::<Pull>(root, &["pr", "view", &number, "--repo", repo], PULL_FIELDS)
+                        .map_err(|err| tracing::debug!("pull request {number} of {repo}: {err}"))
+                        .ok()
+                })
+            })
+            .collect();
+        (
+            joined(runs),
+            joined(own),
+            joined(default_branch),
+            joined(involved),
+            joined(open_total),
+            others.into_iter().filter_map(joined).collect::<Vec<Pull>>(),
+        )
     });
-    let mut others = Vec::new();
-    for number in watched_of(watched, &host, &slug) {
-        let known = |pull: &Pull| pull.number == number;
-        if own.iter().any(known) || involved.iter().any(known) {
-            continue;
-        }
-        let number = number.to_string();
-        // One gone or unreadable doesn't keep the others from showing.
-        match gh(root, &["pr", "view", &number, "--repo", &repo], PULL_FIELDS) {
-            Ok(pull) => others.push(pull),
-            Err(err) => tracing::debug!("pull request {number} of {repo}: {err}"),
-        }
-    }
+    let (runs, own, default_branch) = (runs?, own?, default_branch?);
     Ok(repo_ci(
         &host,
         &slug,
@@ -204,15 +225,28 @@ pub fn fetch(root: &Path, watched: &Watched) -> Result<RepoCi, String> {
 /// assigned to them, but aren't theirs, each once. One list that can't be
 /// read is left out.
 fn involved_pulls(root: &Path, repo: &str) -> Vec<Pull> {
-    let mut pulls: Vec<Pull> = Vec::new();
-    for search in [
+    let searches = [
         "review-requested:@me -author:@me",
         "assignee:@me -author:@me",
-    ] {
-        let args = [
-            "pr", "list", "--repo", repo, "--state", "open", "--search", search, "-L", "50",
-        ];
-        match gh::<Vec<Pull>>(root, &args, PULL_FIELDS) {
+    ];
+    let found: Vec<Result<Vec<Pull>, String>> = std::thread::scope(|scope| {
+        let reads: Vec<_> = searches
+            .map(|search| {
+                scope.spawn(move || {
+                    let args = [
+                        "pr", "list", "--repo", repo, "--state", "open", "--search", search, "-L",
+                        "50",
+                    ];
+                    gh(root, &args, PULL_FIELDS)
+                })
+            })
+            .into_iter()
+            .collect();
+        reads.into_iter().map(joined).collect()
+    });
+    let mut pulls: Vec<Pull> = Vec::new();
+    for (search, found) in searches.into_iter().zip(found) {
+        match found {
             Ok(found) => {
                 for pull in found {
                     if !pulls.iter().any(|seen| seen.number == pull.number) {
@@ -243,7 +277,7 @@ fn open_pulls(root: &Path, host: &str, slug: &str) -> Result<usize, String> {
     Ok(reply.data.repository.pull_requests.total_count)
 }
 
-/// `fetch` each of `roots` off the event loop, on one thread, and `send`
+/// `fetch` each of `roots` off the event loop, side by side, and `send`
 /// what came of each.
 pub fn read_all(
     roots: Vec<PathBuf>,
@@ -251,18 +285,31 @@ pub fn read_all(
     send: impl FnOnce(Vec<(PathBuf, Result<RepoCi, String>)>) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let read = roots
-            .into_iter()
-            .map(|root| {
-                let ci = fetch(&root, &watched);
-                if let Err(err) = &ci {
-                    tracing::debug!("CI of {}: {err}", root.display());
-                }
-                (root, ci)
-            })
-            .collect();
+        let watched = &watched;
+        let read = std::thread::scope(|scope| {
+            let reads: Vec<_> = roots
+                .into_iter()
+                .map(|root| {
+                    scope.spawn(move || {
+                        let ci = fetch(&root, watched);
+                        if let Err(err) = &ci {
+                            tracing::debug!("CI of {}: {err}", root.display());
+                        }
+                        (root, ci)
+                    })
+                })
+                .collect();
+            reads.into_iter().map(joined).collect()
+        });
         send(read)
     });
+}
+
+/// What a thread of a scope came to; its panic goes on.
+fn joined<T>(thread: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    thread
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 /// The pull request a GitHub page at `url` is about, any of its pages
