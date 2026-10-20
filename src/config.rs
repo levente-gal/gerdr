@@ -20,6 +20,10 @@
 //! # Branch names that are one branch across repositories, in the
 //! # repositories panel's branch picker. By default main and master.
 //! same_branches = [["main", "master"], ["production", "prod"]]
+//! # Branches listed first in its branch lists, in this order, after the
+//! # default branch; the rest go newest first. By default main, master,
+//! # dev and develop.
+//! top_branches = ["main", "dev", "staging"]
 //! ```
 //!
 //! Mistakes are logged, and the defaults stand in for what they spoil.
@@ -61,6 +65,7 @@ struct UiConfig {
 #[serde(default, deny_unknown_fields)]
 struct GitConfig {
     same_branches: Option<Vec<Vec<String>>>,
+    top_branches: Option<Vec<String>>,
 }
 
 /// How git branches are seen, from the `[git]` table.
@@ -69,12 +74,18 @@ pub struct Git {
     /// Groups of branch names that are one branch: a repository's `master`
     /// is another's `main`.
     pub same_branches: Vec<Vec<String>>,
+    /// Branches the branch lists show first, in this order, after the
+    /// default branch.
+    pub top_branches: Vec<String>,
 }
 
 impl Default for Git {
     fn default() -> Self {
         Git {
             same_branches: vec![vec!["main".into(), "master".into()]],
+            top_branches: ["main", "master", "dev", "develop"]
+                .map(String::from)
+                .into(),
         }
     }
 }
@@ -140,12 +151,23 @@ pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, Vec<String>) {
             None => problems.push(format!("unknown theme `{theme}`")),
         }
     }
-    let git = match config.git.same_branches {
-        None => Git::default(),
-        Some(groups) => Git {
-            same_branches: same_branches(groups, &mut problems),
-        },
-    };
+    let mut git = Git::default();
+    if let Some(groups) = config.git.same_branches {
+        git.same_branches = same_branches(groups, &mut problems);
+    }
+    if let Some(names) = config.git.top_branches {
+        git.top_branches = names
+            .into_iter()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| {
+                let blank = name.is_empty();
+                if blank {
+                    problems.push("a blank branch name in `top_branches`".into());
+                }
+                !blank
+            })
+            .collect();
+    }
     (keymap, apps, ui, git, problems)
 }
 
@@ -199,6 +221,10 @@ const TEMPLATE: &str = "\
 # # Branch names that are one branch across repositories, in the
 # # repositories panel's branch picker. By default main and master.
 # same_branches = [[\"main\", \"master\"], [\"production\", \"prod\"]]
+# # Branches listed first in its branch lists, in this order, after the
+# # default branch; the rest go newest first. By default main, master,
+# # dev and develop.
+# top_branches = [\"main\", \"dev\", \"staging\"]
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -252,6 +278,7 @@ mod tests {
         assert_eq!(apps.len(), 2);
         assert_eq!(ui.density, Density::Compact);
         assert_eq!(git.same_branches.len(), 2);
+        assert_eq!(git.top_branches, ["main", "dev", "staging"]);
     }
 
     #[test]
@@ -292,6 +319,18 @@ mod tests {
         assert!(problems.is_empty());
         // None at all, if the file says so.
         assert_eq!(same("[git]\nsame_branches = []\n"), (vec![], vec![]));
+    }
+
+    #[test]
+    fn main_master_dev_and_develop_go_first_unless_the_file_says_otherwise() {
+        let top = |text: &str| {
+            let (_, _, _, git, problems) = from_text(text);
+            (git.top_branches, problems)
+        };
+        assert_eq!(top("").0, ["main", "master", "dev", "develop"]);
+        let (names, problems) = top("[git]\ntop_branches = [\" trunk \", \"\"]\n");
+        assert_eq!(names, ["trunk"]);
+        assert_eq!(problems, ["a blank branch name in `top_branches`"]);
     }
 
     #[test]
