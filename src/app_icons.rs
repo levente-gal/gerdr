@@ -8,7 +8,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, OnceLock},
 };
 
 use resvg::{tiny_skia, usvg};
@@ -286,8 +286,22 @@ fn load(path: &Path) -> Option<AppIcon> {
 
 fn read(path: &Path) -> Option<AppIcon> {
     let data = std::fs::read(path).ok()?;
-    let pixmap = if path.extension().is_some_and(|ext| ext == "svg") {
-        let tree = usvg::Tree::from_data(&data, &usvg::Options::default()).ok()?;
+    let symbolic = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.ends_with("-symbolic"));
+    if path.extension().is_some_and(|ext| ext == "svg") {
+        return AppIcon::from_svg(&data, symbolic);
+    }
+    let pixmap = tiny_skia::Pixmap::decode_png(&data).ok()?;
+    Some(AppIcon::from_pixmap(pixmap, symbolic))
+}
+
+impl AppIcon {
+    /// The icon an SVG document draws, `SIZE` big; a `symbolic` one is
+    /// tinted like text where it is drawn.
+    pub fn from_svg(data: &[u8], symbolic: bool) -> Option<Self> {
+        let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
         let size = tree.size();
         let fit = SIZE as f32 / size.width().max(size.height());
         let w = (size.width() * fit).round().max(1.0) as u32;
@@ -298,27 +312,32 @@ fn read(path: &Path) -> Option<AppIcon> {
             tiny_skia::Transform::from_scale(fit, fit),
             &mut pixmap.as_mut(),
         );
-        pixmap
-    } else {
-        tiny_skia::Pixmap::decode_png(&data).ok()?
-    };
-    let symbolic = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .is_some_and(|s| s.ends_with("-symbolic"));
-    Some(AppIcon(Arc::new(Picture {
-        width: pixmap.width() as usize,
-        height: pixmap.height() as usize,
-        rgba: pixmap.take(),
-        symbolic,
-    })))
+        Some(Self::from_pixmap(pixmap, symbolic))
+    }
+
+    fn from_pixmap(pixmap: tiny_skia::Pixmap, symbolic: bool) -> Self {
+        AppIcon(Arc::new(Picture {
+            width: pixmap.width() as usize,
+            height: pixmap.height() as usize,
+            rgba: pixmap.take(),
+            symbolic,
+        }))
+    }
+}
+
+/// GitHub's mark (Octicons' `mark-github`, MIT licensed), symbolic: the
+/// icon of GitHub workspaces and of the CI card.
+pub fn github_icon() -> Option<AppIcon> {
+    static ICON: OnceLock<Option<AppIcon>> = OnceLock::new();
+    ICON.get_or_init(|| AppIcon::from_svg(include_bytes!("../assets/github-mark.svg"), true))
+        .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{rank, weights};
+    use super::{github_icon, rank, weights};
 
     #[test]
     fn ranks_sizes() {
@@ -345,5 +364,20 @@ mod tests {
             let expected = to as f32 / from as f32;
             assert!(per_source.iter().all(|s| (s - expected).abs() < 1e-3));
         }
+    }
+
+    #[test]
+    fn the_github_mark_is_a_symbolic_ring_around_a_cut_out_cat() {
+        let icon = github_icon().expect("the mark reads");
+        assert!(icon.symbolic());
+        // Its own copies, read once.
+        assert_eq!(github_icon(), Some(icon.clone()));
+        let (w, h, rgba) = icon.scaled(16);
+        assert_eq!((w, h), (16, 16));
+        let alpha = |x: usize, y: usize| rgba[(y * w + x) * 4 + 3];
+        // The ring is drawn, the cat's face is cut out, the corners empty.
+        assert!(alpha(1, 8) > 200 && alpha(14, 8) > 200 && alpha(8, 1) > 200);
+        assert!(alpha(8, 8) < 50);
+        assert!(alpha(0, 0) < 50 && alpha(15, 15) < 50);
     }
 }
