@@ -81,6 +81,7 @@ fn agents() -> Vec<Vec<AgentView>> {
                 AgentLine::Field("Tokens".into(), "12k".into()),
             ],
             deletable: false,
+            subagents: Vec::new(),
         }],
         vec![],
     ]

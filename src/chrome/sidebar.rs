@@ -149,6 +149,16 @@ pub struct AgentView {
     /// Whether it is history (a Cursor chat gone idle) that a "×" on the
     /// card deletes from gerdr.
     pub deletable: bool,
+    /// Its subagents that run.
+    pub subagents: Vec<SubagentView>,
+}
+
+/// A subagent on its parent's card: what it is on, and the agent a click
+/// on its line shows, once known.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentView {
+    pub key: Option<AgentKey>,
+    pub task: String,
 }
 
 impl AgentView {
@@ -215,6 +225,7 @@ impl AgentView {
             model,
             lines,
             deletable: false,
+            subagents: Vec::new(),
         }
     }
 
@@ -248,12 +259,15 @@ impl AgentView {
         if row.worktree {
             lines.push(field("Worktree", "its own".into()));
         }
-        lines.extend(
-            chat.subagents
-                .iter()
-                .map(|task| field(SUBAGENT, task.clone().unwrap_or_else(|| "Working".into()))),
-        );
         lines.push(field("chat", row.id.clone()));
+        let subagents = chat
+            .subagents
+            .iter()
+            .map(|run| SubagentView {
+                key: run.chat.clone().map(AgentKey::Cursor),
+                task: run.task.clone().unwrap_or_else(|| "Working".into()),
+            })
+            .collect();
         // A chat not in agent mode says which it is in.
         let kind = match row.mode_name() {
             Some(mode) => format!("cursor {mode}"),
@@ -268,6 +282,7 @@ impl AgentView {
             model: chat.model.clone(),
             lines,
             deletable: false,
+            subagents,
         }
     }
 
@@ -304,13 +319,29 @@ impl AgentView {
             .join(" · ")
     }
 
-    /// What each of its subagents that run is on, a line each below the
-    /// detail line.
-    pub fn subagents(&self) -> impl Iterator<Item = &str> {
-        self.lines.iter().filter_map(|l| match l {
-            AgentLine::Field(label, value) if label == SUBAGENT => Some(value.as_str()),
-            _ => None,
-        })
+    /// How many lines its subagents take below the detail line: one each
+    /// up to `SUBAGENT_LINES`, and one counting the rest.
+    pub fn subagent_lines(&self) -> usize {
+        let n = self.subagents.len();
+        if n > SUBAGENT_LINES {
+            SUBAGENT_LINES + 1
+        } else {
+            n
+        }
+    }
+
+    /// Where line `j` of its subagents sits on its card at `card`: from
+    /// a pill's padding before the text to the card's padding.
+    pub fn subagent_line(&self, card: Rect, density: Density, j: usize) -> Rect {
+        let detail = if self.detail().is_empty() {
+            0
+        } else {
+            CARD_LINE
+        };
+        let x = card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP - PILL_PADDING;
+        let y = card.loc.y + card_pad(density) + CARD_HEADER + detail + j as i32 * CARD_LINE;
+        let w = (card.loc.x + card.size.w - CARD_PAD / 2 - x).max(0);
+        Rectangle::new((x, y).into(), (w, CARD_LINE).into())
     }
 
     /// Everything the card knows, for its tooltip under `label`: a line
@@ -321,6 +352,8 @@ impl AgentView {
             AgentLine::Title(title) => ("Working on".to_owned(), title.clone()),
             AgentLine::Field(label, value) => (label.clone(), value.clone()),
         }));
+        let subagents = self.subagents.iter();
+        fields.extend(subagents.map(|sub| (SUBAGENT.to_owned(), sub.task.clone())));
         fields
     }
 
@@ -331,7 +364,7 @@ impl AgentView {
         } else {
             CARD_LINE
         };
-        let subagents = self.subagents().count() as i32 * CARD_LINE;
+        let subagents = self.subagent_lines() as i32 * CARD_LINE;
         2 * card_pad(density) + CARD_HEADER + detail + subagents
     }
 }
@@ -340,6 +373,10 @@ impl AgentView {
 const FOLDER: &str = "Folder";
 /// The label of a field holding what a subagent that runs is to do.
 const SUBAGENT: &str = "Subagent";
+/// How many subagents a card shows a line each at most.
+pub const SUBAGENT_LINES: usize = 5;
+/// How far a subagent's line starts its text in, past its elbow.
+const SUBAGENT_INDENT: i32 = 12;
 
 /// `key` as a label: its words split on `_` and `-`, the first capitalised.
 fn sentence_case(key: &str) -> String {
@@ -618,12 +655,15 @@ pub struct RowState {
 /// (0 to 16). A blocked card's pulse is not here: it is composed over the
 /// sidebar as its own part (see `blocked_band`), so it never redraws it.
 /// Also whether its agent is open: its pane has the keyboard in the shown
-/// tab, and whether the pointer is on its "×".
+/// tab, whether the pointer is on its "×", and the hover alphas of its
+/// subagents' lines.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CardState {
     pub hover: u8,
     pub open: bool,
     pub close: bool,
+    /// The hover alpha of each of its subagents' lines.
+    pub subagents: [u8; SUBAGENT_LINES],
 }
 
 /// What moves in a GitHub card: the hover alphas (0 to 16) of the card off
@@ -750,6 +790,9 @@ pub struct SidebarLayout {
     pub cards: Vec<Vec<(usize, Rect)>>,
     /// Per workspace, the "×" of each card that has one, by its index.
     pub card_closes: Vec<Vec<(usize, Rect)>>,
+    /// Per workspace, the lines of the subagents a click shows: each with
+    /// its card's index and its own among the card's subagents.
+    pub subagents: Vec<Vec<(usize, usize, Rect)>>,
     /// Per workspace, the "+N more" line after its cards, if it has one.
     pub more: Vec<Option<Rect>>,
     /// Per workspace, its GitHub card, if it has one.
@@ -805,9 +848,11 @@ pub enum SidebarHit {
     /// Line `k` of workspace `i`'s worktrees needing a look: the worktree
     /// `k` of `WorkspaceView::needing_attention`, or the "+N more" line.
     Attention(usize, usize),
-    /// Card `k` (as the data lists it) of workspace `i`, and its "×".
+    /// Card `k` (as the data lists it) of workspace `i`, its "×", and the
+    /// line of its subagent `j`.
     Card(usize, usize),
     CardClose(usize, usize),
+    Subagent(usize, usize, usize),
     /// The "+N more" line after workspace `i`'s cards.
     More(usize),
     /// Workspace `i`'s GitHub card off its chips and count (its header,
@@ -862,6 +907,11 @@ impl SidebarLayout {
         for (i, closes) in self.card_closes.iter().enumerate() {
             if let Some((k, _)) = closes.iter().find(|(_, rect)| inside(*rect)) {
                 return Some(SidebarHit::CardClose(i, *k));
+            }
+        }
+        for (i, lines) in self.subagents.iter().enumerate() {
+            if let Some((k, j, _)) = lines.iter().find(|(_, _, rect)| inside(*rect)) {
+                return Some(SidebarHit::Subagent(i, *k, *j));
             }
         }
         for (i, cards) in self.cards.iter().enumerate() {
@@ -948,6 +998,9 @@ impl SidebarLayout {
         for (_, r) in self.cards.iter_mut().chain(&mut self.card_closes).flatten() {
             up(r);
         }
+        for (_, _, r) in self.subagents.iter_mut().flatten() {
+            up(r);
+        }
         self.more.iter_mut().flatten().for_each(up);
         for ci in self.ci.iter_mut().flatten() {
             up(&mut ci.card);
@@ -1002,6 +1055,7 @@ pub fn sidebar_layout_at(
     );
     let (mut rows, mut card_rects, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
     let (mut card_closes, mut more, mut ci) = (Vec::new(), Vec::new(), Vec::new());
+    let mut subagents = Vec::new();
     let mut y = ROWS_TOP;
     let name_x = ROW_INSET + PADDING as i32 + ROW_ICON_WIDTH + ROW_ICON_GAP;
     let card_x = ROW_INSET + CARD_INDENT;
@@ -1067,6 +1121,19 @@ pub fn sidebar_layout_at(
                 .map(|(k, card)| (*k, card_close(*card, density)))
                 .collect(),
         );
+        subagents.push(
+            ws_cards
+                .iter()
+                .flat_map(|(k, rect)| {
+                    let card = &cards[*k];
+                    let shown = card.subagents.iter().take(SUBAGENT_LINES).enumerate();
+                    shown
+                        .filter(|(_, sub)| sub.key.is_some())
+                        .map(|(j, _)| (*k, j, card.subagent_line(*rect, density, j)))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+        );
         card_rects.push(ws_cards);
         let ws_more = (!ws.more_agents.is_empty()).then(|| {
             let line = Rectangle::new((card_x, y).into(), (card_w, CARD_LINE).into());
@@ -1095,6 +1162,7 @@ pub fn sidebar_layout_at(
         rows,
         cards: card_rects,
         card_closes,
+        subagents,
         more,
         ci,
         blocks,
@@ -1874,10 +1942,9 @@ impl Painter {
         }
 
         // The detail line: where it is and what it is on.
-        let mut line_y = header_y + CARD_HEADER;
         let detail = card.detail();
         if !detail.is_empty() {
-            let band = (px(line_y), px(CARD_LINE));
+            let band = (px(header_y + CARD_HEADER), px(CARD_LINE));
             self.text(
                 c,
                 &detail,
@@ -1888,22 +1955,46 @@ impl Painter {
                 scale,
                 p.muted,
             );
-            line_y += CARD_LINE;
         }
-        // A line per subagent that runs: what it is on.
-        for task in card.subagents() {
-            let band = (px(line_y), px(CARD_LINE));
+        // A line per subagent that runs, after an elbow, what it is on, up
+        // to `SUBAGENT_LINES`, then one counting the rest. One under the
+        // pointer gets a pill, exactly its rect.
+        let task_x = kind_x + px(SUBAGENT_INDENT) as f32;
+        for (j, sub) in card.subagents.iter().take(SUBAGENT_LINES).enumerate() {
+            let line = card.subagent_line(rect, density, j);
+            let lit = alpha(state.subagents[j]);
+            if lit > 0.0 {
+                let (lx, ly, lw, lh) = rect_px(line, scale);
+                c.rounded(lx, ly, lw, lh, lh / 2.0, mix(fill, p.text, 0.1 * lit));
+            }
+            let color = mix(p.muted, p.text, lit);
+            let (ex, thin) = (kind_x as i32 + px(2), px(1).max(1));
+            let (top, mid) = (px(line.loc.y + 3), px(line.loc.y + CARD_LINE / 2));
+            c.fill(ex, top, thin, mid - top + thin, color);
+            c.fill(ex, mid, px(SUBAGENT_INDENT - 5), thin, color);
             self.text(
                 c,
-                &format!("↳ {task}"),
+                &sub.task,
                 DETAIL_FONT_SIZE,
-                kind_x,
+                task_x,
                 right,
-                band,
+                (px(line.loc.y), px(CARD_LINE)),
+                scale,
+                color,
+            );
+        }
+        if let Some(rest) = card.subagents.len().checked_sub(SUBAGENT_LINES + 1) {
+            let line = card.subagent_line(rect, density, SUBAGENT_LINES);
+            self.text(
+                c,
+                &format!("+{} more", rest + 1),
+                DETAIL_FONT_SIZE,
+                task_x,
+                right,
+                (px(line.loc.y), px(CARD_LINE)),
                 scale,
                 p.muted,
             );
-            line_y += CARD_LINE;
         }
     }
 }
@@ -2210,9 +2301,8 @@ mod tests {
             state: SidebarState {
                 cards: vec![
                     open.map(|open| CardState {
-                        hover: 0,
                         open,
-                        close: false,
+                        ..CardState::default()
                     })
                     .to_vec(),
                 ],
@@ -2256,6 +2346,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             deletable: false,
+            subagents: Vec::new(),
         }
     }
 
@@ -2307,8 +2398,44 @@ mod tests {
     }
 
     #[test]
+    fn a_card_shows_five_subagents_then_counts_the_rest() {
+        use super::{SUBAGENT_LINES, SubagentView};
+        use smithay::utils::Point;
+        let mut card = agent("1", AgentStatus::Working, Some("~/src/gerdr"));
+        card.subagents = (0..7)
+            .map(|n| SubagentView {
+                // The third's chat isn't known yet.
+                key: (n != 2).then(|| super::AgentKey::Cursor(format!("s{n}"))),
+                task: format!("Task {n}"),
+            })
+            .collect();
+        assert_eq!(card.subagent_lines(), SUBAGENT_LINES + 1);
+        let one_line = 2 * CARD_PAD + CARD_HEADER + CARD_LINE;
+        assert_eq!(card.height(Density::Comfortable), one_line + 6 * CARD_LINE);
+        let ws = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
+        let agents = vec![vec![card.clone()]];
+        let layout = sidebar_layout_at(&[ws], &agents, 240, Density::Comfortable);
+        // A line each but the unknown one's and the count's.
+        let lines: Vec<_> = layout.subagents[0].iter().map(|l| (l.0, l.1)).collect();
+        assert_eq!(lines, [(0, 0), (0, 1), (0, 3), (0, 4)]);
+        let card_rect = layout.cards[0][0].1;
+        let at = |r: super::Rect| Point::from((r.loc.x as f64 + 4.0, r.loc.y as f64 + 4.0));
+        let first = card.subagent_line(card_rect, Density::Comfortable, 0);
+        assert_eq!(
+            first.loc.y,
+            card_rect.loc.y + CARD_PAD + CARD_HEADER + CARD_LINE
+        );
+        assert_eq!(layout.hit(at(first)), Some(SidebarHit::Subagent(0, 0, 0)));
+        // The unknown one's line and the count are the card's.
+        for j in [2, SUBAGENT_LINES] {
+            let line = card.subagent_line(card_rect, Density::Comfortable, j);
+            assert_eq!(layout.hit(at(line)), Some(SidebarHit::Card(0, 0)));
+        }
+    }
+
+    #[test]
     fn a_cursor_card_shows_its_subagents() {
-        use crate::cursor_agents::{ChatRow, CursorChat};
+        use crate::cursor_agents::{ChatRow, CursorChat, SubagentRun};
         let mut chat = CursorChat {
             row: ChatRow {
                 id: "c1".into(),
@@ -2318,14 +2445,23 @@ mod tests {
             },
             status: AgentStatus::Working,
             model: None,
-            subagents: vec![Some("Audit the plan".into()), None],
+            subagents: vec![
+                SubagentRun {
+                    chat: Some("s1".into()),
+                    task: Some("Audit the plan".into()),
+                },
+                SubagentRun::default(),
+            ],
         };
         let card = AgentView::cursor(&chat);
         assert_eq!(card.detail(), "gerdr · Read main.rs");
+        let tasks: Vec<_> = card.subagents.iter().map(|s| s.task.as_str()).collect();
+        assert_eq!(tasks, ["Audit the plan", "Working"]);
         assert_eq!(
-            card.subagents().collect::<Vec<_>>(),
-            ["Audit the plan", "Working"]
+            card.subagents[0].key,
+            Some(super::AgentKey::Cursor("s1".into()))
         );
+        assert_eq!(card.subagents[1].key, None);
         let fields = card.tooltip_fields();
         assert!(fields.contains(&("Subagent".into(), "Audit the plan".into())));
         assert!(fields.contains(&("Subagent".into(), "Working".into())));
@@ -2333,7 +2469,7 @@ mod tests {
         assert_eq!(card.height(Density::Comfortable), one_line + 2 * CARD_LINE);
         chat.subagents.clear();
         let card = AgentView::cursor(&chat);
-        assert_eq!(card.subagents().count(), 0);
+        assert_eq!(card.subagent_lines(), 0);
         assert_eq!(card.height(Density::Comfortable), one_line);
     }
 
