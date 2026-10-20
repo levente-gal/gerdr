@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "gerdr",
+  "description": "Lets gerdr follow and steer the web pages it shows.",
+  "version": "1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzi7nOkTjDNCyRxmm1pGrO8KvSSqk3O/c61/yedmjIEL7PcwDvzHyFKLL/+uh9kII988upfIAGeOmC9lg5j+0KAoDpqwmbb+3aIuTmq9STUhXZCpq5wHXpU4RiyealB/oIGZU/9xXLcKF8ZCKhmGDGOn1NmIZeXkAXybY8riVtBO73Sq3Q56Wts3ssaqOIUyFruQy13nnPaHlYkugcJYvM0zz2qNDK4L0Ze394u/MNLVJFelvJtoVzLa53Z4e1+B5jGjdIHowBZ3ffNh4sC1Zh0rWJG6p217Gbwr9aN/XKZ4jA1fTNzv1cddnUOMoFlqU8pSH2tXPbcdcHdfTHxyhuQIDAQAB",
+  "permissions": ["nativeMessaging", "storage", "tabs"],
+  "background": { "service_worker": "worker.js" }
+}

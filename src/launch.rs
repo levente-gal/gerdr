@@ -36,7 +36,7 @@ use smithay::reexports::calloop::channel;
 
 use crate::{
     Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, desktop, home_dir, hooks,
-    layout, state_dir,
+    layout, state_dir, web_control,
 };
 
 /// The start of the class of the Ghostty gerdr keeps (see `Gerdr::shared_name`),
@@ -163,12 +163,12 @@ impl Gerdr {
             return None;
         }
         let ws = &self.workspaces[w];
-        let app_id = self.prepare(original, &ws.dir).app_id;
+        let app_id = self.prepare(original, &ws.dir, None).app_id;
         let queued = !app_id.is_empty();
         let pid = if queued {
             None
         } else {
-            match self.start_app(w, t, original) {
+            match self.start_app(w, t, original, None) {
                 Some(pid) => Some(pid),
                 None => {
                     match leaf {
@@ -344,11 +344,9 @@ impl Gerdr {
                 continue;
             }
             dropped |= self.launch_next(&app_id, |gerdr, w, t, i| {
-                let command = gerdr.workspaces[w].tabs[t].expected[i]
-                    .app_command
-                    .clone()
-                    .unwrap_or_default();
-                gerdr.start_app(w, t, &command)
+                let e = &gerdr.workspaces[w].tabs[t].expected[i];
+                let (command, pane) = (e.app_command.clone().unwrap_or_default(), e.pane);
+                gerdr.start_app(w, t, &command, Some(pane))
             });
         }
         dropped
@@ -393,10 +391,11 @@ impl Gerdr {
     }
 
     /// `command` (trimmed) as `start_app` runs it in `dir`: in gerdr's
-    /// Ghostty or Alacritty, in the app for a URL, as a web app, or with a
-    /// profile of gerdr's (see the module), which for Zed is the data dir
-    /// of gerdr's Zed (see `Gerdr::launch_next_zed`).
-    fn prepare(&self, command: &str, dir: &Path) -> Prepared {
+    /// Ghostty or Alacritty, in the app for a URL, as a web app (through
+    /// gerdr's extension for `pane`, see `steered`), or with a profile of
+    /// gerdr's (see the module), which for Zed is the data dir of gerdr's
+    /// Zed (see `Gerdr::launch_next_zed`).
+    fn prepare(&self, command: &str, dir: &Path, pane: Option<u32>) -> Prepared {
         if let Some(shared) = Shared::of(command) {
             let changed = match shared {
                 Shared::Ghostty => {
@@ -424,10 +423,16 @@ impl Gerdr {
         let web = url.as_deref().and_then(|opener| web_app(command, opener));
         let mut app_id = String::new();
         let command = match web {
-            Some((web, site)) => {
-                app_id = site;
-                web
-            }
+            Some((web, site)) => match self.steered(&web, command, pane) {
+                Some(steered) => {
+                    app_id = format!("-{}_", web_control::EXTENSION_ID);
+                    steered
+                }
+                None => {
+                    app_id = site;
+                    web
+                }
+            },
             None => url.unwrap_or_else(|| command.to_owned()),
         };
         let bare_zed = opens_nothing_in_zed(&command);
@@ -460,17 +465,50 @@ impl Gerdr {
         }
     }
 
+    /// The web app command `web` (see `web_app`) changed to open `url`
+    /// through gerdr's extension for `pane`, written into the browser's
+    /// profile of gerdr's first (see `web_control`). The app_id of its
+    /// windows names the extension then, not the site. `None` for a
+    /// browser not known to take the extension, or a Flatpak one, which
+    /// can't run its host.
+    fn steered(&self, web: &str, url: &str, pane: Option<u32>) -> Option<String> {
+        let pane = pane?;
+        let socket = self.web_control.socket()?;
+        let (key, _, flatpak) = program(web)?;
+        if flatpak || !STEERED.contains(&key.as_str()) {
+            return None;
+        }
+        let profile = own_instance(web)?.1?;
+        let extension = web_control::install(&profile, socket)
+            .inspect_err(|err| tracing::warn!("gerdr's extension in {}: {err}", profile.display()))
+            .ok()?;
+        let app = format!("--app={}", desktop::shell_quote(url.trim()));
+        let boot = format!(
+            "--load-extension={} --app={}",
+            desktop::shell_quote(&extension.to_string_lossy()),
+            desktop::shell_quote(&web_control::boot_url(pane, url.trim()))
+        );
+        web.contains(&app).then(|| web.replacen(&app, &boot, 1))
+    }
+
     /// Start `command` (trimmed) for tab `t` of workspace `w`, in the
-    /// workspace's folder (see `prepare`). Its pid, or `None` if it is
-    /// empty, the tab is gone, or it didn't start.
-    pub(crate) fn start_app(&mut self, w: usize, t: usize, command: &str) -> Option<u32> {
+    /// workspace's folder (see `prepare`), showing in `pane` when known.
+    /// Its pid, or `None` if it is empty, the tab is gone, or it didn't
+    /// start.
+    pub(crate) fn start_app(
+        &mut self,
+        w: usize,
+        t: usize,
+        command: &str,
+        pane: Option<u32>,
+    ) -> Option<u32> {
         if command.is_empty() {
             return None;
         }
         let ws = self.workspaces.get(w)?;
         ws.tabs.get(t)?;
         let dir = ws.dir.clone();
-        let prepared = self.prepare(command, &dir);
+        let prepared = self.prepare(command, &dir, pane);
         if let Some(profile) = &prepared.profile
             && let Err(err) = std::fs::create_dir_all(profile)
         {
@@ -543,6 +581,16 @@ const FIREFOXES: &[&str] = &[
     "net.waterfox.waterfox",
     "one.ablaze.floorp",
     "app.zen_browser.zen",
+];
+
+/// The browsers gerdr's extension is known to load in by the command line
+/// (see `Gerdr::steered`): Chrome's own builds don't, since Chrome 137.
+const STEERED: &[&str] = &[
+    "chromium",
+    "chromium-browser",
+    "brave",
+    "brave-browser",
+    "brave-browser-stable",
 ];
 
 /// Browsers of the Chromium family, by program and Flatpak id.
