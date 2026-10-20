@@ -11,9 +11,10 @@
 //! would do too, but sites like Google's refuse to sign in a browser
 //! serving it.
 //!
-//! Chromium keeps a command-line extension's worker from the run before,
-//! even changed, while its file's name stays the same: the worker is
-//! written under a name of its content's (see `install`).
+//! Chromium keeps a command-line extension's worker registered from the
+//! run before, changed or not, while the extension's version stays the
+//! same; and with the version changed, while the worker's file's name
+//! does. Both follow the worker's content (see `install`).
 //!
 //! A pane without a tab of the extension's (its browser was running
 //! before, or can't run the host, as from a Flatpak) is followed by
@@ -149,6 +150,13 @@ fn content_hash(bytes: &[u8]) -> u64 {
     })
 }
 
+/// The extension's version for its worker's `hash`: four numbers of up to
+/// 16 bits.
+fn version(hash: u64) -> String {
+    let part = |shift: u32| (hash >> shift) & 0xffff;
+    format!("{}.{}.{}.{}", part(48), part(32), part(16), part(0))
+}
+
 /// Write `contents` to `path` unless it holds them already.
 fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if std::fs::read(path).is_ok_and(|old| old == contents) {
@@ -162,14 +170,20 @@ fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 pub fn install(profile: &Path, socket: &Path) -> std::io::Result<PathBuf> {
     let dir = profile.join(EXTENSION_DIR);
     std::fs::create_dir_all(&dir)?;
-    let worker = format!("worker-{:016x}.js", content_hash(WORKER.as_bytes()));
+    let hash = content_hash(WORKER.as_bytes());
+    let worker = format!("worker-{hash:016x}.js");
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("worker-") && name != worker {
             std::fs::remove_file(entry.path())?;
         }
     }
-    let manifest = MANIFEST.replace("\"worker.js\"", &format!("\"{worker}\""));
+    let manifest = MANIFEST
+        .replace("\"worker.js\"", &format!("\"{worker}\""))
+        .replace(
+            "\"version\": \"1\"",
+            &format!("\"version\": \"{}\"", version(hash)),
+        );
     write_if_changed(&dir.join("manifest.json"), manifest.as_bytes())?;
     write_if_changed(&dir.join(&worker), WORKER.as_bytes())?;
     write_if_changed(&dir.join("open.html"), OPEN_HTML.as_bytes())?;
@@ -420,6 +434,11 @@ mod tests {
     }
 
     #[test]
+    fn the_version_holds_the_hash_in_four_parts() {
+        assert_eq!(version(0x0001_0002_0003_ffff), "1.2.3.65535");
+    }
+
+    #[test]
     fn messages_are_framed_by_their_size() {
         let mut bytes: &[u8] = &framed(b"{}");
         assert_eq!(read_message(&mut bytes).as_deref(), Some(&b"{}"[..]));
@@ -459,6 +478,8 @@ mod tests {
         let worker = format!("worker-{:016x}.js", content_hash(WORKER.as_bytes()));
         let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
         assert!(manifest.contains(&format!("\"service_worker\": \"{worker}\"")));
+        let hash = content_hash(WORKER.as_bytes());
+        assert!(manifest.contains(&format!("\"version\": \"{}\"", version(hash))));
         assert!(dir.join(&worker).exists());
         assert!(!dir.join("worker-old.js").exists());
         let host = std::fs::read_to_string(dir.join("host")).unwrap();
