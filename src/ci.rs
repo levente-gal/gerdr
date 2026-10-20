@@ -707,7 +707,9 @@ fn branches(default_branch: &str) -> Vec<&str> {
 
 /// The row of branch `name`: the runs of its newest commit among `runs`,
 /// the newest of each workflow; `None` when none ran. Runs of pull
-/// requests from it are left out, as they show on the pull request. Its
+/// requests from it are left out, as they show on the pull request, and
+/// so are runs not started by a push (on a schedule, by hand) when some
+/// push started one: those are the branch's CI. Its
 /// link is its first failed run's, else one running, else its newest
 /// run's; the branch's runs on the Actions page of `web` only when none of
 /// them has a page.
@@ -717,6 +719,9 @@ fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
         .filter(|run| run.head_branch == name)
         .filter(|run| !matches!(run.event.as_str(), "pull_request" | "pull_request_target"))
         .collect();
+    if ran.iter().any(|run| run.event == "push") {
+        ran.retain(|run| run.event == "push");
+    }
     // Newest first.
     ran.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let newest = *ran.first()?;
@@ -1274,6 +1279,36 @@ mod tests {
         // The newest run, not the first check by name.
         assert_eq!(link(&[older.clone(), passed.clone()]), runs_url(3));
         assert_eq!(link(&[passed.clone(), older]), runs_url(3));
+        // A scheduled run after the push doesn't take its place, nor
+        // counts; without a push, it does.
+        let scheduled = run(
+            5,
+            "E",
+            "main",
+            "b",
+            "schedule",
+            "failure",
+            "2026-10-20T11:00:00Z",
+        );
+        let ci = |runs: &[String]| {
+            repo_ci(
+                "github.com",
+                "o/r",
+                "main",
+                &self::runs(runs),
+                &[],
+                &[],
+                &[],
+                0,
+            )
+            .rows[0]
+                .clone()
+        };
+        let row = ci(&[passed.clone(), scheduled.clone()]);
+        assert_eq!((row.link, row.state), (runs_url(3), CiState::Passed));
+        assert_eq!(row.checks.len(), 1);
+        let row = ci(&[scheduled]);
+        assert_eq!((row.link, row.state), (runs_url(5), CiState::Failed));
         // No run with a page: the branch's runs.
         let pageless = passed.replace(&runs_url(3), "");
         assert_eq!(
