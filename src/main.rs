@@ -1252,6 +1252,16 @@ impl Gerdr {
 
     /// The divider within grabbing distance of `pos`, if any.
     pub fn divider_at(&self, pos: Point<f64, Logical>) -> Option<Drag> {
+        // Over the repositories panel only its own line between the tree
+        // and the detail.
+        if let Some(view) = self.repos_view() {
+            let layout = chrome::repos_layout(&view, self.output_size());
+            let on = layout.splitter.to_f64().contains(pos)
+                && layout.sheet.is_none()
+                && layout.branch_menu.is_none()
+                && self.context_menu.is_none();
+            return on.then_some(Drag::ReposSplit);
+        }
         if (pos.x - self.sidebar_width as f64).abs() <= GRAB {
             return Some(Drag::Sidebar);
         }

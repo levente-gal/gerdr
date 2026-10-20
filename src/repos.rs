@@ -735,7 +735,7 @@ fn key_name(button: ReposButton) -> &'static str {
         B::StashPop => "Alt+Shift+S",
         B::Help => "F1",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
-        B::SkipDiverged | B::Cancel => "Esc",
+        B::SkipDiverged | B::Cancel | B::Close => "Esc",
         B::RunInTerminal | B::OpenWorkspace | B::StashDrop | B::DeleteBranch => "",
     }
 }
@@ -786,7 +786,7 @@ fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
             ReposButton::SkipDiverged,
         ],
         Sheet::Confirm { kind, .. } => vec![confirm_button(kind), ReposButton::Cancel],
-        Sheet::Help { .. } => vec![ReposButton::Cancel],
+        Sheet::Help { .. } => vec![ReposButton::Close],
     }
 }
 
@@ -1847,6 +1847,7 @@ impl Panel {
             | B::PullRebase
             | B::PullMerge
             | B::SkipDiverged
+            | B::Close
             | B::DeleteBranch => Err(Why::other("Nothing to answer")),
         }
     }
@@ -2419,6 +2420,7 @@ impl Panel {
             return chip(&text, Tone::Error, &tip);
         }
         if let Some(run) = batch.and_then(|b| b.run(&item.root)) {
+            let ctx_kind = batch.map(|b| &b.kind);
             let batch = batch.map(|b| b.kind.label()).unwrap_or_default();
             match &run.state {
                 RunState::Done => {
@@ -2448,7 +2450,12 @@ impl Panel {
                         Failure::Rejected => (
                             "rejected",
                             Tone::Error,
-                            "The remote refused the push: pull first, or force push".into(),
+                            match ctx_kind {
+                                Some(BatchKind::Push { force: true }) => {
+                                    "The remote branch has commits not fetched or not seen here: fetch and look at them first".into()
+                                }
+                                _ => "The remote refused the push: pull first, or force push".into(),
+                            },
                         ),
                         Failure::Diverged => (
                             "diverged",
@@ -2618,6 +2625,7 @@ impl Panel {
                 label: self.button_label(button, ctx),
                 key: key_name(button).into(),
                 disabled: match self.plan(button, ctx) {
+                    _ if button == ReposButton::Help => None,
                     _ if menu_integrate(button).is_some() => {
                         self.menu_blocked(ctx).map(String::from)
                     }
@@ -3736,7 +3744,8 @@ mod tests {
         assert_eq!(sheet.title, "Keys in the repositories panel");
         assert_eq!(sheet.lines.len(), HELP_KEYS.len());
         assert_eq!(sheet.lines[0].0, "Tab");
-        assert_eq!(sheet.buttons, [ReposButton::Cancel]);
+        assert_eq!(sheet.buttons, [ReposButton::Close]);
+        assert_eq!(help.disabled, None);
         // Enter or Esc closes it, and so does a click on its button.
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());

@@ -15,7 +15,7 @@ use std::{
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
     reexports::calloop::channel,
-    utils::{Logical, Point},
+    utils::{Logical, Point, Size},
 };
 
 use crate::menu::{MenuAction, MenuItem, MenuSpec};
@@ -660,10 +660,11 @@ impl Gerdr {
         };
         match hit {
             ReposHit::More => {
-                if let Some(anchor) = layout.more {
+                if let Some(more) = layout.more {
                     let hints: Vec<&Hint> =
                         layout.overflow.iter().map(|&i| &view.hints[i]).collect();
-                    let spec = repos_menu_spec(&hints, None, anchor);
+                    let mut spec = repos_menu_spec(&hints, None, more);
+                    spec.anchor = above(more, &spec, self.output_size());
                     self.open_menu(spec);
                 }
                 return;
@@ -851,10 +852,15 @@ impl Gerdr {
                 let text = format!("{n} more actions, with their keys");
                 Some(Tooltip::new(&text, layout.more?))
             }
-            ReposHit::Splitter => Some(Tooltip::new(
-                "Drag to give the tree or the diff more room",
-                layout.splitter,
-            )),
+            ReposHit::Splitter => {
+                let s = layout.splitter;
+                let at =
+                    chrome::Rect::new((s.loc.x, pos.y as i32 - 8).into(), (s.size.w, 16).into());
+                Some(Tooltip::new(
+                    "Drag to give the tree or the diff more room",
+                    at,
+                ))
+            }
             ReposHit::BranchDelete(i) => {
                 let (_, rect) = layout.branch_deletes.iter().find(|(j, _)| *j == i)?;
                 Some(Tooltip::new("Delete this local branch", *rect).key("Del"))
@@ -1366,8 +1372,9 @@ fn repos_menu_spec(hints: &[&Hint], path: Option<PathBuf>, anchor: chrome::Rect)
     let mut items: Vec<MenuItem> = hints
         .iter()
         .map(|hint| {
-            let mut item = MenuItem::new(&hint.label, MenuAction::ReposAction(hint.button))
-                .enabled(hint.disabled.is_none());
+            let mut item =
+                MenuItem::new(&sentence(&hint.label), MenuAction::ReposAction(hint.button))
+                    .enabled(hint.disabled.is_none());
             if !hint.key.is_empty() {
                 item = item.hint(&hint.key);
             }
@@ -1378,4 +1385,38 @@ fn repos_menu_spec(hints: &[&Hint], path: Option<PathBuf>, anchor: chrome::Rect)
         items.push(MenuItem::new("Copy path", MenuAction::CopyPath(path)));
     }
     MenuSpec { anchor, items }
+}
+
+/// `label` with its first letter in upper case, as menus write their items
+/// (`Push 3`).
+fn sentence(label: &str) -> String {
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// An anchor that opens `spec`'s menu above `button`, its bottom a gap over
+/// the button's top, on an output of `output`: a button at the bottom of
+/// the panel has its menu go up, inside the panel.
+fn above(button: chrome::Rect, spec: &MenuSpec, output: Size<i32, Logical>) -> chrome::Rect {
+    let rows: Vec<chrome::MenuRow> = spec
+        .items
+        .iter()
+        .map(|item| chrome::MenuRow {
+            label: item.label.clone(),
+            hint: item.hint.clone(),
+            enabled: item.enabled,
+        })
+        .collect();
+    // Under a one-pixel anchor at the top: the gap it keeps, and its height.
+    let probe = chrome::Rect::new((button.loc.x, 0).into(), (button.size.w, 1).into());
+    let (panel, _) = chrome::menu_layout(probe, &rows, output);
+    let gap = panel.loc.y - 1;
+    let y = button.loc.y - panel.size.h - 2 * gap - 1;
+    if y < 0 {
+        return button;
+    }
+    chrome::Rect::new((button.loc.x, y).into(), (button.size.w, 1).into())
 }

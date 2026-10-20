@@ -407,6 +407,8 @@ pub enum ReposButton {
     PullMerge,
     SkipDiverged,
     Cancel,
+    /// On the keys sheet.
+    Close,
 }
 
 impl ReposButton {
@@ -443,6 +445,7 @@ impl ReposButton {
             ReposButton::PullMerge => "Merge",
             ReposButton::SkipDiverged => "Skip those",
             ReposButton::Cancel => "Cancel",
+            ReposButton::Close => "Close",
         }
     }
 }
@@ -3263,7 +3266,7 @@ mod tests {
                             ("Space".into(), "check the line".into(), Tone::Normal),
                             ("Esc".into(), "close".into(), Tone::Normal),
                         ],
-                        buttons: vec![ReposButton::Cancel],
+                        buttons: vec![ReposButton::Close],
                         default: 0,
                     }),
                     ..full()
