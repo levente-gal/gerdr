@@ -223,6 +223,7 @@ fn switcher() -> SwitcherView {
         categories: vec!["All", "Workspaces", "Tabs", "Agents", "Folders"],
         category: 0,
         category_hover: Some(2),
+        hint_hover: None,
         hints: vec![
             ("Enter".into(), "open".into()),
             ("Alt+Enter".into(), "in a new tab".into()),
@@ -472,9 +473,9 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
         0x9ff4f582252e5a7d, // switcher
-        0x587634021d6e12a7, // welcome
+        0xe4d55e0a322e116f, // welcome
         0x59378f4fb455dd74, // quit
-        0x77ad122625699ef8, // project_menu
+        0xd5fbf9747a465bfc, // project_menu
         0x8ee98ca10770cddc, // project_form
         0xa135931fecb12b15, // toast
     ],
@@ -485,11 +486,11 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
-        0x9cc47dd9b2c6fe42, // switcher
-        0x0509f39369ec1781, // welcome
+        0x5f7bff6c609f26be, // switcher
+        0xc6a2b9324f6b7b75, // welcome
         0xca6aac6e936af23a, // quit
-        0x91598fd2bdae834a, // project_menu
-        0x4493e298ea9ee362, // project_form
+        0xde799af24ea3160e, // project_menu
+        0x8d221a9b0c1b93a2, // project_form
         0x03fe8c8c1a28bb89, // toast
     ],
     // Light at 1
@@ -500,9 +501,9 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
         0x38ffd61880514d09, // switcher
-        0xf3e329f9a28eb517, // welcome
+        0x0bf38b649779155b, // welcome
         0x9141f1eb6dfa4384, // quit
-        0xe6f2cd115f6ebbd6, // project_menu
+        0xa0b64fb50d67fbc2, // project_menu
         0x6c3fd3a9752c217d, // project_form
         0x09527b9387445087, // toast
     ],
@@ -513,11 +514,11 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
-        0x9263128b8fc2829f, // switcher
-        0x25745fe948c0e47b, // welcome
+        0x7ab00734e2c6e8e3, // switcher
+        0x2408bfddb0031e83, // welcome
         0xea36deb588723e15, // quit
-        0xede87d592c8cc683, // project_menu
-        0x6643b13592192371, // project_form
+        0xf7d02feda2f8909b, // project_menu
+        0xf77024bdb9b54f61, // project_form
         0x3a08c772671fb90b, // toast
     ],
 ];
@@ -675,6 +676,20 @@ fn dump_overlays() {
             &dir,
             &format!("switcher_{tag}"),
             painter.switcher(&switcher(), 640, scale, p),
+            px(640 + shadow),
+        );
+        dump(
+            &dir,
+            &format!("switcher_hint_{tag}"),
+            painter.switcher(
+                &SwitcherView {
+                    hint_hover: Some(1),
+                    ..switcher()
+                },
+                640,
+                scale,
+                p,
+            ),
             px(640 + shadow),
         );
         dump(

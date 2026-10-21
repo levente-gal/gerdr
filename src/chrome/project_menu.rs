@@ -4,14 +4,14 @@
 use super::{
     BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, CARET_WIDTH, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
     FIELD_GAP, FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING,
-    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HINT_GAP, HINT_KEY_GAP,
-    KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS,
-    PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS,
-    PROJECT_MENU_PADDING, PROJECT_MENU_ROW, PROJECT_MENU_SECTION, PROJECT_MENU_TOP,
-    PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE,
-    RENAME_FIELD, RENAME_INSET, ROW_BUTTON, ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect,
-    SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross,
-    field_text, file, focus_ring, folder, icon_sdf, magnifier, mix, pencil, phys, physical, plus,
+    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KIND_CHOICES, KIND_HEIGHT,
+    LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER,
+    PROJECT_MENU_INPUT, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING,
+    PROJECT_MENU_ROW, PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette,
+    ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
+    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect, SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE,
+    SUGGESTION_ROW, band, commands_prompt, cross, field_text, file, focus_ring, folder,
+    footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil, phys, physical, plus,
     rect_px, stop,
 };
 use crate::WorkspaceKind;
@@ -164,6 +164,8 @@ pub enum MenuHit {
     /// One of the form's two "Opens" choices.
     Kind(WorkspaceKind),
     Suggestion(usize),
+    /// A key hint in the footer, by index into `ProjectMenuView::hints`.
+    Hint(usize),
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -177,6 +179,8 @@ pub struct ProjectMenuLayout {
     /// Per entry, its rect and its row buttons' (none when not hovered).
     pub entries: Vec<(Rect, Vec<(RowButton, Rect)>)>,
     pub footer: Rect,
+    /// The footer's key hints, by index into `ProjectMenuView::hints`.
+    pub hints: Vec<(usize, Rect)>,
     /// Set in form mode.
     pub form: Option<FormLayout>,
     /// Set in settings mode.
@@ -261,6 +265,7 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
         query,
         entries,
         footer,
+        hints: footer_hint_spots(&hint_strs(&view.hints), footer),
         form,
         settings,
     }
@@ -474,6 +479,9 @@ pub fn project_menu_hit(
     let over = |rect: Rect| rect.to_f64().contains(pos);
     if !over(layout.panel) {
         return None;
+    }
+    if let Some(i) = hint_at(&hint_strs(&view.hints), &layout.hints, pos) {
+        return Some(MenuHit::Hint(i));
     }
     if let Some(form) = &layout.form {
         let fields = [
@@ -721,61 +729,13 @@ impl Painter {
 
         let footer = shift(layout.footer);
         divider(&mut c, px(footer.loc.y));
-        let hints: Vec<(&str, &str)> = view
-            .hints
-            .iter()
-            .map(|(keys, action)| (keys.as_str(), action.as_str()))
-            .collect();
-        let inner_w = (footer.size.w - 2 * HELP_PADDING).max(0);
-        let rows = self.hint_rows(&hints, inner_w, scale, footer_rows(hints.len()) as usize);
-        for (i, row) in rows.into_iter().enumerate() {
-            let inner = Rectangle::new(
-                (
-                    footer.loc.x + HELP_PADDING,
-                    footer.loc.y + FOOTER_PAD + i as i32 * FOOTER_ROW,
-                )
-                    .into(),
-                (inner_w, FOOTER_ROW).into(),
-            );
-            self.hints(&mut c, &hints[row], inner, scale, p);
-        }
+        let spots: Vec<_> = layout.hints.iter().map(|(i, r)| (*i, shift(*r))).collect();
+        let hover = match view.hover {
+            Some(MenuHit::Hint(i)) => Some(i),
+            _ => None,
+        };
+        self.hints(&mut c, &hint_strs(&view.hints), &spots, hover, scale, p);
         c.into_buffer(false)
-    }
-
-    /// The key `hints` split into at most `max_rows` rows of keycaps that
-    /// fit in `w` logical pixels, in order: a row takes hints until the
-    /// next would run past the end. What the last row can't take is left
-    /// to it all the same (and dropped when drawn).
-    pub(super) fn hint_rows(
-        &self,
-        hints: &[(&str, &str)],
-        w: i32,
-        scale: f64,
-        max_rows: usize,
-    ) -> Vec<std::ops::Range<usize>> {
-        let s = scale as f32;
-        let (key_gap, gap) = (
-            (HINT_KEY_GAP as f32 * s).round(),
-            (HINT_GAP as f32 * s).round(),
-        );
-        let w = (w as f64 * scale) as f32;
-        let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
-        let (mut start, mut width) = (0, -gap);
-        for (i, (keys, action)) in hints.iter().enumerate() {
-            let more = gap
-                + self.keycaps_width(keys, scale)
-                + key_gap
-                + self.text_width(action, SMALL_FONT_SIZE, scale);
-            if width + more > w && i > start && rows.len() + 1 < max_rows.max(1) {
-                rows.push(start..i);
-                (start, width) = (i, -gap);
-            }
-            width += more;
-        }
-        if start < hints.len() || rows.is_empty() {
-            rows.push(start..hints.len());
-        }
-        rows
     }
 
     /// The project menu's query field in `rect`: a magnifier, then `query`
@@ -1528,50 +1488,14 @@ mod tests {
         assert_eq!(super::footer_rows(4), 1);
         assert_eq!(super::footer_rows(5), 2);
 
-        let painter = Painter::new();
-        if painter.font.is_none() {
-            return;
+        // In order, inside the footer, on its rows.
+        let spots = project_menu_layout(&list, size).hints;
+        let order: Vec<usize> = spots.iter().map(|(i, _)| *i).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        assert!(!spots.is_empty());
+        for (_, spot) in &spots {
+            assert!(tall.contains_rect(*spot), "{spot:?} {tall:?}");
         }
-        let hints: Vec<(&str, &str)> = list
-            .hints
-            .iter()
-            .map(|(k, a)| (k.as_str(), a.as_str()))
-            .collect();
-        let w = tall.size.w - 2 * crate::chrome::HELP_PADDING;
-        for scale in [1.0, 2.0] {
-            let rows = painter.hint_rows(&hints, w, scale, 2);
-            assert!(!rows.is_empty() && rows.len() <= 2);
-            // In order, every hint in one row, none left out.
-            let mut covered = Vec::new();
-            for row in &rows {
-                assert!(!row.is_empty());
-                covered.extend(row.clone());
-            }
-            assert_eq!(covered, (0..hints.len()).collect::<Vec<_>>());
-            // The first row is as full as it can be.
-            let width = |row: &std::ops::Range<usize>| -> f32 {
-                let s = scale as f32;
-                let gap = (crate::chrome::HINT_GAP as f32 * s).round();
-                let key_gap = (crate::chrome::HINT_KEY_GAP as f32 * s).round();
-                hints[row.clone()]
-                    .iter()
-                    .map(|(k, a)| {
-                        gap + painter.keycaps_width(k, scale)
-                            + key_gap
-                            + painter.text_width(a, crate::chrome::SMALL_FONT_SIZE, scale)
-                    })
-                    .sum::<f32>()
-                    - gap
-            };
-            let limit = (w as f64 * scale) as f32;
-            assert!(width(&rows[0]) <= limit);
-            if rows.len() > 1 {
-                assert!(width(&(rows[0].start..rows[0].end + 1)) > limit);
-            }
-        }
-        // One row at most: everything in it.
-        assert_eq!(painter.hint_rows(&hints, w, 1.0, 1), vec![0..hints.len()]);
-        assert_eq!(painter.hint_rows(&[], w, 1.0, 2), vec![0..0]);
     }
 
     #[test]
@@ -1595,7 +1519,8 @@ mod tests {
         let hit = |view: &ProjectMenuView, pos| project_menu_hit(view, size, pos);
         assert!(l.entries.iter().all(|(_, buttons)| buttons.is_empty()));
         assert_eq!(hit(&view, centre(l.query)), Some(MenuHit::Query));
-        assert_eq!(hit(&view, centre(l.footer)), Some(MenuHit::Panel));
+        let corner = (l.footer.loc.x as f64 + 2.0, l.footer.loc.y as f64 + 2.0);
+        assert_eq!(hit(&view, corner.into()), Some(MenuHit::Panel));
         assert_eq!(hit(&view, (1200.0, 700.0).into()), None);
         assert_eq!(hit(&view, (2.0, 60.0).into()), None);
         for (i, (rect, _)) in l.entries.iter().enumerate() {
@@ -1658,8 +1583,13 @@ mod tests {
         for (i, rect) in f.suggestions.iter().enumerate() {
             assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Suggestion(i)));
         }
-        for nothing in [l.query, f.error, l.footer] {
+        for nothing in [l.query, f.error] {
             assert_eq!(hit(&view, centre(nothing)), Some(MenuHit::Panel));
+        }
+        // The footer's key hints are buttons.
+        assert!(!l.hints.is_empty());
+        for (i, rect) in &l.hints {
+            assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Hint(*i)));
         }
         let past = l.panel.loc.y as f64 + l.panel.size.h as f64 + 1.0;
         assert_eq!(hit(&view, (100.0, past).into()), None);
@@ -1684,8 +1614,11 @@ mod tests {
             assert!(inside(l.panel, rect), "{rect:?} outside the panel");
             assert_eq!(hit(&view, centre(rect)), Some(MenuHit::Setting(field)));
         }
-        for nothing in [l.query, f.note, l.footer] {
+        for nothing in [l.query, f.note] {
             assert_eq!(hit(&view, centre(nothing)), Some(MenuHit::Panel));
+        }
+        for (i, rect) in &l.hints {
+            assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Hint(*i)));
         }
     }
 

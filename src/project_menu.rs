@@ -30,6 +30,7 @@ use crate::{
         SettingsField, SettingsView,
     },
     fuzzy, home_dir, hooks,
+    input::Overlay,
     paths::{display, tilde},
     project_list::{self, PATH_CHARS, scrolled},
     text_field::{Edit, Line, TextField},
@@ -763,6 +764,7 @@ impl ProjectMenu {
             }
             MenuHit::Query
             | MenuHit::Panel
+            | MenuHit::Hint(_)
             | MenuHit::Field(_)
             | MenuHit::Setting(_)
             | MenuHit::Kind(_)
@@ -877,6 +879,7 @@ impl ProjectMenu {
             }
             MenuHit::Query
             | MenuHit::Panel
+            | MenuHit::Hint(_)
             | MenuHit::Entry(_)
             | MenuHit::Button(..)
             | MenuHit::Setting(_) => None,
@@ -1318,6 +1321,10 @@ impl Gerdr {
         };
         let page = self.project_menu_page();
         let outcome = match chrome::project_menu_hit(&view, self.output_size(), pos) {
+            // A key hint: its key, pressed.
+            Some(MenuHit::Hint(i)) => {
+                return self.press_hint(Overlay::ProjectMenu, &view.hints[i].0);
+            }
             Some(hit) => match self.project_menu.as_mut() {
                 Some(menu) => menu.click(hit, page),
                 None => None,

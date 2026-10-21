@@ -20,10 +20,11 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr,
+    Action, Gerdr,
     anim::Hover,
     chrome::{self, ProjectRow, WelcomeHit, WelcomeView},
     herdr,
+    input::Overlay,
     project_list::{self, scrolled},
     projects,
     text_field::{Edit, TextField},
@@ -390,6 +391,19 @@ impl Gerdr {
     pub fn welcome_click(&mut self, pos: Point<f64, Logical>) -> bool {
         let page = self.welcome_page();
         let size = self.output_size();
+        // A key hint: its key, pressed.
+        match self.welcome_hint(pos) {
+            Some((WelcomeHit::Hint(i), view)) => {
+                let keys = chrome::welcome_hints(&view)[i].0;
+                self.press_hint(Overlay::Welcome, keys);
+                return true;
+            }
+            Some((WelcomeHit::Quit, _)) => {
+                self.run_action(Action::Quit);
+                return true;
+            }
+            _ => {}
+        }
         let Some(welcome) = self.welcome.as_mut() else {
             return false;
         };
@@ -409,7 +423,7 @@ impl Gerdr {
                     None
                 }
             },
-            None => None,
+            Some(WelcomeHit::Hint(_) | WelcomeHit::Quit) | None => None,
         };
         if let Some(outcome) = outcome {
             self.apply_welcome(outcome);
@@ -417,12 +431,21 @@ impl Gerdr {
         true
     }
 
+    /// The key hint of the welcome screen under `pos`, if any, with the
+    /// view it is in.
+    fn welcome_hint(&self, pos: Point<f64, Logical>) -> Option<(WelcomeHit, WelcomeView)> {
+        let view = self.welcome_view()?;
+        let hit = chrome::welcome_hint(&view, self.output_size(), pos)?;
+        Some((hit, view))
+    }
+
     /// The pointer moved while the welcome screen is shown.
     pub fn welcome_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let page = self.welcome_page();
         let size = self.output_size();
+        let hint = self.welcome_hint(pos).map(|(hit, _)| hit);
         let welcome = self.welcome.as_mut()?;
-        let hit = welcome_hit(welcome, size, page, pos);
+        let hit = hint.or_else(|| welcome_hit(welcome, size, page, pos));
         welcome.set_hover(hit, Instant::now());
         // A project's mark says whether it runs.
         let Some(WelcomeHit::Row(i)) = hit else {

@@ -4,11 +4,11 @@
 //! or hovered row, buttons to review, check out, merge and delete it.
 
 use super::{
-    BUTTON_RADIUS, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW,
-    FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS,
-    LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_INPUT,
-    PROJECT_MENU_PADDING, PROJECT_MENU_ROW, PROJECT_MENU_SECTION, Painter, Palette, ROW_BUTTON,
-    ROW_BUTTON_INSET, Rect, SHADOW, SMALL_FONT_SIZE, band, footer_height, footer_rows, git_branch,
+    BUTTON_RADIUS, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP,
+    GIT_MARK_WIDTH, HELP_MARGIN, HELP_RADIUS, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH,
+    MENU_RADIUS, PADDING, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
+    PROJECT_MENU_SECTION, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, SHADOW,
+    SMALL_FONT_SIZE, band, footer_height, footer_hint_spots, git_branch, hint_at, hint_strs,
     icon_sdf, magnifier, measure, mix, phys, physical,
     project_menu::{menu_mark, menu_query_text},
     rect_px,
@@ -137,6 +137,8 @@ pub enum WorktreesHit {
     /// The scope toggle's segment for every repository (`true`) or the
     /// workspace's.
     Scope(bool),
+    /// A key hint in the footer, by index into `WorktreesView::hints`.
+    Hint(usize),
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -154,6 +156,8 @@ pub struct WorktreesLayout {
     /// hovered).
     pub entries: Vec<(Rect, Vec<(WorktreeButton, Rect)>)>,
     pub footer: Rect,
+    /// The footer's key hints, by index into `WorktreesView::hints`.
+    pub hints: Vec<(usize, Rect)>,
 }
 
 /// How many entries the worktrees popup shows at once on an output of
@@ -242,6 +246,7 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         query,
         entries,
         footer,
+        hints: footer_hint_spots(&hint_strs(&view.hints), footer),
     }
 }
 
@@ -298,9 +303,16 @@ pub fn worktree_marks(
 
 /// What `pos` (output coordinates) is over in the worktrees popup; `None`
 /// outside it.
-pub fn worktrees_hit(layout: &WorktreesLayout, pos: Point<f64, Logical>) -> Option<WorktreesHit> {
+pub fn worktrees_hit(
+    view: &WorktreesView,
+    layout: &WorktreesLayout,
+    pos: Point<f64, Logical>,
+) -> Option<WorktreesHit> {
     if !layout.panel.to_f64().contains(pos) {
         return None;
+    }
+    if let Some(i) = hint_at(&hint_strs(&view.hints), &layout.hints, pos) {
+        return Some(WorktreesHit::Hint(i));
     }
     if let Some((all, _)) = layout.scope.iter().find(|(_, r)| r.to_f64().contains(pos)) {
         return Some(WorktreesHit::Scope(*all));
@@ -440,24 +452,12 @@ impl Painter {
 
         let footer = shift(layout.footer);
         divider(&mut c, px(footer.loc.y));
-        let hints: Vec<(&str, &str)> = view
-            .hints
-            .iter()
-            .map(|(keys, action)| (keys.as_str(), action.as_str()))
-            .collect();
-        let inner_w = (footer.size.w - 2 * HELP_PADDING).max(0);
-        let rows = self.hint_rows(&hints, inner_w, scale, footer_rows(hints.len()) as usize);
-        for (i, row) in rows.into_iter().enumerate() {
-            let inner = Rectangle::new(
-                (
-                    footer.loc.x + HELP_PADDING,
-                    footer.loc.y + FOOTER_PAD + i as i32 * FOOTER_ROW,
-                )
-                    .into(),
-                (inner_w, FOOTER_ROW).into(),
-            );
-            self.hints(&mut c, &hints[row], inner, scale, p);
-        }
+        let spots: Vec<_> = layout.hints.iter().map(|(i, r)| (*i, shift(*r))).collect();
+        let hover = match view.hover {
+            Some(WorktreesHit::Hint(i)) => Some(i),
+            _ => None,
+        };
+        self.hints(&mut c, &hint_strs(&view.hints), &spots, hover, scale, p);
         c.into_buffer(false)
     }
 
@@ -712,24 +712,37 @@ mod tests {
         let centre = |r: Rect| (r.loc.x as f64 + 2.0, r.loc.y as f64 + 2.0).into();
         let (button, rect) = buttons[2];
         assert_eq!(
-            worktrees_hit(&l, centre(rect)),
+            worktrees_hit(&v, &l, centre(rect)),
             Some(WorktreesHit::Button(2, button))
         );
         assert_eq!(
-            worktrees_hit(&l, centre(l.entries[1].0)),
+            worktrees_hit(&v, &l, centre(l.entries[1].0)),
             Some(WorktreesHit::Entry(1))
         );
         assert_eq!(
-            worktrees_hit(&l, centre(l.footer)),
+            worktrees_hit(&v, &l, centre(l.footer)),
             Some(WorktreesHit::Panel)
         );
-        assert_eq!(worktrees_hit(&l, (1.0, 1.0).into()), None);
+        assert_eq!(worktrees_hit(&v, &l, (1.0, 1.0).into()), None);
+        // The footer's key hints are buttons.
+        assert!(!l.hints.is_empty());
+        for (i, rect) in &l.hints {
+            assert!(inside(l.footer, *rect));
+            let mid = (
+                rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+                rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+            );
+            assert_eq!(
+                worktrees_hit(&v, &l, mid.into()),
+                Some(WorktreesHit::Hint(*i))
+            );
+        }
         // The filter field sits between the title and the list.
         assert!(inside(l.panel, l.query));
         assert!(l.query.loc.y >= l.title.loc.y + l.title.size.h);
         assert!(l.entries[0].0.loc.y >= l.query.loc.y + l.query.size.h);
         assert_eq!(
-            worktrees_hit(&l, centre(l.query)),
+            worktrees_hit(&v, &l, centre(l.query)),
             Some(WorktreesHit::Query)
         );
         // The scope toggle's segments, in the title row, are hit.
@@ -737,7 +750,7 @@ mod tests {
         for (all, rect) in &l.scope {
             assert!(inside(l.title, *rect));
             assert_eq!(
-                worktrees_hit(&l, centre(*rect)),
+                worktrees_hit(&v, &l, centre(*rect)),
                 Some(WorktreesHit::Scope(*all))
             );
         }

@@ -21,6 +21,7 @@ mod drop;
 #[cfg(test)]
 mod golden;
 mod help;
+mod hints;
 mod menu;
 mod painter;
 mod pane_bar;
@@ -59,6 +60,7 @@ use canvas::*;
 pub use consts::*;
 pub use drop::*;
 pub use help::*;
+pub use hints::*;
 pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;

@@ -406,6 +406,21 @@ impl Chord {
     }
 }
 
+/// The key a key hint shows ("Ctrl+M", "Shift+Del", "Esc") as pressed:
+/// its modifiers and the key's own symbol. `None` for anything else, like
+/// keys to choose from ("Up / Down").
+pub fn hint_key(keys: &str) -> Option<(ModifiersState, Keysym)> {
+    let Chord { mods, sym } = Chord::parse(keys).ok()?;
+    let mods = ModifiersState {
+        ctrl: mods.ctrl,
+        alt: mods.alt,
+        shift: mods.shift,
+        logo: mods.logo,
+        ..Default::default()
+    };
+    Some((mods, sym))
+}
+
 /// Characters typed with Shift on the key named after them: written
 /// as themselves (or their xkb names) in the config and as themselves in
 /// the help, matched as Shift and the key, as on a US layout.
@@ -421,6 +436,7 @@ fn key_sym(name: &str) -> Option<Keysym> {
             let name = match name.to_ascii_lowercase().as_str() {
                 "esc" => "Escape",
                 "enter" => "Return",
+                "del" => "Delete",
                 _ => name,
             };
             match xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS) {

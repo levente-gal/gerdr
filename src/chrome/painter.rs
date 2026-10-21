@@ -4,8 +4,8 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, HINT_GAP, HINT_KEY_GAP, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb,
-    SMALL_FONT_SIZE, arrow, check, coverage, cross, mix, segment,
+    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, arrow, check, coverage, cross, mix,
+    segment,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
@@ -406,49 +406,6 @@ impl Painter {
         if focused {
             let nudge = if line.caret > 0 { px(1) as f32 } else { 0.0 };
             caret(c, start + to_caret + nudge, field_band, scale, p.accent);
-        }
-    }
-
-    /// Key hints as keycaps, each followed by what it does, centred in
-    /// `rect`: as many of the first as fit.
-    pub(super) fn hints(
-        &self,
-        c: &mut Canvas,
-        hints: &[(&str, &str)],
-        rect: Rect,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let s = scale as f32;
-        let key_gap = (HINT_KEY_GAP as f32 * s).round();
-        let gap = (HINT_GAP as f32 * s).round();
-        let (x, _, w, _) = rect_px(rect, scale);
-        let mut width = -gap;
-        for (n, (keys, action)) in hints.iter().enumerate() {
-            let more = gap
-                + self.keycaps_width(keys, scale)
-                + key_gap
-                + self.text_width(action, SMALL_FONT_SIZE, scale);
-            if width + more > w {
-                return self.hints(c, &hints[..n], rect, scale, p);
-            }
-            width += more;
-        }
-        let width = width.max(0.0);
-        let hints_band = band(rect, scale);
-        let mut pen = (x + (w - width) / 2.0).round();
-        for (keys, action) in hints {
-            let end = self.keycaps(c, keys, pen, hints_band, scale, p);
-            pen = self.text(
-                c,
-                action,
-                SMALL_FONT_SIZE,
-                end + key_gap,
-                f32::MAX,
-                hints_band,
-                scale,
-                p.muted,
-            ) + gap;
         }
     }
 

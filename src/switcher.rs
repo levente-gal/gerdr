@@ -44,6 +44,7 @@ use crate::{
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     desktop, fuzzy, git, home_dir,
+    input::Overlay,
     launch::{self, Place},
     paths::{display, tilde},
     project_list::scrolled,
@@ -242,6 +243,8 @@ pub struct Switcher {
     category: Option<Section>,
     /// The category chip the pointer is over, by index among the chips.
     chip_hover: Option<usize>,
+    /// The key hint under the pointer, by index into `hints()`.
+    hint_hover: Option<usize>,
     /// How many sections the items in the category span, for the room the
     /// headings take.
     sections: usize,
@@ -266,6 +269,7 @@ impl Switcher {
             categories: Vec::new(),
             category: None,
             chip_hover: None,
+            hint_hover: None,
             sections: 1,
             icons: HashMap::new(),
         };
@@ -530,6 +534,7 @@ impl Switcher {
             .category
             .and_then(|c| self.categories.iter().position(|s| *s == c))
             .map_or(0, |i| i + 1);
+        let hints = self.hints();
         SwitcherView {
             query: self.query.line(),
             hint,
@@ -539,7 +544,8 @@ impl Switcher {
             rows,
             selected,
             hover,
-            hints: self.hints(),
+            hint_hover: self.hint_hover.filter(|h| *h < hints.len()),
+            hints,
         }
     }
 
@@ -795,9 +801,11 @@ impl Gerdr {
             .chips
             .iter()
             .position(|chip| chip.to_f64().contains(pos));
+        let hint = chrome::switcher_hint(&view, &layout, pos);
         if let Some(switcher) = self.switcher.as_mut() {
             switcher.hover = hover;
             switcher.chip_hover = chip;
+            switcher.hint_hover = hint;
         }
         // An agent's mark says how it is doing.
         let i = hover?;
@@ -877,6 +885,16 @@ impl Gerdr {
     /// outside the panel it closes the switcher.
     pub fn switcher_click(&mut self, pos: Point<f64, Logical>) {
         let page = self.switcher_page();
+        // A key hint: its key, pressed.
+        if let Some(view) = self.switcher_view() {
+            let layout = chrome::switcher_geometry(&view, self.content_rect());
+            if let (Some(i), Some(switcher)) =
+                (chrome::switcher_hint(&view, &layout, pos), &self.switcher)
+            {
+                let into = Overlay::Switcher(switcher.serial);
+                return self.press_hint(into, &view.hints[i].0);
+            }
+        }
         let Some(mut switcher) = self.switcher.take() else {
             return;
         };

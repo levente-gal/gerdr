@@ -1010,6 +1010,18 @@ impl Gerdr {
         }
     }
 
+    /// A click on a key hint of overlay `into` showing `keys`: that key
+    /// pressed, through the overlay's own key handling.
+    pub fn press_hint(&mut self, into: Overlay, keys: &str) {
+        let Some((mods, sym)) = crate::keys::hint_key(keys) else {
+            return;
+        };
+        if let Some(out) = self.overlay_key(into, &mods, sym, sym) {
+            self.apply_intercepted(out);
+        }
+        self.copy_from_field();
+    }
+
     /// Where the text field with the keyboard is, in the overlay that has
     /// it, and what it shows.
     fn field_spot(&self) -> Option<FieldSpot> {

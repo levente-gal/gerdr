@@ -8,12 +8,12 @@
 //! kind. The key hints go in a footer, as in the project menu.
 
 use super::{
-    BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_MARGIN,
-    HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
-    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder,
-    folder_plus, footer_height, footer_rows, icon_sdf, mix, pencil, physical, prompt, rect_px,
-    status_mark, tab, terminal,
+    BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
+    HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_ICON_GAP,
+    ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS,
+    SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder, folder_plus,
+    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, physical, prompt,
+    rect_px, status_mark, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -95,6 +95,8 @@ pub struct SwitcherView {
     pub hover: Option<usize>,
     /// The footer's key hints, as (key, what it does).
     pub hints: Vec<(String, String)>,
+    /// The key hint under the pointer, by index into `hints`.
+    pub hint_hover: Option<usize>,
 }
 
 /// Where the switcher's parts go: the panel, its query field, a rect per
@@ -108,6 +110,8 @@ pub struct SwitcherLayout {
     pub rows: Vec<Rect>,
     pub sections: Vec<(Rect, &'static str)>,
     pub footer: Rect,
+    /// The footer's key hints, by index into `SwitcherView::hints`.
+    pub hints: Vec<(usize, Rect)>,
 }
 
 /// Where the icon of the switcher row in `row` goes.
@@ -175,7 +179,19 @@ pub(super) fn switcher_parts(
     w: i32,
 ) -> SwitcherLayout {
     let sections: Vec<_> = view.rows.iter().map(|row| row.section).collect();
-    parts(&sections, &view.categories, view.hints.len(), loc, w)
+    let mut layout = parts(&sections, &view.categories, view.hints.len(), loc, w);
+    layout.hints = footer_hint_spots(&hint_strs(&view.hints), layout.footer);
+    layout
+}
+
+/// The key hint of the switcher showing `view` under `pos`, by index into
+/// its hints, with the switcher's parts where `layout` has them.
+pub fn switcher_hint(
+    view: &SwitcherView,
+    layout: &SwitcherLayout,
+    pos: Point<f64, Logical>,
+) -> Option<usize> {
+    hint_at(&hint_strs(&view.hints), &layout.hints, pos)
 }
 
 /// The chips of `labels` in a row from `x` to `right` at `y`: each as
@@ -244,6 +260,7 @@ fn parts(
         rows,
         sections: headings,
         footer,
+        hints: Vec::new(),
     }
 }
 
@@ -468,26 +485,9 @@ impl Painter {
             );
         }
 
-        let footer = layout.footer;
-        divider(&mut c, px(footer.loc.y));
-        let hints: Vec<(&str, &str)> = view
-            .hints
-            .iter()
-            .map(|(keys, action)| (keys.as_str(), action.as_str()))
-            .collect();
-        let inner_w = (footer.size.w - 2 * HELP_PADDING).max(0);
-        let rows = self.hint_rows(&hints, inner_w, scale, footer_rows(hints.len()) as usize);
-        for (i, row) in rows.into_iter().enumerate() {
-            let inner = Rectangle::new(
-                (
-                    footer.loc.x + HELP_PADDING,
-                    footer.loc.y + FOOTER_PAD + i as i32 * FOOTER_ROW,
-                )
-                    .into(),
-                (inner_w, FOOTER_ROW).into(),
-            );
-            self.hints(&mut c, &hints[row], inner, scale, p);
-        }
+        divider(&mut c, px(layout.footer.loc.y));
+        let hints = hint_strs(&view.hints);
+        self.hints(&mut c, &hints, &layout.hints, view.hint_hover, scale, p);
         c.into_buffer(false)
     }
 
@@ -558,6 +558,7 @@ mod tests {
             selected: Some(0),
             hover: None,
             hints: Vec::new(),
+            hint_hover: None,
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
@@ -612,6 +613,7 @@ mod tests {
             selected: Some(0),
             hover: None,
             hints: vec![("Esc".into(), "close".into())],
+            hint_hover: None,
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;

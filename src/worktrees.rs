@@ -31,6 +31,7 @@ use crate::{
     },
     fuzzy,
     git::{self, Worktree},
+    input::Overlay,
     menu::MenuAction,
     paths,
     text_field::{Edit, TextField},
@@ -497,7 +498,10 @@ impl Popup {
             _ => None,
         };
         match hit {
-            WorktreesHit::Panel | WorktreesHit::Query | WorktreesHit::Scope(_) => {
+            WorktreesHit::Panel
+            | WorktreesHit::Query
+            | WorktreesHit::Scope(_)
+            | WorktreesHit::Hint(_) => {
                 self.armed = None;
                 None
             }
@@ -803,10 +807,14 @@ impl Gerdr {
         let layout = chrome::worktrees_layout(&view, self.output_size());
         let (_, items) = self.popup_items();
         let page = self.worktrees_page();
-        let outcome = match chrome::worktrees_hit(&layout, pos) {
+        let outcome = match chrome::worktrees_hit(&view, &layout, pos) {
             Some(WorktreesHit::Scope(all)) => {
                 self.worktrees_scope(all);
                 None
+            }
+            // A key hint: its key, pressed.
+            Some(WorktreesHit::Hint(i)) => {
+                return self.press_hint(Overlay::Worktrees, &view.hints[i].0);
             }
             Some(hit) => match self.worktrees.popup.as_mut() {
                 Some(popup) => popup.click(hit, &items, page),
@@ -823,7 +831,7 @@ impl Gerdr {
     pub fn worktrees_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.worktrees_view()?;
         let layout = chrome::worktrees_layout(&view, self.output_size());
-        let hit = chrome::worktrees_hit(&layout, pos);
+        let hit = chrome::worktrees_hit(&view, &layout, pos);
         if let Some(popup) = self.worktrees.popup.as_mut() {
             popup.hover = hit;
         }

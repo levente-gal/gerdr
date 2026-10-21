@@ -5,12 +5,12 @@ use super::{
     HELP_MARGIN, HINTS_HEIGHT, LABEL_FONT_SIZE, NOTE_GAP, NOTE_HEIGHT, PADDING, Painter, Palette,
     ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, WELCOME_BUTTON,
     WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROW, WELCOME_ROWS,
-    WELCOME_WIDTH, band, coverage, field_text, focus_ring, icon_sdf, mix, phys, physical, plus,
-    rect_px,
+    WELCOME_WIDTH, band, coverage, field_text, focus_ring, hint_at, hint_spots, icon_sdf, mix,
+    phys, physical, plus, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-use smithay::utils::{Logical, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A project card: its name over its path and age (a row and the second
 /// line), and the gap to the next.
@@ -74,6 +74,10 @@ pub struct ProjectRow {
 pub enum WelcomeHit {
     Row(usize),
     Button,
+    /// A key hint under the button, by index into `welcome_hints`.
+    Hint(usize),
+    /// The quit bar's key hint.
+    Quit,
 }
 
 /// Where the parts of the welcome screen go, in output coordinates.
@@ -159,6 +163,57 @@ pub fn welcome_layout(
         hints,
         bar,
     }
+}
+
+/// The key hints under the welcome screen's button for `view`.
+pub fn welcome_hints(view: &WelcomeView) -> Vec<(&'static str, &'static str)> {
+    if view.naming.is_some() {
+        return vec![("Enter", "create"), ("Esc", "cancel")];
+    }
+    let mut hints = vec![
+        ("Up / Down", "select"),
+        ("Enter", "open"),
+        ("Ctrl+N", "new"),
+        ("Del", "forget"),
+    ];
+    if view.in_app {
+        hints.push(("Esc", "back"));
+    }
+    hints
+}
+
+/// The key hints of the welcome screen showing `view` with its parts
+/// where `layout` has them: those under the button by index into
+/// `welcome_hints`, and the quit bar's.
+fn hint_layout(view: &WelcomeView, layout: &WelcomeLayout) -> (Vec<(usize, Rect)>, Option<Rect>) {
+    let hints = hint_spots(&welcome_hints(view), layout.hints);
+    let quit = view.quit_keys.as_deref().and_then(|keys| {
+        hint_spots(&[(keys, "quit")], layout.bar)
+            .first()
+            .map(|(_, r)| *r)
+    });
+    (hints, quit)
+}
+
+/// The key hint of the welcome screen showing `view` on an output of
+/// `size` under `pos`, if any.
+pub fn welcome_hint(
+    view: &WelcomeView,
+    size: Size<i32, Logical>,
+    pos: Point<f64, Logical>,
+) -> Option<WelcomeHit> {
+    let layout = welcome_layout(
+        size,
+        view.rows.len(),
+        view.naming.is_some(),
+        view.note.is_some(),
+    );
+    let (hints, quit) = hint_layout(view, &layout);
+    if let Some(i) = hint_at(&welcome_hints(view), &hints, pos) {
+        return Some(WelcomeHit::Hint(i));
+    }
+    quit.filter(|r| r.to_f64().contains(pos))
+        .map(|_| WelcomeHit::Quit)
 }
 
 /// Where the mark of the project card in `row` goes, which says whether its
@@ -360,23 +415,15 @@ impl Painter {
             self.centered(&mut c, note, SMALL_FONT_SIZE, layout.note, scale, p.warning);
         }
 
-        let hints: Vec<(&str, &str)> = if view.naming.is_some() {
-            vec![("Enter", "create"), ("Esc", "cancel")]
-        } else {
-            let mut hints = vec![
-                ("Up / Down", "select"),
-                ("Enter", "open"),
-                ("Ctrl+N", "new"),
-                ("Del", "forget"),
-            ];
-            if view.in_app {
-                hints.push(("Esc", "back"));
-            }
-            hints
+        let (spots, quit) = hint_layout(view, &layout);
+        let hover = match view.hover {
+            Some(WelcomeHit::Hint(i)) => Some(i),
+            _ => None,
         };
-        self.hints(&mut c, &hints, layout.hints, scale, p);
-        if let Some(keys) = &view.quit_keys {
-            self.hints(&mut c, &[(keys, "quit")], layout.bar, scale, p);
+        self.hints(&mut c, &welcome_hints(view), &spots, hover, scale, p);
+        if let (Some(keys), Some(quit)) = (&view.quit_keys, quit) {
+            let hover = (view.hover == Some(WelcomeHit::Quit)).then_some(0);
+            self.hints(&mut c, &[(keys, "quit")], &[(0, quit)], hover, scale, p);
         }
         c.into_buffer(true)
     }
