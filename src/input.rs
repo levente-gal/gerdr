@@ -355,105 +355,7 @@ impl Gerdr {
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output_geo = self.space.output_geometry(&self.output).unwrap();
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
-                self.pointer = pos;
-                let serial = SERIAL_COUNTER.next_serial();
-                let pointer = self.seat.get_pointer().unwrap();
-                if let Some(drag) = self.drag.clone() {
-                    self.drag_to(&drag, pos);
-                }
-                if let Some(reorder) = self.reorder.as_mut() {
-                    let moved = pos - reorder.from;
-                    reorder.moving |= moved.x.hypot(moved.y) > REORDER_START;
-                    if reorder.moving {
-                        let what = reorder.what;
-                        self.reorder_to(what, pos);
-                    }
-                }
-                if self.field_drag {
-                    self.drag_field(pos);
-                }
-                // An overlay takes the hover from everything under it.
-                let overlay = self.quit.is_some()
-                    || self.welcome.is_some()
-                    || self.project_menu.is_some()
-                    || self.worktrees.is_open()
-                    || self.repos.is_open();
-                // An overlay's icons have tooltips of their own.
-                let mut overlay_tip = None;
-                if self.quit.is_some() {
-                    self.quit_hover(pos);
-                } else if self.welcome.is_some() {
-                    overlay_tip = self.welcome_hover(pos);
-                } else if self.project_menu.is_some() {
-                    overlay_tip = self.project_menu_hover(pos);
-                } else if self.worktrees.is_open() {
-                    overlay_tip = self.worktrees_hover(pos);
-                } else if self.context_menu.is_some() {
-                    self.menu_motion(pos);
-                } else if self.repos.is_open() {
-                    overlay_tip = self.repos_hover(pos);
-                } else if self.switcher.is_some() {
-                    overlay_tip = self.switcher_motion(pos);
-                }
-                // The help panel, behind all those.
-                let popup = overlay || self.switcher.is_some() || self.context_menu.is_some();
-                self.help_hover = if popup { None } else { self.help_hit(pos) };
-                // The region under the pointer lights up, with nothing open
-                // over it, and may offer a tooltip. Its layout is worked
-                // out once for the event.
-                let covered = popup || self.help_hover.is_some();
-                self.header_hover = false;
-                let regions = self.regions_at(pos);
-                let tip = if covered {
-                    overlay_tip
-                } else if let Some(layout) = &regions.sidebar {
-                    self.sidebar_motion(layout, pos)
-                } else if let Some(view) = &regions.strip {
-                    self.tab_strip_motion(view, pos)
-                } else {
-                    self.pane_bar_motion(pos)
-                };
-                // So do the buttons of a terminal pane's bar.
-                let free = !covered && self.drag.is_none() && self.reorder.is_none();
-                self.pane_bar_hover(free.then_some(pos));
-                let offered = free || covered;
-                self.offer_tooltip(tip.filter(|_| offered), Instant::now());
-                let under = self.pointer_target(pos);
-                // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
-                if under.is_none() {
-                    let over_field = (overlay || self.switcher.is_some())
-                        && self
-                            .field_spot()
-                            .is_some_and(|field| field.area.to_f64().contains(pos));
-                    let icon = if over_field {
-                        CursorIcon::Text
-                    } else if self.reorder.is_some_and(|r| r.moving) {
-                        CursorIcon::Grabbing
-                    } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
-                        drag_cursor(&drag)
-                    } else if self.region_hit(pos, &regions) != RegionHit::Nothing
-                        || self.help_hover.is_some_and(|hit| hit != HelpHit::Panel)
-                    {
-                        CursorIcon::Pointer
-                    } else {
-                        CursorIcon::Default
-                    };
-                    if pointer.current_focus().is_some() || icon != self.chrome_cursor {
-                        self.backend.window().set_cursor_visible(true);
-                        self.backend.window().set_cursor(icon);
-                        self.chrome_cursor = icon;
-                    }
-                }
-                pointer.motion(
-                    self,
-                    under,
-                    &MotionEvent {
-                        location: pos,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                pointer.frame(self);
+                self.pointer_moved(pos, event.time_msec());
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
@@ -937,6 +839,112 @@ impl Gerdr {
             from,
             moving: false,
         });
+    }
+
+    /// The pointer moved to `pos` (output coordinates) at `time`: drags
+    /// follow it, what is under it lights up, and its cursor shape and the
+    /// client it is over are found. Also run in place when what is under
+    /// it changed without it moving.
+    pub fn pointer_moved(&mut self, pos: Point<f64, Logical>, time: u32) {
+        self.pointer = pos;
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.seat.get_pointer().unwrap();
+        if let Some(drag) = self.drag.clone() {
+            self.drag_to(&drag, pos);
+        }
+        if let Some(reorder) = self.reorder.as_mut() {
+            let moved = pos - reorder.from;
+            reorder.moving |= moved.x.hypot(moved.y) > REORDER_START;
+            if reorder.moving {
+                let what = reorder.what;
+                self.reorder_to(what, pos);
+            }
+        }
+        if self.field_drag {
+            self.drag_field(pos);
+        }
+        // An overlay takes the hover from everything under it.
+        let overlay = self.quit.is_some()
+            || self.welcome.is_some()
+            || self.project_menu.is_some()
+            || self.worktrees.is_open()
+            || self.repos.is_open();
+        // An overlay's icons have tooltips of their own.
+        let mut overlay_tip = None;
+        if self.quit.is_some() {
+            self.quit_hover(pos);
+        } else if self.welcome.is_some() {
+            overlay_tip = self.welcome_hover(pos);
+        } else if self.project_menu.is_some() {
+            overlay_tip = self.project_menu_hover(pos);
+        } else if self.worktrees.is_open() {
+            overlay_tip = self.worktrees_hover(pos);
+        } else if self.context_menu.is_some() {
+            self.menu_motion(pos);
+        } else if self.repos.is_open() {
+            overlay_tip = self.repos_hover(pos);
+        } else if self.switcher.is_some() {
+            overlay_tip = self.switcher_motion(pos);
+        }
+        // The help panel, behind all those.
+        let popup = overlay || self.switcher.is_some() || self.context_menu.is_some();
+        self.help_hover = if popup { None } else { self.help_hit(pos) };
+        // The region under the pointer lights up, with nothing open
+        // over it, and may offer a tooltip. Its layout is worked
+        // out once for the event.
+        let covered = popup || self.help_hover.is_some();
+        self.header_hover = false;
+        let regions = self.regions_at(pos);
+        let tip = if covered {
+            overlay_tip
+        } else if let Some(layout) = &regions.sidebar {
+            self.sidebar_motion(layout, pos)
+        } else if let Some(view) = &regions.strip {
+            self.tab_strip_motion(view, pos)
+        } else {
+            self.pane_bar_motion(pos)
+        };
+        // So do the buttons of a terminal pane's bar.
+        let free = !covered && self.drag.is_none() && self.reorder.is_none();
+        self.pane_bar_hover(free.then_some(pos));
+        let offered = free || covered;
+        self.offer_tooltip(tip.filter(|_| offered), Instant::now());
+        let under = self.pointer_target(pos);
+        // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
+        if under.is_none() {
+            let over_field = (overlay || self.switcher.is_some())
+                && self
+                    .field_spot()
+                    .is_some_and(|field| field.area.to_f64().contains(pos));
+            let icon = if over_field {
+                CursorIcon::Text
+            } else if self.reorder.is_some_and(|r| r.moving) {
+                CursorIcon::Grabbing
+            } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
+                drag_cursor(&drag)
+            } else if self.region_hit(pos, &regions) != RegionHit::Nothing
+                || self.help_hover.is_some_and(|hit| hit != HelpHit::Panel)
+            {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            };
+            if pointer.current_focus().is_some() || icon != self.chrome_cursor {
+                self.backend.window().set_cursor_visible(true);
+                self.backend.window().set_cursor(icon);
+                self.chrome_cursor = icon;
+            }
+        }
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location: pos,
+                serial,
+                time,
+            },
+        );
+        pointer.frame(self);
     }
 
     /// Re-run pointer focus after the windows under the cursor changed.

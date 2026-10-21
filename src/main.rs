@@ -3452,14 +3452,17 @@ impl Gerdr {
     }
 
     /// A click at `pos` on what `press` says in the help panel: as its
-    /// key after the prefix. A pinned panel stays open for the next.
+    /// key after the prefix. A pinned panel stays open for the next. What
+    /// is under the pointer is found again, as the panel may be gone or
+    /// covered.
     pub fn help_press(&mut self, press: HelpPress, pos: Point<f64, Logical>) {
         self.prefix_armed = false;
         match press {
             HelpPress::Action(action) => self.run_action(action),
             HelpPress::Close => self.help_pinned = false,
         }
-        self.help_hover = self.help_hit(pos);
+        let time = self.start_time.elapsed().as_millis() as u32;
+        self.pointer_moved(pos, time);
     }
 
     pub fn run_action(&mut self, action: Action) {
