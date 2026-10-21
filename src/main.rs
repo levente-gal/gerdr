@@ -817,6 +817,9 @@ pub struct Workspace {
     /// The id of the shown project's record of it (see
     /// `Gerdr::new_workspace`); empty without a project.
     pub record: String,
+    /// Whether it was folded (`Some(true)`) or unfolded by hand in the
+    /// sidebar this run; else its record says, else it folds while quiet.
+    pub folded: Option<bool>,
 }
 
 impl Workspace {
@@ -844,6 +847,7 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             record: String::new(),
+            folded: None,
         }
     }
 }
@@ -979,6 +983,8 @@ pub struct Gerdr {
     pub system_dark: bool,
     /// How much room the chrome takes, from the config file.
     pub density: Density,
+    /// Whether the sidebar shows its "Needs you" list, from the config file.
+    pub needs_you: bool,
     pub sidebar_width: i32,
     /// The next pane id to hand out.
     pub next_pane: u32,
@@ -1590,6 +1596,7 @@ impl Gerdr {
             venv: Default::default(),
             tabs: Vec::new(),
             panes: Vec::new(),
+            folded: None,
         });
         self.projects.save();
         id
@@ -2540,7 +2547,9 @@ impl Gerdr {
         self.poke_herdr();
     }
 
-    /// The agent cards of each workspace, in sidebar order.
+    /// The agent rows of each workspace, in sidebar order. Those of the
+    /// other workspaces that are blocked or done also show in the "Needs
+    /// you" list, unless the config hides it.
     pub fn agent_views(&self) -> Vec<Vec<AgentView>> {
         self.workspaces
             .iter()
@@ -2548,6 +2557,14 @@ impl Gerdr {
             .map(|(w, ws)| {
                 let mut views = self.herdr_cards(ws);
                 views.extend(self.cursor_cards(w));
+                if self.needs_you && w != self.active_workspace {
+                    for view in &mut views {
+                        view.inbox = matches!(
+                            view.status,
+                            herdr::AgentStatus::Blocked | herdr::AgentStatus::Done
+                        );
+                    }
+                }
                 views
             })
             .collect()
@@ -4331,6 +4348,10 @@ impl Gerdr {
                     });
                     view.git = Some(git.clone());
                 }
+                // Folded by hand, else while quiet and not the active one.
+                view.folded = self
+                    .workspace_folded(w)
+                    .unwrap_or_else(|| w != self.active_workspace && view.is_quiet());
                 (view, tabs)
             })
             .collect()
@@ -5297,6 +5318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         theme_mode: ui.theme.or(saved_theme).unwrap_or_default(),
         system_dark: true,
         density: ui.density,
+        needs_you: ui.needs_you,
         sidebar_width: SIDEBAR_WIDTH,
         next_pane: 0,
         drag: None,

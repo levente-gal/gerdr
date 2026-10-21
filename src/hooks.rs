@@ -267,6 +267,7 @@ mod tests {
                 venv: Default::default(),
                 tabs: Vec::new(),
                 panes: Vec::new(),
+                folded: None,
             })
             .collect();
         Project {

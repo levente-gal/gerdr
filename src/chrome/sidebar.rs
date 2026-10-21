@@ -1,31 +1,37 @@
-//! The workspace sidebar: the views of workspaces and agent cards, where
-//! they go, and how they are drawn.
+//! The workspace sidebar: the views of workspaces and agents, where they
+//! go, and how they are drawn.
 //!
-//! A workspace row is two lines: its name with a status chip at the right
-//! (one dot and a word for the most pressing agent, a filled badge with a
-//! count when agents are blocked), then its branch and place, and at the
-//! right how many other worktrees its repository has; then a line per
-//! worktree that needs a look (a few at most). Under it, a
-//! compact card per agent: a header line and a detail line, the most
-//! pressing first. The header holds the project's name, a button opening
-//! the repositories panel and a "+" button opening the menu of what to
-//! add. What moves (hover pills, the pulse on a blocked card, a name being
-//! renamed) comes in through `SidebarState`. After a workspace's agent
-//! cards, a GitHub card shows the CI and pull requests of its folder's
-//! repository: a line per group (its branches' CI, the user's pull
-//! requests, the ones asking for their review), each a label and a chip
-//! per branch or pull request, and a count of the other pull requests.
+//! It reads as a tree. A workspace is a one-line header: a chevron folding
+//! it (when it has anything under it), its kind's icon, its name, its
+//! branch with the marks of where its repository stands, and at the right
+//! the count of its repository's other worktrees, the mark of its CI while
+//! that needs no look, and its status while it is folded or an agent in it
+//! is blocked. Under it, unless folded: a line per worktree that needs a
+//! look (a few at most), a flat row per agent (the most pressing first:
+//! its status mark, its name or kind, what it is on, a line per subagent
+//! that runs), a "+N more" line, then the CI and pull requests of its
+//! folder's repository once something there needs a look (a run failed, a
+//! review waits): a line per group, each a label and a chip per branch or
+//! pull request, and a count of the other pull requests. Quiet things stay
+//! quiet: an idle agent is muted, a green CI is one mark on the header,
+//! and a workspace with nothing going on folds itself (see
+//! `WorkspaceView::is_quiet`). Above the workspaces, a "Needs you" list
+//! gathers the agents of the other workspaces that are blocked or done. The
+//! active workspace's block is tinted. The header of the sidebar holds the
+//! project's name, a button opening the repositories panel and a "+"
+//! button opening the menu of what to add. What moves (hover pills, the
+//! pulse on a blocked agent, a name being renamed) comes in through
+//! `SidebarState`.
 
 use super::repos::scrollbar;
 use super::{
-    BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_GAP, CARD_HEADER, CARD_INDENT, CARD_LINE,
-    CARD_PAD, CARD_RADIUS, CHEVRON_WIDTH, CLOSE_WIDTH, Canvas, DETAIL_FONT_SIZE, Density,
-    FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
-    LABEL_FONT_SIZE, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_BOTTOM, ROW_HEIGHT,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROW_TITLE_HEIGHT,
-    ROWS_TOP, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE,
-    TabView, app, band, chevron_down, ci_mark, cross, distinct, folder, git_branch, icon_sdf,
-    measure, mix, new_tab, physical, rect_px, status_mark, terminal,
+    BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_LINE, CHEVRON_WIDTH, Canvas,
+    DETAIL_FONT_SIZE, Density, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN,
+    HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
+    ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb, SMALL_FONT_SIZE,
+    STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, app, band, chevron_down, ci_mark,
+    cross, distinct, folder, git_branch, icon_sdf, measure, mix, new_tab, physical, rect_px,
+    status_mark, terminal,
 };
 use crate::WorkspaceKind;
 use crate::agents::AgentKey;
@@ -43,55 +49,89 @@ use std::path::PathBuf;
 /// How many steps a hover or pulse alpha in `SidebarState` has: the value
 /// `anim::quantize` gives 1.0.
 const ALPHA_STEPS: f32 = 16.0;
-/// Room for the status chip at the right of a row's name line, which it
-/// shares with the "×": while the row is hovered the chip shrinks to its
-/// dot and the "×" shows, so the name never moves.
-const CHIP_WIDTH: i32 = 66;
-/// The chip's own part of that room, left of the "×".
-const CHIP_SLOT: i32 = CHIP_WIDTH - CLOSE_WIDTH;
-/// The chip's inner padding, and the gap between its dot and its word.
-const CHIP_PADDING: i32 = 6;
-/// Room for the count of other worktrees at the right end of line 2.
+/// A workspace header's height, in comfortable and compact density.
+const HEADER_ROW: i32 = 30;
+const HEADER_ROW_COMPACT: i32 = 26;
+/// An agent row's first line, in comfortable and compact density.
+const AGENT_ROW: i32 = 24;
+const AGENT_ROW_COMPACT: i32 = 22;
+/// The gap between the rows under a header.
+const CHILD_GAP: i32 = 2;
+/// The room after a workspace's block, in comfortable and compact density.
+const BLOCK_GAP: i32 = 8;
+const BLOCK_GAP_COMPACT: i32 = 4;
+/// The fold chevron's column, left of the kind's icon.
+const FOLD_X: i32 = ROW_INSET + 2;
+const FOLD_WIDTH: i32 = 12;
+/// Where a header's kind icon starts, and its name.
+const ICON_X: i32 = FOLD_X + FOLD_WIDTH;
+const NAME_X: i32 = ICON_X + ROW_ICON_WIDTH + 7;
+/// How far a row under a header reaches left of its status mark, which
+/// sits under the header's name; and where the row starts.
+const CHILD_PAD: i32 = 6;
+const CHILD_X: i32 = NAME_X - CHILD_PAD;
+/// Where a row's text starts under a header: after its status mark.
+const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
+/// The "×" at the right end of a header, and of a deletable agent row.
+const CLOSE_SLOT: i32 = 22;
+/// The room of the header's CI mark.
+const CI_SLOT: i32 = 18;
+/// The room of the header's status mark, and the gap before the count of
+/// agents a folded workspace hides.
+const STATUS_SLOT: i32 = 16;
+const COUNT_GAP: i32 = 2;
+/// The narrowest a header's branch is shown in the room its name leaves;
+/// with less it goes.
+const BRANCH_MIN: i32 = 36;
+/// The gap between a header's name and its branch.
+const NAME_GAP: i32 = 8;
+/// Room for the count of other worktrees on the header.
 const WORKTREE_COUNT_WIDTH: i32 = 30;
-/// How far the count's hover pill reaches past it on each side.
+/// How far a hover pill on the header's count or CI mark reaches past it.
 const COUNT_PILL_PAD: i32 = 4;
-/// The most lines a row gives worktrees that need a look; a last line
-/// counts the rest.
+/// The most lines a workspace gives worktrees that need a look; a last
+/// line counts the rest.
 const WORKTREE_LINES: usize = 3;
-const CHIP_DOT: i32 = 8;
-const CHIP_GAP: i32 = 4;
+/// The room a header's worktree lines leave under them.
+const ATTENTION_BOTTOM: i32 = 4;
 /// The gap between the header's name pill and its repositories button,
 /// and between that and the "+".
 const HEADER_GAP: i32 = 4;
 const HEADER_BUTTON_GAP: i32 = 2;
-/// A row in compact density: just the name line.
-const ROW_COMPACT: i32 = 28;
-/// Card padding in compact density: half the comfortable one.
-const CARD_PAD_COMPACT: i32 = CARD_PAD / 2;
-/// The field a row's name turns into while renaming: its height and how
-/// far it reaches left of the name.
+/// The field a header's name turns into while renaming: its height and
+/// how far it reaches left of the name.
 const RENAME_HEIGHT: i32 = 24;
 const RENAME_INSET: i32 = 5;
-/// How much of the warning colour a blocked card's header carries at the
+/// How much of the warning colour a blocked agent's row carries at the
 /// top of its pulse.
 const BLOCKED_TINT: f32 = 0.15;
-/// How much of the tint a blocked card's header keeps at the bottom of its
+/// How much of the tint a blocked row keeps at the bottom of its
 /// breathing; the rest comes and goes with the pulse.
 const BLOCKED_REST: f32 = 0.4;
-/// The width of a card's "×", at the right end of its header.
-const CARD_CLOSE: i32 = 22;
-/// A GitHub card's chip: the room around its mark and label, and the gap
-/// between them; the gap between chips.
+/// How much of the selection colour tints the active workspace's block.
+const ACTIVE_TINT: f32 = 0.45;
+/// The "Needs you" list: its heading's height, and the room after it.
+const INBOX_TITLE: i32 = 20;
+const INBOX_GAP: i32 = 6;
+/// The most of an inbox row its workspace's name takes, as a part of it.
+const INBOX_PLACE: f32 = 0.4;
+/// The gap between an agent row's name and what it is on.
+const TITLE_GAP: i32 = 6;
+/// A GitHub section's chip: the room around its mark and label, and the
+/// gap between them; the gap between chips.
 const CI_CHIP_PAD: i32 = 4;
 const CI_MARK_GAP: i32 = 4;
 const CI_CHIP_GAP: i32 = 4;
 const CI_PILL_RADIUS: f32 = 4.0;
-/// How big GitHub's mark is in a GitHub card's header.
+/// How big GitHub's mark is at the start of a GitHub section.
 const CI_ICON_SIZE: i32 = 12;
-/// The gap between the GitHub card's widest line label and its chips.
+/// The gap between the GitHub section's widest line label and its chips.
 const CI_LABEL_GAP: i32 = 8;
-/// How far the GitHub card's count of other pull requests tints its pill
-/// toward the muted text colour at rest; under the pointer, twice as far.
+/// The room above and below a GitHub section's lines.
+const CI_PAD: i32 = 2;
+/// How far the GitHub section's count of other pull requests tints its
+/// pill toward the muted text colour at rest; under the pointer, twice as
+/// far.
 const CI_COUNT_TINT: f32 = 0.15;
 /// The room left under the last workspace when the sidebar is scrolled to
 /// its end, and the scrollbar's width and its gap from the right edge.
@@ -102,26 +142,43 @@ const SCROLLBAR_INSET: i32 = 1;
 /// its size.
 const GUESS_CHAR: f32 = 0.55;
 
-/// The header band of a blocked agent card at `card`, as `agent_card`
-/// tints it: the part the pulse breathes over.
-pub fn blocked_band(card: Rect, density: Density) -> Rect {
+fn header_height(density: Density) -> i32 {
+    match density {
+        Density::Comfortable => HEADER_ROW,
+        Density::Compact => HEADER_ROW_COMPACT,
+    }
+}
+
+fn agent_row(density: Density) -> i32 {
+    match density {
+        Density::Comfortable => AGENT_ROW,
+        Density::Compact => AGENT_ROW_COMPACT,
+    }
+}
+
+fn block_gap(density: Density) -> i32 {
+    match density {
+        Density::Comfortable => BLOCK_GAP,
+        Density::Compact => BLOCK_GAP_COMPACT,
+    }
+}
+
+/// The first line of an agent row at `row`, as `agent_row` tints it when
+/// blocked: the part the pulse breathes over.
+pub fn blocked_band(row: Rect, density: Density) -> Rect {
     Rectangle::new(
-        (card.loc.x + 1, card.loc.y + 1).into(),
-        (
-            (card.size.w - 2).max(0),
-            (CARD_HEADER + card_pad(density) - 1).max(0),
-        )
-            .into(),
+        row.loc,
+        (row.size.w, agent_row(density).min(row.size.h)).into(),
     )
 }
 
-/// How opaque the pulse band over a blocked card's header is drawn when
-/// the pulse stands at `pulse` (0 to 1).
+/// How opaque the pulse band over a blocked agent's row is drawn when the
+/// pulse stands at `pulse` (0 to 1).
 pub fn pulse_alpha(pulse: f32) -> f32 {
     BLOCKED_TINT * (1.0 - BLOCKED_REST) * pulse.clamp(0.0, 1.0)
 }
 
-/// One line of an agent card below its header.
+/// One line of what is known of an agent, past its name.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentLine {
     /// What the agent is on, from its terminal title.
@@ -130,12 +187,12 @@ pub enum AgentLine {
     Field(String, String),
 }
 
-/// What an agent card shows: everything herdr (or Cursor) reports about
-/// the agent. The card draws its header, one detail line and a line per
+/// What an agent row shows: everything herdr (or Cursor) reports about
+/// the agent. The row shows its name and what it is on, and a line per
 /// subagent that runs; the rest is for its tooltip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentView {
-    /// Which agent; a click on the card shows it.
+    /// Which agent; a click on the row shows it.
     pub key: AgentKey,
     /// The folder it works in, for "Copy path".
     pub dir: Option<PathBuf>,
@@ -147,13 +204,15 @@ pub struct AgentView {
     pub model: Option<String>,
     pub lines: Vec<AgentLine>,
     /// Whether it is history (a Cursor chat gone idle) that a "×" on the
-    /// card deletes from gerdr.
+    /// row deletes from gerdr.
     pub deletable: bool,
     /// Its subagents that run.
     pub subagents: Vec<SubagentView>,
+    /// Whether it also shows in the "Needs you" list at the top.
+    pub inbox: bool,
 }
 
-/// A subagent on its parent's card: what it is on, and the agent a click
+/// A subagent on its parent's row: what it is on, and the agent a click
 /// on its line shows, once known.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubagentView {
@@ -162,7 +221,7 @@ pub struct SubagentView {
 }
 
 impl AgentView {
-    /// The card for `info`, running in herdr pane `pane`.
+    /// The view of `info`, running in herdr pane `pane`.
     pub fn new(info: &AgentInfo, pane: Option<&PaneState>) -> Self {
         let mut lines = Vec::new();
         let field = |label: &str, value: String| AgentLine::Field(label.into(), value);
@@ -226,10 +285,11 @@ impl AgentView {
             lines,
             deletable: false,
             subagents: Vec::new(),
+            inbox: false,
         }
     }
 
-    /// The card for Cursor chat `chat`.
+    /// The view of Cursor chat `chat`.
     pub fn cursor(chat: &CursorChat) -> Self {
         let row = &chat.row;
         let field = |label: &str, value: String| AgentLine::Field(label.into(), value);
@@ -283,6 +343,7 @@ impl AgentView {
             lines,
             deletable: false,
             subagents,
+            inbox: false,
         }
     }
 
@@ -294,7 +355,7 @@ impl AgentView {
         })
     }
 
-    /// What the card calls the agent: its kind, then its name and its
+    /// What its tooltip calls the agent: its kind, then its name and its
     /// model.
     pub fn label(&self) -> String {
         [Some(&self.kind), self.name.as_ref(), self.model.as_ref()]
@@ -305,22 +366,13 @@ impl AgentView {
             .join(" · ")
     }
 
-    /// The card's detail line: the folder it is in (its last component)
-    /// and what it is on.
-    pub fn detail(&self) -> String {
-        let cwd = self.lines.iter().find_map(|l| match l {
-            AgentLine::Field(label, value) if label == FOLDER => Some(basename(value)),
-            _ => None,
-        });
-        [cwd, self.title()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ")
+    /// What its row calls the agent: the name it was given, else its kind.
+    pub fn heading(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.kind)
     }
 
-    /// How many lines its subagents take below the detail line: one each
-    /// up to `SUBAGENT_LINES`, and one counting the rest.
+    /// How many lines its subagents take below its first: one each up to
+    /// `SUBAGENT_LINES`, and one counting the rest.
     pub fn subagent_lines(&self) -> usize {
         let n = self.subagents.len();
         if n > SUBAGENT_LINES {
@@ -330,22 +382,17 @@ impl AgentView {
         }
     }
 
-    /// Where line `j` of its subagents sits on its card at `card`: from
-    /// a pill's padding before the text to the card's padding.
-    pub fn subagent_line(&self, card: Rect, density: Density, j: usize) -> Rect {
-        let detail = if self.detail().is_empty() {
-            0
-        } else {
-            CARD_LINE
-        };
-        let x = card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP - PILL_PADDING;
-        let y = card.loc.y + card_pad(density) + CARD_HEADER + detail + j as i32 * CARD_LINE;
-        let w = (card.loc.x + card.size.w - CARD_PAD / 2 - x).max(0);
+    /// Where line `j` of its subagents sits on its row at `row`: from a
+    /// pill's padding before the text to the row's padding.
+    pub fn subagent_line(&self, row: Rect, density: Density, j: usize) -> Rect {
+        let x = row.loc.x + CHILD_TEXT_X - CHILD_X - PILL_PADDING;
+        let y = row.loc.y + agent_row(density) + j as i32 * CARD_LINE;
+        let w = (row.loc.x + row.size.w - CHILD_PAD / 2 - x).max(0);
         Rectangle::new((x, y).into(), (w, CARD_LINE).into())
     }
 
-    /// Everything the card knows, for its tooltip under `label`: a line
-    /// each, its status first, said in full.
+    /// Everything known of it, for its tooltip under `label`: a line each,
+    /// its status first, said in full.
     pub fn tooltip_fields(&self) -> Vec<(String, String)> {
         let mut fields = vec![("Status".to_owned(), status_meaning(self.status).to_owned())];
         fields.extend(self.lines.iter().map(|l| match l {
@@ -357,15 +404,10 @@ impl AgentView {
         fields
     }
 
-    /// The card's height at `density`, in logical pixels.
+    /// Its row's height at `density`, in logical pixels: a line, and one
+    /// per subagent line.
     pub fn height(&self, density: Density) -> i32 {
-        let detail = if self.detail().is_empty() {
-            0
-        } else {
-            CARD_LINE
-        };
-        let subagents = self.subagent_lines() as i32 * CARD_LINE;
-        2 * card_pad(density) + CARD_HEADER + detail + subagents
+        agent_row(density) + self.subagent_lines() as i32 * CARD_LINE
     }
 }
 
@@ -373,7 +415,7 @@ impl AgentView {
 const FOLDER: &str = "Folder";
 /// The label of a field holding what a subagent that runs is to do.
 const SUBAGENT: &str = "Subagent";
-/// How many subagents a card shows a line each at most.
+/// How many subagents a row shows a line each at most.
 pub const SUBAGENT_LINES: usize = 5;
 /// How far a subagent's line starts its text in, past its elbow.
 const SUBAGENT_INDENT: i32 = 12;
@@ -385,22 +427,6 @@ fn sentence_case(key: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => words,
-    }
-}
-
-/// The last component of a path shown as text.
-fn basename(path: &str) -> &str {
-    path.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|b| !b.is_empty())
-        .unwrap_or(path)
-}
-
-fn card_pad(density: Density) -> i32 {
-    match density {
-        Density::Comfortable => CARD_PAD,
-        Density::Compact => CARD_PAD_COMPACT,
     }
 }
 
@@ -425,8 +451,8 @@ pub fn status_meaning(status: AgentStatus) -> &'static str {
     }
 }
 
-/// What a workspace row shows: its name and kind, and what its tabs show,
-/// put together.
+/// What a workspace header shows: its name and kind, and what its tabs
+/// show, put together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceView {
     pub name: String,
@@ -436,30 +462,34 @@ pub struct WorkspaceView {
     pub branch: Option<String>,
     /// Where its folder's repository stands, shown after `branch`.
     pub git: Option<GitStatus>,
+    /// Where its tabs are; the header leaves it to its tooltip.
     pub place: String,
     /// How many tabs it has and what runs in them; empty without herdr.
-    /// The tab strip shows this, so the row leaves it to its tooltip.
+    /// The tab strip shows this, so the header leaves it to its tooltip.
     pub activity: String,
-    /// The app icon its row shows in place of its kind's, if any.
+    /// The app icon its header shows in place of its kind's, if any.
     pub icon: Option<AppIcon>,
-    /// What the agents kept under it that its cards leave out are called:
-    /// a "+N more" line after the cards counts them.
+    /// What the agents kept under it that its rows leave out are called:
+    /// a "+N more" line after the rows counts them.
     pub more_agents: Vec<String>,
-    /// The CI and pull requests of its folder's repository, as a GitHub
-    /// card after its agents'.
+    /// The CI and pull requests of its folder's repository: a mark on its
+    /// header, or a GitHub section after its agents once it needs a look.
     pub ci: Option<CiView>,
+    /// Whether it shows just its header: folded by hand, or quiet.
+    pub folded: bool,
 }
 
-/// What a GitHub card shows: a chip per branch or pull request, a line per
-/// group of them, and how many other pull requests the repository has (a
-/// count that opens its pull requests page).
+/// What a GitHub section shows: a chip per branch or pull request, a line
+/// per group of them, and how many other pull requests the repository has
+/// (a count that opens its pull requests page).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CiView {
     pub chips: Vec<CiChip>,
     pub other_prs: usize,
 }
 
-/// A chip of the GitHub card: a status mark and a label, `main` or `#42`.
+/// A chip of the GitHub section: a status mark and a label, `main` or
+/// `#42`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CiChip {
     pub label: String,
@@ -476,19 +506,39 @@ pub struct CiChip {
 
 impl CiView {
     /// Whether it has anything to show, neither a chip nor another pull
-    /// request: no card shows otherwise.
+    /// request: nothing shows otherwise.
     pub fn is_empty(&self) -> bool {
         self.chips.is_empty() && self.other_prs == 0
     }
+
+    /// Whether it needs no look: no run failed and no review waits. It is
+    /// then one mark on its workspace's header, not a section.
+    pub fn quiet(&self) -> bool {
+        !self
+            .chips
+            .iter()
+            .any(|c| c.state == CiState::Failed || c.group == Group::Review)
+    }
+
+    /// Where its runs stand together, as the header's mark shows it:
+    /// failed if one did, else running if one runs, else passed if one
+    /// passed.
+    pub fn rollup(&self) -> CiState {
+        let any = |state| self.chips.iter().any(|c| c.state == state);
+        [CiState::Failed, CiState::Running, CiState::Passed]
+            .into_iter()
+            .find(|s| any(*s))
+            .unwrap_or(CiState::Unknown)
+    }
 }
 
-/// The count of `n` other pull requests, as the GitHub card says it.
+/// The count of `n` other pull requests, as the GitHub section says it.
 fn prs_label(n: usize) -> String {
     format!("+{n} PRs")
 }
 
-/// The word the GitHub card's lines of `group` start with.
-fn group_label(group: Group) -> &'static str {
+/// The word the GitHub section's lines of `group` start with.
+pub fn group_label(group: Group) -> &'static str {
     match group {
         Group::Branch => "CI",
         Group::Mine => "Mine",
@@ -497,14 +547,14 @@ fn group_label(group: Group) -> &'static str {
 }
 
 /// How wide `text` is at `size` in logical pixels, measured with the UI
-/// font; without one, a guess as `name_fits` makes.
+/// font; without one, a guess.
 fn text_extent(text: &str, size: f32) -> i32 {
     let guess = || text.chars().count() as f32 * size * GUESS_CHAR;
     measure(text, size).unwrap_or_else(guess).ceil() as i32
 }
 
-/// How wide the GitHub card's chip labelled `label` is: its mark and its
-/// label, with room around them.
+/// How wide the GitHub section's chip labelled `label` is: its mark and
+/// its label, with room around them.
 fn ci_chip_width(label: &str) -> i32 {
     2 * CI_CHIP_PAD + STATUS_WIDTH + CI_MARK_GAP + text_extent(label, DETAIL_FONT_SIZE)
 }
@@ -519,6 +569,11 @@ fn ci_color(state: CiState, p: &Palette) -> Rgb {
         CiState::Running => p.accent,
         CiState::Unknown => p.placeholder,
     }
+}
+
+/// A right-pointing chevron: a folded workspace's.
+fn chevron_right(x: f32, y: f32, s: f32) -> f32 {
+    chevron_down(y, x, s)
 }
 
 impl WorkspaceView {
@@ -564,31 +619,24 @@ impl WorkspaceView {
             icon: None,
             more_agents: Vec::new(),
             ci: None,
+            folded: false,
         }
     }
 
-    /// Whether it has a second line: a branch or a place.
-    fn has_detail(&self) -> bool {
-        self.branch.is_some() || !self.place.is_empty()
+    /// Whether nothing goes on in it: no agent past idle, and no CI that
+    /// needs a look. Such a workspace folds itself unless it is the active
+    /// one or was unfolded by hand.
+    pub fn is_quiet(&self) -> bool {
+        self.status
+            .is_none_or(|s| urgency(s) <= urgency(AgentStatus::Idle))
+            && self.ci.as_ref().is_none_or(CiView::quiet)
     }
 
-    /// The height of the band holding its name, in logical pixels.
-    fn title_height(&self, density: Density) -> i32 {
-        match density {
-            Density::Compact => ROW_COMPACT,
-            Density::Comfortable if self.has_detail() => ROW_TITLE_HEIGHT,
-            Density::Comfortable => ROW_HEIGHT,
-        }
-    }
-
-    /// The row's height at `density`, in logical pixels.
+    /// Its header's height and the worktree lines under it, at `density`.
     pub fn height(&self, density: Density) -> i32 {
-        let title = self.title_height(density);
-        if density == Density::Comfortable && self.has_detail() {
-            title + TAB_LINE * (1 + self.attention_lines() as i32) + ROW_BOTTOM
-        } else {
-            title
-        }
+        let lines = self.attention_lines(density) as i32;
+        let bottom = if lines > 0 { ATTENTION_BOTTOM } else { 0 };
+        header_height(density) + lines * TAB_LINE + bottom
     }
 
     /// The other worktrees of its folder's repository.
@@ -602,9 +650,13 @@ impl WorkspaceView {
         all.filter(|w| w.needs_attention()).collect()
     }
 
-    /// How many lines those take under line 2: one each up to
-    /// `WORKTREE_LINES`, and one counting the rest.
-    fn attention_lines(&self) -> usize {
+    /// How many lines those take under its header at `density`: one each
+    /// up to `WORKTREE_LINES`, and one counting the rest; none while it is
+    /// folded or compact.
+    fn attention_lines(&self, density: Density) -> usize {
+        if self.folded || density == Density::Compact {
+            return 0;
+        }
         let n = self.needing_attention().len();
         if n > WORKTREE_LINES {
             WORKTREE_LINES + 1
@@ -612,10 +664,25 @@ impl WorkspaceView {
             n
         }
     }
+
+    /// Whether its CI shows as the mark on its header: while it needs no
+    /// look, or the workspace is folded.
+    fn ci_mark(&self) -> bool {
+        self.ci
+            .as_ref()
+            .is_some_and(|ci| !ci.is_empty() && (self.folded || ci.quiet()))
+    }
+
+    /// Its GitHub section, while it needs a look and the workspace shows
+    /// it.
+    fn ci_section(&self) -> Option<&CiView> {
+        let ci = self.ci.as_ref()?;
+        (!self.folded && !ci.is_empty() && !ci.quiet()).then_some(ci)
+    }
 }
 
 /// How pressing `status` is, for picking the one a workspace shows and
-/// ordering the cards.
+/// ordering the rows.
 pub fn urgency(status: AgentStatus) -> u8 {
     match status {
         AgentStatus::Blocked => 4,
@@ -642,21 +709,41 @@ pub fn blocked_count(cards: &[AgentView]) -> usize {
         .count()
 }
 
-/// What moves in a workspace row: its hover pill's alpha (0 to 16) and
-/// whether the pointer is on its "×", on its worktree count.
+/// The agents the "Needs you" list shows, as (workspace, agent) indices:
+/// those marked for it, the most pressing first, and among equals by
+/// workspace and as each workspace orders them.
+pub fn inbox_order(agents: &[Vec<AgentView>]) -> Vec<(usize, usize)> {
+    let mut entries: Vec<(usize, usize)> = agents
+        .iter()
+        .enumerate()
+        .flat_map(|(i, cards)| {
+            card_order(cards)
+                .into_iter()
+                .filter(|k| cards[*k].inbox)
+                .map(move |k| (i, k))
+        })
+        .collect();
+    entries.sort_by_key(|(i, k)| std::cmp::Reverse(urgency(agents[*i][*k].status)));
+    entries
+}
+
+/// What moves in a workspace header: its hover pill's alpha (0 to 16) and
+/// whether the pointer is on its "×", its worktree count, its fold
+/// chevron, its CI mark.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowState {
     pub hover: u8,
     pub close: bool,
     pub worktrees: bool,
+    pub fold: bool,
+    pub ci: bool,
 }
 
-/// What moves in an agent card: its hover pill's alpha and, while blocked,
-/// (0 to 16). A blocked card's pulse is not here: it is composed over the
-/// sidebar as its own part (see `blocked_band`), so it never redraws it.
-/// Also whether its agent is open: its pane has the keyboard in the shown
-/// tab, whether the pointer is on its "×", and the hover alphas of its
-/// subagents' lines.
+/// What moves in an agent row: its hover pill's alpha (0 to 16). A blocked
+/// row's pulse is not here: it is composed over the sidebar as its own
+/// part (see `blocked_band`), so it never redraws it. Also whether its
+/// agent is open (its pane has the keyboard in the shown tab), whether the
+/// pointer is on its "×", and the hover alphas of its subagents' lines.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CardState {
     pub hover: u8,
@@ -666,10 +753,11 @@ pub struct CardState {
     pub subagents: [u8; SUBAGENT_LINES],
 }
 
-/// What moves in a GitHub card: the hover alphas (0 to 16) of the card off
-/// its chips and count, of each chip (as `CiView::chips` lists them) and
-/// of its count of other pull requests. A part lights alone: the card fades while
-/// the pointer is on a chip, as `SidebarHit::pill` has it.
+/// What moves in a GitHub section: the hover alphas (0 to 16) of the
+/// section off its chips and count, of each chip (as `CiView::chips`
+/// lists them) and of its count of other pull requests. A part lights
+/// alone: the section fades while the pointer is on a chip, as
+/// `SidebarHit::pill` has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CiCardState {
     pub hover: u8,
@@ -690,12 +778,15 @@ impl CiCardState {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SidebarState {
     pub density: Density,
-    /// Per workspace row.
+    /// Per workspace header.
     pub rows: Vec<RowState>,
-    /// Per workspace, per card as the data lists them (not as drawn).
+    /// Per workspace, per agent as the data lists them (not as drawn).
     pub cards: Vec<Vec<CardState>>,
-    /// Per workspace, its GitHub card.
+    /// Per workspace, its GitHub section.
     pub ci: Vec<CiCardState>,
+    /// The hover alpha of each row of the "Needs you" list, as
+    /// `inbox_order` lists them.
+    pub inbox: Vec<u8>,
     /// The "+" button's hover alpha, and whether its menu is open.
     pub plus: u8,
     pub plus_open: bool,
@@ -726,6 +817,10 @@ impl SidebarState {
     fn ci(&self, i: usize) -> CiCardState {
         self.ci.get(i).cloned().unwrap_or_default()
     }
+
+    fn inbox(&self, n: usize) -> u8 {
+        self.inbox.get(n).copied().unwrap_or(0)
+    }
 }
 
 /// Everything the sidebar is drawn from.
@@ -742,34 +837,46 @@ pub struct SidebarView {
     pub state: SidebarState,
 }
 
-/// Where the parts of a workspace row sit.
+/// Where the parts of a workspace header sit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowLayout {
-    /// The whole row.
+    /// The header and its worktree lines.
     pub rect: Rect,
     /// The band holding its name.
     pub title: Rect,
-    /// Where its name goes, up to the chip (or the "×").
+    /// Where its name goes.
     pub name: Rect,
-    /// The status chip, when it has agents.
+    /// Where its branch goes after the name, when it shows.
+    pub branch: Option<Rect>,
+    /// Its fold chevron, when it has anything to fold.
+    pub fold: Option<Rect>,
+    /// Its status, when it shows: folded, or an agent blocked.
     pub chip: Option<Rect>,
-    /// Its "×" close button.
+    /// The mark of its CI, while that shows on the header.
+    pub ci: Option<Rect>,
+    /// Its "×" close button, at the right end.
     pub close: Rect,
-    /// The count of its other worktrees on line 2, when it has any and
-    /// line 2 shows.
+    /// The count of its other worktrees, when it has any.
     pub worktrees: Option<Rect>,
-    /// The lines under line 2 of the worktrees needing a look, when it
-    /// shows any.
+    /// The lines under the header of the worktrees needing a look, when
+    /// it shows any.
     pub attention: Option<Rect>,
 }
 
 impl RowLayout {
-    /// The field the name turns into while renaming.
+    /// The field the name turns into while renaming: over the name and
+    /// the branch.
     pub fn rename_field(&self) -> Rect {
         let x = self.name.loc.x - RENAME_INSET;
         let y = self.title.loc.y + (self.title.size.h - RENAME_HEIGHT) / 2;
-        let end = self.chip.map_or(self.close.loc.x, |c| c.loc.x) - 2;
-        Rectangle::new((x, y).into(), (end - x, RENAME_HEIGHT).into())
+        let end = [self.worktrees, self.ci, self.chip]
+            .into_iter()
+            .flatten()
+            .map(|r| r.loc.x)
+            .min()
+            .unwrap_or(self.close.loc.x)
+            - 2;
+        Rectangle::new((x, y).into(), ((end - x).max(0), RENAME_HEIGHT).into())
     }
 }
 
@@ -782,28 +889,36 @@ pub struct SidebarLayout {
     pub plus: Rect,
     /// The button left of the "+", opening the repositories panel.
     pub repos: Rect,
+    /// The "Needs you" heading, when the list shows, and its rows: each
+    /// with its agent's workspace and index among that workspace's agents.
+    pub inbox_title: Option<Rect>,
+    pub inbox: Vec<(usize, usize, Rect)>,
     /// One per workspace.
     pub rows: Vec<RowLayout>,
-    /// Per workspace, its agent cards as drawn (the most pressing first):
-    /// each with its index among the workspace's cards as the data lists
-    /// them.
+    /// Per workspace, its agent rows as drawn (the most pressing first):
+    /// each with its index among the workspace's agents as the data lists
+    /// them. None while folded.
     pub cards: Vec<Vec<(usize, Rect)>>,
-    /// Per workspace, the "×" of each card that has one, by its index.
+    /// Per workspace, the "×" of each agent row that has one, by its index.
     pub card_closes: Vec<Vec<(usize, Rect)>>,
     /// Per workspace, the lines of the subagents a click shows: each with
-    /// its card's index and its own among the card's subagents.
+    /// its agent's index and its own among the agent's subagents.
     pub subagents: Vec<Vec<(usize, usize, Rect)>>,
-    /// Per workspace, the "+N more" line after its cards, if it has one.
+    /// Per workspace, the "+N more" line after its agent rows, if it has
+    /// one.
     pub more: Vec<Option<Rect>>,
-    /// Per workspace, its GitHub card, if it has one.
+    /// Per workspace, its GitHub section, if it shows one.
     pub ci: Vec<Option<CiLayout>>,
-    /// Per workspace, all it takes: its row, its cards and the gap after them.
+    /// Per workspace, all it takes: its header, what is under it and the
+    /// gap after them.
     pub blocks: Vec<Rect>,
+    /// The gap closing each block.
+    pub block_gap: i32,
     /// How far everything under the header is scrolled up (see `scrolled`).
     pub scroll: i32,
 }
 
-/// Where the parts of a GitHub card sit.
+/// Where the parts of a GitHub section sit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CiLayout {
     pub card: Rect,
@@ -816,16 +931,12 @@ pub struct CiLayout {
     pub others: Option<Rect>,
 }
 
-/// Where the "×" of a card at `card` sits: at the right end of its header,
-/// where the status pill shows while the pointer is off the card.
-pub fn card_close(card: Rect, density: Density) -> Rect {
+/// Where the "×" of an agent row at `row` sits: at the right end of its
+/// first line.
+pub fn card_close(row: Rect, density: Density) -> Rect {
     Rectangle::new(
-        (
-            card.loc.x + card.size.w - CARD_PAD / 2 - CARD_CLOSE,
-            card.loc.y + card_pad(density),
-        )
-            .into(),
-        (CARD_CLOSE, CARD_HEADER).into(),
+        (row.loc.x + row.size.w - CLOSE_SLOT, row.loc.y).into(),
+        (CLOSE_SLOT, agent_row(density)).into(),
     )
 }
 
@@ -838,24 +949,29 @@ pub enum SidebarHit {
     Plus,
     /// The repositories button.
     Repos,
-    /// Workspace `i`: its row off any part below, its name, its status
-    /// chip, its "×", the count of its other worktrees.
+    /// Workspace `i`: its header off any part below, its name, its status,
+    /// its "×", the count of its other worktrees, its fold chevron, the
+    /// mark of its CI.
     Row(usize),
     Name(usize),
     Chip(usize),
     Close(usize),
     Worktrees(usize),
+    Fold(usize),
+    CiMark(usize),
     /// Line `k` of workspace `i`'s worktrees needing a look: the worktree
     /// `k` of `WorkspaceView::needing_attention`, or the "+N more" line.
     Attention(usize, usize),
-    /// Card `k` (as the data lists it) of workspace `i`, its "×", and the
-    /// line of its subagent `j`.
+    /// Agent `k` (as the data lists them) of workspace `i`: its row, its
+    /// "×", and the line of its subagent `j`.
     Card(usize, usize),
     CardClose(usize, usize),
     Subagent(usize, usize, usize),
-    /// The "+N more" line after workspace `i`'s cards.
+    /// Agent `k` of workspace `i` in the "Needs you" list.
+    Inbox(usize, usize),
+    /// The "+N more" line after workspace `i`'s agent rows.
     More(usize),
-    /// Workspace `i`'s GitHub card off its chips and count (its header,
+    /// Workspace `i`'s GitHub section off its chips and count (its mark,
     /// its line labels, the gaps), chip `k` of it (as `CiView::chips` lists
     /// them), and its count of other pull requests.
     Ci(usize),
@@ -864,7 +980,7 @@ pub enum SidebarHit {
 }
 
 impl SidebarHit {
-    /// The row a hit on any part of workspace `i` belongs to.
+    /// The workspace whose header a hit is on any part of.
     pub fn row(self) -> Option<usize> {
         match self {
             Self::Row(i)
@@ -872,13 +988,16 @@ impl SidebarHit {
             | Self::Chip(i)
             | Self::Close(i)
             | Self::Worktrees(i)
+            | Self::Fold(i)
+            | Self::CiMark(i)
             | Self::Attention(i, _) => Some(i),
             _ => None,
         }
     }
 
-    /// What lights up under this hit: a row for any part of it, a card
-    /// for its "×"; anything else (a GitHub card's chip, its count) itself.
+    /// What lights up under this hit: a header for any part of it, an
+    /// agent row for its "×"; anything else (a GitHub chip, its count, an
+    /// inbox row) itself.
     pub fn pill(self) -> Self {
         match (self.row(), self) {
             (Some(i), _) => Self::Row(i),
@@ -903,6 +1022,9 @@ impl SidebarLayout {
         }
         if pos.y < BAR_HEIGHT as f64 {
             return None;
+        }
+        if let Some((i, k, _)) = self.inbox.iter().find(|(_, _, rect)| inside(*rect)) {
+            return Some(SidebarHit::Inbox(*i, *k));
         }
         for (i, closes) in self.card_closes.iter().enumerate() {
             if let Some((k, _)) = closes.iter().find(|(_, rect)| inside(*rect)) {
@@ -937,8 +1059,12 @@ impl SidebarLayout {
         let (i, row) = self.rows.iter().enumerate().find(|(_, r)| inside(r.rect))?;
         Some(if inside(row.close) {
             SidebarHit::Close(i)
+        } else if row.fold.is_some_and(inside) {
+            SidebarHit::Fold(i)
         } else if row.worktrees.is_some_and(inside) {
             SidebarHit::Worktrees(i)
+        } else if row.ci.is_some_and(inside) {
+            SidebarHit::CiMark(i)
         } else if let Some(lines) = row.attention.filter(|r| inside(*r)) {
             SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
         } else if row.chip.is_some_and(inside) {
@@ -984,13 +1110,24 @@ impl SidebarLayout {
             return self;
         }
         let up = |r: &mut Rect| r.loc.y -= by;
+        self.inbox_title.iter_mut().for_each(up);
+        for (_, _, r) in &mut self.inbox {
+            up(r);
+        }
         for row in &mut self.rows {
             for r in [&mut row.rect, &mut row.title, &mut row.name, &mut row.close] {
                 up(r);
             }
-            for r in [&mut row.chip, &mut row.worktrees, &mut row.attention]
-                .into_iter()
-                .flatten()
+            for r in [
+                &mut row.branch,
+                &mut row.fold,
+                &mut row.chip,
+                &mut row.ci,
+                &mut row.worktrees,
+                &mut row.attention,
+            ]
+            .into_iter()
+            .flatten()
             {
                 up(r);
             }
@@ -1014,9 +1151,9 @@ impl SidebarLayout {
     }
 }
 
-/// Where the header's parts, the rows of `workspaces`, their `agents`
-/// cards and their GitHub cards sit in a sidebar `width` wide, in comfortable
-/// density.
+/// Where the header's parts, the "Needs you" list, the headers of
+/// `workspaces`, their `agents` rows and their GitHub sections sit in a
+/// sidebar `width` wide, in comfortable density.
 #[cfg(test)]
 pub fn sidebar_layout(
     workspaces: &[WorkspaceView],
@@ -1024,6 +1161,22 @@ pub fn sidebar_layout(
     width: i32,
 ) -> SidebarLayout {
     sidebar_layout_at(workspaces, agents, width, Density::Comfortable)
+}
+
+/// The width of workspace `ws`'s status on its header, when it shows one:
+/// a badge counting its blocked agents, else while folded its status mark
+/// and how many agents it hides.
+fn status_extent(ws: &WorkspaceView, cards: &[AgentView]) -> Option<i32> {
+    let blocked = blocked_count(cards);
+    if blocked > 0 {
+        let w = text_extent(&blocked.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+        return Some(w.max(PILL_HEIGHT));
+    }
+    ws.status.filter(|_| ws.folded)?;
+    Some(match cards.len() {
+        0 => STATUS_SLOT,
+        n => STATUS_SLOT + COUNT_GAP + text_extent(&n.to_string(), TINY_FONT_SIZE),
+    })
 }
 
 /// `sidebar_layout` at `density`.
@@ -1053,72 +1206,116 @@ pub fn sidebar_layout_at(
         )
             .into(),
     );
+    let right = width - GAP - ROW_INSET;
+    let child_w = (right - CHILD_X).max(0);
+    let child = |y: i32, h: i32| Rectangle::new((CHILD_X, y).into(), (child_w, h).into());
+    let mut y = ROWS_TOP;
+    let none = Vec::new();
+
+    // The "Needs you" list: a heading, then a one-line row per agent.
+    let entries = inbox_order(agents);
+    let inbox_title = (!entries.is_empty()).then(|| {
+        let title = Rectangle::new((0, y).into(), (width - GAP, INBOX_TITLE).into());
+        y += INBOX_TITLE;
+        title
+    });
+    let inbox = entries
+        .into_iter()
+        .map(|(i, k)| {
+            let rect = child(y, agent_row(density));
+            y += rect.size.h + CHILD_GAP;
+            (i, k, rect)
+        })
+        .collect();
+    if inbox_title.is_some() {
+        y += INBOX_GAP;
+    }
+
     let (mut rows, mut card_rects, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
     let (mut card_closes, mut more, mut ci) = (Vec::new(), Vec::new(), Vec::new());
     let mut subagents = Vec::new();
-    let mut y = ROWS_TOP;
-    let name_x = ROW_INSET + PADDING as i32 + ROW_ICON_WIDTH + ROW_ICON_GAP;
-    let card_x = ROW_INSET + CARD_INDENT;
-    let card_w = (width - GAP - ROW_INSET - card_x).max(0);
-    let none = Vec::new();
     for (i, ws) in workspaces.iter().enumerate() {
-        let (h, title_h) = (ws.height(density), ws.title_height(density));
+        let cards = agents.get(i).unwrap_or(&none);
+        let attention_lines = ws.attention_lines(density) as i32;
+        let foldable = !cards.is_empty()
+            || !ws.more_agents.is_empty()
+            || ws.ci.as_ref().is_some_and(|ci| !ci.is_empty())
+            || !ws.needing_attention().is_empty();
+        let folded = ws.folded && foldable;
+
+        // The header: from the right, its "×", its status, its CI mark and
+        // its worktree count; its name and branch in the rest.
+        let (h, title_h) = (ws.height(density), header_height(density));
         let rect = Rectangle::new((0, y).into(), (width - GAP, h).into());
         let title = Rectangle::new((0, y).into(), (width - GAP, title_h).into());
-        let close_x = width - GAP - ROW_INSET - CLOSE_WIDTH;
-        let close = Rectangle::new((close_x, y).into(), (CLOSE_WIDTH, title_h).into());
-        let chip = ws
-            .status
-            .map(|_| Rectangle::new((close_x - CHIP_SLOT, y).into(), (CHIP_SLOT, title_h).into()));
-        let name_end = chip.map_or(close_x, |c| c.loc.x) - 4;
-        let name = Rectangle::new(
-            (name_x, y).into(),
-            ((name_end - name_x).max(0), title_h).into(),
-        );
-        let worktrees =
-            (density == Density::Comfortable && ws.has_detail() && !ws.worktrees().is_empty())
-                .then(|| {
-                    let x = width - GAP - ROW_INSET - PADDING as i32 - WORKTREE_COUNT_WIDTH;
-                    Rectangle::new(
-                        (x, y + title_h).into(),
-                        (WORKTREE_COUNT_WIDTH, TAB_LINE).into(),
-                    )
-                });
-        let lines = ws.attention_lines() as i32;
-        let attention =
-            (density == Density::Comfortable && ws.has_detail() && lines > 0).then(|| {
-                Rectangle::new(
-                    (ROW_INSET, y + title_h + TAB_LINE).into(),
-                    (width - GAP - 2 * ROW_INSET, lines * TAB_LINE).into(),
-                )
-            });
+        let slot = |x: i32, w: i32| Rectangle::new((x, y).into(), (w, title_h).into());
+        let close = slot(right - CLOSE_SLOT, CLOSE_SLOT);
+        let mut end = close.loc.x;
+        let chip = status_extent(ws, cards).map(|w| {
+            end -= w;
+            slot(end, w)
+        });
+        let ci_mark = ws.ci_mark().then(|| {
+            end -= CI_SLOT;
+            slot(end, CI_SLOT)
+        });
+        let worktrees = (!ws.worktrees().is_empty()).then(|| {
+            end -= WORKTREE_COUNT_WIDTH;
+            slot(end, WORKTREE_COUNT_WIDTH)
+        });
+        let room = (end - 4 - NAME_X).max(0);
+        // A pixel past the name for rounding: a name measured to fit is
+        // never cut.
+        // The name first; the branch in the room it leaves, if enough.
+        let name_w = text_extent(&ws.name, FONT_SIZE) + 1;
+        let with_branch = ws.branch.is_some() && room >= name_w + NAME_GAP + BRANCH_MIN;
+        let (name, branch) = if with_branch {
+            let x = NAME_X + name_w + NAME_GAP;
+            (slot(NAME_X, name_w), Some(slot(x, NAME_X + room - x)))
+        } else {
+            (slot(NAME_X, room), None)
+        };
+        let fold = foldable.then(|| slot(ROW_INSET, ICON_X - ROW_INSET));
+        let attention = (attention_lines > 0).then(|| {
+            Rectangle::new(
+                (ROW_INSET, y + title_h).into(),
+                (width - GAP - 2 * ROW_INSET, attention_lines * TAB_LINE).into(),
+            )
+        });
         rows.push(RowLayout {
             rect,
             title,
             name,
+            branch,
+            fold,
             chip,
+            ci: ci_mark,
             close,
             worktrees,
             attention,
         });
         y += h;
-        let cards = agents.get(i).unwrap_or(&none);
-        let ws_cards: Vec<(usize, Rect)> = card_order(cards)
-            .into_iter()
-            .map(|k| {
-                let card = Rectangle::new(
-                    (card_x, y).into(),
-                    (card_w, cards[k].height(density)).into(),
-                );
-                y += card.size.h + CARD_GAP;
-                (k, card)
-            })
-            .collect();
+
+        // What is under it, unless folded: the agent rows, the "+N more"
+        // line, the GitHub section.
+        let start = y;
+        let ws_cards: Vec<(usize, Rect)> = if folded {
+            Vec::new()
+        } else {
+            card_order(cards)
+                .into_iter()
+                .map(|k| {
+                    let row = child(y, cards[k].height(density));
+                    y += row.size.h + CHILD_GAP;
+                    (k, row)
+                })
+                .collect()
+        };
         card_closes.push(
             ws_cards
                 .iter()
                 .filter(|(k, _)| cards[*k].deletable)
-                .map(|(k, card)| (*k, card_close(*card, density)))
+                .map(|(k, row)| (*k, card_close(*row, density)))
                 .collect(),
         );
         subagents.push(
@@ -1135,21 +1332,22 @@ pub fn sidebar_layout_at(
                 .collect(),
         );
         card_rects.push(ws_cards);
-        let ws_more = (!ws.more_agents.is_empty()).then(|| {
-            let line = Rectangle::new((card_x, y).into(), (card_w, CARD_LINE).into());
-            y += CARD_LINE + CARD_GAP;
+        let ws_more = (!folded && !ws.more_agents.is_empty()).then(|| {
+            let line = child(y, CARD_LINE);
+            y += CARD_LINE + CHILD_GAP;
             line
         });
         more.push(ws_more);
-        let ws_ci = ws.ci.as_ref().filter(|view| !view.is_empty()).map(|view| {
-            let card = ci_layout(view, (card_x, y), card_w, density);
-            y += card.card.size.h + CARD_GAP;
-            card
+        let ws_ci = ws.ci_section().filter(|_| !folded).map(|view| {
+            let section = ci_layout(view, (CHILD_X, y), child_w);
+            y += section.card.size.h + CHILD_GAP;
+            section
         });
-        if !cards.is_empty() || ws_more.is_some() || ws_ci.is_some() {
-            y += CARD_GAP;
-        }
         ci.push(ws_ci);
+        if y > start {
+            y += CHILD_GAP;
+        }
+        y += block_gap(density);
         blocks.push(Rectangle::new(
             rect.loc,
             (rect.size.w, y - rect.loc.y).into(),
@@ -1159,6 +1357,8 @@ pub fn sidebar_layout_at(
         header,
         plus,
         repos,
+        inbox_title,
+        inbox,
         rows,
         cards: card_rects,
         card_closes,
@@ -1166,64 +1366,67 @@ pub fn sidebar_layout_at(
         more,
         ci,
         blocks,
+        block_gap: block_gap(density),
         scroll: 0,
     }
 }
 
-/// Where the parts of the GitHub card showing `view` sit, its top left
-/// corner at `(x, y)` and `width` wide: a header band holding at its right
-/// end the count of other pull requests, then a line per group of chips.
-/// Each line starts with its group's label, under "GitHub" as an agent
-/// card's detail line sits under its name; the chips follow in a column
-/// as wide as the widest label present and a gap, left to right, on a
-/// line under it (in the same column) when the next one does not fit. An
-/// empty group takes no line. A chip wider than the room is cut to fit.
-fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32, density: Density) -> CiLayout {
-    let header_y = y + card_pad(density);
+/// Where the parts of the GitHub section showing `view` sit, its top left
+/// corner at `(x, y)` and `width` wide: a line per group of chips, the
+/// first with the count of other pull requests at its right end. Each line
+/// starts with its group's label where an agent row's text starts, GitHub's
+/// mark left of the first; the chips follow in a column as wide as the
+/// widest label present and a gap, left to right, on a line under it (in
+/// the same column) when the next one does not fit. An empty group takes
+/// no line. A chip wider than the room is cut to fit.
+fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
+    let top = y + CI_PAD;
+    let end = x + width - CHILD_PAD;
     let others = (view.other_prs > 0).then(|| {
         let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
         Rectangle::new(
-            (
-                x + width - CARD_PAD - w,
-                header_y + (CARD_HEADER - PILL_HEIGHT) / 2,
-            )
-                .into(),
+            (end - w, top + (CARD_LINE - PILL_HEIGHT) / 2).into(),
             (w, PILL_HEIGHT).into(),
         )
     });
-    let label_x = x + CARD_PAD + STATUS_WIDTH + STATUS_GAP;
+    let label_x = x + CHILD_TEXT_X - CHILD_X;
     let label_w = view
         .chips
         .iter()
         .map(|chip| text_extent(group_label(chip.group), DETAIL_FONT_SIZE))
         .max()
         .unwrap_or(0);
-    let (left, right) = (
-        label_x + label_w + CI_LABEL_GAP - CI_CHIP_PAD,
-        x + width - CARD_PAD + CI_CHIP_PAD,
-    );
-    let line_y = |line: i32| header_y + CARD_HEADER + line * CARD_LINE;
+    let left = label_x + label_w + CI_LABEL_GAP - CI_CHIP_PAD;
+    let right = end + CI_CHIP_PAD;
+    // The first line leaves the count its room.
+    let bound = |line: i32| match others {
+        Some(o) if line == 0 => o.loc.x - CI_CHIP_GAP,
+        _ => right,
+    };
+    let line_y = |line: i32| top + line * CARD_LINE;
     let (mut chip_x, mut line, mut group) = (left, -1, None);
     let mut labels = Vec::new();
     let chips = view
         .chips
         .iter()
         .map(|chip| {
-            let w = ci_chip_width(&chip.label).min((right - left).max(0));
+            let full = ci_chip_width(&chip.label);
             if group != Some(chip.group) {
                 (chip_x, line, group) = (left, line + 1, Some(chip.group));
                 let label =
                     Rectangle::new((label_x, line_y(line)).into(), (label_w, CARD_LINE).into());
                 labels.push((chip.group, label));
-            } else if chip_x > left && chip_x + w > right {
+            } else if chip_x > left && chip_x + full.min(bound(line) - left) > bound(line) {
                 (chip_x, line) = (left, line + 1);
             }
+            let w = full.min((bound(line) - left).max(0));
             let rect = Rectangle::new((chip_x, line_y(line)).into(), (w, CARD_LINE).into());
             chip_x += w + CI_CHIP_GAP;
             rect
         })
         .collect();
-    let height = 2 * card_pad(density) + CARD_HEADER + (line + 1) * CARD_LINE;
+    let lines = (line + 1).max(others.is_some() as i32);
+    let height = 2 * CI_PAD + lines * CARD_LINE;
     CiLayout {
         card: Rectangle::new((x, y).into(), (width, height).into()),
         chips,
@@ -1253,23 +1456,15 @@ pub fn workspace_slot(blocks: &[Rect], held: usize, y: f64) -> usize {
     blocks.len() - 1
 }
 
-/// Roughly whether `name` at the row's label size fits in `width` logical
-/// pixels, without a font to measure it: for offering the full name as a
-/// tooltip.
-pub fn name_fits(name: &str, width: i32) -> bool {
-    let estimate = name.chars().count() as f32 * LABEL_FONT_SIZE * GUESS_CHAR;
-    estimate <= width as f32
-}
-
 /// A quantized alpha from `SidebarState` as a fraction.
 fn alpha(step: u8) -> f32 {
     (step as f32 / ALPHA_STEPS).clamp(0.0, 1.0)
 }
 
 impl Painter {
-    /// The sidebar: the header (project name and "+"), a row per workspace
-    /// and the agent and GitHub cards under it, with what moves in
-    /// `view.state`.
+    /// The sidebar: the header (project name and "+"), the "Needs you"
+    /// list, a header per workspace and what is under it, with what moves
+    /// in `view.state`.
     pub(super) fn sidebar_view(
         &self,
         view: &SidebarView,
@@ -1287,6 +1482,7 @@ impl Painter {
         let density = state.density;
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
             .scrolled(state.scroll, size.h);
+        self.sidebar_inbox(&mut c, view, &layout, scale, p);
         self.sidebar_rows(&mut c, view, &layout, scale, p);
 
         // The header over the rows scrolled under it.
@@ -1339,7 +1535,49 @@ impl Painter {
         c.into_buffer(true)
     }
 
-    /// The sidebar's workspace rows and their agent and GitHub cards, where
+    /// The "Needs you" list where `layout` has it: a muted heading, then
+    /// a row per agent of another workspace that is blocked or done, with
+    /// its workspace's name at the right.
+    fn sidebar_inbox(
+        &self,
+        c: &mut Canvas,
+        view: &SidebarView,
+        layout: &SidebarLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let Some(title) = layout.inbox_title else {
+            return;
+        };
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        self.text(
+            c,
+            "Needs you",
+            TINY_FONT_SIZE,
+            px(NAME_X - CHILD_PAD) as f32,
+            px(title.loc.x + title.size.w - ROW_INSET) as f32,
+            band(title, scale),
+            scale,
+            p.muted,
+        );
+        let density = view.state.density;
+        for (n, (i, k, rect)) in layout.inbox.iter().enumerate() {
+            let (Some(card), Some(ws)) = (
+                view.agents.get(*i).and_then(|cards| cards.get(*k)),
+                view.workspaces.get(*i),
+            ) else {
+                continue;
+            };
+            let state = CardState {
+                hover: view.state.inbox(n),
+                ..CardState::default()
+            };
+            let place = Some(ws.name.as_str());
+            self.agent_row(c, card, *rect, state, p.panel, place, density, scale, p);
+        }
+    }
+
+    /// The sidebar's workspace headers and what is under them, where
     /// `layout` has them.
     fn sidebar_rows(
         &self,
@@ -1353,275 +1591,299 @@ impl Painter {
         let s = scale as f32;
         let state = &view.state;
         let density = state.density;
+        let none = Vec::new();
         for (i, (row, ws)) in layout.rows.iter().zip(&view.workspaces).enumerate() {
             let is_active = Some(i) == view.active;
+            let cards = view.agents.get(i).unwrap_or(&none);
+            // The active workspace's block, tinted from edge to edge of
+            // what it holds; what lies on it mixes from the tint.
+            let under = if is_active {
+                mix(p.panel, p.selected, ACTIVE_TINT)
+            } else {
+                p.panel
+            };
+            if is_active && let Some(block) = layout.blocks.get(i) {
+                let h = (block.size.h - layout.block_gap).max(0);
+                let inner = Rectangle::new(block.loc, (block.size.w, h).into());
+                let (x, y, w, h) = rect_px(inner, scale);
+                let inset = px(ROW_INSET) as f32;
+                c.rounded(x + inset, y, w - 2.0 * inset, h, ROW_RADIUS * s, under);
+            }
             let row_state = state.row(i);
             let hover = alpha(row_state.hover);
-            let fill = match (is_active, hover > 0.0) {
-                (true, true) => Some(mix(p.selected, p.text, 0.05 * hover)),
-                (true, false) => Some(p.selected),
-                (false, true) => Some(mix(p.panel, p.element, hover)),
-                (false, false) => None,
-            };
+            let fill = (hover > 0.0).then(|| mix(under, p.element, hover));
             if let Some(fill) = fill {
                 let (x, y, w, h) = rect_px(row.rect, scale);
-                c.rounded(
-                    x + px(ROW_INSET) as f32,
-                    y + px(2) as f32,
-                    w - 2.0 * px(ROW_INSET) as f32,
-                    h - 2.0 * px(2) as f32,
-                    ROW_RADIUS * s,
-                    fill,
-                );
+                let inset = px(ROW_INSET) as f32;
+                c.rounded(x + inset, y, w - 2.0 * inset, h, ROW_RADIUS * s, fill);
             }
-            let color = if is_active { p.text } else { p.muted };
-            let title_band = band(row.title, scale);
-            let icon = Rectangle::new(
-                (ROW_INSET + PADDING as i32, row.title.loc.y).into(),
-                (ROW_ICON_WIDTH, row.title.size.h).into(),
-            );
-            let small = 0.8 * s;
-            match ws.kind {
-                WorkspaceKind::Project => {
-                    icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, small))
-                }
-                WorkspaceKind::Terminal => {
-                    icon_sdf(c, icon, scale, p.placeholder, |x, y| terminal(x, y, small))
-                }
-                WorkspaceKind::Cursor => match &ws.icon {
-                    Some(picture) => {
-                        c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
-                    }
-                    None => icon_sdf(c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
-                },
-            }
-            let name_x = px(row.name.loc.x) as f32;
-            let name_end = px(row.name.loc.x + row.name.size.w) as f32;
-            match state.rename.as_ref().filter(|(w, _)| *w == i) {
-                Some((_, typed)) => {
-                    self.rename_field(c, typed, row.rename_field(), scale, p);
-                }
-                None => {
-                    self.text(
-                        c,
-                        &ws.name,
-                        LABEL_FONT_SIZE,
-                        name_x,
-                        name_end,
-                        title_band,
-                        scale,
-                        color,
-                    );
-                }
-            }
-            if let (Some(chip), Some(status)) = (row.chip, ws.status) {
-                let blocked = view.agents.get(i).map_or(0, |cards| blocked_count(cards));
-                // The whole room, or just its own part while the "×" shows.
-                let room = if hover > 0.0 {
-                    chip
-                } else {
-                    Rectangle::new(
-                        chip.loc,
-                        (chip.size.w + row.close.size.w, chip.size.h).into(),
-                    )
-                };
-                self.status_chip(c, status, blocked, room, hover == 0.0, scale, p);
-            }
-            if hover > 0.0 {
-                let color = if row_state.close {
-                    p.text
-                } else {
-                    mix(p.panel, p.placeholder, hover)
-                };
-                icon_sdf(c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
-            }
+            let surface = fill.unwrap_or(under);
+            self.workspace_header(c, ws, cards, row, row_state, i, surface, scale, view, p);
 
-            // The count of its other worktrees at the right end of line 2;
-            // hovering it lists them, on a pill as it opens the popup.
-            if let Some(count) = row.worktrees {
-                let n = ws.worktrees().len().to_string();
-                let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
-                let end = count.loc.x + count.size.w;
-                let icon = Rectangle::new(
-                    (end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH, count.loc.y).into(),
-                    (BRANCH_ICON_WIDTH, count.size.h).into(),
-                );
-                let on = row_state.worktrees;
-                if on {
-                    let pill = Rectangle::new(
-                        (icon.loc.x - COUNT_PILL_PAD, count.loc.y).into(),
-                        (end - icon.loc.x + 2 * COUNT_PILL_PAD, count.size.h).into(),
-                    );
-                    let (x, y, w, h) = rect_px(pill, scale);
-                    let under = fill.unwrap_or(p.panel);
-                    c.rounded(x, y, w, h, 4.0 * s, mix(under, p.text, 0.1));
-                }
-                let (icon_color, n_color) = if on {
-                    (p.text, p.text)
-                } else {
-                    (p.placeholder, p.muted)
-                };
-                icon_sdf(c, icon, scale, icon_color, |x, y| {
-                    git_branch(x, y, 0.75 * s)
-                });
-                self.text(
-                    c,
-                    &n,
-                    DETAIL_FONT_SIZE,
-                    px(end - n_w) as f32,
-                    px(end) as f32,
-                    band(count, scale),
-                    scale,
-                    n_color,
+            for (k, rect) in layout.cards.get(i).unwrap_or(&Vec::new()) {
+                let card_state = state.card(i, *k);
+                self.agent_row(
+                    c, &cards[*k], *rect, card_state, under, None, density, scale, p,
                 );
             }
-
-            // Under line 2, a line per worktree that needs a look: its name,
-            // a dot when changed, and why ("unmerged", "gone").
-            if density == Density::Comfortable && ws.has_detail() {
-                let right = px(row.rect.loc.x + row.rect.size.w - ROW_INSET) as f32 - PADDING * s;
-                let text_x = name_x + ((BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32 * s).round();
-                let needing = ws.needing_attention();
-                for k in 0..ws.attention_lines() {
-                    let line_y = row.title.loc.y + row.title.size.h + TAB_LINE * (1 + k as i32);
-                    let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
-                    let Some(wt) = needing.get(k).filter(|_| k < WORKTREE_LINES) else {
-                        let more = format!("+{} more", needing.len() - WORKTREE_LINES);
-                        self.text(
-                            c,
-                            &more,
-                            DETAIL_FONT_SIZE,
-                            text_x,
-                            right,
-                            band,
-                            scale,
-                            p.placeholder,
-                        );
-                        break;
-                    };
-                    let icon = Rectangle::new(
-                        (row.name.loc.x, line_y).into(),
-                        (BRANCH_ICON_WIDTH, TAB_LINE).into(),
-                    );
-                    icon_sdf(c, icon, scale, p.placeholder, |x, y| {
-                        git_branch(x, y, 0.75 * s)
-                    });
-                    let x = self.text(
-                        c,
-                        &wt.name(),
-                        DETAIL_FONT_SIZE,
-                        text_x,
-                        right,
-                        band,
-                        scale,
-                        p.muted,
-                    );
-                    let dirty = GitStatus {
-                        dirty: wt.dirty,
-                        ..GitStatus::default()
-                    };
-                    let x = self.git_marks(c, &dirty, x, right, band, scale, p);
-                    if let Some(tag) = wt.attention_tag() {
-                        self.text(
-                            c,
-                            &format!("  {tag}"),
-                            DETAIL_FONT_SIZE,
-                            x,
-                            right,
-                            band,
-                            scale,
-                            p.placeholder,
-                        );
-                    }
-                }
-            }
-
-            // Line 2: Git branch and marks, then the place, in comfortable density.
-            if density == Density::Comfortable && ws.has_detail() {
-                let right = match row.worktrees {
-                    Some(count) => px(count.loc.x - BRANCH_ICON_GAP) as f32,
-                    None => px(row.rect.loc.x + row.rect.size.w - ROW_INSET) as f32 - PADDING * s,
-                };
-                let line_y = row.title.loc.y + row.title.size.h;
-                let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
-                let mut place_x = name_x;
-                if let Some(branch) = &ws.branch {
-                    let icon = Rectangle::new(
-                        (row.name.loc.x, line_y).into(),
-                        (BRANCH_ICON_WIDTH, TAB_LINE).into(),
-                    );
-                    icon_sdf(c, icon, scale, p.accent, |x, y| git_branch(x, y, 0.75 * s));
-                    let branch_x =
-                        name_x + ((BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32 * s).round();
-                    place_x = self.text(
-                        c,
-                        branch,
-                        DETAIL_FONT_SIZE,
-                        branch_x,
-                        right,
-                        band,
-                        scale,
-                        p.accent,
-                    );
-                    if let Some(git) = &ws.git {
-                        place_x = self.git_marks(c, git, place_x, right, band, scale, p);
-                    }
-                    if !ws.place.is_empty() {
-                        // The separator only where a bit of the place fits after it.
-                        let sep = self.text_width(" · ", DETAIL_FONT_SIZE, scale);
-                        let some = self.text_width("…", DETAIL_FONT_SIZE, scale) * 2.0;
-                        if place_x + sep + some > right {
-                            continue;
-                        }
-                        place_x = self.text(
-                            c,
-                            " · ",
-                            DETAIL_FONT_SIZE,
-                            place_x,
-                            right,
-                            band,
-                            scale,
-                            p.placeholder,
-                        );
-                    }
-                }
-                self.text(
-                    c,
-                    &ws.place,
-                    DETAIL_FONT_SIZE,
-                    place_x,
-                    right,
-                    band,
-                    scale,
-                    p.muted,
-                );
-            }
-        }
-        for (i, (rects, cards)) in layout.cards.iter().zip(&view.agents).enumerate() {
-            for (k, rect) in rects {
-                self.agent_card(c, &cards[*k], *rect, state.card(i, *k), density, scale, p);
-            }
-        }
-        for (line, ws) in layout.more.iter().zip(&view.workspaces) {
-            if let Some(line) = line {
+            if let Some(Some(line)) = layout.more.get(i) {
                 let n = ws.more_agents.len();
                 self.text(
                     c,
                     &format!("+{n} more"),
                     DETAIL_FONT_SIZE,
-                    px(line.loc.x + CARD_PAD) as f32,
+                    px(line.loc.x + CHILD_TEXT_X - CHILD_X) as f32,
                     px(line.loc.x + line.size.w) as f32,
                     band(*line, scale),
                     scale,
                     p.placeholder,
                 );
             }
-        }
-        for (i, (ci, ws)) in layout.ci.iter().zip(&view.workspaces).enumerate() {
-            if let (Some(ci), Some(ci_view)) = (ci, &ws.ci) {
-                self.ci_card(c, ci_view, ci, &state.ci(i), density, scale, p);
+            if let (Some(Some(ci)), Some(ci_view)) = (layout.ci.get(i), ws.ci.as_ref()) {
+                self.ci_section(c, ci_view, ci, &state.ci(i), under, scale, p);
             }
         }
+    }
+
+    /// Workspace `ws`'s header laid out as `row` on `surface`: its fold
+    /// chevron, kind icon, name, branch and marks, worktree count, CI
+    /// mark and status, the "×" while hovered, and the worktree lines
+    /// under it.
+    #[allow(clippy::too_many_arguments)]
+    fn workspace_header(
+        &self,
+        c: &mut Canvas,
+        ws: &WorkspaceView,
+        cards: &[AgentView],
+        row: &RowLayout,
+        row_state: RowState,
+        i: usize,
+        surface: Rgb,
+        scale: f64,
+        view: &SidebarView,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let hover = alpha(row_state.hover);
+        let title_band = band(row.title, scale);
+        let at = |x: i32, w: i32| {
+            Rectangle::new((x, row.title.loc.y).into(), (w, row.title.size.h).into())
+        };
+
+        if let Some(fold) = row.fold {
+            let color = if row_state.fold {
+                p.text
+            } else {
+                mix(p.placeholder, p.muted, hover)
+            };
+            let icon = Rectangle::new(
+                (FOLD_X, fold.loc.y).into(),
+                (FOLD_WIDTH, fold.size.h).into(),
+            );
+            if ws.folded {
+                icon_sdf(c, icon, scale, color, |x, y| chevron_right(x, y, s));
+            } else {
+                icon_sdf(c, icon, scale, color, |x, y| chevron_down(x, y, s));
+            }
+        }
+        let icon = at(ICON_X, ROW_ICON_WIDTH);
+        let small = 0.8 * s;
+        match ws.kind {
+            WorkspaceKind::Project => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, small))
+            }
+            WorkspaceKind::Terminal => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| terminal(x, y, small))
+            }
+            WorkspaceKind::Cursor => match &ws.icon {
+                Some(picture) => {
+                    c.picture_sized(picture, icon, scale, p.placeholder, ROW_PICTURE_SIZE)
+                }
+                None => icon_sdf(c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
+            },
+        }
+        match view.state.rename.as_ref().filter(|(w, _)| *w == i) {
+            Some((_, typed)) => self.rename_field(c, typed, row.rename_field(), scale, p),
+            None => {
+                self.text(
+                    c,
+                    &ws.name,
+                    FONT_SIZE,
+                    px(row.name.loc.x) as f32,
+                    px(row.name.loc.x + row.name.size.w) as f32,
+                    title_band,
+                    scale,
+                    p.text,
+                );
+                if let (Some(branch_rect), Some(branch)) = (row.branch, &ws.branch) {
+                    let icon = at(branch_rect.loc.x, BRANCH_ICON_WIDTH);
+                    icon_sdf(c, icon, scale, p.placeholder, |x, y| {
+                        git_branch(x, y, 0.75 * s)
+                    });
+                    let x = px(branch_rect.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
+                    let end = px(branch_rect.loc.x + branch_rect.size.w) as f32;
+                    let after = self.text(
+                        c,
+                        branch,
+                        DETAIL_FONT_SIZE,
+                        x,
+                        end,
+                        title_band,
+                        scale,
+                        p.muted,
+                    );
+                    if let Some(git) = &ws.git {
+                        self.git_marks(c, git, after, end, title_band, scale, p);
+                    }
+                }
+            }
+        }
+
+        // The count of its other worktrees; hovering it lists them, on a
+        // pill as it opens the popup.
+        if let Some(count) = row.worktrees {
+            let n = ws.worktrees().len().to_string();
+            let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
+            let end = count.loc.x + count.size.w - COUNT_PILL_PAD;
+            let icon = at(
+                end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH,
+                BRANCH_ICON_WIDTH,
+            );
+            let on = row_state.worktrees;
+            if on {
+                self.lit_pill(c, icon.loc.x, end, row.title, surface, scale, p);
+            }
+            let (icon_color, n_color) = if on {
+                (p.text, p.text)
+            } else {
+                (p.placeholder, p.muted)
+            };
+            icon_sdf(c, icon, scale, icon_color, |x, y| {
+                git_branch(x, y, 0.75 * s)
+            });
+            self.text(
+                c,
+                &n,
+                DETAIL_FONT_SIZE,
+                px(end - n_w) as f32,
+                px(end) as f32,
+                title_band,
+                scale,
+                n_color,
+            );
+        }
+
+        // The mark of its CI, while that needs no look or it is folded.
+        if let (Some(mark), Some(ci)) = (row.ci, &ws.ci) {
+            let state = ci.rollup();
+            let icon = at(mark.loc.x + (CI_SLOT - STATUS_WIDTH) / 2, STATUS_WIDTH);
+            if row_state.ci {
+                let end = icon.loc.x + icon.size.w;
+                self.lit_pill(c, icon.loc.x, end, row.title, surface, scale, p);
+            }
+            icon_sdf(c, icon, scale, ci_color(state, p), |x, y| {
+                ci_mark(state, x, y, s)
+            });
+        }
+
+        if let (Some(chip), Some(status)) = (row.chip, ws.status) {
+            let blocked = blocked_count(cards);
+            let hidden = if ws.folded { cards.len() } else { 0 };
+            self.header_status(c, status, blocked, hidden, chip, scale, p);
+        }
+        if hover > 0.0 {
+            let color = if row_state.close {
+                p.text
+            } else {
+                mix(surface, p.placeholder, hover)
+            };
+            icon_sdf(c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
+        }
+
+        // Under the header, a line per worktree that needs a look: its
+        // name, a dot when changed, and why ("unmerged", "gone").
+        let Some(lines) = row.attention else {
+            return;
+        };
+        let right = px(lines.loc.x + lines.size.w) as f32 - PADDING * s;
+        let text_x = px(NAME_X + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
+        let needing = ws.needing_attention();
+        for k in 0..ws.attention_lines(view.state.density) {
+            let line_y = lines.loc.y + TAB_LINE * k as i32;
+            let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
+            let Some(wt) = needing.get(k).filter(|_| k < WORKTREE_LINES) else {
+                let more = format!("+{} more", needing.len() - WORKTREE_LINES);
+                self.text(
+                    c,
+                    &more,
+                    DETAIL_FONT_SIZE,
+                    text_x,
+                    right,
+                    band,
+                    scale,
+                    p.placeholder,
+                );
+                break;
+            };
+            let icon = Rectangle::new(
+                (NAME_X, line_y).into(),
+                (BRANCH_ICON_WIDTH, TAB_LINE).into(),
+            );
+            icon_sdf(c, icon, scale, p.placeholder, |x, y| {
+                git_branch(x, y, 0.75 * s)
+            });
+            let x = self.text(
+                c,
+                &wt.name(),
+                DETAIL_FONT_SIZE,
+                text_x,
+                right,
+                band,
+                scale,
+                p.muted,
+            );
+            let dirty = GitStatus {
+                dirty: wt.dirty,
+                ..GitStatus::default()
+            };
+            let x = self.git_marks(c, &dirty, x, right, band, scale, p);
+            if let Some(tag) = wt.attention_tag() {
+                self.text(
+                    c,
+                    &format!("  {tag}"),
+                    DETAIL_FONT_SIZE,
+                    x,
+                    right,
+                    band,
+                    scale,
+                    p.placeholder,
+                );
+            }
+        }
+    }
+
+    /// The pill lighting a header part from `x` to `end` under the
+    /// pointer, `COUNT_PILL_PAD` past it each side, in the band `title`.
+    #[allow(clippy::too_many_arguments)]
+    fn lit_pill(
+        &self,
+        c: &mut Canvas,
+        x: i32,
+        end: i32,
+        title: Rect,
+        surface: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let h = PILL_HEIGHT + 4;
+        let pill = Rectangle::new(
+            (x - COUNT_PILL_PAD, title.loc.y + (title.size.h - h) / 2).into(),
+            (end - x + 2 * COUNT_PILL_PAD, h).into(),
+        );
+        let (x, y, w, h) = rect_px(pill, scale);
+        c.rounded(x, y, w, h, 4.0 * s, mix(surface, p.text, 0.1));
     }
 
     /// The project's `name` in the sidebar `header` pill, cut to fit, with
@@ -1694,73 +1956,65 @@ impl Painter {
         icon_sdf(c, rect, scale, color, shape);
     }
 
-    /// The status chip at the right of a row's name line: a dot and a word
-    /// in the status colour; blocked agents make it a filled warning badge
-    /// with their count. Right-aligned in `slot`; the word goes when it
-    /// does not fit, or when `words` is off (the "×" has the room).
+    /// A workspace header's status in `slot`, right-aligned: a filled
+    /// warning badge counting `blocked` agents; else `status`'s mark in its
+    /// colour, then how many agents a fold `hidden`.
     #[allow(clippy::too_many_arguments)]
-    fn status_chip(
+    fn header_status(
         &self,
         c: &mut Canvas,
         status: AgentStatus,
         blocked: usize,
+        hidden: usize,
         slot: Rect,
-        words: bool,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let color = p.status(status);
-        let word = match (status, blocked) {
-            (AgentStatus::Blocked, n) if n > 1 => format!("{n} blocked"),
-            _ => status_label(status).to_owned(),
-        };
-        let pad = (CHIP_PADDING as f32 * s).round();
-        let dot = (CHIP_DOT as f32 * s).round();
-        let gap = (CHIP_GAP as f32 * s).round();
-        let word_w = self.text_width(&word, TINY_FONT_SIZE, scale);
-        let (x0, _, slot_w, _) = rect_px(slot, scale);
-        let right = x0 + slot_w - (2.0 * s).round();
-        let full = 2.0 * pad + dot + gap + word_w;
-        let with_word = words && full <= slot_w;
-        let w = if with_word { full } else { 2.0 * pad + dot };
-        let x = (right - w).round();
-        let h = px(PILL_HEIGHT) as f32;
-        let y = (px(slot.loc.y) as f32 + (px(slot.size.h) as f32 - h) / 2.0).round();
-        let filled = status == AgentStatus::Blocked;
-        let fill = if filled {
-            color
-        } else {
-            mix(p.panel, color, 0.18)
-        };
-        c.rounded(x, y, w.round(), h, h / 2.0, fill);
-        let dot_color = if filled { p.on_accent } else { color };
-        let (cx, cy) = (x + pad + dot / 2.0, y + h / 2.0);
-        c.paint_in(
-            (x + pad) as i32,
-            y as i32,
-            dot as i32 + 1,
-            h as i32,
-            dot_color,
-            |px, py| super::coverage((px - cx).hypot(py - cy) - dot / 2.0),
-        );
-        if with_word {
+        let band = band(slot, scale);
+        if blocked > 0 {
+            let h = px(PILL_HEIGHT) as f32;
+            let (x0, _, w, _) = rect_px(slot, scale);
+            let y = (band.0 as f32 + (band.1 as f32 - h) / 2.0).round();
+            c.rounded(x0, y, w, h, h / 2.0, p.warning);
+            let text = blocked.to_string();
+            let text_w = self.text_width(&text, TINY_FONT_SIZE, scale);
+            let x = (x0 + (w - text_w) / 2.0).round();
+            let pill_band = (y as i32, h as i32);
             self.text(
                 c,
-                &word,
+                &text,
                 TINY_FONT_SIZE,
-                x + pad + dot + gap,
+                x,
                 f32::MAX,
-                (y as i32, h as i32),
+                pill_band,
                 scale,
-                if filled { p.on_accent } else { color },
+                p.on_accent,
+            );
+            return;
+        }
+        let mark = Rectangle::new(slot.loc, (STATUS_SLOT, slot.size.h).into());
+        let color = p.status(status);
+        icon_sdf(c, mark, scale, color, |x, y| status_mark(status, x, y, s));
+        if hidden > 0 {
+            let x = px(slot.loc.x + STATUS_SLOT + COUNT_GAP) as f32;
+            let end = px(slot.loc.x + slot.size.w) as f32 + 1.0;
+            self.text(
+                c,
+                &hidden.to_string(),
+                TINY_FONT_SIZE,
+                x,
+                end,
+                band,
+                scale,
+                p.muted,
             );
         }
     }
 
-    /// The field a row's name turns into while renaming, showing `typed`
-    /// with its selection and caret.
+    /// The field a header's name turns into while renaming, showing
+    /// `typed` with its selection and caret.
     fn rename_field(&self, c: &mut Canvas, typed: &Line, rect: Rect, scale: f64, p: &Palette) {
         let s = scale as f32;
         let (x, y, w, h) = rect_px(rect, scale);
@@ -1788,188 +2042,188 @@ impl Painter {
         );
     }
 
-    /// An agent card: a header with the status mark, the agent's kind and
-    /// name and a status pill, then one detail line. A blocked card's
-    /// header carries the warning colour (its breathing is composed on
-    /// top, see `pulse_band`); the card lightens under the pointer. The
-    /// open agent's card is filled as the active workspace row.
+    /// An agent row on `under`: its status mark, its name or kind and what
+    /// it is on, and at the right a "blocked" pill (an inbox row: its
+    /// workspace's name `place` instead; a deletable row under the pointer:
+    /// its "×"), then a line per subagent that runs. Idle agents are muted;
+    /// a blocked one's line carries the warning colour (its breathing is
+    /// composed on top, see `pulse_band`). The row lightens under the
+    /// pointer; the open agent's is filled as a selection, with an accent
+    /// bar at its left.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn agent_card(
+    pub(super) fn agent_row(
         &self,
         c: &mut Canvas,
         card: &AgentView,
         rect: Rect,
         state: CardState,
+        under: Rgb,
+        place: Option<&str>,
         density: Density,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let (x, y, w, h) = rect_px(rect, scale);
-        let (b, r) = (px(1).max(1) as f32, CARD_RADIUS * s);
+        let r = ROW_RADIUS * s;
         let status = p.status(card.status);
         let blocked = card.status == AgentStatus::Blocked;
         let hover = alpha(state.hover);
         let fill = if state.open {
-            mix(p.selected, p.text, 0.05 * hover)
+            Some(mix(p.selected, p.text, 0.05 * hover))
         } else {
-            mix(mix(p.panel, p.element, 0.6), p.selected, hover)
+            (hover > 0.0).then(|| mix(under, p.element, hover))
         };
-        let edge = if blocked {
-            mix(p.border_variant, status, 0.6)
-        } else {
-            mix(p.border_variant, p.border, hover)
-        };
-        c.rounded(x, y, w, h, r, edge);
-        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-        let pad = card_pad(density);
-        let header_y = rect.loc.y + pad;
+        let base = fill.unwrap_or(under);
+        if let Some(fill) = fill {
+            let (x, y, w, h) = rect_px(rect, scale);
+            c.rounded(x, y, w, h, r, fill);
+        }
+        let first = blocked_band(rect, density);
         if blocked {
-            // The header band in the warning colour, at the bottom of its
+            // The first line in the warning colour, at the bottom of its
             // breathing.
-            let tint = BLOCKED_TINT * BLOCKED_REST;
-            let band_h = px(CARD_HEADER + pad) as f32;
+            let (x, y, w, h) = rect_px(first, scale);
             c.rounded(
-                x + b,
-                y + b,
-                w - 2.0 * b,
-                band_h - b,
-                r - b,
-                mix(fill, p.warning, tint),
-            );
-            // Square off the band's bottom corners against the body.
-            c.fill(
-                (x + b) as i32,
-                (y + band_h - r) as i32,
-                (w - 2.0 * b) as i32,
-                r as i32,
-                mix(fill, p.warning, tint),
+                x,
+                y,
+                w,
+                h,
+                r,
+                mix(base, p.warning, BLOCKED_TINT * BLOCKED_REST),
             );
         }
-        c.rounded(
-            x + 3.0 * s,
-            (px(rect.loc.y) + px(pad)) as f32,
-            2.0 * s,
-            (px(rect.size.h) - 2 * px(pad)) as f32,
-            s,
-            status,
-        );
+        let surface = if blocked {
+            mix(base, p.warning, BLOCKED_TINT * BLOCKED_REST)
+        } else {
+            base
+        };
+        if state.open {
+            let (x, y, _, h) = rect_px(rect, scale);
+            let inset = (4.0 * s).round();
+            c.rounded(
+                x + 2.0 * s,
+                y + inset,
+                2.0 * s,
+                h - 2.0 * inset,
+                s,
+                p.accent,
+            );
+        }
 
-        // Header: status mark, kind, name and model, status pill.
-        let inner_x = rect.loc.x + CARD_PAD;
-        let right = px(rect.loc.x + rect.size.w - CARD_PAD) as f32;
-        let band = (px(header_y), px(CARD_HEADER));
+        let line_band = band(first, scale);
         let mark = Rectangle::new(
-            (inner_x, header_y).into(),
-            (STATUS_WIDTH, CARD_HEADER).into(),
+            (rect.loc.x + CHILD_PAD, rect.loc.y).into(),
+            (STATUS_WIDTH, first.size.h).into(),
         );
         icon_sdf(c, mark, scale, status, |x, y| {
             status_mark(card.status, x, y, s)
         });
-        // A deletable card's "×" takes the status pill's place under the
-        // pointer.
-        let heading_end = if card.deletable && hover > 0.0 {
+        let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
+        let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
+        let end = if card.deletable && hover > 0.0 {
             let close = card_close(rect, density);
             let color = if state.close {
                 p.text
             } else {
-                mix(fill, p.placeholder, hover)
+                mix(surface, p.placeholder, hover)
             };
             icon_sdf(c, close, scale, color, |x, y| cross(x, y, 0.8 * s));
             px(close.loc.x) as f32
-        } else {
+        } else if let Some(place) = place {
+            let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
+            let w = self.text_width(place, DETAIL_FONT_SIZE, scale).min(most);
+            let x = (right - w).round();
+            self.text(
+                c,
+                place,
+                DETAIL_FONT_SIZE,
+                x,
+                right + 1.0,
+                line_band,
+                scale,
+                p.placeholder,
+            );
+            x - px(TITLE_GAP) as f32
+        } else if blocked {
             let label = status_label(card.status);
             let pill_w =
                 self.text_width(label, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
-            let pill_x = (right - pill_w).round();
-            let pill_y = (band.0 as f32 + (band.1 - px(PILL_HEIGHT)) as f32 / 2.0).round();
             let pill_h = px(PILL_HEIGHT) as f32;
+            let pill_x = (right - pill_w).round();
+            let pill_y = (line_band.0 as f32 + (line_band.1 as f32 - pill_h) / 2.0).round();
+            let pill_fill = mix(surface, p.warning, 0.25);
             c.rounded(
                 pill_x,
                 pill_y,
                 pill_w.round(),
                 pill_h,
                 pill_h / 2.0,
-                mix(fill, status, 0.2),
+                pill_fill,
             );
+            let pill_band = (pill_y as i32, pill_h as i32);
+            let x = pill_x + PILL_PADDING as f32 * s;
             self.text(
                 c,
                 label,
                 TINY_FONT_SIZE,
-                pill_x + PILL_PADDING as f32 * s,
+                x,
                 f32::MAX,
-                (pill_y as i32, pill_h as i32),
+                pill_band,
                 scale,
-                status,
+                p.warning,
             );
-            pill_x - px(6) as f32
+            pill_x - px(TITLE_GAP) as f32
+        } else {
+            right
         };
-        let kind_x = px(inner_x + STATUS_WIDTH + STATUS_GAP) as f32;
+        let (heading_color, title_color) = match card.status {
+            AgentStatus::Idle | AgentStatus::Unknown => (p.muted, p.placeholder),
+            AgentStatus::Working => (p.text, p.muted),
+            AgentStatus::Blocked | AgentStatus::Done => (p.text, p.text),
+        };
         let after = self.text(
             c,
-            &card.kind,
-            FONT_SIZE,
-            kind_x,
-            heading_end,
-            band,
+            card.heading(),
+            SMALL_FONT_SIZE,
+            text_x,
+            end,
+            line_band,
             scale,
-            p.text,
+            heading_color,
         );
-        let after = match &card.name {
-            Some(name) => self.text(
-                c,
-                &format!("· {name}"),
-                FONT_SIZE,
-                after + px(5) as f32,
-                heading_end,
-                band,
-                scale,
-                p.accent,
-            ),
-            None => after,
-        };
-        if let Some(model) = &card.model {
+        // What it is on, where a few characters of it fit.
+        let x = after + px(TITLE_GAP) as f32;
+        let some = self.text_width("abc…", SMALL_FONT_SIZE, scale);
+        if let Some(title) = card.title().filter(|_| x + some <= end) {
             self.text(
                 c,
-                &format!("· {model}"),
-                FONT_SIZE,
-                after + px(5) as f32,
-                heading_end,
-                band,
+                title,
+                SMALL_FONT_SIZE,
+                x,
+                end,
+                line_band,
                 scale,
-                p.muted,
+                title_color,
             );
+        }
+        if place.is_some() {
+            return;
         }
 
-        // The detail line: where it is and what it is on.
-        let detail = card.detail();
-        if !detail.is_empty() {
-            let band = (px(header_y + CARD_HEADER), px(CARD_LINE));
-            self.text(
-                c,
-                &detail,
-                DETAIL_FONT_SIZE,
-                kind_x,
-                right,
-                band,
-                scale,
-                p.muted,
-            );
-        }
         // A line per subagent that runs, after an elbow, what it is on, up
         // to `SUBAGENT_LINES`, then one counting the rest. One under the
         // pointer gets a pill, exactly its rect.
-        let task_x = kind_x + px(SUBAGENT_INDENT) as f32;
+        let task_x = text_x + px(SUBAGENT_INDENT) as f32;
         for (j, sub) in card.subagents.iter().take(SUBAGENT_LINES).enumerate() {
             let line = card.subagent_line(rect, density, j);
             let lit = alpha(state.subagents[j]);
             if lit > 0.0 {
                 let (lx, ly, lw, lh) = rect_px(line, scale);
-                c.rounded(lx, ly, lw, lh, lh / 2.0, mix(fill, p.text, 0.1 * lit));
+                c.rounded(lx, ly, lw, lh, lh / 2.0, mix(base, p.text, 0.1 * lit));
             }
             let color = mix(p.muted, p.text, lit);
-            let (ex, thin) = (kind_x as i32 + px(2), px(1).max(1));
+            let (ex, thin) = (text_x as i32 + px(2), px(1).max(1));
             let (top, mid) = (px(line.loc.y + 3), px(line.loc.y + CARD_LINE / 2));
             c.fill(ex, top, thin, mid - top + thin, color);
             c.fill(ex, mid, px(SUBAGENT_INDENT - 5), thin, color);
@@ -2001,57 +2255,39 @@ impl Painter {
 }
 
 impl Painter {
-    /// A GitHub card laid out as `layout`: a header with GitHub's mark,
-    /// "GitHub" and the count of other pull requests on a quiet pill, then
-    /// a line per group, its label and a chip per branch or pull request
-    /// (its status mark and label). The card lightens under the pointer as
-    /// an agent card does; a chip under it gets a pill, exactly its rect,
-    /// and its count a stronger tint.
+    /// A GitHub section laid out as `layout` on `under`: GitHub's mark,
+    /// then a line per group, its label and a chip per branch or pull
+    /// request (its status mark and label), and the count of other pull
+    /// requests on a quiet pill at the first line's right end. The section
+    /// lightens under the pointer as an agent row does; a chip under it
+    /// gets a pill, exactly its rect, and its count a stronger tint.
     #[allow(clippy::too_many_arguments)]
-    fn ci_card(
+    fn ci_section(
         &self,
         c: &mut Canvas,
         view: &CiView,
         layout: &CiLayout,
         state: &CiCardState,
-        density: Density,
+        under: Rgb,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let rect = layout.card;
-        let (x, y, w, h) = rect_px(rect, scale);
-        let (b, r) = (px(1).max(1) as f32, CARD_RADIUS * s);
         let hover = alpha(state.hover);
-        let fill = mix(mix(p.panel, p.element, 0.6), p.selected, hover);
-        c.rounded(x, y, w, h, r, mix(p.border_variant, p.border, hover));
-        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-
-        // Header: GitHub's mark, "GitHub", the count of other PRs.
-        let header_y = rect.loc.y + card_pad(density);
-        let inner_x = rect.loc.x + CARD_PAD;
+        let fill = mix(under, p.element, hover);
+        if hover > 0.0 {
+            let (x, y, w, h) = rect_px(rect, scale);
+            c.rounded(x, y, w, h, ROW_RADIUS * s, fill);
+        }
         let mark = Rectangle::new(
-            (inner_x, header_y).into(),
-            (STATUS_WIDTH, CARD_HEADER).into(),
+            (rect.loc.x + CHILD_PAD, rect.loc.y + CI_PAD).into(),
+            (STATUS_WIDTH, CARD_LINE).into(),
         );
         if let Some(icon) = github_icon() {
             c.picture_sized(&icon, mark, scale, p.muted, CI_ICON_SIZE);
         }
-        let heading_end = match layout.others {
-            Some(others) => px(others.loc.x) - px(6),
-            None => px(rect.loc.x + rect.size.w - CARD_PAD),
-        };
-        self.text(
-            c,
-            "GitHub",
-            FONT_SIZE,
-            px(inner_x + STATUS_WIDTH + STATUS_GAP) as f32,
-            heading_end as f32,
-            (px(header_y), px(CARD_HEADER)),
-            scale,
-            p.text,
-        );
         if let Some(others) = layout.others {
             let lit = alpha(state.others);
             let (ox, oy, ow, oh) = rect_px(others, scale);
@@ -2126,10 +2362,9 @@ impl Painter {
         }
     }
 
-    /// The band composed over a blocked card's header as its pulse: the
-    /// warning colour, `size` big, rounded at the top like the card and
-    /// square at the bottom where the header meets the body. Its opacity
-    /// is given when it is composed (`pulse_alpha`).
+    /// The band composed over a blocked agent's row as its pulse: the
+    /// warning colour, `size` big, rounded as the row. Its opacity is
+    /// given when it is composed (`pulse_alpha`).
     pub(super) fn pulse_band(
         &self,
         size: Size<i32, Logical>,
@@ -2137,12 +2372,9 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(size, scale));
-        let s = scale as f32;
-        let b = (scale.round() as f32).max(1.0);
-        let r = CARD_RADIUS * s - b;
+        let r = ROW_RADIUS * scale as f32;
         let (w, h) = (c.w as f32, c.h as f32);
         c.rounded(0.0, 0.0, w, h, r, p.warning);
-        c.fill(0, (h - r).max(0.0) as i32, c.w, r.ceil() as i32, p.warning);
         c.into_buffer(false)
     }
 }
@@ -2163,18 +2395,15 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentLine, AgentView, CARD_GAP, CARD_HEADER, CARD_LINE, CARD_PAD, CARD_PAD_COMPACT,
-        CHIP_SLOT, CLOSE_WIDTH, Density, FOLDER, GAP, HEADER_BUTTON, ROW_BOTTOM, ROW_COMPACT,
-        ROW_HEIGHT, ROW_INSET, ROW_TITLE_HEIGHT, ROWS_TOP, SCROLL_END, SidebarHit, TAB_LINE,
-        WorkspaceView, card_order, sentence_case, sidebar_layout, sidebar_layout_at,
-        workspace_slot,
-    };
-    use super::{
-        CI_CHIP_GAP, CI_LABEL_GAP, CiChip, CiLayout, CiView, DETAIL_FONT_SIZE, SidebarLayout,
-        ci_chip_width, text_extent,
+        AGENT_ROW, AGENT_ROW_COMPACT, ATTENTION_BOTTOM, AgentLine, AgentView, BLOCK_GAP, CARD_LINE,
+        CHILD_GAP, CHILD_TEXT_X, CHILD_X, CI_CHIP_GAP, CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip,
+        CiLayout, CiView, DETAIL_FONT_SIZE, Density, FOLDER, GAP, HEADER_BUTTON, HEADER_ROW,
+        HEADER_ROW_COMPACT, INBOX_GAP, INBOX_TITLE, NAME_X, ROW_INSET, ROWS_TOP, SCROLL_END,
+        SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView, card_order, ci_chip_width, inbox_order,
+        sentence_case, sidebar_layout, sidebar_layout_at, text_extent, workspace_slot,
     };
     use crate::WorkspaceKind;
-    use crate::chrome::{BAR_HEIGHT, STATUS_GAP, STATUS_WIDTH, TabView};
+    use crate::chrome::{BAR_HEIGHT, TabView};
     use crate::ci::{CiState, Group};
     use crate::git::{GitStatus, Worktree};
     use crate::herdr::AgentStatus;
@@ -2227,7 +2456,34 @@ mod tests {
             icon: None,
             more_agents: Vec::new(),
             ci: None,
+            folded: false,
         }
+    }
+
+    fn agent(pane: &str, status: AgentStatus, cwd: Option<&str>) -> AgentView {
+        AgentView {
+            key: crate::agents::AgentKey::Herdr(pane.into()),
+            dir: None,
+            status,
+            kind: "claude".into(),
+            name: None,
+            model: None,
+            lines: cwd
+                .map(|cwd| AgentLine::Field(FOLDER.into(), cwd.into()))
+                .into_iter()
+                .collect(),
+            deletable: false,
+            subagents: Vec::new(),
+            inbox: false,
+        }
+    }
+
+    fn mid(r: crate::chrome::Rect) -> smithay::utils::Point<f64, smithay::utils::Logical> {
+        (
+            r.loc.x as f64 + r.size.w as f64 / 2.0,
+            r.loc.y as f64 + r.size.h as f64 / 2.0,
+        )
+            .into()
     }
 
     #[test]
@@ -2257,8 +2513,9 @@ mod tests {
         assert!(under.rows[0].rect.loc.y < BAR_HEIGHT);
         let pos = (100.0, (BAR_HEIGHT - 1) as f64).into();
         assert_eq!(under.hit(pos), None);
+        let name = layout.rows[0].name;
         assert_eq!(
-            layout.hit((100.0, ROWS_TOP as f64 + 1.0).into()),
+            layout.hit((name.loc.x as f64 + 2.0, ROWS_TOP as f64 + 1.0).into()),
             Some(SidebarHit::Name(0))
         );
     }
@@ -2284,8 +2541,8 @@ mod tests {
         );
     }
 
-    /// The sidebar with one workspace of three agents, their cards open
-    /// or not by `open`, painted as bytes.
+    /// The sidebar with one workspace of three agents, their rows open or
+    /// not by `open`, painted as bytes.
     fn painted_cards(open: [bool; 3], scale: f64) -> Vec<u8> {
         use super::{CardState, Painter, SidebarState, SidebarView};
         let agents = vec![vec![
@@ -2321,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn the_open_agents_card_stands_out() {
+    fn the_open_agents_row_stands_out() {
         for scale in [1.0, 2.0] {
             let plain = painted_cards([false; 3], scale);
             let first = painted_cards([true, false, false], scale);
@@ -2334,25 +2591,8 @@ mod tests {
         }
     }
 
-    fn agent(pane: &str, status: AgentStatus, cwd: Option<&str>) -> AgentView {
-        AgentView {
-            key: crate::agents::AgentKey::Herdr(pane.into()),
-            dir: None,
-            status,
-            kind: "claude".into(),
-            name: None,
-            model: None,
-            lines: cwd
-                .map(|cwd| AgentLine::Field(FOLDER.into(), cwd.into()))
-                .into_iter()
-                .collect(),
-            deletable: false,
-            subagents: Vec::new(),
-        }
-    }
-
     #[test]
-    fn worktrees_show_as_a_count_on_line_two() {
+    fn worktrees_show_as_a_count_on_the_header() {
         let mut ws = workspace("gerdr", None, Some("main"));
         let plain = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
         assert_eq!(plain.rows[0].worktrees, None);
@@ -2365,41 +2605,54 @@ mod tests {
             ..GitStatus::default()
         });
         // Merged and clean: only counted.
-        let height = ROW_TITLE_HEIGHT + TAB_LINE + ROW_BOTTOM;
-        assert_eq!(ws.height(Density::Comfortable), height);
+        assert_eq!(ws.height(Density::Comfortable), HEADER_ROW);
         // Those needing a look get a line each, up to a count of the rest.
         let worktrees = &mut ws.git.as_mut().unwrap().worktrees;
         worktrees[0].dirty = true;
         worktrees[1].merged = false;
-        assert_eq!(ws.height(Density::Comfortable), height + 2 * TAB_LINE);
+        let lines = |n: i32| HEADER_ROW + n * TAB_LINE + ATTENTION_BOTTOM;
+        assert_eq!(ws.height(Density::Comfortable), lines(2));
         for w in &mut ws.git.as_mut().unwrap().worktrees {
             w.merged = false;
         }
-        assert_eq!(ws.height(Density::Comfortable), height + 4 * TAB_LINE);
-        assert_eq!(ws.height(Density::Compact), ROW_COMPACT);
+        assert_eq!(ws.height(Density::Comfortable), lines(4));
+        assert_eq!(ws.height(Density::Compact), HEADER_ROW_COMPACT);
         let layout = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
-        let count = layout.rows[0].worktrees.expect("a count");
-        assert_eq!(count.loc.y, ROWS_TOP + ROW_TITLE_HEIGHT);
-        let mid = (count.loc.x as f64 + 5.0, count.loc.y as f64 + 5.0).into();
-        assert_eq!(layout.hit(mid), Some(SidebarHit::Worktrees(0)));
+        let row = layout.rows[0];
+        let count = row.worktrees.expect("a count");
+        assert_eq!(count.loc.y, ROWS_TOP);
+        assert!(count.loc.x + count.size.w <= row.close.loc.x);
+        assert_eq!(layout.hit(mid(count)), Some(SidebarHit::Worktrees(0)));
         assert_eq!(SidebarHit::Worktrees(0).pill(), SidebarHit::Row(0));
-        // Compact rows have no line 2 to put it on.
-        let compact = sidebar_layout_at(&[ws], &[], 240, Density::Compact);
-        assert_eq!(compact.rows[0].worktrees, None);
+        let lines = row.attention.expect("worktree lines");
+        assert_eq!(lines.loc.y, ROWS_TOP + HEADER_ROW);
+        assert_eq!(layout.hit(mid(lines)), Some(SidebarHit::Attention(0, 2)));
+        // Compact headers count them, and have no lines.
+        let compact = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Compact);
+        assert!(compact.rows[0].worktrees.is_some());
+        assert_eq!(compact.rows[0].attention, None);
+        // Folded: the lines go, the count stays.
+        ws.folded = true;
+        assert_eq!(ws.height(Density::Comfortable), HEADER_ROW);
+        let folded = sidebar_layout(&[ws], &[], 240);
+        assert!(folded.rows[0].worktrees.is_some());
+        assert_eq!(folded.rows[0].attention, None);
     }
 
     #[test]
-    fn the_label_names_the_model() {
+    fn the_label_names_the_model_and_the_row_its_name() {
         let mut card = agent("p1", AgentStatus::Working, None);
         assert_eq!(card.label(), "claude");
+        assert_eq!(card.heading(), "claude");
         card.model = Some("Opus 5.5".into());
         assert_eq!(card.label(), "claude · Opus 5.5");
         card.name = Some("reviewer".into());
         assert_eq!(card.label(), "claude · reviewer · Opus 5.5");
+        assert_eq!(card.heading(), "reviewer");
     }
 
     #[test]
-    fn a_card_shows_five_subagents_then_counts_the_rest() {
+    fn a_row_shows_five_subagents_then_counts_the_rest() {
         use super::{SUBAGENT_LINES, SubagentView};
         use smithay::utils::Point;
         let mut card = agent("1", AgentStatus::Working, Some("~/src/gerdr"));
@@ -2411,31 +2664,27 @@ mod tests {
             })
             .collect();
         assert_eq!(card.subagent_lines(), SUBAGENT_LINES + 1);
-        let one_line = 2 * CARD_PAD + CARD_HEADER + CARD_LINE;
-        assert_eq!(card.height(Density::Comfortable), one_line + 6 * CARD_LINE);
+        assert_eq!(card.height(Density::Comfortable), AGENT_ROW + 6 * CARD_LINE);
         let ws = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
         let agents = vec![vec![card.clone()]];
         let layout = sidebar_layout_at(&[ws], &agents, 240, Density::Comfortable);
         // A line each but the unknown one's and the count's.
         let lines: Vec<_> = layout.subagents[0].iter().map(|l| (l.0, l.1)).collect();
         assert_eq!(lines, [(0, 0), (0, 1), (0, 3), (0, 4)]);
-        let card_rect = layout.cards[0][0].1;
+        let row = layout.cards[0][0].1;
         let at = |r: super::Rect| Point::from((r.loc.x as f64 + 4.0, r.loc.y as f64 + 4.0));
-        let first = card.subagent_line(card_rect, Density::Comfortable, 0);
-        assert_eq!(
-            first.loc.y,
-            card_rect.loc.y + CARD_PAD + CARD_HEADER + CARD_LINE
-        );
+        let first = card.subagent_line(row, Density::Comfortable, 0);
+        assert_eq!(first.loc.y, row.loc.y + AGENT_ROW);
         assert_eq!(layout.hit(at(first)), Some(SidebarHit::Subagent(0, 0, 0)));
-        // The unknown one's line and the count are the card's.
+        // The unknown one's line and the count are the row's.
         for j in [2, SUBAGENT_LINES] {
-            let line = card.subagent_line(card_rect, Density::Comfortable, j);
+            let line = card.subagent_line(row, Density::Comfortable, j);
             assert_eq!(layout.hit(at(line)), Some(SidebarHit::Card(0, 0)));
         }
     }
 
     #[test]
-    fn a_cursor_card_shows_its_subagents() {
+    fn a_cursor_row_shows_its_subagents() {
         use crate::cursor_agents::{ChatRow, CursorChat, SubagentRun};
         let mut chat = CursorChat {
             row: ChatRow {
@@ -2455,7 +2704,7 @@ mod tests {
             ],
         };
         let card = AgentView::cursor(&chat);
-        assert_eq!(card.detail(), "gerdr · Read main.rs");
+        assert_eq!(card.title(), Some("Read main.rs"));
         let tasks: Vec<_> = card.subagents.iter().map(|s| s.task.as_str()).collect();
         assert_eq!(tasks, ["Audit the plan", "Working"]);
         assert_eq!(
@@ -2466,45 +2715,24 @@ mod tests {
         let fields = card.tooltip_fields();
         assert!(fields.contains(&("Subagent".into(), "Audit the plan".into())));
         assert!(fields.contains(&("Subagent".into(), "Working".into())));
-        let one_line = 2 * CARD_PAD + CARD_HEADER + CARD_LINE;
-        assert_eq!(card.height(Density::Comfortable), one_line + 2 * CARD_LINE);
+        assert_eq!(card.height(Density::Comfortable), AGENT_ROW + 2 * CARD_LINE);
         chat.subagents.clear();
         let card = AgentView::cursor(&chat);
         assert_eq!(card.subagent_lines(), 0);
-        assert_eq!(card.height(Density::Comfortable), one_line);
+        assert_eq!(card.height(Density::Comfortable), AGENT_ROW);
     }
 
     #[test]
-    fn rows_have_two_lines_in_comfortable_and_one_in_compact() {
+    fn headers_and_rows_are_one_line() {
         let with = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
         let plain = workspace("~", None, None);
-        assert_eq!(
-            with.height(Density::Comfortable),
-            ROW_TITLE_HEIGHT + TAB_LINE + ROW_BOTTOM
-        );
-        assert_eq!(plain.height(Density::Comfortable), ROW_HEIGHT);
-        assert_eq!(with.height(Density::Compact), ROW_COMPACT);
-        assert_eq!(plain.height(Density::Compact), ROW_COMPACT);
-    }
-
-    #[test]
-    fn cards_are_a_header_and_a_detail_line() {
+        for ws in [&with, &plain] {
+            assert_eq!(ws.height(Density::Comfortable), HEADER_ROW);
+            assert_eq!(ws.height(Density::Compact), HEADER_ROW_COMPACT);
+        }
         let with = agent("p1", AgentStatus::Idle, Some("gerdr/src"));
-        let bare = agent("p2", AgentStatus::Idle, None);
-        assert_eq!(with.detail(), "src");
-        assert_eq!(bare.detail(), "");
-        assert_eq!(
-            with.height(Density::Comfortable),
-            2 * CARD_PAD + CARD_HEADER + CARD_LINE
-        );
-        assert_eq!(
-            bare.height(Density::Comfortable),
-            2 * CARD_PAD + CARD_HEADER
-        );
-        assert_eq!(
-            with.height(Density::Compact),
-            2 * CARD_PAD_COMPACT + CARD_HEADER + CARD_LINE
-        );
+        assert_eq!(with.height(Density::Comfortable), AGENT_ROW);
+        assert_eq!(with.height(Density::Compact), AGENT_ROW_COMPACT);
         assert_eq!(
             with.tooltip_fields(),
             [
@@ -2516,7 +2744,30 @@ mod tests {
     }
 
     #[test]
-    fn layout_stacks_rows_and_cards_in_both_densities() {
+    fn the_branch_shares_the_header_when_it_fits() {
+        let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
+        let row = layout.rows[0];
+        let branch = row.branch.expect("room for the branch");
+        assert_eq!(row.name.loc.x, NAME_X);
+        assert!(row.name.loc.x + row.name.size.w < branch.loc.x);
+        assert!(branch.loc.x + branch.size.w <= row.close.loc.x);
+        // A long name keeps all the room.
+        let long = "a-workspace-with-a-very-long-name-indeed";
+        let layout = sidebar_layout(&[workspace(long, None, Some("main"))], &[], 240);
+        let row = layout.rows[0];
+        assert_eq!(row.branch, None);
+        assert_eq!(row.name.loc.x + row.name.size.w, row.close.loc.x - 4);
+        // Too narrow: the name alone.
+        let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 120);
+        assert_eq!(layout.rows[0].branch, None);
+        // On the header, the branch is the row's.
+        let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
+        let branch = layout.rows[0].branch.unwrap();
+        assert_eq!(layout.hit(mid(branch)), Some(SidebarHit::Row(0)));
+    }
+
+    #[test]
+    fn layout_stacks_headers_and_rows_in_both_densities() {
         let workspaces = vec![
             workspace("gerdr", Some(AgentStatus::Blocked), Some("main")),
             workspace("~", None, None),
@@ -2539,43 +2790,151 @@ mod tests {
             assert!(layout.repos.loc.x + layout.repos.size.w < layout.plus.loc.x);
             assert!(layout.header.loc.x + layout.header.size.w < layout.repos.loc.x);
             assert_eq!(layout.header.size.h, BAR_HEIGHT - 10);
+            assert_eq!(layout.inbox_title, None);
 
             let row0 = layout.rows[0];
             let h0 = workspaces[0].height(density);
             assert_eq!(row0.rect.loc.y, ROWS_TOP);
             assert_eq!(row0.rect.size, (200 - GAP, h0).into());
-            assert_eq!(row0.title.size.h, workspaces[0].title_height(density));
-            assert_eq!(row0.close.size.w, CLOSE_WIDTH);
-            assert_eq!(row0.close.loc.x, 200 - GAP - ROW_INSET - CLOSE_WIDTH);
-            let chip = row0.chip.expect("a chip for a workspace with agents");
+            assert_eq!(row0.close.size.w, CLOSE_SLOT);
+            assert_eq!(row0.close.loc.x, 200 - GAP - ROW_INSET - CLOSE_SLOT);
+            // A blocked agent shows its badge; nothing else does unfolded.
+            let chip = row0.chip.expect("a badge for a blocked agent");
             assert_eq!(chip.loc.x + chip.size.w, row0.close.loc.x);
-            assert_eq!(chip.size.w, CHIP_SLOT);
             assert!(row0.name.loc.x + row0.name.size.w <= chip.loc.x);
             assert!(layout.rows[1].chip.is_none());
-            assert_eq!(
-                layout.rows[1].name.loc.x + layout.rows[1].name.size.w,
-                layout.rows[1].close.loc.x - 4
-            );
+            assert!(row0.fold.is_some());
+            assert!(layout.rows[1].fold.is_none());
 
-            // Cards: the blocked one first, each as high as it says, with
-            // a gap between and after them.
+            // Rows: the blocked one first, each as high as it says, under
+            // the header's name, with a gap between and after them.
             let cards = &layout.cards[0];
             assert_eq!(cards.iter().map(|(k, _)| *k).collect::<Vec<_>>(), [1, 0]);
-            assert_eq!(cards[0].1.loc.y, ROWS_TOP + h0);
+            assert_eq!(cards[0].1.loc, (CHILD_X, ROWS_TOP + h0).into());
             assert_eq!(cards[0].1.size.h, agents[0][1].height(density));
             assert_eq!(
                 cards[1].1.loc.y,
-                cards[0].1.loc.y + cards[0].1.size.h + CARD_GAP
+                cards[0].1.loc.y + cards[0].1.size.h + CHILD_GAP
             );
-            let block_end = cards[1].1.loc.y + cards[1].1.size.h + 2 * CARD_GAP;
+            let gap = super::block_gap(density);
+            let block_end = cards[1].1.loc.y + cards[1].1.size.h + 2 * CHILD_GAP + gap;
             assert_eq!(layout.blocks[0].size.h, block_end - ROWS_TOP);
             assert_eq!(layout.rows[1].rect.loc.y, block_end);
             assert!(layout.cards[1].is_empty());
-            assert_eq!(layout.blocks[1].size.h, workspaces[1].height(density));
+            assert_eq!(layout.blocks[1].size.h, workspaces[1].height(density) + gap);
         }
         let comfortable = sidebar_layout(&workspaces, &agents, 200);
         let compact = sidebar_layout_at(&workspaces, &agents, 200, Density::Compact);
         assert!(compact.blocks[1].loc.y < comfortable.blocks[1].loc.y);
+    }
+
+    #[test]
+    fn a_folded_workspace_is_its_header() {
+        let mut ws = workspace("gerdr", Some(AgentStatus::Idle), Some("main"));
+        ws.more_agents = vec!["cursor ask · A".into()];
+        ws.ci = Some(ci_view(&["main", "#42"], 1));
+        let agents = vec![vec![
+            agent("p1", AgentStatus::Idle, None),
+            agent("p2", AgentStatus::Idle, None),
+        ]];
+        let open = sidebar_layout(&[ws.clone()], &agents, 240);
+        assert_eq!(open.cards[0].len(), 2);
+        assert!(open.more[0].is_some() && open.ci[0].is_some());
+        assert_eq!(open.rows[0].chip, None);
+        ws.folded = true;
+        let layout = sidebar_layout(&[ws], &agents, 240);
+        assert!(layout.cards[0].is_empty());
+        assert_eq!((layout.more[0], layout.ci[0].clone()), (None, None));
+        assert_eq!(layout.blocks[0].size.h, HEADER_ROW + BLOCK_GAP);
+        // Its status shows, with how many agents it hides, and its CI as
+        // the mark.
+        let row = layout.rows[0];
+        let chip = row.chip.expect("the status of a folded workspace");
+        let count = text_extent("2", crate::chrome::TINY_FONT_SIZE);
+        assert_eq!(chip.size.w, super::STATUS_SLOT + super::COUNT_GAP + count);
+        assert!(row.ci.is_some());
+        let fold = row.fold.expect("a chevron");
+        assert_eq!(layout.hit(mid(fold)), Some(SidebarHit::Fold(0)));
+        assert_eq!(SidebarHit::Fold(0).pill(), SidebarHit::Row(0));
+        // With nothing under it, there is nothing to fold.
+        let mut bare = workspace("~", Some(AgentStatus::Idle), None);
+        bare.folded = true;
+        let layout = sidebar_layout(&[bare], &[], 240);
+        assert_eq!(layout.rows[0].fold, None);
+    }
+
+    #[test]
+    fn quiet_workspaces_have_nothing_going_on() {
+        let mut ws = workspace("gerdr", None, None);
+        assert!(ws.is_quiet());
+        ws.status = Some(AgentStatus::Idle);
+        assert!(ws.is_quiet());
+        ws.status = Some(AgentStatus::Working);
+        assert!(!ws.is_quiet());
+        ws.status = Some(AgentStatus::Idle);
+        ws.ci = Some(passing(&["main", "dev"]));
+        assert!(ws.is_quiet());
+        ws.ci = Some(ci_view(&["main", "#42"], 0));
+        assert!(!ws.is_quiet());
+    }
+
+    #[test]
+    fn a_green_ci_is_a_mark_on_the_header() {
+        let mut ws = workspace("gerdr", None, Some("main"));
+        ws.ci = Some(passing(&["main", "dev"]));
+        assert_eq!(ws.ci.as_ref().unwrap().rollup(), CiState::Passed);
+        let layout = sidebar_layout(&[ws.clone()], &[], 240);
+        assert_eq!(layout.ci[0], None);
+        let mark = layout.rows[0].ci.expect("a CI mark");
+        assert_eq!(layout.hit(mid(mark)), Some(SidebarHit::CiMark(0)));
+        assert_eq!(layout.blocks[0].size.h, HEADER_ROW + BLOCK_GAP);
+        // A review waiting makes it a section, and the mark goes.
+        ws.ci.as_mut().unwrap().chips[1].group = Group::Review;
+        let layout = sidebar_layout(&[ws.clone()], &[], 240);
+        assert!(layout.ci[0].is_some());
+        assert_eq!(layout.rows[0].ci, None);
+        // So does a run failing; the mark says so while folded.
+        let mut ci = passing(&["main", "dev"]);
+        ci.chips[0].state = CiState::Failed;
+        assert_eq!(ci.rollup(), CiState::Failed);
+        ws.ci = Some(ci);
+        assert!(sidebar_layout(&[ws.clone()], &[], 240).ci[0].is_some());
+        ws.folded = true;
+        let layout = sidebar_layout(&[ws], &[], 240);
+        assert_eq!(layout.ci[0], None);
+        assert!(layout.rows[0].ci.is_some());
+    }
+
+    #[test]
+    fn needs_you_lists_the_marked_agents_first() {
+        let workspaces = vec![
+            workspace("gerdr", Some(AgentStatus::Working), None),
+            workspace("aft", Some(AgentStatus::Blocked), None),
+        ];
+        let mut done = agent("p1", AgentStatus::Done, None);
+        done.inbox = true;
+        let mut blocked = agent("p3", AgentStatus::Blocked, None);
+        blocked.inbox = true;
+        let agents = vec![
+            vec![agent("p0", AgentStatus::Working, None), done],
+            vec![agent("p2", AgentStatus::Idle, None), blocked],
+        ];
+        assert_eq!(inbox_order(&agents), [(1, 1), (0, 1)]);
+        let layout = sidebar_layout(&workspaces, &agents, 240);
+        let title = layout.inbox_title.expect("a heading");
+        assert_eq!(title.loc.y, ROWS_TOP);
+        let rows: Vec<_> = layout.inbox.iter().map(|(i, k, _)| (*i, *k)).collect();
+        assert_eq!(rows, [(1, 1), (0, 1)]);
+        let (_, _, first) = layout.inbox[0];
+        assert_eq!(first.loc, (CHILD_X, ROWS_TOP + INBOX_TITLE).into());
+        assert_eq!(first.size.h, AGENT_ROW);
+        assert_eq!(layout.hit(mid(first)), Some(SidebarHit::Inbox(1, 1)));
+        assert_eq!(SidebarHit::Inbox(1, 1).pill(), SidebarHit::Inbox(1, 1));
+        let (_, _, last) = layout.inbox[1];
+        let end = last.loc.y + last.size.h + CHILD_GAP + INBOX_GAP;
+        assert_eq!(layout.rows[0].rect.loc.y, end);
+        // They stay in their workspaces too.
+        assert_eq!(layout.cards[1].len(), 2);
     }
 
     #[test]
@@ -2586,41 +2945,32 @@ mod tests {
         ];
         let agents = vec![vec![agent("p1", AgentStatus::Idle, None)], vec![]];
         let layout = sidebar_layout(&workspaces, &agents, 200);
-        let at = |r: crate::chrome::Rect| {
-            (
-                r.loc.x as f64 + r.size.w as f64 / 2.0,
-                r.loc.y as f64 + r.size.h as f64 / 2.0,
-            )
-                .into()
-        };
-        assert_eq!(layout.hit(at(layout.plus)), Some(SidebarHit::Plus));
-        assert_eq!(layout.hit(at(layout.repos)), Some(SidebarHit::Repos));
-        assert_eq!(layout.hit(at(layout.header)), Some(SidebarHit::Header));
+        assert_eq!(layout.hit(mid(layout.plus)), Some(SidebarHit::Plus));
+        assert_eq!(layout.hit(mid(layout.repos)), Some(SidebarHit::Repos));
+        assert_eq!(layout.hit(mid(layout.header)), Some(SidebarHit::Header));
         let row = layout.rows[0];
-        assert_eq!(layout.hit(at(row.name)), Some(SidebarHit::Name(0)));
-        assert_eq!(layout.hit(at(row.chip.unwrap())), Some(SidebarHit::Chip(0)));
-        assert_eq!(layout.hit(at(row.close)), Some(SidebarHit::Close(0)));
-        // Line 2 is the row itself.
-        let line2 = (
-            row.name.loc.x as f64,
-            (row.title.loc.y + row.title.size.h + 2) as f64,
-        );
-        assert_eq!(layout.hit(line2.into()), Some(SidebarHit::Row(0)));
+        assert_eq!(layout.hit(mid(row.name)), Some(SidebarHit::Name(0)));
+        assert_eq!(layout.hit(mid(row.close)), Some(SidebarHit::Close(0)));
         assert_eq!(
-            layout.hit(at(layout.cards[0][0].1)),
+            layout.hit(mid(layout.cards[0][0].1)),
             Some(SidebarHit::Card(0, 0))
         );
         assert_eq!(
-            layout.hit(at(layout.rows[1].name)),
+            layout.hit(mid(layout.rows[1].name)),
             Some(SidebarHit::Name(1))
         );
         assert_eq!(layout.hit((100.0, 10_000.0).into()), None);
         assert_eq!(SidebarHit::Close(3).pill(), SidebarHit::Row(3));
         assert_eq!(SidebarHit::Card(1, 2).pill(), SidebarHit::Card(1, 2));
+        // A blocked agent's badge is the chip.
+        let blocked = vec![vec![agent("p1", AgentStatus::Blocked, None)], vec![]];
+        let layout = sidebar_layout(&workspaces, &blocked, 200);
+        let chip = layout.rows[0].chip.unwrap();
+        assert_eq!(layout.hit(mid(chip)), Some(SidebarHit::Chip(0)));
     }
 
     #[test]
-    fn history_cards_have_a_close_and_the_rest_a_count() {
+    fn history_rows_have_a_close_and_the_rest_a_count() {
         let mut gerdr = workspace("gerdr", None, None);
         gerdr.more_agents = vec!["cursor plan · A".into(), "cursor ask · B".into()];
         let workspaces = vec![gerdr, workspace("~", None, None)];
@@ -2628,33 +2978,27 @@ mod tests {
         history.deletable = true;
         let agents = vec![vec![agent("p1", AgentStatus::Working, None), history]];
         let layout = sidebar_layout(&workspaces, &agents, 200);
-        let at = |r: crate::chrome::Rect| {
-            (
-                r.loc.x as f64 + r.size.w as f64 / 2.0,
-                r.loc.y as f64 + r.size.h as f64 / 2.0,
-            )
-                .into()
-        };
-        // Only the deletable card has a "×", in its header's right end.
+        // Only the deletable row has a "×", at its right end.
         assert_eq!(layout.card_closes[0].len(), 1);
         let (k, close) = layout.card_closes[0][0];
         let card = layout.cards[0].iter().find(|(c, _)| *c == k).unwrap().1;
         assert_eq!(k, 1);
         assert!(card.contains(close.loc) && close.loc.x > card.loc.x + card.size.w / 2);
-        assert_eq!(layout.hit(at(close)), Some(SidebarHit::CardClose(0, 1)));
+        assert_eq!(layout.hit(mid(close)), Some(SidebarHit::CardClose(0, 1)));
         assert_eq!(SidebarHit::CardClose(0, 1).pill(), SidebarHit::Card(0, 1));
-        // The count goes after the cards, before the next row.
+        // The count goes after the rows, before the next header.
         let more = layout.more[0].unwrap();
         assert!(more.loc.y >= card.loc.y + card.size.h);
         assert!(more.loc.y + more.size.h <= layout.rows[1].rect.loc.y);
-        assert_eq!(layout.hit(at(more)), Some(SidebarHit::More(0)));
+        assert_eq!(layout.hit(mid(more)), Some(SidebarHit::More(0)));
         assert_eq!(layout.more[1], None);
     }
 
     #[test]
     fn renaming_edits_in_the_name_band() {
-        let workspaces = vec![workspace("gerdr", Some(AgentStatus::Idle), Some("main"))];
-        let layout = sidebar_layout(&workspaces, &[], 200);
+        let workspaces = vec![workspace("gerdr", Some(AgentStatus::Blocked), Some("main"))];
+        let agents = vec![vec![agent("p1", AgentStatus::Blocked, None)]];
+        let layout = sidebar_layout(&workspaces, &agents, 200);
         let row = layout.rows[0];
         let field = row.rename_field();
         assert!(field.loc.x < row.name.loc.x);
@@ -2664,7 +3008,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_go_by_urgency_then_as_given() {
+    fn rows_go_by_urgency_then_as_given() {
         let cards = vec![
             agent("a", AgentStatus::Idle, None),
             agent("b", AgentStatus::Done, None),
@@ -2691,19 +3035,26 @@ mod tests {
         assert_eq!(workspace_slot(blocks, 0, last as f64 + 50.0), 2);
     }
 
-    /// A GitHub card of branch chips labelled `labels`, with `others`
-    /// other pull requests.
+    /// GitHub chips of branches labelled `labels`, their states going
+    /// passed, failed, running, unknown, with `others` other pull requests.
     fn ci_view(labels: &[&str], others: usize) -> CiView {
         let chips: Vec<_> = labels.iter().map(|l| (Group::Branch, *l)).collect();
         grouped_ci_view(&chips, others)
     }
 
-    /// A GitHub card of `chips`, each its group and label, with `others`
-    /// other pull requests.
+    /// GitHub chips of branches labelled `labels`, all passed.
+    fn passing(labels: &[&str]) -> CiView {
+        let mut ci = ci_view(labels, 0);
+        ci.chips.iter_mut().for_each(|c| c.state = CiState::Passed);
+        ci
+    }
+
+    /// GitHub chips of `chips`, each its group and label, with `others`
+    /// other pull requests: one failed, so they show as a section.
     fn grouped_ci_view(chips: &[(Group, &str)], others: usize) -> CiView {
         let states = [
-            CiState::Passed,
             CiState::Failed,
+            CiState::Passed,
             CiState::Running,
             CiState::Unknown,
         ];
@@ -2724,16 +3075,8 @@ mod tests {
         }
     }
 
-    fn mid(r: crate::chrome::Rect) -> smithay::utils::Point<f64, smithay::utils::Logical> {
-        (
-            r.loc.x as f64 + r.size.w as f64 / 2.0,
-            r.loc.y as f64 + r.size.h as f64 / 2.0,
-        )
-            .into()
-    }
-
     #[test]
-    fn the_ci_card_follows_the_agent_cards_and_grows_the_block() {
+    fn the_ci_section_follows_the_agent_rows_and_grows_the_block() {
         let mut gerdr = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
         gerdr.more_agents = vec!["cursor ask · A".into()];
         let agents = vec![vec![agent("p1", AgentStatus::Working, None)], vec![]];
@@ -2744,50 +3087,38 @@ mod tests {
             let without = sidebar_layout_at(&plain, &agents, 240, density);
             let layout = sidebar_layout_at(&workspaces, &agents, 240, density);
             assert_eq!(without.ci, [None, None]);
-            let card = layout.ci[0].as_ref().expect("a CI card").card;
-            // After the "+N more" line, as wide as the agent cards.
+            let section = layout.ci[0].as_ref().expect("a GitHub section").card;
+            // After the "+N more" line, as wide as the agent rows.
             let more = layout.more[0].unwrap();
-            let agent_card = layout.cards[0][0].1;
-            assert_eq!(card.loc.y, more.loc.y + more.size.h + CARD_GAP);
-            assert_eq!(
-                (card.loc.x, card.size.w),
-                (agent_card.loc.x, agent_card.size.w)
-            );
-            // A header and a line of chips; the block takes it and the
-            // gap after it, and the next row moves down by as much.
-            let pad = match density {
-                Density::Comfortable => CARD_PAD,
-                Density::Compact => CARD_PAD_COMPACT,
-            };
-            assert_eq!(card.size.h, 2 * pad + CARD_HEADER + CARD_LINE);
-            let end = card.loc.y + card.size.h + 2 * CARD_GAP;
+            let row = layout.cards[0][0].1;
+            assert_eq!(section.loc.y, more.loc.y + more.size.h + CHILD_GAP);
+            assert_eq!((section.loc.x, section.size.w), (row.loc.x, row.size.w));
+            // A line of chips; the block takes it and the gap after it,
+            // and the next header moves down by as much.
+            assert_eq!(section.size.h, 2 * CI_PAD + CARD_LINE);
+            let end = section.loc.y + section.size.h + 2 * CHILD_GAP + super::block_gap(density);
             assert_eq!(layout.blocks[0].size.h, end - ROWS_TOP);
             assert_eq!(layout.rows[1].rect.loc.y, end);
             assert_eq!(
                 layout.rows[1].rect.loc.y - without.rows[1].rect.loc.y,
-                card.size.h + CARD_GAP
+                section.size.h + CHILD_GAP
             );
             assert_eq!(layout.ci[1], None);
         }
-        // A card alone after the row, and none with nothing to show.
+        // Nothing to show: no section, no mark.
         let mut alone = workspace("gerdr", None, None);
-        alone.ci = Some(ci_view(&[], 3));
-        let layout = sidebar_layout(&[alone.clone()], &[], 240);
-        let card = layout.ci[0].as_ref().unwrap();
-        assert_eq!(
-            card.card.loc.y,
-            ROWS_TOP + alone.height(Density::Comfortable)
-        );
-        assert_eq!(card.card.size.h, 2 * CARD_PAD + CARD_HEADER);
-        assert!(card.chips.is_empty());
         alone.ci = Some(CiView::default());
         let layout = sidebar_layout(&[alone.clone()], &[], 240);
         assert_eq!(layout.ci[0], None);
-        assert_eq!(layout.blocks[0].size.h, alone.height(Density::Comfortable));
+        assert_eq!(layout.rows[0].ci, None);
+        assert_eq!(
+            layout.blocks[0].size.h,
+            alone.height(Density::Comfortable) + BLOCK_GAP
+        );
     }
 
     #[test]
-    fn ci_chips_flow_and_wrap_inside_the_card() {
+    fn ci_chips_flow_and_wrap_inside_the_section() {
         let mut ws = workspace("gerdr", None, None);
         let labels = [
             "main", "dev", "#101", "#102", "#103", "#104", "#105", "#106",
@@ -2798,11 +3129,12 @@ mod tests {
         assert_eq!(ci.others, None);
         assert_eq!(ci.chips.len(), labels.len());
         let (card, chips) = (ci.card, &ci.chips);
-        let first_line = card.loc.y + CARD_PAD + CARD_HEADER;
+        let first_line = card.loc.y + CI_PAD;
         assert_eq!(chips[0].loc.y, first_line);
-        // One label, "CI", on the first line; the chips in a column after it.
+        // One label, "CI", on the first line, where a row's text starts;
+        // the chips in a column after it.
         let label_w = text_extent("CI", DETAIL_FONT_SIZE);
-        let label_x = card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP;
+        let label_x = card.loc.x + CHILD_TEXT_X - CHILD_X;
         let label = Rectangle::new((label_x, first_line).into(), (label_w, CARD_LINE).into());
         assert_eq!(ci.labels, [(Group::Branch, label)]);
         assert_eq!(chips[0].loc.x, label_x + label_w + CI_LABEL_GAP - 4);
@@ -2822,7 +3154,7 @@ mod tests {
             }
         }
         assert!(lines > 1, "eight chips take more than a line at 200 px");
-        assert_eq!(card.size.h, 2 * CARD_PAD + CARD_HEADER + lines * CARD_LINE);
+        assert_eq!(card.size.h, 2 * CI_PAD + lines * CARD_LINE);
         for chip in chips {
             assert!(crate::chrome::inside(card, *chip));
         }
@@ -2832,34 +3164,34 @@ mod tests {
         long.ci = Some(ci_view(&["a-branch-with-a-name-far-too-long-for-it"], 0));
         let layout = sidebar_layout(&[long], &[], 200);
         let ci = layout.ci[0].as_ref().unwrap();
-        let card_end = ci.card.loc.x + ci.card.size.w - CARD_PAD + 4;
+        let card_end = ci.card.loc.x + ci.card.size.w - super::CHILD_PAD + 4;
         assert_eq!(ci.chips[0].loc.x + ci.chips[0].size.w, card_end);
-        assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + CARD_LINE);
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + CARD_LINE);
     }
 
     #[test]
-    fn ci_hits_name_the_chip_the_count_and_the_card() {
+    fn ci_hits_name_the_chip_the_count_and_the_section() {
         let mut ws = workspace("gerdr", Some(AgentStatus::Idle), Some("main"));
         ws.ci = Some(ci_view(&["main", "#42"], 4));
         let workspaces = vec![workspace("~", None, None), ws];
         let agents = vec![vec![], vec![agent("p1", AgentStatus::Idle, None)]];
         let layout = sidebar_layout(&workspaces, &agents, 240);
         let ci = layout.ci[1].as_ref().unwrap();
-        let others = ci.others.expect("a count of other runs");
-        // The count at the header's right end, the chips under it.
-        assert!(others.loc.x + others.size.w <= ci.card.loc.x + ci.card.size.w - CARD_PAD);
-        assert!(others.loc.y + others.size.h <= ci.chips[0].loc.y);
+        let others = ci.others.expect("a count of other pull requests");
+        // The count at the first line's right end, after its chips.
+        assert!(others.loc.x + others.size.w <= ci.card.loc.x + ci.card.size.w);
+        assert!(ci.chips[1].loc.x + ci.chips[1].size.w < others.loc.x);
         assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiPrs(1)));
         assert_eq!(layout.hit(mid(ci.chips[0])), Some(SidebarHit::CiChip(1, 0)));
         assert_eq!(layout.hit(mid(ci.chips[1])), Some(SidebarHit::CiChip(1, 1)));
-        // Between the chips, and the header's left, are the card.
+        // Between the chips, and GitHub's mark, are the section.
         let between = (
             (ci.chips[0].loc.x + ci.chips[0].size.w + 1) as f64,
             mid(ci.chips[0]).y,
         );
         assert_eq!(layout.hit(between.into()), Some(SidebarHit::Ci(1)));
-        let header = (ci.card.loc.x as f64 + 10.0, ci.card.loc.y as f64 + 6.0);
-        assert_eq!(layout.hit(header.into()), Some(SidebarHit::Ci(1)));
+        let mark = (ci.card.loc.x as f64 + 8.0, ci.card.loc.y as f64 + 6.0);
+        assert_eq!(layout.hit(mark.into()), Some(SidebarHit::Ci(1)));
         // So is a line's label.
         let (_, label) = ci.labels[0];
         assert_eq!(layout.hit(mid(label)), Some(SidebarHit::Ci(1)));
@@ -2867,7 +3199,7 @@ mod tests {
             layout.hit(mid(layout.cards[1][0].1)),
             Some(SidebarHit::Card(1, 0))
         );
-        // None of it is the row's, and each part lights itself.
+        // None of it is the header's, and each part lights itself.
         for hit in [
             SidebarHit::Ci(1),
             SidebarHit::CiChip(1, 1),
@@ -2916,50 +3248,50 @@ mod tests {
         let at = |view: &SidebarView, x, y| {
             pixel(painter.sidebar_view(view, size, 1.0, p), size.w, x, y)
         };
-        let card = mix(mix(p.panel, p.element, 0.6), p.selected, 0.0);
+        let under = p.panel;
         let chip = ci.chips[1];
         let y = chip.loc.y + chip.size.h / 2;
         let (left, right) = (chip.loc.x + 1, chip.loc.x + chip.size.w - 2);
-        // Nothing lit: the chip is on the card.
-        assert_eq!(at(&view, left, y), card);
-        assert_eq!(at(&view, right, y), card);
+        // Nothing lit: the chip is on the panel.
+        assert_eq!(at(&view, left, y), under);
+        assert_eq!(at(&view, right, y), under);
         // Lit: a pill from edge to edge of its rect, and no further.
         view.state.ci = vec![CiCardState {
             chips: vec![0, 16],
             ..CiCardState::default()
         }];
-        let lit = mix(card, p.text, 0.1);
+        let lit = mix(under, p.text, 0.1);
         assert_eq!(at(&view, left, y), lit);
         assert_eq!(at(&view, right, y), lit);
-        assert_eq!(at(&view, chip.loc.x - 1, y), card);
-        assert_eq!(at(&view, chip.loc.x + chip.size.w, y), card);
-        assert_eq!(at(&view, left, chip.loc.y - 1), card);
+        assert_eq!(at(&view, chip.loc.x - 1, y), under);
+        assert_eq!(at(&view, chip.loc.x + chip.size.w, y), under);
+        assert_eq!(at(&view, left, chip.loc.y - 1), under);
         // The first chip stays unlit.
         let first = ci.chips[0];
-        assert_eq!(at(&view, first.loc.x + 1, y), card);
+        assert_eq!(at(&view, first.loc.x + 1, y), under);
         // The count's quiet pill tints more under the pointer, inside its
         // rect.
         let others = ci.others.unwrap();
         let oy = others.loc.y + others.size.h / 2;
         let ox = others.loc.x + 2;
-        assert_eq!(at(&view, ox, oy), mix(card, p.muted, CI_COUNT_TINT));
+        assert_eq!(at(&view, ox, oy), mix(under, p.muted, CI_COUNT_TINT));
         view.state.ci = vec![CiCardState {
             others: 16,
             ..CiCardState::default()
         }];
-        assert_eq!(at(&view, ox, oy), mix(card, p.muted, 2.0 * CI_COUNT_TINT));
-        assert_eq!(at(&view, others.loc.x - 1, oy), card);
+        assert_eq!(at(&view, ox, oy), mix(under, p.muted, 2.0 * CI_COUNT_TINT));
+        assert_eq!(at(&view, others.loc.x - 1, oy), under);
         // Painted at twice the scale and in the light look too.
         painter.sidebar_view(&view, size, 2.0, Theme::Light.palette());
     }
 
-    /// The layout of a lone workspace's GitHub card of `chips`, `width`
-    /// wide, and the card itself.
+    /// The layout of a lone workspace's GitHub section of `chips`, `width`
+    /// wide, and the section itself.
     fn ci_card_of(chips: &[(Group, &str)], width: i32) -> (SidebarLayout, CiLayout) {
         let mut ws = workspace("gerdr", None, None);
         ws.ci = Some(grouped_ci_view(chips, 0));
         let layout = sidebar_layout(&[ws], &[], width);
-        let ci = layout.ci[0].clone().expect("a GitHub card");
+        let ci = layout.ci[0].clone().expect("a GitHub section");
         (layout, ci)
     }
 
@@ -2972,7 +3304,7 @@ mod tests {
             (Group::Review, "#70"),
         ];
         let (_, ci) = ci_card_of(&chips, 240);
-        let first_line = ci.card.loc.y + CARD_PAD + CARD_HEADER;
+        let first_line = ci.card.loc.y + CI_PAD;
         let ys: Vec<_> = ci.chips.iter().map(|c| c.loc.y).collect();
         assert_eq!(
             ys,
@@ -2992,10 +3324,7 @@ mod tests {
         let groups: Vec<_> = ci.labels.iter().map(|(g, _)| *g).collect();
         assert_eq!(groups, [Group::Branch, Group::Mine, Group::Review]);
         for ((_, label), chip) in ci.labels.iter().zip([0, 2, 3]) {
-            assert_eq!(
-                label.loc.x,
-                ci.card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP
-            );
+            assert_eq!(label.loc.x, ci.card.loc.x + CHILD_TEXT_X - CHILD_X);
             assert_eq!(label.size, (widest, CARD_LINE).into());
             assert_eq!(label.loc.y, ci.chips[chip].loc.y);
             assert!(label.loc.x + label.size.w < ci.chips[chip].loc.x);
@@ -3003,7 +3332,7 @@ mod tests {
         // The first chip of each line in the same column.
         assert_eq!(ci.chips[2].loc.x, ci.chips[0].loc.x);
         assert_eq!(ci.chips[3].loc.x, ci.chips[0].loc.x);
-        assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + 3 * CARD_LINE);
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + 3 * CARD_LINE);
     }
 
     #[test]
@@ -3029,10 +3358,7 @@ mod tests {
         // No label on the wrapped line: one per group.
         assert_eq!(ci.labels.len(), 2);
         let lines = 1 + (mine[mine.len() - 1].loc.y - mine[0].loc.y) / CARD_LINE + 1;
-        assert_eq!(
-            ci.card.size.h,
-            2 * CARD_PAD + CARD_HEADER + lines * CARD_LINE
-        );
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + lines * CARD_LINE);
     }
 
     #[test]
@@ -3041,11 +3367,10 @@ mod tests {
         let groups: Vec<_> = ci.labels.iter().map(|(g, _)| *g).collect();
         assert_eq!(groups, [Group::Branch, Group::Review]);
         assert_eq!(ci.chips[1].loc.y, ci.chips[0].loc.y + CARD_LINE);
-        assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + 2 * CARD_LINE);
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + 2 * CARD_LINE);
         // The column fits the labels present only.
         let (_, mine) = ci_card_of(&[(Group::Mine, "#42")], 240);
-        let column =
-            |w: i32| ci.card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP + w + CI_LABEL_GAP - 4;
+        let column = |w: i32| ci.card.loc.x + CHILD_TEXT_X - CHILD_X + w + CI_LABEL_GAP - 4;
         assert_eq!(
             mine.chips[0].loc.x,
             column(text_extent("Mine", DETAIL_FONT_SIZE))

@@ -494,7 +494,7 @@ impl Chrome {
             parts.push((buffer, rect.loc, rect.size, 1.0));
         }
 
-        // The blocked cards' pulse: one band per card, composed over the
+        // The blocked agents' pulse: one band per row, composed over the
         // sidebar with the pulse as its opacity, so the sidebar itself is
         // not redrawn for it.
         let pulse_alpha = pulse_alpha(view.pulse);
@@ -507,22 +507,27 @@ impl Chrome {
                 view.density,
             )
             .scrolled(view.sidebar.state.scroll, output.h);
-            for (i, cards) in view.sidebar.agents.iter().enumerate() {
-                for (k, card) in cards.iter().enumerate() {
-                    if card.status != crate::herdr::AgentStatus::Blocked {
-                        continue;
-                    }
-                    let rect = layout
-                        .cards
-                        .get(i)
-                        .and_then(|cards| cards.iter().find(|(c, _)| *c == k))
-                        .map(|(_, rect)| *rect);
-                    let band = rect.map(|rect| blocked_band(rect, view.density));
-                    // Not on a card scrolled under the header.
-                    let shows = |b: &Rect| b.size.w > 0 && b.size.h > 0 && b.loc.y >= BAR_HEIGHT;
-                    if let Some(band) = band.filter(shows) {
-                        bands.push(band);
-                    }
+            let blocked = |i: usize, k: usize| {
+                view.sidebar
+                    .agents
+                    .get(i)
+                    .and_then(|cards| cards.get(k))
+                    .is_some_and(|card| card.status == crate::herdr::AgentStatus::Blocked)
+            };
+            // The rows in the workspaces, and those in the "Needs you" list.
+            let rows = layout
+                .cards
+                .iter()
+                .enumerate()
+                .flat_map(|(i, rows)| rows.iter().map(move |(k, rect)| (i, *k, *rect)));
+            for (_, _, rect) in rows
+                .chain(layout.inbox.iter().copied())
+                .filter(|(i, k, _)| blocked(*i, *k))
+            {
+                let band = blocked_band(rect, view.density);
+                // Not on a row scrolled under the header.
+                if band.size.w > 0 && band.size.h > 0 && band.loc.y >= BAR_HEIGHT {
+                    bands.push(band);
                 }
             }
         }
@@ -537,7 +542,7 @@ impl Chrome {
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
         parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
-        // Every card is as wide as the next, so one band buffer fits all.
+        // Every row is as wide as the next, so one band buffer fits all.
         if let Some(size) = bands.first().map(|band| band.size) {
             let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
                 painter.pulse_band(*size, scale, theme.palette())
@@ -728,9 +733,14 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     rects.extend([sidebar.header, sidebar.plus, sidebar.repos]);
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);
-        rects.extend(row.chip);
+        rects.extend(
+            [row.chip, row.fold, row.ci, row.worktrees]
+                .into_iter()
+                .flatten(),
+        );
     }
     rects.extend(sidebar.cards.iter().flatten().map(|(_, rect)| *rect));
+    rects.extend(sidebar.inbox.iter().map(|(_, _, rect)| *rect));
     let strip_w = output.w - view.sidebar_width;
     let shift = |rect: Rect| {
         Rectangle::new(
