@@ -163,7 +163,13 @@ impl Gerdr {
             return None;
         }
         let ws = &self.workspaces[w];
-        let app_id = self.prepare(original, &ws.dir, None).app_id;
+        // Told apart by app_id, it starts in its turn for its leaf (see
+        // `launch_next_apps`): a web page then through gerdr's extension,
+        // whose windows are named after it, not the site (see `steered`).
+        // Only that there is a leaf counts here, not which.
+        let app_id = self
+            .prepare(original, &ws.dir, Some(leaf.unwrap_or_default()))
+            .app_id;
         let queued = !app_id.is_empty();
         let pid = if queued {
             None
