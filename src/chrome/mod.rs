@@ -98,6 +98,8 @@ pub struct ChromeView {
     /// The help panel is pinned open, rather than up for the prefix: it
     /// then carries a title and an Esc hint.
     pub help_pinned: bool,
+    /// What the pointer is on in the help panel.
+    pub help_hover: Option<HelpHit>,
     /// The sidebar: its workspaces, their agents and what moves in it.
     pub sidebar: SidebarView,
     /// Where the blocked agents' pulse stands, 0 to 1 (see `anim::pulse`).
@@ -156,7 +158,7 @@ pub struct Chrome {
     /// the cards).
     pulse: Cached<(Size<i32, Logical>, Theme, f64)>,
     tabs: Cached<(TabStripView, Theme, i32, f64)>,
-    help: Overlay<(HelpLayout, Theme, f64)>,
+    help: Overlay<(HelpLayout, Option<HelpHit>, Theme, f64)>,
     menu: Overlay<(MenuView, Theme, f64)>,
     tooltip: Overlay<(TooltipView, i32, Theme, f64)>,
     switcher: Overlay<(SwitcherView, i32, Theme, f64)>,
@@ -222,6 +224,29 @@ impl Chrome {
 
     /// How wide a toast's button labelled `label` is (see
     /// `Painter::toast_button_width`).
+    /// What `pos` is over in the help panel listing `help` in the app
+    /// `area`, `pinned` open or up for the prefix; `None` off it.
+    pub fn help_hit(
+        &self,
+        help: &Help,
+        pinned: bool,
+        area: Rect,
+        scale: f64,
+        pos: Point<f64, Logical>,
+    ) -> Option<HelpHit> {
+        let width = area.size.w - 2 * HELP_MARGIN;
+        let layout = self.painter.help_layout(help, width, pinned, scale);
+        let panel = help_rect(&layout, area);
+        if !panel.to_f64().contains(pos) {
+            return None;
+        }
+        let spots = self.painter.help_spots(help, &layout, panel.loc, scale);
+        let hit = spots
+            .into_iter()
+            .find(|(_, rect)| rect.to_f64().contains(pos));
+        Some(hit.map_or(HelpHit::Panel, |(hit, _)| hit))
+    }
+
     pub fn toast_button_width(&self, label: &str) -> i32 {
         self.painter.toast_button_width(label)
     }
@@ -379,20 +404,12 @@ impl Chrome {
         let pinned = view.help_pinned;
         let help = view.prefix.as_deref().map(|help| {
             let layout = painter.help_layout(help, area.size.w - 2 * HELP_MARGIN, pinned, scale);
-            let panel = Rectangle::new(
-                (
-                    sidebar_w + (area.size.w - layout.size.w) / 2,
-                    (strip_h + area.size.h - layout.size.h - HELP_MARGIN).max(strip_h),
-                )
-                    .into(),
-                layout.size,
-            );
-            let (loc, size) = shadowed(panel);
-            ((layout, theme, scale), loc, size)
+            let (loc, size) = shadowed(help_rect(&layout, area));
+            ((layout, view.help_hover, theme, scale), loc, size)
         });
-        parts.extend(self.help.part(help, now, true, |(layout, ..)| {
+        parts.extend(self.help.part(help, now, true, |(layout, hover, ..)| {
             let help = view.prefix.as_deref().expect("the help the layout is of");
-            painter.help_panel(help, layout, scale, theme.palette())
+            painter.help_panel(help, layout, *hover, scale, theme.palette())
         }));
 
         // The toasts, stacked at the bottom right of the app area, each

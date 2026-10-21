@@ -67,8 +67,8 @@ use std::{
 };
 
 use chrome::{
-    AgentView, BarButton, Chrome, ChromeView, Density, PlaceholderView, SIDEBAR_MAX_WIDTH,
-    SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
+    AgentView, BarButton, Chrome, ChromeView, Density, HelpHit, HelpPress, PlaceholderView,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
 };
 use frecency::Frecency;
 use hooks::Hook;
@@ -1002,6 +1002,8 @@ pub struct Gerdr {
     pub prefix_armed: bool,
     /// The key help stays open until closed again.
     pub help_pinned: bool,
+    /// What the pointer is on in the help panel, while it shows.
+    pub help_hover: Option<HelpHit>,
     /// The prefix and the keys after it, from the config file.
     pub keymap: keys::Keymap,
     /// Where the pointer is, in window coordinates.
@@ -3438,6 +3440,28 @@ impl Gerdr {
         }
     }
 
+    /// What `pos` is over in the help panel, while it shows.
+    pub fn help_hit(&self, pos: Point<f64, Logical>) -> Option<HelpHit> {
+        if !(self.prefix_armed || self.help_pinned) {
+            return None;
+        }
+        let help = self.keymap.help();
+        let (area, scale) = (self.content_rect(), self.scale());
+        self.chrome
+            .help_hit(&help, self.help_pinned, area, scale, pos)
+    }
+
+    /// A click at `pos` on what `press` says in the help panel: as its
+    /// key after the prefix. A pinned panel stays open for the next.
+    pub fn help_press(&mut self, press: HelpPress, pos: Point<f64, Logical>) {
+        self.prefix_armed = false;
+        match press {
+            HelpPress::Action(action) => self.run_action(action),
+            HelpPress::Close => self.help_pinned = false,
+        }
+        self.help_hover = self.help_hit(pos);
+    }
+
     pub fn run_action(&mut self, action: Action) {
         let tabs = self.workspace().map_or(0, |ws| ws.tabs.len());
         let tab = self.workspace().map_or(0, |ws| ws.active_tab);
@@ -4263,6 +4287,10 @@ impl Gerdr {
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
             return None;
         }
+        // The help panel takes the clicks on it.
+        if self.help_hit(pos).is_some() {
+            return None;
+        }
         self.surface_under(pos)
     }
 
@@ -5066,6 +5094,9 @@ impl Gerdr {
             now,
             pointer: self.pointer,
             help_pinned: self.help_pinned,
+            help_hover: self
+                .help_hover
+                .filter(|_| self.prefix_armed || self.help_pinned),
             sidebar: chrome::SidebarView {
                 workspaces,
                 agents,
@@ -5328,6 +5359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         suppressed_keys: Vec::new(),
         prefix_armed: false,
         help_pinned: false,
+        help_hover: None,
         keymap,
         pointer: (0.0, 0.0).into(),
         last_press: None,

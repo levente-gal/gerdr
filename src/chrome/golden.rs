@@ -6,13 +6,15 @@
 use std::time::Instant;
 
 use super::{
-    AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, ItemIcon, MenuEntry,
-    MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton, PlaceholderView,
-    ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState, SidebarView, SwitcherRow,
-    SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView, TooltipView, WelcomeHit,
-    WelcomeView, WorkspaceView,
+    AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, HelpHit, HelpPress,
+    ItemIcon, MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
+    PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState,
+    SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView,
+    TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
-use crate::{WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level};
+use crate::{
+    Action, WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level,
+};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 
 /// FNV-1a over the buffer's bytes.
@@ -202,6 +204,16 @@ fn help() -> Help {
             ("Shift+P".into(), "projects".into()),
             ("q".into(), "quit".into()),
         ],
+        presses: {
+            let act = |a| Some(HelpPress::Action(a));
+            vec![
+                vec![act(Action::NewTab)],
+                vec![act(Action::CloseTab); 2],
+                vec![act(Action::NextTab), act(Action::PrevTab)],
+                vec![act(Action::Projects)],
+                vec![act(Action::Quit)],
+            ]
+        },
     }
 }
 
@@ -418,7 +430,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
             scale,
         )),
         hash(painter.pane_bar(&pane_bar(), scale, p)),
-        hash(painter.help_panel(&help, &help_layout, scale, p)),
+        hash(painter.help_panel(&help, &help_layout, None, scale, p)),
         hash(painter.menu(&menu(), scale, p)),
         hash(painter.switcher(&switcher(), 640, scale, p)),
         hash(painter.welcome(&welcome(), (800, 600).into(), scale, p)),
@@ -450,7 +462,7 @@ fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let tip_w = painter.tooltip_width(&tip, 400, scale);
     vec![
         hash(painter.menu(&full_menu(), scale, p)),
-        hash(painter.help_panel(&help, &pinned, scale, p)),
+        hash(painter.help_panel(&help, &pinned, None, scale, p)),
         hash(painter.toast(&toast(Some("Retry"), Level::Error), 360, true, scale, p)),
         hash(painter.tooltip(&tip, tip_w, scale, p)),
         hash(painter.placeholder(&placeholder(false), None, scale, p)),
@@ -660,9 +672,17 @@ fn dump_overlays() {
         dump(
             &dir,
             &format!("help_pinned_{tag}"),
-            painter.help_panel(&help, &pinned, scale, p),
+            painter.help_panel(&help, &pinned, None, scale, p),
             px(pinned.size.w + shadow),
         );
+        for (name, hover) in [("row", HelpHit::Row(0)), ("key", HelpHit::Key(2, 1))] {
+            dump(
+                &dir,
+                &format!("help_hover_{name}_{tag}"),
+                painter.help_panel(&help, &pinned, Some(hover), scale, p),
+                px(pinned.size.w + shadow),
+            );
+        }
         dump(
             &dir,
             &format!("toast_{tag}"),

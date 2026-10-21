@@ -24,7 +24,7 @@ use smithay::input::keyboard::{Keysym, ModifiersState, xkb};
 
 use crate::{
     Action,
-    chrome::Help,
+    chrome::{Help, HelpPress},
     layout::{Dir, Side},
 };
 
@@ -623,7 +623,12 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
             .map(|(chord, _)| chord.label())
             .collect()
     };
-    let mut rows = Vec::new();
+    // What a click on a key of the action named `name` does.
+    let press = |name: &str| {
+        let (_, action, ..) = ACTIONS.iter().find(|(n, ..)| *n == name)?;
+        Some(HelpPress::Action(*action))
+    };
+    let (mut rows, mut presses) = (Vec::new(), Vec::new());
     for (label, names) in HELP_LINES {
         let all: Vec<Vec<String>> = names.iter().map(|name| keys(name)).collect();
         if names.len() == 1 || all.iter().any(|keys| keys.len() != 1) {
@@ -634,24 +639,34 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
                     } else {
                         ACTIONS.iter().find(|(n, ..)| n == name).unwrap().2
                     };
+                    presses.push(vec![press(name); keys.len()]);
                     rows.push((keys.join(" / "), label.to_string()));
                 }
             }
         } else if names.len() > 4 {
-            // A run, like the tab numbers: its ends.
+            // A run, like the tab numbers: its ends, standing for them all.
+            presses.push(vec![None]);
             rows.push((
                 format!("{}–{}", all[0][0], all[all.len() - 1][0]),
                 label.to_string(),
             ));
         } else {
             let keys: Vec<&str> = all.iter().map(|keys| keys[0].as_str()).collect();
+            presses.push(names.iter().map(|name| press(name)).collect());
             rows.push((shared_mods(&keys).join(" / "), label.to_string()));
         }
     }
     let prefix = prefix.label();
+    // The prefix goes to the app only as a key.
+    presses.push(vec![None]);
     rows.push((prefix.clone(), format!("send {prefix} to the app")));
+    presses.push(vec![Some(HelpPress::Close)]);
     rows.push(("Esc".into(), "cancel".into()));
-    Help { prefix, rows }
+    Help {
+        prefix,
+        rows,
+        presses,
+    }
 }
 
 #[cfg(test)]

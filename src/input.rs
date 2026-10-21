@@ -40,7 +40,7 @@ use smithay::{
 
 use crate::{
     Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
-    chrome::{self, BarHit, FieldSpot},
+    chrome::{self, BarHit, FieldSpot, HelpHit},
     launch::Place,
     layout::Dir,
     menu::MenuAction,
@@ -395,10 +395,13 @@ impl Gerdr {
                 } else if self.switcher.is_some() {
                     overlay_tip = self.switcher_motion(pos);
                 }
+                // The help panel, behind all those.
+                let popup = overlay || self.switcher.is_some() || self.context_menu.is_some();
+                self.help_hover = if popup { None } else { self.help_hit(pos) };
                 // The region under the pointer lights up, with nothing open
                 // over it, and may offer a tooltip. Its layout is worked
                 // out once for the event.
-                let covered = overlay || self.switcher.is_some() || self.context_menu.is_some();
+                let covered = popup || self.help_hover.is_some();
                 self.header_hover = false;
                 let regions = self.regions_at(pos);
                 let tip = if covered {
@@ -428,7 +431,9 @@ impl Gerdr {
                         CursorIcon::Grabbing
                     } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
                         drag_cursor(&drag)
-                    } else if self.region_hit(pos, &regions) != RegionHit::Nothing {
+                    } else if self.region_hit(pos, &regions) != RegionHit::Nothing
+                        || self.help_hover.is_some_and(|hit| hit != HelpHit::Panel)
+                    {
                         CursorIcon::Pointer
                     } else {
                         CursorIcon::Default
@@ -667,6 +672,16 @@ impl Gerdr {
         }
         if self.context_menu.is_some() {
             self.menu_press(location);
+            return true;
+        }
+        // The help panel: a click on a key does what the key does after
+        // the prefix; it takes every other press on it too.
+        if let Some(hit) = self.help_hit(location) {
+            if button == BTN_LEFT
+                && let Some(press) = self.keymap.help().press(hit)
+            {
+                self.help_press(press, location);
+            }
             return true;
         }
         // The toasts: a click on one dismisses it, on its button does

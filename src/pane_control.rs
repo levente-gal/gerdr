@@ -1469,6 +1469,7 @@ mod tests {
         let own = Help {
             prefix: "Ctrl+A".into(),
             rows: vec![("r / Shift+R".into(), "restart the pane's command".into())],
+            presses: Vec::new(),
         };
         assert_eq!(hint_for(&own, RESTART_HELP).as_deref(), Some("Ctrl+A r"));
         assert_eq!(hint_for(&own, STOP_HELP), None);
