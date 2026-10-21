@@ -1323,7 +1323,7 @@ impl Gerdr {
         let outcome = match chrome::project_menu_hit(&view, self.output_size(), pos) {
             // A key hint: its key, pressed.
             Some(MenuHit::Hint(i)) => {
-                return self.press_hint(Overlay::ProjectMenu, &view.hints[i].0);
+                return self.press_hint(Overlay::ProjectMenu, &view.hints[i].0, pos);
             }
             Some(hit) => match self.project_menu.as_mut() {
                 Some(menu) => menu.click(hit, page),

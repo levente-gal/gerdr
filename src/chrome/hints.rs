@@ -10,7 +10,7 @@ use super::{
 use smithay::utils::{Logical, Point, Rectangle};
 
 /// How high the ground under a hovered hint is at most.
-const HINT_HOVER_HEIGHT: i32 = 28;
+const HINT_HOVER_HEIGHT: i32 = 24;
 
 /// Hints as the painter and the hit tests take them, from a view's owned
 /// ones.

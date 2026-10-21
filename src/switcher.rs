@@ -892,7 +892,7 @@ impl Gerdr {
                 (chrome::switcher_hint(&view, &layout, pos), &self.switcher)
             {
                 let into = Overlay::Switcher(switcher.serial);
-                return self.press_hint(into, &view.hints[i].0);
+                return self.press_hint(into, &view.hints[i].0, pos);
             }
         }
         let Some(mut switcher) = self.switcher.take() else {

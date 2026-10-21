@@ -814,7 +814,7 @@ impl Gerdr {
             }
             // A key hint: its key, pressed.
             Some(WorktreesHit::Hint(i)) => {
-                return self.press_hint(Overlay::Worktrees, &view.hints[i].0);
+                return self.press_hint(Overlay::Worktrees, &view.hints[i].0, pos);
             }
             Some(hit) => match self.worktrees.popup.as_mut() {
                 Some(popup) => popup.click(hit, &items, page),

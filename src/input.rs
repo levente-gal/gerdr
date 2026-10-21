@@ -1010,9 +1010,11 @@ impl Gerdr {
         }
     }
 
-    /// A click on a key hint of overlay `into` showing `keys`: that key
-    /// pressed, through the overlay's own key handling.
-    pub fn press_hint(&mut self, into: Overlay, keys: &str) {
+    /// A click at `pos` on a key hint of overlay `into` showing `keys`:
+    /// that key pressed, through the overlay's own key handling. What the
+    /// pointer is over is found again, as the overlay may have changed
+    /// under it.
+    pub fn press_hint(&mut self, into: Overlay, keys: &str, pos: Point<f64, Logical>) {
         let Some((mods, sym)) = crate::keys::hint_key(keys) else {
             return;
         };
@@ -1020,6 +1022,14 @@ impl Gerdr {
             self.apply_intercepted(out);
         }
         self.copy_from_field();
+        let _ = match self.text_overlay() {
+            Some(Overlay::Welcome) => self.welcome_hover(pos),
+            Some(Overlay::ProjectMenu) => self.project_menu_hover(pos),
+            Some(Overlay::Worktrees) => self.worktrees_hover(pos),
+            Some(Overlay::Repos) => self.repos_hover(pos),
+            Some(Overlay::Switcher(_)) => self.switcher_motion(pos),
+            None => None,
+        };
     }
 
     /// Where the text field with the keyboard is, in the overlay that has

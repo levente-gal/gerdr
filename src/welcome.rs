@@ -395,7 +395,7 @@ impl Gerdr {
         match self.welcome_hint(pos) {
             Some((WelcomeHit::Hint(i), view)) => {
                 let keys = chrome::welcome_hints(&view)[i].0;
-                self.press_hint(Overlay::Welcome, keys);
+                self.press_hint(Overlay::Welcome, keys, pos);
                 return true;
             }
             Some((WelcomeHit::Quit, _)) => {
@@ -484,7 +484,7 @@ impl Gerdr {
         let quit_keys = help
             .rows
             .iter()
-            .find(|(_, label)| label == "quit")
+            .find(|(_, label)| label.trim_end_matches('…') == "quit")
             .map(|(keys, _)| format!("{} {keys}", help.prefix));
         Some(welcome.view(
             self.welcome_page(),
