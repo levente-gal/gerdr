@@ -52,6 +52,12 @@ const ALPHA_STEPS: f32 = 16.0;
 /// A workspace header's height, in comfortable and compact density.
 const HEADER_ROW: i32 = 30;
 const HEADER_ROW_COMPACT: i32 = 26;
+/// A header with a branch: the band of its name, then the line under it
+/// of its branch, in comfortable and compact density.
+const NAME_LINE: i32 = 24;
+const NAME_LINE_COMPACT: i32 = 22;
+const BRANCH_LINE: i32 = 16;
+const BRANCH_LINE_COMPACT: i32 = 13;
 /// An agent row's first line, in comfortable and compact density.
 const AGENT_ROW: i32 = 24;
 const AGENT_ROW_COMPACT: i32 = 22;
@@ -80,11 +86,8 @@ const CI_SLOT: i32 = 18;
 /// agents a folded workspace hides.
 const STATUS_SLOT: i32 = 16;
 const COUNT_GAP: i32 = 2;
-/// The narrowest a header's branch is shown in the room its name leaves;
-/// with less it goes.
-const BRANCH_MIN: i32 = 36;
-/// The gap between a header's name and its branch.
-const NAME_GAP: i32 = 8;
+/// The gap between a header's name and what is right of it.
+const NAME_GAP: i32 = 4;
 /// Room for the count of other worktrees on the header.
 const WORKTREE_COUNT_WIDTH: i32 = 30;
 /// How far a hover pill on the header's count or CI mark reaches past it.
@@ -636,7 +639,19 @@ impl WorkspaceView {
     pub fn height(&self, density: Density) -> i32 {
         let lines = self.attention_lines(density) as i32;
         let bottom = if lines > 0 { ATTENTION_BOTTOM } else { 0 };
-        header_height(density) + lines * TAB_LINE + bottom
+        let (name, branch) = self.header_lines(density);
+        name + branch + lines * TAB_LINE + bottom
+    }
+
+    /// The heights of its header's name band and of the line under it
+    /// holding its branch: with a branch, it has both, so a long name
+    /// keeps the width and the branch always shows.
+    fn header_lines(&self, density: Density) -> (i32, i32) {
+        match (self.branch.is_some(), density) {
+            (false, _) => (header_height(density), 0),
+            (true, Density::Comfortable) => (NAME_LINE, BRANCH_LINE),
+            (true, Density::Compact) => (NAME_LINE_COMPACT, BRANCH_LINE_COMPACT),
+        }
     }
 
     /// The other worktrees of its folder's repository.
@@ -844,15 +859,17 @@ pub struct RowLayout {
     pub rect: Rect,
     /// The band holding its name.
     pub title: Rect,
-    /// Where its name goes.
+    /// Where its name goes: under the "×" too while nothing else is
+    /// right of it, since that shows only under the pointer.
     pub name: Rect,
-    /// Where its branch goes after the name, when it shows.
+    /// The line under the name holding its branch, when it has one.
     pub branch: Option<Rect>,
     /// Its fold chevron, when it has anything to fold.
     pub fold: Option<Rect>,
     /// Its status, when it shows: folded, or an agent blocked.
     pub chip: Option<Rect>,
-    /// The mark of its CI, while that shows on the header.
+    /// The mark of its CI, while that shows on the header: at the right
+    /// end of the branch's line, else of the name's band.
     pub ci: Option<Rect>,
     /// Its "×" close button, at the right end.
     pub close: Rect,
@@ -872,6 +889,7 @@ impl RowLayout {
         let end = [self.worktrees, self.ci, self.chip]
             .into_iter()
             .flatten()
+            .filter(|r| r.loc.y == self.title.loc.y)
             .map(|r| r.loc.x)
             .min()
             .unwrap_or(self.close.loc.x)
@@ -1244,41 +1262,47 @@ pub fn sidebar_layout_at(
         let folded = ws.folded && foldable;
 
         // The header: from the right, its "×", its status, its CI mark and
-        // its worktree count; its name and branch in the rest.
-        let (h, title_h) = (ws.height(density), header_height(density));
+        // its worktree count, its name in the rest. With a branch, the
+        // branch goes on a line under the name, with the CI mark and the
+        // count at that line's right end.
+        let h = ws.height(density);
+        let (title_h, branch_h) = ws.header_lines(density);
         let rect = Rectangle::new((0, y).into(), (width - GAP, h).into());
         let title = Rectangle::new((0, y).into(), (width - GAP, title_h).into());
         let slot = |x: i32, w: i32| Rectangle::new((x, y).into(), (w, title_h).into());
+        let below = |x: i32, w: i32| Rectangle::new((x, y + title_h).into(), (w, branch_h).into());
         let close = slot(right - CLOSE_SLOT, CLOSE_SLOT);
         let mut end = close.loc.x;
         let chip = status_extent(ws, cards).map(|w| {
             end -= w;
             slot(end, w)
         });
-        let ci_mark = ws.ci_mark().then(|| {
-            end -= CI_SLOT;
-            slot(end, CI_SLOT)
-        });
-        let worktrees = (!ws.worktrees().is_empty()).then(|| {
-            end -= WORKTREE_COUNT_WIDTH;
-            slot(end, WORKTREE_COUNT_WIDTH)
-        });
-        let room = (end - 4 - NAME_X).max(0);
-        // A pixel past the name for rounding: a name measured to fit is
-        // never cut.
-        // The name first; the branch in the room it leaves, if enough.
-        let name_w = text_extent(&ws.name, FONT_SIZE) + 1;
-        let with_branch = ws.branch.is_some() && room >= name_w + NAME_GAP + BRANCH_MIN;
-        let (name, branch) = if with_branch {
-            let x = NAME_X + name_w + NAME_GAP;
-            (slot(NAME_X, name_w), Some(slot(x, NAME_X + room - x)))
-        } else {
-            (slot(NAME_X, room), None)
+        // The CI mark and the count: at the right end of the branch's
+        // line, else of the header.
+        let mut branch_end = right;
+        let mut take = |w: i32| {
+            if branch_h > 0 {
+                branch_end -= w;
+                below(branch_end, w)
+            } else {
+                end -= w;
+                slot(end, w)
+            }
         };
+        let ci_mark = ws.ci_mark().then(|| take(CI_SLOT));
+        let worktrees = (!ws.worktrees().is_empty()).then(|| take(WORKTREE_COUNT_WIDTH));
+        // The name may reach under the "×", which shows only under the
+        // pointer, while nothing else is right of it.
+        let name_end = if end == close.loc.x { right } else { end };
+        let name = slot(NAME_X, (name_end - NAME_GAP - NAME_X).max(0));
+        let branch = ws
+            .branch
+            .is_some()
+            .then(|| below(NAME_X, (branch_end - NAME_GAP - NAME_X).max(0)));
         let fold = foldable.then(|| slot(ROW_INSET, ICON_X - ROW_INSET));
         let attention = (attention_lines > 0).then(|| {
             Rectangle::new(
-                (ROW_INSET, y + title_h).into(),
+                (ROW_INSET, y + title_h + branch_h).into(),
                 (width - GAP - 2 * ROW_INSET, attention_lines * TAB_LINE).into(),
             )
         });
@@ -1670,6 +1694,8 @@ impl Painter {
         let at = |x: i32, w: i32| {
             Rectangle::new((x, row.title.loc.y).into(), (w, row.title.size.h).into())
         };
+        let within =
+            |r: Rect, x: i32, w: i32| Rectangle::new((x, r.loc.y).into(), (w, r.size.h).into());
 
         if let Some(fold) = row.fold {
             let color = if row_state.fold {
@@ -1706,35 +1732,42 @@ impl Painter {
         match view.state.rename.as_ref().filter(|(w, _)| *w == i) {
             Some((_, typed)) => self.rename_field(c, typed, row.rename_field(), scale, p),
             None => {
+                // Under the pointer the "×" shows, and a name reaching
+                // under it stops short of it.
+                let mut end = row.name.loc.x + row.name.size.w;
+                if hover > 0.0 {
+                    end = end.min(row.close.loc.x - NAME_GAP);
+                }
                 self.text(
                     c,
                     &ws.name,
                     FONT_SIZE,
                     px(row.name.loc.x) as f32,
-                    px(row.name.loc.x + row.name.size.w) as f32,
+                    px(end) as f32,
                     title_band,
                     scale,
                     p.text,
                 );
-                if let (Some(branch_rect), Some(branch)) = (row.branch, &ws.branch) {
-                    let icon = at(branch_rect.loc.x, BRANCH_ICON_WIDTH);
+                if let (Some(line), Some(branch)) = (row.branch, &ws.branch) {
+                    let line_band = band(line, scale);
+                    let icon = within(line, line.loc.x, BRANCH_ICON_WIDTH);
                     icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                         git_branch(x, y, 0.75 * s)
                     });
-                    let x = px(branch_rect.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
-                    let end = px(branch_rect.loc.x + branch_rect.size.w) as f32;
+                    let x = px(line.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
+                    let end = px(line.loc.x + line.size.w) as f32;
                     let after = self.text(
                         c,
                         branch,
                         DETAIL_FONT_SIZE,
                         x,
                         end,
-                        title_band,
+                        line_band,
                         scale,
                         p.muted,
                     );
                     if let Some(git) = &ws.git {
-                        self.git_marks(c, git, after, end, title_band, scale, p);
+                        self.git_marks(c, git, after, end, line_band, scale, p);
                     }
                 }
             }
@@ -1746,13 +1779,14 @@ impl Painter {
             let n = ws.worktrees().len().to_string();
             let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
             let end = count.loc.x + count.size.w - COUNT_PILL_PAD;
-            let icon = at(
+            let icon = within(
+                count,
                 end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH,
                 BRANCH_ICON_WIDTH,
             );
             let on = row_state.worktrees;
             if on {
-                self.lit_pill(c, icon.loc.x, end, row.title, surface, scale, p);
+                self.lit_pill(c, icon.loc.x, end, count, surface, scale, p);
             }
             let (icon_color, n_color) = if on {
                 (p.text, p.text)
@@ -1768,7 +1802,7 @@ impl Painter {
                 DETAIL_FONT_SIZE,
                 px(end - n_w) as f32,
                 px(end) as f32,
-                title_band,
+                band(count, scale),
                 scale,
                 n_color,
             );
@@ -1777,10 +1811,14 @@ impl Painter {
         // The mark of its CI, while that needs no look or it is folded.
         if let (Some(mark), Some(ci)) = (row.ci, &ws.ci) {
             let state = ci.rollup();
-            let icon = at(mark.loc.x + (CI_SLOT - STATUS_WIDTH) / 2, STATUS_WIDTH);
+            let icon = within(
+                mark,
+                mark.loc.x + (CI_SLOT - STATUS_WIDTH) / 2,
+                STATUS_WIDTH,
+            );
             if row_state.ci {
                 let end = icon.loc.x + icon.size.w;
-                self.lit_pill(c, icon.loc.x, end, row.title, surface, scale, p);
+                self.lit_pill(c, icon.loc.x, end, mark, surface, scale, p);
             }
             icon_sdf(c, icon, scale, ci_color(state, p), |x, y| {
                 ci_mark(state, x, y, s)
@@ -2395,11 +2433,12 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_ROW, AGENT_ROW_COMPACT, ATTENTION_BOTTOM, AgentLine, AgentView, BLOCK_GAP, CARD_LINE,
-        CHILD_GAP, CHILD_TEXT_X, CHILD_X, CI_CHIP_GAP, CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip,
-        CiLayout, CiView, DETAIL_FONT_SIZE, Density, FOLDER, GAP, HEADER_BUTTON, HEADER_ROW,
-        HEADER_ROW_COMPACT, INBOX_GAP, INBOX_TITLE, NAME_X, ROW_INSET, ROWS_TOP, SCROLL_END,
-        SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView, card_order, ci_chip_width, inbox_order,
+        AGENT_ROW, AGENT_ROW_COMPACT, ATTENTION_BOTTOM, AgentLine, AgentView, BLOCK_GAP,
+        BRANCH_LINE, BRANCH_LINE_COMPACT, CARD_LINE, CHILD_GAP, CHILD_TEXT_X, CHILD_X, CI_CHIP_GAP,
+        CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip, CiLayout, CiView, DETAIL_FONT_SIZE, Density,
+        FOLDER, GAP, HEADER_BUTTON, HEADER_ROW, HEADER_ROW_COMPACT, INBOX_GAP, INBOX_TITLE,
+        NAME_LINE, NAME_LINE_COMPACT, NAME_X, ROW_INSET, ROWS_TOP, SCROLL_END, SidebarHit,
+        SidebarLayout, TAB_LINE, WorkspaceView, card_order, ci_chip_width, inbox_order,
         sentence_case, sidebar_layout, sidebar_layout_at, text_extent, workspace_slot,
     };
     use crate::WorkspaceKind;
@@ -2408,6 +2447,10 @@ mod tests {
     use crate::git::{GitStatus, Worktree};
     use crate::herdr::AgentStatus;
     use smithay::utils::Rectangle;
+
+    /// A header with a branch: its name's band and its branch's line.
+    const BRANCHED: i32 = NAME_LINE + BRANCH_LINE;
+    const BRANCHED_COMPACT: i32 = NAME_LINE_COMPACT + BRANCH_LINE_COMPACT;
 
     #[test]
     fn workspace_puts_its_tabs_together() {
@@ -2605,27 +2648,31 @@ mod tests {
             ..GitStatus::default()
         });
         // Merged and clean: only counted.
-        assert_eq!(ws.height(Density::Comfortable), HEADER_ROW);
+        assert_eq!(ws.height(Density::Comfortable), BRANCHED);
         // Those needing a look get a line each, up to a count of the rest.
         let worktrees = &mut ws.git.as_mut().unwrap().worktrees;
         worktrees[0].dirty = true;
         worktrees[1].merged = false;
-        let lines = |n: i32| HEADER_ROW + n * TAB_LINE + ATTENTION_BOTTOM;
+        let lines = |n: i32| BRANCHED + n * TAB_LINE + ATTENTION_BOTTOM;
         assert_eq!(ws.height(Density::Comfortable), lines(2));
         for w in &mut ws.git.as_mut().unwrap().worktrees {
             w.merged = false;
         }
         assert_eq!(ws.height(Density::Comfortable), lines(4));
-        assert_eq!(ws.height(Density::Compact), HEADER_ROW_COMPACT);
+        assert_eq!(ws.height(Density::Compact), BRANCHED_COMPACT);
         let layout = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
         let row = layout.rows[0];
+        // On the branch's line, at its right end.
         let count = row.worktrees.expect("a count");
-        assert_eq!(count.loc.y, ROWS_TOP);
-        assert!(count.loc.x + count.size.w <= row.close.loc.x);
+        let branch = row.branch.expect("a branch");
+        assert_eq!(count.loc.y, ROWS_TOP + NAME_LINE);
+        assert_eq!(count.loc.y, branch.loc.y);
+        assert!(branch.loc.x + branch.size.w < count.loc.x);
+        assert_eq!(count.loc.x + count.size.w, row.close.loc.x + CLOSE_SLOT);
         assert_eq!(layout.hit(mid(count)), Some(SidebarHit::Worktrees(0)));
         assert_eq!(SidebarHit::Worktrees(0).pill(), SidebarHit::Row(0));
         let lines = row.attention.expect("worktree lines");
-        assert_eq!(lines.loc.y, ROWS_TOP + HEADER_ROW);
+        assert_eq!(lines.loc.y, ROWS_TOP + BRANCHED);
         assert_eq!(layout.hit(mid(lines)), Some(SidebarHit::Attention(0, 2)));
         // Compact headers count them, and have no lines.
         let compact = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Compact);
@@ -2633,7 +2680,7 @@ mod tests {
         assert_eq!(compact.rows[0].attention, None);
         // Folded: the lines go, the count stays.
         ws.folded = true;
-        assert_eq!(ws.height(Density::Comfortable), HEADER_ROW);
+        assert_eq!(ws.height(Density::Comfortable), BRANCHED);
         let folded = sidebar_layout(&[ws], &[], 240);
         assert!(folded.rows[0].worktrees.is_some());
         assert_eq!(folded.rows[0].attention, None);
@@ -2723,13 +2770,13 @@ mod tests {
     }
 
     #[test]
-    fn headers_and_rows_are_one_line() {
+    fn headers_are_a_line_and_one_for_the_branch() {
         let with = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
         let plain = workspace("~", None, None);
-        for ws in [&with, &plain] {
-            assert_eq!(ws.height(Density::Comfortable), HEADER_ROW);
-            assert_eq!(ws.height(Density::Compact), HEADER_ROW_COMPACT);
-        }
+        assert_eq!(plain.height(Density::Comfortable), HEADER_ROW);
+        assert_eq!(plain.height(Density::Compact), HEADER_ROW_COMPACT);
+        assert_eq!(with.height(Density::Comfortable), BRANCHED);
+        assert_eq!(with.height(Density::Compact), BRANCHED_COMPACT);
         let with = agent("p1", AgentStatus::Idle, Some("gerdr/src"));
         assert_eq!(with.height(Density::Comfortable), AGENT_ROW);
         assert_eq!(with.height(Density::Compact), AGENT_ROW_COMPACT);
@@ -2744,22 +2791,36 @@ mod tests {
     }
 
     #[test]
-    fn the_branch_shares_the_header_when_it_fits() {
-        let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
+    fn the_branch_has_a_line_under_the_name() {
+        let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 200);
         let row = layout.rows[0];
-        let branch = row.branch.expect("room for the branch");
-        assert_eq!(row.name.loc.x, NAME_X);
-        assert!(row.name.loc.x + row.name.size.w < branch.loc.x);
-        assert!(branch.loc.x + branch.size.w <= row.close.loc.x);
-        // A long name keeps all the room.
+        let branch = row.branch.expect("a line for the branch");
+        assert_eq!((row.name.loc.x, branch.loc.x), (NAME_X, NAME_X));
+        assert_eq!(row.title.size.h, NAME_LINE);
+        assert_eq!(branch.loc.y, row.name.loc.y + NAME_LINE);
+        assert_eq!(branch.size.h, BRANCH_LINE);
+        // A long name keeps the width, under the "×" too: that shows
+        // only under the pointer.
         let long = "a-workspace-with-a-very-long-name-indeed";
-        let layout = sidebar_layout(&[workspace(long, None, Some("main"))], &[], 240);
+        let layout = sidebar_layout(&[workspace(long, None, Some("main"))], &[], 200);
         let row = layout.rows[0];
-        assert_eq!(row.branch, None);
-        assert_eq!(row.name.loc.x + row.name.size.w, row.close.loc.x - 4);
-        // Too narrow: the name alone.
-        let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 120);
+        assert!(row.branch.is_some());
+        assert_eq!(
+            row.name.loc.x + row.name.size.w,
+            row.close.loc.x + CLOSE_SLOT - 4
+        );
+        assert_eq!(layout.hit(mid(row.close)), Some(SidebarHit::Close(0)));
+        // A status right of it bounds it.
+        let busy = workspace(long, Some(AgentStatus::Idle), Some("main"));
+        let agents = vec![vec![agent("p1", AgentStatus::Blocked, None)]];
+        let layout = sidebar_layout(&[busy], &agents, 200);
+        let row = layout.rows[0];
+        let chip = row.chip.expect("a blocked badge");
+        assert_eq!(row.name.loc.x + row.name.size.w, chip.loc.x - 4);
+        // Without a branch, one line.
+        let layout = sidebar_layout(&[workspace("~", None, None)], &[], 200);
         assert_eq!(layout.rows[0].branch, None);
+        assert_eq!(layout.rows[0].rect.size.h, HEADER_ROW);
         // On the header, the branch is the row's.
         let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
         let branch = layout.rows[0].branch.unwrap();
@@ -2845,7 +2906,7 @@ mod tests {
         let layout = sidebar_layout(&[ws], &agents, 240);
         assert!(layout.cards[0].is_empty());
         assert_eq!((layout.more[0], layout.ci[0].clone()), (None, None));
-        assert_eq!(layout.blocks[0].size.h, HEADER_ROW + BLOCK_GAP);
+        assert_eq!(layout.blocks[0].size.h, BRANCHED + BLOCK_GAP);
         // Its status shows, with how many agents it hides, and its CI as
         // the mark.
         let row = layout.rows[0];
@@ -2887,7 +2948,11 @@ mod tests {
         assert_eq!(layout.ci[0], None);
         let mark = layout.rows[0].ci.expect("a CI mark");
         assert_eq!(layout.hit(mid(mark)), Some(SidebarHit::CiMark(0)));
-        assert_eq!(layout.blocks[0].size.h, HEADER_ROW + BLOCK_GAP);
+        // At the right end of the branch's line.
+        let row = layout.rows[0];
+        assert_eq!(mark.loc.y, row.branch.unwrap().loc.y);
+        assert_eq!(mark.loc.x + mark.size.w, row.close.loc.x + CLOSE_SLOT);
+        assert_eq!(layout.blocks[0].size.h, BRANCHED + BLOCK_GAP);
         // A review waiting makes it a section, and the mark goes.
         ws.ci.as_mut().unwrap().chips[1].group = Group::Review;
         let layout = sidebar_layout(&[ws.clone()], &[], 240);
