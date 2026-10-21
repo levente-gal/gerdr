@@ -915,7 +915,7 @@ pub enum Action {
     FlipPane,
     /// Move the focused pane to a new tab of the workspace.
     PaneToNewTab,
-    /// Open the worktrees popup, to review, merge and delete the
+    /// Open the worktrees popup, to review, check out, merge and delete the
     /// repositories' worktrees.
     Worktrees,
     /// Open the repositories panel, to branch, commit, push and sync the
@@ -1450,14 +1450,14 @@ impl Gerdr {
         self.start_terminal_running(w, t, split, None)
     }
 
-    /// `start_terminal`, its shell running `run`'s command in `run`'s
-    /// folder.
+    /// `start_terminal`, its shell starting in `run`'s folder, running
+    /// `run`'s command if any.
     fn start_terminal_running(
         &mut self,
         w: usize,
         t: Option<usize>,
         split: Dir,
-        run: Option<(PathBuf, String)>,
+        run: Option<(PathBuf, Option<String>)>,
     ) -> Option<(u32, Option<herdr::PaneInfo>)> {
         let dir = match &run {
             Some((cd, _)) => cd.clone(),
@@ -1471,7 +1471,7 @@ impl Gerdr {
                 term.arg("--working-directory")
                     .arg(&dir)
                     .args(self.theme().palette().alacritty_options());
-                if let Some((_, command)) = &run {
+                if let Some((_, Some(command))) = &run {
                     term.args(["-e", "sh", "-c", command]);
                 }
                 self.spawn(term, &dir, "alacritty")
@@ -1490,7 +1490,7 @@ impl Gerdr {
         w: usize,
         t: Option<usize>,
         split: Dir,
-        run: Option<(PathBuf, String)>,
+        run: Option<(PathBuf, Option<String>)>,
     ) -> Option<herdr::PaneInfo> {
         let env = self.herdr.as_ref()?.pane_env(&self.socket_name);
         let ws = &self.workspaces[w];
@@ -1528,7 +1528,7 @@ impl Gerdr {
             venv,
             captured_env: Vec::new(),
             cd: run.as_ref().map(|(cd, _)| cd.clone()),
-            command: run.map(|(_, command)| command),
+            command: run.and_then(|(_, command)| command),
         };
         prepare::spawn_prepare(socket, vec![prep]);
         Some(pane)
@@ -3308,6 +3308,12 @@ impl Gerdr {
     /// Open a tab in workspace `w` whose shell runs `command` in `cd`, and
     /// show it.
     pub fn new_tab_running(&mut self, w: usize, cd: &Path, command: String) {
+        self.new_tab_in(w, cd, Some(command));
+    }
+
+    /// Open a tab in workspace `w` whose shell starts in `cd`, running
+    /// `command` if any, and show it.
+    pub fn new_tab_in(&mut self, w: usize, cd: &Path, command: Option<String>) {
         if w >= self.workspaces.len() {
             return;
         }

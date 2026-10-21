@@ -5,15 +5,15 @@
 //!
 //! Typing filters them by name, path and repository. Up/Down select, Enter
 //! (or Ctrl+D) opens the diff against the main worktree's branch in a new
-//! tab, Ctrl+M squashes it in there (in a tab, for the commit message and
-//! any conflicts), Delete deletes it (twice when that loses changes or
-//! commits), Shift+Delete deletes the repository's merged ones, Ctrl+O
-//! opens it as a workspace, Ctrl+C copies its path, Esc clears the filter,
-//! then closes.
+//! tab, Ctrl+K checks its branch out in the main worktree, Ctrl+M squashes
+//! it in there (in a tab, for the commit message and any conflicts), Delete
+//! deletes it (twice when that loses changes or commits), Shift+Delete
+//! deletes the repository's merged ones, Ctrl+O opens a tab in it, Ctrl+C
+//! copies its path, Esc clears the filter, then closes.
 
 use std::{
     cmp::Reverse,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -41,12 +41,13 @@ use crate::{
 #[derive(Default)]
 pub struct Worktrees {
     popup: Option<Popup>,
-    /// The worktrees being deleted, by path.
-    busy: HashSet<PathBuf>,
+    /// The worktrees being deleted or checked out, by path, with what
+    /// their rows say meanwhile.
+    busy: HashMap<PathBuf, &'static str>,
     /// The worktrees squashed in a tab, by path, until they read as merged.
     merging: HashSet<PathBuf>,
-    /// Hands the deletes' results to the event loop.
-    done: Option<channel::Sender<Deleted>>,
+    /// Hands the deletes' and checkouts' results to the event loop.
+    done: Option<channel::Sender<Done>>,
 }
 
 impl Worktrees {
@@ -124,6 +125,8 @@ enum Entry {
 pub enum Outcome {
     Close,
     Diff(PathBuf),
+    /// Check the worktree's branch out in the main worktree.
+    Checkout(PathBuf),
     Merge(PathBuf),
     Delete {
         path: PathBuf,
@@ -138,6 +141,18 @@ pub enum Outcome {
 /// What deleting worktrees came to: per worktree, its name and path, and
 /// why it failed.
 type Deleted = Vec<(String, PathBuf, Result<(), String>)>;
+
+/// What a thread working on worktrees came to.
+enum Done {
+    Deleted(Deleted),
+    /// Checking worktree `path`'s branch out in the main worktree, with
+    /// what to say once it is.
+    CheckedOut {
+        path: PathBuf,
+        said: String,
+        result: Result<(), String>,
+    },
+}
 
 /// The lines of `items`, a repository's label before its worktrees.
 fn entries(items: &[Item]) -> Vec<Entry> {
@@ -213,6 +228,9 @@ fn buttons(wt: &Worktree) -> Vec<WorktreeButton> {
     if !wt.gone {
         buttons.push(WorktreeButton::Diff);
     }
+    if can_checkout(wt) {
+        buttons.push(WorktreeButton::Checkout);
+    }
     if can_merge(wt) {
         buttons.push(WorktreeButton::Merge);
     }
@@ -223,7 +241,11 @@ fn buttons(wt: &Worktree) -> Vec<WorktreeButton> {
 }
 
 fn can_merge(wt: &Worktree) -> bool {
-    !wt.main && !wt.gone && !wt.merged && wt.branch.is_some()
+    can_checkout(wt) && !wt.merged
+}
+
+fn can_checkout(wt: &Worktree) -> bool {
+    !wt.main && !wt.gone && wt.branch.is_some()
 }
 
 /// Deleting `wt` loses nothing: it is merged and clean, or its folder is
@@ -427,6 +449,7 @@ impl Popup {
                 return path(|wt| !wt.gone).map(Outcome::Diff);
             }
             Keysym::d | Keysym::D if ctrl => return path(|wt| !wt.gone).map(Outcome::Diff),
+            Keysym::k | Keysym::K if ctrl => return path(can_checkout).map(Outcome::Checkout),
             Keysym::m | Keysym::M if ctrl => return path(can_merge).map(Outcome::Merge),
             Keysym::o | Keysym::O if ctrl => return path(|wt| !wt.gone).map(Outcome::Open),
             Keysym::c | Keysym::C if ctrl => return path(|_| true).map(Outcome::Copy),
@@ -495,6 +518,7 @@ impl Popup {
                 };
                 let (mods, sym) = match button {
                     WorktreeButton::Diff => (ModifiersState::default(), Keysym::Return),
+                    WorktreeButton::Checkout => (ctrl, Keysym::k),
                     WorktreeButton::Merge => (ctrl, Keysym::m),
                     WorktreeButton::Delete => (ModifiersState::default(), Keysym::Delete),
                 };
@@ -504,12 +528,12 @@ impl Popup {
     }
 
     /// What it shows of `items` in a view of `page` entries, with the
-    /// repositories' `names`, the worktrees being deleted `busy`.
+    /// repositories' `names`, the worktrees being worked on `busy`.
     fn view(
         &self,
         items: &[Item],
         names: &[String],
-        busy: &HashSet<PathBuf>,
+        busy: &HashMap<PathBuf, &'static str>,
         page: usize,
     ) -> WorktreesView {
         let shown = self.shown(items, page);
@@ -521,8 +545,8 @@ impl Popup {
                 Entry::Item(k) => {
                     let item = &items[k];
                     let wt = &item.wt;
-                    let state = if busy.contains(&wt.path) {
-                        LineState::Busy("deleting…".into())
+                    let state = if let Some(doing) = busy.get(&wt.path) {
+                        LineState::Busy((*doing).into())
                     } else if self.armed == Some(Armed::Delete(wt.path.clone())) {
                         LineState::Armed(loses(wt))
                     } else if self.armed == Some(Armed::CleanUp(item.main.clone()))
@@ -549,10 +573,11 @@ impl Popup {
         let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
         let mut hints = vec![
             hint("Enter", "diff"),
+            hint("Ctrl+K", "check out in main"),
             hint("Ctrl+M", "squash merge"),
             hint("Del", "delete"),
             hint("Shift+Del", "delete merged"),
-            hint("Ctrl+O", "open"),
+            hint("Ctrl+O", "open in a tab"),
             hint("Ctrl+C", "copy path"),
         ];
         if self.focus.is_some() {
@@ -607,7 +632,8 @@ fn shown_path(path: &Path, main: &Path) -> String {
 impl Gerdr {
     /// The worktrees of the repositories the workspaces are in, the main
     /// worktree first, then those needing a look; the repository of
-    /// `focus` (a main worktree) first. With the repositories' names.
+    /// `focus` (a main worktree) first. With the repositories' names. Their
+    /// tabs open in the active workspace, else the repository's first.
     fn worktree_items(&self, focus: Option<&Path>) -> (Vec<String>, Vec<Item>) {
         let mut repos: Vec<(PathBuf, usize, Vec<Worktree>)> = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
@@ -617,7 +643,12 @@ impl Gerdr {
             let Some(main) = status.main_path() else {
                 continue;
             };
-            if repos.iter().any(|(m, ..)| m == main) {
+            if let Some(repo) = repos.iter_mut().find(|(m, ..)| m == main) {
+                // The active workspace is where its tabs open, when it is in
+                // the repository.
+                if w == self.active_workspace {
+                    repo.1 = w;
+                }
                 continue;
             }
             let mut all: Vec<Worktree> = status.all_worktrees().into_iter().cloned().collect();
@@ -839,7 +870,21 @@ impl Gerdr {
             Outcome::Diff(path) => {
                 let Some(item) = find(&path) else { return };
                 self.close_worktrees();
-                self.new_tab_running(item.workspace, &item.wt.path, diff_command(&item));
+                let w = self.worktree_workspace(&item);
+                self.new_tab_running(w, &item.wt.path, diff_command(&item));
+            }
+            Outcome::Checkout(path) => {
+                let Some(item) = find(&path) else { return };
+                let main = self
+                    .worktree_items(None)
+                    .1
+                    .into_iter()
+                    .find(|i| i.wt.path == item.main);
+                let Some(main) = main else { return };
+                if let Err(why) = git::checkout_check(&main.wt, &item.wt) {
+                    return self.toast(why, Level::Warning);
+                }
+                self.checkout_worktree(item, main.wt.name());
             }
             Outcome::Merge(path) => {
                 let Some(item) = find(&path) else { return };
@@ -864,8 +909,10 @@ impl Gerdr {
                 self.delete_worktrees(merged, false);
             }
             Outcome::Open(path) => {
+                let Some(item) = find(&path) else { return };
                 self.close_worktrees();
-                self.open_project(path);
+                let w = self.worktree_workspace(&item);
+                self.new_tab_in(w, &item.wt.path, None);
             }
             Outcome::Copy(path) => {
                 self.copy_text(path.display().to_string());
@@ -896,6 +943,52 @@ impl Gerdr {
         }
     }
 
+    /// The workspace a tab in worktree `item` opens in: one in the worktree
+    /// itself, else the repository's (see `worktree_items`).
+    fn worktree_workspace(&self, item: &Item) -> usize {
+        let own = |ws: &crate::Workspace| !item.wt.main && ws.dir.starts_with(&item.wt.path);
+        if self.workspace().is_some_and(own) {
+            return self.active_workspace;
+        }
+        self.workspaces
+            .iter()
+            .position(own)
+            .unwrap_or(item.workspace)
+    }
+
+    /// Check worktree `item`'s branch out in its repository's main worktree,
+    /// called `main_name`, off the event loop.
+    fn checkout_worktree(&mut self, item: Item, main_name: String) {
+        if self.worktrees.busy.contains_key(&item.wt.path) {
+            return;
+        }
+        let Some(tx) = self.done_sender() else {
+            return;
+        };
+        let Some(branch) = item.wt.branch.clone() else {
+            return;
+        };
+        // Whoever is in the worktree stays on its commit; their next
+        // commits miss the branch.
+        let said = match self.in_use(&item.wt) {
+            Some(user) => format!(
+                "Checked out {branch} in {main_name}; {user} in its worktree is detached now"
+            ),
+            None => format!("Checked out {branch} in {main_name}"),
+        };
+        self.worktrees
+            .busy
+            .insert(item.wt.path.clone(), "checking out…");
+        std::thread::spawn(move || {
+            let result = git::checkout_in_main(&item.main, &item.wt);
+            let _ = tx.send(Done::CheckedOut {
+                path: item.wt.path,
+                said,
+                result,
+            });
+        });
+    }
+
     /// The pane or workspace still in worktree `wt`, by its name, if any:
     /// an agent may be working there.
     fn in_use(&self, wt: &Worktree) -> Option<String> {
@@ -921,7 +1014,7 @@ impl Gerdr {
     fn delete_worktrees(&mut self, items: Vec<Item>, force: bool) {
         let mut doomed = Vec::new();
         for item in items {
-            if self.worktrees.busy.contains(&item.wt.path) {
+            if self.worktrees.busy.contains_key(&item.wt.path) {
                 continue;
             }
             if let Some(user) = self.in_use(&item.wt).filter(|_| !item.wt.gone) {
@@ -934,11 +1027,13 @@ impl Gerdr {
         if doomed.is_empty() {
             return;
         }
-        let Some(tx) = self.deleted_sender() else {
+        let Some(tx) = self.done_sender() else {
             return;
         };
         for item in &doomed {
-            self.worktrees.busy.insert(item.wt.path.clone());
+            self.worktrees
+                .busy
+                .insert(item.wt.path.clone(), "deleting…");
         }
         std::thread::spawn(move || {
             let deleted = doomed
@@ -948,29 +1043,44 @@ impl Gerdr {
                     (item.wt.name(), item.wt.path, result)
                 })
                 .collect();
-            let _ = tx.send(deleted);
+            let _ = tx.send(Done::Deleted(deleted));
         });
     }
 
-    /// Where the deletes' threads send what they came to; set up the first
-    /// time.
-    fn deleted_sender(&mut self) -> Option<channel::Sender<Deleted>> {
+    /// Where the deletes' and checkouts' threads send what they came to;
+    /// set up the first time.
+    fn done_sender(&mut self) -> Option<channel::Sender<Done>> {
         if self.worktrees.done.is_none() {
-            let (tx, rx) = channel::channel::<Deleted>();
-            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
-                if let channel::Event::Msg(deleted) = event {
-                    state.worktrees_deleted(deleted);
-                }
-            });
+            let (tx, rx) = channel::channel::<Done>();
+            let inserted = self
+                .loop_handle
+                .insert_source(rx, |event, _, state| match event {
+                    channel::Event::Msg(Done::Deleted(deleted)) => state.worktrees_deleted(deleted),
+                    channel::Event::Msg(Done::CheckedOut { path, said, result }) => {
+                        state.worktree_checked_out(&path, said, result);
+                    }
+                    channel::Event::Closed => {}
+                });
             match inserted {
                 Ok(_) => self.worktrees.done = Some(tx),
                 Err(err) => {
-                    tracing::warn!("deleting worktrees: {err}");
+                    tracing::warn!("working on worktrees: {err}");
                     return None;
                 }
             }
         }
         self.worktrees.done.clone()
+    }
+
+    /// A worktree's branch was checked out in the main worktree, or failed
+    /// to be.
+    fn worktree_checked_out(&mut self, path: &Path, said: String, result: Result<(), String>) {
+        self.worktrees.busy.remove(path);
+        match result {
+            Ok(()) => self.toast(said, Level::Success),
+            Err(why) => self.toast(format!("Couldn't check it out: {why}"), Level::Error),
+        }
+        self.refresh_git();
     }
 
     /// Worktrees were deleted, or failed to be.
@@ -1104,6 +1214,7 @@ mod tests {
         let mut popup = Popup::default();
         popup.select(&items, 0, 10);
         assert_eq!(popup.key(&ctrl(), Keysym::m, &items, 10), None);
+        assert_eq!(popup.key(&ctrl(), Keysym::k, &items, 10), None);
         assert_eq!(
             press(&mut popup, Keysym::Return, &items),
             Some(Outcome::Diff("/src/r".into()))
@@ -1119,8 +1230,17 @@ mod tests {
             popup.key(&ctrl(), Keysym::m, &items, 10),
             Some(Outcome::Merge("/src/r/.wt/wip".into()))
         );
+        assert_eq!(
+            popup.key(&ctrl(), Keysym::k, &items, 10),
+            Some(Outcome::Checkout("/src/r/.wt/wip".into()))
+        );
         press(&mut popup, Keysym::End, &items);
         assert_eq!(popup.key(&ctrl(), Keysym::m, &items, 10), None);
+        // A merged one is checked out still.
+        assert_eq!(
+            popup.key(&ctrl(), Keysym::k, &items, 10),
+            Some(Outcome::Checkout("/src/r/.wt/done".into()))
+        );
         assert_eq!(
             press(&mut popup, Keysym::Escape, &items),
             Some(Outcome::Close)
@@ -1164,7 +1284,7 @@ mod tests {
         );
         let names = vec!["r".to_owned(), "s".to_owned()];
         let mut popup = Popup::default();
-        let view = |popup: &Popup| popup.view(&items, &names, &HashSet::new(), 3);
+        let view = |popup: &Popup| popup.view(&items, &names, &HashMap::new(), 3);
         let height = view(&popup).list_height;
         assert_eq!(height, 3 * chrome::WORKTREES_ROW);
         // Scrolled to the second worktree, its repository's label stays on top.

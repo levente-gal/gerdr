@@ -1,7 +1,7 @@
 //! The worktrees popup: the worktrees of a workspace's repository, or of
 //! every repository the workspaces are in, a section per repository, under
 //! a field filtering them; each with where it stands and, on the selected
-//! or hovered row, buttons to review, merge and delete it.
+//! or hovered row, buttons to review, check out, merge and delete it.
 
 use super::{
     BUTTON_RADIUS, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW,
@@ -99,6 +99,7 @@ pub enum LineState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorktreeButton {
     Diff,
+    Checkout,
     Merge,
     Delete,
 }
@@ -107,6 +108,7 @@ impl WorktreeButton {
     fn label(self) -> &'static str {
         match self {
             WorktreeButton::Diff => "Diff",
+            WorktreeButton::Checkout => "Checkout",
             WorktreeButton::Merge => "Merge",
             WorktreeButton::Delete => "Delete",
         }
@@ -116,6 +118,7 @@ impl WorktreeButton {
     fn width(self) -> i32 {
         match self {
             WorktreeButton::Diff => 48,
+            WorktreeButton::Checkout => 76,
             WorktreeButton::Merge => 58,
             WorktreeButton::Delete => 62,
         }
@@ -647,7 +650,7 @@ mod tests {
             entries: vec![
                 WorktreeEntry::Repo("gerdr".into()),
                 line("main", vec![Diff]),
-                line("topic", vec![Diff, Merge, Delete]),
+                line("topic", vec![Diff, Checkout, Merge, Delete]),
             ],
             list_height: 0,
             selected: Some(2),
@@ -699,7 +702,7 @@ mod tests {
         assert!(inside(l.panel, l.footer));
         assert!(l.entries[1].1.is_empty());
         let buttons = &l.entries[2].1;
-        assert_eq!(buttons.len(), 3);
+        assert_eq!(buttons.len(), 4);
         assert!(buttons.iter().all(|(_, r)| inside(l.entries[2].0, *r)));
         assert!(
             buttons
@@ -755,6 +758,15 @@ mod tests {
         let l = worktrees_layout(&hovered, size);
         assert_eq!(l.entries[1].1.len(), 1);
         assert!(l.entries[2].1.is_empty());
+    }
+
+    #[test]
+    fn the_buttons_labels_fit() {
+        use WorktreeButton::*;
+        for button in [Diff, Checkout, Merge, Delete] {
+            let w = measure(button.label(), SMALL_FONT_SIZE).unwrap_or(0.0);
+            assert!(w + 16.0 <= button.width() as f32, "{button:?}: {w}");
+        }
     }
 
     #[test]

@@ -582,6 +582,45 @@ pub fn remove_worktree(main: &Path, w: &Worktree, force: bool) -> Result<(), Str
     Ok(())
 }
 
+/// Why worktree `w`'s branch can't be checked out in the repository's main
+/// worktree `main` now, if anything stops it: uncommitted changes either
+/// side would stay behind or come along.
+pub fn checkout_check(main: &Worktree, w: &Worktree) -> Result<(), String> {
+    let name = w.name();
+    if w.main {
+        return Err("This is the main worktree".into());
+    }
+    if w.branch.is_none() {
+        return Err(format!("{name} has no branch"));
+    }
+    if w.gone {
+        return Err(format!("{name}'s folder is gone"));
+    }
+    if w.dirty {
+        return Err(format!("{name} has uncommitted changes"));
+    }
+    if main.dirty {
+        return Err(format!("{} has uncommitted changes", main.name()));
+    }
+    Ok(())
+}
+
+/// Check worktree `w`'s branch out in the main worktree at `main`, leaving
+/// `w` on its commit, detached: Git has a branch checked out in one
+/// worktree at a time. `w` gets its branch back if the main one can't take
+/// it.
+pub fn checkout_in_main(main: &Path, w: &Worktree) -> Result<(), String> {
+    let Some(branch) = &w.branch else {
+        return Err(format!("{} has no branch", w.name()));
+    };
+    git_run(&w.path, &["switch", "--detach"])?;
+    if let Err(why) = git_run(main, &["switch", branch]) {
+        let _ = git_run(&w.path, &["switch", branch]);
+        return Err(why);
+    }
+    Ok(())
+}
+
 /// Why worktree `w` can't be squashed into the main worktree at `main` now,
 /// if anything stops it.
 pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
@@ -777,8 +816,8 @@ fn code(xy: &str) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        Change, GitStatus, InProgress, Worktree, parse, parse_worktrees, pick_remote,
-        remote_to_web, remove_worktree, squash_check, status,
+        Change, GitStatus, InProgress, Worktree, checkout_check, checkout_in_main, parse,
+        parse_worktrees, pick_remote, remote_to_web, remove_worktree, squash_check, status,
     };
     use std::{
         path::{Path, PathBuf},
@@ -920,6 +959,46 @@ mod tests {
         assert_eq!(remove_worktree(&repo.0, &wip, true), Ok(()));
         assert!(!path.exists());
         assert!(remove_worktree(&repo.0, &main, true).is_err());
+    }
+
+    #[test]
+    fn a_worktrees_branch_is_checked_out_in_the_main_one() {
+        let repo = Repo::new();
+        let path = repo.worktree("topic");
+        let (topic, main) = (repo.find("topic"), repo.find("main"));
+        assert_eq!(checkout_check(&main, &topic), Ok(()));
+        assert!(checkout_check(&main, &main).is_err());
+        assert_eq!(checkout_in_main(&repo.0, &topic), Ok(()));
+        let status = status(&repo.0).unwrap();
+        assert_eq!(status.branch.as_deref(), Some("topic"));
+        // The worktree stays on the commit, detached.
+        let left = status.worktrees.iter().find(|w| w.path == path).unwrap();
+        assert_eq!(left.branch, None);
+        assert_eq!(left.head, topic.head);
+        // Uncommitted changes either side stop it.
+        std::fs::write(path.join("scratch"), "x").unwrap();
+        let dirty = Worktree {
+            dirty: true,
+            ..topic.clone()
+        };
+        assert!(checkout_check(&main, &dirty).is_err());
+        let main = Worktree {
+            dirty: true,
+            ..main
+        };
+        assert!(checkout_check(&main, &topic).is_err());
+    }
+
+    #[test]
+    fn a_failed_checkout_gives_the_worktree_its_branch_back() {
+        let repo = Repo::new();
+        let path = repo.worktree("topic");
+        let topic = repo.find("topic");
+        // An untracked file in main that topic tracks stops the switch.
+        std::fs::write(repo.0.join("topic"), "mine").unwrap();
+        assert!(checkout_in_main(&repo.0, &topic).is_err());
+        assert_eq!(status(&repo.0).unwrap().branch.as_deref(), Some("main"));
+        assert_eq!(status(&path).unwrap().branch.as_deref(), Some("topic"));
     }
 
     #[test]
