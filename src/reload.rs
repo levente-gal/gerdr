@@ -441,6 +441,7 @@ mod tests {
             venv: VenvSetting::Auto,
             tabs,
             panes: Vec::new(),
+            folded: None,
         }
     }
 

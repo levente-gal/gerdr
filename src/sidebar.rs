@@ -53,6 +53,20 @@ fn worktrees_tooltip(worktrees: &[Worktree], root: Option<&Path>, anchor: Rect) 
     Tooltip::new(&text, anchor).rows(rows)
 }
 
+/// The tooltip of workspace `ws`'s header, about `anchor`: its name, then
+/// its branch, where its tabs are and what runs in them, each when known.
+fn workspace_tooltip(ws: &WorkspaceView, anchor: Rect) -> Tooltip {
+    let fields = [
+        ("Branch", ws.branch.clone()),
+        ("Folder", Some(ws.place.clone())),
+        ("Tabs", Some(ws.activity.clone())),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| Some((label.to_owned(), value.filter(|v| !v.is_empty())?)))
+    .collect();
+    Tooltip::new(&ws.name, anchor).fields(fields)
+}
+
 impl Gerdr {
     /// Where the sidebar's parts sit, at the configured density.
     pub(crate) fn sidebar_layout(&self) -> SidebarLayout {
@@ -64,6 +78,33 @@ impl Gerdr {
             .collect();
         chrome::sidebar_layout_at(&workspaces, &agents, self.sidebar_width, self.density)
             .scrolled(self.sidebar_scroll.round() as i32, self.output_size().h)
+    }
+
+    /// Whether workspace `w` was folded or unfolded by hand: this run, else
+    /// as its record keeps it. `None` leaves it to fold while quiet.
+    pub(crate) fn workspace_folded(&self, w: usize) -> Option<bool> {
+        let ws = self.workspaces.get(w)?;
+        ws.folded.or_else(|| {
+            let project = self.project.as_deref()?;
+            self.projects.record(project, &ws.record)?.folded
+        })
+    }
+
+    /// Fold workspace `w` in the sidebar if it shows what is under its
+    /// header, else unfold it; kept in its record.
+    pub(crate) fn toggle_fold(&mut self, w: usize) {
+        let Some(folded) = self.workspace_views().get(w).map(|(ws, _)| !ws.folded) else {
+            return;
+        };
+        self.workspaces[w].folded = Some(folded);
+        let id = self.workspaces[w].record.clone();
+        if let Some(project) = self.project.clone()
+            && let Some(record) = self.projects.record_mut(&project, &id)
+            && record.folded != Some(folded)
+        {
+            record.folded = Some(folded);
+            self.projects.save();
+        }
     }
 
     /// Scroll the sidebar's rows by `dy` logical pixels (down when
@@ -139,7 +180,14 @@ impl Gerdr {
                 hover: quantize(hover.alpha(SidebarHit::Row(i), now)),
                 close: hit == Some(SidebarHit::Close(i)),
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
+                fold: hit == Some(SidebarHit::Fold(i)),
+                ci: hit == Some(SidebarHit::CiMark(i)),
             })
+            .collect();
+        let inbox = layout
+            .inbox
+            .iter()
+            .map(|(i, k, _)| quantize(hover.alpha(SidebarHit::Inbox(*i, *k), now)))
             .collect();
         let focused = self.focused_agent();
         let cards = agents
@@ -191,6 +239,7 @@ impl Gerdr {
             rows,
             cards,
             ci,
+            inbox,
             plus,
             plus_open,
             repos,
@@ -225,7 +274,7 @@ impl Gerdr {
                     self.open_welcome(true);
                 }
             }
-            (SidebarHit::Card(i, k), BTN_LEFT) => {
+            (SidebarHit::Card(i, k) | SidebarHit::Inbox(i, k), BTN_LEFT) => {
                 if let Some(card) = self.agent_views().get(i).and_then(|c| c.get(k)) {
                     let key = card.key.clone();
                     self.focus_agent(&key);
@@ -244,7 +293,8 @@ impl Gerdr {
                     self.delete_cursor_chat(&chat);
                 }
             }
-            (SidebarHit::Ci(i), BTN_LEFT) => self.focus_repo_tab(i),
+            (SidebarHit::Ci(i) | SidebarHit::CiMark(i), BTN_LEFT) => self.focus_repo_tab(i),
+            (SidebarHit::Fold(i), BTN_LEFT) => self.toggle_fold(i),
             (SidebarHit::CiChip(i, k), BTN_LEFT) => {
                 if let Some((_, row)) = self.ci_row(i, k) {
                     let link = row.link.clone();
@@ -344,8 +394,39 @@ impl Gerdr {
             }
             SidebarHit::Name(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                let fits = chrome::name_fits(&ws.0.name, row.name.size.w);
-                (!fits).then(|| Tooltip::new(&ws.0.name, row.name))
+                Some(workspace_tooltip(&ws.0, row.title))
+            }
+            SidebarHit::Fold(i) => {
+                let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
+                let text = if ws.0.folded { "Unfold" } else { "Fold" };
+                Some(Tooltip::new(text, row.fold?))
+            }
+            SidebarHit::CiMark(i) => {
+                let repo = self.ci_repo(i)?;
+                let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
+                let ci = ws.0.ci.as_ref()?;
+                let text = format!("GitHub · {}", repo.slug);
+                let mut fields: Vec<_> = ci
+                    .chips
+                    .iter()
+                    .map(|chip| {
+                        let label = format!("{} {}", chrome::group_label(chip.group), chip.label);
+                        (label, ci_state_word(chip.state).to_owned())
+                    })
+                    .collect();
+                if ci.other_prs > 0 {
+                    fields.push(("Other PRs".into(), ci.other_prs.to_string()));
+                }
+                let tip = Tooltip::new(&text, row.ci?).fields(fields);
+                Some(tip.key("click to show its page"))
+            }
+            SidebarHit::Inbox(i, k) => {
+                let card = agents.get(i)?.get(k)?;
+                let rect = layout.inbox.iter().find(|e| (e.0, e.1) == (i, k))?.2;
+                let ws = &workspaces.get(i)?.0.name;
+                let mut fields = vec![("Workspace".to_owned(), ws.clone())];
+                fields.extend(card.tooltip_fields());
+                Some(Tooltip::new(&card.label(), rect).fields(fields))
             }
             SidebarHit::Card(i, k) => {
                 let card = agents.get(i)?.get(k)?;
@@ -382,12 +463,8 @@ impl Gerdr {
                 })
             }
             SidebarHit::Row(i) => {
-                // Without line 2 (compact) the row itself lists them.
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                let (worktrees, git) = (ws.0.worktrees(), ws.0.git.as_ref());
-                let root = git.and_then(|g| g.root.as_deref());
-                (row.worktrees.is_none() && !worktrees.is_empty())
-                    .then(|| worktrees_tooltip(worktrees, root, row.rect))
+                Some(workspace_tooltip(&ws.0, row.title))
             }
             SidebarHit::Header => None,
             SidebarHit::Ci(i) => {
@@ -439,7 +516,7 @@ impl Gerdr {
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
-            SidebarHit::Ci(i) | SidebarHit::CiPrs(i) => {
+            SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
                 let repo = self.ci_repo(i)?;
                 let items = vec![
                     MenuItem::new(
@@ -464,7 +541,8 @@ impl Gerdr {
             }
             SidebarHit::Card(i, k)
             | SidebarHit::CardClose(i, k)
-            | SidebarHit::Subagent(i, k, _) => {
+            | SidebarHit::Subagent(i, k, _)
+            | SidebarHit::Inbox(i, k) => {
                 let card = self.agent_views().get(i)?.get(k)?.clone();
                 let mut items = vec![MenuItem::new(
                     "Focus",

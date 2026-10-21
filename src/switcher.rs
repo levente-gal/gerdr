@@ -1556,6 +1556,7 @@ mod tests {
             venv: Default::default(),
             tabs: Vec::new(),
             panes: Vec::new(),
+            folded: None,
         };
         Project {
             id: id.into(),

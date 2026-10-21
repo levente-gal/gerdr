@@ -201,6 +201,10 @@ pub struct WorkspaceRecord {
     pub tabs: Vec<TabRecord>,
     #[serde(default)]
     pub panes: Vec<PaneRecord>,
+    /// Whether it was folded or unfolded by hand in the sidebar; `None`
+    /// leaves it to fold while quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<bool>,
 }
 
 /// What a workspace opens with: mirrors `WorkspaceKind`.
@@ -653,6 +657,14 @@ impl Store {
     }
 
     /// Project `project`'s workspace record `id`.
+    /// Project `project`'s record of workspace `id`.
+    pub fn record(&self, project: &str, id: &str) -> Option<&WorkspaceRecord> {
+        self.project(project)?
+            .workspaces
+            .iter()
+            .find(|w| w.id == id)
+    }
+
     pub fn record_mut(&mut self, project: &str, id: &str) -> Option<&mut WorkspaceRecord> {
         self.project_mut(project)?
             .workspaces
@@ -1306,6 +1318,7 @@ fn record(herdr_id: String, label: String, kind: Kind, dir: PathBuf) -> Workspac
         venv: VenvSetting::Auto,
         tabs: Vec::new(),
         panes: Vec::new(),
+        folded: None,
     }
 }
 
@@ -1446,6 +1459,7 @@ mod tests {
                         env: vec![("VIRTUAL_ENV".into(), "/v".into())],
                         skip: vec!["rm -rf build".into()],
                     }],
+                    folded: None,
                 }],
                 before_start: "docker compose up -d".into(),
                 after_stop: "docker compose down".into(),

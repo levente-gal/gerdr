@@ -35,16 +35,11 @@ pub(super) const GIT_MARK_GAP: i32 = 4;
 pub const SIDEBAR_WIDTH: i32 = 200;
 pub const SIDEBAR_MIN_WIDTH: i32 = 120;
 pub const SIDEBAR_MAX_WIDTH: i32 = 480;
-/// A workspace row: just its name, or its name in a shorter title band,
-/// then the same detail lines as a tab.
-pub(super) const ROW_HEIGHT: i32 = 32;
-pub(super) const ROW_TITLE_HEIGHT: i32 = 28;
-pub(super) const ROW_BOTTOM: i32 = 6;
+/// Where the sidebar's rows start, under its header.
 pub(super) const ROWS_TOP: i32 = BAR_HEIGHT + 6;
 /// Horizontal inset of the rounded sidebar row highlight.
 pub(super) const ROW_INSET: i32 = 6;
 pub(super) const ROW_RADIUS: f32 = 6.0;
-pub(super) const CLOSE_WIDTH: i32 = 28;
 pub(super) const TAB_MAX_WIDTH: i32 = 360;
 pub(super) const BUTTON_WIDTH: i32 = 36;
 /// Side of the rounded square behind the tab strip's "+", which reaches on
@@ -66,14 +61,9 @@ pub(super) const APP_ICON_SIZE: i32 = 20;
 /// How big an app icon a sidebar row shows for its workspace.
 pub(super) const ROW_PICTURE_SIZE: i32 = 16;
 pub(super) const GAP: i32 = 1;
-/// Agent cards, under their workspace's row: indent past the row's icon,
-/// space around them, inner padding, the header line and each detail line.
-pub(super) const CARD_INDENT: i32 = 14;
-pub(super) const CARD_GAP: i32 = 4;
-pub(super) const CARD_PAD: i32 = 7;
-pub(super) const CARD_HEADER: i32 = 20;
+/// A line under an agent's row in the sidebar: a subagent's, a GitHub
+/// section's.
 pub(super) const CARD_LINE: i32 = 17;
-pub(super) const CARD_RADIUS: f32 = 6.0;
 /// Room for the status mark left of the agent's name.
 pub(super) const STATUS_WIDTH: i32 = 10;
 pub(super) const STATUS_GAP: i32 = 7;
