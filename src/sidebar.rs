@@ -96,13 +96,22 @@ impl Gerdr {
         let Some(folded) = self.workspace_views().get(w).map(|(ws, _)| !ws.folded) else {
             return;
         };
-        self.workspaces[w].folded = Some(folded);
-        let id = self.workspaces[w].record.clone();
+        self.set_fold(w, Some(folded));
+    }
+
+    /// Fold workspace `w` by hand (`Some`), or leave it to fold while
+    /// quiet (`None`); here and in its record.
+    fn set_fold(&mut self, w: usize, folded: Option<bool>) {
+        let Some(ws) = self.workspaces.get_mut(w) else {
+            return;
+        };
+        ws.folded = folded;
+        let id = ws.record.clone();
         if let Some(project) = self.project.clone()
             && let Some(record) = self.projects.record_mut(&project, &id)
-            && record.folded != Some(folded)
+            && record.folded != folded
         {
-            record.folded = Some(folded);
+            record.folded = folded;
             self.projects.save();
         }
     }
@@ -275,6 +284,12 @@ impl Gerdr {
                 }
             }
             (SidebarHit::Card(i, k) | SidebarHit::Inbox(i, k), BTN_LEFT) => {
+                // An agent shown from the "Needs you" list shows in its
+                // workspace too: a fold by hand gives way, and the
+                // workspace folds again once quiet.
+                if matches!(hit, SidebarHit::Inbox(..)) && self.workspace_folded(i) == Some(true) {
+                    self.set_fold(i, None);
+                }
                 if let Some(card) = self.agent_views().get(i).and_then(|c| c.get(k)) {
                     let key = card.key.clone();
                     self.focus_agent(&key);
