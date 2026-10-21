@@ -3331,6 +3331,47 @@ impl Gerdr {
         self.show_active();
     }
 
+    /// Open a tab in workspace `w` laid out like a project's first: Zed on
+    /// `dir` on top, a terminal in `dir` below, and show it. The Zed is
+    /// launched by command, so the tab brings it back on `dir` when restored.
+    pub fn new_project_tab(&mut self, w: usize, dir: &Path) {
+        if w >= self.workspaces.len() {
+            return;
+        }
+        if w != self.active_workspace {
+            self.switch_workspace(w);
+        }
+        let zed = self.new_pane_id();
+        let mut tab = Tab {
+            layout: Some(Node::Leaf(zed)),
+            ..Default::default()
+        };
+        let mut expected = Expected::new(None, launch::ZED_APP_ID, zed, true);
+        expected.app_command = Some(format!(
+            "zed -n {}",
+            crate::desktop::shell_quote(&dir.to_string_lossy())
+        ));
+        tab.expected.push(expected);
+        let ws = &mut self.workspaces[w];
+        ws.tabs.push(tab);
+        let t = ws.tabs.len() - 1;
+        ws.active_tab = t;
+        let run = Some((dir.to_path_buf(), None));
+        if let Some((pid, herdr)) = self.start_terminal_running(w, Some(t), Dir::Down, run) {
+            let term = self.new_pane_id();
+            let tab = &mut self.workspaces[w].tabs[t];
+            tab.layout
+                .as_mut()
+                .unwrap()
+                .split(zed, term, Dir::Down, TOP_RATIO);
+            tab.expected
+                .push(Expected::terminal(pid, term, false, herdr));
+        }
+        self.launch_next_zed();
+        self.prune();
+        self.show_active();
+    }
+
     /// Split the focused pane like herdr: it keeps the left or top half, a
     /// new terminal in the workspace folder gets the other and the focus.
     pub fn split_pane(&mut self, dir: Dir) {

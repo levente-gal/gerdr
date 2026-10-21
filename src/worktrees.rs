@@ -8,8 +8,9 @@
 //! tab, Ctrl+K checks its branch out in the main worktree, Ctrl+M squashes
 //! it in there (in a tab, for the commit message and any conflicts), Delete
 //! deletes it (twice when that loses changes or commits), Shift+Delete
-//! deletes the repository's merged ones, Ctrl+O opens a tab in it, Ctrl+C
-//! copies its path, Esc clears the filter, then closes.
+//! deletes the repository's merged ones, Ctrl+O opens a tab in it (Zed
+//! over a terminal), Ctrl+C copies its path, Esc clears the filter, then
+//! closes.
 
 use std::{
     cmp::Reverse,
@@ -912,7 +913,7 @@ impl Gerdr {
                 let Some(item) = find(&path) else { return };
                 self.close_worktrees();
                 let w = self.worktree_workspace(&item);
-                self.new_tab_in(w, &item.wt.path, None);
+                self.new_project_tab(w, &item.wt.path);
             }
             Outcome::Copy(path) => {
                 self.copy_text(path.display().to_string());
