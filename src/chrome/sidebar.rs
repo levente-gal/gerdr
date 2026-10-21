@@ -1173,7 +1173,8 @@ pub fn sidebar_layout_at(
 /// Where the parts of the GitHub card showing `view` sit, its top left
 /// corner at `(x, y)` and `width` wide: a header band holding at its right
 /// end the count of other pull requests, then a line per group of chips.
-/// Each line starts with its group's label; the chips follow in a column
+/// Each line starts with its group's label, under "GitHub" as an agent
+/// card's detail line sits under its name; the chips follow in a column
 /// as wide as the widest label present and a gap, left to right, on a
 /// line under it (in the same column) when the next one does not fit. An
 /// empty group takes no line. A chip wider than the room is cut to fit.
@@ -1190,7 +1191,7 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32, density: Density) ->
             (w, PILL_HEIGHT).into(),
         )
     });
-    let label_x = x + CARD_PAD;
+    let label_x = x + CARD_PAD + STATUS_WIDTH + STATUS_GAP;
     let label_w = view
         .chips
         .iter()
@@ -2173,7 +2174,7 @@ mod tests {
         ci_chip_width, text_extent,
     };
     use crate::WorkspaceKind;
-    use crate::chrome::{BAR_HEIGHT, TabView};
+    use crate::chrome::{BAR_HEIGHT, STATUS_GAP, STATUS_WIDTH, TabView};
     use crate::ci::{CiState, Group};
     use crate::git::{GitStatus, Worktree};
     use crate::herdr::AgentStatus;
@@ -2801,15 +2802,10 @@ mod tests {
         assert_eq!(chips[0].loc.y, first_line);
         // One label, "CI", on the first line; the chips in a column after it.
         let label_w = text_extent("CI", DETAIL_FONT_SIZE);
-        let label = Rectangle::new(
-            (card.loc.x + CARD_PAD, first_line).into(),
-            (label_w, CARD_LINE).into(),
-        );
+        let label_x = card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP;
+        let label = Rectangle::new((label_x, first_line).into(), (label_w, CARD_LINE).into());
         assert_eq!(ci.labels, [(Group::Branch, label)]);
-        assert_eq!(
-            chips[0].loc.x,
-            card.loc.x + CARD_PAD + label_w + CI_LABEL_GAP - 4
-        );
+        assert_eq!(chips[0].loc.x, label_x + label_w + CI_LABEL_GAP - 4);
         let mut lines = 1;
         for (pair, label) in chips.windows(2).zip(&labels[1..]) {
             let (a, b) = (pair[0], pair[1]);
@@ -2996,7 +2992,10 @@ mod tests {
         let groups: Vec<_> = ci.labels.iter().map(|(g, _)| *g).collect();
         assert_eq!(groups, [Group::Branch, Group::Mine, Group::Review]);
         for ((_, label), chip) in ci.labels.iter().zip([0, 2, 3]) {
-            assert_eq!(label.loc.x, ci.card.loc.x + CARD_PAD);
+            assert_eq!(
+                label.loc.x,
+                ci.card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP
+            );
             assert_eq!(label.size, (widest, CARD_LINE).into());
             assert_eq!(label.loc.y, ci.chips[chip].loc.y);
             assert!(label.loc.x + label.size.w < ci.chips[chip].loc.x);
@@ -3045,7 +3044,8 @@ mod tests {
         assert_eq!(ci.card.size.h, 2 * CARD_PAD + CARD_HEADER + 2 * CARD_LINE);
         // The column fits the labels present only.
         let (_, mine) = ci_card_of(&[(Group::Mine, "#42")], 240);
-        let column = |w: i32| ci.card.loc.x + CARD_PAD + w + CI_LABEL_GAP - 4;
+        let column =
+            |w: i32| ci.card.loc.x + CARD_PAD + STATUS_WIDTH + STATUS_GAP + w + CI_LABEL_GAP - 4;
         assert_eq!(
             mine.chips[0].loc.x,
             column(text_extent("Mine", DETAIL_FONT_SIZE))
