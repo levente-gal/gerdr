@@ -4070,9 +4070,15 @@ impl Gerdr {
             }
             // A window both moving and changing size moves once the client
             // has drawn the new size (see `pending_place`); while a divider
-            // moves, it follows the divider.
+            // moves, it follows the divider. Only a window on screen waits:
+            // a hidden one gets no frame callbacks, so a client waiting for
+            // one to draw its new size never would, and it would stay
+            // hidden for good.
             let size = window.geometry().size;
-            let moving = self.space.element_location(&window) != Some(rect.loc);
+            let moving = self
+                .space
+                .element_location(&window)
+                .is_some_and(|loc| loc != rect.loc);
             if !resizing && moving && size != rect.size && size.w > 0 && size.h > 0 {
                 self.pending_place.insert(id, (size, rect.loc));
             } else {
