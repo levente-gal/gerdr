@@ -46,6 +46,7 @@ mod repo_batches;
 mod repos;
 mod sidebar;
 mod switcher;
+mod syntax;
 mod system_theme;
 mod tab_strip;
 mod text_field;

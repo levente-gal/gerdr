@@ -2446,16 +2446,33 @@ impl Painter {
                     }
                     c.fill(tint_x, y, px(DIFF_BAR), h, tone);
                 }
-                self.mono_text(
-                    c,
-                    &line.text,
-                    REPOS_MONO_SIZE,
-                    tx,
-                    bend,
-                    row_band,
-                    scale,
-                    p.text,
-                );
+                // The code's coloured runs and the plain text between,
+                // each placed by the width of the text before it.
+                let bytes: Vec<usize> = line
+                    .text
+                    .char_indices()
+                    .map(|(b, _)| b)
+                    .chain([line.text.len()])
+                    .collect();
+                let byte = |n: usize| bytes[n.min(bytes.len() - 1)];
+                let mut run = |from: usize, to: usize, color: Rgb| {
+                    let (from, to) = (byte(from), byte(to));
+                    if from >= to {
+                        return;
+                    }
+                    let x = tx + self.mono_width(&line.text[..from], REPOS_MONO_SIZE, scale);
+                    if x < bend {
+                        let text = &line.text[from..to];
+                        self.mono_text(c, text, REPOS_MONO_SIZE, x, bend, row_band, scale, color);
+                    }
+                };
+                let mut at = 0;
+                for (range, kind) in &line.syntax {
+                    run(at, range.start, p.text);
+                    run(range.start, range.end, p.code(*kind));
+                    at = range.end;
+                }
+                run(at, usize::MAX, p.text);
             }
             DetailRow::Note(text) => {
                 self.mixed_text(
@@ -3076,6 +3093,9 @@ mod tests {
             text: text.into(),
             number: 1,
             words: words.to_vec(),
+            syntax: crate::syntax::lang("x.rs")
+                .map(|lang| crate::syntax::highlight(lang, text, &mut Default::default()))
+                .unwrap_or_default(),
         })
     }
 

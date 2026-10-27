@@ -1,6 +1,7 @@
 //! The light and dark looks: Zed's One Dark and One Light palettes.
 
 use crate::herdr::AgentStatus;
+use crate::syntax::Kind;
 
 pub(super) type Rgb = [u8; 3];
 
@@ -122,12 +123,23 @@ pub(crate) struct Palette {
     pub(super) warning: Rgb,
     pub(super) error: Rgb,
     pub(super) shadow: f32,
+    /// Code's colours in a diff: Zed's `syntax` of this look.
+    pub(super) syntax: SyntaxColors,
     /// What Zed's terminal uses with this look: its background and
     /// foreground, and the 16 ANSI colours (the 8 normal, then the 8
     /// bright ones, in ANSI order), pushed to Alacritty.
     pub(super) terminal_background: Rgb,
     pub(super) terminal_foreground: Rgb,
     pub(super) ansi: [Rgb; 16],
+}
+
+pub(crate) struct SyntaxColors {
+    keyword: Rgb,
+    string: Rgb,
+    comment: Rgb,
+    constant: Rgb,
+    type_: Rgb,
+    function: Rgb,
 }
 
 pub(super) const ONE_DARK: Palette = Palette {
@@ -149,6 +161,14 @@ pub(super) const ONE_DARK: Palette = Palette {
     warning: hex(0xdec184),
     error: hex(0xd07277),
     shadow: 0.45,
+    syntax: SyntaxColors {
+        keyword: hex(0xb477cf),
+        string: hex(0xa1c181),
+        comment: hex(0x5d636f),
+        constant: hex(0xbf956a),
+        type_: hex(0x6eb4bf),
+        function: hex(0x73ade9),
+    },
     terminal_background: hex(0x282c34),
     terminal_foreground: hex(0xabb2bf),
     ansi: [
@@ -190,6 +210,14 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     warning: hex(0xa48819),
     error: hex(0xd36151),
     shadow: 0.18,
+    syntax: SyntaxColors {
+        keyword: hex(0xa449ab),
+        string: hex(0x649f57),
+        comment: hex(0xa2a3a7),
+        constant: hex(0xad6e25),
+        type_: hex(0x3882b7),
+        function: hex(0x5b79e3),
+    },
     terminal_background: hex(0xfafafa),
     terminal_foreground: hex(0x2a2c33),
     ansi: [
@@ -213,6 +241,19 @@ pub(super) const ONE_LIGHT: Palette = Palette {
 };
 
 impl Palette {
+    /// The colour code of `kind` is drawn in.
+    pub(super) fn code(&self, kind: Kind) -> Rgb {
+        let s = &self.syntax;
+        match kind {
+            Kind::Keyword => s.keyword,
+            Kind::String => s.string,
+            Kind::Comment => s.comment,
+            Kind::Constant => s.constant,
+            Kind::Type => s.type_,
+            Kind::Function => s.function,
+        }
+    }
+
     pub(super) fn status(&self, status: AgentStatus) -> Rgb {
         match status {
             AgentStatus::Working => self.accent,

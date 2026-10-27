@@ -5,6 +5,8 @@
 
 use std::ops::Range;
 
+use crate::syntax::{self, Spans};
+
 /// How many lines of one file's diff are kept; the rest are counted.
 pub const FILE_LINES: usize = 2000;
 /// A removed and an added line this long or longer aren't compared word
@@ -56,6 +58,9 @@ pub struct Line {
     /// The words changed from the line it pairs with, by char index
     /// into `text`; empty when it pairs with none, or is all changed.
     pub words: Words,
+    /// Its code's colours, by char index into `text`; empty when the
+    /// file's language isn't known.
+    pub syntax: Spans,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -170,6 +175,7 @@ impl Section {
                 text: expand(text),
                 number,
                 words: Vec::new(),
+                syntax: Vec::new(),
             });
         }
     }
@@ -206,10 +212,33 @@ impl Section {
             let more = format!("… {} more lines", self.dropped);
             self.diff.notes.insert(0, more);
         }
+        let lang = syntax::lang(&self.diff.path);
         for hunk in &mut self.diff.hunks {
             pair_words(&mut hunk.lines);
+            if let Some(lang) = lang {
+                colour(lang, &mut hunk.lines);
+            }
         }
         self.diff
+    }
+}
+
+/// A hunk's lines coloured as `lang`, the file before (context and
+/// removed lines) and after (context and added lines) each read on its
+/// own, so a comment opened on one side stays on that side. A hunk
+/// starts mid-file, so it starts as code.
+fn colour(lang: &syntax::Lang, lines: &mut [Line]) {
+    let (mut before, mut after) = (syntax::State::default(), syntax::State::default());
+    for line in lines {
+        line.syntax = match line.kind {
+            LineKind::Removed => syntax::highlight(lang, &line.text, &mut before),
+            LineKind::Added => syntax::highlight(lang, &line.text, &mut after),
+            LineKind::Context => {
+                let spans = syntax::highlight(lang, &line.text, &mut after);
+                before = after;
+                spans
+            }
+        };
     }
 }
 
@@ -582,6 +611,7 @@ mod tests {
             text: text.into(),
             number: 1,
             words: Vec::new(),
+            syntax: Vec::new(),
         })
         .collect();
         pair_words(&mut lines);
@@ -589,6 +619,35 @@ mod tests {
         assert!(lines[1].words.is_empty());
         assert_eq!(lines[2].words, [4..5]);
         assert!(lines[4].words.is_empty());
+    }
+
+    #[test]
+    fn code_is_coloured_each_side_on_its_own() {
+        use crate::syntax::Kind;
+        let d = text(&[
+            "diff --git a/x.rs b/x.rs",
+            "--- a/x.rs",
+            "+++ b/x.rs",
+            "@@ -1,3 +1,3 @@",
+            "-/* old",
+            "+fn new() {}",
+            " let x = 1;",
+            "diff --git a/notes b/notes",
+            "--- a/notes",
+            "+++ b/notes",
+            "@@ -1 +1 @@",
+            "+fn plain",
+        ]);
+        let files = parse(&d);
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(lines[0].syntax, [(0..6, Kind::Comment)]);
+        assert_eq!(
+            lines[1].syntax,
+            [(0..2, Kind::Keyword), (3..6, Kind::Function)]
+        );
+        // The comment the removed line opened isn't on the new side.
+        assert_eq!(lines[2].syntax[0], (0..3, Kind::Keyword));
+        assert!(files[1].hunks[0].lines[0].syntax.is_empty());
     }
 
     #[test]
