@@ -789,12 +789,21 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         strip.prefix,
         strip.overflow(),
         strip.watch.is_some(),
+        strip.inbox.is_some(),
     );
     rects.extend(layout.tabs.iter().chain(&layout.closes).map(|r| shift(*r)));
     if !layout.tabs.is_empty() {
         rects.push(shift(layout.plus));
     }
-    rects.extend(layout.overflow.into_iter().chain(layout.prefix).map(shift));
+    rects.extend(
+        layout
+            .overflow
+            .into_iter()
+            .chain(layout.prefix)
+            .chain(layout.watch)
+            .chain(layout.inbox)
+            .map(shift),
+    );
     rects.push(shift(layout.toggle));
     for bar in view.pane_bars.iter().filter(|bar| bar.visible) {
         rects.push(bar.rect);

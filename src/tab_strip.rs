@@ -1,5 +1,5 @@
 //! Input to the tab strip: presses on the tabs, the "+" button, the
-//! overflow chip and the theme switch; the pointer moving over them
+//! overflow chip, the inbox button and the theme switch; the pointer moving over them
 //! (hover and tooltips); and their right-click menus (see `chrome::tabs`
 //! for what the strip shows).
 
@@ -24,6 +24,15 @@ pub fn next_mode(mode: ThemeMode) -> ThemeMode {
         ThemeMode::System => ThemeMode::Dark,
         ThemeMode::Dark => ThemeMode::Light,
         ThemeMode::Light => ThemeMode::System,
+    }
+}
+
+/// What the inbox button's tooltip says while it counts `count` items.
+pub fn inbox_tooltip(count: usize) -> String {
+    match count {
+        0 => "Inbox".to_owned(),
+        1 => "Inbox · 1 needs you".to_owned(),
+        n => format!("Inbox · {n} need you"),
     }
 }
 
@@ -156,7 +165,8 @@ impl Gerdr {
     /// Everything the strip is drawn from: the tabs of the active workspace
     /// (a tab named by hand keeps its name), the theme mode, the prefix
     /// badge, the rename in progress, what the pointer is over while nothing
-    /// covers the strip, and the other workspaces with a blocked agent.
+    /// covers the strip, the other workspaces with a blocked agent, and the
+    /// inbox's count.
     pub(crate) fn tab_strip_view(&self) -> TabStripView {
         let views = self.workspace_views();
         let tabs: Vec<TabView> = self
@@ -171,6 +181,8 @@ impl Gerdr {
             let is_blocked = ws.status == Some(crate::herdr::AgentStatus::Blocked);
             (n + 1, blocked + usize::from(is_blocked))
         });
+        let workspaces: Vec<_> = views.into_iter().map(|(ws, _)| ws).collect();
+        let inbox = self.inbox_count(&workspaces, &self.agent_views());
         let renaming = self.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Tab(w, t) if w == self.active_workspace => Some((t, r.field.line())),
             _ => None,
@@ -185,6 +197,7 @@ impl Gerdr {
             renaming,
             elsewhere,
             watch: self.focused_pull_request().map(|(_, _, watched)| watched),
+            inbox: Some(inbox),
         };
         view.hover = self.tab_hover.over();
         view.hover_alpha = self.tab_hover.alpha_over(Instant::now());
@@ -250,6 +263,7 @@ impl Gerdr {
             view.prefix,
             view.overflow(),
             view.watch.is_some(),
+            view.inbox.is_some(),
         )
     }
 
@@ -283,7 +297,8 @@ impl Gerdr {
     /// `input`); "×" or middle click closes it. A tab held with the left
     /// button can be dragged to another place. "+" opens a terminal in a
     /// new tab, the overflow chip switches to a workspace that needs
-    /// input, and the switch at the right end cycles the theme mode.
+    /// input, the inbox button opens the inbox, and the switch at the right
+    /// end cycles the theme mode.
     pub(crate) fn tab_strip_press(&mut self, x: i32, y: i32, button: u32) {
         let view = self.tab_strip_view();
         let hit = self.tab_strip_layout(&view).hit(x, y);
@@ -303,6 +318,7 @@ impl Gerdr {
             }
             (BTN_LEFT, Some(TabHit::Plus)) => self.new_tab(),
             (BTN_LEFT, Some(TabHit::Watch)) => self.toggle_watch(),
+            (BTN_LEFT, Some(TabHit::Inbox)) => self.open_inbox(None),
             _ => {}
         }
     }
@@ -363,6 +379,11 @@ impl Gerdr {
                 };
                 Tooltip::new(&text, anchor(layout.watch?))
             }
+            TabHit::Inbox => {
+                let tip = Tooltip::new(&inbox_tooltip(view.inbox?), anchor(layout.inbox?));
+                let key = self.keymap.help().key_for("inbox", 0);
+                keyed(tip, &key)
+            }
         })
     }
 
@@ -398,7 +419,7 @@ impl Gerdr {
                 anchor: anchor(layout.toggle),
                 items: theme_items(view.mode),
             }),
-            TabHit::Overflow | TabHit::Prefix | TabHit::Watch => None,
+            TabHit::Overflow | TabHit::Prefix | TabHit::Watch | TabHit::Inbox => None,
         }
     }
 }
@@ -406,10 +427,17 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyHints, mode_tooltip, next_mode, overflow_tooltip, plus_menu_items, tab_menu_items,
-        theme_items,
+        KeyHints, inbox_tooltip, mode_tooltip, next_mode, overflow_tooltip, plus_menu_items,
+        tab_menu_items, theme_items,
     };
     use crate::{chrome::ThemeMode, layout::Dir, menu::MenuAction};
+
+    #[test]
+    fn the_inbox_tooltip_says_how_many_need_the_user() {
+        assert_eq!(inbox_tooltip(0), "Inbox");
+        assert_eq!(inbox_tooltip(1), "Inbox · 1 needs you");
+        assert_eq!(inbox_tooltip(3), "Inbox · 3 need you");
+    }
 
     #[test]
     fn the_switch_cycles_system_dark_light() {

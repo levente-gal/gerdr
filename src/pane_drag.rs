@@ -131,6 +131,7 @@ impl Gerdr {
                 view.prefix,
                 view.overflow(),
                 view.watch.is_some(),
+                view.inbox.is_some(),
             );
             let mut rect = pick(&layout, t)?;
             rect.loc += strip.loc;

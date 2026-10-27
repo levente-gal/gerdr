@@ -292,6 +292,23 @@ pub(super) fn ci_mark(state: CiState, x: f32, y: f32, s: f32) -> f32 {
     }
 }
 
+/// Signed distance to an inbox tray centred on the origin: a box whose
+/// floor dips into a slot in the middle.
+pub(super) fn tray(x: f32, y: f32, s: f32) -> f32 {
+    let outline = rounded_rect(x, y, -7.0 * s, -6.0 * s, 14.0 * s, 12.0 * s, 2.0 * s).abs();
+    let floor = [
+        (-7.0, 1.0, -3.0, 1.0),
+        (-3.0, 1.0, -2.0, 3.0),
+        (-2.0, 3.0, 2.0, 3.0),
+        (2.0, 3.0, 3.0, 1.0),
+        (3.0, 1.0, 7.0, 1.0),
+    ]
+    .into_iter()
+    .map(|(ax, ay, bx, by)| segment(x, y, ax * s, ay * s, bx * s, by * s))
+    .fold(f32::MAX, f32::min);
+    outline.min(floor) - STROKE * s
+}
+
 /// Signed distance to an eye centred on the origin: an almond outline,
 /// where two circles overlap, around a round pupil. Watch.
 pub(super) fn eye(x: f32, y: f32, s: f32) -> f32 {

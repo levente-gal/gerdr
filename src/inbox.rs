@@ -304,6 +304,22 @@ pub fn visible(
         .collect()
 }
 
+/// Whether the tab strip's inbox button counts `item`: an agent blocked or
+/// done, a pull request asking for review, a failed CI of `main`, `master`,
+/// `dev` or `develop`.
+pub fn counted(item: &InboxItem) -> bool {
+    match &item.detail {
+        Detail::Agent { status, .. } => {
+            matches!(status, AgentStatus::Blocked | AgentStatus::Done)
+        }
+        Detail::Ci { subject, state, .. } => {
+            item.tone == Tone::Review
+                || (*state == CiState::Failed && crate::ci::LONG_LIVED.contains(&subject.as_str()))
+        }
+        _ => false,
+    }
+}
+
 /// `items` in list order: by section, then the most urgent first, then the
 /// oldest.
 pub fn order(items: &[InboxItem]) -> Vec<InboxItem> {

@@ -72,6 +72,8 @@ pub enum Target {
     Welcome,
     /// The key help, kept open.
     Shortcuts,
+    /// The inbox panel.
+    Inbox,
     /// The config file, to edit.
     Settings,
     /// A project's file, by id, to edit in a new tab.
@@ -103,6 +105,7 @@ impl Target {
             Target::Folder(_) => Section::Folders,
             Target::Welcome
             | Target::Shortcuts
+            | Target::Inbox
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -122,6 +125,7 @@ impl Target {
             Target::Folder(_) => "folder",
             Target::Welcome
             | Target::Shortcuts
+            | Target::Inbox
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -632,6 +636,7 @@ fn frecency_key(
         }
         Target::Welcome
         | Target::Shortcuts
+        | Target::Inbox
         | Target::Settings
         | Target::ProjectFile(_)
         | Target::ReloadProjects => return None,
@@ -736,7 +741,8 @@ impl Gerdr {
 
     /// What the run prompt offers: the page of the workspace's repository,
     /// the apps named in the config file and the installed apps, the
-    /// commands typed before, then the project file's commands.
+    /// commands typed before, then the inbox and the project file's
+    /// commands.
     fn run_items(&self) -> Vec<Item> {
         let icons = self.program_icons();
         let page = self
@@ -767,11 +773,22 @@ impl Gerdr {
                 Target::Command(command),
             )
         }));
+        items.push(self.inbox_entry());
         items.extend(project_file_items(
             self.project.as_deref(),
             home_dir().as_deref(),
         ));
         self.weighed(items)
+    }
+
+    /// The row opening the inbox, saying how many items its button counts.
+    fn inbox_entry(&self) -> Item {
+        let detail = match self.inbox_count_now() {
+            0 => "agents, Git, GitHub and todos".to_owned(),
+            1 => "1 needs you".to_owned(),
+            n => format!("{n} need you"),
+        };
+        Item::new(ItemIcon::Command, "Inbox", detail, Target::Inbox)
     }
 
     /// `items` with their frecency.
@@ -951,6 +968,7 @@ impl Gerdr {
             }
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
+            Target::Inbox => self.open_inbox(None),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
@@ -1121,6 +1139,7 @@ impl Gerdr {
                 Target::Folder(dir.clone()),
             ));
         }
+        items.push(self.inbox_entry());
         items.push(Item::new(
             ItemIcon::Command,
             "Shortcuts",
