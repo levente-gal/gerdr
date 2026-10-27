@@ -11,7 +11,8 @@
 //! Delete dismisses it (until it changes), Ctrl+S snoozes it for an hour,
 //! Ctrl+Shift+S until tomorrow morning, Ctrl+H lists the hidden ones
 //! (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits one (Tab
-//! cycles the workspace it is linked to); Delete marks a todo done,
+//! cycles the workspace it is linked to); Ctrl+T adds a ticket repository
+//! (`owner/repo`) to the shown project; Delete marks a todo done,
 //! Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C copies it,
 //! Ctrl+R reads the issues again. Tab lists the active workspace's items
 //! only, or every workspace's again. Esc clears the filter, then goes back
@@ -40,7 +41,7 @@ use crate::{
     config, fuzzy,
     herdr::AgentStatus,
     inbox_store::{InboxFile, TodoId, Triage},
-    issues::{IssueSource, IssuesRead, IssuesState},
+    issues::{IssueSource, IssuesRead, IssuesState, TicketRepo},
     text_field::{Edit, TextField},
     wheel::Wheel,
 };
@@ -260,10 +261,15 @@ pub enum Outcome {
         text: String,
         workspace: Option<usize>,
     },
+    /// Add this repository (`owner/repo` or `host/owner/repo`) to the
+    /// shown project's ticket repositories.
+    AddTickets(String),
     /// Read the issues again.
     Refresh,
     /// List the dismissed or snoozed item again.
     Restore(ItemId),
+    /// Say this.
+    Notice(String),
 }
 
 /// What the panel lists and acts on, gathered afresh for each event.
@@ -673,7 +679,8 @@ impl Inbox {
 pub struct Panel {
     /// What the list is filtered by.
     query: TextField,
-    /// The todo being written, while one is (Ctrl+N, Ctrl+E).
+    /// The todo (Ctrl+N, Ctrl+E) or ticket repository (Ctrl+T) being
+    /// written, while one is.
     compose: Option<Compose>,
     hover: Option<InboxHit>,
     /// The section to select the first item of, on opening.
@@ -711,10 +718,12 @@ impl Default for Panel {
     }
 }
 
-/// A todo being written.
+/// A todo, or a ticket repository, being written.
 #[derive(Debug)]
 struct Compose {
     text: TextField,
+    /// A ticket repository to add, not a todo: no id, no workspace.
+    tickets: bool,
     /// The todo edited; `None` for a new one.
     id: Option<TodoId>,
     /// The workspace it is linked to, by index into `Listing::workspaces`.
@@ -976,8 +985,19 @@ impl Panel {
         let workspace = item.and_then(|i| i.workspace).or(list.active);
         self.compose = Some(Compose {
             text: TextField::default(),
+            tickets: false,
             id: None,
             workspace: workspace.filter(|&w| w < list.workspaces.len()),
+        });
+    }
+
+    /// Write a ticket repository to add.
+    fn write_tickets(&mut self) {
+        self.compose = Some(Compose {
+            text: TextField::default(),
+            tickets: true,
+            id: None,
+            workspace: None,
         });
     }
 
@@ -996,14 +1016,16 @@ impl Panel {
         };
         self.compose = Some(Compose {
             text: text.into(),
+            tickets: false,
             id: Some(id),
             workspace: item.workspace.filter(|&w| w < list.workspaces.len()),
         });
     }
 
-    /// A key while a todo is being written: the field takes what edits
-    /// it; Enter saves (an empty one is dropped), Esc drops it, Tab and
-    /// Shift+Tab cycle the workspace it is linked to.
+    /// A key while a todo or ticket repository is being written: the
+    /// field takes what edits it; Enter saves (an empty one is dropped; a
+    /// repository not written as one is said so, and kept to fix), Esc
+    /// drops it, Tab and Shift+Tab cycle the workspace a todo is linked to.
     fn compose_key(
         &mut self,
         mods: &ModifiersState,
@@ -1019,16 +1041,29 @@ impl Panel {
             Keysym::Escape => self.compose = None,
             Keysym::Return | Keysym::KP_Enter if !mods.ctrl => {
                 let compose = self.compose.take()?;
-                let text = compose.text.trim();
+                let text = compose.text.trim().to_owned();
+                if compose.tickets && !text.is_empty() {
+                    let repo = TicketRepo {
+                        repo: text.clone(),
+                        project: None,
+                    };
+                    if repo.place().is_err() {
+                        self.compose = Some(compose);
+                        return Some(Outcome::Notice(format!(
+                            "\"{text}\" is not owner/repo or host/owner/repo"
+                        )));
+                    }
+                    return Some(Outcome::AddTickets(text));
+                }
                 if !text.is_empty() {
                     return Some(Outcome::SaveTodo {
                         id: compose.id,
-                        text: text.to_owned(),
+                        text,
                         workspace: compose.workspace,
                     });
                 }
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab if !mods.ctrl => {
+            Keysym::Tab | Keysym::ISO_Left_Tab if !mods.ctrl && !compose.tickets => {
                 let back = mods.shift || sym == Keysym::ISO_Left_Tab;
                 compose.workspace = cycle(compose.workspace, list.workspaces.len(), back);
             }
@@ -1121,6 +1156,10 @@ impl Panel {
                 self.write(item, list);
                 return None;
             }
+            Keysym::t | Keysym::T if ctrl => {
+                self.write_tickets();
+                return None;
+            }
             Keysym::Return | Keysym::KP_Enter if !ctrl => ItemAction::GoTo,
             // Shift changes the symbol: match both cases.
             Keysym::s | Keysym::S if ctrl && shift => ItemAction::SnoozeLong,
@@ -1207,9 +1246,9 @@ impl Panel {
     /// The footer's hints, for what is selected (`actions`) over `list`.
     fn hints(&self, actions: &[ItemAction], list: &Listing) -> Vec<(String, String)> {
         let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
-        if self.compose.is_some() {
-            let mut hints = vec![hint("Enter", "save")];
-            if !list.workspaces.is_empty() {
+        if let Some(compose) = &self.compose {
+            let mut hints = vec![hint("Enter", if compose.tickets { "add" } else { "save" })];
+            if !compose.tickets && !list.workspaces.is_empty() {
                 hints.push(hint("Tab", "link a workspace"));
             }
             hints.push(hint("Esc", "cancel"));
@@ -1240,6 +1279,7 @@ impl Panel {
         })
         .collect();
         hints.push(hint("Ctrl+N", "new todo"));
+        hints.push(hint("Ctrl+T", "add ticket repo"));
         hints.push(hint(
             "Ctrl+H",
             if self.show_hidden {
@@ -1338,10 +1378,11 @@ impl Panel {
             };
             detail.fields.push(("Hidden".to_owned(), why));
         }
-        let placeholder = if self.show_hidden {
-            "Filter the hidden items…"
-        } else {
-            "Filter the inbox…"
+        let placeholder = match &self.compose {
+            Some(c) if c.tickets => "Ticket repository: owner/repo…",
+            Some(_) => "New todo…",
+            None if self.show_hidden => "Filter the hidden items…",
+            None => "Filter the inbox…",
         };
         InboxView {
             project: list.project.map(str::to_owned),
@@ -1352,6 +1393,7 @@ impl Panel {
                 text: c.text.line(),
                 workspace: c.workspace.and_then(|w| list.workspaces.get(w).cloned()),
                 editing: c.id.is_some(),
+                tickets: c.tickets,
             }),
             rows,
             first,
@@ -1658,6 +1700,42 @@ mod tests {
         assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
         assert!(panel.view(&list).compose.is_none());
         assert_eq!(&**panel.field_mut(), "");
+    }
+
+    #[test]
+    fn ctrl_t_adds_a_ticket_repository() {
+        let items = vec![item("a", Section::Git, Some(1))];
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::new(None);
+        assert_eq!(ctrl(&mut panel, Keysym::t, &list), None);
+        let view = panel.view(&list);
+        let compose = view.compose.unwrap();
+        assert!(compose.tickets);
+        assert_eq!(compose.workspace, None);
+        assert_eq!(view.placeholder, "Ticket repository: owner/repo…");
+        assert!(!view.hints.iter().any(|(k, _)| k == "Tab"));
+        // Tab links no workspace.
+        press(&mut panel, Keysym::Tab, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().workspace, None);
+        // Not a repository: said so, and kept to fix.
+        type_text(&mut panel, "acme", &list);
+        assert!(matches!(
+            press(&mut panel, Keysym::Return, &list),
+            Some(Outcome::Notice(_))
+        ));
+        assert!(panel.view(&list).compose.unwrap().tickets);
+        type_text(&mut panel, "/tickets ", &list);
+        assert_eq!(
+            press(&mut panel, Keysym::Return, &list),
+            Some(Outcome::AddTickets("acme/tickets".into()))
+        );
+        assert!(panel.view(&list).compose.is_none());
+        // Esc drops it, the panel staying open.
+        ctrl(&mut panel, Keysym::t, &list);
+        assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
+        assert!(panel.view(&list).compose.is_none());
     }
 
     #[test]

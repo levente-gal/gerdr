@@ -391,7 +391,9 @@ impl Gerdr {
                 text,
                 workspace,
             } => self.save_todo(id, text, workspace),
+            Outcome::AddTickets(repo) => self.add_tickets(repo),
             Outcome::Refresh => self.refresh_issues(),
+            Outcome::Notice(text) => self.show_notice(text),
             Outcome::Restore(id) => {
                 if let Some(project) = self.project.clone() {
                     self.inbox_restore(&project, id.0);
@@ -557,6 +559,32 @@ impl Gerdr {
             }
         }
         self.save_inbox();
+    }
+
+    /// Add `repo` to the shown project's ticket repositories, saved, and
+    /// read its tickets. Not one there already.
+    fn add_tickets(&mut self, repo: String) {
+        let repo = TicketRepo {
+            repo,
+            project: None,
+        };
+        let key = repo.key();
+        let Some(project) = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project_mut(id))
+        else {
+            return self
+                .show_notice("Ticket repositories are kept per project: open one first".into());
+        };
+        if project.tickets.iter().any(|r| r.key() == key) {
+            return self.show_notice(format!("{} is a ticket repository already", repo.repo));
+        }
+        let name = repo.repo.clone();
+        project.tickets.push(repo);
+        self.projects.save();
+        self.show_notice(format!("Reading the tickets of {name}"));
+        self.refresh_issues();
     }
 
     /// The toast's "Undo" after a dismiss or snooze: list item `id` of
