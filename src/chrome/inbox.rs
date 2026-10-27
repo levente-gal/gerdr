@@ -19,6 +19,7 @@ use super::{
     segment,
 };
 use crate::text_field::Line;
+use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -112,6 +113,9 @@ pub struct InboxView {
     pub empty: String,
     /// Hidden (dismissed, snoozed) items are listed too (Ctrl+H).
     pub show_hidden: bool,
+    /// The part of the first row scrolled past, 0 to 1; with some, `rows`
+    /// take one more under the page, shown in part.
+    pub part: f64,
 }
 
 /// A todo being written in the inbox panel.
@@ -236,8 +240,11 @@ pub struct InboxLayout {
     /// The list, left.
     pub list: Rect,
     /// Per row in view, its rect and its buttons' (none unless selected or
-    /// hovered).
+    /// hovered). A scrolled list's first and last rows reach out of
+    /// `window`.
     pub rows: Vec<(Rect, Vec<Rect>)>,
+    /// Where the rows show, inside `list`'s padding.
+    pub window: Rect,
     /// The detail, right.
     pub detail: Rect,
     pub detail_buttons: Vec<Rect>,
@@ -542,8 +549,17 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let (list, detail) = body(panel, footer_h);
 
     let (row_x, row_w) = row_span(list);
-    let mut y = list.loc.y + INBOX_PAD;
+    let start = list.loc.y + INBOX_PAD;
     let list_end = list.loc.y + list.size.h - INBOX_PAD;
+    let height = |row: &InboxRow| match row {
+        InboxRow::Label { .. } => INBOX_LABEL,
+        InboxRow::Item(_) => INBOX_ROW,
+    };
+    // Scrolled part of the first row, the rows start up by as much and
+    // show where they would without the last, shown in part.
+    let scrolled = view.part > 0.0;
+    let shift = wheel::shift(view.part, view.rows.first().map_or(0, height));
+    let mut y = start - shift;
     let mut full = false;
     let with_buttons = match view.hover {
         Some(InboxHit::Row(i) | InboxHit::Button(i, _)) => Some(i),
@@ -554,12 +570,14 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let h = match row {
-                InboxRow::Label { .. } => INBOX_LABEL,
-                InboxRow::Item(_) => INBOX_ROW,
+            let h = height(row);
+            // More rows than fit (more than a page) take no room; a
+            // scrolled list's last is shown in part, cut by `window`.
+            full |= if scrolled {
+                y >= list_end
+            } else {
+                y + h > list_end
             };
-            // More rows than fit (more than a page) take no room.
-            full |= y + h > list_end;
             let h = if full { 0 } else { h };
             let rect = Rectangle::new((row_x, y).into(), (row_w, h).into());
             y += h;
@@ -571,6 +589,15 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
             (rect, buttons)
         })
         .collect();
+    let under = usize::from(scrolled);
+    let rows_h: i32 = view.rows[..view.rows.len().saturating_sub(under)]
+        .iter()
+        .map(height)
+        .sum();
+    let window = Rectangle::new(
+        (list.loc.x, start).into(),
+        (list.size.w, ((start + rows_h).min(list_end) - start).max(0)).into(),
+    );
     let detail_buttons = view
         .detail
         .as_ref()
@@ -583,6 +610,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
         query,
         list,
         rows,
+        window,
         detail,
         detail_buttons,
         footer,
@@ -610,7 +638,13 @@ pub fn inbox_hit(
     if on(&layout.query) {
         return Some(InboxHit::Query);
     }
-    for (i, (rect, buttons)) in layout.rows.iter().enumerate() {
+    // Rows scrolled out of the window are not hit.
+    let rows = if on(&layout.window) {
+        &layout.rows[..]
+    } else {
+        &[]
+    };
+    for (i, (rect, buttons)) in rows.iter().enumerate() {
         if let Some(k) = buttons.iter().position(on) {
             return Some(InboxHit::Button(i, k));
         }
@@ -699,14 +733,18 @@ impl Painter {
         if view.rows.is_empty() {
             self.centered(&mut c, &view.empty, FONT_SIZE, list, scale, p.placeholder);
         }
-        for (i, ((rect, buttons), row)) in layout.rows.iter().zip(&view.rows).enumerate() {
-            if rect.size.h == 0 {
-                continue;
+        let (x, y, w, h) = rect_px(shift(layout.window), scale);
+        c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
+            for (i, ((rect, buttons), row)) in layout.rows.iter().zip(&view.rows).enumerate() {
+                if rect.size.h == 0 {
+                    continue;
+                }
+                let buttons: Vec<_> = buttons.iter().map(|r| shift(*r)).collect();
+                self.inbox_row(c, view, i, row, shift(*rect), &buttons, scale, p);
             }
-            let buttons: Vec<_> = buttons.iter().map(|r| shift(*r)).collect();
-            self.inbox_row(&mut c, view, i, row, shift(*rect), &buttons, scale, p);
-        }
-        let shown = view.rows.len();
+        });
+        // The scrollbar goes by whole rows, the one shown in part not one.
+        let shown = view.rows.len().saturating_sub(usize::from(view.part > 0.0));
         scrollbar(
             &mut c,
             scroll_track(list),
@@ -1592,6 +1630,7 @@ mod tests {
             hints: hints(),
             empty: "Nothing needs you".into(),
             show_hidden: false,
+            part: 0.0,
         }
     }
 
@@ -1856,6 +1895,43 @@ mod tests {
         let (last, _) = l.rows.last().unwrap();
         let below = (centre(*last).x, (last.loc.y + last.size.h + 10) as f64).into();
         assert_eq!(inbox_hit(&v, &l, below), Some(InboxHit::Panel));
+    }
+
+    #[test]
+    fn a_scrolled_list_moves_up_and_shows_its_last_row_in_part() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let page = inbox_page(size);
+        let rows: Vec<_> = std::iter::once(label("Git", page, 0))
+            .chain((0..page).map(|n| item(&n.to_string(), "t", "s", InboxTone::Info, "")))
+            .collect();
+        let whole = InboxView {
+            rows: rows[..page].to_vec(),
+            selected: None,
+            ..view()
+        };
+        let scrolled = InboxView {
+            rows,
+            selected: None,
+            part: 0.5,
+            ..view()
+        };
+        let (a, b) = (inbox_layout(&whole, size), inbox_layout(&scrolled, size));
+        // As high as its rows but the last, shown in part, and moved up
+        // half the first one.
+        assert_eq!(a.window, b.window);
+        assert_eq!(b.rows[0].0.loc.y, b.window.loc.y - INBOX_LABEL / 2);
+        let last = b.rows[page].0;
+        let bottom = b.window.loc.y + b.window.size.h;
+        assert!(last.size.h == INBOX_ROW && last.loc.y < bottom);
+        assert!(last.loc.y + last.size.h > bottom);
+        assert!(inside(b.list, b.window));
+        // Above the window, the first row is not hit; at its bottom, the
+        // last is.
+        let x = b.window.loc.x as f64 + 40.0;
+        let above = (x, b.window.loc.y as f64 - 2.0).into();
+        assert_eq!(inbox_hit(&scrolled, &b, above), Some(InboxHit::Panel));
+        let low = (x, bottom as f64 - 2.0).into();
+        assert_eq!(inbox_hit(&scrolled, &b, low), Some(InboxHit::Row(page)));
     }
 
     #[test]
