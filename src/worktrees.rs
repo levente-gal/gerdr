@@ -31,6 +31,7 @@ use crate::{
     },
     fuzzy,
     git::{self, Worktree},
+    git_ops::Turn,
     input::Overlay,
     menu::MenuAction,
     paths,
@@ -108,6 +109,10 @@ struct Item {
     repo: usize,
     /// The repository's main worktree, where Git runs for it.
     main: PathBuf,
+    /// The git folder its worktrees share: whose turn (`git_ops::Turn`)
+    /// a delete or checkout takes, so the repositories panel's fetches
+    /// and batches don't run at once.
+    common: PathBuf,
     /// What its branch merges into: the main worktree's branch, else its
     /// commit.
     target: String,
@@ -710,7 +715,7 @@ impl Gerdr {
     /// `focus` (a main worktree) first. With the repositories' names. Their
     /// tabs open in the active workspace, else the repository's first.
     fn worktree_items(&self, focus: Option<&Path>) -> (Vec<String>, Vec<Item>) {
-        let mut repos: Vec<(PathBuf, usize, Vec<Worktree>)> = Vec::new();
+        let mut repos: Vec<(PathBuf, PathBuf, usize, Vec<Worktree>)> = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             let Some(status) = self.git.get(&ws.dir) else {
                 continue;
@@ -722,18 +727,19 @@ impl Gerdr {
                 // The active workspace is where its tabs open, when it is in
                 // the repository.
                 if w == self.active_workspace {
-                    repo.1 = w;
+                    repo.2 = w;
                 }
                 continue;
             }
             let mut all: Vec<Worktree> = status.all_worktrees().into_iter().cloned().collect();
             all.sort_by_key(|wt| (!wt.main, !wt.needs_attention()));
-            repos.push((main.to_path_buf(), w, all));
+            let common = status.common_dir.clone().unwrap_or_else(|| main.to_owned());
+            repos.push((main.to_path_buf(), common, w, all));
         }
         repos.sort_by_key(|(main, ..)| Some(main.as_path()) != focus);
         let mut names = Vec::new();
         let mut items = Vec::new();
-        for (repo, (main, workspace, all)) in repos.into_iter().enumerate() {
+        for (repo, (main, common, workspace, all)) in repos.into_iter().enumerate() {
             names.push(main.file_name().map_or_else(
                 || main.display().to_string(),
                 |n| n.to_string_lossy().into(),
@@ -747,6 +753,7 @@ impl Gerdr {
                 items.push(Item {
                     repo,
                     main: main.clone(),
+                    common: common.clone(),
                     target: target.clone(),
                     workspace,
                     wt,
@@ -1055,7 +1062,10 @@ impl Gerdr {
             .busy
             .insert(item.wt.path.clone(), "checking out…");
         std::thread::spawn(move || {
-            let result = git::checkout_in_main(&item.main, &item.wt);
+            let result = {
+                let _turn = Turn::take(&item.common, "a worktree checkout");
+                git::checkout_in_main(&item.main, &item.wt)
+            };
             let _ = tx.send(Done::CheckedOut {
                 path: item.wt.path,
                 said,
@@ -1114,7 +1124,10 @@ impl Gerdr {
             let deleted = doomed
                 .into_iter()
                 .map(|item| {
-                    let result = git::remove_worktree(&item.main, &item.wt, force);
+                    let result = {
+                        let _turn = Turn::take(&item.common, "a worktree delete");
+                        git::remove_worktree(&item.main, &item.wt, force)
+                    };
                     (item.wt.name(), item.wt.path, result)
                 })
                 .collect();
@@ -1215,6 +1228,7 @@ mod tests {
         Item {
             repo,
             main: "/src/r".into(),
+            common: "/src/r/.git".into(),
             target: "main".into(),
             workspace: 0,
             wt: Worktree {
