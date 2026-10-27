@@ -39,10 +39,11 @@ pub const WORKTREES_LABEL: i32 = PROJECT_MENU_SECTION;
 /// What the worktrees popup shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorktreesView {
-    /// The entries in view, scrolled.
+    /// The entries in view, scrolled, then those under the list shown in
+    /// part (in its last rows' room, or as it scrolls part of a row).
     pub entries: Vec<WorktreeEntry>,
     /// How high the list is kept, whatever is in view, so it does not
-    /// change as it scrolls.
+    /// change as it scrolls; entries past it show in part.
     pub list_height: i32,
     /// The selected entry, by index into `entries`.
     pub selected: Option<usize>,
@@ -58,9 +59,7 @@ pub struct WorktreesView {
     pub repo: Option<String>,
     /// What the list says when it is empty.
     pub empty: String,
-    /// The part of the first worktree scrolled past, 0 to 1; with some,
-    /// the entries take the next worktree (and its label) under the list,
-    /// shown in part.
+    /// The part of the first worktree scrolled past, 0 to 1.
     pub part: f64,
 }
 
@@ -243,15 +242,9 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
             (rect, buttons)
         })
         .collect();
-    // A list scrolled part of a row overflows, as high as it is kept, the
-    // entries under it shown in part.
-    if view.part > 0.0 {
-        y = start;
-    }
-    // Room for the line saying there are none.
-    y = y
-        .max(start + view.list_height)
-        .max(start + PROJECT_MENU_ROW);
+    // As high as it is kept, the entries past it shown in part; with room
+    // for the line saying there are none.
+    let y = start + view.list_height.max(PROJECT_MENU_ROW);
     let list = Rectangle::new((row_x, start).into(), (row_w, y - start).into());
     let footer_h = footer_height(view.hints.len());
     let bottom = y + PROJECT_MENU_PADDING + footer_h;
@@ -727,7 +720,7 @@ mod tests {
                 line("main", vec![Diff]),
                 line("topic", vec![Diff, Checkout, Merge, Delete]),
             ],
-            list_height: 0,
+            list_height: WORKTREES_LABEL + 2 * WORKTREES_ROW,
             selected: Some(2),
             hover: None,
             hints: vec![("↵".into(), "diff".into()), ("Del".into(), "delete".into())],
@@ -878,6 +871,18 @@ mod tests {
         let bottom = l.list.loc.y + l.list.size.h;
         let (last, _) = l.entries.last().unwrap();
         assert!(last.loc.y < bottom && last.loc.y + last.size.h > bottom);
+        // At rest, the label under the last rows peeks in their room, and
+        // the list keeps its height.
+        let rest = worktrees_layout(
+            &WorktreesView {
+                part: 0.0,
+                ..scrolled.clone()
+            },
+            size,
+        );
+        assert_eq!(rest.list, l.list);
+        let (label_under, _) = rest.entries[3];
+        assert!(label_under.loc.y < bottom && label_under.loc.y + label_under.size.h > bottom);
         // The label covers the worktree under it; under the list is none.
         let x = l.list.loc.x as f64 + 40.0;
         let on_label = (x, l.list.loc.y as f64 + 4.0);

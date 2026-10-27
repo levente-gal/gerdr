@@ -214,21 +214,37 @@ fn shown(items: &[Item], first: usize, page: usize) -> Vec<Entry> {
     shown
 }
 
-/// What a view of `shown` entries of `items` adds under them while
-/// scrolled part of a row: the next worktree, with its repository's label
-/// when that starts there.
-fn under(items: &[Item], shown: &[Entry]) -> Vec<Entry> {
-    let Some(&Entry::Item(k)) = shown.last() else {
+/// The entries under a view of `page` rows showing `shown` of `items`
+/// that show in part: those reaching into the room its last rows leave,
+/// and as far as scrolling part of its first worktree brings up.
+fn under(items: &[Item], shown: &[Entry], page: usize) -> Vec<Entry> {
+    let (Some(&Entry::Item(first)), Some(&Entry::Item(last))) = (
+        shown.iter().find(|e| matches!(e, Entry::Item(_))),
+        shown.last(),
+    ) else {
         return Vec::new();
     };
-    let Some(next) = items.get(k + 1) else {
-        return Vec::new();
+    // Scrolling the first worktree brings the next one up to its place.
+    let step = match items.get(first + 1) {
+        Some(next) if next.repo != items[first].repo => {
+            chrome::WORKTREES_ROW + chrome::WORKTREES_LABEL
+        }
+        _ => chrome::WORKTREES_ROW,
     };
+    let reach = room(page) + step;
+    let mut h: i32 = shown.iter().copied().map(height).sum();
     let mut under = Vec::new();
-    if next.repo != items[k].repo {
-        under.push(Entry::Repo(next.repo));
+    for (k, item) in items.iter().enumerate().skip(last + 1) {
+        if h >= reach {
+            break;
+        }
+        if item.repo != items[k - 1].repo {
+            under.push(Entry::Repo(item.repo));
+            h += chrome::WORKTREES_LABEL;
+        }
+        under.push(Entry::Item(k));
+        h += chrome::WORKTREES_ROW;
     }
-    under.push(Entry::Item(k + 1));
     under
 }
 
@@ -411,9 +427,9 @@ impl Popup {
         self.first.min(last_first(items, page))
     }
 
-    /// The entries a view of `page` rows shows, with the part of its first
-    /// worktree scrolled past: with some, the entries under the page too,
-    /// shown in part.
+    /// The entries a view of `page` rows shows, then those under it shown
+    /// in part, with the part of its first worktree scrolled past.
+    /// Selection and keys keep to the view's own entries.
     fn in_view(&self, items: &[Item], page: usize) -> (Vec<Entry>, f64) {
         let first = self.first_shown(items, page);
         let mut shown = shown(items, first, page);
@@ -423,10 +439,8 @@ impl Popup {
         } else {
             0.0
         };
-        if part > 0.0 {
-            let under = under(items, &shown);
-            shown.extend(under);
-        }
+        let under = under(items, &shown, page);
+        shown.extend(under);
         (shown, part)
     }
 
@@ -1373,6 +1387,8 @@ mod tests {
     #[test]
     fn a_touchpad_scrolls_by_parts_of_a_row() {
         let mut items = items();
+        items.push(item(0, "a", false, false, false));
+        items.push(item(0, "b", false, false, false));
         let mut other = item(1, "other", true, false, false);
         (other.main, other.wt.path) = ("/src/s".into(), "/src/s".into());
         items.push(other);
@@ -1388,18 +1404,26 @@ mod tests {
                 })
                 .collect()
         };
+        let key = |popup: &mut Popup, sym: Keysym| {
+            popup.key(&ModifiersState::default(), sym, &items, 3);
+        };
         let mut popup = Popup::default();
         popup.select(&items, 0, 3);
-        assert_eq!(shown(&popup), ["# r", "main", "wip"]);
+        // Under the page, already at rest, what shows in its last rows'
+        // room and as it scrolls part of a row.
+        assert_eq!(shown(&popup), ["# r", "main", "wip", "done", "a"]);
+        assert_eq!(view(&popup).part, 0.0);
         popup.wheel_by(&items, 1.5, 3);
         assert_eq!(view(&popup).part, 0.5);
-        // The next worktree, under the list, with its repository's label.
-        assert_eq!(shown(&popup), ["# r", "wip", "done", "# s", "other"]);
+        assert_eq!(shown(&popup), ["# r", "wip", "done", "a", "b"]);
         assert_eq!(view(&popup).list_height, 3 * chrome::WORKTREES_ROW);
+        // The next repository's label and worktree come with it.
+        popup.scroll(&items, 3, 3);
+        assert_eq!(shown(&popup), ["# r", "b", "# s", "other"]);
         // Up past the top holds the list whole, and so does its end.
-        popup.wheel_by(&items, -3.0, 3);
+        popup.wheel_by(&items, -9.0, 3);
         assert_eq!(view(&popup).part, 0.0);
-        assert_eq!(shown(&popup), ["# r", "main", "wip"]);
+        assert_eq!(shown(&popup), ["# r", "main", "wip", "done", "a"]);
         popup.wheel_by(&items, 9.5, 3);
         assert_eq!(view(&popup).part, 0.0);
         assert_eq!(shown(&popup), ["# s", "other"]);
@@ -1407,18 +1431,24 @@ mod tests {
         // in part, drop the part.
         popup.wheel_by(&items, -2.5, 3);
         assert_eq!(view(&popup).part, 0.5);
-        popup.key(&ModifiersState::default(), Keysym::End, &items, 3);
+        key(&mut popup, Keysym::End);
         assert_eq!(view(&popup).part, 0.0);
         popup.wheel_by(&items, -2.5, 3);
         assert_eq!(view(&popup).part, 0.5);
-        popup.key(&ModifiersState::default(), Keysym::Home, &items, 3);
+        key(&mut popup, Keysym::Home);
         assert_eq!(view(&popup).part, 0.0);
-        assert_eq!(shown(&popup), ["# r", "main", "wip"]);
-        // A click on the worktree under the list scrolls it in.
+        assert_eq!(shown(&popup), ["# r", "main", "wip", "done", "a"]);
+        // Keys keep to the page: a worktree under it is scrolled in.
+        key(&mut popup, Keysym::Down);
+        key(&mut popup, Keysym::Down);
+        assert_eq!(popup.first_shown(&items, 3), 1);
+        assert_eq!(view(&popup).selected, Some(2));
+        // So is one clicked.
+        key(&mut popup, Keysym::Home);
         popup.wheel_by(&items, 0.5, 3);
-        let under = view(&popup).entries.len() - 1;
-        popup.click(WorktreesHit::Entry(under), &items, 3);
+        popup.click(WorktreesHit::Entry(3), &items, 3);
         assert_eq!(popup.selected(&items), Some(2));
+        assert_eq!(popup.first_shown(&items, 3), 1);
         assert_eq!(view(&popup).part, 0.0);
     }
 
