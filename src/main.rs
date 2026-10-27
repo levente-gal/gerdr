@@ -2583,8 +2583,10 @@ impl Gerdr {
 
     /// The agent rows of each workspace, in sidebar order. Those of the
     /// other workspaces that are blocked or done also show in the "Needs
-    /// you" list, unless the config hides it.
+    /// you" list, unless the config hides it or the inbox has them
+    /// dismissed or snoozed.
     pub fn agent_views(&self) -> Vec<Vec<AgentView>> {
+        let now = inbox_store::now_secs();
         self.workspaces
             .iter()
             .enumerate()
@@ -2596,7 +2598,7 @@ impl Gerdr {
                         view.inbox = matches!(
                             view.status,
                             herdr::AgentStatus::Blocked | herdr::AgentStatus::Done
-                        );
+                        ) && !self.inbox_hides_agent(view, now);
                     }
                 }
                 views
@@ -4502,6 +4504,7 @@ impl Gerdr {
         self.welcome = None;
         self.quit = None;
         self.project = Some(id.to_owned());
+        self.load_inbox();
         self.projects.last_active = Some(id.to_owned());
         if let Some(project) = self.projects.project_mut(id) {
             project.last_used = projects::now();

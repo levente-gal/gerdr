@@ -139,6 +139,30 @@ impl<'a> Sources<'a> {
     }
 }
 
+/// An agent card's fingerprint: its status and herdr's count of its
+/// state changes (a Cursor chat's last update), so it changes whenever
+/// the agent moves on. `None` for what is not an agent (a CI card).
+pub fn agent_fingerprint(
+    view: &AgentView,
+    herdr_agents: &[AgentInfo],
+    cursor_chats: &[CursorChat],
+) -> Option<String> {
+    let status = status_label(view.status);
+    match &view.key {
+        AgentKey::Herdr(pane_id) => {
+            let info = herdr_agents.iter().find(|a| &a.pane_id == pane_id);
+            let seq = info.map_or(0, |a| a.state_change_seq);
+            Some(format!("{status}#{seq}"))
+        }
+        AgentKey::Cursor(chat) => {
+            let chat = cursor_chats.iter().find(|c| &c.row.id == chat);
+            let updated = chat.map_or(0, |c| c.row.updated_ms);
+            Some(format!("{status}#{updated}"))
+        }
+        AgentKey::Ci(_) => None,
+    }
+}
+
 /// The agents blocked, done or at work, in every workspace.
 pub fn agent_items(src: &Sources) -> Vec<InboxItem> {
     let mut items = Vec::new();
@@ -155,20 +179,13 @@ pub fn agent_items(src: &Sources) -> Vec<InboxItem> {
             if !listed.insert(view.key.clone()) {
                 continue;
             }
-            let status = status_label(view.status);
-            let (fingerprint, pane) = match &view.key {
-                AgentKey::Herdr(pane_id) => {
-                    let info = src.herdr_agents.iter().find(|a| &a.pane_id == pane_id);
-                    let seq = info.map_or(0, |a| a.state_change_seq);
-                    let pane = src.pane_text.get(pane_id).map(|p| p.text.clone());
-                    (format!("{status}#{seq}"), pane)
-                }
-                AgentKey::Cursor(chat) => {
-                    let chat = src.cursor_chats.iter().find(|c| &c.row.id == chat);
-                    let updated = chat.map_or(0, |c| c.row.updated_ms);
-                    (format!("{status}#{updated}"), None)
-                }
-                AgentKey::Ci(_) => continue,
+            let Some(fingerprint) = agent_fingerprint(view, src.herdr_agents, src.cursor_chats)
+            else {
+                continue;
+            };
+            let pane = match &view.key {
+                AgentKey::Herdr(pane_id) => src.pane_text.get(pane_id).map(|p| p.text.clone()),
+                _ => None,
             };
             let age = src
                 .agent_since
@@ -760,6 +777,9 @@ mod tests {
         f.herdr_agents = vec![herdr_info("p1", 4)];
         let after = agent_items(&f.sources());
         assert_ne!(before[0].fingerprint, after[0].fingerprint);
+        // The sidebar's check of a card agrees with the inbox's item.
+        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats);
+        assert_eq!(print.as_ref(), Some(&after[0].fingerprint));
     }
 
     #[test]

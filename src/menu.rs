@@ -14,6 +14,7 @@ use smithay::{
 use crate::{
     Action, Gerdr, WorkspaceKind,
     chrome::{self, MenuRow, MenuView, Rect, ReposButton, ThemeMode},
+    inbox_store,
     layout::{Dir, Side},
     rename::RenameTarget,
 };
@@ -85,6 +86,15 @@ pub enum MenuAction {
     InboxRestore {
         project: String,
         id: String,
+    },
+    /// A toast's "Undo" after an inbox todo was deleted: put `todo` back
+    /// in project `project`'s file (by id), at index `at` of its todos,
+    /// with how it was triaged.
+    InboxUndelete {
+        project: String,
+        todo: inbox_store::Todo,
+        at: usize,
+        triage: Option<inbox_store::Triage>,
     },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
@@ -326,6 +336,12 @@ impl Gerdr {
             MenuAction::Repos => self.open_repos(),
             MenuAction::Inbox => self.open_inbox(None),
             MenuAction::InboxRestore { project, id } => self.inbox_restore(&project, id),
+            MenuAction::InboxUndelete {
+                project,
+                todo,
+                at,
+                triage,
+            } => self.inbox_undelete(&project, todo, at, triage),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }

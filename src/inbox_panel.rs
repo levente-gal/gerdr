@@ -124,6 +124,24 @@ impl Gerdr {
         (Some(id) == self.project.as_ref()).then_some(file)
     }
 
+    /// Whether the inbox has the agent of card `view` dismissed or snoozed
+    /// at `now` (seconds), as it is now: the sidebar's "Needs you" list
+    /// leaves it out too.
+    pub(crate) fn inbox_hides_agent(&self, view: &AgentView, now: u64) -> bool {
+        let Some(file) = self.inbox_file() else {
+            return false;
+        };
+        inbox_sources::agent_fingerprint(view, &self.agents, &self.cursor_chats).is_some_and(
+            |print| inbox::hides(&file.triage, &format!("agent:{}", view.key), &print, now),
+        )
+    }
+
+    /// Load the shown project's inbox file, so what it hides is hidden
+    /// from the sidebar too before the inbox is first opened.
+    pub(crate) fn load_inbox(&mut self) {
+        self.inbox_file_mut();
+    }
+
     /// Save the shown project's inbox file, its stale triage pruned.
     fn save_inbox(&mut self) {
         let Some((id, file)) = self.inbox.store.as_mut() else {
@@ -440,10 +458,23 @@ impl Gerdr {
                 let Some(file) = self.inbox_file_mut() else {
                     return;
                 };
-                file.todos.retain(|t| t.id != todo);
-                file.triage.remove(&id.0);
+                let Some(at) = file.todos.iter().position(|t| t.id == todo) else {
+                    return;
+                };
+                let todo = file.todos.remove(at);
+                let triage = file.triage.remove(&id.0);
                 self.save_inbox();
-                self.toast(format!("Deleted: {}", item.title), Level::Info);
+                let text = format!("Deleted: {}", item.title);
+                let Some(project) = self.project.clone() else {
+                    return self.toast(text, Level::Info);
+                };
+                let undelete = MenuAction::InboxUndelete {
+                    project,
+                    todo,
+                    at,
+                    triage,
+                };
+                self.toast_with(text, Level::Info, Some(("Undo".to_owned(), undelete)));
             }
             // The panel edits the todo itself, and hands back `SaveTodo`.
             ItemAction::Edit => {}
@@ -533,15 +564,30 @@ impl Gerdr {
     /// file loaded is changed if it is that project's, else that project's
     /// is loaded, changed and saved on its own.
     pub fn inbox_restore(&mut self, project: &str, id: String) {
+        self.change_inbox_of(project, |file| restore(file, &id));
+    }
+
+    /// The toast's "Undo" after a todo was deleted: put `todo` back in
+    /// project `project`'s file at index `at` (or last, if there are fewer
+    /// now), triaged as it was. Not if one of its id was written since.
+    pub fn inbox_undelete(&mut self, project: &str, todo: Todo, at: usize, triage: Option<Triage>) {
+        self.change_inbox_of(project, |file| undelete(file, todo, at, triage));
+    }
+
+    /// Change project `project`'s inbox file (by id) with `change`, and
+    /// save it if `change` says it changed. The project needn't be the
+    /// shown one: the file loaded is changed if it is that project's, else
+    /// that project's is loaded, changed and saved on its own.
+    fn change_inbox_of(&mut self, project: &str, change: impl FnOnce(&mut InboxFile) -> bool) {
         match self.inbox.store.as_mut() {
             Some((p, file)) if p == project => {
-                if restore(file, &id) {
+                if change(file) {
                     self.save_inbox();
                 }
             }
             _ => {
                 let mut file = inbox_store::load(None, project);
-                if restore(&mut file, &id)
+                if change(&mut file)
                     && let Err(err) = inbox_store::save(None, project, &file)
                 {
                     tracing::warn!("inbox of {project}: {err}");
@@ -764,6 +810,20 @@ fn restore(file: &mut InboxFile, id: &str) -> bool {
     changed
 }
 
+/// Put deleted `todo` back in `file` at index `at` (or last), with its
+/// `triage`; whether it was. Not if a todo of its id is there already.
+fn undelete(file: &mut InboxFile, todo: Todo, at: usize, triage: Option<Triage>) -> bool {
+    if file.todos.iter().any(|t| t.id == todo.id) {
+        return false;
+    }
+    if let Some(triage) = triage {
+        file.triage.insert(format!("todo:{}", todo.id.0), triage);
+    }
+    let at = at.min(file.todos.len());
+    file.todos.insert(at, todo);
+    true
+}
+
 /// The id of a new todo of `file`: `t<next_todo>`, moved past any taken,
 /// and `next_todo` moved on.
 fn next_todo_id(file: &mut InboxFile) -> TodoId {
@@ -773,5 +833,39 @@ fn next_todo_id(file: &mut InboxFile) -> TodoId {
         if !file.todos.iter().any(|t| t.id == id) {
             return id;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn todo(id: &str) -> Todo {
+        Todo {
+            id: TodoId(id.into()),
+            text: id.into(),
+            ..Todo::default()
+        }
+    }
+
+    #[test]
+    fn a_deleted_todo_comes_back_where_it_was() {
+        let mut file = InboxFile {
+            todos: vec![todo("t1"), todo("t3")],
+            ..InboxFile::default()
+        };
+        let triage = Triage {
+            fingerprint: String::new(),
+            until: Some(9),
+            seen: 1,
+        };
+        assert!(undelete(&mut file, todo("t2"), 1, Some(triage.clone())));
+        let ids: Vec<_> = file.todos.iter().map(|t| t.id.0.as_str()).collect();
+        assert_eq!(ids, ["t1", "t2", "t3"]);
+        assert_eq!(file.triage.get("todo:t2"), Some(&triage));
+        // Once is enough; past the end goes last.
+        assert!(!undelete(&mut file, todo("t2"), 0, None));
+        assert!(undelete(&mut file, todo("t4"), 9, None));
+        assert_eq!(file.todos.last().map(|t| t.id.0.as_str()), Some("t4"));
     }
 }
