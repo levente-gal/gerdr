@@ -1751,7 +1751,7 @@ impl Painter {
                 if let (Some(line), Some(branch)) = (row.branch, &ws.branch) {
                     let line_band = band(line, scale);
                     let icon = within(line, line.loc.x, BRANCH_ICON_WIDTH);
-                    icon_sdf(c, icon, scale, p.placeholder, |x, y| {
+                    icon_sdf(c, icon, scale, p.accent, |x, y| {
                         git_branch(x, y, 0.75 * s)
                     });
                     let x = px(line.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
@@ -1764,7 +1764,7 @@ impl Painter {
                         end,
                         line_band,
                         scale,
-                        p.muted,
+                        p.accent,
                     );
                     if let Some(git) = &ws.git {
                         self.git_marks(c, git, after, end, line_band, scale, p);
