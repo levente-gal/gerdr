@@ -283,7 +283,7 @@ fn buttons(wt: &Worktree) -> Vec<WorktreeButton> {
 }
 
 fn can_merge(wt: &Worktree) -> bool {
-    can_checkout(wt) && !wt.merged
+    can_checkout(wt) && !wt.merged && !wt.fresh
 }
 
 fn can_checkout(wt: &Worktree) -> bool {

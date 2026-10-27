@@ -131,8 +131,9 @@ impl Worktree {
         })
     }
 
-    /// Whether it still needs a look: changes in it, a branch not merged
-    /// (or none), or its folder gone. A merged, clean one is done with.
+    /// Whether it still needs a look: changes in it, a branch with commits
+    /// not merged (or none), or its folder gone. A merged, clean one is
+    /// done with; a new one with no commit yet has nothing to look at.
     pub fn needs_attention(&self) -> bool {
         self.dirty || self.attention_tag().is_some()
     }
@@ -141,7 +142,7 @@ impl Worktree {
     pub fn attention_tag(&self) -> Option<&'static str> {
         if self.gone {
             Some("gone")
-        } else if !self.main && !self.merged {
+        } else if !self.main && !self.merged && !self.fresh {
             Some("unmerged")
         } else {
             None
@@ -149,10 +150,15 @@ impl Worktree {
     }
 
     /// Where it stands, in a word or two: why it needs a look, else "main
-    /// worktree" or "merged".
+    /// worktree", "new" or "merged".
     pub fn tag(&self) -> &'static str {
-        self.attention_tag()
-            .unwrap_or(if self.main { "main worktree" } else { "merged" })
+        self.attention_tag().unwrap_or(if self.main {
+            "main worktree"
+        } else if self.fresh {
+            "new"
+        } else {
+            "merged"
+        })
     }
 }
 
@@ -645,6 +651,9 @@ pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
     if w.merged {
         return Err(format!("{name} is merged already"));
     }
+    if w.fresh {
+        return Err(format!("{name} has no commit of its own"));
+    }
     if w.dirty {
         return Err(format!("{name} has uncommitted changes"));
     }
@@ -940,6 +949,12 @@ mod tests {
         let new = repo.find("new");
         assert!(new.fresh && !new.merged && !new.main);
         assert!(!repo.find("main").fresh);
+        assert_eq!(new.tag(), "new");
+        assert!(!new.needs_attention());
+        assert_eq!(
+            squash_check(&repo.0, &new),
+            Err("new has no commit of its own".into())
+        );
         // It goes, branch and all, without force.
         assert_eq!(remove_worktree(&repo.0, &new, false), Ok(()));
         assert!(!path.exists());
