@@ -1025,18 +1025,23 @@ pub fn log_path(app: &str) -> PathBuf {
 /// `app`'s log, open for appending; started over once too big. `None`
 /// (and a warning) when it can't be opened.
 pub fn log_file(app: &str) -> Option<std::fs::File> {
-    let path = log_path(app);
+    append_log(&log_path(app))
+}
+
+/// The log at `path`, open for appending, its folder made; started over
+/// once too big. `None` (and a warning) when it can't be opened.
+pub fn append_log(path: &Path) -> Option<std::fs::File> {
     let open = || {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX);
+        let big = std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX);
         std::fs::OpenOptions::new()
             .create(true)
             .append(!big)
             .write(true)
             .truncate(big)
-            .open(&path)
+            .open(path)
     };
     open()
         .inspect_err(|err| tracing::warn!("opening {}: {err}", path.display()))

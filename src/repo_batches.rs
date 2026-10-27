@@ -23,7 +23,7 @@ use crate::{
     Drag, Gerdr,
     chrome::{self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, Tone, TreeLine},
     git::{GitStatus, InProgress},
-    git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
+    git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
         Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
         RunState,
@@ -368,18 +368,27 @@ fn fetches_first(kind: &BatchKind) -> bool {
     matches!(kind, BatchKind::Integrate { .. } | BatchKind::Pull(_))
 }
 
-/// Of `roots` with their shared git folders, one per repository.
-fn one_per_repository(roots: Vec<(PathBuf, Option<PathBuf>)>) -> Vec<PathBuf> {
+/// Of `roots` with their shared git folders, one per repository, with
+/// what its turn is taken by (`git_ops::Turn`).
+fn one_per_repository(roots: Vec<(PathBuf, Option<PathBuf>)>) -> Vec<(PathBuf, PathBuf)> {
     let mut seen = Vec::new();
     let mut out = Vec::new();
     for (root, common) in roots {
         if common.as_ref().is_some_and(|c| seen.contains(c)) {
             continue;
         }
-        seen.extend(common);
-        out.push(root);
+        seen.extend(common.clone());
+        let key = common.unwrap_or_else(|| root.clone());
+        out.push((root, key));
     }
     out
+}
+
+/// `fetch --all` in `root` in its repository's turn (`key`), waiting for
+/// what runs there first.
+fn fetch_in_turn(root: &Path, key: &Path) -> OpResult {
+    let _turn = Turn::take(key, "a fetch");
+    git_ops::fetch_all(root)
 }
 
 /// A few file names, then how many more.
@@ -502,8 +511,8 @@ impl Gerdr {
         };
         std::thread::spawn(move || {
             std::thread::scope(|scope| {
-                for root in &roots {
-                    scope.spawn(move || git_ops::fetch_all(root));
+                for (root, key) in &roots {
+                    scope.spawn(move || fetch_in_turn(root, key));
                 }
             });
             let _ = tx.send(RepoEvent::Fetched);
@@ -1093,8 +1102,8 @@ impl Gerdr {
         std::thread::spawn(move || {
             let mut verdicts = found;
             std::thread::scope(|scope| {
-                for root in &fetches {
-                    scope.spawn(move || git_ops::fetch_all(root));
+                for (root, key) in &fetches {
+                    scope.spawn(move || fetch_in_turn(root, key));
                 }
             });
             std::thread::scope(|scope| {
@@ -1154,8 +1163,8 @@ impl Gerdr {
         }
         std::thread::spawn(move || {
             std::thread::scope(|scope| {
-                for root in &fetches {
-                    scope.spawn(move || git_ops::fetch_all(root));
+                for (root, key) in &fetches {
+                    scope.spawn(move || fetch_in_turn(root, key));
                 }
             });
             let have = probes
@@ -1250,7 +1259,6 @@ impl Gerdr {
             std::thread::spawn(move || {
                 while let Some(task) = Queue::next(&queue) {
                     let root = task.job.root.clone();
-                    let before = git_ops::head(&root);
                     let step = |what: &str| {
                         let _ = tx.send(RepoEvent::Step {
                             batch: task.batch,
@@ -1258,8 +1266,18 @@ impl Gerdr {
                             what: what.to_owned(),
                         });
                     };
+                    // A fetch of the panel's own, or a check's, may run
+                    // there still.
+                    let key = task.common.clone().unwrap_or_else(|| root.clone());
+                    let what = format!("the {}", task.kind.label().to_lowercase());
+                    let turn = Turn::try_take(&key, &what).unwrap_or_else(|holder| {
+                        step(&format!("waiting for {holder}"));
+                        Turn::take(&key, &what)
+                    });
+                    let before = git_ops::head(&root);
                     let result = perform(&task, &step);
                     let after = git_ops::head(&root);
+                    drop(turn);
                     Queue::done(&queue, &task);
                     let _ = tx.send(RepoEvent::Finished {
                         batch: task.batch,

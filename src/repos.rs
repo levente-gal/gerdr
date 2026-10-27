@@ -564,7 +564,8 @@ impl Batch {
     }
 
     /// The result bar's line: `Commit and push: 2 done · 1 conflict ·
-    /// 1 failed`, and its colour.
+    /// 1 failed`, with why when only one failed (`Push: 1 failed: cannot
+    /// lock ref …`), and its colour.
     pub fn summary(&self) -> (String, Tone) {
         let (mut done, mut conflicts, mut failed, mut skipped, mut going) = (0, 0, 0, 0, 0);
         for run in &self.runs {
@@ -590,8 +591,13 @@ impl Batch {
         if conflicts > 0 {
             parts.push(count(conflicts, "conflict"));
         }
-        if failed > 0 {
-            parts.push(format!("{failed} failed"));
+        // One failure says why, here and in the toast when the panel is
+        // closed.
+        let whys: Vec<&str> = self.runs.iter().filter_map(RepoRun::failed_why).collect();
+        match whys[..] {
+            [why] if going == 0 && failed == 1 => parts.push(format!("1 failed: {why}")),
+            _ if failed > 0 => parts.push(format!("{failed} failed")),
+            _ => {}
         }
         if skipped > 0 {
             parts.push(format!("{skipped} skipped"));
@@ -628,6 +634,20 @@ pub struct RepoRun {
     pub state: RunState,
     /// Every command run in it, for the log.
     pub log: Vec<Ran>,
+}
+
+impl RepoRun {
+    /// Why it failed, other than on conflicts, when git said.
+    fn failed_why(&self) -> Option<&str> {
+        match &self.state {
+            RunState::Failed {
+                failure: Failure::Conflict(_),
+                ..
+            } => None,
+            RunState::Failed { why, .. } => Some(why.trim()).filter(|w| !w.is_empty()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2880,19 +2900,24 @@ impl Panel {
                         Failure::Locked => (
                             "locked",
                             Tone::Warning,
-                            "Another git command holds its lock: try again once it is done".into(),
+                            "Another git command holds its lock: try again once it is done, or delete the lock if none runs".into(),
                         ),
                         Failure::Timeout => (
                             "timed out",
                             Tone::Error,
                             "The remote took too long: run it in a terminal".into(),
                         ),
-                        Failure::Blocked(_) => ("blocked", Tone::Warning, why.clone()),
+                        Failure::Blocked(_) => return chip("blocked", Tone::Warning, why),
                         Failure::Other => (
                             "failed",
                             Tone::Error,
                             format!("{batch} failed: see the log (Ctrl+T)"),
                         ),
+                    };
+                    // What git said first: the hint alone hides it.
+                    let tip = match why.trim() {
+                        "" => tip,
+                        why => format!("{why} · {tip}"),
                     };
                     return chip(text, tone, &tip);
                 }
@@ -4294,10 +4319,17 @@ mod tests {
         assert_eq!(
             b.summary(),
             (
-                "Commit and push: 2 done · 1 conflict · 1 failed · 1 skipped".into(),
+                "Commit and push: 2 done · 1 conflict · 1 failed: it went wrong · 1 skipped".into(),
                 Tone::Error
             )
         );
+        // Two failures: only how many.
+        b.runs.push(run("h", failed(Failure::Locked)));
+        assert_eq!(
+            b.summary().0,
+            "Commit and push: 2 done · 1 conflict · 2 failed · 1 skipped"
+        );
+        b.runs.pop();
         b.runs.remove(3);
         assert_eq!(b.summary().1, Tone::Warning);
         b.runs.truncate(2);

@@ -15,7 +15,7 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -43,6 +43,16 @@ const FOLDER_FILES: usize = 200;
 const UNTRACKED_BYTES: u64 = 1 << 20;
 /// How many commits `log_ahead` shows without an upstream.
 const LOG_LAST: &str = "10";
+/// How long to wait before each new try of a command that found a lock
+/// held: another git (the user's, an editor's) is likely done by then.
+#[cfg(not(test))]
+const LOCK_RETRIES: [Duration; 3] = [
+    Duration::from_millis(300),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+#[cfg(test)]
+const LOCK_RETRIES: [Duration; 3] = [Duration::from_millis(10); 3];
 
 /// A command that ran, for the log.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +80,7 @@ pub enum Failure {
     Diverged,
     /// The branch is checked out in the worktree at this path.
     CheckedOut(PathBuf),
-    /// Another git holds `index.lock`.
+    /// Another git holds a lock: `index.lock`, a ref's, `packed-refs`'.
     Locked,
     /// It took longer than allowed and was killed.
     Timeout,
@@ -134,9 +144,11 @@ pub enum Verdict {
 }
 
 /// Whether a command talks to a remote: it gets longer, and ssh in batch
-/// mode.
+/// mode. A `Read` only asks: it takes no lock it can do without
+/// (`GIT_OPTIONAL_LOCKS=0`), so it never gets in an operation's way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reach {
+    Read,
     Local,
     Network,
 }
@@ -166,7 +178,7 @@ fn limit(reach: Reach) -> Duration {
         return limit;
     }
     match reach {
-        Reach::Local => LOCAL_TIMEOUT,
+        Reach::Read | Reach::Local => LOCAL_TIMEOUT,
         Reach::Network => NETWORK_TIMEOUT,
     }
 }
@@ -222,6 +234,9 @@ fn exec(dir: &Path, args: &[&str], reach: Reach) -> Output {
         && let Some(ssh) = batch_ssh(dir)
     {
         cmd.env("GIT_SSH_COMMAND", ssh);
+    }
+    if reach == Reach::Read {
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
     }
     #[cfg(test)]
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -334,8 +349,110 @@ impl Drain {
 /// What `git args` prints in `dir` when it succeeds: a question asked, not
 /// logged.
 fn query(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = exec(dir, args, Reach::Local);
+    let out = exec(dir, args, Reach::Read);
     out.ran.ok.then_some(out.stdout)
+}
+
+/// The repositories gerdr runs a git command that writes in, by shared
+/// git folder, each with what runs there: one at a time in each, or two
+/// fetches (a background one and the user's push) fight over its refs'
+/// locks and one fails.
+static TURNS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+/// Told when a turn is over.
+static TURN_OVER: Condvar = Condvar::new();
+
+/// A repository's turn to be written in, by one thread, until dropped.
+/// Taken around every operation the panel runs, in the background too.
+#[must_use]
+pub struct Turn(PathBuf);
+
+impl Turn {
+    /// The turn of the repository whose shared git folder is `key` (its
+    /// folder when it has none), for `what` (`"a fetch"`); else what has
+    /// it now.
+    pub fn try_take(key: &Path, what: &str) -> Result<Self, String> {
+        let mut turns = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, holder)) = turns.iter().find(|(k, _)| k == key) {
+            return Err(holder.clone());
+        }
+        turns.push((key.to_owned(), what.to_owned()));
+        Ok(Self(key.to_owned()))
+    }
+
+    /// The turn of `key` for `what`, waiting for it.
+    pub fn take(key: &Path, what: &str) -> Self {
+        let mut turns = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        while turns.iter().any(|(k, _)| k == key) {
+            turns = TURN_OVER.wait(turns).unwrap_or_else(|e| e.into_inner());
+        }
+        turns.push((key.to_owned(), what.to_owned()));
+        Self(key.to_owned())
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut turns = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        turns.retain(|(k, _)| *k != self.0);
+        TURN_OVER.notify_all();
+    }
+}
+
+/// Add the commands of `log` that failed, run in `dir`, to gerdr's
+/// `git.log`, with all they printed: what the panel showed is gone once
+/// the next batch runs, and a background fetch's failure isn't shown.
+#[cfg_attr(test, allow(unused_variables))]
+fn log_failed(dir: &Path, log: &[Ran]) {
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let failed: Vec<&Ran> = log.iter().filter(|r| !r.ok).collect();
+        if failed.is_empty() {
+            return;
+        }
+        let Some(mut file) = crate::launch::append_log(&crate::state_dir().join("git.log")) else {
+            return;
+        };
+        let mut text = String::new();
+        for ran in failed {
+            text.push_str(&format!(
+                "{} {}\n$ {}\n{}",
+                local_time(),
+                dir.display(),
+                ran.command,
+                ran.output
+            ));
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push('\n');
+        }
+        let _ = file.write_all(text.as_bytes());
+    }
+}
+
+/// The local time now, `2026-10-27 14:03:52`.
+#[cfg(not(test))]
+fn local_time() -> String {
+    // SAFETY: `localtime_r` writes only to the `tm` it is given, and an
+    // all-zero `tm` is a valid one.
+    let tm = unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return String::new();
+        }
+        tm
+    };
+    format!(
+        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
 }
 
 /// What kind of failure git's output tells of. A conflict's files are
@@ -346,7 +463,12 @@ pub fn classify(stderr: &str, stdout: &str) -> Failure {
     if let Some(path) = checked_out_at(&text) {
         return Failure::CheckedOut(path);
     }
-    if has("index.lock") {
+    // A ref named like a folder another has is no lock gone free later.
+    let locked = has("index.lock")
+        || has(".lock': File exists")
+        || has("cannot lock ref") && !has("exists; cannot create")
+        || has("could not lock config file");
+    if locked {
         return Failure::Locked;
     }
     const AUTH: [&str; 6] = [
@@ -428,6 +550,28 @@ fn conflicted(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether `args` can run again after it found a lock held: a command
+/// that stops before changing anything when it does, or does no harm
+/// done twice. Not one that may stop half-way (a rebase, a merge, a
+/// stash pop), where trying again would find it in progress.
+fn retryable(args: &[&str]) -> bool {
+    let mut words = args.iter().copied();
+    let verb = loop {
+        match words.next() {
+            Some("-c" | "-C") => {
+                words.next();
+            }
+            Some(flag) if flag.starts_with('-') => {}
+            word => break word,
+        }
+    };
+    match verb {
+        Some("fetch" | "push" | "add" | "commit" | "switch" | "branch") => true,
+        Some("stash") => matches!(words.next(), Some("push" | "drop")),
+        _ => false,
+    }
+}
+
 /// `Failed` for an operation not tried, for `why`.
 fn blocked(why: &str, log: Vec<Ran>) -> Failed {
     Failed {
@@ -461,13 +605,24 @@ impl<'a> Op<'a> {
         self.exec(args, Reach::Network)
     }
 
+    /// Run `args`, again a few times while it finds a lock held, when
+    /// running it again is safe; every try is logged.
     fn exec(&mut self, args: &[&str], reach: Reach) -> Result<String, Failed> {
-        let out = exec(self.dir, args, reach);
-        self.log.push(out.ran.clone());
-        if out.ran.ok {
-            return Ok(out.stdout);
+        let mut waits = LOCK_RETRIES.iter();
+        loop {
+            let out = exec(self.dir, args, reach);
+            self.log.push(out.ran.clone());
+            if out.ran.ok {
+                return Ok(out.stdout);
+            }
+            let locked = out.timed_out.is_none()
+                && classify(&out.stderr, &out.stdout) == Failure::Locked
+                && retryable(args);
+            match waits.next() {
+                Some(&wait) if locked => std::thread::sleep(wait),
+                _ => return Err(self.failed(&out)),
+            }
         }
-        Err(self.failed(&out))
     }
 
     /// The failure `out` tells of, with the log so far.
@@ -475,6 +630,7 @@ impl<'a> Op<'a> {
         let log = std::mem::take(&mut self.log);
         if let Some(after) = out.timed_out {
             let why = format!("timed out after {} s", after.as_secs_f32());
+            log_failed(self.dir, &log);
             return Failed {
                 failure: Failure::Timeout,
                 why,
@@ -493,6 +649,7 @@ impl<'a> Op<'a> {
         if why.is_empty() {
             why = format!("{} failed", out.ran.command);
         }
+        log_failed(self.dir, &log);
         Failed { failure, why, log }
     }
 
@@ -581,11 +738,7 @@ fn switch_args(dir: &Path, name: &str) -> Vec<String> {
 
 /// Where `dir`'s checkout stands now.
 pub fn head(dir: &Path) -> Option<Head> {
-    let sym = exec(
-        dir,
-        &["symbolic-ref", "-q", "--short", "HEAD"],
-        Reach::Local,
-    );
+    let sym = exec(dir, &["symbolic-ref", "-q", "--short", "HEAD"], Reach::Read);
     let branch = match sym.code {
         Some(0) => Some(sym.stdout.trim().to_owned()),
         // Not a symbolic ref: detached.
@@ -858,7 +1011,7 @@ pub fn predict_merge(dir: &Path, ours: &str, theirs: &str) -> Verdict {
         ours,
         theirs,
     ];
-    let out = exec(dir, &args, Reach::Local);
+    let out = exec(dir, &args, Reach::Read);
     // The tree it made, then (with -z) a NUL after each conflicted file.
     let mut fields = out.stdout.split('\0');
     let tree = fields.next().unwrap_or("");
@@ -1027,7 +1180,7 @@ pub fn repo_diff(dir: &Path, changes: &[Change]) -> Vec<FileDiff> {
             "-M",
             &from,
         ];
-        let out = exec(&top, &args, Reach::Local);
+        let out = exec(&top, &args, Reach::Read);
         match out.code {
             Some(0) => tracked = diff::parse(&cap(out.stdout, REPO_DIFF_LINES)),
             _ => failed = Some(why(&out.stderr, &out.stdout)),
@@ -1073,7 +1226,7 @@ fn untracked(top: &Path, change: &Change) -> FileDiff {
             "--",
             path,
         ];
-        let out = exec(top, &args, Reach::Local);
+        let out = exec(top, &args, Reach::Read);
         if out.code != Some(0) {
             return note(why(&out.stderr, &out.stdout));
         }
@@ -1396,6 +1549,34 @@ mod tests {
                 "Unable to create '/r/.git/index.lock': File exists.",
             ),
             (
+                "error: cannot lock ref 'refs/remotes/origin/main': Unable to create \
+                 '/r/.git/refs/remotes/origin/main.lock': File exists.\n",
+                "",
+                Locked,
+                "cannot lock ref 'refs/remotes/origin/main': Unable to create \
+                 '/r/.git/refs/remotes/origin/main.lock': File exists.",
+            ),
+            (
+                "error: Unable to create '/r/.git/packed-refs.lock': File exists.\n",
+                "",
+                Locked,
+                "Unable to create '/r/.git/packed-refs.lock': File exists.",
+            ),
+            (
+                "error: could not lock config file .git/config: File exists\n",
+                "",
+                Locked,
+                "could not lock config file .git/config: File exists",
+            ),
+            (
+                "error: cannot lock ref 'refs/remotes/origin/a/b': 'refs/remotes/origin/a' \
+                 exists; cannot create 'refs/remotes/origin/a/b'\n",
+                "",
+                Other,
+                "cannot lock ref 'refs/remotes/origin/a/b': 'refs/remotes/origin/a' \
+                 exists; cannot create 'refs/remotes/origin/a/b'",
+            ),
+            (
                 "ssh: connect to host 127.0.0.1 port 1: Connection refused\r\n\
                  fatal: Could not read from remote repository.\n",
                 "",
@@ -1414,6 +1595,58 @@ mod tests {
             assert_eq!(&classify(stderr, stdout), want, "{stderr}{stdout}");
             assert_eq!(why(stderr, stdout), *want_why, "{stderr}{stdout}");
         }
+    }
+
+    #[test]
+    fn retried_only_where_safe() {
+        assert!(retryable(&["fetch", "--all", "--prune"]));
+        assert!(retryable(&["push", "-u", "origin", "HEAD"]));
+        assert!(retryable(&["--literal-pathspecs", "commit", "-m", "x"]));
+        assert!(retryable(&["-c", "a=b", "stash", "push", "-u"]));
+        assert!(!retryable(&["stash", "pop"]));
+        assert!(!retryable(&["rebase", "origin/main"]));
+        assert!(!retryable(&["merge", "--no-edit", "origin/main"]));
+        assert!(!retryable(&["pull", "--ff-only"]));
+    }
+
+    #[test]
+    fn locks_held_tried_again() {
+        let fx = Fx::local();
+        write(&fx.repo, "a", "changed");
+        std::fs::write(fx.repo.join(".git/index.lock"), "").unwrap();
+        let failed = commit_paths(&fx.repo, &["a".into()], "m").unwrap_err();
+        assert_eq!(failed.failure, Failure::Locked);
+        assert!(failed.why.contains("index.lock"), "{}", failed.why);
+        // The `add`, tried once and then once per wait.
+        assert_eq!(failed.log.len(), 1 + LOCK_RETRIES.len());
+        assert!(failed.log.iter().all(|r| !r.ok));
+        // Not a stash pop: it may have stopped half-way.
+        let failed = stash_pop(&fx.repo).unwrap_err();
+        assert_eq!(failed.log.len(), 1);
+        std::fs::remove_file(fx.repo.join(".git/index.lock")).unwrap();
+        commit_paths(&fx.repo, &["a".into()], "m").unwrap();
+    }
+
+    #[test]
+    fn one_turn_per_repository() {
+        let (a, b) = (Path::new("/turn/a"), Path::new("/turn/b"));
+        let turn = Turn::try_take(a, "a fetch").unwrap();
+        assert_eq!(
+            Turn::try_take(a, "the push").err().as_deref(),
+            Some("a fetch")
+        );
+        let other = Turn::try_take(b, "the push").unwrap();
+        let waiter = std::thread::spawn(move || {
+            let _turn = Turn::take(a, "the push");
+            Instant::now()
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let freed = Instant::now();
+        drop(turn);
+        assert!(waiter.join().unwrap() >= freed);
+        drop(other);
+        assert!(Turn::try_take(a, "x").is_ok());
+        assert!(Turn::try_take(b, "x").is_ok());
     }
 
     #[test]
