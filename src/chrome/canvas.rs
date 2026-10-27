@@ -12,6 +12,9 @@ pub(super) struct Canvas {
     pub(super) w: i32,
     pub(super) h: i32,
     pub(super) px: Vec<u8>,
+    /// Where drawing lands, as left, top, right and bottom edges (physical
+    /// pixels): all of the canvas when `None`. See `clipped`.
+    clip: Option<[i32; 4]>,
 }
 
 impl Canvas {
@@ -20,15 +23,41 @@ impl Canvas {
             w: size.w,
             h: size.h,
             px: vec![0; (size.w * size.h * 4) as usize],
+            clip: None,
         }
     }
 
+    /// Draw with `draw` only within a rectangle (physical pixels), as a
+    /// scrolled list does within its place.
+    pub(super) fn clipped<R>(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        draw: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let [x0, y0, x1, y1] = self.bounds();
+        let outer = self
+            .clip
+            .replace([x.max(x0), y.max(y0), (x + w).min(x1), (y + h).min(y1)]);
+        let drawn = draw(self);
+        self.clip = outer;
+        drawn
+    }
+
+    /// Where drawing lands: left, top, right and bottom edges.
+    fn bounds(&self) -> [i32; 4] {
+        self.clip.unwrap_or([0, 0, self.w, self.h])
+    }
+
     pub(super) fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, [r, g, b]: Rgb) {
-        let (x0, x1) = (x.max(0), (x + w).min(self.w));
+        let [left, top, right, bottom] = self.bounds();
+        let (x0, x1) = (x.max(left), (x + w).min(right));
         if x0 >= x1 {
             return;
         }
-        for py in y.max(0)..(y + h).min(self.h) {
+        for py in y.max(top)..(y + h).min(bottom) {
             let row = ((py * self.w + x0) * 4) as usize..((py * self.w + x1) * 4) as usize;
             for pixel in self.px[row].as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&[b, g, r, 0xff]);
@@ -47,7 +76,8 @@ impl Canvas {
 
     /// Lay `color` over the pixel at `coverage` opacity.
     pub(super) fn blend(&mut self, x: i32, y: i32, [r, g, b]: Rgb, coverage: f32) {
-        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+        let [left, top, right, bottom] = self.bounds();
+        if x < left || y < top || x >= right || y >= bottom {
             return;
         }
         let a = coverage.clamp(0.0, 1.0);
@@ -106,9 +136,10 @@ impl Canvas {
         let centre = |start: i32, len: i32| (start as f64 + len as f64 / 2.0) * scale;
         let x0 = (centre(rect.loc.x, rect.size.w) - w as f64 / 2.0).round() as i32;
         let y0 = (centre(rect.loc.y, rect.size.h) - h as f64 / 2.0).round() as i32;
+        let [left, top, right, bottom] = self.bounds();
         for (i, &[r, g, b, a]) in rgba.as_chunks::<4>().0.iter().enumerate() {
             let (x, y) = (x0 + (i % w) as i32, y0 + (i / w) as i32);
-            if a == 0 || x < 0 || y < 0 || x >= self.w || y >= self.h {
+            if a == 0 || x < left || y < top || x >= right || y >= bottom {
                 continue;
             }
             if icon.symbolic() {

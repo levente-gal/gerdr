@@ -35,6 +35,7 @@ use crate::{
     project_list::{self, PATH_CHARS, scrolled},
     text_field::{Edit, Line, TextField},
     tooltip::Tooltip,
+    wheel::Wheel,
 };
 
 /// How many of zoxide's folders the list offers as new projects.
@@ -47,8 +48,8 @@ const SUGGESTIONS: usize = 5;
 pub struct ProjectMenu {
     /// What the pointer is over, and its pill fading in.
     hover: Hover<MenuHit>,
-    /// The wheel's turn not yet a whole row, in rows.
-    wheel: f64,
+    /// The wheel's turn not yet a whole row.
+    wheel: Wheel,
     /// What was typed to filter the projects.
     query: TextField,
     /// The projects, by id, most recently used first.
@@ -715,6 +716,19 @@ impl ProjectMenu {
         }
     }
 
+    /// The wheel turned `rows` rows (down positive): whole rows scroll the
+    /// list, the part of a row left shows it moved by as much.
+    fn wheel_by(&mut self, rows: f64, page: usize) {
+        let first = self.first_shown(page);
+        let whole = self.wheel.turn(rows, first);
+        if whole != 0 {
+            self.scroll_by(whole as i32, page);
+        }
+        let last = self.items.len().saturating_sub(page.max(1));
+        self.wheel
+            .settle(first as i64 + whole, self.first_shown(page), last);
+    }
+
     /// A click on `hit`; `page` is how many entries are shown.
     fn click(&mut self, hit: MenuHit, page: usize) -> Option<Outcome> {
         if self.form.is_some() {
@@ -950,6 +964,7 @@ impl ProjectMenu {
                     ("Esc", "back"),
                 ]),
                 hover_alpha,
+                part: 0.0,
             };
         }
         if let Some(settings) = &self.settings {
@@ -962,10 +977,18 @@ impl ProjectMenu {
                 settings: Some(settings.view()),
                 hints: hints(&[("Tab", "next"), ("Enter", "save"), ("Esc", "back")]),
                 hover_alpha,
+                part: 0.0,
             };
         }
         let first = self.first_shown(page);
         let end = (first + page.max(1)).min(self.items.len());
+        // Scrolled part of a row, the list shows one more under it.
+        let part = if end < self.items.len() {
+            self.wheel.part(first)
+        } else {
+            0.0
+        };
+        let shown = end + usize::from(part > 0.0);
         // The recent projects are numbered from the top, shown or not.
         let mut recent: u8 = 0;
         let entries = self
@@ -978,7 +1001,7 @@ impl ProjectMenu {
                 {
                     recent = recent.saturating_add(1);
                 }
-                if !(first..end).contains(&i) {
+                if !(first..shown).contains(&i) {
                     return None;
                 }
                 Some(match item {
@@ -1036,6 +1059,7 @@ impl ProjectMenu {
             settings: None,
             hints,
             hover_alpha,
+            part,
         }
     }
 }
@@ -1386,12 +1410,7 @@ impl Gerdr {
     pub fn project_menu_scroll(&mut self, rows: f64) {
         let page = self.project_menu_page();
         if let Some(menu) = self.project_menu.as_mut() {
-            menu.wheel += rows;
-            let whole = menu.wheel.trunc();
-            menu.wheel -= whole;
-            if whole != 0.0 {
-                menu.scroll_by(whole as i32, page);
-            }
+            menu.wheel_by(rows, page);
         }
     }
 
@@ -1620,6 +1639,27 @@ mod tests {
         m.scroll_by(-100, 4);
         assert_eq!(labels(&m, 4)[0], "# Current");
         assert_eq!(selected(&m, 4), "p0");
+    }
+
+    #[test]
+    fn a_touchpad_scrolls_by_parts_of_a_row() {
+        let names: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut m = menu(&refs);
+        m.wheel_by(1.5, 4);
+        let v = view(&m, 4);
+        assert_eq!(v.part, 0.5);
+        // The row shown in part under the list too.
+        assert_eq!(labels(&m, 4), ["aft", "# Recent", "p0", "p1", "p2"]);
+        // Up past the top holds the list whole.
+        m.wheel_by(-3.0, 4);
+        assert_eq!(view(&m, 4).part, 0.0);
+        assert_eq!(labels(&m, 4).len(), 4);
+        // A key moving the list drops the part.
+        m.wheel_by(0.5, 4);
+        assert_eq!(view(&m, 4).part, 0.5);
+        press(&mut m, Keysym::End);
+        assert_eq!(view(&m, 4).part, 0.0);
     }
 
     #[test]

@@ -364,6 +364,7 @@ fn project_menu() -> ProjectMenuView {
             ("Esc".into(), "close".into()),
         ],
         hover_alpha: 16,
+        part: 0.0,
     }
 }
 
@@ -385,6 +386,7 @@ fn form() -> ProjectMenuView {
         settings: None,
         hints: vec![("Esc".into(), "back".into())],
         hover_alpha: 16,
+        part: 0.0,
     }
 }
 
