@@ -37,6 +37,7 @@ use crate::{
     text_field::{Edit, TextField},
     toast::Level,
     tooltip::Tooltip,
+    wheel::Wheel,
 };
 
 /// The worktrees popup, while open, and what is being done to worktrees.
@@ -82,8 +83,8 @@ struct Popup {
     /// Where the selected worktree was in the list: what is selected once
     /// it is gone.
     selected_at: usize,
-    /// Wheel rows not scrolled yet.
-    wheel: f64,
+    /// The wheel's turn not yet a whole worktree.
+    wheel: Wheel,
     /// What the list is filtered by.
     query: TextField,
     /// Every repository's worktrees, not just the focused one's.
@@ -213,6 +214,24 @@ fn shown(items: &[Item], first: usize, page: usize) -> Vec<Entry> {
     shown
 }
 
+/// What a view of `shown` entries of `items` adds under them while
+/// scrolled part of a row: the next worktree, with its repository's label
+/// when that starts there.
+fn under(items: &[Item], shown: &[Entry]) -> Vec<Entry> {
+    let Some(&Entry::Item(k)) = shown.last() else {
+        return Vec::new();
+    };
+    let Some(next) = items.get(k + 1) else {
+        return Vec::new();
+    };
+    let mut under = Vec::new();
+    if next.repo != items[k].repo {
+        under.push(Entry::Repo(next.repo));
+    }
+    under.push(Entry::Item(k + 1));
+    under
+}
+
 /// The furthest worktree a view of `page` rows scrolls to: the first from
 /// which the rest all fit.
 fn last_first(items: &[Item], page: usize) -> usize {
@@ -335,9 +354,11 @@ impl Popup {
         let Some(item) = items.get(k) else { return };
         self.selected = Some(item.wt.path.clone());
         self.selected_at = k;
-        self.first = self.first.min(last_first(items, page));
-        if k < self.first {
+        self.first = self.first_shown(items, page);
+        // The first worktree, partly scrolled past, is shown whole.
+        if k <= self.first {
             self.first = k;
+            self.wheel = Wheel::default();
         }
         while !shown(items, self.first, page).contains(&Entry::Item(k)) {
             self.first += 1;
@@ -358,6 +379,7 @@ impl Popup {
     fn refilter(&mut self, items: &[Item], page: usize) {
         self.armed = None;
         self.first = 0;
+        self.wheel = Wheel::default();
         let kept = self.selected(items).filter(|_| self.query.is_empty());
         if let Some(k) = kept.or((!items.is_empty()).then_some(0)) {
             self.select(items, k, page);
@@ -365,14 +387,47 @@ impl Popup {
     }
 
     /// Scroll by `rows` worktrees, within the list.
-    fn scroll(&mut self, items: &[Item], rows: i32, page: usize) {
+    fn scroll(&mut self, items: &[Item], rows: i64, page: usize) {
         let last = last_first(items, page);
-        self.first = (self.first as i64 + rows as i64).clamp(0, last as i64) as usize;
+        let first = self.first_shown(items, page) as i64;
+        self.first = (first + rows).clamp(0, last as i64) as usize;
     }
 
-    /// The entries in a view of `page` rows, as scrolled.
-    fn shown(&self, items: &[Item], page: usize) -> Vec<Entry> {
-        shown(items, self.first.min(last_first(items, page)), page)
+    /// The wheel turned `rows` worktrees (down positive): whole ones
+    /// scroll the list, the part of one left shows it moved by as much.
+    fn wheel_by(&mut self, items: &[Item], rows: f64, page: usize) {
+        let first = self.first_shown(items, page);
+        let whole = self.wheel.turn(rows, first);
+        if whole != 0 {
+            self.scroll(items, whole, page);
+        }
+        let last = last_first(items, page);
+        self.wheel
+            .settle(first as i64 + whole, self.first_shown(items, page), last);
+    }
+
+    /// The first worktree in a view of `page` rows, as scrolled.
+    fn first_shown(&self, items: &[Item], page: usize) -> usize {
+        self.first.min(last_first(items, page))
+    }
+
+    /// The entries a view of `page` rows shows, with the part of its first
+    /// worktree scrolled past: with some, the entries under the page too,
+    /// shown in part.
+    fn in_view(&self, items: &[Item], page: usize) -> (Vec<Entry>, f64) {
+        let first = self.first_shown(items, page);
+        let mut shown = shown(items, first, page);
+        // None once the list shows its end.
+        let part = if first < last_first(items, page) {
+            self.wheel.part(first)
+        } else {
+            0.0
+        };
+        if part > 0.0 {
+            let under = under(items, &shown);
+            shown.extend(under);
+        }
+        (shown, part)
     }
 
     /// A key for the filter, if it takes it: what it did to the filter
@@ -492,7 +547,7 @@ impl Popup {
 
     /// A click on `hit`, over `items` in a view of `page` entries.
     fn click(&mut self, hit: WorktreesHit, items: &[Item], page: usize) -> Option<Outcome> {
-        let shown = self.shown(items, page);
+        let (shown, _) = self.in_view(items, page);
         let at = |i: usize| match shown.get(i) {
             Some(Entry::Item(k)) => Some(*k),
             _ => None,
@@ -541,7 +596,7 @@ impl Popup {
         busy: &HashMap<PathBuf, &'static str>,
         page: usize,
     ) -> WorktreesView {
-        let shown = self.shown(items, page);
+        let (shown, part) = self.in_view(items, page);
         let selected = self.selected(items);
         let entries = shown
             .iter()
@@ -621,6 +676,7 @@ impl Popup {
                     .map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into())
             }),
             empty: empty.into(),
+            part,
         }
     }
 }
@@ -855,12 +911,7 @@ impl Gerdr {
         let (_, items) = self.popup_items();
         let page = self.worktrees_page();
         if let Some(popup) = self.worktrees.popup.as_mut() {
-            popup.wheel += rows;
-            let whole = popup.wheel.trunc();
-            popup.wheel -= whole;
-            if whole != 0.0 {
-                popup.scroll(&items, whole as i32, page);
-            }
+            popup.wheel_by(&items, rows, page);
         }
     }
 
@@ -1317,6 +1368,58 @@ mod tests {
         let v = view(&popup);
         assert_eq!(v.entries[0], WorktreeEntry::Repo("r".into()));
         assert_eq!(v.selected, Some(1));
+    }
+
+    #[test]
+    fn a_touchpad_scrolls_by_parts_of_a_row() {
+        let mut items = items();
+        let mut other = item(1, "other", true, false, false);
+        (other.main, other.wt.path) = ("/src/s".into(), "/src/s".into());
+        items.push(other);
+        let names = vec!["r".to_owned(), "s".to_owned()];
+        let view = |popup: &Popup| popup.view(&items, &names, &HashMap::new(), 3);
+        let shown = |popup: &Popup| -> Vec<String> {
+            view(popup)
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    WorktreeEntry::Repo(name) => format!("# {name}"),
+                    WorktreeEntry::Worktree(line) => line.name.clone(),
+                })
+                .collect()
+        };
+        let mut popup = Popup::default();
+        popup.select(&items, 0, 3);
+        assert_eq!(shown(&popup), ["# r", "main", "wip"]);
+        popup.wheel_by(&items, 1.5, 3);
+        assert_eq!(view(&popup).part, 0.5);
+        // The next worktree, under the list, with its repository's label.
+        assert_eq!(shown(&popup), ["# r", "wip", "done", "# s", "other"]);
+        assert_eq!(view(&popup).list_height, 3 * chrome::WORKTREES_ROW);
+        // Up past the top holds the list whole, and so does its end.
+        popup.wheel_by(&items, -3.0, 3);
+        assert_eq!(view(&popup).part, 0.0);
+        assert_eq!(shown(&popup), ["# r", "main", "wip"]);
+        popup.wheel_by(&items, 9.5, 3);
+        assert_eq!(view(&popup).part, 0.0);
+        assert_eq!(shown(&popup), ["# s", "other"]);
+        // Keys moving the list, or selecting the worktree scrolled past
+        // in part, drop the part.
+        popup.wheel_by(&items, -2.5, 3);
+        assert_eq!(view(&popup).part, 0.5);
+        popup.key(&ModifiersState::default(), Keysym::End, &items, 3);
+        assert_eq!(view(&popup).part, 0.0);
+        popup.wheel_by(&items, -2.5, 3);
+        assert_eq!(view(&popup).part, 0.5);
+        popup.key(&ModifiersState::default(), Keysym::Home, &items, 3);
+        assert_eq!(view(&popup).part, 0.0);
+        assert_eq!(shown(&popup), ["# r", "main", "wip"]);
+        // A click on the worktree under the list scrolls it in.
+        popup.wheel_by(&items, 0.5, 3);
+        let under = view(&popup).entries.len() - 1;
+        popup.click(WorktreesHit::Entry(under), &items, 3);
+        assert_eq!(popup.selected(&items), Some(2));
+        assert_eq!(view(&popup).part, 0.0);
     }
 
     /// Two repositories: gerdr at /src/r (main, wip, done) and herdr at
