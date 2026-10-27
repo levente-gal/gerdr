@@ -4714,6 +4714,7 @@ impl Gerdr {
             workspaces: Vec::new(),
             before_start: String::new(),
             after_stop: String::new(),
+            tickets: Vec::new(),
         });
         self.projects.save();
         id

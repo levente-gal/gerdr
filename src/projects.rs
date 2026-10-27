@@ -177,6 +177,10 @@ pub struct Project {
     /// A shell line run after its session stops. Empty for none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub after_stop: String,
+    /// Repositories that hold only tickets: their issues assigned to the
+    /// user show in the inbox's Tickets, in the order of their board.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tickets: Vec<crate::issues::TicketRepo>,
 }
 
 /// What gerdr kept of a workspace of a project.
@@ -1305,6 +1309,7 @@ pub fn migrate(
         workspaces,
         before_start: String::new(),
         after_stop: String::new(),
+        tickets: Vec::new(),
     })
 }
 
@@ -1463,6 +1468,7 @@ mod tests {
                 }],
                 before_start: "docker compose up -d".into(),
                 after_stop: "docker compose down".into(),
+                tickets: Vec::new(),
             }],
         }
     }

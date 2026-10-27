@@ -1655,6 +1655,7 @@ mod tests {
             workspaces: vec![record; workspaces],
             before_start: String::new(),
             after_stop: String::new(),
+            tickets: Vec::new(),
         }
     }
 
