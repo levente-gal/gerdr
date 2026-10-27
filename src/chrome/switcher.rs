@@ -19,6 +19,7 @@ use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
 use crate::herdr::AgentStatus;
 use crate::text_field::Line;
+use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle};
 
@@ -97,6 +98,9 @@ pub struct SwitcherView {
     pub hints: Vec<(String, String)>,
     /// The key hint under the pointer, by index into `hints`.
     pub hint_hover: Option<usize>,
+    /// The part of the first row scrolled past, 0 to 1; with some, the
+    /// rows take one more under the list, shown in part.
+    pub part: f64,
 }
 
 /// Where the switcher's parts go: the panel, its query field, a rect per
@@ -107,8 +111,12 @@ pub struct SwitcherLayout {
     pub panel: Rect,
     pub input: Rect,
     pub chips: Vec<Rect>,
+    /// A scrolled list's first and last rows, and their headings, reach
+    /// out of `list`.
     pub rows: Vec<Rect>,
     pub sections: Vec<(Rect, &'static str)>,
+    /// Where the rows and their headings show.
+    pub list: Rect,
     pub footer: Rect,
     /// The footer's key hints, by index into `SwitcherView::hints`.
     pub hints: Vec<(usize, Rect)>,
@@ -136,6 +144,7 @@ pub fn switcher_layout(rows: usize, area: Rect) -> (Rect, Rect, Vec<Rect>) {
         &vec![None; rows],
         &[],
         0,
+        0.0,
         panel_origin(area),
         panel_width(area),
     );
@@ -179,9 +188,28 @@ pub(super) fn switcher_parts(
     w: i32,
 ) -> SwitcherLayout {
     let sections: Vec<_> = view.rows.iter().map(|row| row.section).collect();
-    let mut layout = parts(&sections, &view.categories, view.hints.len(), loc, w);
+    let mut layout = parts(
+        &sections,
+        &view.categories,
+        view.hints.len(),
+        view.part,
+        loc,
+        w,
+    );
     layout.hints = footer_hint_spots(&hint_strs(&view.hints), layout.footer);
     layout
+}
+
+/// The row of the switcher laid out as `layout` under `pos`, by index into
+/// its rows: none outside the list, where a scrolled list's rows reach.
+pub fn switcher_row_at(layout: &SwitcherLayout, pos: Point<f64, Logical>) -> Option<usize> {
+    if !layout.list.to_f64().contains(pos) {
+        return None;
+    }
+    layout
+        .rows
+        .iter()
+        .position(|row| row.to_f64().contains(pos))
 }
 
 /// The key hint of the switcher showing `view` under `pos`, by index into
@@ -219,11 +247,13 @@ fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
 /// The panel `w` wide at `loc`, with the chips of `categories` (none
 /// without any), a row per entry of `sections` (the heading over it, if
 /// any) and a footer for `hints` key hints; it keeps room for one row
-/// without any.
+/// without any. With `part` of the first row scrolled past, the rows are
+/// moved up by as much and the last one is shown in part.
 fn parts(
     sections: &[Option<&'static str>],
     categories: &[&str],
     hints: usize,
+    part: f64,
     loc: Point<i32, Logical>,
     w: i32,
 ) -> SwitcherLayout {
@@ -234,6 +264,27 @@ fn parts(
     if !chips.is_empty() {
         y += CHIPS_ROW;
     }
+    let start = y;
+    let heading = |i: usize| match sections.get(i) {
+        Some(Some(_)) => SECTION_HEIGHT,
+        _ => 0,
+    };
+    // Scrolled part of the first row, the list starts up by as much of the
+    // way to the second row (the first row's heading goes up with it, to
+    // be shown again over the second row once scrolled whole), and ends
+    // where it would without its last row and that row's heading.
+    let scrolled = part > 0.0 && sections.len() > 1;
+    let shift = if scrolled {
+        wheel::shift(part, ROW_HEIGHT + heading(1))
+    } else {
+        0
+    };
+    let under = if scrolled {
+        ROW_HEIGHT + heading(sections.len() - 1)
+    } else {
+        0
+    };
+    y -= shift;
     let mut rows = Vec::with_capacity(sections.len());
     let mut headings = Vec::new();
     for section in sections {
@@ -250,6 +301,8 @@ fn parts(
     if sections.is_empty() {
         y += ROW_HEIGHT;
     }
+    y += shift - under;
+    let list = Rectangle::new((x, start).into(), (row_w, y - start).into());
     let footer_h = footer_height(hints);
     let footer = Rectangle::new((loc.x, y + SWITCHER_PADDING).into(), (w, footer_h).into());
     let h = y + SWITCHER_PADDING + footer_h - loc.y;
@@ -259,6 +312,7 @@ fn parts(
         chips,
         rows,
         sections: headings,
+        list,
         footer,
         hints: Vec::new(),
     }
@@ -334,6 +388,7 @@ impl Painter {
                 &[None],
                 &view.categories,
                 view.hints.len(),
+                0.0,
                 (SHADOW, SHADOW).into(),
                 w,
             );
@@ -350,143 +405,155 @@ impl Painter {
                 p.placeholder,
             );
         }
-        for (rect, label) in &layout.sections {
-            let band = (
-                px(rect.loc.y + rect.size.h - SECTION_TEXT),
-                px(SECTION_TEXT),
-            );
-            self.text(
-                &mut c,
-                &label.to_uppercase(),
-                TINY_FONT_SIZE,
-                px(rect.loc.x) as f32 + PADDING * s,
-                px(rect.loc.x + rect.size.w) as f32 - PADDING * s,
-                band,
-                scale,
-                p.placeholder,
-            );
-        }
-        for (i, (slot, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
-            let (x, y, w, h) = (
-                px(slot.loc.x),
-                px(slot.loc.y),
-                px(slot.size.w),
-                px(slot.size.h),
-            );
-            let fill = if view.selected == Some(i) {
-                Some(p.selected)
-            } else if view.hover == Some(i) {
-                Some(p.element)
-            } else {
-                None
-            };
-            if let Some(fill) = fill {
-                c.rounded(
-                    x as f32,
-                    y as f32,
-                    w as f32,
-                    h as f32,
-                    (MENU_RADIUS - 2.0) * s,
-                    fill,
+        // The rows and their headings, cut to the list as it scrolls.
+        let (x, y, w, h) = rect_px(layout.list, scale);
+        c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
+            for (rect, label) in &layout.sections {
+                let band = (
+                    px(rect.loc.y + rect.size.h - SECTION_TEXT),
+                    px(SECTION_TEXT),
+                );
+                self.text(
+                    c,
+                    &label.to_uppercase(),
+                    TINY_FONT_SIZE,
+                    px(rect.loc.x) as f32 + PADDING * s,
+                    px(rect.loc.x + rect.size.w) as f32 - PADDING * s,
+                    band,
+                    scale,
+                    p.placeholder,
                 );
             }
-            let icon = switcher_icon(*slot);
-            let small = 0.8 * s;
-            match &row.icon {
-                ItemIcon::Workspace(WorkspaceKind::Project) => {
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                        folder(x, y, small)
-                    })
-                }
-                ItemIcon::Workspace(WorkspaceKind::Terminal) => {
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                        terminal(x, y, small)
-                    })
-                }
-                ItemIcon::Workspace(WorkspaceKind::Cursor) => {
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small))
-                }
-                ItemIcon::Tab => {
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| tab(x, y, small))
-                }
-                &ItemIcon::Agent(status) => {
-                    icon_sdf(&mut c, icon, scale, p.status(status), |x, y| {
-                        status_mark(status, x, y, s)
-                    })
-                }
-                ItemIcon::Folder => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                    folder_plus(x, y, small)
-                }),
-                ItemIcon::App => {
-                    icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| app(x, y, small))
-                }
-                ItemIcon::Picture(picture) => c.picture(picture, icon, scale, p.placeholder),
-                ItemIcon::Command => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                    prompt(x, y, small)
-                }),
-                ItemIcon::Settings => icon_sdf(&mut c, icon, scale, p.placeholder, |x, y| {
-                    pencil(x, y, small)
-                }),
+            for (i, (slot, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
+                self.switcher_row(c, view, i, row, *slot, scale, p);
             }
-
-            // The kind pill at the right; the text stops before it.
-            let pill_w =
-                self.text_width(row.kind, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
-            let pill_x = ((x + w) as f32 - PADDING * s - pill_w).round();
-            let pill_h = px(PILL_HEIGHT) as f32;
-            let pill_y = (y as f32 + (h as f32 - pill_h) / 2.0).round();
-            c.rounded(
-                pill_x,
-                pill_y,
-                pill_w.round(),
-                pill_h,
-                pill_h / 2.0,
-                mix(fill.unwrap_or(p.elevated), p.muted, 0.18),
-            );
-            self.text(
-                &mut c,
-                row.kind,
-                TINY_FONT_SIZE,
-                pill_x + PILL_PADDING as f32 * s,
-                f32::MAX,
-                (pill_y as i32, pill_h as i32),
-                scale,
-                p.muted,
-            );
-
-            let right = pill_x - px(PILL_GAP) as f32;
-            let text_x = px(icon.loc.x + ROW_ICON_WIDTH + ROW_ICON_GAP) as f32;
-            let label_band = (y + px(LINE_INSET), px(LABEL_LINE));
-            self.marked(
-                &mut c,
-                &row.label,
-                &row.label_hits,
-                FONT_SIZE,
-                text_x,
-                right,
-                label_band,
-                scale,
-                (p.text, p.accent),
-            );
-            let detail_top = y + px(LINE_INSET + LABEL_LINE);
-            let detail_band = (detail_top, y + h - px(LINE_INSET) - detail_top);
-            self.marked(
-                &mut c,
-                &row.detail,
-                &row.detail_hits,
-                SMALL_FONT_SIZE,
-                text_x,
-                right,
-                detail_band,
-                scale,
-                (p.muted, p.accent),
-            );
-        }
-
+        });
         divider(&mut c, px(layout.footer.loc.y));
         let hints = hint_strs(&view.hints);
         self.hints(&mut c, &hints, &layout.hints, view.hint_hover, scale, p);
         c.into_buffer(false)
+    }
+
+    /// Row `i` of the switcher showing `view`, `row`, in `slot`: its icon,
+    /// its two lines of text and the kind pill, on a pill when selected or
+    /// under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn switcher_row(
+        &self,
+        c: &mut Canvas,
+        view: &SwitcherView,
+        i: usize,
+        row: &SwitcherRow,
+        slot: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (x, y, w, h) = (
+            px(slot.loc.x),
+            px(slot.loc.y),
+            px(slot.size.w),
+            px(slot.size.h),
+        );
+        let fill = if view.selected == Some(i) {
+            Some(p.selected)
+        } else if view.hover == Some(i) {
+            Some(p.element)
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            c.rounded(
+                x as f32,
+                y as f32,
+                w as f32,
+                h as f32,
+                (MENU_RADIUS - 2.0) * s,
+                fill,
+            );
+        }
+        let icon = switcher_icon(slot);
+        let small = 0.8 * s;
+        match &row.icon {
+            ItemIcon::Workspace(WorkspaceKind::Project) => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, small))
+            }
+            ItemIcon::Workspace(WorkspaceKind::Terminal) => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| terminal(x, y, small))
+            }
+            ItemIcon::Workspace(WorkspaceKind::Cursor) => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| app(x, y, small))
+            }
+            ItemIcon::Tab => icon_sdf(c, icon, scale, p.placeholder, |x, y| tab(x, y, small)),
+            &ItemIcon::Agent(status) => icon_sdf(c, icon, scale, p.status(status), |x, y| {
+                status_mark(status, x, y, s)
+            }),
+            ItemIcon::Folder => icon_sdf(c, icon, scale, p.placeholder, |x, y| {
+                folder_plus(x, y, small)
+            }),
+            ItemIcon::App => icon_sdf(c, icon, scale, p.placeholder, |x, y| app(x, y, small)),
+            ItemIcon::Picture(picture) => c.picture(picture, icon, scale, p.placeholder),
+            ItemIcon::Command => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| prompt(x, y, small))
+            }
+            ItemIcon::Settings => {
+                icon_sdf(c, icon, scale, p.placeholder, |x, y| pencil(x, y, small))
+            }
+        }
+
+        // The kind pill at the right; the text stops before it.
+        let pill_w =
+            self.text_width(row.kind, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
+        let pill_x = ((x + w) as f32 - PADDING * s - pill_w).round();
+        let pill_h = px(PILL_HEIGHT) as f32;
+        let pill_y = (y as f32 + (h as f32 - pill_h) / 2.0).round();
+        c.rounded(
+            pill_x,
+            pill_y,
+            pill_w.round(),
+            pill_h,
+            pill_h / 2.0,
+            mix(fill.unwrap_or(p.elevated), p.muted, 0.18),
+        );
+        self.text(
+            c,
+            row.kind,
+            TINY_FONT_SIZE,
+            pill_x + PILL_PADDING as f32 * s,
+            f32::MAX,
+            (pill_y as i32, pill_h as i32),
+            scale,
+            p.muted,
+        );
+
+        let right = pill_x - px(PILL_GAP) as f32;
+        let text_x = px(icon.loc.x + ROW_ICON_WIDTH + ROW_ICON_GAP) as f32;
+        let label_band = (y + px(LINE_INSET), px(LABEL_LINE));
+        self.marked(
+            c,
+            &row.label,
+            &row.label_hits,
+            FONT_SIZE,
+            text_x,
+            right,
+            label_band,
+            scale,
+            (p.text, p.accent),
+        );
+        let detail_top = y + px(LINE_INSET + LABEL_LINE);
+        let detail_band = (detail_top, y + h - px(LINE_INSET) - detail_top);
+        self.marked(
+            c,
+            &row.detail,
+            &row.detail_hits,
+            SMALL_FONT_SIZE,
+            text_x,
+            right,
+            detail_band,
+            scale,
+            (p.muted, p.accent),
+        );
     }
 
     /// Category chip `i`, `label`, in `rect`: an outlined pill, filled and
@@ -527,7 +594,7 @@ mod tests {
     use super::{
         CHIP_GAP, CHIP_HEIGHT, CHIPS_ROW, ItemIcon, ROW_HEIGHT, SECTION_HEIGHT, SWITCHER_INPUT,
         SWITCHER_PADDING, SwitcherRow, SwitcherView, chip_rects, footer_height, switcher_geometry,
-        switcher_layout, switcher_page,
+        switcher_layout, switcher_page, switcher_row_at,
     };
     use smithay::utils::Rectangle;
 
@@ -557,6 +624,7 @@ mod tests {
             hover: None,
             hints: Vec::new(),
             hint_hover: None,
+            part: 0.0,
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
@@ -612,6 +680,7 @@ mod tests {
             hover: None,
             hints: vec![("Esc".into(), "close".into())],
             hint_hover: None,
+            part: 0.0,
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
@@ -624,6 +693,48 @@ mod tests {
         }
         assert_eq!(layout.sections[0].0.loc.y, top + CHIPS_ROW);
         assert_eq!(layout.rows[0].loc.y, top + CHIPS_ROW + SECTION_HEIGHT);
+    }
+
+    #[test]
+    fn a_scrolled_list_moves_up_and_shows_its_last_row_in_part() {
+        let area = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let whole = SwitcherView {
+            query: "".into(),
+            hint: "",
+            categories: Vec::new(),
+            category: 0,
+            category_hover: None,
+            rows: vec![row(Some("Workspaces")), row(Some("Tabs")), row(None)],
+            selected: Some(0),
+            hover: None,
+            hints: Vec::new(),
+            hint_hover: None,
+            part: 0.0,
+        };
+        let mut scrolled = whole.clone();
+        scrolled.rows.push(row(None));
+        scrolled.part = 0.5;
+        let (a, b) = (
+            switcher_geometry(&whole, area),
+            switcher_geometry(&scrolled, area),
+        );
+        // As tall as without its last row, shown in part; moved up half
+        // the way to the second row, under its heading.
+        assert_eq!((a.list, a.panel), (b.list, b.panel));
+        let shift = (ROW_HEIGHT + SECTION_HEIGHT) / 2;
+        assert_eq!(b.rows[0].loc.y, a.rows[0].loc.y - shift);
+        assert_eq!(b.sections[1].0.loc.y, a.sections[1].0.loc.y - shift);
+        let bottom = b.list.loc.y + b.list.size.h;
+        let last = b.rows[3];
+        assert!(last.loc.y < bottom && last.loc.y + last.size.h > bottom);
+        // Only the rows' parts within the list are hit.
+        let x = b.list.loc.x as f64 + 40.0;
+        let at = |y: i32| switcher_row_at(&b, (x, y as f64 + 0.5).into());
+        assert!(b.rows[0].loc.y < b.list.loc.y);
+        assert_eq!(at(b.list.loc.y - 1), None);
+        assert_eq!(at(b.list.loc.y), Some(0));
+        assert_eq!(at(bottom - 1), Some(3));
+        assert_eq!(at(bottom), None);
     }
 
     #[test]

@@ -239,6 +239,7 @@ fn switcher() -> SwitcherView {
         category: 0,
         category_hover: Some(2),
         hint_hover: None,
+        part: 0.0,
         hints: vec![
             ("Enter".into(), "open".into()),
             ("Alt+Enter".into(), "in a new tab".into()),
