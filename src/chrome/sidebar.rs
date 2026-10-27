@@ -31,7 +31,7 @@ use super::{
     ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb, SMALL_FONT_SIZE,
     STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, app, band, chevron_down, ci_mark,
     cross, distinct, folder, git_branch, icon_sdf, measure, mix, new_tab, physical, rect_px,
-    status_mark, terminal,
+    restart_arrow, status_mark, terminal,
 };
 use crate::WorkspaceKind;
 use crate::agents::AgentKey;
@@ -80,6 +80,8 @@ const CHILD_X: i32 = NAME_X - CHILD_PAD;
 const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
 /// The "×" at the right end of a header, and of a deletable agent row.
 const CLOSE_SLOT: i32 = 22;
+/// The restart button left of a header's "×".
+const RESTART_SLOT: i32 = 22;
 /// The room of the header's CI mark.
 const CI_SLOT: i32 = 18;
 /// The room of the header's status mark, and the gap before the count of
@@ -480,6 +482,9 @@ pub struct WorkspaceView {
     pub ci: Option<CiView>,
     /// Whether it shows just its header: folded by hand, or quiet.
     pub folded: bool,
+    /// Whether it has commands that run again after a reboot: its header
+    /// then has a button restarting them all.
+    pub restart: bool,
 }
 
 /// What a GitHub section shows: a chip per branch or pull request, a line
@@ -623,6 +628,7 @@ impl WorkspaceView {
             more_agents: Vec::new(),
             ci: None,
             folded: false,
+            restart: false,
         }
     }
 
@@ -743,12 +749,13 @@ pub fn inbox_order(agents: &[Vec<AgentView>]) -> Vec<(usize, usize)> {
 }
 
 /// What moves in a workspace header: its hover pill's alpha (0 to 16) and
-/// whether the pointer is on its "×", its worktree count, its fold
-/// chevron, its CI mark.
+/// whether the pointer is on its "×", its restart button, its worktree
+/// count, its fold chevron, its CI mark.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowState {
     pub hover: u8,
     pub close: bool,
+    pub restart: bool,
     pub worktrees: bool,
     pub fold: bool,
     pub ci: bool,
@@ -859,8 +866,9 @@ pub struct RowLayout {
     pub rect: Rect,
     /// The band holding its name.
     pub title: Rect,
-    /// Where its name goes: under the "×" too while nothing else is
-    /// right of it, since that shows only under the pointer.
+    /// Where its name goes: under the "×" and the restart button too
+    /// while nothing else is right of them, since they show only under
+    /// the pointer.
     pub name: Rect,
     /// The line under the name holding its branch, when it has one.
     pub branch: Option<Rect>,
@@ -873,6 +881,9 @@ pub struct RowLayout {
     pub ci: Option<Rect>,
     /// Its "×" close button, at the right end.
     pub close: Rect,
+    /// Its button restarting its commands, left of the "×", when it has
+    /// commands to restart.
+    pub restart: Option<Rect>,
     /// The count of its other worktrees, when it has any.
     pub worktrees: Option<Rect>,
     /// The lines under the header of the worktrees needing a look, when
@@ -881,6 +892,12 @@ pub struct RowLayout {
 }
 
 impl RowLayout {
+    /// Where the buttons showing only under the pointer start: the
+    /// restart button, else the "×".
+    pub fn buttons_x(&self) -> i32 {
+        self.restart.unwrap_or(self.close).loc.x
+    }
+
     /// The field the name turns into while renaming: over the name and
     /// the branch.
     pub fn rename_field(&self) -> Rect {
@@ -892,7 +909,7 @@ impl RowLayout {
             .filter(|r| r.loc.y == self.title.loc.y)
             .map(|r| r.loc.x)
             .min()
-            .unwrap_or(self.close.loc.x)
+            .unwrap_or(self.buttons_x())
             - 2;
         Rectangle::new((x, y).into(), ((end - x).max(0), RENAME_HEIGHT).into())
     }
@@ -968,12 +985,13 @@ pub enum SidebarHit {
     /// The repositories button.
     Repos,
     /// Workspace `i`: its header off any part below, its name, its status,
-    /// its "×", the count of its other worktrees, its fold chevron, the
-    /// mark of its CI.
+    /// its "×", its restart button, the count of its other worktrees, its
+    /// fold chevron, the mark of its CI.
     Row(usize),
     Name(usize),
     Chip(usize),
     Close(usize),
+    Restart(usize),
     Worktrees(usize),
     Fold(usize),
     CiMark(usize),
@@ -1007,6 +1025,7 @@ impl SidebarHit {
             | Self::Name(i)
             | Self::Chip(i)
             | Self::Close(i)
+            | Self::Restart(i)
             | Self::Worktrees(i)
             | Self::Fold(i)
             | Self::CiMark(i)
@@ -1082,6 +1101,8 @@ impl SidebarLayout {
         let (i, row) = self.rows.iter().enumerate().find(|(_, r)| inside(r.rect))?;
         Some(if inside(row.close) {
             SidebarHit::Close(i)
+        } else if row.restart.is_some_and(inside) {
+            SidebarHit::Restart(i)
         } else if row.fold.is_some_and(inside) {
             SidebarHit::Fold(i)
         } else if row.worktrees.is_some_and(inside) {
@@ -1142,6 +1163,7 @@ impl SidebarLayout {
                 up(r);
             }
             for r in [
+                &mut row.restart,
                 &mut row.branch,
                 &mut row.fold,
                 &mut row.chip,
@@ -1266,8 +1288,8 @@ pub fn sidebar_layout_at(
             || !ws.needing_attention().is_empty();
         let folded = ws.folded && foldable;
 
-        // The header: from the right, its "×", its status, its CI mark and
-        // its worktree count, its name in the rest. With a branch, the
+        // The header: from the right, its "×", its restart button, its
+        // status, its CI mark and its worktree count, its name in the rest. With a branch, the
         // branch goes on a line under the name, with the CI mark and the
         // count at that line's right end.
         let h = ws.height(density);
@@ -1277,7 +1299,11 @@ pub fn sidebar_layout_at(
         let slot = |x: i32, w: i32| Rectangle::new((x, y).into(), (w, title_h).into());
         let below = |x: i32, w: i32| Rectangle::new((x, y + title_h).into(), (w, branch_h).into());
         let close = slot(right - CLOSE_SLOT, CLOSE_SLOT);
-        let mut end = close.loc.x;
+        let restart = ws
+            .restart
+            .then(|| slot(close.loc.x - RESTART_SLOT, RESTART_SLOT));
+        let buttons = restart.unwrap_or(close).loc.x;
+        let mut end = buttons;
         let chip = status_extent(ws, cards).map(|w| {
             end -= w;
             slot(end, w)
@@ -1296,9 +1322,9 @@ pub fn sidebar_layout_at(
         };
         let ci_mark = ws.ci_mark().then(|| take(CI_SLOT));
         let worktrees = (!ws.worktrees().is_empty()).then(|| take(WORKTREE_COUNT_WIDTH));
-        // The name may reach under the "×", which shows only under the
-        // pointer, while nothing else is right of it.
-        let name_end = if end == close.loc.x { right } else { end };
+        // The name may reach under the "×" and the restart button, which
+        // show only under the pointer, while nothing else is right of them.
+        let name_end = if end == buttons { right } else { end };
         let name = slot(NAME_X, (name_end - NAME_GAP - NAME_X).max(0));
         let branch = ws
             .branch
@@ -1320,6 +1346,7 @@ pub fn sidebar_layout_at(
             chip,
             ci: ci_mark,
             close,
+            restart,
             worktrees,
             attention,
         });
@@ -1737,11 +1764,11 @@ impl Painter {
         match view.state.rename.as_ref().filter(|(w, _)| *w == i) {
             Some((_, typed)) => self.rename_field(c, typed, row.rename_field(), scale, p),
             None => {
-                // Under the pointer the "×" shows, and a name reaching
-                // under it stops short of it.
+                // Under the pointer the "×" and the restart button show,
+                // and a name reaching under them stops short of them.
                 let mut end = row.name.loc.x + row.name.size.w;
                 if hover > 0.0 {
-                    end = end.min(row.close.loc.x - NAME_GAP);
+                    end = end.min(row.buttons_x() - NAME_GAP);
                 }
                 self.text(
                     c,
@@ -1756,9 +1783,7 @@ impl Painter {
                 if let (Some(line), Some(branch)) = (row.branch, &ws.branch) {
                     let line_band = band(line, scale);
                     let icon = within(line, line.loc.x, BRANCH_ICON_WIDTH);
-                    icon_sdf(c, icon, scale, p.accent, |x, y| {
-                        git_branch(x, y, 0.75 * s)
-                    });
+                    icon_sdf(c, icon, scale, p.accent, |x, y| git_branch(x, y, 0.75 * s));
                     let x = px(line.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
                     let end = px(line.loc.x + line.size.w) as f32;
                     let after = self.text(
@@ -1842,6 +1867,16 @@ impl Painter {
                 mix(surface, p.placeholder, hover)
             };
             icon_sdf(c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
+            if let Some(restart) = row.restart {
+                let color = if row_state.restart {
+                    p.text
+                } else {
+                    mix(surface, p.placeholder, hover)
+                };
+                icon_sdf(c, restart, scale, color, |x, y| {
+                    restart_arrow(x, y, 0.8 * s)
+                });
+            }
         }
 
         // Under the header, a line per worktree that needs a look: its
@@ -2505,6 +2540,7 @@ mod tests {
             more_agents: Vec::new(),
             ci: None,
             folded: false,
+            restart: false,
         }
     }
 
@@ -2830,6 +2866,39 @@ mod tests {
         let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
         let branch = layout.rows[0].branch.unwrap();
         assert_eq!(layout.hit(mid(branch)), Some(SidebarHit::Row(0)));
+    }
+
+    #[test]
+    fn a_workspace_with_commands_has_a_restart_button_left_of_its_close() {
+        let mut ws = workspace("gerdr", None, Some("main"));
+        let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 200);
+        assert_eq!(layout.rows[0].restart, None);
+        ws.restart = true;
+        let layout = sidebar_layout(&[ws.clone()], &[], 200);
+        let row = layout.rows[0];
+        let restart = row.restart.expect("a restart button");
+        assert_eq!(restart.loc.x + restart.size.w, row.close.loc.x);
+        assert_eq!(restart.loc.y, row.close.loc.y);
+        assert_eq!(row.buttons_x(), restart.loc.x);
+        assert_eq!(layout.hit(mid(restart)), Some(SidebarHit::Restart(0)));
+        assert_eq!(SidebarHit::Restart(0).pill(), SidebarHit::Row(0));
+        // A name may still reach under both, which show only under the
+        // pointer; a status right of them bounds it at the button.
+        assert_eq!(
+            row.name.loc.x + row.name.size.w,
+            row.close.loc.x + CLOSE_SLOT - 4
+        );
+        ws.status = Some(AgentStatus::Idle);
+        let agents = vec![vec![agent("p1", AgentStatus::Blocked, None)]];
+        let layout = sidebar_layout(&[ws], &agents, 200);
+        let row = layout.rows[0];
+        let chip = row.chip.expect("a blocked badge");
+        assert_eq!(chip.loc.x + chip.size.w, row.restart.unwrap().loc.x);
+        // Scrolled, it moves with its header.
+        let mut many = vec![workspace("x", None, None); 40];
+        many[1].restart = true;
+        let row = sidebar_layout(&many, &[], 200).scrolled(50, 300).rows[1];
+        assert_eq!(row.restart.unwrap().loc.y, row.close.loc.y);
     }
 
     #[test]

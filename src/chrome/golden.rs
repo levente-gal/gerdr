@@ -53,6 +53,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             more_agents: Vec::new(),
             ci: None,
             folded: false,
+            restart: false,
         },
         WorkspaceView {
             name: "~".into(),
@@ -66,6 +67,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             more_agents: Vec::new(),
             ci: None,
             folded: false,
+            restart: false,
         },
     ]
 }

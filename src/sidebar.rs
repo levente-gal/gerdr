@@ -189,6 +189,7 @@ impl Gerdr {
             .map(|i| RowState {
                 hover: quantize(hover.alpha(SidebarHit::Row(i), now)),
                 close: hit == Some(SidebarHit::Close(i)),
+                restart: hit == Some(SidebarHit::Restart(i)),
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
@@ -325,6 +326,7 @@ impl Gerdr {
                 }
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
+            (SidebarHit::Restart(i), BTN_LEFT) => self.restart_workspace(i),
             (SidebarHit::Worktrees(i), BTN_LEFT) => {
                 let dir = self.workspaces.get(i).map(|ws| ws.dir.clone());
                 self.open_worktrees(dir);
@@ -396,6 +398,26 @@ impl Gerdr {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
+            }
+            SidebarHit::Restart(i) => {
+                let rect = layout.rows.get(i)?.restart?;
+                // Each command, and where it runs.
+                let home = home_dir();
+                let fields: Vec<_> = self
+                    .workspace_restarts(i)
+                    .into_iter()
+                    .map(|(_, c)| {
+                        let place = c.cwd.as_deref().map_or(String::new(), |dir| {
+                            paths::display(dir, home.as_deref(), 40)
+                        });
+                        (chrome::command_line(&c.command).unwrap_or(c.command), place)
+                    })
+                    .collect();
+                let text = match fields.len() {
+                    1 => "Restart its command".to_owned(),
+                    n => format!("Restart its {n} commands"),
+                };
+                Some(Tooltip::new(&text, rect).fields(fields))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
@@ -613,6 +635,8 @@ impl Gerdr {
                     let item = MenuItem::new("Worktrees…", MenuAction::Worktrees(dir));
                     items.push(hinted(item, "worktrees"));
                 }
+                let restart = MenuItem::new("Restart commands", MenuAction::RestartWorkspace(i));
+                items.push(restart.enabled(!self.workspace_restarts(i).is_empty()));
                 items.push(hinted(
                     MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
                     "close workspace",
