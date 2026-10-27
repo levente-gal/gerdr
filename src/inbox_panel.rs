@@ -124,6 +124,24 @@ impl Gerdr {
         (Some(id) == self.project.as_ref()).then_some(file)
     }
 
+    /// Whether the inbox has the agent of card `view` dismissed or snoozed
+    /// at `now` (seconds), as it is now: the sidebar's "Needs you" list
+    /// leaves it out too.
+    pub(crate) fn inbox_hides_agent(&self, view: &AgentView, now: u64) -> bool {
+        let Some(file) = self.inbox_file() else {
+            return false;
+        };
+        inbox_sources::agent_fingerprint(view, &self.agents, &self.cursor_chats).is_some_and(
+            |print| inbox::hides(&file.triage, &format!("agent:{}", view.key), &print, now),
+        )
+    }
+
+    /// Load the shown project's inbox file, so what it hides is hidden
+    /// from the sidebar too before the inbox is first opened.
+    pub(crate) fn load_inbox(&mut self) {
+        self.inbox_file_mut();
+    }
+
     /// Save the shown project's inbox file, its stale triage pruned.
     fn save_inbox(&mut self) {
         let Some((id, file)) = self.inbox.store.as_mut() else {

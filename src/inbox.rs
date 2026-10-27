@@ -284,9 +284,16 @@ pub struct Listing<'a> {
 /// Whether `item` is hidden by `triage` at `now` (seconds): dismissed or
 /// snoozed while its fingerprint is the same, and the snooze not out yet.
 pub fn is_hidden(item: &InboxItem, triage: &BTreeMap<String, Triage>, now: u64) -> bool {
-    triage.get(&item.id.0).is_some_and(|t| {
-        t.fingerprint == item.fingerprint && t.until.is_none_or(|until| now < until)
-    })
+    hides(triage, &item.id.0, &item.fingerprint, now)
+}
+
+/// Whether `triage` hides the item `id` at `now` (seconds) while its
+/// fingerprint is `fingerprint`: what `is_hidden` asks, for those (the
+/// sidebar's) that have no `InboxItem` at hand.
+pub fn hides(triage: &BTreeMap<String, Triage>, id: &str, fingerprint: &str, now: u64) -> bool {
+    triage
+        .get(id)
+        .is_some_and(|t| t.fingerprint == fingerprint && t.until.is_none_or(|until| now < until))
 }
 
 /// The items of `items` to list at `now` (seconds): those not hidden by
