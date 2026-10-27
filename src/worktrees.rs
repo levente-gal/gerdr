@@ -290,9 +290,16 @@ fn can_checkout(wt: &Worktree) -> bool {
     !wt.main && !wt.gone && wt.branch.is_some()
 }
 
-/// Deleting `wt` loses nothing: it is merged and clean, or its folder is
-/// gone.
+/// Deleting `wt` loses nothing: it is clean and merged or without a
+/// commit of its own, or its folder is gone.
 fn safe_to_delete(wt: &Worktree) -> bool {
+    done_with(wt) || (wt.fresh && !wt.dirty)
+}
+
+/// `wt` is done with, for a clean-up: merged and clean, or its folder
+/// gone. Not a new one with no commit yet: work may be about to start in
+/// it.
+fn done_with(wt: &Worktree) -> bool {
     wt.gone || (wt.merged && !wt.dirty)
 }
 
@@ -302,7 +309,7 @@ fn loses(wt: &Worktree) -> String {
     if wt.dirty {
         what.push("its changes");
     }
-    if !wt.merged {
+    if !wt.merged && !wt.fresh {
         what.push("unmerged commits");
     }
     format!("Delete again to delete, with {}", what.join(" and "))
@@ -313,7 +320,7 @@ fn loses(wt: &Worktree) -> String {
 fn merged_ones<'a>(items: &'a [Item], main: &Path) -> Vec<&'a Item> {
     items
         .iter()
-        .filter(|i| i.main == main && !i.wt.main && safe_to_delete(&i.wt))
+        .filter(|i| i.main == main && !i.wt.main && done_with(&i.wt))
         .collect()
 }
 
@@ -630,7 +637,7 @@ impl Popup {
                         LineState::Armed(loses(wt))
                     } else if self.armed == Some(Armed::CleanUp(item.main.clone()))
                         && !wt.main
-                        && safe_to_delete(wt)
+                        && done_with(wt)
                     {
                         LineState::Armed("Shift+Delete again to delete the merged ones".into())
                     } else if wt.needs_attention() {
@@ -1295,6 +1302,35 @@ mod tests {
         popup.select(&items, 0, 10);
         assert_eq!(press(&mut popup, Keysym::Delete, &items), None);
         assert_eq!(popup.armed, None);
+    }
+
+    #[test]
+    fn a_new_worktree_goes_at_once_but_not_in_a_clean_up() {
+        let mut items = items();
+        let mut new = item(0, "new", false, false, false);
+        new.wt.fresh = true;
+        items.push(new);
+        let mut popup = Popup::default();
+        popup.select(&items, 3, 10);
+        assert_eq!(
+            press(&mut popup, Keysym::Delete, &items),
+            Some(Outcome::Delete {
+                path: "/src/r/.wt/new".into(),
+                force: false
+            })
+        );
+        let cleaned: Vec<_> = merged_ones(&items, Path::new("/src/r"))
+            .iter()
+            .map(|i| i.wt.name())
+            .collect();
+        assert_eq!(cleaned, ["done"]);
+        // With changes, it asks twice, for those only.
+        items[3].wt.dirty = true;
+        assert_eq!(press(&mut popup, Keysym::Delete, &items), None);
+        assert_eq!(
+            loses(&items[3].wt),
+            "Delete again to delete, with its changes"
+        );
     }
 
     #[test]
