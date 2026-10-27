@@ -15,6 +15,7 @@ use super::{
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
+use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -57,6 +58,10 @@ pub struct WorktreesView {
     pub repo: Option<String>,
     /// What the list says when it is empty.
     pub empty: String,
+    /// The part of the first worktree scrolled past, 0 to 1; with some,
+    /// the entries take the next worktree (and its label) under the list,
+    /// shown in part.
+    pub part: f64,
 }
 
 /// An entry of the worktrees popup.
@@ -153,8 +158,10 @@ pub struct WorktreesLayout {
     pub scope: Vec<(bool, Rect)>,
     pub query: Rect,
     /// Per entry, its rect and its buttons' (none unless selected or
-    /// hovered).
+    /// hovered). A scrolled list's entries reach out of `list`.
     pub entries: Vec<(Rect, Vec<(WorktreeButton, Rect)>)>,
+    /// Where the entries show.
+    pub list: Rect,
     pub footer: Rect,
     /// The footer's key hints, by index into `WorktreesView::hints`.
     pub hints: Vec<(usize, Rect)>,
@@ -212,16 +219,20 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         Some(WorktreesHit::Entry(i) | WorktreesHit::Button(i, _)) => Some(i),
         _ => view.selected,
     };
+    let (shift, pushed) = scrolled_by(view);
     let entries = view
         .entries
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let h = match entry {
-                WorktreeEntry::Repo(_) => PROJECT_MENU_SECTION,
-                WorktreeEntry::Worktree(_) => PROJECT_MENU_ROW,
+            let h = height(entry);
+            // The label on top stays, but for the next one pushing it out.
+            let up = if i == 0 && pinned(view) {
+                pushed
+            } else {
+                shift
             };
-            let rect = Rectangle::new((row_x, y).into(), (row_w, h).into());
+            let rect = Rectangle::new((row_x, y - up).into(), (row_w, h).into());
             y += h;
             let buttons = match entry {
                 WorktreeEntry::Worktree(line) if with_buttons == Some(i) => {
@@ -232,10 +243,16 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
             (rect, buttons)
         })
         .collect();
+    // A list scrolled part of a row overflows, as high as it is kept, the
+    // entries under it shown in part.
+    if view.part > 0.0 {
+        y = start;
+    }
     // Room for the line saying there are none.
     y = y
         .max(start + view.list_height)
         .max(start + PROJECT_MENU_ROW);
+    let list = Rectangle::new((row_x, start).into(), (row_w, y - start).into());
     let footer_h = footer_height(view.hints.len());
     let bottom = y + PROJECT_MENU_PADDING + footer_h;
     let footer = Rectangle::new((x, bottom - footer_h).into(), (w, footer_h).into());
@@ -245,9 +262,49 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         scope,
         query,
         entries,
+        list,
         footer,
         hints: footer_hint_spots(&hint_strs(&view.hints), footer),
     }
+}
+
+/// How high `entry` is in the list.
+fn height(entry: &WorktreeEntry) -> i32 {
+    match entry {
+        WorktreeEntry::Repo(_) => WORKTREES_LABEL,
+        WorktreeEntry::Worktree(_) => WORKTREES_ROW,
+    }
+}
+
+/// The list's first entry is the label of the first worktree's repository,
+/// kept on top as the worktrees under it scroll.
+fn pinned(view: &WorktreesView) -> bool {
+    matches!(view.entries.first(), Some(WorktreeEntry::Repo(_)))
+}
+
+/// How far up `view`'s entries are moved by the part of its first
+/// worktree scrolled past, and how far its label on top: not at all, but
+/// for the next repository's label pushing it out.
+///
+/// Scrolling one worktree moves the next one up to where the first is:
+/// the first's height, and the next one's label's when it has one.
+fn scrolled_by(view: &WorktreesView) -> (i32, i32) {
+    let skip = usize::from(pinned(view));
+    let mut rest = view.entries.iter().skip(skip);
+    let Some(first) = rest.next() else {
+        return (0, 0);
+    };
+    let label = rest
+        .next()
+        .filter(|entry| matches!(entry, WorktreeEntry::Repo(_)))
+        .map_or(0, height);
+    let shift = wheel::shift(view.part, height(first) + label);
+    let pushed = if label > 0 {
+        (shift - height(first)).max(0)
+    } else {
+        0
+    };
+    (shift, pushed)
 }
 
 /// `buttons` at the right end of a row in `rect`, vertically centred.
@@ -320,6 +377,10 @@ pub fn worktrees_hit(
     if layout.query.to_f64().contains(pos) {
         return Some(WorktreesHit::Query);
     }
+    if !layout.list.to_f64().contains(pos) {
+        return Some(WorktreesHit::Panel);
+    }
+    // The label on top comes first: it covers the worktree scrolled under it.
     for (i, (rect, buttons)) in layout.entries.iter().enumerate() {
         if let Some((button, _)) = buttons.iter().find(|(_, r)| r.to_f64().contains(pos)) {
             return Some(WorktreesHit::Button(i, *button));
@@ -442,10 +503,26 @@ impl Painter {
                 p.placeholder,
             );
         }
-        for (i, ((rect, buttons), entry)) in layout.entries.iter().zip(&view.entries).enumerate() {
-            let rect = shift(*rect);
-            let buttons: Vec<_> = buttons.iter().map(|(b, r)| (*b, shift(*r))).collect();
-            self.worktree_entry(&mut c, view, i, entry, rect, &buttons, scale, p);
+        // The entries show within the list, the worktrees scrolled under
+        // the label on top below it; then the label.
+        let list = shift(layout.list);
+        let bottom = list.loc.y + list.size.h;
+        let pin = usize::from(pinned(view));
+        let below = match layout.entries.first() {
+            Some((label, _)) if pin > 0 => (label.loc.y + label.size.h + by.y).max(list.loc.y),
+            _ => list.loc.y,
+        };
+        for (top, shown) in [(below, pin..view.entries.len()), (list.loc.y, 0..pin)] {
+            let area = Rectangle::new((list.loc.x, top).into(), (list.size.w, bottom - top).into());
+            let (x, y, w, h) = rect_px(area, scale);
+            c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
+                for i in shown {
+                    let (rect, buttons) = &layout.entries[i];
+                    let rect = shift(*rect);
+                    let buttons: Vec<_> = buttons.iter().map(|(b, r)| (*b, shift(*r))).collect();
+                    self.worktree_entry(c, view, i, &view.entries[i], rect, &buttons, scale, p);
+                }
+            });
         }
 
         let footer = shift(layout.footer);
@@ -658,6 +735,7 @@ mod tests {
             all: false,
             repo: Some("gerdr".into()),
             empty: "No worktrees match".into(),
+            part: 0.0,
         }
     }
 
@@ -769,6 +847,66 @@ mod tests {
         let l = worktrees_layout(&hovered, size);
         assert_eq!(l.entries[1].1.len(), 1);
         assert!(l.entries[2].1.is_empty());
+    }
+
+    #[test]
+    fn a_scrolled_list_moves_up_under_its_label_and_shows_the_next_in_part() {
+        let size: Size<i32, Logical> = (1920, 1080).into();
+        let label = |name: &str| WorktreeEntry::Repo(name.into());
+        let scrolled = WorktreesView {
+            entries: vec![
+                label("r"),
+                line("wip", Vec::new()),
+                line("done", Vec::new()),
+                label("s"),
+                line("other", Vec::new()),
+            ],
+            list_height: 3 * WORKTREES_ROW,
+            selected: None,
+            part: 0.5,
+            ..view()
+        };
+        let l = worktrees_layout(&scrolled, size);
+        // As high as it is kept, its label on top staying, the worktrees
+        // moved up half the first, the last reaching out under it.
+        assert_eq!(l.list.size.h, 3 * WORKTREES_ROW);
+        assert_eq!(l.entries[0].0.loc.y, l.list.loc.y);
+        assert_eq!(
+            l.entries[1].0.loc.y,
+            l.list.loc.y + WORKTREES_LABEL - WORKTREES_ROW / 2
+        );
+        let bottom = l.list.loc.y + l.list.size.h;
+        let (last, _) = l.entries.last().unwrap();
+        assert!(last.loc.y < bottom && last.loc.y + last.size.h > bottom);
+        // The label covers the worktree under it; under the list is none.
+        let x = l.list.loc.x as f64 + 40.0;
+        let on_label = (x, l.list.loc.y as f64 + 4.0);
+        assert_eq!(
+            worktrees_hit(&scrolled, &l, on_label.into()),
+            Some(WorktreesHit::Entry(0))
+        );
+        let under: Point<f64, Logical> = (x, bottom as f64 + 2.0).into();
+        assert!(l.entries[4].0.to_f64().contains(under));
+        assert_eq!(
+            worktrees_hit(&scrolled, &l, under),
+            Some(WorktreesHit::Panel)
+        );
+        // The next repository's label pushes the one on top out.
+        let pushing = WorktreesView {
+            entries: vec![
+                label("r"),
+                line("done", Vec::new()),
+                label("s"),
+                line("other", Vec::new()),
+            ],
+            part: 0.75,
+            ..scrolled
+        };
+        let l = worktrees_layout(&pushing, size);
+        let (top, next) = (l.entries[0].0, l.entries[2].0);
+        assert!(top.loc.y < l.list.loc.y);
+        assert_eq!(top.loc.y + top.size.h, next.loc.y);
+        assert_eq!(l.list.size.h, 3 * WORKTREES_ROW);
     }
 
     #[test]
