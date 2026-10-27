@@ -503,12 +503,14 @@ impl Gerdr {
                 .map(|i| (i.root.clone(), i.status.common_dir.clone()))
                 .collect(),
         );
-        if roots.is_empty() {
+        // One round at a time: opened again meanwhile, the panel waits for it.
+        if roots.is_empty() || self.repos.fetches > 0 {
             return;
         }
         let Some(tx) = self.repos_sender() else {
             return;
         };
+        self.repos.fetches += 1;
         std::thread::spawn(move || {
             std::thread::scope(|scope| {
                 for (root, key) in &roots {
@@ -550,6 +552,7 @@ impl Gerdr {
             items,
             same_branches,
             top_branches,
+            fetches,
             ..
         } = &mut self.repos;
         if let Some(panel) = panel.as_mut() {
@@ -558,6 +561,7 @@ impl Gerdr {
                 batch: batch.as_ref(),
                 page,
                 now: SystemTime::now(),
+                fetching: *fetches > 0,
                 same: same_branches,
                 top: top_branches,
                 density,
@@ -591,6 +595,7 @@ impl Gerdr {
             batch: self.repos.batch.as_ref(),
             page,
             now: SystemTime::now(),
+            fetching: self.repos.fetches > 0,
             same: &self.repos.same_branches,
             top: &self.repos.top_branches,
             density,
@@ -649,6 +654,7 @@ impl Gerdr {
             items,
             same_branches,
             top_branches,
+            fetches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -656,6 +662,7 @@ impl Gerdr {
             batch: batch.as_ref(),
             page,
             now: SystemTime::now(),
+            fetching: *fetches > 0,
             same: same_branches,
             top: top_branches,
             density,
@@ -710,6 +717,7 @@ impl Gerdr {
             items,
             same_branches,
             top_branches,
+            fetches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -717,6 +725,7 @@ impl Gerdr {
             batch: batch.as_ref(),
             page,
             now: SystemTime::now(),
+            fetching: *fetches > 0,
             same: same_branches,
             top: top_branches,
             density,
@@ -795,6 +804,7 @@ impl Gerdr {
             items,
             same_branches,
             top_branches,
+            fetches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -802,6 +812,7 @@ impl Gerdr {
             batch: batch.as_ref(),
             page,
             now: SystemTime::now(),
+            fetching: *fetches > 0,
             same: same_branches,
             top: top_branches,
             density,
@@ -923,6 +934,7 @@ impl Gerdr {
             items,
             same_branches,
             top_branches,
+            fetches,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -930,6 +942,7 @@ impl Gerdr {
             batch: batch.as_ref(),
             page,
             now: SystemTime::now(),
+            fetching: *fetches > 0,
             same: same_branches,
             top: top_branches,
             density,
@@ -951,6 +964,7 @@ impl Gerdr {
             batch: self.repos.batch.as_ref(),
             page: self.repos_page(),
             now: SystemTime::now(),
+            fetching: self.repos.fetches > 0,
             same: &self.repos.same_branches,
             top: &self.repos.top_branches,
             density,
@@ -1096,16 +1110,22 @@ impl Gerdr {
         let id = self.repos.next_id;
         self.repos.next_id += 1;
         self.repos.checking = Some(id);
+        if !fetches.is_empty() {
+            self.repos.fetches += 1;
+        }
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.error = Some(format!("Checking {}…", kind.label().to_lowercase()));
         }
         std::thread::spawn(move || {
             let mut verdicts = found;
-            std::thread::scope(|scope| {
-                for (root, key) in &fetches {
-                    scope.spawn(move || fetch_in_turn(root, key));
-                }
-            });
+            if !fetches.is_empty() {
+                std::thread::scope(|scope| {
+                    for (root, key) in &fetches {
+                        scope.spawn(move || fetch_in_turn(root, key));
+                    }
+                });
+                let _ = tx.send(RepoEvent::Fetched);
+            }
             std::thread::scope(|scope| {
                 let kind = &kind;
                 let handles: Vec<_> = probes
@@ -1158,15 +1178,21 @@ impl Gerdr {
         let id = self.repos.next_id;
         self.repos.next_id += 1;
         self.repos.checking = Some(id);
+        if !fetches.is_empty() {
+            self.repos.fetches += 1;
+        }
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.error = Some(format!("Fetching to look for {name}…"));
         }
         std::thread::spawn(move || {
-            std::thread::scope(|scope| {
-                for (root, key) in &fetches {
-                    scope.spawn(move || fetch_in_turn(root, key));
-                }
-            });
+            if !fetches.is_empty() {
+                std::thread::scope(|scope| {
+                    for (root, key) in &fetches {
+                        scope.spawn(move || fetch_in_turn(root, key));
+                    }
+                });
+                let _ = tx.send(RepoEvent::Fetched);
+            }
             let have = probes
                 .iter()
                 .filter_map(|(root, remote, on)| {
@@ -1416,6 +1442,7 @@ impl Gerdr {
                     items,
                     same_branches,
                     top_branches,
+                    fetches,
                     ..
                 } = &mut self.repos;
                 let ctx = Ctx {
@@ -1423,6 +1450,7 @@ impl Gerdr {
                     batch: batch.as_ref(),
                     page,
                     now: SystemTime::now(),
+                    fetching: *fetches > 0,
                     same: same_branches,
                     top: top_branches,
                     density,
@@ -1434,7 +1462,10 @@ impl Gerdr {
                 // Read again if the status moved on meanwhile.
                 self.repos_detail();
             }
-            RepoEvent::Fetched => self.refresh_git(),
+            RepoEvent::Fetched => {
+                self.repos.fetches = self.repos.fetches.saturating_sub(1);
+                self.refresh_git();
+            }
         }
     }
 
