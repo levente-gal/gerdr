@@ -801,13 +801,18 @@ impl Panel {
                 .filter(|i| is_hidden(i, list.triage, list.now))
                 .count()
         };
+        // A section with only hidden items keeps its label, to say so.
         let mut rows = Vec::new();
-        for (k, item) in items.iter().enumerate() {
-            if k == 0 || items[k - 1].section != item.section {
-                let count = items.iter().filter(|i| i.section == item.section).count();
-                rows.push(Entry::Label(item.section, count, hidden(item.section)));
+        for section in Section::ALL {
+            let listed: Vec<usize> = (0..items.len())
+                .filter(|&k| items[k].section == section)
+                .collect();
+            let hidden = hidden(section);
+            if listed.is_empty() && hidden == 0 {
+                continue;
             }
-            rows.push(Entry::Item(k));
+            rows.push(Entry::Label(section, listed.len(), hidden));
+            rows.extend(listed.into_iter().map(Entry::Item));
         }
         Listed { items, rows }
     }
@@ -1272,6 +1277,21 @@ impl Panel {
         } else {
             "Nothing needs you"
         };
+        let mut detail = selected.map(|k| detail_view(&listed.items[k], &item_actions, list.now));
+        // A hidden one says why, and till when.
+        if let (Some(detail), Some(k)) = (detail.as_mut(), selected)
+            && self.show_hidden
+            && let Some(triage) = list.triage.get(&listed.items[k].id.0)
+        {
+            let why = match triage.until {
+                Some(until) => {
+                    let left = Duration::from_secs(until.saturating_sub(list.now));
+                    format!("snoozed, back in {}", age_text(left))
+                }
+                None => "dismissed until it changes".to_owned(),
+            };
+            detail.fields.push(("Hidden".to_owned(), why));
+        }
         let placeholder = if self.show_hidden {
             "Filter the hidden items…"
         } else {
@@ -1295,7 +1315,7 @@ impl Panel {
                 .filter(|r| (first..end).contains(r))
                 .map(|r| r - first),
             hover: self.hover,
-            detail: selected.map(|k| detail_view(&listed.items[k], &item_actions, list.now)),
+            detail,
             hints: self.hints(&item_actions, list),
             empty: empty.into(),
             show_hidden: self.show_hidden,
@@ -1479,6 +1499,8 @@ mod tests {
             Some(Outcome::Restore(ItemId("b".into())))
         );
         assert!(view.hints.contains(&("Del".into(), "restore".into())));
+        let fields = view.detail.map(|d| d.fields).unwrap_or_default();
+        assert!(fields.contains(&("Hidden".into(), "dismissed until it changes".into())));
         // Esc goes back to the list first.
         assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
         assert!(!panel.show_hidden());
@@ -1869,6 +1891,17 @@ mod tests {
             .collect();
         assert_eq!(labels, [("Git", 2, 1), ("GitHub", 1, 1)]);
         assert_eq!(view.total, 5);
+        // All of a section hidden, its label stays to say so.
+        let triage = BTreeMap::from([("d".to_owned(), dismissed("f1", None))]);
+        let triage = triage.into_iter().chain(list.triage.clone()).collect();
+        let list = listing(&items, &triage, &names);
+        let view = Panel::new(None).view(&list);
+        assert!(view.rows.iter().any(|r| *r
+            == InboxRow::Label {
+                title: "GitHub".into(),
+                count: 0,
+                hidden: 2,
+            }));
     }
 
     #[test]

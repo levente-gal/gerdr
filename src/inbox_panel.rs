@@ -30,7 +30,7 @@ use crate::{
     input::Overlay,
     issues::{self, GhRepo, IssuesRead},
     menu::MenuAction,
-    toast::Level,
+    toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
 
@@ -242,7 +242,8 @@ impl Gerdr {
         outcome
     }
 
-    /// A left click while the inbox panel is open: outside it closes it.
+    /// A left click while the inbox panel is open: outside it closes it,
+    /// but on a toast (the Undo of what was just done) presses that.
     pub fn inbox_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.inbox_view() else {
             return;
@@ -262,7 +263,15 @@ impl Gerdr {
                 self.inbox_follow_selection();
                 outcome
             }
-            None => Some(Outcome::Close),
+            None => match self.toast_press(pos) {
+                Some(hit) => {
+                    if let ToastHit::Action(action) = hit {
+                        self.menu_action(action);
+                    }
+                    None
+                }
+                None => Some(Outcome::Close),
+            },
         };
         if let Some(outcome) = outcome {
             self.apply_inbox(outcome);
