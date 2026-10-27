@@ -231,6 +231,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ),
     ("worktrees", Action::Worktrees, "worktrees", "w"),
     ("repos", Action::Repos, "repositories", "g"),
+    ("inbox", Action::Inbox, "inbox", "i"),
     (
         "reload-projects",
         Action::ReloadProjects,
@@ -300,6 +301,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("run the project's start commands", &["run-start-commands"]),
     ("worktrees", &["worktrees"]),
     ("repositories", &["repos"]),
+    ("inbox", &["inbox"]),
     ("reload the project file", &["reload-projects"]),
     ("quit…", &["quit"]),
 ];
@@ -680,7 +682,7 @@ mod tests {
     };
 
     fn from_config(text: &str) -> (Keymap, Vec<String>) {
-        let (keymap, _, _, _, problems) = config::from_text(text);
+        let (keymap, _, _, _, _, problems) = config::from_text(text);
         (keymap, problems)
     }
 
@@ -733,6 +735,7 @@ mod tests {
                 "Shift+B: run the project's start commands",
                 "W: worktrees",
                 "G: repositories",
+                "I: inbox",
                 "Alt+R: reload the project file",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",

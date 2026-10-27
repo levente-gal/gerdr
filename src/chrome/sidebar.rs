@@ -985,6 +985,8 @@ pub enum SidebarHit {
     Card(usize, usize),
     CardClose(usize, usize),
     Subagent(usize, usize, usize),
+    /// The "Needs you" list's heading: it opens the inbox.
+    InboxTitle,
     /// Agent `k` of workspace `i` in the "Needs you" list.
     Inbox(usize, usize),
     /// The "+N more" line after workspace `i`'s agent rows.
@@ -1040,6 +1042,9 @@ impl SidebarLayout {
         }
         if pos.y < BAR_HEIGHT as f64 {
             return None;
+        }
+        if self.inbox_title.is_some_and(inside) {
+            return Some(SidebarHit::InboxTitle);
         }
         if let Some((i, k, _)) = self.inbox.iter().find(|(_, _, rect)| inside(*rect)) {
             return Some(SidebarHit::Inbox(*i, *k));

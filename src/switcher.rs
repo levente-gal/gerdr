@@ -695,6 +695,7 @@ impl Gerdr {
     /// Open the switcher, and ask zoxide for its folders again meanwhile.
     pub fn open_switcher(&mut self) {
         self.project_menu = None;
+        self.inbox.close();
         self.switcher = Some(Switcher::new(self.switcher_items(), false, Place::Split));
         self.query_zoxide();
     }
@@ -703,6 +704,7 @@ impl Gerdr {
     /// `place`, and look for installed apps again meanwhile.
     pub fn open_run_prompt(&mut self, place: Place) {
         self.project_menu = None;
+        self.inbox.close();
         // The commands run before there was frecency start it off, once.
         let history: Vec<String> = launch::history()
             .iter()

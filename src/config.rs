@@ -25,6 +25,13 @@
 //! # default branch; the rest go newest first. By default main, master,
 //! # dev and develop.
 //! top_branches = ["main", "dev", "staging"]
+//!
+//! [inbox]
+//! # Linear's issues assigned to you show in the inbox's todos with an API
+//! # key; LINEAR_API_KEY in the environment wins over this.
+//! linear_api_key = "lin_api_…"
+//! # Only these teams' issues, by key. By default every team's.
+//! linear_teams = ["ENG"]
 //! ```
 //!
 //! Mistakes are logged, and the defaults stand in for what they spoil.
@@ -51,6 +58,7 @@ struct Config {
     apps: BTreeMap<String, String>,
     ui: UiConfig,
     git: GitConfig,
+    inbox: InboxConfig,
 }
 
 /// The `[ui]` table, as written.
@@ -68,6 +76,56 @@ struct UiConfig {
 struct GitConfig {
     same_branches: Option<Vec<Vec<String>>>,
     top_branches: Option<Vec<String>>,
+}
+
+/// The `[inbox]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct InboxConfig {
+    linear_api_key: Option<String>,
+    linear_teams: Option<Vec<String>>,
+}
+
+/// What the inbox reads Linear with, from the `[inbox]` table.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InboxSettings {
+    /// Linear's API key in the file; the environment's wins (see `linear`).
+    pub linear_api_key: Option<String>,
+    /// The teams whose issues to list, by key; empty for every team's.
+    pub linear_teams: Vec<String>,
+}
+
+impl InboxSettings {
+    /// How to read Linear, with `env_key` (`LINEAR_API_KEY`) over the
+    /// file's key; `None` without either.
+    pub fn linear(self, env_key: Option<String>) -> Option<Linear> {
+        let key = env_key
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+            .or(self.linear_api_key)?;
+        Some(Linear {
+            key,
+            teams: self.linear_teams,
+        })
+    }
+}
+
+/// How to read the Linear issues assigned to the user.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Linear {
+    /// The API key: never logged nor put on a command line.
+    pub key: String,
+    /// The teams whose issues to list, by key; empty for every team's.
+    pub teams: Vec<String>,
+}
+
+impl std::fmt::Debug for Linear {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Linear")
+            .field("key", &"…")
+            .field("teams", &self.teams)
+            .finish()
+    }
 }
 
 /// How git branches are seen, from the `[git]` table.
@@ -113,8 +171,10 @@ impl Default for Ui {
     }
 }
 
-/// The shortcuts, apps, look and git settings in the config file.
-pub fn load() -> (Keymap, Vec<App>, Ui, Git) {
+/// The shortcuts, apps, look and git settings in the config file, and how
+/// the inbox reads Linear (`LINEAR_API_KEY` in the environment over the
+/// file's key).
+pub fn load() -> (Keymap, Vec<App>, Ui, Git, Option<Linear>) {
     let path = config_file();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -125,16 +185,17 @@ pub fn load() -> (Keymap, Vec<App>, Ui, Git) {
             String::new()
         }
     };
-    let (keymap, apps, ui, git, problems) = from_text(&text);
+    let (keymap, apps, ui, git, inbox, problems) = from_text(&text);
     for problem in problems {
         tracing::warn!("{}: {problem}", path.display());
     }
-    (keymap, apps, ui, git)
+    let linear = inbox.linear(std::env::var("LINEAR_API_KEY").ok());
+    (keymap, apps, ui, git, linear)
 }
 
-/// The shortcuts, apps, look and git settings `text` describes, and what's
-/// wrong with it.
-pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, Vec<String>) {
+/// The shortcuts, apps, look, git and inbox settings `text` describes, and
+/// what's wrong with it.
+pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, InboxSettings, Vec<String>) {
     let mut problems = Vec::new();
     let config: Config = toml::from_str(text).unwrap_or_else(|err| {
         problems.push(err.to_string());
@@ -186,7 +247,22 @@ pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, Vec<String>) {
             })
             .collect();
     }
-    (keymap, apps, ui, git, problems)
+    let inbox = InboxSettings {
+        linear_api_key: config
+            .inbox
+            .linear_api_key
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty()),
+        linear_teams: config
+            .inbox
+            .linear_teams
+            .unwrap_or_default()
+            .into_iter()
+            .map(|team| team.trim().to_owned())
+            .filter(|team| !team.is_empty())
+            .collect(),
+    };
+    (keymap, apps, ui, git, inbox, problems)
 }
 
 /// The groups of branch names as written, without the blank names, the
@@ -243,6 +319,13 @@ const TEMPLATE: &str = "\
 # # default branch; the rest go newest first. By default main, master,
 # # dev and develop.
 # top_branches = [\"main\", \"dev\", \"staging\"]
+#
+# [inbox]
+# # Linear's issues assigned to you show in the inbox's todos with an API
+# # key; LINEAR_API_KEY in the environment wins over this.
+# linear_api_key = \"lin_api_…\"
+# # Only these teams' issues, by key. By default every team's.
+# linear_teams = [\"ENG\"]
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -274,15 +357,16 @@ pub fn config_file() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Density, Git, TEMPLATE, ThemeMode, Ui, from_text};
+    use super::{Density, Git, InboxSettings, TEMPLATE, ThemeMode, Ui, from_text};
 
     #[test]
     fn the_template_changes_nothing() {
-        let (_, apps, ui, git, problems) = from_text(TEMPLATE);
+        let (_, apps, ui, git, inbox, problems) = from_text(TEMPLATE);
         assert!(problems.is_empty(), "{problems:?}");
         assert!(apps.is_empty());
         assert_eq!(ui, Ui::default());
         assert_eq!(git, Git::default());
+        assert_eq!(inbox, InboxSettings::default());
         // Each example, uncommented, is understood.
         let examples: String = TEMPLATE
             .lines()
@@ -291,17 +375,19 @@ mod tests {
             .filter(|line| !line.starts_with('#'))
             .map(|line| format!("{line}\n"))
             .collect();
-        let (_, apps, ui, git, problems) = from_text(&examples);
+        let (_, apps, ui, git, inbox, problems) = from_text(&examples);
         assert!(problems.is_empty(), "{problems:?}\n{examples}");
         assert_eq!(apps.len(), 2);
         assert_eq!(ui.density, Density::Compact);
         assert_eq!(git.same_branches.len(), 2);
         assert_eq!(git.top_branches, ["main", "dev", "staging"]);
+        assert_eq!(inbox.linear_teams, ["ENG"]);
+        assert!(inbox.linear_api_key.is_some());
     }
 
     #[test]
     fn apps() {
-        let (_, apps, _, _, problems) =
+        let (_, apps, _, _, _, problems) =
             from_text("[apps]\nfiles = \"nautilus .\"\nbrowser = \" firefox \"\nnone = \"\"\n");
         let apps: Vec<_> = apps
             .iter()
@@ -313,17 +399,18 @@ mod tests {
 
     #[test]
     fn mistakes() {
-        assert_eq!(from_text("[key]\n").4.len(), 1);
-        assert_eq!(from_text("[apps]\nbrowser = 1\n").4.len(), 1);
+        assert_eq!(from_text("[key]\n").5.len(), 1);
+        assert_eq!(from_text("[apps]\nbrowser = 1\n").5.len(), 1);
+        assert_eq!(from_text("[inbox]\nlinear = 1\n").5.len(), 1);
     }
 
     fn ui(text: &str) -> (Ui, Vec<String>) {
-        let (_, _, ui, _, problems) = from_text(text);
+        let (_, _, ui, _, _, problems) = from_text(text);
         (ui, problems)
     }
 
     fn same(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
-        let (_, _, _, git, problems) = from_text(text);
+        let (_, _, _, git, _, problems) = from_text(text);
         (git.same_branches, problems)
     }
 
@@ -342,7 +429,7 @@ mod tests {
     #[test]
     fn main_master_dev_and_develop_go_first_unless_the_file_says_otherwise() {
         let top = |text: &str| {
-            let (_, _, _, git, problems) = from_text(text);
+            let (_, _, _, git, _, problems) = from_text(text);
             (git.top_branches, problems)
         };
         assert_eq!(top("").0, ["main", "master", "dev", "develop"]);
@@ -413,6 +500,37 @@ mod tests {
         let (parsed, problems) = ui("[ui]\nneeds_you = false\n");
         assert!(!parsed.needs_you);
         assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn linear_is_read_with_the_environments_key_over_the_files() {
+        let settings = |text: &str| from_text(text).4;
+        assert_eq!(settings("").linear(None), None);
+        assert_eq!(
+            settings("[inbox]\nlinear_api_key = \" \"\n").linear(None),
+            None
+        );
+        let file =
+            settings("[inbox]\nlinear_api_key = \"from-file\"\nlinear_teams = [\"ENG\", \"\"]\n");
+        let linear = file.clone().linear(None).expect("the file's key");
+        assert_eq!(
+            (linear.key.as_str(), linear.teams),
+            ("from-file", vec!["ENG".to_owned()])
+        );
+        let linear = file.clone().linear(Some("from-env".into())).expect("a key");
+        assert_eq!(linear.key, "from-env");
+        // A blank one in the environment leaves the file's.
+        assert_eq!(
+            file.linear(Some(" ".into())).map(|l| l.key),
+            Some("from-file".into())
+        );
+        assert_eq!(
+            settings("").linear(Some("k".into())).map(|l| l.teams),
+            Some(vec![])
+        );
+        // The key stays out of logs.
+        let linear = settings("").linear(Some("secret".into())).unwrap();
+        assert!(!format!("{linear:?}").contains("secret"));
     }
 
     #[test]

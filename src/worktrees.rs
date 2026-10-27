@@ -730,6 +730,7 @@ impl Gerdr {
     pub fn open_worktrees(&mut self, dir: Option<PathBuf>) {
         self.switcher = None;
         self.repos.close();
+        self.inbox.close();
         self.project_menu = None;
         self.stop_key_repeat();
         self.close_menu();

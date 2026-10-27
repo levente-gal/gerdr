@@ -657,7 +657,7 @@ fn gh_api<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> 
 
 /// What `gh args`, run in `root`, prints, read as JSON, or what it says
 /// went wrong.
-fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> {
+pub(crate) fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> {
     let what = args.get(..2).unwrap_or(args).join(" ");
     let out = Command::new("gh")
         .args(args)

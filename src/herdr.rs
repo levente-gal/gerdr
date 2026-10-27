@@ -1004,6 +1004,26 @@ impl Herdr {
         self.get("agent.list", json!({}), "agents")
     }
 
+    /// The text of pane `pane_id`, its last `lines` lines of `source`:
+    /// `visible` (the screen as it is, for apps on the alternate screen,
+    /// which have no scrollback), `recent` (the scrollback's end, at most
+    /// 1000 lines), `recent_unwrapped` or `detection`.
+    pub fn pane_read(
+        &mut self,
+        pane_id: &str,
+        source: &str,
+        lines: usize,
+    ) -> Result<String, String> {
+        let mut result = self.call(
+            "pane.read",
+            json!({"pane_id": pane_id, "source": source, "lines": lines}),
+        )?;
+        match result["read"]["text"].take() {
+            Value::String(text) => Ok(text),
+            _ => Err("pane.read: no text in the reply".into()),
+        }
+    }
+
     /// Mark the agent in `pane_id` as seen, turning `done` into `idle`.
     pub fn agent_focus(&mut self, pane_id: &str) -> Result<(), String> {
         self.call("agent.focus", json!({"target": pane_id}))

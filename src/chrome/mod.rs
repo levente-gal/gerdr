@@ -22,6 +22,7 @@ mod drop;
 mod golden;
 mod help;
 mod hints;
+mod inbox;
 mod menu;
 mod painter;
 mod pane_bar;
@@ -61,6 +62,7 @@ pub use consts::*;
 pub use drop::*;
 pub use help::*;
 pub use hints::*;
+pub use inbox::*;
 pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
@@ -132,6 +134,8 @@ pub struct ChromeView {
     pub worktrees: Option<WorktreesView>,
     /// Set while the repositories panel is open.
     pub repos: Option<ReposView>,
+    /// Set while the inbox panel is open.
+    pub inbox: Option<InboxView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
@@ -167,6 +171,7 @@ pub struct Chrome {
     project_menu: Overlay<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
     worktrees: Overlay<(WorktreesView, Size<i32, Logical>, Theme, f64)>,
     repos: Overlay<(ReposView, Size<i32, Logical>, Theme, f64)>,
+    inbox: Overlay<(InboxView, Size<i32, Logical>, Theme, f64)>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -212,6 +217,7 @@ impl Chrome {
             project_menu: Overlay::default(),
             worktrees: Overlay::default(),
             repos: Overlay::default(),
+            inbox: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -373,6 +379,15 @@ impl Chrome {
         });
         parts.extend(self.repos.part(repos, now, true, |(panel, output, ..)| {
             painter.repos(panel, *output, scale, theme.palette())
+        }));
+
+        // The inbox panel, as high.
+        let inbox = view.inbox.map(|panel| {
+            let (loc, size) = shadowed(inbox_layout(&panel, output).panel);
+            ((panel, output, theme, scale), loc, size)
+        });
+        parts.extend(self.inbox.part(inbox, now, true, |(panel, output, ..)| {
+            painter.inbox(panel, *output, scale, theme.palette())
         }));
 
         // The project menu reaches over the sidebar and the apps.
@@ -757,6 +772,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         );
     }
     rects.extend(sidebar.cards.iter().flatten().map(|(_, rect)| *rect));
+    rects.extend(sidebar.inbox_title);
     rects.extend(sidebar.inbox.iter().map(|(_, _, rect)| *rect));
     let strip_w = output.w - view.sidebar_width;
     let shift = |rect: Rect| {
@@ -823,6 +839,17 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
             rects.push(menu);
             rects.extend(rows);
         }
+    }
+    if let Some(panel) = &view.inbox {
+        let layout = inbox_layout(panel, output);
+        for (rect, buttons) in layout.rows {
+            rects.push(rect);
+            rects.extend(buttons);
+        }
+        rects.extend(layout.scope.into_iter().map(|(_, rect)| rect));
+        rects.extend(layout.detail_buttons);
+        rects.push(layout.query);
+        rects.extend(layout.hints.into_iter().map(|(_, rect)| rect));
     }
     if view.quit.is_some() {
         let quit = quit_layout(output);

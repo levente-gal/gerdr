@@ -25,7 +25,12 @@ mod git_ops;
 mod handlers;
 mod herdr;
 mod hooks;
+mod inbox;
+mod inbox_panel;
+mod inbox_sources;
+mod inbox_store;
 mod input;
+mod issues;
 mod keys;
 mod launch;
 mod layout;
@@ -927,6 +932,9 @@ pub enum Action {
     /// Open the repositories panel, to branch, commit, push and sync the
     /// project's repositories as one.
     Repos,
+    /// Open the inbox, to go through what wants the user across the
+    /// project, or close it again.
+    Inbox,
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -963,6 +971,10 @@ pub enum Reorderable {
     /// dropped (see `pane_drag`).
     Pane(u32),
 }
+
+/// A window's size when asked to change it, and its place then (see
+/// `Gerdr::pending_place`).
+pub type PendingPlace = (Size<i32, Logical>, Point<i32, Logical>);
 
 pub struct Gerdr {
     pub start_time: Instant,
@@ -1033,7 +1045,7 @@ pub struct Gerdr {
     /// to move and change size at once (a pane bar taking or giving back
     /// its room) stays put until then, so its old buffer never shows at
     /// the new place and jumps again when the new one comes.
-    pub pending_place: HashMap<ObjectId, (Size<i32, Logical>, Point<i32, Logical>)>,
+    pub pending_place: HashMap<ObjectId, PendingPlace>,
 
     pub socket_name: OsString,
     /// Zed's data dir, shared by all workspaces so they run in one Zed process.
@@ -1076,6 +1088,8 @@ pub struct Gerdr {
     pub worktrees: worktrees::Worktrees,
     /// The repositories panel and its batches.
     pub repos: repos::Repos,
+    /// The inbox panel and what it reads for itself (see `inbox`).
+    pub inbox: inbox::Inbox,
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
@@ -1084,6 +1098,9 @@ pub struct Gerdr {
     pub blocked_since: HashMap<agents::AgentKey, Instant>,
     /// What each agent was doing when last looked at, to tell news by.
     pub agent_statuses: HashMap<agents::AgentKey, herdr::AgentStatus>,
+    /// What each agent is doing, and since when it has been, for the
+    /// inbox's ages.
+    pub agent_since: HashMap<agents::AgentKey, (herdr::AgentStatus, Instant)>,
     /// What gerdr knows of its Cursor's chats (see `cursor_agents`).
     pub cursor: cursor_agents::Chats,
     /// Those doing something or with news, shown as cards.
@@ -2444,6 +2461,18 @@ impl Gerdr {
             Instant::now(),
             BLOCKED_REMINDER,
         );
+        let now = Instant::now();
+        let since = watched
+            .iter()
+            .map(|a| {
+                let at = match self.agent_since.get(&a.key) {
+                    Some((status, at)) if *status == a.status => *at,
+                    _ => now,
+                };
+                (a.key.clone(), (a.status, at))
+            })
+            .collect();
+        self.agent_since = since;
         self.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
         if let Some(notifier) = self.notifier.as_mut() {
             for news in news {
@@ -3543,6 +3572,8 @@ impl Gerdr {
             }
             Action::Worktrees => self.open_worktrees(None),
             Action::Repos => self.open_repos(),
+            Action::Inbox if self.inbox.is_open() => self.close_inbox(),
+            Action::Inbox => self.open_inbox(None),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -4286,6 +4317,7 @@ impl Gerdr {
             || self.project_menu.is_some()
             || self.worktrees.is_open()
             || self.repos.is_open()
+            || self.inbox.is_open()
         {
             return None;
         }
@@ -4564,6 +4596,7 @@ impl Gerdr {
         self.project_menu = None;
         self.worktrees.close();
         self.repos.close();
+        self.inbox.close();
         self.header_hover = false;
         self.project = None;
         self.focus(None);
@@ -5062,6 +5095,7 @@ impl Gerdr {
             .collect();
         let agents = self.agent_views();
         let sidebar_state = self.sidebar_state(now, &workspaces, &agents);
+        let inbox = self.inbox_view_with(&workspaces, &agents);
         let ws = self.workspace();
         let active = ws.map(|_| self.active_workspace);
         let area = self.content_rect();
@@ -5124,6 +5158,7 @@ impl Gerdr {
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
             repos: self.repos_view(),
+            inbox,
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
             theme: self.theme(),
@@ -5334,7 +5369,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| ListeningSocketSource::new_auto())?;
     let socket_name = socket.socket_name().to_os_string();
 
-    let (keymap, apps, ui, git_config) = config::load();
+    let (keymap, apps, ui, git_config, linear) = config::load();
     let saved_theme = std::fs::read_to_string(theme_file())
         .ok()
         .and_then(|s| ThemeMode::from_name(&s));
@@ -5398,11 +5433,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             top_branches: git_config.top_branches,
             ..Default::default()
         },
+        inbox: inbox::Inbox {
+            linear,
+            ..Default::default()
+        },
         web_pending: false,
         web_control: web_control::WebControl::default(),
         notifier: None,
         blocked_since: HashMap::new(),
         agent_statuses: HashMap::new(),
+        agent_since: HashMap::new(),
         cursor: Default::default(),
         cursor_chats: Vec::new(),
         cursor_idle: Vec::new(),
@@ -5604,6 +5644,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();
+    state.watch_issues();
     state.connect_notifier();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
