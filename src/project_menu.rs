@@ -983,11 +983,9 @@ impl ProjectMenu {
         let first = self.first_shown(page);
         let end = (first + page.max(1)).min(self.items.len());
         // Scrolled part of a row, the list shows one more under it.
-        let part = if end < self.items.len() {
-            self.wheel.part(first)
-        } else {
-            0.0
-        };
+        // Asked for always, to drop a part left before the list moved.
+        let part = self.wheel.part(first);
+        let part = if end < self.items.len() { part } else { 0.0 };
         let shown = end + usize::from(part > 0.0);
         // The recent projects are numbered from the top, shown or not.
         let mut recent: u8 = 0;

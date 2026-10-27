@@ -2,11 +2,14 @@
 //! and the part of a row left over shows as the list moved up by that part
 //! of its first row, so a touchpad scrolls it smoothly.
 
+use std::cell::Cell;
+
 /// The wheel's turn not yet a whole row, and the first row shown then.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wheel {
-    /// In rows, from 0 up to (not including) 1.
-    part: f64,
+    /// In rows, from 0 up to (not including) 1. Dropped when the list is
+    /// seen moved (see `part`), so it can't come back with the list.
+    part: Cell<f64>,
     /// The first row shown when `part` was left.
     at: usize,
 }
@@ -18,7 +21,7 @@ impl Wheel {
     pub fn turn(&mut self, rows: f64, first: usize) -> i64 {
         let part = self.part(first) + rows;
         let whole = part.floor();
-        self.part = part - whole;
+        self.part.set(part - whole);
         self.at = first;
         whole as i64
     }
@@ -29,15 +32,19 @@ impl Wheel {
     /// as asked and there is a row under the list to show it with.
     pub fn settle(&mut self, wanted: i64, first: usize, last: usize) {
         if wanted != first as i64 || first >= last {
-            self.part = 0.0;
+            self.part.set(0.0);
         }
         self.at = first;
     }
 
     /// The part of row `first`, the first row shown, scrolled past: none
-    /// once the list moved otherwise (by keys, say).
+    /// once the list moved otherwise (by keys, say), and none from then on
+    /// even if it moves back. Ask for it with every view of the list.
     pub fn part(&self, first: usize) -> f64 {
-        if self.at == first { self.part } else { 0.0 }
+        if self.at != first {
+            self.part.set(0.0);
+        }
+        self.part.get()
     }
 }
 
@@ -88,11 +95,13 @@ mod tests {
     }
 
     #[test]
-    fn a_list_moved_otherwise_drops_the_part() {
+    fn a_list_moved_away_and_back_drops_the_part() {
         let (mut wheel, mut first) = (Wheel::default(), 2);
         scroll(&mut wheel, &mut first, 0.5, 10, 4);
-        assert_eq!(wheel.part(5), 0.0);
         assert_eq!(wheel.part(2), 0.5);
+        // Seen at the end by keys, then back where the part was left.
+        assert_eq!(wheel.part(6), 0.0);
+        assert_eq!(wheel.part(2), 0.0);
     }
 
     #[test]
