@@ -3,8 +3,9 @@
 //! shown project, a section per kind: agents blocked, done or at work; Git
 //! needing a look (changes, commits to push or pull, stashes, a merge
 //! stopped half-way, worktrees left behind); GitHub's failed CI and pull
-//! requests asking for review; and todos (gerdr's own, and the GitHub and
-//! Linear issues assigned to the user).
+//! requests asking for review; the tickets assigned to the user in the
+//! project's ticket repositories, in their board's order; and todos
+//! (gerdr's own, and the GitHub and Linear issues assigned to the user).
 //!
 //! Typing filters the list. Up/Down select, Enter goes to the item,
 //! Delete dismisses it (until it changes), Ctrl+S snoozes it for an hour,
@@ -60,14 +61,16 @@ pub enum Section {
     Agents,
     Git,
     GitHub,
+    Tickets,
     Todos,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Agents,
         Section::Git,
         Section::GitHub,
+        Section::Tickets,
         Section::Todos,
     ];
 
@@ -77,6 +80,7 @@ impl Section {
             Section::Agents => "Agents",
             Section::Git => "Git",
             Section::GitHub => "GitHub",
+            Section::Tickets => "Tickets",
             Section::Todos => "Todos",
         }
     }

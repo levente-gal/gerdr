@@ -1,6 +1,6 @@
 //! The inbox's items, gathered from what gerdr already shows: the agent
 //! cards, the workspaces' Git status and worktrees, the CI cards, the
-//! issues read for the inbox and its own todos. Pure: everything comes in
+//! issues and tickets read for the inbox and its own todos. Pure: everything comes in
 //! as `Sources`, so tests build them by hand.
 
 use std::{
@@ -18,7 +18,7 @@ use crate::{
     herdr::{AgentInfo, AgentStatus},
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
     inbox_store::InboxFile,
-    issues::{Issue, IssueSource, IssuesRead, IssuesState},
+    issues::{Issue, IssueSource, IssuesRead, IssuesState, TicketRepo},
 };
 
 /// What the items are built from.
@@ -47,6 +47,8 @@ pub struct Sources<'a> {
     /// The CI of the project's repositories, by root (`Gerdr::ci`).
     pub ci: &'a HashMap<PathBuf, RepoCi>,
     pub issues: &'a IssuesState,
+    /// The shown project's ticket repositories (`Project::tickets`).
+    pub tickets: &'a [TicketRepo],
     /// The shown project's inbox file, once loaded.
     pub store: Option<&'a InboxFile>,
     /// Agent panes' last lines, by herdr pane id.
@@ -438,12 +440,17 @@ pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
 }
 
 /// The GitHub and Linear issues assigned to the user: GitHub's of the
-/// project's repositories only.
+/// project's repositories only, but its ticket repositories (their issues
+/// are its tickets).
 pub fn issue_items(src: &Sources) -> Vec<InboxItem> {
     let mut items = Vec::new();
     let repos = src.github();
+    let tickets: HashSet<String> = src.tickets.iter().map(TicketRepo::key).collect();
     for (key, read) in &src.issues.last.github {
         let Ok(issues) = read else { continue };
+        if tickets.contains(key) {
+            continue;
+        }
         let Some((_, _, shared)) = repos.iter().find(|(k, ..)| k == key) else {
             continue;
         };
@@ -459,6 +466,25 @@ pub fn issue_items(src: &Sources) -> Vec<InboxItem> {
     if let Some(Ok(issues)) = &src.issues.last.linear {
         for issue in issues {
             items.push(issue_item(issue, None, "", Target::Link(issue.url.clone())));
+        }
+    }
+    items
+}
+
+/// The tickets assigned to the user in the project's ticket
+/// repositories, each repository's in the order read (its board's).
+pub fn ticket_items(src: &Sources) -> Vec<InboxItem> {
+    let mut items = Vec::new();
+    for repo in src.tickets {
+        let key = repo.key();
+        let read = src.issues.last.tickets.iter().find(|(k, _)| *k == key);
+        let Some((_, Ok(tickets))) = read else {
+            continue;
+        };
+        for ticket in tickets {
+            let mut item = issue_item(ticket, None, "", Target::Link(ticket.url.clone()));
+            item.section = Section::Tickets;
+            items.push(item);
         }
     }
     items
@@ -543,6 +569,7 @@ pub fn collect(src: &Sources) -> Vec<InboxItem> {
     items.extend(git_items(src));
     items.extend(ci_items(src));
     items.extend(issue_items(src));
+    items.extend(ticket_items(src));
     items.extend(todo_items(src));
     items
 }
@@ -550,18 +577,8 @@ pub fn collect(src: &Sources) -> Vec<InboxItem> {
 /// A round of reading the issues, `read`, taken over `last`: a source
 /// that failed keeps what it last read, if anything.
 pub fn merge_issues(last: &IssuesRead, read: IssuesRead) -> IssuesRead {
-    let github = read
-        .github
-        .into_iter()
-        .map(|(key, result)| {
-            let result = result.or_else(|err| {
-                tracing::debug!("issues of {key}: {err}");
-                let old = last.github.iter().find(|(k, _)| *k == key);
-                old.and_then(|(_, r)| r.clone().ok()).ok_or(err)
-            });
-            (key, result)
-        })
-        .collect();
+    let github = merge_repos(&last.github, read.github);
+    let tickets = merge_repos(&last.tickets, read.tickets);
     let linear = read.linear.map(|result| {
         result.or_else(|err| {
             tracing::debug!("Linear's issues: {err}");
@@ -569,7 +586,28 @@ pub fn merge_issues(last: &IssuesRead, read: IssuesRead) -> IssuesRead {
             old.ok_or(err)
         })
     });
-    IssuesRead { github, linear }
+    IssuesRead {
+        github,
+        tickets,
+        linear,
+    }
+}
+
+/// Per repository, what was `read`, over what was `last` read when it
+/// failed.
+type RepoReads = Vec<(String, Result<Vec<Issue>, String>)>;
+
+fn merge_repos(last: &RepoReads, read: RepoReads) -> RepoReads {
+    read.into_iter()
+        .map(|(key, result)| {
+            let result = result.or_else(|err| {
+                tracing::debug!("issues of {key}: {err}");
+                let old = last.iter().find(|(k, _)| *k == key);
+                old.and_then(|(_, r)| r.clone().ok()).ok_or(err)
+            });
+            (key, result)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -596,6 +634,7 @@ mod tests {
         agent_since: HashMap<AgentKey, (AgentStatus, Instant)>,
         ci: HashMap<PathBuf, RepoCi>,
         issues: IssuesState,
+        tickets: Vec<TicketRepo>,
         store: Option<InboxFile>,
         pane_text: HashMap<String, PaneText>,
     }
@@ -623,6 +662,7 @@ mod tests {
                 agent_since: &self.agent_since,
                 ci: &self.ci,
                 issues: &self.issues,
+                tickets: &self.tickets,
                 store: self.store.as_ref(),
                 pane_text: &self.pane_text,
                 now: Instant::now(),
@@ -1019,6 +1059,7 @@ mod tests {
                 ),
             ],
             linear: Some(Ok(vec![issue(IssueSource::Linear, "uuid")])),
+            ..IssuesRead::default()
         };
         let items = issue_items(&f.sources());
         assert_eq!(ids(&items), ["gh:github.com/o/r#1", "linear:uuid"]);
@@ -1076,6 +1117,7 @@ mod tests {
         let old = vec![issue(IssueSource::GitHub, "github.com/o/r#1")];
         let last = IssuesRead {
             github: vec![("github.com/o/r".into(), Ok(old.clone()))],
+            tickets: vec![("github.com/o/t".into(), Ok(old.clone()))],
             linear: Some(Ok(Vec::new())),
         };
         let read = IssuesRead {
@@ -1083,11 +1125,51 @@ mod tests {
                 ("github.com/o/r".into(), Err("offline".into())),
                 ("github.com/o/new".into(), Err("offline".into())),
             ],
+            tickets: vec![("github.com/o/t".into(), Err("offline".into()))],
             linear: Some(Err("offline".into())),
         };
         let merged = merge_issues(&last, read);
-        assert_eq!(merged.github[0].1, Ok(old));
+        assert_eq!(merged.github[0].1, Ok(old.clone()));
         assert_eq!(merged.github[1].1, Err("offline".into()));
+        assert_eq!(merged.tickets[0].1, Ok(old));
         assert_eq!(merged.linear, Some(Ok(Vec::new())));
+    }
+
+    #[test]
+    fn tickets_keep_their_order_in_a_section_of_their_own() {
+        let mut f = Fixture::default();
+        // The ticket repository is a workspace too: its issues show once,
+        // as tickets.
+        f.workspace("t", "/t", Some(git("/t")));
+        let mut ci = repo(Vec::new());
+        ci.slug = "o/t".into();
+        f.ci.insert("/t".into(), ci);
+        f.tickets = vec![TicketRepo {
+            repo: "o/t".into(),
+            project: None,
+        }];
+        let ticket = |n: u64| issue(IssueSource::GitHub, &format!("github.com/o/t#{n}"));
+        f.issues.last = IssuesRead {
+            github: vec![("github.com/o/t".into(), Ok(vec![ticket(1)]))],
+            tickets: vec![("github.com/o/t".into(), Ok(vec![ticket(3), ticket(1)]))],
+            ..IssuesRead::default()
+        };
+        let items = collect(&f.sources());
+        assert_eq!(ids(&items), ["gh:github.com/o/t#3", "gh:github.com/o/t#1"]);
+        assert!(items.iter().all(|i| i.section == Section::Tickets));
+        assert_eq!(items[0].workspace, None);
+        assert_eq!(
+            items[0].target,
+            Target::Link("https://example.com/github.com/o/t#3".into())
+        );
+        // The list keeps the board's order, not the read's.
+        let ordered = crate::inbox::order(&items);
+        assert_eq!(
+            ids(&ordered),
+            ["gh:github.com/o/t#3", "gh:github.com/o/t#1"]
+        );
+        // A project without the repository shows none of them.
+        f.tickets.clear();
+        assert!(ticket_items(&f.sources()).is_empty());
     }
 }

@@ -30,7 +30,7 @@ use crate::{
     inbox_sources::{self, Sources},
     inbox_store::{self, InboxFile, Todo, TodoId, Triage},
     input::Overlay,
-    issues::{self, GhRepo, IssuesRead},
+    issues::{self, GhRepo, IssuesRead, TicketRepo},
     menu::MenuAction,
     toast::{Level, ToastHit},
     tooltip::Tooltip,
@@ -200,6 +200,7 @@ impl Gerdr {
             agent_since: &self.agent_since,
             ci: &self.ci,
             issues: &self.inbox.issues,
+            tickets: self.ticket_repos(),
             store: self.inbox_file(),
             pane_text: &self.inbox.pane_text,
             now: Instant::now(),
@@ -659,9 +660,17 @@ impl Gerdr {
         repos
     }
 
+    /// The shown project's ticket repositories.
+    fn ticket_repos(&self) -> &[TicketRepo] {
+        self.project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+            .map_or(&[], |project| &project.tickets)
+    }
+
     /// Whether the issues are to be read again: none under way, and none
     /// read for `every`, or a repository not read yet (the CI found one
-    /// since).
+    /// since, a project with other ticket repositories is shown).
     fn issues_due(&self, every: Duration) -> bool {
         let issues = &self.inbox.issues;
         if issues.pending || self.inbox.issues_tx.is_none() {
@@ -672,7 +681,11 @@ impl Gerdr {
             let key = crate::ci::key(&repo.host, &repo.slug);
             !issues.last.github.iter().any(|(k, _)| *k == key)
         });
-        stale || unread
+        let unread_tickets = self.ticket_repos().iter().any(|repo| {
+            let key = repo.key();
+            !issues.last.tickets.iter().any(|(k, _)| *k == key)
+        });
+        stale || unread || unread_tickets
     }
 
     /// Read the issues now, off the event loop, unless a round is under
@@ -685,15 +698,16 @@ impl Gerdr {
             return;
         }
         let repos = self.gh_repos();
+        let tickets = self.ticket_repos().to_vec();
         let linear = self.inbox.linear.clone();
-        if repos.is_empty() && linear.is_none() {
+        if repos.is_empty() && tickets.is_empty() && linear.is_none() {
             self.inbox.issues.last = IssuesRead::default();
             self.inbox.issues.at = Some(Instant::now());
             return;
         }
         self.inbox.issues.pending = true;
         let spawned = thread::Builder::new().name("issues".into()).spawn(move || {
-            let _ = tx.send(issues::read_all(repos, linear));
+            let _ = tx.send(issues::read_all(repos, tickets, linear));
         });
         if let Err(err) = spawned {
             self.inbox.issues.pending = false;

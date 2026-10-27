@@ -456,6 +456,7 @@ mod tests {
             workspaces,
             before_start: String::new(),
             after_stop: String::new(),
+            tickets: Vec::new(),
         }
     }
 
