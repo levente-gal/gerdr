@@ -93,6 +93,9 @@ pub struct Repos {
     pub(crate) reading_diffs: HashMap<PathBuf, u64>,
     /// The check under way, by id: an older one's answer is stale.
     pub(crate) checking: Option<u64>,
+    /// How many of the panel's own fetches run (on opening it, before a
+    /// check): its summary says it is fetching meanwhile.
+    pub(crate) fetches: usize,
     /// Groups of branch names that are one branch (`main`, `master`), from
     /// the config.
     pub(crate) same_branches: Vec<Vec<String>>,
@@ -147,6 +150,9 @@ pub struct Ctx<'a> {
     pub page: (usize, usize),
     /// The time now, for how long ago the repositories fetched.
     pub now: SystemTime,
+    /// A fetch of the panel's own runs: how long ago it last fetched says
+    /// nothing then.
+    pub fetching: bool,
     /// Groups of branch names that are one branch (`main`, `master`).
     pub same: &'a [Vec<String>],
     /// Branches the branch lists show first, in this order, after the
@@ -3030,9 +3036,18 @@ impl Panel {
         if conflicts > 0 {
             parts.push(count(conflicts, "conflict"));
         }
-        parts.push(match items.iter().filter_map(|i| i.status.fetched).max() {
-            Some(at) => format!("fetched {} ago", ago(at, ctx.now)),
-            None => "never fetched".into(),
+        // A fetch's own FETCH_HEAD, the first repository's done, would
+        // say "fetched 0s ago" while the others still fetch.
+        let fetch_batch = ctx.batch.is_some_and(|b| {
+            !b.finished() && matches!(b.kind, BatchKind::Fetch | BatchKind::Pull(_))
+        });
+        parts.push(if ctx.fetching || fetch_batch {
+            "fetching…".into()
+        } else {
+            match items.iter().filter_map(|i| i.status.fetched).max() {
+                Some(at) => format!("fetched {} ago", ago(at, ctx.now)),
+                None => "never fetched".into(),
+            }
         });
         parts.join(" · ")
     }
@@ -4164,6 +4179,7 @@ mod tests {
             batch,
             page: (20, 20),
             now: UNIX_EPOCH + Duration::from_secs(NOW),
+            fetching: false,
             same: &SAME,
             top: &TOP,
             density: Density::Comfortable,
@@ -5198,6 +5214,33 @@ mod tests {
         };
         let view = panel.view("gerdr", &ctx);
         assert_eq!(view.summary, "2 dirty · 1 conflict · never fetched");
+        // While a fetch runs, how long ago one did says nothing.
+        let fetching = super::Ctx {
+            fetching: true,
+            ..ctx
+        };
+        assert_eq!(
+            panel.view("gerdr", &fetching).summary,
+            "2 dirty · 1 conflict · fetching…"
+        );
+        let b = batch(BatchKind::Fetch, vec![run("a", RunState::Queued)]);
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx
+        };
+        assert_eq!(
+            panel.view("gerdr", &ctx).summary,
+            "2 dirty · 1 conflict · fetching…"
+        );
+        let done = batch(BatchKind::Fetch, vec![run("a", RunState::Done)]);
+        let ctx = super::Ctx {
+            batch: Some(&done),
+            ..ctx
+        };
+        assert_eq!(
+            panel.view("gerdr", &ctx).summary,
+            "2 dirty · 1 conflict · never fetched"
+        );
         assert_eq!(ago(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(5)), "5s");
         assert_eq!(
             ago(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(2 * 86400)),
