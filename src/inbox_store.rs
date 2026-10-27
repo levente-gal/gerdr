@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
 
 /// How long a triage entry whose item is gone is kept, in seconds.
-#[allow(dead_code)] // Until the inbox panel uses it (wave 1's merge).
 pub const PRUNE_AFTER: u64 = 30 * 24 * 3600;
 
 /// A todo's id within its project: `t1`, `t2`…
@@ -82,7 +81,6 @@ impl Default for InboxFile {
 
 /// Project `project`'s file under `root` (`None`: gerdr's data folder,
 /// `projects::data_dir`).
-#[allow(dead_code)] // Until the inbox panel uses it (wave 1's merge).
 pub fn file(root: Option<&Path>, project: &str) -> PathBuf {
     let root = root.map_or_else(crate::projects::data_dir, Path::to_path_buf);
     root.join("inbox").join(format!("{project}.json"))
@@ -92,7 +90,6 @@ pub fn file(root: Option<&Path>, project: &str) -> PathBuf {
 /// none or it can't be read. One that can't be read is set aside as
 /// `<id>.json.bad-<unix time>` (as `projects` does), so the next save
 /// doesn't lose it.
-#[allow(dead_code)] // Until the inbox panel uses it (wave 1's merge).
 pub fn load(root: Option<&Path>, project: &str) -> InboxFile {
     let path = file(root, project);
     let raw = match std::fs::read(&path) {
@@ -100,34 +97,21 @@ pub fn load(root: Option<&Path>, project: &str) -> InboxFile {
         Err(err) if err.kind() == ErrorKind::NotFound => return InboxFile::default(),
         Err(err) => {
             tracing::warn!("reading {}: {err}", path.display());
-            set_aside(&path);
+            crate::projects::set_aside(&path);
             return InboxFile::default();
         }
     };
     serde_json::from_slice(&raw).unwrap_or_else(|err| {
         tracing::warn!("reading {}: {err}", path.display());
-        set_aside(&path);
+        crate::projects::set_aside(&path);
         InboxFile::default()
     })
 }
 
 /// Save project `project`'s inbox under `root`, atomically.
-#[allow(dead_code)] // Until the inbox panel uses it (wave 1's merge).
 pub fn save(root: Option<&Path>, project: &str, inbox: &InboxFile) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(inbox).map_err(std::io::Error::other)?;
     crate::projects::write_atomic(&file(root, project), &bytes)
-}
-
-/// Move the unreadable file at `path` out of the way of the next save, as
-/// `<path>.bad-<unix time>`.
-fn set_aside(path: &Path) {
-    let mut bad = path.as_os_str().to_owned();
-    bad.push(format!(".bad-{}", now_secs()));
-    let bad = PathBuf::from(bad);
-    match std::fs::rename(path, &bad) {
-        Ok(()) => tracing::warn!("set {} aside as {}", path.display(), bad.display()),
-        Err(err) => tracing::warn!("setting {} aside: {err}", path.display()),
-    }
 }
 
 /// The hour "tomorrow morning" starts at, local time.
@@ -141,7 +125,6 @@ const NIGHT_ENDS: i32 = 5;
 /// "snooze until tomorrow" runs out. Before 05:00 it is the same day's
 /// 09:00, as the user hasn't slept yet. A day later if the local time
 /// can't be worked out.
-#[allow(dead_code)] // Until the inbox panel uses it (wave 1's merge).
 pub fn tomorrow_morning(now: u64) -> u64 {
     let fallback = now + 24 * 3600;
     let Ok(time) = libc::time_t::try_from(now) else {
@@ -180,7 +163,6 @@ fn morning_after(mut tm: libc::tm) -> libc::tm {
 
 /// Forget the triage entries not seen for `PRUNE_AFTER` before `now`, and
 /// the todos done that long ago.
-#[allow(dead_code)] // Until the inbox panel uses it (wave 1's merge).
 pub fn prune(inbox: &mut InboxFile, now: u64) {
     let fresh = |at: u64| now.saturating_sub(at) <= PRUNE_AFTER;
     inbox.triage.retain(|_, triage| fresh(triage.seen));

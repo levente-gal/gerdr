@@ -829,7 +829,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Move the unreadable file at `path` out of the way of the next save, as
 /// `<path>.bad-<unix time>`; whether it is out of the way.
-fn set_aside(path: &Path) -> bool {
+pub(crate) fn set_aside(path: &Path) -> bool {
     let bad = bad_name(path, now());
     match std::fs::rename(path, &bad) {
         Ok(()) => {

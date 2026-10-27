@@ -79,8 +79,11 @@ pub enum MenuAction {
     /// Open the inbox.
     Inbox,
     /// A toast's "Undo" after an inbox item was dismissed or snoozed: list
-    /// the item (by `inbox::ItemId`) again.
-    InboxRestore(String),
+    /// the item (by `inbox::ItemId`) of project `project` (by id) again.
+    InboxRestore {
+        project: String,
+        id: String,
+    },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
 }
@@ -319,7 +322,7 @@ impl Gerdr {
             MenuAction::DeleteWorktree(path) => self.delete_merged_worktree(&path),
             MenuAction::Repos => self.open_repos(),
             MenuAction::Inbox => self.open_inbox(None),
-            MenuAction::InboxRestore(id) => self.inbox_restore(id),
+            MenuAction::InboxRestore { project, id } => self.inbox_restore(&project, id),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }

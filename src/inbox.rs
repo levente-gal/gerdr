@@ -402,13 +402,14 @@ fn last_lines(text: &str, n: usize) -> Vec<String> {
         .collect()
 }
 
-/// The mark before a check of state `state` in a CI detail.
-fn check_mark(state: CiState) -> char {
+/// The word before a check of state `state` in a CI detail: a word, as
+/// the monospace font has no check marks.
+fn check_word(state: CiState) -> &'static str {
     match state {
-        CiState::Failed => '✗',
-        CiState::Passed => '✓',
-        CiState::Running => '●',
-        CiState::Unknown => '○',
+        CiState::Failed => "failed",
+        CiState::Passed => "passed",
+        CiState::Running => "running",
+        CiState::Unknown => "pending",
     }
 }
 
@@ -428,6 +429,8 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
     let mut field = |label: &str, value: String| fields.push((label.to_owned(), value));
     let mut block_title = None;
     let mut block = Vec::new();
+    // A pane's last lines: what an agent asks is at the end.
+    let block_tail = matches!(item.detail, Detail::Agent { .. });
     match &item.detail {
         Detail::Agent {
             status,
@@ -508,7 +511,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 block_title = Some("Checks".to_owned());
                 block = checks
                     .into_iter()
-                    .map(|(name, state, _)| format!("{} {name}", check_mark(*state)))
+                    .map(|(name, state, _)| format!("{:<7} {name}", check_word(*state)))
                     .collect();
             }
         }
@@ -564,6 +567,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         fields,
         block_title,
         block,
+        block_tail,
         buttons: actions.iter().map(|a| a.button()).collect(),
     }
 }
@@ -751,9 +755,17 @@ impl Panel {
         self.all
     }
 
-    /// The selected item.
+    /// The selected item, as last settled (see `settle_on`).
     pub fn selected(&self) -> Option<&ItemId> {
         self.selected.as_ref()
+    }
+
+    /// Select what the view shows as selected in `list`, while nothing is
+    /// (the panel just opened) or what was is gone: so `selected` is that
+    /// before any key or click.
+    pub fn settle_on(&mut self, list: &Listing) {
+        let listed = self.listed(list);
+        self.settle(&listed, list.page);
     }
 
     /// What it lists of `list`: the items not hidden (or only those, with
@@ -891,6 +903,13 @@ impl Panel {
         }
         let id = item.id.clone();
         Some(match action {
+            // A todo of no workspace leads nowhere: written over instead.
+            ItemAction::GoTo
+                if matches!(item.target, Target::Todo(_)) && item.workspace.is_none() =>
+            {
+                self.edit(item, list);
+                return None;
+            }
             ItemAction::GoTo => Outcome::GoTo(id),
             ItemAction::Restore => Outcome::Restore(id),
             ItemAction::Edit => {
@@ -1601,6 +1620,47 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_todo_of_no_workspace_edits_it() {
+        let items = vec![todo(4, None), todo(5, Some(1))];
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::new(None);
+        assert_eq!(press(&mut panel, Keysym::Return, &list), None);
+        let compose = panel.view(&list).compose.unwrap();
+        assert!(compose.editing);
+        assert_eq!(compose.text, "todo:t4 text");
+        press(&mut panel, Keysym::Escape, &list);
+        press(&mut panel, Keysym::Down, &list);
+        assert_eq!(
+            press(&mut panel, Keysym::Return, &list),
+            Some(Outcome::GoTo(ItemId("todo:t5".into())))
+        );
+    }
+
+    #[test]
+    fn the_selection_is_settled_before_a_key() {
+        let items = vec![
+            item("a", Section::Git, None),
+            agent("b", AgentStatus::Blocked, 5),
+        ];
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::new(Some(Section::Git));
+        assert_eq!(panel.selected(), None);
+        panel.settle_on(&list);
+        assert_eq!(panel.selected(), Some(&ItemId("a".into())));
+        // What it shows selected is what is selected.
+        assert_eq!(selected_id(&panel.view(&list)).as_deref(), Some("a"));
+        // Gone, the one in its place is.
+        let rest = vec![items[1].clone()];
+        let list = listing(&rest, &triage, &names);
+        panel.settle_on(&list);
+        assert_eq!(panel.selected(), Some(&ItemId("b".into())));
+    }
+
+    #[test]
     fn esc_clears_the_filter_then_closes() {
         let items = vec![
             item("alpha", Section::Git, None),
@@ -1908,6 +1968,8 @@ mod tests {
         assert_eq!(detail.block.len(), PANE_LINES);
         assert_eq!(detail.block.first().map(String::as_str), Some("line 11"));
         assert_eq!(detail.block.last().map(String::as_str), Some("line 30"));
+        // Its end is what matters: cut at the start when it doesn't fit.
+        assert!(detail.block_tail);
         assert!(detail.fields.contains(&("For".into(), "1m".into())));
         let mut git = item("git:/r", Section::Git, Some(0));
         git.detail = Detail::Git {
@@ -1922,6 +1984,7 @@ mod tests {
         };
         let detail = detail_view(&git, &git.actions, 0);
         assert_eq!(detail.block, ["M src/a.rs", "? new"]);
+        assert!(!detail.block_tail);
         assert!(
             detail
                 .fields

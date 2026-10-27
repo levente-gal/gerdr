@@ -196,6 +196,9 @@ pub struct InboxDetailView {
     /// Monospace lines: the pane's last lines, the changed files, the
     /// failing checks.
     pub block: Vec<String>,
+    /// What matters of `block` is at its end (a pane's last lines, an
+    /// agent's question): cut short at its start rather than its end.
+    pub block_tail: bool,
     /// What can be done to it.
     pub buttons: Vec<InboxButton>,
 }
@@ -1154,7 +1157,8 @@ impl Painter {
     /// The selected item's `detail` in `rect` (buffer coordinates): its
     /// dot and title, its fields as label and value, the heading over its
     /// block of monospace lines (cut short with a line saying how many
-    /// more there are), and its buttons along the bottom.
+    /// more there are, or at its start with `block_tail`), and its buttons
+    /// along the bottom.
     #[allow(clippy::too_many_arguments)]
     fn inbox_detail(
         &self,
@@ -1247,7 +1251,14 @@ impl Painter {
                     (block.size.w, BLOCK_LINE).into(),
                 )
             };
-            for (n, text) in detail.block.iter().take(shown).enumerate() {
+            let more = detail.block.len().saturating_sub(shown);
+            // With the tail kept, the line saying what is cut goes first.
+            let (lines, top, cut_at) = if detail.block_tail {
+                (&detail.block[more..], usize::from(cut), 0)
+            } else {
+                (&detail.block[..shown.min(detail.block.len())], 0, shown)
+            };
+            for (n, text) in lines.iter().enumerate() {
                 let text = text.replace('\t', "    ");
                 self.mono_text(
                     c,
@@ -1255,20 +1266,20 @@ impl Painter {
                     BLOCK_FONT_SIZE,
                     lx,
                     lright,
-                    band(line_at(n), scale),
+                    band(line_at(top + n), scale),
                     scale,
                     p.text,
                 );
             }
             if cut {
-                let more = detail.block.len() - shown;
+                let what = if detail.block_tail { "earlier" } else { "more" };
                 self.text(
                     c,
-                    &format!("… {more} more"),
+                    &format!("… {more} {what}"),
                     SMALL_FONT_SIZE,
                     lx,
                     lright,
-                    band(line_at(shown), scale),
+                    band(line_at(cut_at), scale),
                     scale,
                     p.placeholder,
                 );
@@ -1391,6 +1402,7 @@ mod tests {
             ],
             block_title: Some("Last output".into()),
             block,
+            block_tail: true,
             buttons: detail_buttons(),
         }
     }
@@ -1414,6 +1426,7 @@ mod tests {
                 "?? notes/a-very-long-path/that/goes/on/and/on/and/on/for/a/while/longer/than/the/pane/is/wide.md".into(),
                 "UU src/main.rs".into(),
             ],
+            block_tail: false,
             buttons: detail_buttons(),
         }
     }
@@ -1429,10 +1442,11 @@ mod tests {
             ],
             block_title: Some("Checks".into()),
             block: vec![
-                "clippy            failed".into(),
-                "test (ubuntu)     failed".into(),
-                "build             passed".into(),
+                "failed  clippy".into(),
+                "failed  test (ubuntu)".into(),
+                "passed  build".into(),
             ],
+            block_tail: false,
             buttons: vec![
                 button("Open", "Enter"),
                 button("Copy link", "Ctrl+C"),
@@ -1460,6 +1474,7 @@ mod tests {
             ],
             block_title: None,
             block: Vec::new(),
+            block_tail: false,
             buttons: vec![
                 button("Open", "Enter"),
                 button("Copy link", "Ctrl+C"),
@@ -1479,6 +1494,7 @@ mod tests {
             ],
             block_title: None,
             block: Vec::new(),
+            block_tail: false,
             buttons: vec![
                 button("Go to", "Enter"),
                 button("Edit", "Ctrl+E"),
@@ -1639,6 +1655,7 @@ mod tests {
                 ],
                 block_title: Some("Last output".into()),
                 block: vec!["All tests pass.".into()],
+                block_tail: true,
                 buttons: vec![button("Restore", "Delete"), button("Go to", "Enter")],
             }),
             ..view()

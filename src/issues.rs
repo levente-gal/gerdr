@@ -91,7 +91,6 @@ impl IssuesState {
 /// whose issues can't be read (`gh` missing or signed out) gets the error
 /// `gh` gave, and Linear's what it or `curl` said; nothing is logged but at
 /// debug level.
-#[allow(dead_code)] // Until the inbox reads issues (wave 1's merge).
 pub fn read_all(github: Vec<GhRepo>, linear: Option<config::Linear>) -> IssuesRead {
     std::thread::scope(|scope| {
         let linear = linear.map(|linear| scope.spawn(move || read_linear(&linear)));

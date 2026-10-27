@@ -131,6 +131,61 @@ fn load_font(path: Option<String>) -> Option<FontVec> {
     FontVec::try_from_vec(data).ok()
 }
 
+/// The fonts that draw what the monospace font lacks (a TUI's `❯`, `⏺`,
+/// `✓`), by character: as fontconfig picks them, each font loaded once
+/// and kept; `None` when no font has it.
+type Fallbacks = std::collections::HashMap<char, Option<&'static FontVec>>;
+
+/// The font to draw each of `chars` with, which the monospace font lacks:
+/// looked up the first time (one `fc-match` for all those new, then one
+/// for those its pick lacks, while picks help), then remembered.
+fn fallbacks(chars: &[char]) -> Vec<Option<&'static FontVec>> {
+    use std::sync::{Mutex, OnceLock};
+    static FOUND: OnceLock<Mutex<Fallbacks>> = OnceLock::new();
+    static FILES: OnceLock<Mutex<Vec<(String, &'static FontVec)>>> = OnceLock::new();
+    let found = FOUND.get_or_init(Mutex::default);
+    let mut found = found.lock().unwrap_or_else(|e| e.into_inner());
+    let mut new: Vec<char> = chars
+        .iter()
+        .copied()
+        .filter(|ch| !found.contains_key(ch))
+        .collect();
+    new.sort_unstable();
+    new.dedup();
+    let files = FILES.get_or_init(Mutex::default);
+    let mut files = files.lock().unwrap_or_else(|e| e.into_inner());
+    while !new.is_empty() {
+        let charset: Vec<String> = new.iter().map(|ch| format!("{:x}", *ch as u32)).collect();
+        let file = find_family(&format!("monospace:charset={}", charset.join(" ")));
+        let font = file.and_then(|file| match files.iter().find(|(f, _)| *f == file) {
+            Some((_, font)) => Some(*font),
+            None => {
+                let font: &'static FontVec = Box::leak(Box::new(load_font(Some(file.clone()))?));
+                files.push((file, font));
+                Some(font)
+            }
+        });
+        let has = |ch: char| font.filter(|font| font.glyph_id(ch).0 != 0);
+        let (drawn, rest): (Vec<char>, Vec<char>) = new.iter().partition(|&&ch| has(ch).is_some());
+        // No font has the rest.
+        let last = drawn.is_empty();
+        for ch in drawn {
+            found.insert(ch, has(ch));
+        }
+        if last {
+            for ch in rest {
+                found.insert(ch, None);
+            }
+            break;
+        }
+        new = rest;
+    }
+    chars
+        .iter()
+        .map(|ch| found.get(ch).copied().flatten())
+        .collect()
+}
+
 /// How wide `text` is in the UI font at `size`, in logical pixels, for a
 /// layout that has no painter at hand; `None` without a font. The font is
 /// loaded the first time.
@@ -248,10 +303,40 @@ impl Painter {
         scale: f64,
         color: Rgb,
     ) -> f32 {
-        match self.mono_font() {
-            Some(font) => text_in(font, c, text, size, x, max_x, band, scale, color),
-            None => x,
+        let Some(font) = self.mono_font() else {
+            return x;
+        };
+        let lacks = |ch: char| !ch.is_whitespace() && font.glyph_id(ch).0 == 0;
+        let missing: Vec<char> = text.chars().filter(|&ch| lacks(ch)).collect();
+        if missing.is_empty() {
+            return text_in(font, c, text, size, x, max_x, band, scale, color);
         }
+        // Runs the monospace font has, and the characters it lacks each in
+        // the font fontconfig picks for it.
+        let other: std::collections::HashMap<char, &FontVec> = missing
+            .iter()
+            .zip(fallbacks(&missing))
+            .filter_map(|(ch, f)| Some((*ch, f?)))
+            .collect();
+        let font_of = |ch: char| other.get(&ch).copied().unwrap_or(font);
+        let mut pen = x;
+        let mut rest = text;
+        while let Some(first) = rest.chars().next() {
+            let run_font = font_of(first);
+            let end = rest
+                .char_indices()
+                .find(|&(_, ch)| !std::ptr::eq(font_of(ch), run_font))
+                .map_or(rest.len(), |(i, _)| i);
+            let (run, after) = rest.split_at(end);
+            let width = width_in(run_font, run, size, scale);
+            if pen + width > max_x {
+                // What fits of it, with "…": the end.
+                return text_in(run_font, c, run, size, pen, max_x, band, scale, color);
+            }
+            pen = text_in(run_font, c, run, size, pen, f32::MAX, band, scale, color);
+            rest = after;
+        }
+        pen
     }
 
     /// A checkbox at the left of `rect`, vertically centred: an outlined
@@ -759,6 +844,7 @@ mod tests {
     use crate::chrome::{Check, FONT_SIZE, Theme};
     use crate::git::{Change, GitStatus, InProgress};
     use crate::text_field::Line;
+    use ab_glyph::Font;
 
     #[test]
     fn a_conflict_or_an_operation_half_done_adds_a_mark_before_the_dirty_dot() {
@@ -798,6 +884,23 @@ mod tests {
             let end = painter.checkbox(&mut c, rect, state, false, 1.0, p);
             assert_eq!(end, (10 + super::CHECKBOX_SIZE) as f32);
         }
+    }
+
+    #[test]
+    fn what_the_monospace_font_lacks_is_drawn_from_another() {
+        let painter = Painter::new();
+        // `❯`: what Claude Code marks the chosen answer with.
+        let lacked = '❯';
+        let Some(mono) = painter.mono.as_ref() else {
+            return;
+        };
+        if mono.glyph_id(lacked).0 != 0 || super::fallbacks(&[lacked])[0].is_none() {
+            return;
+        }
+        let mut c = Canvas::new((60, 30).into());
+        let p = Theme::Dark.palette();
+        painter.mono_text(&mut c, "❯", 14.0, 4.0, 60.0, (0, 30), 1.0, p.text);
+        assert!(c.px.iter().any(|&b| b != 0));
     }
 
     #[test]

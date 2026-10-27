@@ -338,7 +338,11 @@ impl Gerdr {
                 workspace,
             } => self.save_todo(id, text, workspace),
             Outcome::Refresh => self.refresh_issues(),
-            Outcome::Restore(id) => self.inbox_restore(id.0),
+            Outcome::Restore(id) => {
+                if let Some(project) = self.project.clone() {
+                    self.inbox_restore(&project, id.0);
+                }
+            }
         }
     }
 
@@ -346,7 +350,7 @@ impl Gerdr {
     fn inbox_act(&mut self, id: &ItemId, action: ItemAction) {
         // A hidden item listed again needs nothing of it but its id.
         if action == ItemAction::Restore {
-            return self.inbox_restore(id.0.clone());
+            return self.apply_inbox(Outcome::Restore(id.clone()));
         }
         let Some(item) = self.inbox_item(id) else {
             return;
@@ -421,10 +425,17 @@ impl Gerdr {
         }
     }
 
-    /// `text`, in a toast whose "Undo" lists item `id` again.
+    /// `text`, in a toast whose "Undo" lists item `id` of the shown
+    /// project again.
     fn toast_undo(&mut self, text: String, id: &ItemId) {
-        let undo = ("Undo".to_owned(), MenuAction::InboxRestore(id.0.clone()));
-        self.toast_with(text, Level::Info, Some(undo));
+        let Some(project) = self.project.clone() else {
+            return self.toast(text, Level::Info);
+        };
+        let restore = MenuAction::InboxRestore {
+            project,
+            id: id.0.clone(),
+        };
+        self.toast_with(text, Level::Info, Some(("Undo".to_owned(), restore)));
     }
 
     /// Go where `item` leads (see `Target`), the panel closed first. A
@@ -481,21 +492,26 @@ impl Gerdr {
         self.save_inbox();
     }
 
-    /// The toast's "Undo" after a dismiss or snooze: list item `id` again.
-    /// After a todo was marked done, it isn't any more.
-    pub fn inbox_restore(&mut self, id: String) {
-        let Some(file) = self.inbox_file_mut() else {
-            return;
-        };
-        let mut changed = file.triage.remove(&id).is_some();
-        if let Some(todo) = id.strip_prefix("todo:")
-            && let Some(todo) = file.todos.iter_mut().find(|t| t.id.0 == todo)
-            && todo.done.take().is_some()
-        {
-            changed = true;
-        }
-        if changed {
-            self.save_inbox();
+    /// The toast's "Undo" after a dismiss or snooze: list item `id` of
+    /// project `project` (by id) again. After a todo was marked done, it
+    /// isn't any more. The project needn't be the shown one any more: the
+    /// file loaded is changed if it is that project's, else that project's
+    /// is loaded, changed and saved on its own.
+    pub fn inbox_restore(&mut self, project: &str, id: String) {
+        match self.inbox.store.as_mut() {
+            Some((p, file)) if p == project => {
+                if restore(file, &id) {
+                    self.save_inbox();
+                }
+            }
+            _ => {
+                let mut file = inbox_store::load(None, project);
+                if restore(&mut file, &id)
+                    && let Err(err) = inbox_store::save(None, project, &file)
+                {
+                    tracing::warn!("inbox of {project}: {err}");
+                }
+            }
         }
     }
 
@@ -601,8 +617,17 @@ impl Gerdr {
         }
     }
 
-    /// Read the pane of the selected item, if it is a herdr agent's.
+    /// Read the pane of the selected item, if it is a herdr agent's: the
+    /// one the view shows selected, settled first (just opened, or the one
+    /// selected gone).
     fn inbox_follow_selection(&mut self) {
+        if self.inbox.panel.is_none() {
+            return;
+        }
+        let parts = self.inbox_parts();
+        if let Some(panel) = self.inbox.panel.as_mut() {
+            panel.settle_on(&parts.listing());
+        }
         let selected = self.inbox.panel.as_ref().and_then(Panel::selected);
         let key = selected
             .and_then(|id| id.0.strip_prefix("agent:"))
@@ -686,6 +711,19 @@ impl Gerdr {
             }
         }
     }
+}
+
+/// List item `id` of `file` again: its triage forgotten, and a todo
+/// marked done not done any more; whether anything changed.
+fn restore(file: &mut InboxFile, id: &str) -> bool {
+    let mut changed = file.triage.remove(id).is_some();
+    if let Some(todo) = id.strip_prefix("todo:")
+        && let Some(todo) = file.todos.iter_mut().find(|t| t.id.0 == todo)
+        && todo.done.take().is_some()
+    {
+        changed = true;
+    }
+    changed
 }
 
 /// The id of a new todo of `file`: `t<next_todo>`, moved past any taken,
