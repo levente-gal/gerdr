@@ -821,21 +821,33 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         let layout = placeholder_layout(placeholder.rect, placeholder.timed_out);
         rects.extend(layout.retry.into_iter().chain(layout.close));
     }
+    // A scrolled list's rows, as far as the list shows them.
+    let within = |list: Rect| move |rect: Rect| rect.intersection(list);
     if let Some(switcher) = &view.switcher {
         let layout = switcher_geometry(switcher, area);
-        rects.extend(layout.rows.into_iter().chain(layout.chips));
+        rects.extend(layout.rows.into_iter().filter_map(within(layout.list)));
+        rects.extend(layout.chips);
     }
     if let Some(popup) = &view.worktrees {
-        for (rect, buttons) in worktrees_layout(popup, output).entries {
-            rects.push(rect);
-            rects.extend(buttons.into_iter().map(|(_, rect)| rect));
+        let layout = worktrees_layout(popup, output);
+        for (rect, buttons) in layout.entries {
+            rects.extend(within(layout.list)(rect));
+            rects.extend(
+                buttons
+                    .into_iter()
+                    .filter_map(|(_, rect)| within(layout.list)(rect)),
+            );
         }
     }
     if let Some(panel) = &view.repos {
         let layout = repos_layout(panel, output);
         for (line, check, expander) in layout.lines {
-            rects.extend([line, check]);
-            rects.extend(expander);
+            rects.extend(
+                [line, check]
+                    .into_iter()
+                    .filter_map(within(layout.tree_list)),
+            );
+            rects.extend(expander.and_then(within(layout.tree_list)));
         }
         rects.extend(layout.buttons.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_tabs.into_iter().map(|(_, rect)| rect));
@@ -846,14 +858,17 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.push(layout.branch);
         if let Some((menu, rows)) = layout.branch_menu {
             rects.push(menu);
-            rects.extend(rows);
+            match layout.branch_list {
+                Some(list) => rects.extend(rows.into_iter().filter_map(within(list))),
+                None => rects.extend(rows),
+            }
         }
     }
     if let Some(panel) = &view.inbox {
         let layout = inbox_layout(panel, output);
         for (rect, buttons) in layout.rows {
-            rects.push(rect);
-            rects.extend(buttons);
+            rects.extend(within(layout.window)(rect));
+            rects.extend(buttons.into_iter().filter_map(within(layout.window)));
         }
         rects.extend(layout.scope.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_buttons);

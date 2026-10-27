@@ -239,6 +239,7 @@ fn switcher() -> SwitcherView {
         category: 0,
         category_hover: Some(2),
         hint_hover: None,
+        part: 0.0,
         hints: vec![
             ("Enter".into(), "open".into()),
             ("Alt+Enter".into(), "in a new tab".into()),
@@ -364,6 +365,7 @@ fn project_menu() -> ProjectMenuView {
             ("Esc".into(), "close".into()),
         ],
         hover_alpha: 16,
+        part: 0.0,
     }
 }
 
@@ -385,6 +387,7 @@ fn form() -> ProjectMenuView {
         settings: None,
         hints: vec![("Esc".into(), "back".into())],
         hover_alpha: 16,
+        part: 0.0,
     }
 }
 
