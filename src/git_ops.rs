@@ -519,15 +519,19 @@ fn checked_out_at(text: &str) -> Option<PathBuf> {
     Some(PathBuf::from(line.rsplit_once('\'')?.0))
 }
 
-/// One line on why a command failed: the last line git marked as an
-/// error, else the last line, with `fatal: `, `error: ` or `hint: `
-/// stripped; from stderr, else stdout.
+/// One line on why a command failed: what the remote said when it
+/// refused a push, else the last line git marked as an error, else the
+/// last line, with `fatal: `, `error: ` or `hint: ` stripped; from
+/// stderr, else stdout.
 fn why(stderr: &str, stdout: &str) -> String {
     let text = if stderr.trim().is_empty() {
         stdout
     } else {
         stderr
     };
+    if let Some(said) = refusal(text) {
+        return said;
+    }
     let lines = || text.lines().map(str::trim).filter(|l| !l.is_empty());
     let marked = lines()
         .rfind(|l| l.starts_with("fatal: ") || l.starts_with("error: "))
@@ -538,6 +542,43 @@ fn why(stderr: &str, stdout: &str) -> String {
         .trim_start_matches("error: ")
         .trim_start_matches("hint: ")
         .to_owned()
+}
+
+/// Why the remote refused a push, in its words: its `remote:` lines (a
+/// hook's, a protected branch's), then the reason `[remote rejected]`
+/// gives, `(pre-receive hook declined)`. git's own last line only says
+/// "failed to push some refs".
+fn refusal(text: &str) -> Option<String> {
+    let rejected = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("! [remote rejected]"))?;
+    let reason = rejected
+        .rsplit_once('(')
+        .map(|(_, r)| r.trim().trim_end_matches(')').trim())
+        .filter(|r| !r.is_empty());
+    // Not the progress a push prints along the way.
+    const PROGRESS: [&str; 5] = [
+        "Enumerating objects",
+        "Counting objects",
+        "Compressing objects",
+        "Total ",
+        "Resolving deltas",
+    ];
+    let said: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("remote:"))
+        .map(|l| l.trim().trim_start_matches("error: ").trim())
+        .filter(|l| !l.is_empty() && !PROGRESS.iter().any(|p| l.starts_with(p)))
+        .collect();
+    let mut why = said.join(" ");
+    if let Some(reason) = reason {
+        why = if why.is_empty() {
+            reason.to_owned()
+        } else {
+            format!("{why} ({reason})")
+        };
+    }
+    (!why.is_empty()).then_some(why)
 }
 
 /// The files with unresolved conflicts, from the worktree's top folder.
@@ -1590,6 +1631,35 @@ mod tests {
                 "pathspec 'nope' did not match any file(s) known to git",
             ),
             ("hint: only a hint\n", "", Other, "only a hint"),
+            (
+                "remote: pushes to lib are frozen until Friday        \n\
+                 To /srv/lib.git\n \
+                 ! [remote rejected] HEAD -> main (pre-receive hook declined)\n\
+                 error: failed to push some refs to '/srv/lib.git'\n",
+                "",
+                Other,
+                "pushes to lib are frozen until Friday (pre-receive hook declined)",
+            ),
+            (
+                "Enumerating objects: 5, done.\n\
+                 remote: Resolving deltas: 100% (1/1), completed with 1 local object.\n\
+                 remote: error: GH006: Protected branch update failed for refs/heads/main.\n\
+                 remote: error: Changes must be made through a pull request.\n\
+                 To github.com:o/r.git\n \
+                 ! [remote rejected] main -> main (protected branch hook declined)\n\
+                 error: failed to push some refs to 'github.com:o/r.git'\n",
+                "",
+                Other,
+                "GH006: Protected branch update failed for refs/heads/main. \
+                 Changes must be made through a pull request. (protected branch hook declined)",
+            ),
+            (
+                "To /srv/r.git\n ! [remote rejected] main -> main (shallow update not allowed)\n\
+                 error: failed to push some refs to '/srv/r.git'\n",
+                "",
+                Other,
+                "shallow update not allowed",
+            ),
         ];
         for (stderr, stdout, want, want_why) in samples {
             assert_eq!(&classify(stderr, stdout), want, "{stderr}{stdout}");
