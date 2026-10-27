@@ -842,8 +842,12 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     if let Some(panel) = &view.repos {
         let layout = repos_layout(panel, output);
         for (line, check, expander) in layout.lines {
-            rects.extend([line, check]);
-            rects.extend(expander);
+            rects.extend(
+                [line, check]
+                    .into_iter()
+                    .filter_map(within(layout.tree_list)),
+            );
+            rects.extend(expander.and_then(within(layout.tree_list)));
         }
         rects.extend(layout.buttons.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_tabs.into_iter().map(|(_, rect)| rect));
@@ -854,7 +858,10 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.push(layout.branch);
         if let Some((menu, rows)) = layout.branch_menu {
             rects.push(menu);
-            rects.extend(rows);
+            match layout.branch_list {
+                Some(list) => rects.extend(rows.into_iter().filter_map(within(list))),
+                None => rects.extend(rows),
+            }
         }
     }
     if let Some(panel) = &view.inbox {
