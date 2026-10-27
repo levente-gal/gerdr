@@ -20,8 +20,8 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
-    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical, plus,
-    rect_px, rounded_rect, trash,
+    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, plus, rect_px,
+    rounded_rect, trash,
 };
 use crate::diff::LineKind;
 use crate::text_field::Line;
@@ -1659,12 +1659,10 @@ impl Painter {
         let parts = parts(view, size);
         let layout = &parts.layout;
         let panel = layout.panel;
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
-        c.popup(panel.size, HELP_RADIUS, scale, p);
         let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
         let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
         let across = |c: &mut Canvas, y: i32| {

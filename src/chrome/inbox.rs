@@ -12,7 +12,7 @@ use super::{
     MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, STROKE, band, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf,
-    magnifier, measure, mix, pencil, phys, physical, plus,
+    magnifier, measure, mix, pencil, phys, plus,
     project_menu::{menu_mark, menu_query_text},
     rect_px,
     repos::scrollbar,
@@ -674,11 +674,9 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = inbox_layout(view, size);
         let panel = layout.panel;
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let border = px(1).max(1);
-        c.popup(panel.size, HELP_RADIUS, scale, p);
         let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
         let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
         let divider = |c: &mut Canvas, y: i32| {

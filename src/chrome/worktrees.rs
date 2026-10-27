@@ -9,7 +9,7 @@ use super::{
     MENU_RADIUS, PADDING, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
     PROJECT_MENU_SECTION, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, SHADOW,
     SMALL_FONT_SIZE, band, footer_height, footer_hint_spots, git_branch, hint_at, hint_strs,
-    icon_sdf, magnifier, measure, mix, phys, physical,
+    icon_sdf, magnifier, measure, mix, phys,
     project_menu::{menu_mark, menu_query_text},
     rect_px,
 };
@@ -355,12 +355,10 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = worktrees_layout(view, size);
         let panel = layout.panel;
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
-        c.popup(panel.size, HELP_RADIUS, scale, p);
         let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
         let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
         let divider = |c: &mut Canvas, y: i32| {

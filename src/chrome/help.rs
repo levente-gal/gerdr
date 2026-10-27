@@ -2,9 +2,9 @@
 //! with the Shortcuts action: then it carries a title and a way out.
 
 use super::{
-    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, Canvas, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP,
-    HELP_MARGIN, HELP_PADDING, HELP_RADIUS, HELP_ROW_HEIGHT, HELP_TITLE_HEIGHT, KEY_FONT_SIZE,
-    Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, physical, rect_px,
+    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_MARGIN,
+    HELP_PADDING, HELP_RADIUS, HELP_ROW_HEIGHT, HELP_TITLE_HEIGHT, KEY_FONT_SIZE, Painter, Palette,
+    Rect, SHADOW, SMALL_FONT_SIZE, rect_px,
 };
 use crate::Action;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -235,12 +235,10 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let outer = Size::from((layout.size.w + 2 * SHADOW, layout.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(layout.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let border = px(1).max(1);
         let (ox, oy) = (px(SHADOW), px(SHADOW));
-        c.popup(layout.size, HELP_RADIUS, scale, p);
         let ground = self
             .help_spots(help, layout, (SHADOW, SHADOW).into(), scale)
             .into_iter()
