@@ -76,6 +76,11 @@ pub enum MenuAction {
     DeleteWorktree(PathBuf),
     /// Open the repositories panel.
     Repos,
+    /// Open the inbox.
+    Inbox,
+    /// A toast's "Undo" after an inbox item was dismissed or snoozed: list
+    /// the item (by `inbox::ItemId`) again.
+    InboxRestore(String),
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
 }
@@ -313,6 +318,8 @@ impl Gerdr {
             MenuAction::Worktrees(dir) => self.open_worktrees(Some(dir)),
             MenuAction::DeleteWorktree(path) => self.delete_merged_worktree(&path),
             MenuAction::Repos => self.open_repos(),
+            MenuAction::Inbox => self.open_inbox(None),
+            MenuAction::InboxRestore(id) => self.inbox_restore(id),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }

@@ -731,7 +731,7 @@ pub struct Reread {
 }
 
 /// The folder of gerdr's files.
-fn data_dir() -> PathBuf {
+pub(crate) fn data_dir() -> PathBuf {
     home_dir().unwrap_or_default().join(".local/share/gerdr")
 }
 
@@ -817,7 +817,7 @@ fn on_disk(path: &Path, written: Option<u64>) -> Option<u64> {
 }
 
 /// Write `bytes` to `path` atomically: to `<path>.tmp`, then renamed.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

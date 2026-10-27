@@ -19,6 +19,7 @@ use crate::{
     ci_watch::ci_state_word,
     git::Worktree,
     home_dir,
+    inbox::Section,
     input::{BTN_LEFT, BTN_MIDDLE},
     launch,
     menu::{MenuAction, MenuItem, MenuSpec},
@@ -283,6 +284,7 @@ impl Gerdr {
                     self.open_welcome(true);
                 }
             }
+            (SidebarHit::InboxTitle, BTN_LEFT) => self.open_inbox(Some(Section::Agents)),
             (SidebarHit::Card(i, k) | SidebarHit::Inbox(i, k), BTN_LEFT) => {
                 // An agent shown from the "Needs you" list shows in its
                 // workspace too: a fold by hand gives way, and the
@@ -434,6 +436,13 @@ impl Gerdr {
                 }
                 let tip = Tooltip::new(&text, row.ci?).fields(fields);
                 Some(tip.key("click to show its page"))
+            }
+            SidebarHit::InboxTitle => {
+                let tip = Tooltip::new("Open the inbox", layout.inbox_title?);
+                Some(match self.keymap.help().key_for("inbox", 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
+                })
             }
             SidebarHit::Inbox(i, k) => {
                 let card = agents.get(i)?.get(k)?;
@@ -625,6 +634,7 @@ impl Gerdr {
                     "open project",
                 ),
                 MenuItem::new("New Cursor", MenuAction::NewCursor),
+                hinted(MenuItem::new("Inbox…", MenuAction::Inbox), "inbox"),
             ],
         }
     }

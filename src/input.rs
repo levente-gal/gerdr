@@ -41,6 +41,7 @@ use smithay::{
 use crate::{
     Action, Drag, Gerdr, REORDER_START, REPEAT_DELAY, REPEAT_RATE, Reorder, Reorderable,
     chrome::{self, BarHit, FieldSpot, HelpHit},
+    inbox,
     launch::Place,
     layout::Dir,
     menu::MenuAction,
@@ -98,6 +99,8 @@ enum Intercepted {
     Worktrees(worktrees::Outcome),
     /// The repositories panel asked for this.
     Repos(repos::Outcome),
+    /// The inbox panel asked for this.
+    Inbox(inbox::Outcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -107,6 +110,7 @@ pub enum Overlay {
     ProjectMenu,
     Worktrees,
     Repos,
+    Inbox,
     /// The switcher of this serial: not one opened after it.
     Switcher(u64),
 }
@@ -127,10 +131,12 @@ fn over_welcome(action: &Action) -> bool {
 
 /// Whether `action`, picked with the prefix, works over the project menu:
 /// what acts on gerdr itself, and the key that opened the menu, to close it.
+/// The same goes over the worktrees popup and the repositories and inbox
+/// panels; the inbox's key opens it over the others, and closes it.
 fn over_project_menu(action: &Action) -> bool {
     matches!(
         action,
-        Action::ToggleTheme | Action::Quit | Action::Projects
+        Action::ToggleTheme | Action::Quit | Action::Projects | Action::Inbox
     )
 }
 
@@ -183,6 +189,7 @@ impl Gerdr {
                             || state.project_menu.is_some()
                             || state.worktrees.is_open()
                             || state.repos.is_open()
+                            || state.inbox.is_open()
                             || state.switcher.is_some();
                         if overlay {
                             state.tooltip.hide();
@@ -298,6 +305,25 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::Repos));
                         }
+                        if state.inbox.is_open() {
+                            state.suppressed_keys.push(code);
+                            if state.prefix_armed {
+                                state.prefix_armed = false;
+                                let action =
+                                    state.keymap.action(mods, sym).filter(over_project_menu);
+                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                            }
+                            if state.keymap.is_prefix(mods, sym) {
+                                state.prefix_armed = true;
+                                return FilterResult::Intercept(None);
+                            }
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.inbox_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
+                            return FilterResult::Intercept(out.map(Intercepted::Inbox));
+                        }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
@@ -394,7 +420,8 @@ impl Gerdr {
                         || self.welcome.is_some()
                         || self.project_menu.is_some()
                         || self.worktrees.is_open()
-                        || self.repos.is_open())
+                        || self.repos.is_open()
+                        || self.inbox.is_open())
                 {
                     if pointer.is_grabbed() {
                         pointer.button(
@@ -445,6 +472,7 @@ impl Gerdr {
                     || self.switcher.is_some()
                     || self.worktrees.is_open()
                     || self.repos.is_open()
+                    || self.inbox.is_open()
                 {
                     let rows = event
                         .amount_v120(Axis::Vertical)
@@ -458,6 +486,8 @@ impl Gerdr {
                             self.worktrees_scroll(rows);
                         } else if self.repos.is_open() {
                             self.repos_scroll(rows);
+                        } else if self.inbox.is_open() {
+                            self.inbox_scroll(rows);
                         } else {
                             self.switcher_scroll(rows);
                         }
@@ -562,6 +592,13 @@ impl Gerdr {
                 }
                 BTN_RIGHT => self.repos_right_click(location),
                 _ => {}
+            }
+            return true;
+        }
+        if self.inbox.is_open() {
+            if button == BTN_LEFT {
+                self.inbox_click(location);
+                self.press_field(location);
             }
             return true;
         }
@@ -749,6 +786,16 @@ impl Gerdr {
                 RegionHit::Nothing
             };
         }
+        if let Some(view) = self.inbox_view() {
+            let layout = chrome::inbox_layout(&view, output);
+            let hit = chrome::inbox_hit(&view, &layout, pos);
+            return match hit {
+                None | Some(chrome::InboxHit::Panel | chrome::InboxHit::Query) => {
+                    RegionHit::Nothing
+                }
+                Some(_) => RegionHit::Control,
+            };
+        }
         if let Some(view) = self.worktrees_view() {
             let layout = chrome::worktrees_layout(&view, output);
             let mut rows = layout.entries.iter();
@@ -868,7 +915,8 @@ impl Gerdr {
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.worktrees.is_open()
-            || self.repos.is_open();
+            || self.repos.is_open()
+            || self.inbox.is_open();
         // An overlay's icons have tooltips of their own.
         let mut overlay_tip = None;
         if self.quit.is_some() {
@@ -883,6 +931,8 @@ impl Gerdr {
             self.menu_motion(pos);
         } else if self.repos.is_open() {
             overlay_tip = self.repos_hover(pos);
+        } else if self.inbox.is_open() {
+            overlay_tip = self.inbox_hover(pos);
         } else if self.switcher.is_some() {
             overlay_tip = self.switcher_motion(pos);
         }
@@ -975,6 +1025,7 @@ impl Gerdr {
             Intercepted::Quit(outcome) => self.apply_quit(outcome),
             Intercepted::Worktrees(outcome) => self.apply_worktrees(outcome),
             Intercepted::Repos(outcome) => self.apply_repos(outcome),
+            Intercepted::Inbox(outcome) => self.apply_inbox(outcome),
         }
     }
 
@@ -991,6 +1042,8 @@ impl Gerdr {
             Some(Overlay::Worktrees)
         } else if self.repos.is_open() {
             Some(Overlay::Repos)
+        } else if self.inbox.is_open() {
+            Some(Overlay::Inbox)
         } else {
             self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial))
         }
@@ -1027,6 +1080,7 @@ impl Gerdr {
                 .worktrees_key(mods, sym, typed)
                 .map(Intercepted::Worktrees),
             Overlay::Repos => self.repos_key(mods, sym, typed).map(Intercepted::Repos),
+            Overlay::Inbox => self.inbox_key(mods, sym, typed).map(Intercepted::Inbox),
             Overlay::Switcher(_) => self
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
@@ -1050,6 +1104,7 @@ impl Gerdr {
             Some(Overlay::ProjectMenu) => self.project_menu_hover(pos),
             Some(Overlay::Worktrees) => self.worktrees_hover(pos),
             Some(Overlay::Repos) => self.repos_hover(pos),
+            Some(Overlay::Inbox) => self.inbox_hover(pos),
             Some(Overlay::Switcher(_)) => self.switcher_motion(pos),
             None => None,
         };
@@ -1070,6 +1125,7 @@ impl Gerdr {
                 scale,
             )),
             Overlay::Repos => Some(chrome::repos_field(&self.repos_view()?, size, scale)),
+            Overlay::Inbox => Some(chrome::inbox_field(&self.inbox_view()?, size, scale)),
             Overlay::Switcher(_) => Some(chrome::switcher_field(
                 &self.switcher_view()?,
                 self.content_rect(),
@@ -1085,6 +1141,7 @@ impl Gerdr {
             Overlay::ProjectMenu => self.project_menu.as_mut()?.field_mut(),
             Overlay::Worktrees => self.worktrees.field_mut(),
             Overlay::Repos => self.repos.field_mut(),
+            Overlay::Inbox => self.inbox.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
         }
     }
@@ -1287,6 +1344,8 @@ mod tests {
         assert!(over_project_menu(&Action::Quit));
         // The key that opened the menu closes it.
         assert!(over_project_menu(&Action::Projects));
+        // The inbox opens over it, and its key closes the inbox again.
+        assert!(over_project_menu(&Action::Inbox));
         assert!(!over_project_menu(&Action::LastProject));
         assert!(!over_project_menu(&Action::NewTab));
         assert!(!over_project_menu(&Action::Switcher));
