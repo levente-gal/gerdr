@@ -15,10 +15,19 @@
 //! rebase onto. Its branches come default branch first, then the config's
 //! `top_branches`, then the newest.
 //!
-//! Keys: Tab moves between the tree and the field. In the tree Up/Down
-//! select, Space checks, Left/Right fold, Enter opens a file in Zed or
-//! folds a repository, and typing goes to the field; Shift with Up/Down
-//! or the pages scrolls the detail. Ctrl+N opens the branch picker to
+//! The detail shows every change of every repository one after another,
+//! as one diff: per repository a header, per file a header (its checkbox
+//! the same as its tree line's) over its hunks, the words changed within
+//! a line marked. Selecting a line in the tree scrolls it there; the
+//! header of the file in view stays pinned at its top.
+//!
+//! Keys: Tab moves from the tree to the detail to the field. In the tree
+//! Up/Down select, Space checks, Left/Right fold, Enter opens a file in
+//! Zed or folds a repository, and typing goes to the field; Shift with
+//! Up/Down or the pages scrolls the detail. In the detail the arrows and
+//! the pages scroll, Alt+Up/Down go to the file before or after, and for
+//! the file at the top Space checks it, Left/Right fold it and Enter
+//! opens it in Zed at the line in view. Ctrl+N opens the branch picker to
 //! create a branch (in it, Ctrl+Enter creates the one typed), Ctrl+Enter
 //! commits (Ctrl+Shift+Enter then pushes), Ctrl+P pushes (Ctrl+Shift+P force
 //! pushes), Ctrl+F fetches, Ctrl+L pulls, Ctrl+M merges the default
@@ -35,7 +44,8 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
+    ops::Range,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -48,9 +58,11 @@ use smithay::{
 use crate::{
     chrome::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, Density,
-        DetailLine, DetailTab, DetailView, DiffTone, FileLine, Hint, LineState, RepoLine, RepoMark,
-        ReposButton, ReposHit, ReposView, ResultBar, SheetView, Tone, TreeLine,
+        DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone, FileLine, Hint,
+        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, SheetView,
+        Tone, TreeLine,
     },
+    diff::FileDiff,
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
     text_field::{self, Edit, TextField},
@@ -73,8 +85,11 @@ pub struct Repos {
     /// The panel as closed, with the project it was for: opened again for
     /// the same project, it is as it was left.
     pub(crate) kept: Option<(Option<String>, Panel)>,
-    /// The detail being read.
+    /// The log or stashes being read.
     pub(crate) reading: Option<DetailKey>,
+    /// The diffs being read, by root, with the Git status read each is
+    /// for.
+    pub(crate) reading_diffs: HashMap<PathBuf, u64>,
     /// The check under way, by id: an older one's answer is stale.
     pub(crate) checking: Option<u64>,
     /// Groups of branch names that are one branch (`main`, `master`), from
@@ -148,6 +163,9 @@ pub struct Ctx<'a> {
 pub enum Focus {
     #[default]
     Tree,
+    /// The detail pane: the keys scroll it, and in the diff act on the
+    /// file at its top.
+    Detail,
     Field,
 }
 
@@ -178,13 +196,23 @@ pub struct Panel {
     pub(crate) first: usize,
     /// The first detail line in view.
     pub(crate) detail_first: usize,
-    /// The tab asked for with Ctrl+D / Ctrl+T, else the selection's own
-    /// (a file's diff, a repository's log).
+    /// The tab asked for with Ctrl+D / Ctrl+T, else the diff.
     pub(crate) tab: Option<DetailTab>,
-    /// The detail read for, and what it says.
+    /// The log or stashes read for, and what they say.
     pub(crate) detail: Option<(DetailKey, String)>,
-    /// A diff read, its lines told apart once, not with every frame.
-    pub(crate) diff: Vec<DetailLine>,
+    /// Each repository's diff read, by root: the Git status read it was
+    /// for (`diff_gen`), and its files.
+    pub(crate) diffs: HashMap<PathBuf, (u64, Vec<FileDiff>)>,
+    /// Counts the Git status reads: a diff read for an earlier one is
+    /// read again, still shown meanwhile.
+    pub(crate) diff_gen: u64,
+    /// Files folded in the diff, by (root, path).
+    pub(crate) diff_folded: HashSet<(PathBuf, String)>,
+    /// The diff's rows, worked out as what they show changes, not with
+    /// every frame; and the roots of the repositories they index, in
+    /// `Ctx::items`' order as it was.
+    diff_rows: Vec<DiffRow>,
+    diff_roots: Vec<PathBuf>,
     pub(crate) hover: Option<ReposHit>,
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
@@ -680,6 +708,12 @@ pub enum RepoEvent {
         key: DetailKey,
         text: String,
     },
+    /// A repository's diff, read for Git status read `generation`.
+    Diffs {
+        root: PathBuf,
+        generation: u64,
+        files: Vec<FileDiff>,
+    },
 }
 
 /// What the panel asked for.
@@ -732,6 +766,49 @@ impl Row {
             Row::Repo(k) | Row::File(k, _) => k,
         }
     }
+}
+
+/// A row of the diff, by index: repository `k` of `Panel::diff_roots`,
+/// file `f` of its diff, hunk `h` of the file, line `l` of the hunk,
+/// note `n` of the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffRow {
+    Repo(usize),
+    /// Its diff isn't read yet.
+    Reading(usize),
+    File(usize, usize),
+    Hunk(usize, usize, usize),
+    Line(usize, usize, usize, usize),
+    Note(usize, usize, usize),
+    /// Room before a repository's header.
+    Gap,
+}
+
+impl DiffRow {
+    /// The file it is, or is in.
+    fn file(self) -> Option<(usize, usize)> {
+        match self {
+            DiffRow::File(k, f)
+            | DiffRow::Hunk(k, f, _)
+            | DiffRow::Line(k, f, _, _)
+            | DiffRow::Note(k, f, _) => Some((k, f)),
+            DiffRow::Repo(_) | DiffRow::Reading(_) | DiffRow::Gap => None,
+        }
+    }
+
+    /// A repository's header or a file's.
+    fn is_header(self) -> bool {
+        matches!(self, DiffRow::Repo(_) | DiffRow::File(..))
+    }
+}
+
+/// Where the diff is scrolled to, by who it is: a repository's header or
+/// a file's, and how many rows past it. Kept as the rows change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Anchor {
+    root: PathBuf,
+    path: Option<String>,
+    offset: usize,
 }
 
 /// Why an action wasn't done.
@@ -903,13 +980,14 @@ fn missing(jobs: &[Job], have: &[(PathBuf, Found)]) -> Vec<Job> {
 
 /// The panel's keys, as the help sheet lists them: the key, what it does.
 const HELP_KEYS: &[(&str, &str)] = &[
-    ("Tab", "the field, or the tree"),
+    ("Tab", "the tree, the diff, the field"),
     ("Up / Down", "select a line"),
     ("PgUp / PgDn", "a page of lines"),
     ("Shift+Up / Down", "scroll the diff or log"),
-    ("Space", "check the line"),
+    ("Alt+Up / Down", "in the diff, the file before or after"),
+    ("Space", "check the line, or the diff's file"),
     ("Ctrl+A", "check everything, or nothing"),
-    ("Left / Right", "fold or unfold a repository"),
+    ("Left / Right", "fold a repository, or the diff's file"),
     ("Enter", "open the file in Zed; fold a repository"),
     ("Ctrl+D / Ctrl+T", "the diff, the log"),
     ("Ctrl+S", "switch them all to a branch"),
@@ -963,33 +1041,6 @@ fn detail_line(text: &str, tone: DiffTone) -> DetailLine {
         text: text.into(),
         tone,
     }
-}
-
-/// A diff's lines, coloured by what they are. A file's header runs from
-/// its `diff --git` to its first hunk, so a removed line that starts with
-/// `--` isn't taken for one.
-fn diff_lines(text: &str) -> Vec<DetailLine> {
-    let mut head = false;
-    text.lines()
-        .map(|line| {
-            let tone = if line.starts_with("diff --git") {
-                head = true;
-                DiffTone::Header
-            } else if line.starts_with("@@") {
-                head = false;
-                DiffTone::Hunk
-            } else if head {
-                DiffTone::Header
-            } else if line.starts_with('+') {
-                DiffTone::Added
-            } else if line.starts_with('-') {
-                DiffTone::Removed
-            } else {
-                DiffTone::Plain
-            };
-            detail_line(line, tone)
-        })
-        .collect()
 }
 
 /// How long before `now` `then` was, in its largest unit: `2m`.
@@ -1060,10 +1111,12 @@ impl Panel {
     /// A panel over `items`, nothing checked: repositories with changes
     /// unfolded unless they have `FOLD_FILES` or more, the first selected.
     pub fn new(items: &[RepoItem]) -> Panel {
-        Panel {
+        let mut panel = Panel {
             selected: items.first().map(|i| Selected::Repo(i.root.clone())),
             ..Panel::default()
-        }
+        };
+        panel.build_rows(items, None);
+        panel
     }
 
     /// Whether `item`'s files are shown.
@@ -1160,10 +1213,13 @@ impl Panel {
                 Selected::File(items[k].root.clone(), path)
             }
         };
-        if self.selected.as_ref() != Some(&id) {
+        let moved = self.selected.as_ref() != Some(&id);
+        self.selected = Some(id);
+        if moved && self.tab() == DetailTab::Diff {
+            self.show_selected();
+        } else if moved {
             self.detail_first = 0;
         }
-        self.selected = Some(id);
         self.selected_at = k;
         let page = page.max(1);
         if k < self.first {
@@ -1893,6 +1949,7 @@ impl Panel {
     /// was, or near where it was.
     pub fn refresh(&mut self, ctx: &Ctx) {
         let items = ctx.items;
+        let anchor = self.diff_anchor();
         let roots: HashSet<&Path> = items.iter().map(|i| i.root.as_path()).collect();
         self.checked_repos.retain(|r| roots.contains(r.as_path()));
         self.unfolded.retain(|r| roots.contains(r.as_path()));
@@ -1903,9 +1960,23 @@ impl Panel {
                 .find(|i| i.root == *root)
                 .is_some_and(|i| i.status.changes.iter().any(|c| c.path == *path))
         });
+        let changed = |root: &Path, path: &str| {
+            items
+                .iter()
+                .find(|i| i.root == root)
+                .is_some_and(|i| i.status.changes.iter().any(|c| c.path == path))
+        };
+        self.diffs.retain(|root, _| {
+            items
+                .iter()
+                .any(|i| i.root == *root && !i.status.changes.is_empty())
+        });
+        self.diff_folded.retain(|(root, path)| changed(root, path));
         self.settle(items, ctx.page.0);
         // The diff or log may have changed with it.
         self.detail_stale = true;
+        self.diff_gen += 1;
+        self.build_rows(items, anchor);
     }
 
     /// Whether `button` can be done now and what it asks for, else why
@@ -2366,11 +2437,12 @@ impl Panel {
         None
     }
 
-    /// Show the detail's `tab`.
+    /// Show the detail's `tab`; the diff where the selection is.
     fn set_tab(&mut self, tab: DetailTab) {
-        if self.tab != Some(tab) {
+        if self.tab() != tab {
             self.tab = Some(tab);
             self.detail_first = 0;
+            self.show_selected();
         }
     }
 
@@ -2441,10 +2513,16 @@ impl Panel {
         }
         if plain && matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) {
             self.focus = match self.focus {
-                Focus::Tree => Focus::Field,
+                Focus::Tree => Focus::Detail,
+                Focus::Detail => Focus::Field,
                 Focus::Field => Focus::Tree,
             };
             return None;
+        }
+        if self.focus == Focus::Detail
+            && let Some(outcome) = self.detail_press(mods, sym, ctx)
+        {
+            return outcome;
         }
         if self.focus == Focus::Field {
             match self.field.key(mods, sym, typed) {
@@ -2614,6 +2692,23 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
+            ReposHit::DiffRow(i) => {
+                self.focus = Focus::Detail;
+                if let Some(r) = self.detail_row_at(i, ctx) {
+                    self.select_diff_row(r, ctx);
+                }
+            }
+            ReposHit::DiffCheck(i) => {
+                let r = self.detail_row_at(i, ctx)?;
+                self.select_diff_row(r, ctx);
+                self.toggle_diff_file(r, ctx);
+            }
+            ReposHit::DiffFold(i) => {
+                let r = self.detail_row_at(i, ctx)?;
+                let (root, path) = self.diff_path(r)?;
+                let folded = self.diff_folded.contains(&(root, path));
+                self.fold_diff_file(r, !folded, ctx);
+            }
             ReposHit::BranchButton => self.open_branch_menu(MenuAction::Switch, ctx),
             ReposHit::Detail
             | ReposHit::Panel
@@ -2680,30 +2775,22 @@ impl Panel {
     /// Scroll the detail, or else the tree, by `whole` lines (down
     /// positive), as far as there are lines.
     fn scroll_by(&mut self, whole: i64, over_detail: bool, ctx: &Ctx) {
-        let (len, page, first) = if over_detail {
-            let len = self.detail_total(ctx);
-            (len, ctx.page.1, &mut self.detail_first)
-        } else {
+        let (last, first) = if !over_detail {
             let len = self.rows(ctx.items).len();
-            (len, ctx.page.0, &mut self.first)
-        };
-        let last = len.saturating_sub(page.max(1)) as i64;
-        *first = ((*first).min(last as usize) as i64 + whole).clamp(0, last) as usize;
-    }
-
-    /// How many lines the detail has in all: a diff read is kept told
-    /// apart, the rest is worked out.
-    fn detail_total(&self, ctx: &Ctx) -> usize {
-        let file = self.selection(ctx.items).is_some_and(|(_, c)| c.is_some());
-        let read = self
-            .detail
-            .as_ref()
-            .is_some_and(|(key, _)| Some(key) == self.detail_key().as_ref());
-        if file && read && self.tab_for(true) == DetailTab::Diff {
-            self.diff.len()
+            (len.saturating_sub(ctx.page.0.max(1)), &mut self.first)
+        } else if self.tab() == DetailTab::Diff {
+            (self.diff_last(ctx.page.1), &mut self.detail_first)
         } else {
-            self.detail_lines(ctx).len()
-        }
+            let len = self.detail_lines(ctx).len();
+            (
+                len.saturating_sub(ctx.page.1.max(1)),
+                &mut self.detail_first,
+            )
+        };
+        let last = last as i64;
+        *first = ((*first).min(last as usize) as i64)
+            .saturating_add(whole)
+            .clamp(0, last) as usize;
     }
 
     /// `item`'s state chip: the operation it is stopped in, else what the
@@ -2957,39 +3044,29 @@ impl Panel {
             .collect()
     }
 
-    /// The detail tab shown: the one asked for, else a file's diff or a
-    /// repository's log.
-    fn tab_for(&self, file: bool) -> DetailTab {
-        self.tab.unwrap_or(if file {
-            DetailTab::Diff
-        } else {
-            DetailTab::Log
-        })
+    /// The detail tab shown: the one asked for, else the diff.
+    fn tab(&self) -> DetailTab {
+        self.tab.unwrap_or_default()
     }
 
-    /// The detail the selection shows, read or not: a file's diff, a
-    /// repository's log; none for a repository's diff.
+    /// The log or stashes the selection shows, read or not; none for the
+    /// diff, read per repository.
     fn detail_key(&self) -> Option<DetailKey> {
-        let (root, file) = match self.selected.as_ref()? {
-            Selected::Repo(root) => (root, None),
-            Selected::File(root, path) => (root, Some(path)),
+        let root = match self.selected.as_ref()? {
+            Selected::Repo(root) | Selected::File(root, _) => root,
         };
-        let tab = self.tab_for(file.is_some());
-        let file = match tab {
-            DetailTab::Diff => Some(file?.clone()),
-            DetailTab::Log | DetailTab::Stashes => None,
-        };
-        Some(DetailKey {
+        let tab = self.tab();
+        (tab != DetailTab::Diff).then(|| DetailKey {
             root: root.clone(),
-            file,
+            file: None,
             tab,
         })
     }
 
-    /// Every line of the detail: the diff read, or the log read with
-    /// every command the last batch ran there and what it printed.
+    /// Every line of the log or stashes: as read, the log with every
+    /// command the last batch ran there and what it printed.
     fn detail_lines(&self, ctx: &Ctx) -> Vec<DetailLine> {
-        let Some((k, c)) = self.selection(ctx.items) else {
+        let Some((k, _)) = self.selection(ctx.items) else {
             return Vec::new();
         };
         let key = self.detail_key();
@@ -2998,11 +3075,8 @@ impl Panel {
             .as_ref()
             .filter(|(k, _)| Some(k) == key.as_ref())
             .map(|(_, text)| text.as_str());
-        match self.tab_for(c.is_some()) {
-            DetailTab::Diff if c.is_none() => {
-                vec![detail_line("Select a file for its diff", DiffTone::Plain)]
-            }
-            DetailTab::Diff => text.map(|_| self.diff.clone()).unwrap_or_default(),
+        match self.tab() {
+            DetailTab::Diff => Vec::new(),
             DetailTab::Stashes => text
                 .into_iter()
                 .flat_map(str::lines)
@@ -3044,44 +3118,532 @@ impl Panel {
         }
     }
 
-    /// The detail pane, scrolled.
+    /// The detail pane, scrolled: of a long diff only the page is copied.
     fn detail_view(&self, ctx: &Ctx) -> DetailView {
-        let Some((k, c)) = self.selection(ctx.items) else {
-            return DetailView::default();
-        };
-        let item = &ctx.items[k];
         let page = ctx.page.1.max(1);
-        let tab = self.tab_for(c.is_some());
-        let read = self
-            .detail
-            .as_ref()
-            .is_some_and(|(key, _)| Some(key) == self.detail_key().as_ref());
-        // Only the page of a long diff is copied.
-        let (lines, first, total) = if tab == DetailTab::Diff && c.is_some() && read {
-            let total = self.diff.len();
-            let first = self.detail_first.min(total.saturating_sub(page));
-            (
-                self.diff[first..(first + page).min(total)].to_vec(),
-                first,
-                total,
-            )
-        } else {
-            let lines = self.detail_lines(ctx);
-            let total = lines.len();
-            let first = self.detail_first.min(total.saturating_sub(page));
-            let lines = lines.into_iter().skip(first).take(page).collect();
-            (lines, first, total)
+        let tab = self.tab();
+        let focused = self.focus == Focus::Detail;
+        if tab == DetailTab::Diff {
+            let (sticky, range) = self.diff_window(page);
+            let mut rows: Vec<DetailRow> = sticky
+                .iter()
+                .map(|&h| self.diff_row_view(h, true, ctx))
+                .collect();
+            rows.extend(range.clone().map(|r| self.diff_row_view(r, false, ctx)));
+            if self.diff_rows.is_empty() && !ctx.items.is_empty() {
+                let text = "No changes in any repository";
+                rows = vec![DetailRow::Text(detail_line(text, DiffTone::Plain))];
+            }
+            return DetailView {
+                tab,
+                title: self.diff_title(ctx),
+                rows,
+                sticky: sticky.is_some(),
+                first: range.start,
+                total: self.diff_rows.len(),
+                focused,
+            };
+        }
+        let Some((k, _)) = self.selection(ctx.items) else {
+            return DetailView {
+                tab,
+                focused,
+                ..DetailView::default()
+            };
         };
+        let lines = self.detail_lines(ctx);
+        let total = lines.len();
+        let first = self.detail_first.min(total.saturating_sub(page));
         DetailView {
             tab,
-            title: match c {
-                Some(c) => change_text(&item.status.changes[c]),
-                None => item.label.clone(),
-            },
-            lines,
+            title: ctx.items[k].label.clone(),
+            rows: lines
+                .into_iter()
+                .skip(first)
+                .take(page)
+                .map(DetailRow::Text)
+                .collect(),
+            sticky: false,
             first,
             total,
+            focused,
         }
+    }
+
+    /// Over the diff: `All changes · 2 repositories · 5 files · +12 −3`.
+    fn diff_title(&self, ctx: &Ctx) -> String {
+        let dirty: Vec<&RepoItem> = ctx
+            .items
+            .iter()
+            .filter(|i| !i.status.changes.is_empty())
+            .collect();
+        if dirty.is_empty() {
+            return "All changes".into();
+        }
+        let files: usize = dirty.iter().map(|i| i.status.changes.len()).sum();
+        let (added, removed) = dirty
+            .iter()
+            .filter_map(|i| self.diffs.get(&i.root))
+            .flat_map(|(_, files)| files)
+            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+        let files = if files == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{files} files")
+        };
+        format!(
+            "All changes · {} · {files} · +{added} −{removed}",
+            repos(dirty.len())
+        )
+    }
+
+    /// Work the diff's rows out again for `items`, scrolled back to
+    /// `anchor`: per repository with changes its header, then each file's
+    /// header and, unless folded, its hunks (each after a line saying what
+    /// it is in, but the first when git says nothing) and notes.
+    fn build_rows(&mut self, items: &[RepoItem], anchor: Option<Anchor>) {
+        let mut rows = Vec::new();
+        for (k, item) in items.iter().enumerate() {
+            if item.status.changes.is_empty() {
+                continue;
+            }
+            if !rows.is_empty() {
+                rows.push(DiffRow::Gap);
+            }
+            rows.push(DiffRow::Repo(k));
+            let Some((_, files)) = self.diffs.get(&item.root) else {
+                rows.push(DiffRow::Reading(k));
+                continue;
+            };
+            for (f, file) in files.iter().enumerate() {
+                rows.push(DiffRow::File(k, f));
+                let key = (item.root.clone(), file.path.clone());
+                if self.diff_folded.contains(&key) {
+                    continue;
+                }
+                for (h, hunk) in file.hunks.iter().enumerate() {
+                    if h > 0 || !hunk.context.is_empty() {
+                        rows.push(DiffRow::Hunk(k, f, h));
+                    }
+                    rows.extend((0..hunk.lines.len()).map(|l| DiffRow::Line(k, f, h, l)));
+                }
+                rows.extend((0..file.notes.len()).map(|n| DiffRow::Note(k, f, n)));
+            }
+        }
+        self.diff_rows = rows;
+        self.diff_roots = items.iter().map(|i| i.root.clone()).collect();
+        if let Some(anchor) = anchor.filter(|_| self.tab() == DetailTab::Diff) {
+            self.scroll_to(&anchor);
+        }
+    }
+
+    /// File `f` of the diff of repository `k` of `diff_roots`, with its
+    /// root.
+    fn diff_file(&self, k: usize, f: usize) -> Option<(&Path, &FileDiff)> {
+        let root = self.diff_roots.get(k)?;
+        let file = self.diffs.get(root)?.1.get(f)?;
+        Some((root, file))
+    }
+
+    /// The root and path of the file diff row `r` is, or is in.
+    fn diff_path(&self, r: usize) -> Option<(PathBuf, String)> {
+        let (k, f) = self.diff_rows.get(r)?.file()?;
+        let (root, file) = self.diff_file(k, f)?;
+        Some((root.to_path_buf(), file.path.clone()))
+    }
+
+    /// Where the diff is scrolled to, by who it is.
+    fn diff_anchor(&self) -> Option<Anchor> {
+        let first = self.detail_first.min(self.diff_rows.len().checked_sub(1)?);
+        let head = (0..=first).rev().find(|&r| self.diff_rows[r].is_header())?;
+        let (root, path) = match self.diff_rows[head] {
+            DiffRow::Repo(k) => (self.diff_roots.get(k)?.clone(), None),
+            row => {
+                let (root, path) = self.diff_path(head).filter(|_| row.file().is_some())?;
+                (root, Some(path))
+            }
+        };
+        Some(Anchor {
+            root,
+            path,
+            offset: first - head,
+        })
+    }
+
+    /// The row of `root`'s header, or of its file `path`'s.
+    fn header_row(&self, root: &Path, path: Option<&str>) -> Option<usize> {
+        self.diff_rows.iter().position(|&row| match (row, path) {
+            (DiffRow::Repo(k), None) => self.diff_roots.get(k).is_some_and(|r| r == root),
+            (DiffRow::File(k, f), Some(path)) => self
+                .diff_file(k, f)
+                .is_some_and(|(r, file)| r == root && file.path == path),
+            _ => false,
+        })
+    }
+
+    /// Scroll the diff back to `anchor`, no further than its file's rows;
+    /// to its repository's header when the file is gone.
+    fn scroll_to(&mut self, anchor: &Anchor) {
+        let (head, offset) = match self.header_row(&anchor.root, anchor.path.as_deref()) {
+            Some(head) => (head, anchor.offset),
+            None => match self.header_row(&anchor.root, None) {
+                Some(head) => (head, 0),
+                None => return,
+            },
+        };
+        let end = self.diff_rows[head + 1..]
+            .iter()
+            .position(|r| r.is_header() || *r == DiffRow::Gap)
+            .map_or(self.diff_rows.len(), |n| head + 1 + n);
+        self.detail_first = (head + offset).min(end - 1);
+    }
+
+    /// Scroll the diff to the selected line's repository or file.
+    fn show_selected(&mut self) {
+        if self.tab() != DetailTab::Diff {
+            return;
+        }
+        let head = match &self.selected {
+            Some(Selected::Repo(root)) => self.header_row(root, None),
+            Some(Selected::File(root, path)) => self
+                .header_row(root, Some(path))
+                .or_else(|| self.header_row(root, None)),
+            None => None,
+        };
+        if let Some(head) = head {
+            self.detail_first = head;
+        }
+    }
+
+    /// The first row the diff can be scrolled to on a page of `page`: the
+    /// last row shows under the header pinned at the top.
+    fn diff_last(&self, page: usize) -> usize {
+        let (total, page) = (self.diff_rows.len(), page.max(1));
+        if total > page { total - page + 1 } else { 0 }
+    }
+
+    /// The diff in view on a page of `page`: the header of the file its
+    /// first row is in, pinned at the top unless that row is the header,
+    /// and the rows under it.
+    fn diff_window(&self, page: usize) -> (Option<usize>, Range<usize>) {
+        let page = page.max(1);
+        let first = self.detail_first.min(self.diff_last(page));
+        let sticky = self.file_head(first).filter(|&h| h < first && page > 1);
+        let room = page - usize::from(sticky.is_some());
+        (sticky, first..(first + room).min(self.diff_rows.len()))
+    }
+
+    /// The header row of the file diff row `r` is in.
+    fn file_head(&self, r: usize) -> Option<usize> {
+        let (k, f) = self.diff_rows.get(r)?.file()?;
+        (0..=r)
+            .rev()
+            .find(|&h| self.diff_rows[h] == DiffRow::File(k, f))
+    }
+
+    /// The header of the file the diff's keys act on: the one at its top,
+    /// else the first in view.
+    fn current_file(&self, page: usize) -> Option<usize> {
+        let (_, range) = self.diff_window(page);
+        let first = range.start;
+        self.file_head(first).or_else(|| {
+            range
+                .clone()
+                .find(|&r| matches!(self.diff_rows[r], DiffRow::File(..)))
+        })
+    }
+
+    /// Diff row `r` as the detail pane shows it; a file's header `pinned`
+    /// at the top says its repository too.
+    fn diff_row_view(&self, r: usize, pinned: bool, ctx: &Ctx) -> DetailRow {
+        let blank = || DetailRow::Text(detail_line("", DiffTone::Plain));
+        let item = |k: usize| {
+            ctx.items
+                .get(k)
+                .filter(|i| self.diff_roots.get(k) == Some(&i.root))
+        };
+        let row = self.diff_rows[r];
+        let file = row
+            .file()
+            .and_then(|(k, f)| Some((item(k)?, self.diff_file(k, f)?.1)));
+        match (row, file) {
+            (DiffRow::Repo(k), _) => {
+                let Some(item) = item(k) else {
+                    return blank();
+                };
+                let files = self.diffs.get(&item.root).map(|(_, f)| f.as_slice());
+                let files = files.unwrap_or_default();
+                DetailRow::Repo(DiffRepo {
+                    label: item.label.clone(),
+                    branch: item.status.branch.clone(),
+                    files: item.status.changes.len(),
+                    added: files.iter().map(|f| f.added).sum(),
+                    removed: files.iter().map(|f| f.removed).sum(),
+                })
+            }
+            (DiffRow::Reading(_), _) => DetailRow::Note("Reading…".into()),
+            (DiffRow::File(..), Some((item, file))) => {
+                let change = item.status.changes.iter().find(|c| c.path == file.path);
+                let check = match change {
+                    Some(c) if self.file_checked(item, c) => Check::On,
+                    _ => Check::Off,
+                };
+                let selected = matches!(
+                    &self.selected,
+                    Some(Selected::File(root, path)) if *root == item.root && *path == file.path
+                );
+                let key = (item.root.clone(), file.path.clone());
+                DetailRow::File(DiffFile {
+                    repo: pinned.then(|| item.label.clone()),
+                    path: match &file.orig {
+                        Some(orig) => format!("{orig} → {}", file.path),
+                        None => file.path.clone(),
+                    },
+                    code: file.code,
+                    check,
+                    folded: self.diff_folded.contains(&key),
+                    added: file.added,
+                    removed: file.removed,
+                    selected,
+                })
+            }
+            (DiffRow::Hunk(_, _, h), Some((_, file))) => {
+                let hunk = &file.hunks[h];
+                DetailRow::Hunk {
+                    context: hunk.context.clone(),
+                    number: hunk.lines.first().map_or(0, |l| l.number),
+                }
+            }
+            (DiffRow::Line(_, _, h, l), Some((_, file))) => {
+                DetailRow::Line(file.hunks[h].lines[l].clone())
+            }
+            (DiffRow::Note(_, _, n), Some((_, file))) => DetailRow::Note(file.notes[n].clone()),
+            _ => blank(),
+        }
+    }
+
+    /// The diff row shown as row `i` of the detail pane.
+    fn detail_row_at(&self, i: usize, ctx: &Ctx) -> Option<usize> {
+        if self.tab() != DetailTab::Diff {
+            return None;
+        }
+        let (sticky, range) = self.diff_window(ctx.page.1);
+        let r = match sticky {
+            Some(head) if i == 0 => head,
+            Some(_) => range.start + i - 1,
+            None => range.start + i,
+        };
+        (r < range.end || Some(r) == sticky).then_some(r)
+    }
+
+    /// Select in the tree the repository or file diff row `r` is in (its
+    /// repository unfolded for it), the diff staying where it is.
+    fn select_diff_row(&mut self, r: usize, ctx: &Ctx) {
+        let items = ctx.items;
+        let id = match self.diff_rows.get(r) {
+            Some(DiffRow::Repo(k) | DiffRow::Reading(k)) => match self.diff_roots.get(*k) {
+                Some(root) => Selected::Repo(root.clone()),
+                None => return,
+            },
+            _ => match self.diff_path(r) {
+                Some((root, path)) => Selected::File(root, path),
+                None => return,
+            },
+        };
+        if let Selected::File(root, _) = &id
+            && let Some(item) = items.iter().find(|i| i.root == *root)
+        {
+            self.set_open(item, true);
+        }
+        let rows = self.rows(items);
+        let old = self.selected.replace(id);
+        let at = self.selected_row(&rows, items);
+        self.selected = old;
+        if let Some(t) = at {
+            let keep = self.detail_first;
+            self.select(&rows, t, items, ctx.page.0);
+            self.detail_first = keep;
+        }
+    }
+
+    /// Check the file diff row `r` is in, or uncheck it, as its tree line.
+    fn toggle_diff_file(&mut self, r: usize, ctx: &Ctx) {
+        let items = ctx.items;
+        let Some((root, path)) = self.diff_path(r) else {
+            return;
+        };
+        let Some(k) = items.iter().position(|i| i.root == root) else {
+            return;
+        };
+        if let Some(c) = items[k].status.changes.iter().position(|c| c.path == path) {
+            self.toggle(Row::File(k, c), items);
+        }
+    }
+
+    /// Fold the file diff row `r` is in, or unfold it, its header then at
+    /// the top.
+    fn fold_diff_file(&mut self, r: usize, fold: bool, ctx: &Ctx) {
+        let Some((root, path)) = self.diff_path(r) else {
+            return;
+        };
+        let key = (root.clone(), path.clone());
+        if fold {
+            self.diff_folded.insert(key);
+        } else {
+            self.diff_folded.remove(&key);
+        }
+        let anchor = Anchor {
+            root,
+            path: Some(path),
+            offset: 0,
+        };
+        self.build_rows(ctx.items, Some(anchor));
+    }
+
+    /// Scroll the diff to the next file's header (`by` 1) or the one
+    /// before (-1), selecting it in the tree.
+    fn jump_file(&mut self, by: i64, ctx: &Ctx) {
+        let (_, range) = self.diff_window(ctx.page.1);
+        let first = range.start;
+        let is_file = |r: &DiffRow| matches!(r, DiffRow::File(..));
+        let to = if by > 0 {
+            (first + 1..self.diff_rows.len()).find(|&r| is_file(&self.diff_rows[r]))
+        } else {
+            (0..first).rev().find(|&r| is_file(&self.diff_rows[r]))
+        };
+        if let Some(to) = to {
+            self.detail_first = to;
+            self.select_diff_row(to, ctx);
+        }
+    }
+
+    /// Open the file shown as row `i` of the detail pane in Zed, at that
+    /// line (or at its first hunk's).
+    pub fn open_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
+        let r = self.detail_row_at(i, ctx)?;
+        self.open_diff_row(r)
+    }
+
+    /// Open the file diff row `r` is in in Zed, at its line: a line's own,
+    /// else the first of its hunk or file.
+    fn open_diff_row(&self, r: usize) -> Option<Outcome> {
+        let row = *self.diff_rows.get(r)?;
+        let (k, f) = row.file()?;
+        let (root, file) = self.diff_file(k, f)?;
+        let number = match row {
+            DiffRow::Line(_, _, h, l) => Some(file.hunks[h].lines[l].number),
+            DiffRow::Hunk(_, _, h) => file.hunks[h].lines.first().map(|l| l.number),
+            _ => file.hunks.first()?.lines.first().map(|l| l.number),
+        };
+        let path = match number.filter(|_| file.code != 'D') {
+            Some(n) => format!("{}:{n}", file.path),
+            None => file.path.clone(),
+        };
+        Some(Outcome::OpenInZed {
+            root: root.to_path_buf(),
+            paths: vec![path],
+        })
+    }
+
+    /// A key while the detail has the keyboard; `None` when it isn't one
+    /// of its own. The arrows, the pages, Home and End scroll it; in the
+    /// diff Alt+Up/Down go to the file before or after, and for the file
+    /// at the top Space checks it, Left and Right fold and unfold it, and
+    /// Enter opens it in Zed at the first line in view.
+    fn detail_press(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        ctx: &Ctx,
+    ) -> Option<Option<Outcome>> {
+        let page = ctx.page.1.max(1);
+        let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+        let alt = mods.alt && !(mods.ctrl || mods.logo || mods.shift);
+        let by = match sym {
+            _ if !plain => 0,
+            Keysym::Down | Keysym::KP_Down => 1,
+            Keysym::Up | Keysym::KP_Up => -1,
+            Keysym::Page_Down | Keysym::KP_Page_Down => page as i64,
+            Keysym::Page_Up | Keysym::KP_Page_Up => -(page as i64),
+            Keysym::Home | Keysym::KP_Home => i64::MIN,
+            Keysym::End | Keysym::KP_End => i64::MAX,
+            _ => 0,
+        };
+        if by != 0 {
+            self.scroll_by(by, true, ctx);
+            return Some(None);
+        }
+        if self.tab() != DetailTab::Diff {
+            return None;
+        }
+        match sym {
+            Keysym::Down | Keysym::KP_Down if alt => self.jump_file(1, ctx),
+            Keysym::Up | Keysym::KP_Up if alt => self.jump_file(-1, ctx),
+            Keysym::space if plain => {
+                if let Some(head) = self.current_file(page) {
+                    self.toggle_diff_file(head, ctx);
+                }
+            }
+            Keysym::Left | Keysym::KP_Left | Keysym::Right | Keysym::KP_Right if plain => {
+                let fold = matches!(sym, Keysym::Left | Keysym::KP_Left);
+                if let Some(head) = self.current_file(page) {
+                    self.fold_diff_file(head, fold, ctx);
+                }
+            }
+            Keysym::Return | Keysym::KP_Enter if plain => {
+                let head = self.current_file(page)?;
+                let (_, range) = self.diff_window(page);
+                let file = self.diff_rows[head].file();
+                let line = range.clone().find(|&r| {
+                    matches!(self.diff_rows[r], DiffRow::Line(..))
+                        && self.diff_rows[r].file() == file
+                });
+                return Some(self.open_diff_row(line.unwrap_or(head)));
+            }
+            _ => return None,
+        }
+        Some(None)
+    }
+
+    /// The repositories whose diff wants reading, with their changes in
+    /// the tree's order and the Git status read it is for: those not read
+    /// since it, while the diff shows.
+    pub fn diffs_wanted(&self, ctx: &Ctx) -> Vec<(PathBuf, Vec<Change>, u64)> {
+        if self.tab() != DetailTab::Diff {
+            return Vec::new();
+        }
+        ctx.items
+            .iter()
+            .filter(|i| !i.status.changes.is_empty())
+            .filter(|i| {
+                self.diffs
+                    .get(&i.root)
+                    .is_none_or(|(generation, _)| *generation < self.diff_gen)
+            })
+            .map(|i| {
+                let changes = &i.status.changes;
+                let order = file_order(changes);
+                let changes = order.into_iter().map(|c| changes[c].clone()).collect();
+                (i.root.clone(), changes, self.diff_gen)
+            })
+            .collect()
+    }
+
+    /// A repository's diff came back, read for Git status read
+    /// `generation`: kept unless one read later is, or the repository is
+    /// gone or clean; the diff stays on what it showed.
+    pub fn set_diffs(&mut self, root: PathBuf, generation: u64, files: Vec<FileDiff>, ctx: &Ctx) {
+        let items = ctx.items;
+        let wanted = items
+            .iter()
+            .any(|i| i.root == root && !i.status.changes.is_empty());
+        let newer = self.diffs.get(&root).is_some_and(|(g, _)| *g > generation);
+        if !wanted || newer {
+            return;
+        }
+        let anchor = self.diff_anchor();
+        self.diffs.insert(root, (generation, files));
+        self.build_rows(items, anchor);
     }
 
     /// The sheet, as shown.
@@ -3306,8 +3868,8 @@ impl Panel {
         }
     }
 
-    /// The detail the selection wants read, when it isn't read yet (or
-    /// was before the last Git status read).
+    /// The log or stashes the selection wants read, when not read yet (or
+    /// read before the last Git status read).
     pub fn detail_wanted(&self, ctx: &Ctx) -> Option<DetailKey> {
         self.selection(ctx.items)?;
         let key = self.detail_key()?;
@@ -3323,10 +3885,6 @@ impl Panel {
         if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
             self.detail_first = 0;
         }
-        self.diff = match key.tab {
-            DetailTab::Diff => diff_lines(&text),
-            DetailTab::Log | DetailTab::Stashes => Vec::new(),
-        };
         self.detail = Some((key, text));
         self.detail_stale = false;
     }
@@ -3559,6 +4117,60 @@ mod tests {
 
     fn select_file(panel: &mut Panel, name: &str, path: &str) {
         panel.selected = Some(Selected::File(root(name), path.into()));
+    }
+
+    /// A diff of `path` adding `lines`.
+    fn added(path: &str, code: char, lines: &[&str]) -> FileDiff {
+        let mut file = FileDiff::default();
+        if !lines.is_empty() {
+            let mut text = String::from("diff --git a/f b/f\n@@ -0,0 +1 @@\n");
+            for line in lines {
+                text.push_str(&format!("+{line}\n"));
+            }
+            file = crate::diff::parse(&text).pop().unwrap();
+        }
+        file.path = path.into();
+        file.code = code;
+        file
+    }
+
+    /// The diffs of `items()` read: src/git.rs adding a, b and c,
+    /// notes.md adding n, new.rs renamed from old.rs. The diff's rows:
+    /// gerdr, src/git.rs, a, b, c, notes.md, n, a gap, zed, new.rs.
+    fn read_diffs(panel: &mut Panel, ctx: &Ctx) {
+        let g = panel.diff_gen;
+        let gerdr = vec![
+            added("src/git.rs", 'M', &["a", "b", "c"]),
+            added("notes.md", '?', &["n"]),
+        ];
+        panel.set_diffs(root("gerdr"), g, gerdr, ctx);
+        let mut renamed = added("new.rs", 'R', &[]);
+        renamed.orig = Some("old.rs".into());
+        panel.set_diffs(root("zed"), g, vec![renamed], ctx);
+    }
+
+    /// The detail's rows in short: `# repo`, `= file`, `+line`, `@ hunk`,
+    /// `~ note`, else the text.
+    fn detail_rows(view: &ReposView) -> Vec<String> {
+        view.detail
+            .rows
+            .iter()
+            .map(|row| match row {
+                DetailRow::Text(line) => line.text.clone(),
+                DetailRow::Repo(repo) => format!("# {}", repo.label),
+                DetailRow::File(file) => format!("= {}", file.path),
+                DetailRow::Hunk { context, .. } => format!("@ {context}"),
+                DetailRow::Line(line) => {
+                    let sign = match line.kind {
+                        crate::diff::LineKind::Added => '+',
+                        crate::diff::LineKind::Removed => '-',
+                        crate::diff::LineKind::Context => ' ',
+                    };
+                    format!("{sign}{}", line.text)
+                }
+                DetailRow::Note(note) => format!("~ {note}"),
+            })
+            .collect()
     }
 
     fn job(name: &str, files: &[&str]) -> Job {
@@ -4184,37 +4796,36 @@ mod tests {
                 paths: vec!["src/git.rs".into()]
             })
         );
-        // A diff of five lines, two in view: Shift+Down scrolls it.
-        let key = panel.detail_key().unwrap();
-        panel.set_detail(key, "a\nb\nc\nd\ne".into());
+        // The diff, ten rows, two in view: Shift+Down scrolls it.
+        read_diffs(&mut panel, &ctx);
+        panel.detail_first = 0;
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.first, view.detail.total), (0, 5));
+        assert_eq!((view.detail.first, view.detail.total), (0, 10));
         assert_eq!(
             press(&mut panel, mods(false, true, false), Keysym::Down, &ctx),
             None
         );
         assert_eq!(panel.detail_first, 1);
-        press(
-            &mut panel,
-            mods(false, true, false),
-            Keysym::Page_Down,
-            &ctx,
-        );
+        let page_down = |panel: &mut Panel| {
+            press(panel, mods(false, true, false), Keysym::Page_Down, &ctx);
+        };
+        page_down(&mut panel);
         assert_eq!(panel.detail_first, 3);
-        press(
-            &mut panel,
-            mods(false, true, false),
-            Keysym::Page_Down,
-            &ctx,
-        );
-        assert_eq!(panel.detail_first, 3);
+        page_down(&mut panel);
+        assert_eq!(panel.detail_first, 5);
         press(&mut panel, mods(false, true, false), Keysym::Up, &ctx);
-        assert_eq!(panel.detail_first, 2);
+        assert_eq!(panel.detail_first, 4);
         // With the field focused too.
         panel.focus = Focus::Field;
         press(&mut panel, mods(false, true, false), Keysym::Page_Up, &ctx);
-        assert_eq!(panel.detail_first, 0);
-        assert_eq!(panel.view("p", &ctx).detail.first, 0);
+        assert_eq!(panel.detail_first, 2);
+        assert_eq!(panel.view("p", &ctx).detail.first, 2);
+        // As far as the last row, under the header pinned at the top.
+        panel.scroll(100.0, true, &ctx);
+        assert_eq!(panel.detail_first, 9);
+        let view = panel.view("p", &ctx);
+        assert_eq!(detail_rows(&view), ["= old.rs → new.rs"]);
+        assert!(!view.detail.sticky);
     }
 
     #[test]
@@ -4397,9 +5008,11 @@ mod tests {
         assert_eq!(panel.field.line().caret, 0);
         assert_eq!(panel.view("p", &ctx).selected, Some(1));
         assert!(panel.view("p", &ctx).field_focused);
-        // Tab goes back and forth.
+        // Tab goes round: the tree, the detail, the field.
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Tree);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(panel.focus, Focus::Detail);
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Field);
         // Esc closes, from the field too.
@@ -4673,7 +5286,13 @@ mod tests {
         panel.set_detail(key, "stash@{0} · 1 day ago · On main: wip\n".into());
         let detail = panel.view("p", &ctx).detail;
         assert_eq!(detail.tab, DetailTab::Stashes);
-        assert_eq!(detail.lines[0].text, "stash@{0} · 1 day ago · On main: wip");
+        assert_eq!(
+            detail.rows[0],
+            DetailRow::Text(detail_line(
+                "stash@{0} · 1 day ago · On main: wip",
+                DiffTone::Plain
+            ))
+        );
         // Not while a batch runs.
         let b = batch(
             BatchKind::Fetch,
@@ -4688,7 +5307,7 @@ mod tests {
     }
 
     #[test]
-    fn the_detail_shows_the_diff_and_the_log() {
+    fn the_detail_shows_every_diff_and_the_log() {
         let items = items();
         let mut ran = Ran {
             command: "git push -u origin HEAD".into(),
@@ -4704,60 +5323,129 @@ mod tests {
         let b = batch(BatchKind::Push { force: false }, vec![pushed]);
         let ctx = ctx(&items, Some(&b));
         let mut panel = Panel::new(&items);
-        select_file(&mut panel, "gerdr", "src/git.rs");
-        let diff = DetailKey {
-            root: root("gerdr"),
-            file: Some("src/git.rs".into()),
-            tab: DetailTab::Diff,
-        };
-        assert_eq!(panel.detail_wanted(&ctx), Some(diff.clone()));
-        // A read for what was selected before is dropped.
-        let log = DetailKey {
-            file: None,
-            tab: DetailTab::Log,
-            ..diff.clone()
-        };
-        panel.set_detail(log.clone(), "old".into());
-        assert_eq!(panel.detail, None);
-        let text = "diff --git a/src/git.rs b/src/git.rs\nindex 1..2 100644\n--- a/src/git.rs\n\
-                    +++ b/src/git.rs\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n--- not a header\n";
-        panel.set_detail(diff.clone(), text.into());
-        assert_eq!(panel.detail_wanted(&ctx), None);
-        let view = panel.view("p", &ctx);
-        assert_eq!(view.detail.title, "src/git.rs");
-        assert_eq!(view.detail.tab, DetailTab::Diff);
-        let tones: Vec<DiffTone> = view.detail.lines.iter().map(|l| l.tone).collect();
-        use DiffTone::*;
+        // Every repository with changes, read one by one.
+        let wanted: Vec<(PathBuf, Vec<String>, u64)> = panel
+            .diffs_wanted(&ctx)
+            .into_iter()
+            .map(|(root, changes, g)| (root, changes.into_iter().map(|c| c.path).collect(), g))
+            .collect();
         assert_eq!(
-            tones,
+            wanted,
             [
-                Header, Header, Header, Header, Hunk, Plain, Removed, Added, Removed
+                (
+                    root("gerdr"),
+                    vec!["src/git.rs".into(), "notes.md".into()],
+                    0
+                ),
+                (root("zed"), vec!["new.rs".into()], 0),
             ]
         );
-        // A status read has it read again, shown meanwhile.
-        panel.refresh(&ctx);
-        assert_eq!(panel.detail_wanted(&ctx), Some(diff.clone()));
-        assert_eq!(panel.view("p", &ctx).detail.lines.len(), 9);
-        // The detail scrolls within its lines.
+        assert_eq!(panel.detail_wanted(&ctx), None);
+        let view = panel.view("p", &ctx);
+        assert_eq!(view.detail.tab, DetailTab::Diff);
+        assert_eq!(
+            view.detail.title,
+            "All changes · 2 repositories · 3 files · +0 −0"
+        );
+        assert_eq!(
+            detail_rows(&view),
+            ["# gerdr", "~ Reading…", "", "# zed", "~ Reading…"]
+        );
+        // A clean repository's is dropped.
+        panel.set_diffs(root("herdr"), 0, vec![added("x", 'M', &["x"])], &ctx);
+        assert!(!panel.diffs.contains_key(&root("herdr")));
+        read_diffs(&mut panel, &ctx);
+        assert!(panel.diffs_wanted(&ctx).is_empty());
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            view.detail.title,
+            "All changes · 2 repositories · 3 files · +4 −0"
+        );
+        assert_eq!(
+            detail_rows(&view),
+            [
+                "# gerdr",
+                "= src/git.rs",
+                "+a",
+                "+b",
+                "+c",
+                "= notes.md",
+                "+n",
+                "",
+                "# zed",
+                "= old.rs → new.rs",
+            ]
+        );
+        // Scrolled into a file, its header is pinned at the top, with its
+        // repository's name.
         let paged = super::Ctx {
             page: (20, 4),
             ..ctx
         };
-        panel.scroll(100.0, true, &paged);
+        panel.detail_first = 3;
+        let view = panel.view("p", &paged);
+        assert!(view.detail.sticky);
+        assert_eq!(
+            detail_rows(&view),
+            ["= src/git.rs", "+b", "+c", "= notes.md"]
+        );
+        let DetailRow::File(file) = &view.detail.rows[0] else {
+            panic!("{:?}", view.detail.rows[0]);
+        };
+        assert_eq!(file.repo.as_deref(), Some("gerdr"));
+        assert_eq!((file.added, file.code), (3, 'M'));
+        // A status read has them read again, shown meanwhile, scrolled
+        // where they were.
+        panel.refresh(&ctx);
+        assert_eq!(panel.diffs_wanted(&ctx).len(), 2);
+        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        panel.set_diffs(
+            root("gerdr"),
+            1,
+            vec![added("src/git.rs", 'M', &["a", "c"])],
+            &ctx,
+        );
+        assert_eq!(panel.detail_first, 3);
+        assert_eq!(detail_rows(&panel.view("p", &paged))[1], "+c");
+        // A read for an earlier status read, coming late, is dropped.
+        panel.set_diffs(root("gerdr"), 0, vec![], &ctx);
+        assert_eq!(panel.diffs[&root("gerdr")].1.len(), 1);
+        // Selecting a line in the tree scrolls the diff to it.
+        read_diffs(&mut panel, &ctx);
+        panel.focus = Focus::Tree;
+        select(&mut panel, "gerdr");
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.detail_first, 1);
+        press(&mut panel, none(), Keysym::Down, &ctx);
         assert_eq!(panel.detail_first, 5);
-        assert_eq!(panel.view("p", &paged).detail.lines[0].text, " same");
+        let view = panel.view("p", &ctx);
+        let DetailRow::File(file) = &view.detail.rows[5] else {
+            panic!("{:?}", view.detail.rows[5]);
+        };
+        assert!(file.selected);
         // The repository's log, with what the batch ran there.
         select(&mut panel, "gerdr");
+        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        let log = DetailKey {
+            root: root("gerdr"),
+            file: None,
+            tab: DetailTab::Log,
+        };
         assert_eq!(panel.detail_wanted(&ctx), Some(log.clone()));
+        assert!(panel.diffs_wanted(&ctx).is_empty());
         panel.set_detail(log.clone(), "abc1234 Read the branch".into());
         assert_eq!(panel.detail_first, 0);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!(detail.title, "gerdr");
         assert_eq!(detail.tab, DetailTab::Log);
+        use DiffTone::*;
         let lines: Vec<(&str, DiffTone)> = detail
-            .lines
+            .rows
             .iter()
-            .map(|l| (l.text.as_str(), l.tone))
+            .map(|row| match row {
+                DetailRow::Text(l) => (l.text.as_str(), l.tone),
+                other => panic!("{other:?}"),
+            })
             .collect();
         assert_eq!(
             lines,
@@ -4770,15 +5458,97 @@ mod tests {
                 ("! [rejected] main -> main (fetch first)", Error),
             ]
         );
-        // Ctrl+D asks for a diff: a repository has none.
-        press(&mut panel, ctrl(), Keysym::d, &ctx);
-        assert_eq!(panel.detail_wanted(&ctx), None);
-        let detail = panel.view("p", &ctx).detail;
-        assert_eq!(detail.lines[0].text, "Select a file for its diff");
-        // Ctrl+T, a file's repository's log.
-        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        // A file's line, its repository's log.
         select_file(&mut panel, "gerdr", "src/git.rs");
         assert_eq!(panel.detail_wanted(&ctx), None);
+        // Ctrl+D, the diff again, where the selection is.
+        press(&mut panel, ctrl(), Keysym::d, &ctx);
+        assert_eq!(panel.detail_wanted(&ctx), None);
+        assert_eq!(panel.detail_first, 1);
+    }
+
+    #[test]
+    fn the_diff_has_its_own_keys_and_clicks() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 4);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        // Tab: the tree, the detail, the field.
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(panel.focus, Focus::Detail);
+        // Down scrolls; Alt+Down goes to the next file, selected in the
+        // tree, and Alt+Up back.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("gerdr"))));
+        press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
+        assert_eq!(panel.detail_first, 5);
+        let notes = Selected::File(root("gerdr"), "notes.md".into());
+        assert_eq!(panel.selected, Some(notes));
+        press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
+        assert_eq!(panel.detail_first, 9);
+        press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
+        press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
+        assert_eq!(panel.detail_first, 1);
+        // Space checks the file at the top, as its tree line.
+        panel.detail_first = 3;
+        press(&mut panel, none(), Keysym::space, &ctx);
+        let key = (root("gerdr"), "src/git.rs".to_string());
+        assert!(panel.checked_files.contains(&key));
+        let DetailRow::File(file) = &panel.view("p", &ctx).detail.rows[0] else {
+            panic!();
+        };
+        assert_eq!(file.check, Check::On);
+        // Enter opens it in Zed at the first line in view.
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::OpenInZed {
+                root: root("gerdr"),
+                paths: vec!["src/git.rs:2".into()],
+            })
+        );
+        // Left folds it, its header at the top; Right unfolds it.
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.view("p", &ctx).detail.total, 7);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        // Typing doesn't act on the tree.
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(panel.focus, Focus::Field);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        assert_eq!(panel.focus, Focus::Tree);
+
+        // Clicks: on a file's checkbox, its chevron, a row.
+        panel.detail_first = 0;
+        panel.click(ReposHit::DiffCheck(1), &ctx);
+        assert!(!panel.checked_files.contains(&key));
+        panel.click(ReposHit::DiffFold(1), &ctx);
+        assert_eq!(panel.view("p", &ctx).detail.total, 7);
+        // Folded, its header went to the top.
+        assert_eq!(panel.detail_first, 1);
+        panel.click(ReposHit::DiffFold(0), &ctx);
+        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        panel.detail_first = 0;
+        panel.click(ReposHit::DiffRow(3), &ctx);
+        assert_eq!(panel.focus, Focus::Detail);
+        let git = Selected::File(root("gerdr"), "src/git.rs".into());
+        assert_eq!(panel.selected, Some(git));
+        assert_eq!(panel.detail_first, 0);
+        assert_eq!(
+            panel.open_detail_row(3, &ctx),
+            Some(Outcome::OpenInZed {
+                root: root("gerdr"),
+                paths: vec!["src/git.rs:2".into()],
+            })
+        );
+        // Under the pinned header, rows are one down.
+        panel.detail_first = 3;
+        assert_eq!(panel.detail_row_at(0, &ctx), Some(1));
+        assert_eq!(panel.detail_row_at(1, &ctx), Some(3));
+        assert_eq!(panel.detail_row_at(3, &ctx), Some(5));
+        assert_eq!(panel.detail_row_at(4, &ctx), None);
     }
 
     #[test]

@@ -1,9 +1,12 @@
 //! The repositories panel: the project's repositories as one, nearly as big
 //! as the output. On the left a tree, a row per repository (a checkbox,
 //! its branch, where it stands, what is being done to it) with its changed
-//! files under it, each with a checkbox; on the right the selected file's
-//! diff or the selected repository's log; under both a field (a commit
-//! message), the last batch's result and the actions.
+//! files under it, each with a checkbox; on the right every change of
+//! every repository as one diff (repository and file headers banded,
+//! the file in view's pinned at the top, added and removed lines tinted
+//! with their changed words tinted more), or the selected repository's
+//! log; under both a field (a commit message), the last batch's result
+//! and the actions.
 //! A sheet over it asks before a batch that could conflict, or that can't
 //! be taken back, and lists the keys. At the left of the header, a
 //! branch picker: the branch the repositories acted on are on, and a menu
@@ -20,6 +23,7 @@ use super::{
     chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, physical, plus,
     rect_px, rounded_rect, trash,
 };
+use crate::diff::LineKind;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -82,6 +86,18 @@ pub fn repos_detail_line(density: Density) -> i32 {
     }
 }
 const REPOS_MONO_SIZE: f32 = 14.0;
+/// A file's header in the diff: its fold chevron's room, its checkbox's,
+/// and its status letter's pill; how far in a diff line's text starts,
+/// past the bar marking it added or removed, and that bar's width.
+const DIFF_FOLD: i32 = 18;
+const DIFF_CHECK: i32 = 26;
+const DIFF_BADGE: i32 = 18;
+const DIFF_INSET: i32 = 8;
+const DIFF_BAR: i32 = 3;
+/// How strongly an added or removed line is tinted, and its changed
+/// words.
+const DIFF_TINT: f32 = 0.10;
+const DIFF_WORD_TINT: f32 = 0.28;
 /// The Diff and Log tabs: each this wide, this far apart.
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
@@ -327,19 +343,24 @@ pub struct Hint {
     pub disabled: Option<String>,
 }
 
-/// The right side: the selected file's diff, or the selected repository's
-/// log.
+/// The right side: every change of every repository one after another,
+/// or the selected repository's log or stashes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DetailView {
     pub tab: DetailTab,
-    /// Above it: the file's path, or the repository's name.
+    /// Above it: `All changes · 2 repositories · 5 files`, or the
+    /// repository's name.
     pub title: String,
-    /// The lines in view, scrolled.
-    pub lines: Vec<DetailLine>,
-    /// Where `lines` start among them all, and how many there are: where
+    /// The rows in view, scrolled; with `sticky`, the first is the header
+    /// of the file the rest start in, pinned at the top.
+    pub rows: Vec<DetailRow>,
+    pub sticky: bool,
+    /// Where the rows start among them all, and how many there are: where
     /// the scrollbar stands.
     pub first: usize,
     pub total: usize,
+    /// The detail has the keyboard.
+    pub focused: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -351,7 +372,54 @@ pub enum DetailTab {
     Stashes,
 }
 
-/// A line of a diff or a log, in the monospace font.
+/// A row of the detail pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DetailRow {
+    /// A line of a log, or what the pane says (`Reading…`).
+    Text(DetailLine),
+    /// A repository's header over its files.
+    Repo(DiffRepo),
+    /// A file's header over its hunks.
+    File(DiffFile),
+    /// Between hunks: what git says they are in (a function's first line),
+    /// and the line the hunk starts at.
+    Hunk {
+        context: String,
+        number: usize,
+    },
+    Line(crate::diff::Line),
+    /// What isn't a hunk: `Binary file`, an untracked folder's files.
+    Note(String),
+}
+
+/// A repository's header in the diff.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiffRepo {
+    pub label: String,
+    pub branch: Option<String>,
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// A file's header in the diff.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiffFile {
+    /// Its repository's name, on the header pinned at the top.
+    pub repo: Option<String>,
+    /// From the repository's top folder; a rename as `old → new`.
+    pub path: String,
+    /// `git::Change::code`.
+    pub code: char,
+    pub check: Check,
+    pub folded: bool,
+    pub added: usize,
+    pub removed: usize,
+    /// It is the tree's selected line.
+    pub selected: bool,
+}
+
+/// A line of a log, in the monospace font.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailLine {
     pub text: String,
@@ -362,13 +430,9 @@ pub struct DetailLine {
 pub enum DiffTone {
     #[default]
     Plain,
-    Added,
-    Removed,
-    /// `@@ … @@`.
-    Hunk,
-    /// `diff --git`, `index`, `---`, `+++`; in a log, a command run.
+    /// A command run.
     Header,
-    /// In a log, what a failed command printed.
+    /// What a failed command printed.
     Error,
 }
 
@@ -490,6 +554,11 @@ pub enum ReposHit {
     DetailTab(DetailTab),
     /// The detail pane (for the wheel).
     Detail,
+    /// A row of the detail, by index into `DetailView::rows`.
+    DiffRow(usize),
+    /// A file header's checkbox, and its fold chevron.
+    DiffCheck(usize),
+    DiffFold(usize),
     /// The branch picker's button.
     BranchButton,
     /// A row of the branch menu, by index into `BranchMenuView::rows`.
@@ -669,6 +738,11 @@ pub struct ReposLayout {
     pub splitter: Rect,
     pub detail: Rect,
     pub detail_tabs: Vec<(DetailTab, Rect)>,
+    /// Per detail row in view, its rect; a file header's checkbox and
+    /// fold chevron, by index into them.
+    pub detail_rows: Vec<Rect>,
+    pub detail_checks: Vec<(usize, Rect)>,
+    pub detail_folds: Vec<(usize, Rect)>,
     pub field: Rect,
     pub result: Option<Rect>,
     /// The result bar's buttons, the footer's, and the sheet's.
@@ -977,6 +1051,29 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             .into(),
     );
 
+    // The detail's rows; a file header's chevron, then its checkbox.
+    let (mut detail_rows, mut detail_checks, mut detail_folds) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for (i, row) in view.detail.rows.iter().enumerate() {
+        let ry = body.loc.y + i as i32 * line_h;
+        if ry + line_h > body.loc.y + body.size.h {
+            break;
+        }
+        if let DetailRow::File(_) = row {
+            let fold = Rectangle::new((body.loc.x, ry).into(), (DIFF_FOLD, line_h).into());
+            let check = Rectangle::new(
+                (body.loc.x + DIFF_FOLD, ry).into(),
+                (DIFF_CHECK, line_h).into(),
+            );
+            detail_folds.push((i, fold));
+            detail_checks.push((i, check));
+        }
+        detail_rows.push(Rectangle::new(
+            (body.loc.x, ry).into(),
+            (body.size.w, line_h).into(),
+        ));
+    }
+
     // The result bar's buttons, right-aligned.
     let mut result_buttons = Vec::new();
     if let (Some(bar), Some(rect)) = (&view.result, result) {
@@ -1157,6 +1254,9 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             splitter,
             detail,
             detail_tabs,
+            detail_rows,
+            detail_checks,
+            detail_folds,
             field,
             result,
             buttons,
@@ -1302,6 +1402,15 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if let Some((tab, _)) = layout.detail_tabs.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::DetailTab(*tab));
     }
+    if let Some((i, _)) = layout.detail_folds.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::DiffFold(*i));
+    }
+    if let Some((i, _)) = layout.detail_checks.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::DiffCheck(*i));
+    }
+    if let Some(i) = layout.detail_rows.iter().position(at) {
+        return Some(ReposHit::DiffRow(i));
+    }
     if at(&layout.detail) {
         return Some(ReposHit::Detail);
     }
@@ -1370,6 +1479,17 @@ pub(super) fn scrollbar(
         w / 2.0,
         mix(p.elevated, p.muted, 0.45),
     );
+}
+
+/// The colour of a change's status letter (`git::Change::code`) in `p`.
+fn code_color(code: char, p: &Palette) -> Rgb {
+    match code {
+        'A' => p.success,
+        'D' | 'U' => p.error,
+        'R' | 'C' => p.accent,
+        '?' => p.muted,
+        _ => p.warning,
+    }
 }
 
 /// The colour of `tone` in `p`.
@@ -2040,35 +2160,36 @@ impl Painter {
             p.border_variant,
         );
 
-        let (bx, bend) = phys(body, scale);
         let line_h = repos_detail_line(view.density);
         // Tints reach across the pane, short of its edges.
-        let (tint_x, tint_end) = (
+        let tint = (
             px(rect.loc.x) + border,
             px(rect.loc.x + rect.size.w) - border,
         );
         let mut shown = 0;
-        for (i, line) in view.detail.lines.iter().enumerate() {
+        for (i, row) in view.detail.rows.iter().enumerate() {
             let ly = body.loc.y + i as i32 * line_h;
             if ly + line_h > body.loc.y + body.size.h {
                 break;
             }
             shown += 1;
-            let row = Rectangle::new((body.loc.x, ly).into(), (body.size.w, line_h).into());
-            let row_band = band(row, scale);
-            let (color, tint) = match line.tone {
-                DiffTone::Plain => (p.text, None),
-                DiffTone::Added => (p.success, Some(mix(p.elevated, p.success, 0.12))),
-                DiffTone::Removed => (p.error, Some(mix(p.elevated, p.error, 0.12))),
-                DiffTone::Hunk => (p.accent, None),
-                DiffTone::Header => (p.muted, None),
-                DiffTone::Error => (p.error, None),
-            };
-            if let Some(tint) = tint {
-                c.fill(tint_x, row_band.0, tint_end - tint_x, row_band.1, tint);
+            let at = Rectangle::new((body.loc.x, ly).into(), (body.size.w, line_h).into());
+            self.detail_row(c, view, i, row, at, tint, scale, p);
+        }
+        // The header pinned at the top casts a shadow on what scrolls under.
+        if view.detail.sticky && shown > 0 {
+            let (y, h) = band(
+                Rectangle::new(body.loc, (body.size.w, line_h).into()),
+                scale,
+            );
+            c.fill(tint.0, y + h - border, tint.1 - tint.0, border, p.border);
+            let depth = px(4).max(1);
+            for dy in 0..depth {
+                let fade = 1.0 - dy as f32 / depth as f32;
+                for x in tint.0..tint.1 {
+                    c.blend(x, y + h + dy, [0, 0, 0], p.shadow * 0.35 * fade * fade);
+                }
             }
-            let text = line.text.replace('\t', "    ");
-            self.mono_text(c, &text, REPOS_MONO_SIZE, bx, bend, row_band, scale, color);
         }
         let track = Rectangle::new(
             (
@@ -2079,7 +2200,316 @@ impl Painter {
             (SCROLLBAR, body.size.h).into(),
         );
         let (first, total) = (view.detail.first, view.detail.total);
+        let shown = shown - usize::from(view.detail.sticky && shown > 0);
         scrollbar(c, track, (first, shown.max(1), total), scale, p);
+    }
+
+    /// Row `i` of the detail in `rect`; its tint across the pane from
+    /// `tint.0` to `tint.1` (physical pixels). A repository's header and a
+    /// file's are banded, a hunk is a rule with what it is in, an added or
+    /// removed line is tinted with a bar at its left and its changed words
+    /// tinted more.
+    #[allow(clippy::too_many_arguments)]
+    fn detail_row(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        i: usize,
+        row: &DetailRow,
+        rect: Rect,
+        (tint_x, tint_end): (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (bx, bend) = phys(rect, scale);
+        let row_band = band(rect, scale);
+        let (y, h) = row_band;
+        let border = px(1).max(1);
+        let gap = (FIELD_GAP as f32 * s).round();
+        let inset = px(DIFF_INSET) as f32;
+        let across = |c: &mut Canvas, color: Rgb| c.fill(tint_x, y, tint_end - tint_x, h, color);
+        match row {
+            DetailRow::Text(line) => {
+                let color = match line.tone {
+                    DiffTone::Plain => p.text,
+                    DiffTone::Header => p.muted,
+                    DiffTone::Error => p.error,
+                };
+                self.mono_text(
+                    c,
+                    &line.text,
+                    REPOS_MONO_SIZE,
+                    bx,
+                    bend,
+                    row_band,
+                    scale,
+                    color,
+                );
+            }
+            DetailRow::Repo(repo) => {
+                across(c, mix(p.elevated, p.text, 0.07));
+                c.fill(tint_x, y + h - border, tint_end - tint_x, border, p.border);
+                let files = match repo.files {
+                    1 => "1 file".to_string(),
+                    n => format!("{n} files"),
+                };
+                let counts = self.diff_counts(
+                    c,
+                    Some(&files),
+                    (repo.added, repo.removed),
+                    bend,
+                    row_band,
+                    scale,
+                    p,
+                );
+                let right = counts - gap;
+                let mut pen = self.mixed_text(
+                    c,
+                    &repo.label,
+                    FONT_SIZE,
+                    bx,
+                    right,
+                    row_band,
+                    scale,
+                    p.text,
+                );
+                if let Some(branch) = &repo.branch {
+                    pen += gap;
+                    let icon = Rectangle::new(
+                        ((pen / s).round() as i32, rect.loc.y).into(),
+                        (14, rect.size.h).into(),
+                    );
+                    if pen + px(14) as f32 + gap < right {
+                        icon_sdf(c, icon, scale, p.muted, |x, y| git_branch(x, y, s));
+                        pen += px(14) as f32 + (gap / 2.0).round();
+                        self.mixed_text(
+                            c,
+                            branch,
+                            SMALL_FONT_SIZE,
+                            pen,
+                            right,
+                            row_band,
+                            scale,
+                            p.muted,
+                        );
+                    }
+                }
+            }
+            DetailRow::File(file) => {
+                let hovered = matches!(
+                    view.hover,
+                    Some(ReposHit::DiffRow(j) | ReposHit::DiffCheck(j) | ReposHit::DiffFold(j)) if j == i
+                );
+                let fill = if file.selected {
+                    mix(p.elevated, p.selected, 0.75)
+                } else if hovered {
+                    mix(p.elevated, p.selected, 0.45)
+                } else {
+                    mix(p.elevated, p.text, 0.035)
+                };
+                across(c, fill);
+                c.fill(tint_x, y, tint_end - tint_x, border, p.border_variant);
+                if file.selected && view.detail.focused {
+                    c.fill(tint_x, y, px(2), h, p.accent);
+                }
+                let fold = Rectangle::new(rect.loc, (DIFF_FOLD, rect.size.h).into());
+                let color = if view.hover == Some(ReposHit::DiffFold(i)) {
+                    p.text
+                } else {
+                    p.muted
+                };
+                icon_sdf(c, fold, scale, color, |x, y| {
+                    expander_mark(!file.folded, x, y, s)
+                });
+                let side = CHECKBOX_SIZE;
+                let box_rect = Rectangle::new(
+                    (rect.loc.x + DIFF_FOLD + (DIFF_CHECK - side) / 2, rect.loc.y).into(),
+                    (side, rect.size.h).into(),
+                );
+                let check_hovered = view.hover == Some(ReposHit::DiffCheck(i));
+                self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
+                // The status letter on a pill of its colour.
+                let tone = code_color(file.code, p);
+                let (bw, bh) = (px(DIFF_BADGE) as f32, px(DIFF_BADGE - 2) as f32);
+                let badge_x = px(rect.loc.x + DIFF_FOLD + DIFF_CHECK) as f32;
+                let badge_y = (y as f32 + (h as f32 - bh) / 2.0).round();
+                c.rounded(
+                    badge_x,
+                    badge_y,
+                    bw,
+                    bh,
+                    3.0 * s,
+                    mix(p.elevated, tone, 0.2),
+                );
+                let letter = file.code.to_string();
+                let lw = self.mono_width(&letter, SMALL_FONT_SIZE, scale);
+                let lx = (badge_x + (bw - lw) / 2.0).round();
+                self.mono_text(
+                    c,
+                    &letter,
+                    SMALL_FONT_SIZE,
+                    lx,
+                    f32::MAX,
+                    row_band,
+                    scale,
+                    tone,
+                );
+                let counts = self.diff_counts(
+                    c,
+                    None,
+                    (file.added, file.removed),
+                    bend,
+                    row_band,
+                    scale,
+                    p,
+                );
+                let right = counts - gap;
+                let mut pen = badge_x + bw + gap;
+                if let Some(repo) = &file.repo {
+                    let label = format!("{repo} ›");
+                    pen = self.mixed_text(
+                        c,
+                        &label,
+                        SMALL_FONT_SIZE,
+                        pen,
+                        right,
+                        row_band,
+                        scale,
+                        p.muted,
+                    );
+                    pen += (gap / 2.0).round();
+                }
+                self.path_text(
+                    c,
+                    &file.path,
+                    FONT_SIZE,
+                    pen,
+                    right,
+                    row_band,
+                    scale,
+                    (p.muted, p.text),
+                );
+            }
+            DetailRow::Hunk { context, number } => {
+                // A short rule, what the hunk is in, then a rule on.
+                let mid = y + h / 2;
+                let lead = px(12);
+                c.fill(bx as i32, mid, lead, border, p.border_variant);
+                let label = if context.is_empty() {
+                    format!("line {number}")
+                } else {
+                    context.clone()
+                };
+                let tx = bx + lead as f32 + (gap / 2.0).round();
+                let end = self.mono_text(
+                    c,
+                    &label,
+                    SMALL_FONT_SIZE,
+                    tx,
+                    bend,
+                    row_band,
+                    scale,
+                    p.muted,
+                );
+                let from = (end + (gap / 2.0).round()) as i32;
+                if (from as f32) < bend {
+                    c.fill(from, mid, bend as i32 - from, border, p.border_variant);
+                }
+            }
+            DetailRow::Line(line) => {
+                let tone = match line.kind {
+                    LineKind::Added => Some(p.success),
+                    LineKind::Removed => Some(p.error),
+                    LineKind::Context => None,
+                };
+                let tx = bx + inset;
+                if let Some(tone) = tone {
+                    across(c, mix(p.elevated, tone, DIFF_TINT));
+                    let word = mix(p.elevated, tone, DIFF_WORD_TINT);
+                    let upto = |n: usize| {
+                        let end = line
+                            .text
+                            .char_indices()
+                            .nth(n)
+                            .map_or(line.text.len(), |(b, _)| b);
+                        tx + self.mono_width(&line.text[..end], REPOS_MONO_SIZE, scale)
+                    };
+                    for w in &line.words {
+                        let (x0, x1) = (upto(w.start), upto(w.end).min(bend));
+                        if x0 >= bend {
+                            break;
+                        }
+                        let (wy, wh) = ((y + border) as f32, (h - 2 * border) as f32);
+                        c.rounded(x0, wy, x1 - x0, wh, 2.0 * s, word);
+                    }
+                    c.fill(tint_x, y, px(DIFF_BAR), h, tone);
+                }
+                self.mono_text(
+                    c,
+                    &line.text,
+                    REPOS_MONO_SIZE,
+                    tx,
+                    bend,
+                    row_band,
+                    scale,
+                    p.text,
+                );
+            }
+            DetailRow::Note(text) => {
+                self.mixed_text(
+                    c,
+                    text,
+                    SMALL_FONT_SIZE,
+                    bx + inset,
+                    bend,
+                    row_band,
+                    scale,
+                    p.placeholder,
+                );
+            }
+        }
+    }
+
+    /// At the right of a header, ending at `right` (physical pixels):
+    /// `lead` muted, then the lines added and removed in their colours,
+    /// each only when some are. Returns where they start.
+    #[allow(clippy::too_many_arguments)]
+    fn diff_counts(
+        &self,
+        c: &mut Canvas,
+        lead: Option<&str>,
+        (added, removed): (usize, usize),
+        right: f32,
+        band: (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) -> f32 {
+        let size = SMALL_FONT_SIZE;
+        let gap = (6.0 * scale as f32).round();
+        let mut parts: Vec<(String, Rgb)> = Vec::new();
+        if let Some(lead) = lead {
+            parts.push((lead.to_string(), p.muted));
+        }
+        if added > 0 {
+            parts.push((format!("+{added}"), p.success));
+        }
+        if removed > 0 {
+            parts.push((format!("−{removed}"), p.error));
+        }
+        let widths: Vec<f32> = parts
+            .iter()
+            .map(|(t, _)| self.mixed_width(t, size, scale))
+            .collect();
+        let total = widths.iter().sum::<f32>() + gap * parts.len().saturating_sub(1) as f32;
+        let left = (right - total).round();
+        let mut x = left;
+        for ((text, color), w) in parts.iter().zip(widths) {
+            self.mixed_text(c, text, size, x, f32::MAX, band, scale, *color);
+            x += w + gap;
+        }
+        left
     }
 
     /// The detail pane's `tab` segment in `rect`: an outlined pill, filled
@@ -2596,9 +3026,11 @@ impl Painter {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use crate::chrome::{Theme, inside};
+    use std::ops::Range;
 
     const SIZES: [(i32, i32); 3] = [(800, 600), (1280, 800), (2560, 1440)];
 
@@ -2637,6 +3069,15 @@ mod tests {
     }
 
     const DENSITY: Density = Density::Comfortable;
+
+    fn diff_line(kind: LineKind, text: &str, words: &[Range<usize>]) -> DetailRow {
+        DetailRow::Line(crate::diff::Line {
+            kind,
+            text: text.into(),
+            number: 1,
+            words: words.to_vec(),
+        })
+    }
 
     fn detail_line(text: &str, tone: DiffTone) -> DetailLine {
         DetailLine {
@@ -2738,34 +3179,68 @@ mod tests {
             ],
             detail: DetailView {
                 tab: DetailTab::Diff,
-                title: "src/git.rs".into(),
-                lines: vec![
-                    detail_line("diff --git a/src/git.rs b/src/git.rs", DiffTone::Header),
-                    detail_line("index 3f2a1c0..9b8e7d6 100644", DiffTone::Header),
-                    detail_line("--- a/src/git.rs", DiffTone::Header),
-                    detail_line("+++ b/src/git.rs", DiffTone::Header),
-                    detail_line(
-                        "@@ -104,6 +104,9 @@ pub fn status(dir: &Path)",
-                        DiffTone::Hunk,
+                title: "All changes · 2 repositories · 3 files · +3 −1".into(),
+                rows: vec![
+                    DetailRow::File(DiffFile {
+                        repo: Some("gerdr".into()),
+                        path: "src/git.rs".into(),
+                        code: 'M',
+                        check: Check::On,
+                        added: 2,
+                        removed: 1,
+                        selected: true,
+                        ..DiffFile::default()
+                    }),
+                    DetailRow::Hunk {
+                        context: "pub fn status(dir: &Path)".into(),
+                        number: 104,
+                    },
+                    diff_line(LineKind::Context, "    let root = toplevel(dir)?;", &[]),
+                    diff_line(
+                        LineKind::Removed,
+                        "    let out = git(dir, &[\"status\", \"--porcelain=v2\"])?;",
+                        &[],
                     ),
-                    detail_line("     let root = toplevel(dir)?;", DiffTone::Plain),
-                    detail_line(
-                        "-    let out = git(dir, &[\"status\", \"--porcelain=v2\"])?;",
-                        DiffTone::Removed,
+                    diff_line(
+                        LineKind::Added,
+                        "    let out = git(dir, &[\"status\", \"--porcelain=v2\", \"-z\"])?;",
+                        &[51..57],
                     ),
-                    detail_line(
-                        "+    let out = git(dir, &[\"status\", \"--porcelain=v2\", \"-z\"])?;",
-                        DiffTone::Added,
+                    diff_line(
+                        LineKind::Added,
+                        "    let changes = parse_changes(&out);",
+                        &[],
                     ),
-                    detail_line("+\tlet changes = parse_changes(&out);", DiffTone::Added),
-                    detail_line(
-                        "     Ok(GitStatus { root, ..parse(&out) })",
-                        DiffTone::Plain,
-                    ),
-                    detail_line("error: hook pre-commit failed", DiffTone::Error),
+                    DetailRow::Note("Binary file".into()),
+                    DetailRow::Text(detail_line("", DiffTone::Plain)),
+                    DetailRow::Repo(DiffRepo {
+                        label: "zed".into(),
+                        branch: Some("main".into()),
+                        files: 2,
+                        added: 1,
+                        removed: 0,
+                    }),
+                    DetailRow::File(DiffFile {
+                        path: "old.rs → crates/editor/src/new.rs".into(),
+                        code: 'R',
+                        ..DiffFile::default()
+                    }),
+                    DetailRow::File(DiffFile {
+                        path: "notes.md".into(),
+                        code: '?',
+                        folded: true,
+                        added: 1,
+                        ..DiffFile::default()
+                    }),
+                    DetailRow::Text(detail_line(
+                        "error: hook pre-commit failed",
+                        DiffTone::Error,
+                    )),
                 ],
+                sticky: true,
                 first: 3,
                 total: 40,
+                focused: true,
             },
             sheet: None,
             empty: "No repositories in this project".into(),
@@ -3114,7 +3589,24 @@ mod tests {
                     assert_eq!(hit(*r), Some(ReposHit::DetailTab(*t)));
                 }
                 assert_eq!(hit(l.field), Some(ReposHit::Field));
-                assert_eq!(hit(l.detail), Some(ReposHit::Detail));
+                for (i, r) in l.detail_rows.iter().enumerate() {
+                    // Past a file header's chevron and checkbox.
+                    let end = Rectangle::new(
+                        (r.loc.x + r.size.w - 4, r.loc.y).into(),
+                        (4, r.size.h).into(),
+                    );
+                    assert_eq!(hit(end), Some(ReposHit::DiffRow(i)));
+                }
+                for &(i, r) in &l.detail_folds {
+                    assert_eq!(hit(r), Some(ReposHit::DiffFold(i)));
+                }
+                for &(i, r) in &l.detail_checks {
+                    assert_eq!(hit(r), Some(ReposHit::DiffCheck(i)));
+                }
+                assert!(matches!(
+                    hit(l.detail),
+                    Some(ReposHit::Detail | ReposHit::DiffRow(_))
+                ));
                 assert_eq!(hit(l.header), Some(ReposHit::Panel));
                 assert_eq!(repos_hit(&l, (1.0, 1.0).into()), None);
                 let below = (

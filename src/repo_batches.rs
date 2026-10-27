@@ -567,8 +567,9 @@ impl Gerdr {
         self.repos_refresh();
     }
 
-    /// Read the diff or log the selection wants, off the event loop, unless
-    /// it is being read.
+    /// Read the diffs, log or stashes the panel wants, off the event loop,
+    /// unless they are being read: each repository's diff on its own
+    /// thread.
     fn repos_detail(&mut self) {
         let page = self.repos_page();
         let (density, tree_share) = self.repos_env();
@@ -585,30 +586,38 @@ impl Gerdr {
             density,
             tree_share,
         };
-        let Some(key) = panel.detail_wanted(&ctx) else {
+        let diffs = panel.diffs_wanted(&ctx);
+        let key = panel
+            .detail_wanted(&ctx)
+            .filter(|key| self.repos.reading.as_ref() != Some(key));
+        let Some(tx) = self.repos_sender() else {
             return;
         };
-        if self.repos.reading.as_ref() == Some(&key) {
-            return;
+        for (root, changes, generation) in diffs {
+            // One read at a time per repository: the next once it is in.
+            if self.repos.reading_diffs.contains_key(&root) {
+                continue;
+            }
+            self.repos.reading_diffs.insert(root.clone(), generation);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let files = git_ops::repo_diff(&root, &changes);
+                let _ = tx.send(RepoEvent::Diffs {
+                    root,
+                    generation,
+                    files,
+                });
+            });
         }
-        let change = key.file.as_ref().and_then(|file| {
-            let item = self.repos.items.iter().find(|i| i.root == key.root)?;
-            item.status
-                .changes
-                .iter()
-                .find(|c| &c.path == file)
-                .cloned()
-        });
-        let Some(tx) = self.repos_sender() else {
+        let Some(key) = key else {
             return;
         };
         self.repos.reading = Some(key.clone());
         std::thread::spawn(move || {
-            let text = match (key.tab, &change) {
-                (DetailTab::Diff, Some(change)) => git_ops::diff(&key.root, change),
-                (DetailTab::Diff, None) => String::new(),
-                (DetailTab::Log, _) => git_ops::log_ahead(&key.root),
-                (DetailTab::Stashes, _) => git_ops::stash_list(&key.root),
+            let text = match key.tab {
+                DetailTab::Diff => String::new(),
+                DetailTab::Log => git_ops::log_ahead(&key.root),
+                DetailTab::Stashes => git_ops::stash_list(&key.root),
             };
             let _ = tx.send(RepoEvent::Detail { key, text });
         });
@@ -709,6 +718,7 @@ impl Gerdr {
                 ReposHit::Line(i) if double && p.is_file_line(i, &ctx) => {
                     p.press(ReposButton::OpenInZed, &ctx)
                 }
+                ReposHit::DiffRow(i) if double => p.open_detail_row(i, &ctx),
                 _ => outcome,
             }
         });
@@ -1371,6 +1381,38 @@ impl Gerdr {
                     panel.set_detail(key, text);
                 }
                 // The selection may have moved on while it was read.
+                self.repos_detail();
+            }
+            RepoEvent::Diffs {
+                root,
+                generation,
+                files,
+            } => {
+                self.repos.reading_diffs.remove(&root);
+                let page = self.repos_page();
+                let (density, tree_share) = self.repos_env();
+                let Repos {
+                    panel,
+                    batch,
+                    items,
+                    same_branches,
+                    top_branches,
+                    ..
+                } = &mut self.repos;
+                let ctx = Ctx {
+                    items,
+                    batch: batch.as_ref(),
+                    page,
+                    now: SystemTime::now(),
+                    same: same_branches,
+                    top: top_branches,
+                    density,
+                    tree_share,
+                };
+                if let Some(panel) = panel.as_mut() {
+                    panel.set_diffs(root, generation, files, &ctx);
+                }
+                // Read again if the status moved on meanwhile.
                 self.repos_detail();
             }
             RepoEvent::Fetched => self.refresh_git(),

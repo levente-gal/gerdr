@@ -21,6 +21,7 @@ use std::{
 
 use crate::{
     desktop::shell_quote,
+    diff::{self, FileDiff},
     git::{self, Change, InProgress},
 };
 
@@ -34,8 +35,12 @@ const POLL: Duration = Duration::from_millis(20);
 /// How long a command's output may still take to arrive once it has ended:
 /// something it left running (a detached `gc`) may hold the pipe open.
 const GRACE: Duration = Duration::from_secs(2);
-/// How many lines of a diff are shown.
-const DIFF_LINES: usize = 5000;
+/// How many lines of a repository's diff are read.
+const REPO_DIFF_LINES: usize = 20_000;
+/// How many of an untracked folder's files are listed.
+const FOLDER_FILES: usize = 200;
+/// An untracked file bigger than this isn't shown.
+const UNTRACKED_BYTES: u64 = 1 << 20;
 /// How many commits `log_ahead` shows without an upstream.
 const LOG_LAST: &str = "10";
 
@@ -992,27 +997,74 @@ pub fn valid_branch(dir: &Path, name: &str) -> bool {
     query(dir, &["check-ref-format", "--branch", name]).is_some()
 }
 
-/// `text` cut to `DIFF_LINES` lines, saying how many more there were.
-fn cap(text: String) -> String {
+/// `text` cut to `lines` lines, saying how many more there were.
+fn cap(text: String, lines: usize) -> String {
     let total = text.lines().count();
-    if total <= DIFF_LINES {
+    if total <= lines {
         return text;
     }
-    let mut out: String = text
-        .lines()
-        .take(DIFF_LINES)
-        .flat_map(|l| [l, "\n"])
-        .collect();
-    out.push_str(&format!("… {} more lines\n", total - DIFF_LINES));
+    let mut out: String = text.lines().take(lines).flat_map(|l| [l, "\n"]).collect();
+    out.push_str(&format!("… {} more lines\n", total - lines));
     out
 }
 
-/// The diff of `change` against HEAD, for the detail pane; an untracked
-/// file as all added, an untracked folder as its file list.
-pub fn diff(dir: &Path, change: &Change) -> String {
+/// The changes of a repository's `changes` against HEAD, one diff per
+/// change in their order, for the detail pane: the tracked ones from one
+/// `git diff`, an untracked file as all added, an untracked folder as
+/// its files.
+pub fn repo_diff(dir: &Path, changes: &[Change]) -> Vec<FileDiff> {
     let top = top(dir);
+    let mut tracked = Vec::new();
+    let mut failed = None;
+    if changes.iter().any(|c| c.code != '?') {
+        let from = head_oid(&top).unwrap_or_else(|| empty_tree(&top));
+        let args = [
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "-M",
+            &from,
+        ];
+        let out = exec(&top, &args, Reach::Local);
+        match out.code {
+            Some(0) => tracked = diff::parse(&cap(out.stdout, REPO_DIFF_LINES)),
+            _ => failed = Some(why(&out.stderr, &out.stdout)),
+        }
+    }
+    changes
+        .iter()
+        .map(|change| {
+            if change.code == '?' {
+                return untracked(&top, change);
+            }
+            let found = tracked.iter().position(|f| f.path == change.path);
+            let mut file = found.map_or_else(FileDiff::default, |i| tracked.swap_remove(i));
+            if found.is_none() {
+                let why = failed.clone();
+                file.notes
+                    .push(why.unwrap_or_else(|| "No changes to show".into()));
+            }
+            file.path = change.path.clone();
+            file.orig = change.orig.clone();
+            file.code = change.code;
+            file
+        })
+        .collect()
+}
+
+/// An untracked file as a diff adding all of it, an untracked folder as
+/// the files in it; or why they aren't shown.
+fn untracked(top: &Path, change: &Change) -> FileDiff {
     let path = change.path.as_str();
-    let out = if change.code == '?' && path.ends_with('/') {
+    let note = |note: String| FileDiff {
+        path: path.into(),
+        code: change.code,
+        notes: vec![note],
+        ..FileDiff::default()
+    };
+    if path.ends_with('/') {
         let args = [
             "--literal-pathspecs",
             "ls-files",
@@ -1021,39 +1073,56 @@ pub fn diff(dir: &Path, change: &Change) -> String {
             "--",
             path,
         ];
-        exec(&top, &args, Reach::Local)
-    } else if change.code == '?' {
-        let args = [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-index",
-            "--",
-            "/dev/null",
-            path,
-        ];
-        exec(&top, &args, Reach::Local)
-    } else {
-        let from = head_oid(&top).unwrap_or_else(|| empty_tree(&top));
-        let mut args = vec![
-            "--literal-pathspecs",
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "-M",
-            &from,
-            "--",
-        ];
-        args.extend(change.orig.as_deref());
-        args.push(path);
-        exec(&top, &args, Reach::Local)
-    };
-    // `diff --no-index` exits 1 when the files differ, as they do.
-    match out.code {
-        Some(0) => cap(out.stdout),
-        Some(1) if change.code == '?' && !out.stdout.is_empty() => cap(out.stdout),
-        _ => why(&out.stderr, &out.stdout),
+        let out = exec(top, &args, Reach::Local);
+        if out.code != Some(0) {
+            return note(why(&out.stderr, &out.stdout));
+        }
+        let mut file = note(String::new());
+        let all: Vec<&str> = out.stdout.lines().collect();
+        file.notes = all
+            .iter()
+            .take(FOLDER_FILES)
+            .map(|l| l.to_string())
+            .collect();
+        if all.len() > FOLDER_FILES {
+            file.notes
+                .push(format!("… {} more files", all.len() - FOLDER_FILES));
+        }
+        return file;
     }
+    let full = top.join(path);
+    let meta = match std::fs::symlink_metadata(&full) {
+        Ok(meta) => meta,
+        Err(e) => return note(e.to_string()),
+    };
+    if meta.file_type().is_symlink() {
+        let to = std::fs::read_link(&full).unwrap_or_default();
+        return note(format!("Symbolic link to {}", to.display()));
+    }
+    if meta.len() > UNTRACKED_BYTES {
+        return note(format!("Not shown: {} KB", meta.len() / 1024));
+    }
+    let bytes = match std::fs::read(&full) {
+        Ok(bytes) => bytes,
+        Err(e) => return note(e.to_string()),
+    };
+    if bytes[..bytes.len().min(8000)].contains(&0) {
+        return note("Binary file".into());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    if text.is_empty() {
+        return note("Empty file".into());
+    }
+    let mut diff = String::from("diff --git a/f b/f\n@@ -0,0 +1 @@\n");
+    for line in text.lines() {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    let mut file = diff::parse(&diff).pop().unwrap_or_default();
+    file.path = path.into();
+    file.code = change.code;
+    file
 }
 
 /// The commits the upstream doesn't have yet, one line each (`log
@@ -1107,6 +1176,7 @@ pub fn stash_drop(dir: &Path) -> OpResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::LineKind;
     use std::{
         os::unix::fs::PermissionsExt,
         sync::atomic::{AtomicUsize, Ordering},
@@ -2007,38 +2077,59 @@ mod tests {
             orig: orig.map(String::from),
             code,
         };
+        let lines = |f: &FileDiff| -> Vec<String> {
+            let kind = |k| match k {
+                LineKind::Added => '+',
+                LineKind::Removed => '-',
+                LineKind::Context => ' ',
+            };
+            f.hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .map(|l| format!("{}{}", kind(l.kind), l.text))
+                .collect()
+        };
         write(dir, "a", "changed\n");
-        let d = diff(dir, &change("a", None, 'M'));
-        assert!(d.contains("-first") && d.contains("+changed"), "{d}");
         write(dir, "new file", "hello\n");
-        let d = diff(dir, &change("new file", None, '?'));
-        assert!(d.contains("new file mode") && d.contains("+hello"), "{d}");
         write(dir, "u/one", "1");
         write(dir, "u/two/three", "3");
-        assert_eq!(diff(dir, &change("u/", None, '?')), "u/one\nu/two/three\n");
+        write(dir, "bin", "\0\0");
         commit(dir, "old", "moved\n");
         git(dir, &["mv", "old", "moved"]);
-        let d = diff(dir, &change("moved", Some("old"), 'R'));
-        assert!(
-            d.contains("rename from old") && d.contains("rename to moved"),
-            "{d}"
-        );
-        std::fs::remove_file(dir.join("a")).unwrap();
-        let d = diff(dir, &change("a", None, 'D'));
-        assert!(d.contains("deleted file mode"), "{d}");
+        let changes = [
+            change("a", None, 'M'),
+            change("new file", None, '?'),
+            change("u/", None, '?'),
+            change("moved", Some("old"), 'R'),
+            change("bin", None, '?'),
+            change("gone", None, 'D'),
+        ];
+        let d = repo_diff(dir, &changes);
+        let paths: Vec<&str> = d.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a", "new file", "u/", "moved", "bin", "gone"]);
+        assert_eq!(lines(&d[0]), ["-first", "+changed"]);
+        assert_eq!((d[0].added, d[0].removed, d[0].code), (1, 1, 'M'));
+        assert_eq!(lines(&d[1]), ["+hello"]);
+        assert_eq!(d[1].code, '?');
+        assert_eq!(d[2].notes, ["u/one", "u/two/three"]);
+        assert_eq!(d[3].orig.as_deref(), Some("old"));
+        assert!(d[3].hunks.is_empty(), "{:?}", d[3]);
+        assert_eq!(d[4].notes, ["Binary file"]);
+        // Not changed after all: said so.
+        assert_eq!(d[5].notes, ["No changes to show"]);
 
         let big: String = (0..6000).map(|n| format!("{n}\n")).collect();
         write(dir, "big", &big);
-        let d = diff(dir, &change("big", None, '?'));
-        assert_eq!(d.lines().count(), DIFF_LINES + 1);
-        assert!(d.ends_with("… 1006 more lines\n"), "{}", &d[d.len() - 40..]);
+        let d = repo_diff(dir, &[change("big", None, '?')]);
+        assert_eq!(d[0].added, 6000);
+        assert_eq!(d[0].notes, ["… 4000 more lines"]);
 
         git(&fx.root, &["init", "-q", "-b", "main", "unborn"]);
         let unborn = fx.root.join("unborn");
         write(&unborn, "x", "x\n");
         git(&unborn, &["add", "x"]);
-        let d = diff(&unborn, &change("x", None, 'A'));
-        assert!(d.contains("+x"), "{d}");
+        let d = repo_diff(&unborn, &[change("x", None, 'A')]);
+        assert_eq!(lines(&d[0]), ["+x"]);
     }
 
     #[test]

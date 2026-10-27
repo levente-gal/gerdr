@@ -17,6 +17,7 @@ mod clipboard;
 mod config;
 mod cursor_agents;
 mod desktop;
+mod diff;
 mod frecency;
 mod fuzzy;
 mod git;
