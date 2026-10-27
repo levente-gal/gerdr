@@ -1,7 +1,7 @@
 //! The toasts at the bottom right of the app area: a stack of short
 //! notes, each with a colour bar for its level and, some, a button.
 
-use super::{Canvas, FONT_SIZE, Painter, Palette, Rect, Rgb, SHADOW, band, physical, rect_px};
+use super::{FONT_SIZE, Painter, Palette, Rect, Rgb, SHADOW, band, rect_px};
 use crate::toast::Level;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Rectangle, Size};
@@ -119,10 +119,8 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let size = Size::from((w, TOAST_HEIGHT));
-        let outer = Size::from((w + 2 * SHADOW, TOAST_HEIGHT + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(size, TOAST_RADIUS, scale, p);
         let s = scale as f32;
-        c.popup(size, TOAST_RADIUS, scale, p);
         let panel = Rectangle::new((SHADOW, SHADOW).into(), size);
         // The bar, inset from the panel's edge and rounded like it.
         let (x, y, _, h) = rect_px(panel, scale);

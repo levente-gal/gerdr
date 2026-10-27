@@ -7,6 +7,7 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Rectangle, Size, Transform};
 
 /// ARGB8888 pixels with premultiplied alpha, stored little-endian as B, G, R, A.
+#[derive(Clone)]
 pub(super) struct Canvas {
     pub(super) w: i32,
     pub(super) h: i32,
@@ -63,12 +64,8 @@ impl Canvas {
         }
     }
 
-    /// Blend `color` over every pixel at the coverage `shape` gives for its centre.
-    pub(super) fn paint(&mut self, color: Rgb, shape: impl Fn(f32, f32) -> f32) {
-        self.paint_in(0, 0, self.w, self.h, color, shape);
-    }
-
-    /// `paint`, limited to a rectangle (physical pixels).
+    /// Blend `color` over every pixel of a rectangle (physical pixels) at
+    /// the coverage `shape` gives for its centre.
     pub(super) fn paint_in(
         &mut self,
         x0: i32,
@@ -186,11 +183,28 @@ impl Canvas {
         // Soft shadow, dropped slightly below the panel.
         let blur = (SHADOW as f32 - 2.0) * s;
         let shadow_y = oy + 3.0 * s;
-        self.paint([0, 0, 0], |x, y| {
+        let shade = |x: f32, y: f32| {
             let d = rounded_rect(x, y, ox, shadow_y, w, h, radius);
             let t = 1.0 - (d / blur).clamp(0.0, 1.0);
             p.shadow * t * t
-        });
+        };
+        // The panel hides the shadow under it but at its rounded corners:
+        // shade only the band around the panel's inside.
+        let (ix0, ix1) = (
+            (ox + radius).ceil() as i32,
+            (ox + w - radius).floor() as i32,
+        );
+        let (iy0, iy1) = (
+            (oy + radius).ceil() as i32,
+            (oy + h - radius).floor() as i32,
+        );
+        // A panel narrower or shorter than its corners has no inside.
+        let (ix1, iy1) = (ix1.max(ix0), iy1.max(iy0));
+        let black = [0, 0, 0];
+        self.paint_in(0, 0, self.w, iy0, black, shade);
+        self.paint_in(0, iy1, self.w, self.h - iy1, black, shade);
+        self.paint_in(0, iy0, ix0, iy1 - iy0, black, shade);
+        self.paint_in(ix1, iy0, self.w - ix1, iy1 - iy0, black, shade);
         self.rounded(ox, oy, w, h, radius, p.border);
         let b = px(1).max(1) as f32;
         self.rounded(

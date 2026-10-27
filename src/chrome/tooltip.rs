@@ -5,7 +5,7 @@
 
 use super::{
     BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, DETAIL_FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH,
-    Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf, physical, rect_px,
+    Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf, rect_px,
 };
 use crate::git::GitStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -151,10 +151,8 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let size = Size::from((w, view.height()));
-        let outer = Size::from((w + 2 * SHADOW, view.height() + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(size, TOOLTIP_RADIUS, scale, p);
         let s = scale as f32;
-        c.popup(size, TOOLTIP_RADIUS, scale, p);
         let panel = Rectangle::new((SHADOW, SHADOW).into(), size);
         let (x, _, pw, _) = rect_px(panel, scale);
         let pad = TOOLTIP_PADDING as f32 * s;

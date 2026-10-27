@@ -12,15 +12,15 @@ use super::{
     HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_ICON_GAP,
     ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS,
     SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder, folder_plus,
-    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, physical, prompt,
-    rect_px, status_mark, tab, terminal,
+    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, prompt, rect_px,
+    status_mark, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
 use crate::herdr::AgentStatus;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle};
 
 /// A row: two lines of text.
 const ROW_HEIGHT: i32 = 40;
@@ -297,12 +297,10 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = switcher_parts(view, (SHADOW, SHADOW).into(), w);
         let (panel, input) = (layout.panel, layout.input);
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
-        c.popup(panel.size, HELP_RADIUS, scale, p);
 
         let band = (px(input.loc.y), px(input.size.h));
         self.edit_line(

@@ -4,19 +4,38 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, arrow, check, coverage, cross, mix,
-    segment,
+    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SHADOW, arrow, check, coverage,
+    cross, mix, segment,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use smithay::utils::{Logical, Rectangle, Size};
+use std::cell::RefCell;
+
+/// How many bytes of popup backgrounds `Painter` keeps, besides the last
+/// one drawn.
+const POPUP_CACHE_BYTES: usize = 64 << 20;
 
 pub(super) struct Painter {
     pub(super) font: Option<FontVec>,
     /// The monospace font, for diffs and logs; `None` when there is none,
     /// and the font above is used instead.
     pub(super) mono: Option<FontVec>,
+    /// Popup backgrounds drawn lately, the last used first: a popup drawn
+    /// again, say as its list scrolls, starts from a copy.
+    popups: RefCell<Vec<(PopupKey, Canvas)>>,
+}
+
+/// What a popup's background is drawn from.
+#[derive(Clone, Copy, PartialEq)]
+struct PopupKey {
+    size: Size<i32, Logical>,
+    radius: f32,
+    scale: f64,
+    border: Rgb,
+    elevated: Rgb,
+    shadow: f32,
 }
 
 /// A logical rectangle's left and right edges in physical pixels.
@@ -268,7 +287,51 @@ impl Painter {
         if mono.is_none() {
             tracing::warn!("chrome: no monospace font found, diffs use the UI font");
         }
-        Self { font, mono }
+        Self {
+            font,
+            mono,
+            popups: RefCell::default(),
+        }
+    }
+
+    /// A canvas for a popup panel of logical `size` with its shadow, border
+    /// and fill drawn (see `Canvas::popup`), the panel `SHADOW` in from the
+    /// top left.
+    pub(super) fn popup(
+        &self,
+        size: Size<i32, Logical>,
+        radius: f32,
+        scale: f64,
+        p: &Palette,
+    ) -> Canvas {
+        let key = PopupKey {
+            size,
+            radius,
+            scale,
+            border: p.border,
+            elevated: p.elevated,
+            shadow: p.shadow,
+        };
+        let mut popups = self.popups.borrow_mut();
+        let entry = match popups.iter().position(|(k, _)| *k == key) {
+            Some(i) => popups.remove(i),
+            None => {
+                let outer = Size::from((size.w + 2 * SHADOW, size.h + 2 * SHADOW));
+                let mut c = Canvas::new(physical(outer, scale));
+                c.popup(size, radius, scale, p);
+                (key, c)
+            }
+        };
+        popups.insert(0, entry);
+        let mut kept = 0;
+        popups.retain(|(_, c)| {
+            let keep = kept == 0 || kept + c.px.len() <= POPUP_CACHE_BYTES;
+            if keep {
+                kept += c.px.len();
+            }
+            keep
+        });
+        popups[0].1.clone()
     }
 
     /// The monospace font, else the UI font.

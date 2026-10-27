@@ -1,10 +1,10 @@
 //! The quit dialog over everything.
 
 use super::{
-    BUTTON_RADIUS, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_WIDTH, Canvas, Check, FONT_SIZE,
-    HELP_RADIUS, LABEL_FONT_SIZE, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
-    QUIT_BUTTONS, QUIT_HEIGHT, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, QUIT_WIDTH, Rect, SHADOW,
-    band, focus_ring, mix, phys, physical, rect_px,
+    BUTTON_RADIUS, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_WIDTH, Check, FONT_SIZE, HELP_RADIUS,
+    LABEL_FONT_SIZE, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_BUTTONS,
+    QUIT_HEIGHT, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, QUIT_WIDTH, Rect, SHADOW, band,
+    focus_ring, mix, phys, rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -95,11 +95,9 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = quit_layout(size);
         let panel = layout.panel;
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        c.popup(panel.size, HELP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
         let shift = |r: Rect| {
             Rectangle::new(

@@ -11,8 +11,8 @@ use super::{
     ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
     ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect, SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE,
     SUGGESTION_ROW, band, commands_prompt, cross, field_text, file, focus_ring, folder,
-    footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil, phys, physical, plus,
-    rect_px, stop,
+    footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil, phys, plus, rect_px,
+    stop,
 };
 use crate::WorkspaceKind;
 use crate::text_field::Line;
@@ -620,12 +620,10 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = project_menu_layout(view, size);
         let panel = layout.panel;
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
-        c.popup(panel.size, HELP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
         let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
         let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);

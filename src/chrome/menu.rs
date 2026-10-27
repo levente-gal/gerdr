@@ -3,8 +3,8 @@
 //! opens one and what its items do).
 
 use super::{
-    Canvas, FONT_SIZE, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_RADIUS, MENU_WIDTH, PADDING, Painter,
-    Palette, Rect, SHADOW, SMALL_FONT_SIZE, physical,
+    FONT_SIZE, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_RADIUS, MENU_WIDTH, PADDING, Painter, Palette,
+    Rect, SHADOW, SMALL_FONT_SIZE,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -83,11 +83,9 @@ impl Painter {
         // it, on an output tall enough that it hangs below.
         let anchor = Rectangle::new((0, -MENU_GAP).into(), (0, 0).into());
         let (panel, items) = menu_layout(anchor, &view.rows, (i32::MAX / 2, i32::MAX / 2).into());
-        let outer = Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW));
-        let mut c = Canvas::new(physical(outer, scale));
+        let mut c = self.popup(panel.size, MENU_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        c.popup(panel.size, MENU_RADIUS, scale, p);
         // Item rects relative to the buffer, which starts `SHADOW` before the panel.
         let shift = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
         for (i, (item, row)) in items.iter().zip(&view.rows).enumerate() {
