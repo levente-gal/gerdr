@@ -52,6 +52,7 @@ use crate::{
     text_field::{Edit, TextField},
     toast::Level,
     tooltip::Tooltip,
+    wheel::Wheel,
 };
 
 /// How long a path in a row's detail may get.
@@ -236,8 +237,8 @@ pub struct Switcher {
     selected: usize,
     /// The first match shown.
     scroll: usize,
-    /// The wheel's turn not yet a whole row, in rows.
-    wheel: f64,
+    /// The wheel's turn not yet a whole row.
+    wheel: Wheel,
     /// The shown row the pointer is over.
     hover: Option<usize>,
     /// The sections the items span, but the typed command's: a category
@@ -268,7 +269,7 @@ impl Switcher {
             matches: Vec::new(),
             selected: 0,
             scroll: 0,
-            wheel: 0.0,
+            wheel: Wheel::default(),
             hover: None,
             categories: Vec::new(),
             category: None,
@@ -400,6 +401,7 @@ impl Switcher {
         self.matches = found;
         self.selected = selected;
         self.scroll = 0;
+        self.wheel = Wheel::default();
     }
 
     /// Its text field: the query.
@@ -496,13 +498,36 @@ impl Switcher {
         self.selected = self.selected.clamp(first, end - 1);
     }
 
-    /// The rows shown, `page` at most.
+    /// The wheel turned `rows` rows (down positive): whole rows scroll the
+    /// list, the part of a row left shows it moved by as much.
+    fn wheel_by(&mut self, rows: f64, page: usize) {
+        let first = scrolled(self.scroll, self.selected, page);
+        let whole = self.wheel.turn(rows, first);
+        if whole != 0 {
+            self.scroll_by(whole as i32, page);
+        }
+        let last = self.matches.len().saturating_sub(page.max(1));
+        self.wheel.settle(
+            first as i64 + whole,
+            scrolled(self.scroll, self.selected, page),
+            last,
+        );
+    }
+
+    /// The rows shown, `page` at most, and one more shown in part under
+    /// them when the wheel left a part of a row.
     fn view(&self, page: usize) -> SwitcherView {
         let scroll = scrolled(self.scroll, self.selected, page);
+        // Scrolled part of a row, the list shows one more under it.
+        let part = if scroll + page.max(1) < self.matches.len() {
+            self.wheel.part(scroll)
+        } else {
+            0.0
+        };
         let mut last: Option<Section> = None;
         let rows: Vec<SwitcherRow> = self.matches[scroll.min(self.matches.len())..]
             .iter()
-            .take(page)
+            .take(page + usize::from(part > 0.0))
             .map(|m| {
                 let item = &self.items[m.item];
                 // A heading over the first row shown and wherever the
@@ -550,6 +575,7 @@ impl Switcher {
             hover,
             hint_hover: self.hint_hover.filter(|h| *h < hints.len()),
             hints,
+            part,
         }
     }
 
@@ -812,10 +838,7 @@ impl Gerdr {
     pub fn switcher_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.switcher_view()?;
         let layout = chrome::switcher_geometry(&view, self.content_rect());
-        let hover = layout
-            .rows
-            .iter()
-            .position(|row| row.to_f64().contains(pos));
+        let hover = chrome::switcher_row_at(&layout, pos);
         let chip = layout
             .chips
             .iter()
@@ -890,12 +913,7 @@ impl Gerdr {
     pub fn switcher_scroll(&mut self, rows: f64) {
         let page = self.switcher_page();
         if let Some(switcher) = self.switcher.as_mut() {
-            switcher.wheel += rows;
-            let whole = switcher.wheel.trunc();
-            switcher.wheel -= whole;
-            if whole != 0.0 {
-                switcher.scroll_by(whole as i32, page);
-            }
+            switcher.wheel_by(rows, page);
         }
     }
 
@@ -927,11 +945,7 @@ impl Gerdr {
             self.switcher = Some(switcher);
             return;
         }
-        match layout
-            .rows
-            .iter()
-            .position(|row| row.to_f64().contains(pos))
-        {
+        match chrome::switcher_row_at(&layout, pos) {
             Some(row) => {
                 if let Some(target) = switcher.row_target(row, page).cloned() {
                     self.switch_to(target, switcher.place);
@@ -1571,6 +1585,40 @@ mod tests {
         type_in(&mut switcher, "xyz");
         switcher.scroll_by(1, 5);
         assert_eq!(switcher.view(5).selected, None);
+    }
+
+    #[test]
+    fn a_touchpad_scrolls_by_parts_of_a_row() {
+        let mut switcher = Switcher::new(
+            (0..8).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        switcher.wheel_by(1.5, 5);
+        assert_eq!(switcher.view(5).part, 0.5);
+        // The row shown in part under the list too.
+        assert_eq!(
+            labels(&switcher),
+            ["ws1", "ws2", "ws3", "ws4", "ws5", "ws6"]
+        );
+        // Down past the end, and up past the top, holds the list whole.
+        switcher.wheel_by(5.0, 5);
+        assert_eq!(switcher.view(5).part, 0.0);
+        assert_eq!(labels(&switcher), ["ws3", "ws4", "ws5", "ws6", "ws7"]);
+        switcher.wheel_by(-4.5, 5);
+        assert_eq!(switcher.view(5).part, 0.0);
+        assert_eq!(labels(&switcher).len(), 5);
+        // A key moving the list drops the part.
+        switcher.wheel_by(0.5, 5);
+        assert_eq!(switcher.view(5).part, 0.5);
+        let none = ModifiersState::default();
+        switcher.key(&none, Keysym::Page_Down, Keysym::Page_Down, 5);
+        assert_eq!(switcher.view(5).part, 0.0);
+        // As does typing, which starts the list over.
+        switcher.wheel_by(-1.5, 5);
+        assert_eq!(switcher.view(5).part, 0.5);
+        type_in(&mut switcher, "w");
+        assert_eq!(switcher.view(5).part, 0.0);
     }
 
     #[test]
