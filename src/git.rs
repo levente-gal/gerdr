@@ -114,6 +114,10 @@ pub struct Worktree {
     /// default branch, merged, squashed or picked (see `merged`): likely
     /// done with.
     pub merged: bool,
+    /// Its branch has no commit of its own yet: it is at the main
+    /// worktree's HEAD or a default branch. Not merged, as there is nothing
+    /// to merge, but deleting it loses no commit.
+    pub fresh: bool,
     /// Its folder is gone; `git worktree prune` would drop it.
     pub gone: bool,
 }
@@ -425,12 +429,15 @@ fn worktrees(dir: &Path, here: Option<&Path>) -> (Option<Worktree>, Vec<Worktree
     all[0].main = true;
     let main_head = all[0].head.clone();
     let also: Vec<&str> = main_head.as_deref().into_iter().collect();
+    let mut targets = merge_targets(dir);
+    targets.extend(main_head.clone());
     for w in &mut all {
-        w.merged = !w.main
-            && w.branch.is_some()
+        let branch = !w.main && w.branch.is_some();
+        w.merged = branch
             && w.head
                 .as_deref()
                 .is_some_and(|head| merged(dir, head, &also));
+        w.fresh = branch && w.head.as_ref().is_some_and(|head| targets.contains(head));
         w.dirty =
             !w.gone && git(&w.path, &["status", "--porcelain"]).is_some_and(|o| !o.is_empty());
     }
@@ -556,8 +563,9 @@ fn merge_targets(dir: &Path) -> Vec<String> {
 }
 
 /// Remove worktree `w` of the repository whose main worktree is at `main`,
-/// and its branch once merged, or anyway when `force`: its changes, and its
-/// commits not merged, are lost then. A gone one is pruned.
+/// and its branch once merged or when it has no commit of its own, or
+/// anyway when `force`: its changes, and its commits not merged, are lost
+/// then. A gone one is pruned.
 pub fn remove_worktree(main: &Path, w: &Worktree, force: bool) -> Result<(), String> {
     if w.main {
         return Err("the main worktree stays".into());
@@ -574,7 +582,7 @@ pub fn remove_worktree(main: &Path, w: &Worktree, force: bool) -> Result<(), Str
         git_run(main, &args)?;
     }
     if let Some(branch) = &w.branch
-        && (w.merged || force)
+        && (w.merged || w.fresh || force)
     {
         // -D: -d takes a squashed branch for unmerged.
         git_run(main, &["branch", "-D", branch])?;
@@ -921,6 +929,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn a_branch_with_no_commit_of_its_own_is_fresh() {
+        let repo = Repo::new();
+        let path = repo.0.with_file_name("new");
+        let p = path.to_str().unwrap();
+        repo.git(&repo.0, &["worktree", "add", "-q", "-b", "new", p]);
+        let new = repo.find("new");
+        assert!(new.fresh && !new.merged && !new.main);
+        assert!(!repo.find("main").fresh);
+        // It goes, branch and all, without force.
+        assert_eq!(remove_worktree(&repo.0, &new, false), Ok(()));
+        assert!(!path.exists());
+        let branches = super::git(&repo.0, &["branch", "--list", "new"]).unwrap();
+        assert!(branches.trim().is_empty(), "{branches}");
+        // A commit of its own makes it not.
+        repo.worktree("topic");
+        assert!(!repo.find("topic").fresh);
     }
 
     #[test]
