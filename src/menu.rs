@@ -28,6 +28,8 @@ pub enum MenuAction {
     NewCursor,
     /// A GitHub page in a tab of workspace `.0` (see `Gerdr::open_page`).
     OpenPage(usize, String),
+    /// The same in a new tab, even when a tab shows it already.
+    OpenPageInNewTab(usize, String),
     /// Stop watching the CI of a pull request, by repository key and
     /// number (see `ci_watch`).
     Unwatch(String, u64),
@@ -268,6 +270,7 @@ impl Gerdr {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
             MenuAction::NewCursor => self.open_cursor(None),
             MenuAction::OpenPage(w, url) => self.open_page(w, url),
+            MenuAction::OpenPageInNewTab(w, url) => self.open_page_in_new_tab(w, url),
             MenuAction::Unwatch(key, n) => self.unwatch(&key, n),
             MenuAction::OpenFolder => self.pick_workspace(WorkspaceKind::Terminal),
             MenuAction::NewProject => self.run_action(Action::NewProject),

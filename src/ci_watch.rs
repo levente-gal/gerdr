@@ -300,7 +300,15 @@ impl Gerdr {
         {
             return self.show_leaf(w, t, leaf);
         }
-        let ws = &self.workspaces[w];
+        self.open_page_in_new_tab(w, url);
+    }
+
+    /// Open `url` in a new tab of workspace `w`, even when a tab already
+    /// shows it.
+    pub fn open_page_in_new_tab(&mut self, w: usize, url: String) {
+        let Some(ws) = self.workspaces.get(w) else {
+            return;
+        };
         let before = (self.active_workspace, ws.active_tab);
         let ws = &mut self.workspaces[w];
         ws.tabs.push(Tab::default());

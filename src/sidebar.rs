@@ -533,21 +533,30 @@ impl Gerdr {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
                 let repo = self.ci_repo(i)?;
+                let (pulls, web) = (repo.pulls_url(), repo.web_url());
                 let items = vec![
+                    MenuItem::new("Open pull requests", MenuAction::OpenPage(i, pulls.clone())),
                     MenuItem::new(
-                        "Open pull requests",
-                        MenuAction::OpenPage(i, repo.pulls_url()),
+                        "Open pull requests in new tab",
+                        MenuAction::OpenPageInNewTab(i, pulls),
                     ),
-                    MenuItem::new("Open repository", MenuAction::OpenPage(i, repo.web_url())),
+                    MenuItem::new("Open repository", MenuAction::OpenPage(i, web.clone())),
+                    MenuItem::new(
+                        "Open repository in new tab",
+                        MenuAction::OpenPageInNewTab(i, web),
+                    ),
                 ];
                 Some(MenuSpec { anchor: at, items })
             }
             SidebarHit::CiChip(i, k) => {
                 let (repo, row) = self.ci_row(i, k)?;
-                let mut items = vec![MenuItem::new(
-                    "Open",
-                    MenuAction::OpenPage(i, row.link.clone()),
-                )];
+                let mut items = vec![
+                    MenuItem::new("Open", MenuAction::OpenPage(i, row.link.clone())),
+                    MenuItem::new(
+                        "Open in new tab",
+                        MenuAction::OpenPageInNewTab(i, row.link.clone()),
+                    ),
+                ];
                 if let (true, Subject::Pr(n)) = (row.watched, &row.subject) {
                     let key = ci::key(&repo.host, &repo.slug);
                     items.push(MenuItem::new("Unwatch", MenuAction::Unwatch(key, *n)));
