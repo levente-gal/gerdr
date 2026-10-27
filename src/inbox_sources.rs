@@ -927,6 +927,47 @@ mod tests {
         assert!(items[0].actions.contains(&ItemAction::CopyLink));
     }
 
+    #[test]
+    fn the_inbox_button_counts_agents_done_or_blocked_reviews_and_long_lived_failures() {
+        let mut f = Fixture::default();
+        f.workspace("a", "/r", Some(git("/r")));
+        f.agents[0] = vec![
+            agent(AgentKey::Herdr("p1".into()), AgentStatus::Blocked),
+            agent(AgentKey::Herdr("p2".into()), AgentStatus::Done),
+            agent(AgentKey::Herdr("p3".into()), AgentStatus::Working),
+        ];
+        let failed = |name: &str| row(Subject::Branch(name.into()), CiState::Failed, Group::Branch);
+        f.ci.insert(
+            "/r".into(),
+            repo(vec![
+                failed("main"),
+                failed("master"),
+                failed("dev"),
+                failed("trunk"),
+                row(Subject::Pr(4), CiState::Failed, Group::Mine),
+                row(Subject::Pr(5), CiState::Passed, Group::Review),
+                row(Subject::Pr(6), CiState::Failed, Group::Review),
+            ]),
+        );
+        let counted: Vec<_> = collect(&f.sources())
+            .into_iter()
+            .filter(crate::inbox::counted)
+            .map(|i| i.id.0)
+            .collect();
+        assert_eq!(
+            counted,
+            [
+                "agent:p1",
+                "agent:p2",
+                "ci:github.com/o/r:main",
+                "ci:github.com/o/r:master",
+                "ci:github.com/o/r:dev",
+                "ci:github.com/o/r:#5",
+                "ci:github.com/o/r:#6",
+            ]
+        );
+    }
+
     fn issue(source: IssueSource, id: &str) -> Issue {
         Issue {
             source,

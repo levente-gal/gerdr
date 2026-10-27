@@ -24,7 +24,9 @@ use crate::{
     agents::AgentKey,
     chrome::{self, AgentView, InboxHit, InboxRow, InboxView, WorkspaceView},
     herdr,
-    inbox::{InboxItem, ItemAction, ItemId, Listing, Outcome, PaneText, Panel, Section, Target},
+    inbox::{
+        self, InboxItem, ItemAction, ItemId, Listing, Outcome, PaneText, Panel, Section, Target,
+    },
     inbox_sources::{self, Sources},
     inbox_store::{self, InboxFile, Todo, TodoId, Triage},
     input::Overlay,
@@ -185,6 +187,30 @@ impl Gerdr {
             now: Instant::now(),
             now_secs: inbox_store::now_secs(),
         })
+    }
+
+    /// How many items the tab strip's inbox button counts (see
+    /// `inbox::counted`), hidden ones left out, from the sidebar's
+    /// `workspaces` and their `agents`.
+    pub fn inbox_count(&self, workspaces: &[WorkspaceView], agents: &[Vec<AgentView>]) -> usize {
+        let triage = self.inbox_file().map(|file| &file.triage);
+        let now = inbox_store::now_secs();
+        self.inbox_items(workspaces, agents)
+            .iter()
+            .filter(|item| {
+                inbox::counted(item) && !triage.is_some_and(|t| inbox::is_hidden(item, t, now))
+            })
+            .count()
+    }
+
+    /// The same, from the views as they are now.
+    pub fn inbox_count_now(&self) -> usize {
+        let workspaces: Vec<_> = self
+            .workspace_views()
+            .into_iter()
+            .map(|(ws, _)| ws)
+            .collect();
+        self.inbox_count(&workspaces, &self.agent_views())
     }
 
     /// What the panel's `Listing` borrows, worked out afresh.
@@ -556,6 +582,9 @@ impl Gerdr {
     /// the selected agent's pane while the panel is open; forget the panes'
     /// text once it is closed.
     fn inbox_tick(&mut self) {
+        // The tab strip's count leaves out what the shown project's file
+        // hides: have it loaded.
+        self.inbox_file_mut();
         let open = self.inbox.is_open();
         if self.issues_due(if open { ISSUES_OPEN } else { ISSUES_CLOSED }) {
             self.refresh_issues();
