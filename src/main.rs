@@ -1097,7 +1097,8 @@ pub struct Gerdr {
     pub pending_place: HashMap<ObjectId, PendingPlace>,
 
     pub socket_name: OsString,
-    /// Zed's data dir, shared by all workspaces so they run in one Zed process.
+    /// The data dir of the project's Zed, which all its workspaces run in
+    /// (see `launch::zed_data_dir`).
     pub zed_data: PathBuf,
     pub children: Vec<Child>,
     /// gerdr's herdr session, holding the terminals; `None` without herdr.
@@ -4647,6 +4648,13 @@ impl Gerdr {
             self.refuse_open(id);
             return false;
         }
+        // Open in another gerdr as well (`--attach`): a Zed of its own here.
+        let alongside = self.attach
+            && self
+                .project_lock
+                .as_ref()
+                .is_none_or(|lock| lock.id() != id)
+            && project_lock::dir().is_some_and(|dir| project_lock::is_open_elsewhere(&dir, id));
         // Taken before the lock held is let go of, so no other gerdr comes
         // in between when it is this project's (see `reload_projects`).
         let lock = project_lock::dir().and_then(|dir| {
@@ -4661,6 +4669,12 @@ impl Gerdr {
         self.quit = None;
         self.restart = None;
         self.project = Some(id.to_owned());
+        let instance = if alongside {
+            format!("{id}@{}", self.socket_name.to_string_lossy())
+        } else {
+            id.to_owned()
+        };
+        self.zed_data = launch::zed_data_dir(&home_dir().unwrap_or_default(), &instance);
         // Before what it restores asks for its apps kept running.
         self.attach_keeper();
         self.load_inbox();
@@ -5540,11 +5554,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The portal can be slow to answer: asked now, alongside the setup.
     let system_theme = system_theme::read();
 
-    // Own data dir so Zed runs its own instance here instead of handing the
-    // windows to a Zed already running on the host.
-    let zed_data = launch::zed_data_dir(&home_dir().unwrap_or_default());
-    let _ = std::fs::create_dir_all(&zed_data);
-
     let mut event_loop: EventLoop<'static, Gerdr> = EventLoop::try_new()?;
     let display: Display<Gerdr> = Display::new()?;
     let dh = display.handle();
@@ -5619,6 +5628,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = ListeningSocketSource::with_name("gerdr-0")
         .or_else(|_| ListeningSocketSource::new_auto())?;
     let socket_name = socket.socket_name().to_os_string();
+    // Until a project is shown, Zed's data dir is this gerdr's own.
+    let zed_data = launch::zed_data_dir(
+        &home_dir().unwrap_or_default(),
+        &socket_name.to_string_lossy(),
+    );
 
     let (keymap, apps, ui, git_config, linear, keep_apps) = config::load();
     let saved_theme = std::fs::read_to_string(theme_file())
