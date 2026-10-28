@@ -15,7 +15,9 @@
 //! are apart from the desktop's. A Firefox locks its profile, so gerdr's
 //! runs under a name of its own, and the next ones hand their window to it:
 //! that window is told by its app_id. A project runs one VS Code of a kind:
-//! starting it again shows the one running (see `running_vs_code`).
+//! starting it again shows the one running (see `running_vs_code`). VS
+//! Codes and Zed get a profile per project, so another gerdr's doesn't take
+//! their windows either (see `instance_dir`).
 //!
 //! Ghostty and Alacritty can open all their windows from one process.
 //! gerdr keeps one of each for the project shown, apart from the desktop's
@@ -297,7 +299,7 @@ impl Gerdr {
         self.open_cursor(Some(&command));
         self.cursor_opened = Some(id.to_owned());
         // One just started would take the link as its own start.
-        let Some((own, _)) = own_instance(&command, Some(&self.zed_data)).filter(|_| running)
+        let Some((own, _)) = own_instance(&command, Some(&self.instance_dir)).filter(|_| running)
         else {
             return;
         };
@@ -451,8 +453,15 @@ impl Gerdr {
             None => url.unwrap_or_else(|| command.to_owned()),
         };
         let bare_zed = opens_nothing_in_zed(&command);
-        match own_instance(&command, Some(&self.zed_data)) {
+        match own_instance(&command, Some(&self.instance_dir)) {
             Some((mut command, profile)) => {
+                // Not a Flatpak one's, which sees only its own folder.
+                if let (Some(key), Some(profile), Some(home)) =
+                    (vs_code_of(&command), &profile, home_dir())
+                    && profile.starts_with(&self.instance_dir)
+                {
+                    ready_vs_code_profile(&home, &key, profile);
+                }
                 if command.contains(BROWSER_APP_ID) {
                     app_id = BROWSER_APP_ID.to_owned();
                 } else if program_name(&command).is_some_and(|key| ZEDS.contains(&key.as_str())) {
@@ -732,16 +741,23 @@ const ZED_OWN: &[&str] = &["db", "logs", "hang_traces"];
 /// What all of gerdr's Zeds share even before one has made it.
 const ZED_SHARED: &[&str] = &["config", "extensions"];
 
-/// The data dir of gerdr's Zed for `instance` (the project shown, see
-/// `Gerdr::show_project`), made ready. Zed runs one process per data dir
-/// and hands new windows to it, so with one of gerdr's own it doesn't hand
-/// them to a Zed on the host, and with one per project not to another
-/// gerdr's. Settings, extensions and downloads stay shared: all but its
-/// database, logs and socket link to `~/.local/share/gerdr/zed`.
-pub fn zed_data_dir(home: &Path, instance: &str) -> PathBuf {
-    let shared = home.join(".local/share/gerdr/zed");
-    let dir = home.join(".local/share/gerdr/zed-projects").join(instance);
-    if let Err(err) = link_zed_shared(&shared, &dir) {
+/// The folder of the data of gerdr's Zed and VS Codes for `instance` (the
+/// project shown, see `Gerdr::show_project`). They run one process per
+/// data dir and hand new windows to it: with one per project, not to
+/// another gerdr's. What they keep for all projects (settings, logins,
+/// extensions) links to their shared data dir, see `zed_data_dir` and
+/// `vs_code_profile`.
+pub fn instance_dir(home: &Path, instance: &str) -> PathBuf {
+    home.join(".local/share/gerdr/instances").join(instance)
+}
+
+/// The data dir of gerdr's Zed in instance folder `instance` (see
+/// `instance_dir`), made ready: all but its database, logs and socket link
+/// to `~/.local/share/gerdr/zed`, which also keeps Zed apart from one on
+/// the host.
+pub fn zed_data_dir(home: &Path, instance: &Path) -> PathBuf {
+    let dir = instance.join("zed");
+    if let Err(err) = link_zed_shared(&home.join(".local/share/gerdr/zed"), &dir) {
         tracing::warn!("making Zed's data dir {}: {err}", dir.display());
     }
     dir
@@ -760,16 +776,79 @@ fn link_zed_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
     for name in ZED_SHARED {
         std::fs::create_dir_all(shared.join(name))?;
     }
+    link_entries(shared, dir, |name| {
+        !ZED_OWN.iter().any(|own| name == *own) && !name.to_string_lossy().ends_with(".sock")
+    })
+}
+
+/// Link the entries of folder `shared` that `linked` picks into `dir`,
+/// leaving those `dir` has already.
+fn link_entries(
+    shared: &Path,
+    dir: &Path,
+    linked: impl Fn(&std::ffi::OsStr) -> bool,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(shared)? {
         let name = entry?.file_name();
-        let own =
-            ZED_OWN.iter().any(|own| name == *own) || name.to_string_lossy().ends_with(".sock");
         let link = dir.join(&name);
-        if !own && link.symlink_metadata().is_err() {
+        if linked(&name) && link.symlink_metadata().is_err() {
             std::os::unix::fs::symlink(shared.join(&name), link)?;
         }
     }
     Ok(())
+}
+
+/// What of a VS Code's `User/globalStorage/storage.json` is its process's
+/// own: the windows it brings back and the workspaces it keeps unsaved
+/// edits of (in its own `Backups`). Another process's would open its
+/// windows, or drop its backups as missing.
+const VS_CODE_OWN_STATE: &[&str] = &["windowsState", "backupWorkspaces"];
+
+/// Make VS Code profile `dir` (see `own_instance`) share what VS Code
+/// `key` keeps in gerdr's profile of it for all projects: everything in
+/// `User` (settings, logins, chats, extension data) but the state of its
+/// windows (see `VS_CODE_OWN_STATE`), copied when new, and the machine id.
+/// The rest, Chromium's own and locked while it runs, is the profile's.
+fn ready_vs_code_profile(home: &Path, key: &str, dir: &Path) {
+    let shared = profile_dir(home, key);
+    if let Err(err) = link_vs_code_shared(&shared, dir) {
+        tracing::warn!("making the profile {}: {err}", dir.display());
+    }
+}
+
+/// See `ready_vs_code_profile`.
+fn link_vs_code_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
+    let (shared_user, user) = (shared.join("User"), dir.join("User"));
+    let (shared_global, global) = (
+        shared_user.join("globalStorage"),
+        user.join("globalStorage"),
+    );
+    std::fs::create_dir_all(&shared_global)?;
+    std::fs::create_dir_all(&global)?;
+    link_entries(shared, dir, |name| name == "machineid")?;
+    link_entries(&shared_user, &user, |name| name != "globalStorage")?;
+    // SQLite finds a database's journal by where its link leads.
+    link_entries(&shared_global, &global, |name| {
+        let name = name.to_string_lossy();
+        name != "storage.json"
+            && !["-wal", "-shm", "-journal"]
+                .iter()
+                .any(|end| name.ends_with(end))
+    })?;
+    let state = global.join("storage.json");
+    if state.exists() {
+        return Ok(());
+    }
+    let Ok(text) = std::fs::read_to_string(shared_global.join("storage.json")) else {
+        return Ok(());
+    };
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_str(&text) else {
+        return Ok(());
+    };
+    for own in VS_CODE_OWN_STATE {
+        fields.remove(*own);
+    }
+    std::fs::write(state, serde_json::Value::Object(fields).to_string())
 }
 
 /// Copy folder `from` to `to`, with all in it.
@@ -938,23 +1017,24 @@ fn vs_code_of(command: &str) -> Option<String> {
     program_name(command).filter(|key| VS_CODES.contains(&key.as_str()))
 }
 
-/// The profile gerdr keeps for the app of program `key`.
+/// The profile gerdr keeps for the app of program `key`; for a VS Code, the
+/// one its projects' profiles share (see `ready_vs_code_profile`).
 fn profile_dir(home: &Path, key: &str) -> PathBuf {
     home.join(".local/share/gerdr/profiles").join(key)
 }
 
-/// The profile of gerdr's Cursor.
+/// The profile all of gerdr's Cursors share their chats in.
 pub fn cursor_profile() -> Option<PathBuf> {
     Some(profile_dir(&home_dir()?, CURSOR))
 }
 
 /// `command` changed to start a copy of its own of an app that hands new
 /// windows to a running one: a browser or a VS Code with gerdr's profile
-/// for it, a Zed with data dir `zed_data` (see `zed_data_dir`), and that
-/// folder, or a Ghostty told not to (without a folder); `None` when
-/// `command` doesn't start such an app, already picks its profile, or is a
-/// Zed without `zed_data`.
-fn own_instance(command: &str, zed_data: Option<&Path>) -> Option<(String, Option<PathBuf>)> {
+/// for it (a VS Code's and a Zed's in instance folder `instance`, see
+/// `instance_dir`), and that folder, or a Ghostty told not to (without a
+/// folder); `None` when `command` doesn't start such an app, already picks
+/// its profile, or is a VS Code or Zed without `instance`.
+fn own_instance(command: &str, instance: Option<&Path>) -> Option<(String, Option<PathBuf>)> {
     let (key, end, flatpak) = program(command)?;
     if GHOSTTYS.contains(&key.as_str()) {
         let off = format!("{SINGLE_INSTANCE}=false");
@@ -987,7 +1067,9 @@ fn own_instance(command: &str, zed_data: Option<&Path>) -> Option<(String, Optio
     let profile = if flatpak {
         home.join(".var/app").join(&key).join("gerdr-profile")
     } else if ZEDS.contains(&key.as_str()) {
-        zed_data?.to_path_buf()
+        instance?.join("zed")
+    } else if VS_CODES.contains(&key.as_str()) {
+        instance?.join(&key)
     } else {
         profile_dir(&home, &key)
     };
@@ -1124,8 +1206,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        alacritty_command, ghostty_command, lineage, link_zed_shared, log_path,
-        opens_nothing_in_zed, own_instance, vs_code_of, web_app,
+        alacritty_command, ghostty_command, lineage, link_vs_code_shared, link_zed_shared,
+        log_path, opens_nothing_in_zed, own_instance, vs_code_of, web_app,
     };
     use crate::home_dir;
 
@@ -1317,12 +1399,77 @@ mod tests {
     }
 
     #[test]
+    fn vs_code_profiles_share_their_user_folder_but_window_state() {
+        let root = std::env::temp_dir().join(format!("gerdr-vs-code-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (shared, dir) = (root.join("cursor"), root.join("aft"));
+        let global = shared.join("User/globalStorage");
+        for folder in ["Backups/1", "Local Storage", "User/workspaceStorage"] {
+            std::fs::create_dir_all(shared.join(folder)).unwrap();
+        }
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(shared.join("machineid"), "m").unwrap();
+        std::fs::write(shared.join("code.lock"), "1").unwrap();
+        std::fs::write(shared.join("User/settings.json"), "{}").unwrap();
+        std::fs::write(global.join("state.vscdb"), "").unwrap();
+        std::fs::write(global.join("state.vscdb-wal"), "").unwrap();
+        std::fs::write(
+            global.join("storage.json"),
+            r#"{"telemetry.machineId":"t","windowsState":{},"backupWorkspaces":{}}"#,
+        )
+        .unwrap();
+        link_vs_code_shared(&shared, &dir).unwrap();
+        // Again: what it has stays.
+        std::fs::write(global.join("storage.json"), "{}").unwrap();
+        link_vs_code_shared(&shared, &dir).unwrap();
+        let entries = |dir: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let linked = entry.file_type().unwrap().is_symlink();
+                    (entry.file_name().into_string().unwrap(), linked)
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        let owned = |names: &[(&str, bool)]| -> Vec<(String, bool)> {
+            names
+                .iter()
+                .map(|(name, linked)| (name.to_string(), *linked))
+                .collect()
+        };
+        assert_eq!(
+            entries(&dir),
+            owned(&[("User", false), ("machineid", true)])
+        );
+        assert_eq!(
+            entries(&dir.join("User")),
+            owned(&[
+                ("globalStorage", false),
+                ("settings.json", true),
+                ("workspaceStorage", true),
+            ])
+        );
+        assert_eq!(
+            entries(&dir.join("User/globalStorage")),
+            owned(&[("state.vscdb", true), ("storage.json", false)])
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("User/globalStorage/storage.json")).unwrap(),
+            r#"{"telemetry.machineId":"t"}"#
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn browsers_get_their_own_profile() {
         let home = home_dir().unwrap();
-        let zed_data = home.join(".local/share/gerdr/zed-projects/aft");
+        let instance = home.join(".local/share/gerdr/instances/aft");
         let home = home.to_string_lossy().into_owned();
         let run = |command: &str| {
-            own_instance(command, Some(&zed_data)).map(|(command, _)| command.replace(&home, "~"))
+            own_instance(command, Some(&instance)).map(|(command, _)| command.replace(&home, "~"))
         };
         assert_eq!(
             run("/usr/share/librewolf/librewolf").unwrap(),
@@ -1343,7 +1490,7 @@ mod tests {
         );
         assert_eq!(
             run("/usr/share/cursor/cursor --new-window").unwrap(),
-            "/usr/share/cursor/cursor --user-data-dir=~/.local/share/gerdr/profiles/cursor --new-window"
+            "/usr/share/cursor/cursor --user-data-dir=~/.local/share/gerdr/instances/aft/cursor --new-window"
         );
         assert_eq!(
             run("/usr/bin/ghostty --gtk-single-instance=true").unwrap(),
@@ -1356,11 +1503,11 @@ mod tests {
         assert_eq!(run("code --user-data-dir=/x ."), None);
         assert_eq!(
             run("/home/me/.local/zed.app/bin/zed").unwrap(),
-            "/home/me/.local/zed.app/bin/zed --user-data-dir=~/.local/share/gerdr/zed-projects/aft"
+            "/home/me/.local/zed.app/bin/zed --user-data-dir=~/.local/share/gerdr/instances/aft/zed"
         );
         assert_eq!(
             run("zeditor -n .").unwrap(),
-            "zeditor --user-data-dir=~/.local/share/gerdr/zed-projects/aft -n ."
+            "zeditor --user-data-dir=~/.local/share/gerdr/instances/aft/zed -n ."
         );
         assert_eq!(
             run("flatpak run dev.zed.Zed").unwrap(),
@@ -1368,6 +1515,7 @@ mod tests {
         );
         assert_eq!(run("zed --user-data-dir /x"), None);
         assert_eq!(own_instance("zed", None), None);
+        assert_eq!(own_instance("cursor", None), None);
         assert!(opens_nothing_in_zed("/home/me/.local/zed.app/bin/zed"));
         assert!(opens_nothing_in_zed("flatpak run dev.zed.Zed "));
         assert!(!opens_nothing_in_zed("zed -n ."));

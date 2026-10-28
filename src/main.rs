@@ -1097,6 +1097,9 @@ pub struct Gerdr {
     pub pending_place: HashMap<ObjectId, PendingPlace>,
 
     pub socket_name: OsString,
+    /// The folder of the project's Zed and VS Code data (see
+    /// `launch::instance_dir`).
+    pub instance_dir: PathBuf,
     /// The data dir of the project's Zed, which all its workspaces run in
     /// (see `launch::zed_data_dir`).
     pub zed_data: PathBuf,
@@ -4648,7 +4651,8 @@ impl Gerdr {
             self.refuse_open(id);
             return false;
         }
-        // Open in another gerdr as well (`--attach`): a Zed of its own here.
+        // Open in another gerdr as well (`--attach`): a Zed and VS Codes of
+        // their own here.
         let alongside = self.attach
             && self
                 .project_lock
@@ -4674,7 +4678,9 @@ impl Gerdr {
         } else {
             id.to_owned()
         };
-        self.zed_data = launch::zed_data_dir(&home_dir().unwrap_or_default(), &instance);
+        let home = home_dir().unwrap_or_default();
+        self.instance_dir = launch::instance_dir(&home, &instance);
+        self.zed_data = launch::zed_data_dir(&home, &self.instance_dir);
         // Before what it restores asks for its apps kept running.
         self.attach_keeper();
         self.load_inbox();
@@ -5628,11 +5634,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = ListeningSocketSource::with_name("gerdr-0")
         .or_else(|_| ListeningSocketSource::new_auto())?;
     let socket_name = socket.socket_name().to_os_string();
-    // Until a project is shown, Zed's data dir is this gerdr's own.
-    let zed_data = launch::zed_data_dir(
-        &home_dir().unwrap_or_default(),
-        &socket_name.to_string_lossy(),
-    );
+    // Until a project is shown, the apps' data dirs are this gerdr's own.
+    let home = home_dir().unwrap_or_default();
+    let instance_dir = launch::instance_dir(&home, &socket_name.to_string_lossy());
+    let zed_data = launch::zed_data_dir(&home, &instance_dir);
 
     let (keymap, apps, ui, git_config, linear, keep_apps) = config::load();
     let saved_theme = std::fs::read_to_string(theme_file())
@@ -5677,6 +5682,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bar_states: pane_control::BarStates::default(),
         pending_place: HashMap::new(),
         socket_name: socket_name.clone(),
+        instance_dir,
         zed_data,
         children: Vec::new(),
         herdr: None,
