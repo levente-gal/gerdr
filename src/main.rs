@@ -1854,6 +1854,20 @@ impl Gerdr {
                 });
             }
         }
+        // What runs again is a service, should it crash before it has run
+        // long (see `Gerdr::restart_workspace`).
+        let now = Instant::now();
+        for prep in &preps {
+            if let Some(command) = &prep.command {
+                let captured = projects::Captured {
+                    command: command.clone(),
+                    cwd: Some(prep.cd.clone().unwrap_or_else(|| prep.pane_cwd.clone())),
+                    env: prep.captured_env.clone(),
+                };
+                let service = pane_control::Remembered::service(captured, now);
+                self.last_commands.insert(prep.pane_id.clone(), service);
+            }
+        }
         prepare::spawn_prepare(socket, preps);
     }
 
@@ -2034,6 +2048,7 @@ impl Gerdr {
                     &pane.pane_id,
                     foreground.as_ref(),
                     pane.cwd.as_deref(),
+                    now,
                 );
                 let idle_long = match foreground {
                     Some(projects::Foreground::Idle) => {

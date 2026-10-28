@@ -12,8 +12,8 @@ use crate::{
     agents::AgentKey,
     anim::quantize,
     chrome::{
-        self, AgentView, CardState, CiCardState, Rect, RowState, SidebarHit, SidebarLayout,
-        SidebarState, TooltipRow, WorkspaceView,
+        self, AgentView, BarStatus, CardState, CiCardState, Rect, RowState, SidebarHit,
+        SidebarLayout, SidebarState, TooltipRow, WorkspaceView,
     },
     ci::{self, Subject},
     ci_watch::ci_state_word,
@@ -401,15 +401,18 @@ impl Gerdr {
             }
             SidebarHit::Restart(i) => {
                 let rect = layout.rows.get(i)?.restart?;
-                // Each command, and where it runs.
+                // Each command, where it runs, and whether it has exited.
                 let home = home_dir();
                 let fields: Vec<_> = self
                     .workspace_restarts(i)
                     .into_iter()
-                    .map(|(_, c)| {
-                        let place = c.cwd.as_deref().map_or(String::new(), |dir| {
+                    .map(|(pane_id, c)| {
+                        let mut place = c.cwd.as_deref().map_or(String::new(), |dir| {
                             paths::display(dir, home.as_deref(), 40)
                         });
+                        if self.pane_bar_content(&pane_id).status == BarStatus::Exited {
+                            place = format!("exited · {place}");
+                        }
                         (chrome::command_line(&c.command).unwrap_or(c.command), place)
                     })
                     .collect();
