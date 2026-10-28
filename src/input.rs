@@ -766,7 +766,7 @@ impl Gerdr {
         let output = self.output_size();
         // Over an overlay, only its own controls count.
         if self.quit.is_some() {
-            let quit = chrome::quit_layout(output);
+            let quit = self.quit_layout();
             let mut controls = quit.buttons.iter().chain(std::iter::once(&quit.checkbox));
             return if controls.any(|rect| rect.to_f64().contains(pos)) {
                 RegionHit::Control

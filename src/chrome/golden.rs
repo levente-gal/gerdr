@@ -324,6 +324,7 @@ fn quit() -> QuitView {
         selected: 2,
         dont_ask: true,
         hover: Some(QuitHit::Button(1)),
+        switch_to: None,
     }
 }
 

@@ -160,6 +160,10 @@ pub(super) const QUIT_BUTTON_GAP: i32 = 8;
 /// Cancel, Stop project, Keep running: labels and widths.
 pub(super) const QUIT_BUTTONS: [(&str, i32); 3] =
     [("Cancel", 84), ("Stop project", 116), ("Keep running", 124)];
+/// Cancel, Switch, Open in new gerdr: labels and widths, when switching
+/// projects.
+pub(super) const SWITCH_BUTTONS: [(&str, i32); 3] =
+    [("Cancel", 84), ("Switch", 84), ("Open in new gerdr", 148)];
 pub(super) const BUTTON_RADIUS: f32 = 6.0;
 
 /// The sidebar header's project name: the gap between it and its chevron,

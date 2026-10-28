@@ -5,7 +5,8 @@
 //! split right or down; the new half gets a terminal in the workspace folder.
 //! Terminals live in a herdr session of gerdr's own (see `herdr`), so they
 //! keep running when gerdr quits and come back when it starts again. Any
-//! other Wayland app can be launched into a split too (see `launch`).
+//! other Wayland app can be launched into a split too (see `launch`); some,
+//! Cursor by default, keep running when gerdr quits as well (see `keep`).
 
 mod agents;
 mod anim;
@@ -31,6 +32,7 @@ mod inbox_sources;
 mod inbox_store;
 mod input;
 mod issues;
+mod keep;
 mod keys;
 mod launch;
 mod layout;
@@ -244,6 +246,9 @@ pub struct Expected {
     /// A Zed window of the pane went away without gerdr closing it (see
     /// `remove_window`): its placeholder says so.
     pub closed: bool,
+    /// The app runs on the project's server of apps kept running (see
+    /// `keep`): its window comes through that server's client.
+    pub kept: bool,
 }
 
 impl Expected {
@@ -259,6 +264,7 @@ impl Expected {
             started: Instant::now(),
             timed_out: false,
             closed: false,
+            kept: false,
         }
     }
 
@@ -1155,6 +1161,16 @@ pub struct Gerdr {
     cursor_poke: Option<std::sync::mpsc::Sender<Vec<String>>>,
     /// Where Cursor's hooks reach this gerdr.
     cursor_socket: Option<PathBuf>,
+    /// The programs whose apps keep running when gerdr quits (see `keep`).
+    pub keep_apps: Vec<String>,
+    /// The shown project's server of apps kept running, while gerdr shows
+    /// its windows.
+    pub keeper: Option<keep::Keeper>,
+    /// Whether gerdr said that keeping apps running needs wprs.
+    pub keep_warned: bool,
+    /// The project to stop once another is shown instead (see
+    /// `ask_switch`).
+    pub stop_left: Option<String>,
     /// The Cursor chat last shown from its card, whose card is filled
     /// while Cursor has the keyboard.
     pub cursor_opened: Option<String>,
@@ -1491,10 +1507,38 @@ impl Gerdr {
 
     /// Start a child on our socket, in its own process group; what it
     /// writes to its stderr goes to `app`'s log (see `launch::log_file`).
-    fn spawn(&mut self, mut cmd: Command, dir: &Path, app: &str) -> Option<u32> {
+    fn spawn(&mut self, cmd: Command, dir: &Path, app: &str) -> Option<u32> {
+        let display = self.socket_name.clone();
+        let pid = self.spawn_on(cmd, dir, app, &display)?;
+        self.process_groups.push(pid as i32);
+        Some(pid)
+    }
+
+    /// Start a child as `spawn` does, but on the Wayland display `display`
+    /// of a project's server (see `keep`), and in a process group gerdr
+    /// doesn't end: it keeps running when gerdr quits.
+    pub fn spawn_kept(
+        &mut self,
+        cmd: Command,
+        dir: &Path,
+        app: &str,
+        display: &str,
+    ) -> Option<u32> {
+        self.spawn_on(cmd, dir, app, std::ffi::OsStr::new(display))
+    }
+
+    /// Start a child on Wayland display `display`, in its own process
+    /// group; reaped, but not ended by gerdr.
+    fn spawn_on(
+        &mut self,
+        mut cmd: Command,
+        dir: &Path,
+        app: &str,
+        display: &std::ffi::OsStr,
+    ) -> Option<u32> {
         let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
         herdr::scrub_env(&mut cmd, socket.as_deref());
-        cmd.env("WAYLAND_DISPLAY", &self.socket_name)
+        cmd.env("WAYLAND_DISPLAY", display)
             .env_remove("DISPLAY") // no XWayland escape to the host
             .current_dir(dir)
             .process_group(0);
@@ -1505,7 +1549,6 @@ impl Gerdr {
             Ok(child) => {
                 let pid = child.id();
                 self.children.push(child);
-                self.process_groups.push(pid as i32);
                 Some(pid)
             }
             Err(err) => {
@@ -3856,6 +3899,7 @@ impl Gerdr {
                 false
             }
         });
+        self.kept_client_exited(&exited);
         let now = Instant::now();
         let mut dropped = false;
         // A Zed that exited without a window: the next queued one may start.
@@ -4070,13 +4114,30 @@ impl Gerdr {
         };
         // The process we started nearest up the window's own, else its app_id.
         let lineage = pid.map(launch::lineage).unwrap_or_default();
-        let ours = lineage
-            .iter()
-            .find_map(|pid| find(&|e| e.pid == Some(*pid)));
+        // A window of an app kept running comes through the client of the
+        // project's server: it goes to a pane waiting for such an app, one
+        // of its program first (see `keep`).
+        let kept = || {
+            if !self.from_keeper(&lineage) {
+                return None;
+            }
+            let program = |e: &Expected| {
+                e.app_command
+                    .as_deref()
+                    .and_then(launch::program_name)
+                    .is_some_and(|program| app_id.contains(&program.to_ascii_lowercase()))
+            };
+            find(&|e| e.kept && program(e)).or_else(|| find(&|e| e.kept))
+        };
+        let ours = || {
+            lineage
+                .iter()
+                .find_map(|pid| find(&|e| e.pid == Some(*pid)))
+        };
         // A Zed window the shown project waits for: Zed hands windows from
         // one process to another, so it may come from an old one.
         let zed = || find(&|e| e.pid.is_some() && e.app_id == "zed" && app_id.contains(&e.app_id));
-        let claimed = ours.or_else(zed);
+        let claimed = kept().or_else(ours).or_else(zed);
         // A late window of a project switched away from: its processes are
         // on their way out.
         let in_groups = |groups: &[i32]| {
@@ -4496,7 +4557,14 @@ impl Gerdr {
     /// Show project `id`: the project shown now keeps running in the
     /// background. A project without workspaces asks for a folder.
     pub fn switch_project(&mut self, id: &str) {
-        self.enter_project(id, true, Vec::new());
+        self.ask_switch(quit::Switch {
+            id: id.to_owned(),
+            then: quit::Then::Enter {
+                pick: true,
+                folders: Vec::new(),
+            },
+            created: false,
+        });
     }
 
     /// Show project `id` as `enter_project_now` does, opening `folders` in
@@ -4593,6 +4661,8 @@ impl Gerdr {
         self.quit = None;
         self.restart = None;
         self.project = Some(id.to_owned());
+        // Before what it restores asks for its apps kept running.
+        self.attach_keeper();
         self.load_inbox();
         self.projects.last_active = Some(id.to_owned());
         if let Some(project) = self.projects.project_mut(id) {
@@ -4610,9 +4680,19 @@ impl Gerdr {
         self.place_held(id);
         self.show_active();
         if let Some(left) = left {
+            // Asked for when switching (see `ask_switch`).
+            let stop = self.stop_left.take().as_ref() == Some(&left);
             let name = |id: &str| self.projects.project(id).map(|p| p.name.clone());
             if let (Some(new), Some(old)) = (name(id), name(&left)) {
-                self.show_notice(projects::switch_notice(&new, &old));
+                let notice = if stop {
+                    projects::stop_notice(&new, &old)
+                } else {
+                    projects::switch_notice(&new, &old)
+                };
+                self.show_notice(notice);
+            }
+            if stop {
+                self.stop_project(&left);
             }
             self.previous_project = Some(left);
         }
@@ -4677,10 +4757,12 @@ impl Gerdr {
                     .entry(project.clone())
                     .or_default()
                     .push(pane.window);
-            } else {
+            } else if !self.is_kept_window(&pane.window) {
                 pane.window.toplevel().unwrap().send_close();
             }
         }
+        // Its apps kept running stay on their server (see `keep`).
+        self.detach_keeper();
         self.retire_children();
         if let Some((mut picker, _)) = self.picker.take() {
             let _ = picker.kill();
@@ -4767,12 +4849,13 @@ impl Gerdr {
     /// `CLOSE_GRACE` to, say to save their work, running `event_loop`
     /// meanwhile.
     fn close_windows(&mut self, event_loop: &mut EventLoop<'static, Gerdr>) {
+        // Those of apps kept running stay open on their server (see `keep`).
         let windows: Vec<Window> = self
             .workspaces
             .iter()
             .flat_map(|ws| &ws.tabs)
             .flat_map(|tab| &tab.panes)
-            .filter(|p| !p.stray)
+            .filter(|p| !p.stray && !self.is_kept_window(&p.window))
             .map(|p| p.window.clone())
             .collect();
         for window in &windows {
@@ -4799,7 +4882,14 @@ impl Gerdr {
     /// Start a new, empty project called `name` and show it.
     pub fn create_project(&mut self, name: &str) {
         let id = self.add_project(name);
-        self.switch_project(&id);
+        self.ask_switch(quit::Switch {
+            id,
+            then: quit::Then::Enter {
+                pick: true,
+                folders: Vec::new(),
+            },
+            created: true,
+        });
     }
 
     /// A new, empty project called `name`; returns its id. A herdr session
@@ -4848,7 +4938,17 @@ impl Gerdr {
         kind: WorkspaceKind,
     ) {
         let id = self.add_project(name);
-        self.enter_project(&id, false, Vec::new());
+        self.ask_switch(quit::Switch {
+            id,
+            then: quit::Then::Open { folder, kind },
+            created: true,
+        });
+    }
+
+    /// Show project `id`, just made, opening `folder` in it as a workspace
+    /// of `kind`, if given.
+    fn enter_project_with(&mut self, id: &str, folder: Option<PathBuf>, kind: WorkspaceKind) {
+        self.enter_project(id, false, Vec::new());
         match (folder, kind) {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
             (Some(folder), WorkspaceKind::Terminal) => self.open_terminal(folder),
@@ -4856,7 +4956,9 @@ impl Gerdr {
             (None, _) => {}
         }
         // After the switch's notice, so it wins.
-        self.show_notice(format!("Created {}", name.trim()));
+        if let Some(name) = self.projects.project(id).map(|p| p.name.clone()) {
+            self.show_notice(format!("Created {name}"));
+        }
     }
 
     /// Rename project `id` to `name` (trimmed; not to nothing); its id and
@@ -4889,8 +4991,9 @@ impl Gerdr {
         self.show_notice(format!("Saved {name}'s start and stop commands"));
     }
 
-    /// Stop project `id`'s herdr session, off the event loop; not the shown
-    /// one. `project_stopped` takes it from there.
+    /// Stop project `id`'s herdr session, off the event loop, and its apps
+    /// kept running (see `keep`); not the shown one. `project_stopped`
+    /// takes it from there.
     pub fn stop_project(&mut self, id: &str) {
         if self.project.as_deref() == Some(id) {
             return tracing::warn!("not stopping project {id}: it is the one shown");
@@ -4901,6 +5004,7 @@ impl Gerdr {
         if !self.stopping.insert(id.to_owned()) {
             return;
         }
+        self.stop_kept(id);
         // Neither running nor stopped until it answers.
         self.running.remove(id);
         if self.stop_status.is_none() {
@@ -5017,6 +5121,11 @@ impl Gerdr {
         self.record_tabs();
         self.close_web_control();
         let stopped = stop && self.stop_session();
+        // Its apps kept running go with it: their windows close with the
+        // others (see `close_windows`).
+        if stop && let Some(id) = self.project.clone() {
+            self.stop_kept(&id);
+        }
         if stopped
             && let Some(project) = self
                 .project
@@ -5511,7 +5620,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| ListeningSocketSource::new_auto())?;
     let socket_name = socket.socket_name().to_os_string();
 
-    let (keymap, apps, ui, git_config, linear) = config::load();
+    let (keymap, apps, ui, git_config, linear, keep_apps) = config::load();
     let saved_theme = std::fs::read_to_string(theme_file())
         .ok()
         .and_then(|s| ThemeMode::from_name(&s));
@@ -5590,6 +5699,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_idle: Vec::new(),
         cursor_poke: None,
         cursor_socket: None,
+        keep_apps,
+        keeper: None,
+        keep_warned: false,
+        stop_left: None,
         cursor_opened: None,
         host_focused: true,
         process_groups: Vec::new(),
@@ -5805,6 +5918,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     state.frecency.save();
     state.close_windows(&mut event_loop);
+    state.detach_keeper();
     state.kill_children();
     if let Some((mut picker, _)) = state.picker.take() {
         let _ = picker.kill();
