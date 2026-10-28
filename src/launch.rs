@@ -171,8 +171,15 @@ impl Gerdr {
             .prepare(original, &ws.dir, Some(leaf.unwrap_or_default()))
             .app_id;
         let queued = !app_id.is_empty();
+        // A restored leaf shows the app its project kept running, if any
+        // (see `keep`).
+        let kept = leaf
+            .filter(|_| !queued && self.keeps(original))
+            .and_then(|_| self.take_kept(original));
         let pid = if queued {
             None
+        } else if kept.is_some() {
+            kept
         } else {
             match self.start_app(w, t, original, None) {
                 Some(pid) => Some(pid),
@@ -190,6 +197,7 @@ impl Gerdr {
         let id = leaf.unwrap_or_else(|| self.new_split(w, t));
         let mut expected = Expected::new(pid, &app_id, id, leaf.is_none());
         expected.app_command = Some(original.to_owned());
+        expected.kept = self.is_kept(pid);
         self.workspaces[w].tabs[t].expected.push(expected);
         if !queued {
             return Some(id);
@@ -536,6 +544,11 @@ impl Gerdr {
                 format!("Cursor's agents won't show at once: {err}"),
                 crate::toast::Level::Warning,
             );
+        }
+        // Not one that hands its window to another process: that one's
+        // would come and go with gerdr.
+        if prepared.app_id.is_empty() && self.keeps(command) {
+            return self.start_kept(cmd, &dir, &log, command.trim());
         }
         self.spawn(cmd, &dir, &log)
     }

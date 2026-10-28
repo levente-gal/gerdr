@@ -733,6 +733,7 @@ mod tests {
                         selected: 2,
                         dont_ask: scale > 1.0,
                         hover: Some(QuitHit::Button(1)),
+                        switch_to: None,
                     };
                     painter.quit_dialog(&quit, size, scale, theme.palette());
                 }

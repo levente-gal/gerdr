@@ -1263,6 +1263,11 @@ pub fn switch_notice(new: &str, old: &str) -> String {
     format!("Switched to {new} · {old} keeps running")
 }
 
+/// The notice after switching to project `new` from `old`, which stops.
+pub fn stop_notice(new: &str, old: &str) -> String {
+    format!("Switched to {new} · stopping {old}")
+}
+
 /// The greeting for the local `hour` (0–23).
 pub fn greeting(hour: u32) -> &'static str {
     match hour {

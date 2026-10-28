@@ -1075,8 +1075,7 @@ impl crate::Gerdr {
     /// a hook's word gets old.
     pub fn watch_cursor_agents(&mut self) {
         use smithay::reexports::calloop::{
-            Interest, Mode, PostAction, channel,
-            generic::Generic,
+            channel,
             timer::{TimeoutAction, Timer},
         };
         let Some(db) = crate::launch::cursor_profile()
@@ -1099,23 +1098,12 @@ impl crate::Gerdr {
         }
         let keep = self.projects.cursor_history.ids();
         self.cursor_poke = Some(watch_db(db, keep, move |rows| tx.send(rows).is_ok()));
-        match hook_socket(&self.socket_name).map(|path| (bind_hook_socket(&path), path)) {
-            Some((Ok(socket), path)) => {
-                let source = Generic::new(socket, Interest::READ, Mode::Level);
-                let inserted = self.loop_handle.insert_source(source, |_, socket, state| {
-                    for event in take_events(socket) {
-                        state.cursor.hear(event);
-                    }
-                    state.cursor_changed();
-                    state.read_cursor_db();
-                    Ok(PostAction::Continue)
-                });
-                match inserted {
-                    Ok(_) => self.cursor_socket = Some(path),
-                    Err(err) => tracing::warn!("cursor's hooks: {err}"),
+        match hook_socket(&self.socket_name) {
+            Some(path) => {
+                if self.listen_cursor_hooks(&path).is_some() {
+                    self.cursor_socket = Some(path);
                 }
             }
-            Some((Err(err), path)) => tracing::warn!("cursor's hooks, {}: {err}", path.display()),
             None => tracing::warn!("cursor's hooks: no XDG_RUNTIME_DIR"),
         }
         let timer = Timer::from_duration(DB_INTERVAL);
@@ -1128,6 +1116,30 @@ impl crate::Gerdr {
         if let Err(err) = self.loop_handle.insert_source(timer, tick) {
             tracing::warn!("cursor's agents: {err}");
         }
+    }
+
+    /// Hear Cursor's hooks at `path` (see `hook_socket`): gerdr's own, or
+    /// a server's of apps kept running (see `keep`). `None` if it can't.
+    pub fn listen_cursor_hooks(
+        &mut self,
+        path: &Path,
+    ) -> Option<smithay::reexports::calloop::RegistrationToken> {
+        use smithay::reexports::calloop::{Interest, Mode, PostAction, generic::Generic};
+        let socket = bind_hook_socket(path)
+            .inspect_err(|err| tracing::warn!("cursor's hooks, {}: {err}", path.display()))
+            .ok()?;
+        let source = Generic::new(socket, Interest::READ, Mode::Level);
+        self.loop_handle
+            .insert_source(source, |_, socket, state| {
+                for event in take_events(socket) {
+                    state.cursor.hear(event);
+                }
+                state.cursor_changed();
+                state.read_cursor_db();
+                Ok(PostAction::Continue)
+            })
+            .inspect_err(|err| tracing::warn!("cursor's hooks: {err}"))
+            .ok()
     }
 
     /// Take in what Cursor's chats do now, and notify of what is news.

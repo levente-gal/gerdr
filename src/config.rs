@@ -26,6 +26,12 @@
 //! # dev and develop.
 //! top_branches = ["main", "dev", "staging"]
 //!
+//! [keep]
+//! # Apps that keep running when gerdr quits, as terminals do, by program:
+//! # gerdr shows them again when it starts. Needs wprs (wprsd and wprsc) on
+//! # PATH. By default Cursor; [] keeps none.
+//! apps = ["cursor"]
+//!
 //! [inbox]
 //! # Linear's issues assigned to you show in the inbox's todos with an API
 //! # key; LINEAR_API_KEY in the environment wins over this.
@@ -58,6 +64,7 @@ struct Config {
     apps: BTreeMap<String, String>,
     ui: UiConfig,
     git: GitConfig,
+    keep: KeepConfig,
     inbox: InboxConfig,
 }
 
@@ -77,6 +84,16 @@ struct GitConfig {
     same_branches: Option<Vec<Vec<String>>>,
     top_branches: Option<Vec<String>>,
 }
+
+/// The `[keep]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct KeepConfig {
+    apps: Option<Vec<String>>,
+}
+
+/// The programs whose apps keep running when gerdr quits, by default.
+const KEEP_APPS: [&str; 1] = ["cursor"];
 
 /// The `[inbox]` table, as written.
 #[derive(Default, Deserialize)]
@@ -171,10 +188,10 @@ impl Default for Ui {
     }
 }
 
-/// The shortcuts, apps, look and git settings in the config file, and how
+/// The shortcuts, apps, look and git settings in the config file, how
 /// the inbox reads Linear (`LINEAR_API_KEY` in the environment over the
-/// file's key).
-pub fn load() -> (Keymap, Vec<App>, Ui, Git, Option<Linear>) {
+/// file's key), and the programs whose apps keep running (see `keep`).
+pub fn load() -> (Keymap, Vec<App>, Ui, Git, Option<Linear>, Vec<String>) {
     let path = config_file();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -185,17 +202,28 @@ pub fn load() -> (Keymap, Vec<App>, Ui, Git, Option<Linear>) {
             String::new()
         }
     };
-    let (keymap, apps, ui, git, inbox, problems) = from_text(&text);
+    let (keymap, apps, ui, git, inbox, problems, keep) = from_text(&text);
     for problem in problems {
         tracing::warn!("{}: {problem}", path.display());
     }
     let linear = inbox.linear(std::env::var("LINEAR_API_KEY").ok());
-    (keymap, apps, ui, git, linear)
+    (keymap, apps, ui, git, linear, keep)
 }
 
-/// The shortcuts, apps, look, git and inbox settings `text` describes, and
-/// what's wrong with it.
-pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, InboxSettings, Vec<String>) {
+/// The shortcuts, apps, look, git and inbox settings `text` describes,
+/// what's wrong with it, and the programs whose apps keep running.
+#[allow(clippy::type_complexity)]
+pub fn from_text(
+    text: &str,
+) -> (
+    Keymap,
+    Vec<App>,
+    Ui,
+    Git,
+    InboxSettings,
+    Vec<String>,
+    Vec<String>,
+) {
     let mut problems = Vec::new();
     let config: Config = toml::from_str(text).unwrap_or_else(|err| {
         problems.push(err.to_string());
@@ -262,7 +290,21 @@ pub fn from_text(text: &str) -> (Keymap, Vec<App>, Ui, Git, InboxSettings, Vec<S
             .filter(|team| !team.is_empty())
             .collect(),
     };
-    (keymap, apps, ui, git, inbox, problems)
+    let keep = match config.keep.apps {
+        Some(names) => names
+            .into_iter()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| {
+                let blank = name.is_empty();
+                if blank {
+                    problems.push("a blank program name in `[keep] apps`".into());
+                }
+                !blank
+            })
+            .collect(),
+        None => KEEP_APPS.map(String::from).into(),
+    };
+    (keymap, apps, ui, git, inbox, problems, keep)
 }
 
 /// The groups of branch names as written, without the blank names, the
@@ -320,6 +362,12 @@ const TEMPLATE: &str = "\
 # # dev and develop.
 # top_branches = [\"main\", \"dev\", \"staging\"]
 #
+# [keep]
+# # Apps that keep running when gerdr quits, as terminals do, by program:
+# # gerdr shows them again when it starts. Needs wprs (wprsd and wprsc) on
+# # PATH. By default Cursor; [] keeps none.
+# apps = [\"cursor\"]
+#
 # [inbox]
 # # Linear's issues assigned to you show in the inbox's todos with an API
 # # key; LINEAR_API_KEY in the environment wins over this.
@@ -361,7 +409,7 @@ mod tests {
 
     #[test]
     fn the_template_changes_nothing() {
-        let (_, apps, ui, git, inbox, problems) = from_text(TEMPLATE);
+        let (_, apps, ui, git, inbox, problems, _) = from_text(TEMPLATE);
         assert!(problems.is_empty(), "{problems:?}");
         assert!(apps.is_empty());
         assert_eq!(ui, Ui::default());
@@ -375,7 +423,7 @@ mod tests {
             .filter(|line| !line.starts_with('#'))
             .map(|line| format!("{line}\n"))
             .collect();
-        let (_, apps, ui, git, inbox, problems) = from_text(&examples);
+        let (_, apps, ui, git, inbox, problems, _) = from_text(&examples);
         assert!(problems.is_empty(), "{problems:?}\n{examples}");
         assert_eq!(apps.len(), 2);
         assert_eq!(ui.density, Density::Compact);
@@ -387,7 +435,7 @@ mod tests {
 
     #[test]
     fn apps() {
-        let (_, apps, _, _, _, problems) =
+        let (_, apps, _, _, _, problems, _) =
             from_text("[apps]\nfiles = \"nautilus .\"\nbrowser = \" firefox \"\nnone = \"\"\n");
         let apps: Vec<_> = apps
             .iter()
@@ -398,6 +446,15 @@ mod tests {
     }
 
     #[test]
+    fn keep_apps() {
+        assert_eq!(from_text("").6, ["cursor"]);
+        assert!(from_text("[keep]\napps = []\n").6.is_empty());
+        let (.., problems, keep) = from_text("[keep]\napps = [\" code \", \"\"]\n");
+        assert_eq!(keep, ["code"]);
+        assert_eq!(problems, ["a blank program name in `[keep] apps`"]);
+    }
+
+    #[test]
     fn mistakes() {
         assert_eq!(from_text("[key]\n").5.len(), 1);
         assert_eq!(from_text("[apps]\nbrowser = 1\n").5.len(), 1);
@@ -405,12 +462,12 @@ mod tests {
     }
 
     fn ui(text: &str) -> (Ui, Vec<String>) {
-        let (_, _, ui, _, _, problems) = from_text(text);
+        let (_, _, ui, _, _, problems, _) = from_text(text);
         (ui, problems)
     }
 
     fn same(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
-        let (_, _, _, git, _, problems) = from_text(text);
+        let (_, _, _, git, _, problems, _) = from_text(text);
         (git.same_branches, problems)
     }
 
@@ -429,7 +486,7 @@ mod tests {
     #[test]
     fn main_master_dev_and_develop_go_first_unless_the_file_says_otherwise() {
         let top = |text: &str| {
-            let (_, _, _, git, _, problems) = from_text(text);
+            let (_, _, _, git, _, problems, _) = from_text(text);
             (git.top_branches, problems)
         };
         assert_eq!(top("").0, ["main", "master", "dev", "develop"]);

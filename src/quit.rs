@@ -2,9 +2,16 @@
 //! background (the default), or stop it. "Don't ask again" remembers the
 //! choice; the quit action (prefix, Shift+Q) asks again regardless.
 //!
+//! Switching to another project asks the same dialog whether to stop the
+//! one shown, its apps, terminals and agents, or keep it running and open
+//! the other in a new gerdr (the default).
+//!
 //! Left/Right and Tab move between the buttons, Enter presses the selected
-//! one, K and S press Keep running and Stop project, Space checks "Don't ask
-//! again", Esc cancels.
+//! one, K and S press Keep running and Stop project (N and S, Open in new
+//! gerdr and Switch, when switching), Space checks "Don't ask again", Esc
+//! cancels.
+
+use std::{os::unix::process::CommandExt, path::PathBuf, process::Stdio};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -12,10 +19,11 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr,
+    Gerdr, WorkspaceKind,
     chrome::{self, QuitHit, QuitView},
-    herdr,
+    herdr, launch,
     projects::QuitChoice,
+    toast::Level,
 };
 
 const STOP: usize = 1;
@@ -24,11 +32,14 @@ const KEEP: usize = 2;
 /// The quit dialog's state, while it is open.
 #[derive(Debug)]
 pub struct QuitDialog {
-    /// 0 Cancel, 1 Stop project, 2 Keep running (as `QuitView::selected`).
+    /// 0 Cancel, 1 Stop project, 2 Keep running (as `QuitView::selected`);
+    /// when switching, 0 Cancel, 1 Switch, 2 Open in new gerdr.
     pub selected: usize,
     pub dont_ask: bool,
     /// What the pointer is over.
     pub hover: Option<QuitHit>,
+    /// The switch to another project it asks about, if not quitting.
+    pub switch: Option<Switch>,
 }
 
 impl Default for QuitDialog {
@@ -38,8 +49,34 @@ impl Default for QuitDialog {
             selected: KEEP,
             dont_ask: false,
             hover: None,
+            switch: None,
         }
     }
+}
+
+/// A switch to another project, asked about (see `Gerdr::ask_switch`).
+#[derive(Debug)]
+pub struct Switch {
+    /// The project to show.
+    pub id: String,
+    pub then: Then,
+    /// The project was made for the switch: it goes if the switch is
+    /// cancelled.
+    pub created: bool,
+}
+
+/// What showing the project switched to comes with.
+#[derive(Debug)]
+pub enum Then {
+    /// As `Gerdr::enter_project`: `folders` opened in it, or with none
+    /// and `pick`, a folder asked for when it has no workspaces.
+    Enter { pick: bool, folders: Vec<PathBuf> },
+    /// `folder` opened in it as a workspace of `kind` (see
+    /// `Gerdr::create_project_with`).
+    Open {
+        folder: Option<PathBuf>,
+        kind: WorkspaceKind,
+    },
 }
 
 /// What the quit dialog asks gerdr to do.
@@ -72,14 +109,16 @@ impl QuitDialog {
     /// the layout applied, isn't needed).
     fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
         let plain = !(mods.ctrl || mods.alt || mods.logo);
+        let switching = self.switch.is_some();
         match sym {
             Keysym::Escape => return Some(Outcome::Cancel),
             Keysym::Return | Keysym::KP_Enter => return Some(self.press(self.selected)),
             Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => self.step(-1),
             Keysym::Tab if mods.shift => self.step(-1),
             Keysym::Right | Keysym::KP_Right | Keysym::Tab => self.step(1),
-            Keysym::space if plain => self.dont_ask = !self.dont_ask,
-            Keysym::k | Keysym::K if plain => return Some(self.press(KEEP)),
+            Keysym::space if plain && !switching => self.dont_ask = !self.dont_ask,
+            Keysym::k | Keysym::K if plain && !switching => return Some(self.press(KEEP)),
+            Keysym::n | Keysym::N if plain && switching => return Some(self.press(KEEP)),
             Keysym::s | Keysym::S if plain => return Some(self.press(STOP)),
             _ => {}
         }
@@ -142,6 +181,16 @@ impl Gerdr {
 
     /// Do what the quit dialog asked.
     pub fn apply_quit(&mut self, outcome: Outcome) {
+        if let Some(switch) = self.quit.as_mut().and_then(|d| d.switch.take()) {
+            self.quit = None;
+            self.refresh_pointer_focus();
+            return match outcome {
+                Outcome::Stop { .. } => self.switch_now(switch, true),
+                Outcome::Keep { .. } => self.open_in_new_gerdr(switch),
+                Outcome::Cancel if switch.created => self.forget_project(&switch.id),
+                Outcome::Cancel => {}
+            };
+        }
         let (choice, remember) = match outcome {
             Outcome::Cancel => {
                 self.quit = None;
@@ -158,18 +207,89 @@ impl Gerdr {
         self.quit_app(choice == QuitChoice::Stop);
     }
 
+    /// Show project `switch.id` as `switch.then` says: right away when no
+    /// other project is shown, else once asked whether to stop the one
+    /// shown or keep it and open the other in a new gerdr.
+    pub fn ask_switch(&mut self, switch: Switch) {
+        let shown = self.project.as_deref();
+        if shown.is_none_or(|id| id == switch.id) {
+            return self.switch_now(switch, false);
+        }
+        // Not a question: it can't be shown here anyway.
+        if self.open_elsewhere(&switch.id) {
+            return self.refuse_open(&switch.id);
+        }
+        self.project_menu = None;
+        self.quit = Some(QuitDialog {
+            switch: Some(switch),
+            ..QuitDialog::default()
+        });
+        self.refresh_pointer_focus();
+    }
+
+    /// Show the project `switch` is about, stopping the one left if
+    /// `stop` (see `show_project`).
+    fn switch_now(&mut self, switch: Switch, stop: bool) {
+        self.stop_left = stop.then(|| self.project.clone()).flatten();
+        match switch.then {
+            Then::Enter { pick, folders } => self.enter_project(&switch.id, pick, folders),
+            Then::Open { folder, kind } => self.enter_project_with(&switch.id, folder, kind),
+        }
+    }
+
+    /// Show the project `switch` is about in a new gerdr, which keeps the
+    /// one shown running here.
+    fn open_in_new_gerdr(&mut self, switch: Switch) {
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(err) => return self.toast(format!("Couldn't start gerdr: {err}"), Level::Error),
+        };
+        let folders = match switch.then {
+            Then::Enter { folders, .. } => folders,
+            Then::Open {
+                folder: Some(folder),
+                kind: WorkspaceKind::Project,
+            } => vec![folder],
+            Then::Open { .. } => Vec::new(),
+        };
+        let mut cmd = std::process::Command::new(exe);
+        // gerdr's own environment: the new one opens on the same host.
+        cmd.arg("--project")
+            .arg(&switch.id)
+            .arg("--")
+            .args(folders)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .process_group(0);
+        if let Some(log) = launch::log_file("gerdr") {
+            cmd.stderr(Stdio::from(log));
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                self.children.push(child);
+                let name = self
+                    .projects
+                    .project(&switch.id)
+                    .map_or(switch.id.clone(), |p| p.name.clone());
+                self.show_notice(format!("Opening {name} in a new gerdr"));
+            }
+            Err(err) => self.toast(format!("Couldn't start gerdr: {err}"), Level::Error),
+        }
+    }
+
     /// A left click while the quit dialog is open; `false` if it isn't.
     pub fn quit_click(&mut self, pos: Point<f64, Logical>) -> bool {
-        let layout = chrome::quit_layout(self.output_size());
+        let layout = self.quit_layout();
         let Some(dialog) = self.quit.as_mut() else {
             return false;
         };
         let outcome = match quit_hit(&layout, pos) {
             Some(QuitHit::Button(button)) => Some(dialog.press(button)),
-            Some(QuitHit::Checkbox) => {
+            Some(QuitHit::Checkbox) if dialog.switch.is_none() => {
                 dialog.dont_ask = !dialog.dont_ask;
                 None
             }
+            Some(QuitHit::Checkbox) => None,
             None if layout.panel.to_f64().contains(pos) => None,
             None => Some(Outcome::Cancel),
         };
@@ -179,9 +299,15 @@ impl Gerdr {
         true
     }
 
+    /// Where the quit dialog's parts go, as it asks now.
+    pub fn quit_layout(&self) -> chrome::QuitLayout {
+        let switching = self.quit.as_ref().is_some_and(|d| d.switch.is_some());
+        chrome::quit_layout(self.output_size(), switching)
+    }
+
     /// The pointer moved while the quit dialog is open.
     pub fn quit_hover(&mut self, pos: Point<f64, Logical>) {
-        let layout = chrome::quit_layout(self.output_size());
+        let layout = self.quit_layout();
         if let Some(dialog) = self.quit.as_mut() {
             dialog.hover = quit_hit(&layout, pos);
         }
@@ -189,20 +315,17 @@ impl Gerdr {
 
     pub fn quit_view(&self) -> Option<QuitView> {
         let dialog = self.quit.as_ref()?;
-        let project = self
-            .project
-            .as_deref()
-            .map(|id| {
-                self.projects
-                    .project(id)
-                    .map_or_else(|| id.to_owned(), |p| p.name.clone())
-            })
-            .unwrap_or_default();
+        let name = |id: &str| {
+            self.projects
+                .project(id)
+                .map_or_else(|| id.to_owned(), |p| p.name.clone())
+        };
         Some(QuitView {
-            project,
+            project: self.project.as_deref().map(name).unwrap_or_default(),
             selected: dialog.selected,
             dont_ask: dialog.dont_ask,
             hover: dialog.hover,
+            switch_to: dialog.switch.as_ref().map(|s| name(&s.id)),
         })
     }
 }
@@ -280,6 +403,36 @@ mod tests {
         );
         press(&mut dialog, Keysym::space);
         assert!(!dialog.dont_ask);
+    }
+
+    #[test]
+    fn switching_keys() {
+        let mut dialog = QuitDialog {
+            switch: Some(Switch {
+                id: "aft".into(),
+                then: Then::Enter {
+                    pick: true,
+                    folders: Vec::new(),
+                },
+                created: false,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            press(&mut dialog, Keysym::Return),
+            Some(Outcome::Keep { remember: false })
+        );
+        assert_eq!(press(&mut dialog, Keysym::space), None);
+        assert!(!dialog.dont_ask);
+        assert_eq!(press(&mut dialog, Keysym::k), None);
+        assert_eq!(
+            press(&mut dialog, Keysym::n),
+            Some(Outcome::Keep { remember: false })
+        );
+        assert_eq!(
+            press(&mut dialog, Keysym::s),
+            Some(Outcome::Stop { remember: false })
+        );
     }
 
     #[test]
