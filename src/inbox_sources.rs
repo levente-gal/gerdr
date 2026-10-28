@@ -12,7 +12,7 @@ use std::{
 use crate::{
     agents::AgentKey,
     chrome::{AgentView, WorkspaceView, status_label, status_meaning},
-    ci::{self, CiState, Group, RepoCi},
+    ci::{self, CiState, Group, RepoCi, Subject},
     cursor_agents::CursorChat,
     git::{GitStatus, InProgress, Worktree},
     herdr::{AgentInfo, AgentStatus},
@@ -245,7 +245,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
         let branch = git.branch.clone().unwrap_or_else(|| "detached HEAD".into());
         items.push(InboxItem {
             id: ItemId(format!("git:{}", root.display())),
-            section: Section::Git,
+            section: Section::Repos,
             fingerprint: git_fingerprint(git),
             workspace: Some(w),
             title: folder,
@@ -293,7 +293,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
         };
         items.push(InboxItem {
             id: ItemId(format!("worktree:{}", wt.path.display())),
-            section: Section::Git,
+            section: Section::Repos,
             fingerprint: format!(
                 "{}:{}:{}",
                 wt.tag(),
@@ -391,7 +391,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// The failed CI rows and the pull requests asking for review: what keeps
-/// a GitHub card from being quiet (`CiView::quiet`).
+/// a GitHub card from being quiet (`CiView::quiet`). A pull request's go
+/// under Pull requests, a branch's under Repos.
 pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
     let mut items = Vec::new();
     for (key, repo, shared) in src.github() {
@@ -410,7 +411,10 @@ pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
             };
             items.push(InboxItem {
                 id: ItemId(format!("ci:{key}:{subject}")),
-                section: Section::GitHub,
+                section: match row.subject {
+                    Subject::Pr(_) => Section::PullRequests,
+                    Subject::Branch(_) => Section::Repos,
+                },
                 fingerprint: format!("{:?}:{}", row.state, row.link),
                 workspace: Some(w),
                 title: row.title.clone().unwrap_or_else(|| subject.clone()),
@@ -482,9 +486,12 @@ pub fn ticket_items(src: &Sources) -> Vec<InboxItem> {
             continue;
         };
         for ticket in tickets {
-            let mut item = issue_item(ticket, None, "", Target::Link(ticket.url.clone()));
-            item.section = Section::Tickets;
-            items.push(item);
+            items.push(issue_item(
+                ticket,
+                None,
+                "",
+                Target::Link(ticket.url.clone()),
+            ));
         }
     }
     items
@@ -504,7 +511,7 @@ fn issue_item(issue: &Issue, w: Option<usize>, name: &str, target: Target) -> In
         .join(" · ");
     InboxItem {
         id: ItemId(id),
-        section: Section::Todos,
+        section: Section::Tickets,
         fingerprint: issue.updated.clone(),
         workspace: w,
         title: issue.title.clone(),
@@ -540,7 +547,7 @@ pub fn todo_items(src: &Sources) -> Vec<InboxItem> {
         let name = w.map(|w| src.name(w));
         InboxItem {
             id: ItemId(format!("todo:{}", todo.id.0)),
-            section: Section::Todos,
+            section: Section::Tickets,
             fingerprint: String::new(),
             workspace: w,
             title: todo.text.lines().next().unwrap_or_default().to_owned(),
@@ -568,8 +575,8 @@ pub fn collect(src: &Sources) -> Vec<InboxItem> {
     let mut items = agent_items(src);
     items.extend(git_items(src));
     items.extend(ci_items(src));
-    items.extend(issue_items(src));
     items.extend(ticket_items(src));
+    items.extend(issue_items(src));
     items.extend(todo_items(src));
     items
 }
@@ -615,7 +622,7 @@ mod tests {
     use super::*;
     use crate::{
         WorkspaceKind,
-        ci::{Check, CiRow, Subject},
+        ci::{Check, CiRow},
         cursor_agents::ChatRow,
         git::Change,
         inbox_store::{Todo, TodoId},
@@ -1063,7 +1070,7 @@ mod tests {
         };
         let items = issue_items(&f.sources());
         assert_eq!(ids(&items), ["gh:github.com/o/r#1", "linear:uuid"]);
-        assert_eq!(items[0].section, Section::Todos);
+        assert_eq!(items[0].section, Section::Tickets);
         assert_eq!(items[0].fingerprint, "2026-10-01T00:00:00Z");
         assert_eq!(
             items[0].target,
@@ -1136,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn tickets_keep_their_order_in_a_section_of_their_own() {
+    fn tickets_keep_their_board_order() {
         let mut f = Fixture::default();
         // The ticket repository is a workspace too: its issues show once,
         // as tickets.

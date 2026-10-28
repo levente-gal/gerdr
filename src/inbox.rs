@@ -1,11 +1,12 @@
 //! The inbox (prefix, i; the sidebar's "+" menu; a click on its "Needs
 //! you" heading): one place to go through what wants the user across the
-//! shown project, a section per kind: agents blocked, done or at work; Git
-//! needing a look (changes, commits to push or pull, stashes, a merge
-//! stopped half-way, worktrees left behind); GitHub's failed CI and pull
-//! requests asking for review; the tickets assigned to the user in the
-//! project's ticket repositories, in their board's order; and todos
-//! (gerdr's own, and the GitHub and Linear issues assigned to the user).
+//! shown project, a section per kind: agents blocked, done or at work;
+//! repos needing a look (changes, commits to push or pull, stashes, a
+//! merge stopped half-way, worktrees left behind, a branch's failed CI);
+//! pull requests asking for review or failing CI; and tickets: those
+//! assigned to the user in the project's ticket repositories (in their
+//! board's order), then the GitHub and Linear issues assigned to the user,
+//! then gerdr's own todos.
 //!
 //! Typing filters the list. Up/Down select, Enter goes to the item,
 //! Delete dismisses it (until it changes), Ctrl+S snoozes it for an hour,
@@ -60,29 +61,36 @@ pub struct ItemId(pub String);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Section {
     Agents,
-    Git,
-    GitHub,
+    Repos,
+    PullRequests,
     Tickets,
-    Todos,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 4] = [
         Section::Agents,
-        Section::Git,
-        Section::GitHub,
+        Section::Repos,
+        Section::PullRequests,
         Section::Tickets,
-        Section::Todos,
     ];
 
     /// Its label's title.
     pub fn title(self) -> &'static str {
         match self {
             Section::Agents => "Agents",
-            Section::Git => "Git",
-            Section::GitHub => "GitHub",
+            Section::Repos => "Repos",
+            Section::PullRequests => "Pull requests",
             Section::Tickets => "Tickets",
-            Section::Todos => "Todos",
+        }
+    }
+
+    /// Its label's icon.
+    pub fn icon(self) -> chrome::InboxIcon {
+        match self {
+            Section::Agents => chrome::InboxIcon::Agent,
+            Section::Repos => chrome::InboxIcon::Repo,
+            Section::PullRequests => chrome::InboxIcon::PullRequest,
+            Section::Tickets => chrome::InboxIcon::Ticket,
         }
     }
 }
@@ -109,6 +117,28 @@ pub struct InboxItem {
     /// What can be done to it, on its row and in its detail, in order.
     pub actions: Vec<ItemAction>,
     pub detail: Detail,
+}
+
+impl InboxItem {
+    /// Its mark: an agent's status, a repository or worktree, a branch's
+    /// failed CI, a pull request, a ticket or a todo.
+    pub fn icon(&self) -> chrome::InboxIcon {
+        use chrome::InboxIcon as I;
+        match &self.detail {
+            Detail::Agent { status, .. } => match status {
+                AgentStatus::Blocked => I::Blocked,
+                AgentStatus::Done => I::Done,
+                AgentStatus::Working => I::Working,
+                _ => I::Agent,
+            },
+            Detail::Git { .. } if self.id.0.starts_with("worktree:") => I::Worktree,
+            Detail::Git { .. } => I::Repo,
+            Detail::Ci { .. } if self.section == Section::PullRequests => I::PullRequest,
+            Detail::Ci { .. } => I::Failed,
+            Detail::Issue { .. } => I::Ticket,
+            Detail::Todo { .. } => I::Todo,
+        }
+    }
 }
 
 /// Where going to an item leads.
@@ -597,6 +627,8 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
     }
     InboxDetailView {
         title: item.title.clone(),
+        subtitle: item.subtitle.clone(),
+        icon: item.icon(),
         tone: item.tone,
         fields,
         block_title,
@@ -1327,6 +1359,7 @@ impl Panel {
             .enumerate()
             .map(|(n, entry)| match *entry {
                 Entry::Label(section, count, hidden) => InboxRow::Label {
+                    icon: section.icon(),
                     title: section.title().to_owned(),
                     count,
                     hidden,
@@ -1345,6 +1378,7 @@ impl Panel {
                         id: item.id.0.clone(),
                         title: item.title.clone(),
                         subtitle: item.subtitle.clone(),
+                        icon: item.icon(),
                         tone: item.tone,
                         age: item.age.map(age_text).unwrap_or_default(),
                         hidden: self.show_hidden,
@@ -1457,7 +1491,7 @@ mod tests {
     }
 
     fn todo(n: u32, workspace: Option<usize>) -> InboxItem {
-        let mut item = item(&format!("todo:t{n}"), Section::Todos, workspace);
+        let mut item = item(&format!("todo:t{n}"), Section::Tickets, workspace);
         item.target = Target::Todo(TodoId(format!("t{n}")));
         item.actions = vec![A::GoTo, A::Snooze, A::Done, A::Edit, A::Delete];
         item
@@ -1536,7 +1570,7 @@ mod tests {
 
     #[test]
     fn a_dismissed_item_is_hidden_until_it_changes() {
-        let mut it = item("git:/src/r", Section::Git, Some(0));
+        let mut it = item("git:/src/r", Section::Repos, Some(0));
         let triage = BTreeMap::from([("git:/src/r".to_owned(), dismissed("f1", None))]);
         assert!(is_hidden(&it, &triage, 1000));
         assert!(visible(std::slice::from_ref(&it), &triage, 1000, false).is_empty());
@@ -1552,7 +1586,7 @@ mod tests {
 
     #[test]
     fn a_snooze_runs_out() {
-        let it = item("ci:x", Section::GitHub, None);
+        let it = item("ci:x", Section::PullRequests, None);
         let triage = BTreeMap::from([("ci:x".to_owned(), dismissed("f1", Some(2000)))]);
         assert!(is_hidden(&it, &triage, 1999));
         assert!(!is_hidden(&it, &triage, 2000));
@@ -1562,8 +1596,8 @@ mod tests {
     #[test]
     fn ctrl_h_lists_only_the_hidden_ones_to_restore() {
         let items = vec![
-            item("a", Section::Git, Some(0)),
-            item("b", Section::Git, Some(0)),
+            item("a", Section::Repos, Some(0)),
+            item("b", Section::Repos, Some(0)),
         ];
         let triage = BTreeMap::from([("b".to_owned(), dismissed("f1", None))]);
         let names = names();
@@ -1609,9 +1643,9 @@ mod tests {
     #[test]
     fn the_selection_survives_a_reorder_and_a_removal() {
         let mut items = vec![
-            item("a", Section::Git, Some(0)),
-            item("b", Section::Git, Some(0)),
-            item("c", Section::Git, Some(0)),
+            item("a", Section::Repos, Some(0)),
+            item("b", Section::Repos, Some(0)),
+            item("c", Section::Repos, Some(0)),
         ];
         let triage = BTreeMap::new();
         let names = names();
@@ -1626,7 +1660,7 @@ mod tests {
         assert_eq!(panel.selected(), Some(&ItemId("a".into())));
         // Gone, the one taking its place is selected.
         items.retain(|i| i.id.0 != "a");
-        items.push(item("d", Section::Git, Some(0)));
+        items.push(item("d", Section::Repos, Some(0)));
         let list = listing(&items, &triage, &names);
         assert_eq!(selected_id(&panel.view(&list)).as_deref(), Some("d"));
         assert_eq!(
@@ -1638,14 +1672,14 @@ mod tests {
     #[test]
     fn it_opens_on_the_focused_section() {
         let items = vec![
-            item("a", Section::Git, Some(0)),
+            item("a", Section::Repos, Some(0)),
             todo(1, None),
             todo(2, None),
         ];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
-        let panel = Panel::new(Some(Section::Todos));
+        let panel = Panel::new(Some(Section::Tickets));
         assert_eq!(selected_id(&panel.view(&list)).as_deref(), Some("todo:t1"));
         // A section with nothing in it: the first item.
         let panel = Panel::new(Some(Section::Agents));
@@ -1654,7 +1688,7 @@ mod tests {
 
     #[test]
     fn a_todo_is_written_linked_and_saved() {
-        let items = vec![item("a", Section::Git, Some(1))];
+        let items = vec![item("a", Section::Repos, Some(1))];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
@@ -1704,7 +1738,7 @@ mod tests {
 
     #[test]
     fn ctrl_t_adds_a_ticket_repository() {
-        let items = vec![item("a", Section::Git, Some(1))];
+        let items = vec![item("a", Section::Repos, Some(1))];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
@@ -1740,7 +1774,7 @@ mod tests {
 
     #[test]
     fn ctrl_e_edits_a_todo() {
-        let items = vec![todo(3, Some(0)), item("a", Section::Git, None)];
+        let items = vec![todo(3, Some(0)), item("a", Section::Repos, None)];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
@@ -1788,13 +1822,13 @@ mod tests {
     #[test]
     fn the_selection_is_settled_before_a_key() {
         let items = vec![
-            item("a", Section::Git, None),
+            item("a", Section::Repos, None),
             agent("b", AgentStatus::Blocked, 5),
         ];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
-        let mut panel = Panel::new(Some(Section::Git));
+        let mut panel = Panel::new(Some(Section::Repos));
         assert_eq!(panel.selected(), None);
         panel.settle_on(&list);
         assert_eq!(panel.selected(), Some(&ItemId("a".into())));
@@ -1810,8 +1844,8 @@ mod tests {
     #[test]
     fn esc_clears_the_filter_then_closes() {
         let items = vec![
-            item("alpha", Section::Git, None),
-            item("beta", Section::Git, None),
+            item("alpha", Section::Repos, None),
+            item("beta", Section::Repos, None),
         ];
         let triage = BTreeMap::new();
         let names = names();
@@ -1838,7 +1872,7 @@ mod tests {
     fn no_key_takes_the_default_prefix() {
         // Ctrl+B arms the prefix before the panel sees it, and the prefix
         // then eats the next key too.
-        let items = vec![todo(1, None), item("a", Section::Git, None)];
+        let items = vec![todo(1, None), item("a", Section::Repos, None)];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
@@ -1861,7 +1895,7 @@ mod tests {
 
     #[test]
     fn only_what_the_item_allows_is_asked_for() {
-        let mut gh = item("gh:o/r#1", Section::Todos, None);
+        let mut gh = item("gh:o/r#1", Section::Tickets, None);
         gh.actions = vec![A::GoTo, A::OpenLink, A::CopyLink];
         let items = vec![gh, todo(1, None)];
         let triage = BTreeMap::new();
@@ -1912,7 +1946,7 @@ mod tests {
         let labels: Vec<_> = detail.buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(labels, ["Go to", "Snooze", "Done", "Edit", "Delete"]);
         // Snooze until tomorrow, where allowed.
-        let items = vec![item("a", Section::Git, None)];
+        let items = vec![item("a", Section::Repos, None)];
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         assert_eq!(
@@ -1927,7 +1961,10 @@ mod tests {
 
     #[test]
     fn clicks_select_go_and_act() {
-        let items = vec![item("a", Section::Git, None), item("b", Section::Git, None)];
+        let items = vec![
+            item("a", Section::Repos, None),
+            item("b", Section::Repos, None),
+        ];
         let triage = BTreeMap::new();
         let names = names();
         let list = listing(&items, &triage, &names);
@@ -1960,8 +1997,8 @@ mod tests {
     #[test]
     fn the_scope_is_the_active_workspace_or_all() {
         let items = vec![
-            item("a", Section::Git, Some(0)),
-            item("b", Section::Git, Some(1)),
+            item("a", Section::Repos, Some(0)),
+            item("b", Section::Repos, Some(1)),
             todo(1, None),
         ];
         let triage = BTreeMap::new();
@@ -1987,11 +2024,11 @@ mod tests {
     #[test]
     fn labels_count_the_listed_and_hidden() {
         let items = vec![
-            item("a", Section::Git, None),
-            item("b", Section::Git, None),
-            item("c", Section::Git, None),
-            item("d", Section::GitHub, None),
-            item("e", Section::GitHub, None),
+            item("a", Section::Repos, None),
+            item("b", Section::Repos, None),
+            item("c", Section::Repos, None),
+            item("d", Section::PullRequests, None),
+            item("e", Section::PullRequests, None),
         ];
         let triage = BTreeMap::from([
             ("b".to_owned(), dismissed("f1", None)),
@@ -2010,11 +2047,12 @@ mod tests {
                     title,
                     count,
                     hidden,
+                    ..
                 } => Some((title.as_str(), *count, *hidden)),
                 InboxRow::Item(_) => None,
             })
             .collect();
-        assert_eq!(labels, [("Git", 2, 1), ("GitHub", 1, 1)]);
+        assert_eq!(labels, [("Repos", 2, 1), ("Pull requests", 1, 1)]);
         assert_eq!(view.total, 5);
         // All of a section hidden, its label stays to say so.
         let triage = BTreeMap::from([("d".to_owned(), dismissed("f1", None))]);
@@ -2023,7 +2061,8 @@ mod tests {
         let view = Panel::new(None).view(&list);
         assert!(view.rows.iter().any(|r| *r
             == InboxRow::Label {
-                title: "GitHub".into(),
+                icon: chrome::InboxIcon::PullRequest,
+                title: "Pull requests".into(),
                 count: 0,
                 hidden: 2,
             }));
@@ -2032,7 +2071,7 @@ mod tests {
     #[test]
     fn paging_keeps_the_selection_in_view() {
         let items: Vec<_> = (0..12)
-            .map(|n| item(&format!("g{n}"), Section::Git, None))
+            .map(|n| item(&format!("g{n}"), Section::Repos, None))
             .chain((0..3).map(|n| todo(n, None)))
             .collect();
         let triage = BTreeMap::new();
@@ -2064,7 +2103,7 @@ mod tests {
         assert_eq!(panel.selected(), Some(&ItemId("todo:t0".into())));
         let view = in_view(&panel);
         assert_eq!(view.selected, Some(4));
-        assert!(matches!(&view.rows[3], InboxRow::Label { title, .. } if title == "Todos"));
+        assert!(matches!(&view.rows[3], InboxRow::Label { title, .. } if title == "Tickets"));
         press(&mut panel, Keysym::End, &list);
         assert_eq!(in_view(&panel).first, 12);
         press(&mut panel, Keysym::Page_Up, &list);
@@ -2099,7 +2138,7 @@ mod tests {
     #[test]
     fn a_touchpad_scrolls_by_parts_of_a_row() {
         let items: Vec<_> = (0..12)
-            .map(|n| item(&format!("g{n}"), Section::Git, None))
+            .map(|n| item(&format!("g{n}"), Section::Repos, None))
             .chain((0..3).map(|n| todo(n, None)))
             .collect();
         let triage = BTreeMap::new();
@@ -2150,14 +2189,14 @@ mod tests {
     #[test]
     fn agents_go_by_urgency_then_wait() {
         let items = vec![
-            item("todo", Section::Todos, None),
+            item("todo", Section::Tickets, None),
             agent("working", AgentStatus::Working, 500),
-            item("git", Section::Git, None),
+            item("git", Section::Repos, None),
             agent("done-new", AgentStatus::Done, 10),
             agent("blocked", AgentStatus::Blocked, 5),
             agent("done-old", AgentStatus::Done, 300),
-            item("ci", Section::GitHub, None),
-            item("git2", Section::Git, None),
+            item("ci", Section::PullRequests, None),
+            item("git2", Section::Repos, None),
         ];
         let ids: Vec<_> = order(&items).into_iter().map(|i| i.id.0).collect();
         assert_eq!(
@@ -2183,7 +2222,7 @@ mod tests {
         // Its end is what matters: cut at the start when it doesn't fit.
         assert!(detail.block_tail);
         assert!(detail.fields.contains(&("For".into(), "1m".into())));
-        let mut git = item("git:/r", Section::Git, Some(0));
+        let mut git = item("git:/r", Section::Repos, Some(0));
         git.detail = Detail::Git {
             branch: Some("main".into()),
             upstream: None,

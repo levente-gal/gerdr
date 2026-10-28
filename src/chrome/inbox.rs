@@ -1,5 +1,6 @@
 //! The inbox panel: what wants the user across the shown project, a
-//! section per kind (agents, Git, GitHub, todos), as a grouped list on the
+//! section per kind (agents, repos, pull requests, tickets), as a grouped
+//! list on the
 //! left under a field filtering it (and composing todos), the selected
 //! item's detail on the right, and the footer's key hints.
 //!
@@ -11,13 +12,12 @@ use super::{
     HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE, MENU_MARK_GAP,
     MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, STROKE, band, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf,
-    magnifier, measure, mix, pencil, phys, plus,
-    project_menu::{menu_mark, menu_query_text},
-    rect_px,
-    repos::scrollbar,
-    segment,
+    SMALL_FONT_SIZE, STROKE, band, check, cross, folder, footer_height, footer_hint_spots,
+    git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil, phys, plus,
+    project_menu::menu_query_text, rect_px, repos::scrollbar, rounded_rect, segment, status_mark,
+    tray,
 };
+use crate::herdr::AgentStatus;
 use crate::text_field::Line;
 use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -31,8 +31,8 @@ const INBOX_MAX_HEIGHT: i32 = 1000;
 const INBOX_TITLE: i32 = 44;
 const INBOX_FIELD: i32 = PROJECT_MENU_INPUT;
 /// How high an item's row is, and a section's label.
-pub const INBOX_ROW: i32 = 44;
-pub const INBOX_LABEL: i32 = 28;
+pub const INBOX_ROW: i32 = 48;
+pub const INBOX_LABEL: i32 = 34;
 /// The list's share of the panel's width, and the narrowest it gets
 /// (short of half the panel).
 const INBOX_LIST_SHARE: f64 = 0.4;
@@ -44,24 +44,39 @@ const SCROLLBAR: i32 = 6;
 const SCROLLBAR_GAP: i32 = 4;
 /// The scope toggle's segments in the title row: "This workspace" and
 /// "All", and how far it keeps from the right edge.
-const SCOPE_OWN: i32 = 120;
-const SCOPE_ALL: i32 = 48;
-const SCOPE_INSET: i32 = 12;
+const SCOPE_OWN: i32 = 124;
+const SCOPE_ALL: i32 = 52;
+const SCOPE_INSET: i32 = 14;
+/// How far the toggle's track reaches out round its segments.
+const SCOPE_TRACK_PAD: i32 = 3;
 /// The gap between buttons, and the room either side of a label on one.
 const BUTTON_GAP: i32 = 4;
 const BUTTON_PAD: i32 = 10;
 /// How much of an item's row its buttons leave for its title.
 const ROW_TEXT_MIN: i32 = 120;
-/// An item's dot, and the lines of its row: the title's band from the
-/// top, then the subtitle's.
-const DOT: i32 = 8;
-const ROW_TITLE_TOP: i32 = 4;
+/// An item's mark: a tinted square this wide, its corners' radius, how
+/// far in from the row's left it sits, and the gap after it.
+const BADGE: i32 = 30;
+const BADGE_RADIUS: f32 = 8.0;
+const BADGE_INSET: i32 = 8;
+const BADGE_GAP: i32 = 12;
+/// How much of the tone a mark's ground takes.
+const BADGE_TINT: f32 = 0.16;
+/// The detail's title mark, larger.
+const DETAIL_BADGE: i32 = 36;
+/// A section label's count: its pill's height and the room either side
+/// of the number.
+const COUNT_HEIGHT: i32 = 18;
+const COUNT_PAD: i32 = 7;
+/// The lines of an item's row: the title's band from the top, then the
+/// subtitle's.
+const ROW_TITLE_TOP: i32 = 6;
 const ROW_TITLE: i32 = 20;
 const ROW_SUBTITLE: i32 = 16;
 /// The detail: its title row, a field's line, the widest its labels'
 /// column gets, the heading over its block, a line of the block in the
 /// monospace font of this size, and the room inside the block.
-const DETAIL_TITLE: i32 = 44;
+const DETAIL_TITLE: i32 = 60;
 const DETAIL_LINE: i32 = 24;
 const DETAIL_LABEL_MAX: i32 = 140;
 const DETAIL_HEADING: i32 = 28;
@@ -134,8 +149,9 @@ pub struct InboxCompose {
 /// A row of the inbox list.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboxRow {
-    /// A section's label, as `Git 2 · 1 hidden`; not selectable.
+    /// A section's label, as `Repos 2 · 1 hidden`; not selectable.
     Label {
+        icon: InboxIcon,
         title: String,
         count: usize,
         hidden: usize,
@@ -151,7 +167,8 @@ pub struct InboxLine {
     pub title: String,
     /// Under the title: `workspace · status`.
     pub subtitle: String,
-    /// The dot before the title.
+    /// The mark before the title, in the colour of `tone`.
+    pub icon: InboxIcon,
     pub tone: InboxTone,
     /// At the right: `5m`, `2h`, `3d`; empty when unknown.
     pub age: String,
@@ -161,7 +178,34 @@ pub struct InboxLine {
     pub buttons: Vec<InboxButton>,
 }
 
-/// What colour an item's dot (and its detail's title mark) is.
+/// What an item's mark (and its detail's title mark) shows, and a
+/// section label's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InboxIcon {
+    /// An agent, as the Agents section's label shows it.
+    Agent,
+    /// An agent waiting for input: an exclamation mark.
+    Blocked,
+    /// An agent done with unseen work: a check mark.
+    Done,
+    /// An agent at work: the spinner's ring.
+    Working,
+    /// A repository needing a look: a branch.
+    Repo,
+    /// A worktree needing a look: a folder.
+    Worktree,
+    /// A branch whose CI failed: a cross.
+    Failed,
+    /// A pull request.
+    PullRequest,
+    /// A ticket, an issue.
+    #[default]
+    Ticket,
+    /// One of gerdr's todos: a box to tick.
+    Todo,
+}
+
+/// What colour an item's mark (and its detail's title mark) is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InboxTone {
     /// An agent waiting for input: the blocked colour.
@@ -194,6 +238,9 @@ pub struct InboxButton {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InboxDetailView {
     pub title: String,
+    /// Under the title: as the item's row says it.
+    pub subtitle: String,
+    pub icon: InboxIcon,
     pub tone: InboxTone,
     /// Label and value lines: `Status`, `Workspace`, `Branch`…
     pub fields: Vec<(String, String)>,
@@ -527,7 +574,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let scope = if view.all.is_some() {
         let y = top + (INBOX_TITLE - ROW_BUTTON) / 2;
         let all_x = x + w - SCOPE_INSET - SCOPE_ALL;
-        let own_x = all_x - BUTTON_GAP - SCOPE_OWN;
+        let own_x = all_x - SCOPE_OWN;
         vec![
             (
                 false,
@@ -676,16 +723,62 @@ pub fn inbox_field(view: &InboxView, size: Size<i32, Logical>, scale: f64) -> Fi
     }
 }
 
-/// The colour of an item's dot of `tone` in `p`.
+/// The colour of an item's mark of `tone` in `p`.
 fn tone_color(tone: InboxTone, p: &Palette) -> Rgb {
     match tone {
         InboxTone::Blocked | InboxTone::Attention => p.warning,
         InboxTone::Done => p.success,
         InboxTone::Working => p.accent,
         InboxTone::Failed => p.error,
-        // ANSI magenta: apart from the rest, readable in both looks.
+        // ANSI magenta and cyan: apart from the rest, readable in both
+        // looks.
         InboxTone::Review => p.ansi[5],
-        InboxTone::Info => p.muted,
+        InboxTone::Info => p.ansi[6],
+    }
+}
+
+/// Signed distance to `icon`'s shape centred on the origin, about 12
+/// logical pixels across.
+fn icon_shape(icon: InboxIcon, x: f32, y: f32, s: f32) -> f32 {
+    let ring =
+        |cx: f32, cy: f32, r: f32| ((x - cx * s).hypot(y - cy * s) - r * s).abs() - STROKE * s;
+    let line = |ax: f32, ay: f32, bx: f32, by: f32| {
+        segment(x, y, ax * s, ay * s, bx * s, by * s) - STROKE * s
+    };
+    match icon {
+        // A head with two eyes and an antenna.
+        InboxIcon::Agent => {
+            let head = rounded_rect(x, y, -5.5 * s, -3.0 * s, 11.0 * s, 8.5 * s, 2.5 * s).abs()
+                - STROKE * s;
+            let eyes = (x.abs() - 2.3 * s).hypot(y - 1.2 * s) - 1.1 * s;
+            let antenna = line(0.0, -3.0, 0.0, -5.0).min(x.hypot(y + 5.6 * s) - 1.1 * s);
+            head.min(eyes).min(antenna)
+        }
+        InboxIcon::Blocked => {
+            let bar = segment(x, y, 0.0, -4.6 * s, 0.0, 0.8 * s) - 1.1 * s;
+            bar.min(x.hypot(y - 4.0 * s) - 1.25 * s)
+        }
+        InboxIcon::Done => check(x, y, 1.25 * s),
+        InboxIcon::Working => status_mark(AgentStatus::Working, x, y, 1.3 * s),
+        InboxIcon::Repo => git_branch(x, y, s),
+        InboxIcon::Worktree => folder(x, y, 0.72 * s) - 0.25 * s,
+        InboxIcon::Failed => cross(x, y, 1.05 * s) - 0.2 * s,
+        // Two branches' ends joined on the left; on the right, a line up
+        // to an arrow pointing back at them.
+        InboxIcon::PullRequest => ring(-3.6, -4.2, 1.7)
+            .min(ring(-3.6, 4.2, 1.7))
+            .min(ring(3.6, 4.2, 1.7))
+            .min(line(-3.6, -2.5, -3.6, 2.5))
+            .min(line(3.6, 2.5, 3.6, -2.0))
+            .min(line(3.6, -2.0, 1.6, -4.2))
+            .min(line(1.6, -4.2, -0.4, -4.2))
+            .min(line(-0.4, -4.2, 1.4, -6.0))
+            .min(line(-0.4, -4.2, 1.4, -2.4)),
+        // An open issue: a ring round a dot.
+        InboxIcon::Ticket => ring(0.0, 0.0, 5.4).min(x.hypot(y) - 1.6 * s),
+        InboxIcon::Todo => {
+            rounded_rect(x, y, -4.8 * s, -4.8 * s, 9.6 * s, 9.6 * s, 2.2 * s).abs() - STROKE * s
+        }
     }
 }
 
@@ -848,12 +941,25 @@ impl Painter {
         pen
     }
 
-    /// A dot of `color` `DOT` across, centred on (`cx`, `cy`) (logical,
-    /// buffer coordinates).
-    fn inbox_dot(&self, c: &mut Canvas, cx: i32, cy: i32, scale: f64, color: Rgb) {
-        let dot = Rectangle::new((cx - DOT / 2, cy - DOT / 2).into(), (DOT, DOT).into());
-        let (x, y, w, h) = rect_px(dot, scale);
-        c.rounded(x, y, w, h, w / 2.0, color);
+    /// An item's mark in `rect` (logical, buffer coordinates): `icon` in
+    /// `color` on a rounded square of `ground` tinted with it, the icon
+    /// grown by `grow`.
+    #[allow(clippy::too_many_arguments)]
+    fn inbox_badge(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        icon: InboxIcon,
+        color: Rgb,
+        ground: Rgb,
+        grow: f32,
+        scale: f64,
+    ) {
+        let (x, y, w, h) = rect_px(rect, scale);
+        let r = BADGE_RADIUS * grow * scale as f32;
+        c.rounded(x, y, w, h, r, mix(ground, color, BADGE_TINT));
+        let s = grow * scale as f32;
+        icon_sdf(c, rect, scale, color, |x, y| icon_shape(icon, x, y, s));
     }
 
     /// The title row in `title`: "Inbox", the project's name, a tag while
@@ -875,6 +981,17 @@ impl Painter {
         if let Some((_, first)) = scope.first() {
             right = px(first.loc.x) - gap;
         }
+        // The tray over the field's magnifier, the title over its text.
+        let mark = Rectangle::new(
+            (
+                title.loc.x + PROJECT_MENU_PADDING + PADDING as i32,
+                title.loc.y,
+            )
+                .into(),
+            (MENU_MARK_WIDTH, title.size.h).into(),
+        );
+        icon_sdf(c, mark, scale, p.accent, |x, y| tray(x, y, 0.95 * s));
+        let x = x + px(MENU_MARK_WIDTH + MENU_MARK_GAP);
         let title_band = band(title, scale);
         let mut after = self.text(
             c,
@@ -910,14 +1027,24 @@ impl Painter {
                 p.warning,
             );
         }
+        // One outlined track behind both segments.
+        if let (Some((_, first)), Some((_, last))) = (scope.first(), scope.last()) {
+            let track = first.merge(*last);
+            let pad = SCOPE_TRACK_PAD;
+            let track = Rectangle::new(
+                (track.loc.x - pad, track.loc.y - pad).into(),
+                (track.size.w + 2 * pad, track.size.h + 2 * pad).into(),
+            );
+            self.inbox_pill(c, track, p.element, scale, p);
+        }
         for &(all, rect) in scope {
             self.inbox_scope(c, view, all, rect, scale, p);
         }
     }
 
     /// The scope toggle's segment for every workspace (`all`) or the
-    /// active one's, in `rect`: an outlined pill, filled when it is the
-    /// scope shown, lighter under the pointer.
+    /// active one's, in `rect` on the toggle's track: filled when it is
+    /// the scope shown, lighter under the pointer.
     fn inbox_scope(
         &self,
         c: &mut Canvas,
@@ -929,13 +1056,16 @@ impl Painter {
     ) {
         let on = view.all == Some(all);
         let fill = if on {
-            p.selected
+            Some(p.selected)
         } else if view.hover == Some(InboxHit::Scope(all)) {
-            mix(p.element, p.selected, 0.5)
+            Some(mix(p.element, p.selected, 0.5))
         } else {
-            p.element
+            None
         };
-        self.inbox_pill(c, rect, fill, scale, p);
+        if let Some(fill) = fill {
+            let (x, y, w, h) = rect_px(rect, scale);
+            c.rounded(x, y, w, h, (BUTTON_RADIUS - 2.0) * scale as f32, fill);
+        }
         let label = if all { "All" } else { "This workspace" };
         let color = if on { p.text } else { p.muted };
         self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
@@ -1024,9 +1154,10 @@ impl Painter {
     }
 
     /// Row `i` of the list in `rect` (buffer coordinates), with its
-    /// `buttons`: a section's label, or an item's dot, title and age over
-    /// its subtitle, on the selection's ground when selected and a lighter
-    /// one under the pointer; a hidden item's muted.
+    /// `buttons`: a section's label (its icon, title and count, under a
+    /// rule unless first), or an item's mark, title and age over its
+    /// subtitle, on the selection's ground when selected and a lighter one
+    /// under the pointer; a hidden item's muted.
     #[allow(clippy::too_many_arguments)]
     fn inbox_row(
         &self,
@@ -1042,47 +1173,80 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let gap = (FIELD_GAP as f32 * s).round();
-        let mark = menu_mark(rect);
         let (x, y, w, h) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
+        let text_x = px(rect.loc.x + BADGE_INSET + BADGE + BADGE_GAP) as f32;
         let line = match row {
             InboxRow::Label {
+                icon,
                 title,
                 count,
                 hidden,
             } => {
-                let label_band = band(rect, scale);
-                let after = self.text(
-                    c,
-                    &title.to_uppercase(),
-                    DETAIL_FONT_SIZE,
-                    px(mark.loc.x) as f32,
-                    right,
-                    label_band,
-                    scale,
-                    p.placeholder,
+                if i > 0 {
+                    let border = px(1).max(1);
+                    let inset = px(BADGE_INSET);
+                    c.fill(
+                        x as i32 + inset,
+                        y as i32 + px(4),
+                        w as i32 - 2 * inset,
+                        border,
+                        p.border_variant,
+                    );
+                }
+                // The label sits low, near the items it heads.
+                let low = Rectangle::new(
+                    (rect.loc.x, rect.loc.y + rect.size.h - COUNT_HEIGHT - 6).into(),
+                    (rect.size.w, COUNT_HEIGHT).into(),
                 );
+                let mark = Rectangle::new(
+                    (rect.loc.x + BADGE_INSET, low.loc.y).into(),
+                    (BADGE, low.size.h).into(),
+                );
+                icon_sdf(c, mark, scale, p.muted, |x, y| {
+                    icon_shape(*icon, x, y, 0.9 * s)
+                });
+                let label_band = band(low, scale);
                 let after = self.text(
                     c,
-                    &count.to_string(),
-                    DETAIL_FONT_SIZE,
-                    after + gap * 0.75,
+                    title,
+                    SMALL_FONT_SIZE,
+                    text_x,
                     right,
                     label_band,
                     scale,
                     p.muted,
                 );
-                if *hidden > 0 {
+                let number = count.to_string();
+                let pill_w = extent(&number, DETAIL_FONT_SIZE) + 2 * COUNT_PAD;
+                let pill_x = after + gap;
+                if pill_x + px(pill_w) as f32 <= right {
+                    let (_, py, _, ph) = rect_px(low, scale);
+                    let pw = px(pill_w) as f32;
+                    c.rounded(pill_x, py, pw, ph, ph / 2.0, p.element);
+                    let nw = self.text_width(&number, DETAIL_FONT_SIZE, scale);
                     self.text(
                         c,
-                        &format!("· {hidden} hidden"),
+                        &number,
                         DETAIL_FONT_SIZE,
-                        after + gap * 0.75,
+                        pill_x + (pw - nw) / 2.0,
                         right,
                         label_band,
                         scale,
-                        p.placeholder,
+                        p.muted,
                     );
+                    if *hidden > 0 {
+                        self.text(
+                            c,
+                            &format!("{hidden} hidden"),
+                            DETAIL_FONT_SIZE,
+                            pill_x + pw + gap,
+                            right,
+                            label_band,
+                            scale,
+                            p.placeholder,
+                        );
+                    }
                 }
                 return;
             }
@@ -1091,15 +1255,20 @@ impl Painter {
 
         // The highlight stops short of the rows above and below.
         let (hy, hh) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = (MENU_RADIUS - 2.0) * s;
+        let r = (MENU_RADIUS + 2.0) * s;
         let hovered = matches!(
             view.hover,
             Some(InboxHit::Row(j) | InboxHit::Button(j, _)) if j == i
         );
-        if view.selected == Some(i) {
-            c.rounded(x, hy, w, hh, r, p.selected);
+        let ground = if view.selected == Some(i) {
+            p.selected
         } else if hovered {
-            c.rounded(x, hy, w, hh, r, mix(p.elevated, p.selected, 0.5));
+            mix(p.elevated, p.selected, 0.5)
+        } else {
+            p.elevated
+        };
+        if ground != p.elevated {
+            c.rounded(x, hy, w, hh, r, ground);
         }
 
         // The title's line, and the subtitle's under it; without a
@@ -1118,18 +1287,20 @@ impl Painter {
             (t, Some(st))
         };
         let tone = tone_color(line.tone, p);
-        let dot = if line.hidden {
-            mix(p.elevated, tone, 0.45)
+        let mark_color = if line.hidden {
+            mix(p.elevated, p.placeholder, 0.8)
         } else {
             tone
         };
-        self.inbox_dot(
-            c,
-            mark.loc.x + MENU_MARK_WIDTH / 2,
-            title_rect.loc.y + title_rect.size.h / 2,
-            scale,
-            dot,
+        let badge = Rectangle::new(
+            (
+                rect.loc.x + BADGE_INSET,
+                rect.loc.y + (rect.size.h - BADGE) / 2,
+            )
+                .into(),
+            (BADGE, BADGE).into(),
         );
+        self.inbox_badge(c, badge, line.icon, mark_color, ground, 1.0, scale);
 
         for (k, &button) in buttons.iter().enumerate() {
             let label = line.buttons.get(k).map_or("", |b| b.label.as_str());
@@ -1152,7 +1323,6 @@ impl Painter {
         if !line.age.is_empty() {
             let age_w = self.text_width(&line.age, SMALL_FONT_SIZE, scale);
             let age_x = end - age_w;
-            let text_x = px(mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP) as f32;
             // Only where it leaves the title some room.
             if age_x > text_x + 4.0 * gap {
                 self.text(
@@ -1168,7 +1338,6 @@ impl Painter {
                 title_end = age_x - gap;
             }
         }
-        let text_x = px(mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP) as f32;
         self.any_text(
             c,
             &line.title,
@@ -1216,24 +1385,50 @@ impl Painter {
 
         let title = parts.title;
         let (tx, tright) = phys(title, scale);
-        let dot_x = rect.loc.x + HELP_PADDING + DOT / 2;
-        self.inbox_dot(
-            c,
-            dot_x,
-            title.loc.y + title.size.h / 2,
-            scale,
-            tone_color(detail.tone, p),
+        let badge = Rectangle::new(
+            (
+                rect.loc.x + HELP_PADDING,
+                title.loc.y + (title.size.h - DETAIL_BADGE) / 2,
+            )
+                .into(),
+            (DETAIL_BADGE, DETAIL_BADGE).into(),
         );
+        let grow = DETAIL_BADGE as f32 / BADGE as f32;
+        let color = tone_color(detail.tone, p);
+        self.inbox_badge(c, badge, detail.icon, color, p.elevated, grow, scale);
+        let text_x = tx + px(HELP_PADDING + DETAIL_BADGE) as f32 + gap * 1.5;
+        let text_end = tright - px(HELP_PADDING) as f32;
+        // The title over the subtitle, the two centred on the mark.
+        let (title_band, subtitle_band) = if detail.subtitle.is_empty() {
+            (band(title, scale), None)
+        } else {
+            let top = badge.loc.y - 2;
+            let t = Rectangle::new((title.loc.x, top).into(), (title.size.w, 22).into());
+            let st = Rectangle::new((title.loc.x, top + 22).into(), (title.size.w, 18).into());
+            (band(t, scale), Some(band(st, scale)))
+        };
         self.any_text(
             c,
             &detail.title,
             LABEL_FONT_SIZE,
-            tx + px(HELP_PADDING + DOT) as f32 + gap,
-            tright - px(HELP_PADDING) as f32,
-            band(title, scale),
+            text_x,
+            text_end,
+            title_band,
             scale,
             p.text,
         );
+        if let Some(subtitle_band) = subtitle_band {
+            self.any_text(
+                c,
+                &detail.subtitle,
+                SMALL_FONT_SIZE,
+                text_x,
+                text_end,
+                subtitle_band,
+                scale,
+                p.muted,
+            );
+        }
         c.fill(
             px(rect.loc.x) + border,
             px(title.loc.y + title.size.h) - border,
@@ -1394,6 +1589,7 @@ mod tests {
             id: id.into(),
             title: title.into(),
             subtitle: subtitle.into(),
+            icon: InboxIcon::Ticket,
             tone,
             age: age.into(),
             hidden: false,
@@ -1407,6 +1603,7 @@ mod tests {
 
     fn label(title: &str, count: usize, hidden: usize) -> InboxRow {
         InboxRow::Label {
+            icon: InboxIcon::Repo,
             title: title.into(),
             count,
             hidden,
@@ -1432,6 +1629,8 @@ mod tests {
         block.push("  3. No, and tell Claude what to do differently (esc)".into());
         InboxDetailView {
             title: "claude · reviewer".into(),
+            subtitle: String::new(),
+            icon: InboxIcon::Ticket,
             tone: InboxTone::Blocked,
             fields: vec![
                 ("Status".into(), "Blocked, waiting for input".into()),
@@ -1449,6 +1648,8 @@ mod tests {
     fn git_detail() -> InboxDetailView {
         InboxDetailView {
             title: "backend".into(),
+            subtitle: String::new(),
+            icon: InboxIcon::Ticket,
             tone: InboxTone::Attention,
             fields: vec![
                 ("Branch".into(), "feat/inbox → origin/feat/inbox".into()),
@@ -1473,6 +1674,8 @@ mod tests {
     fn ci_detail() -> InboxDetailView {
         InboxDetailView {
             title: "Show every repository's changes as one diff".into(),
+            subtitle: String::new(),
+            icon: InboxIcon::Ticket,
             tone: InboxTone::Failed,
             fields: vec![
                 ("Pull request".into(), "#142".into()),
@@ -1498,6 +1701,8 @@ mod tests {
     fn issue_detail() -> InboxDetailView {
         InboxDetailView {
             title: "Inbox: Linear issues assigned to me".into(),
+            subtitle: String::new(),
+            icon: InboxIcon::Ticket,
             tone: InboxTone::Info,
             fields: vec![
                 ("Source".into(), "Linear".into()),
@@ -1526,6 +1731,8 @@ mod tests {
     fn todo_detail() -> InboxDetailView {
         InboxDetailView {
             title: "Write the release notes for the inbox".into(),
+            subtitle: String::new(),
+            icon: InboxIcon::Ticket,
             tone: InboxTone::Info,
             fields: vec![
                 ("Workspace".into(), "backend".into()),
@@ -1689,6 +1896,8 @@ mod tests {
             selected: Some(1),
             detail: Some(InboxDetailView {
                 title: "aider".into(),
+                subtitle: String::new(),
+                icon: InboxIcon::Ticket,
                 tone: InboxTone::Done,
                 fields: vec![
                     ("Status".into(), "Done".into()),

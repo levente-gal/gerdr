@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use super::{
     AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, HelpHit, HelpPress,
-    ItemIcon, MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
+    InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView, ItemIcon,
+    MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
     PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState,
     SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView,
     TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
@@ -410,6 +411,171 @@ const SURFACES: [&str; 11] = [
 ];
 
 /// Every surface at (theme, scale), in `SURFACES` order.
+fn inbox_item(
+    id: &str,
+    title: &str,
+    subtitle: &str,
+    icon: InboxIcon,
+    tone: InboxTone,
+    age: &str,
+) -> InboxRow {
+    InboxRow::Item(InboxLine {
+        id: id.into(),
+        title: title.into(),
+        subtitle: subtitle.into(),
+        icon,
+        tone,
+        age: age.into(),
+        hidden: false,
+        buttons: Vec::new(),
+    })
+}
+
+fn inbox() -> InboxView {
+    let label = |icon, title: &str, count, hidden| InboxRow::Label {
+        icon,
+        title: title.into(),
+        count,
+        hidden,
+    };
+    let button = |label: &str, key: &str| InboxButton {
+        label: label.into(),
+        key: key.into(),
+    };
+    use InboxIcon as I;
+    use InboxTone as T;
+    let mut rows = vec![
+        label(I::Agent, "Agents", 3, 0),
+        inbox_item(
+            "a1",
+            "claude",
+            "gerdr · blocked · Allow edit?",
+            I::Blocked,
+            T::Blocked,
+            "2m",
+        ),
+        inbox_item("a2", "codex", "gerdr-inbox · done", I::Done, T::Done, "14m"),
+        inbox_item(
+            "a3",
+            "claude",
+            "aft · working",
+            I::Working,
+            T::Working,
+            "1h",
+        ),
+        label(I::Repo, "Repos", 3, 1),
+        inbox_item(
+            "g1",
+            "gerdr",
+            "gerdr · main · 3 changes, ↑2",
+            I::Repo,
+            T::Attention,
+            "",
+        ),
+        inbox_item(
+            "g2",
+            "fix-scroll",
+            "gerdr · worktree · merged",
+            I::Worktree,
+            T::Attention,
+            "",
+        ),
+        inbox_item(
+            "c2",
+            "main",
+            "gerdr · main · CI failed",
+            I::Failed,
+            T::Failed,
+            "",
+        ),
+        label(I::PullRequest, "Pull requests", 2, 0),
+        inbox_item(
+            "c1",
+            "Speed up popup paint",
+            "gerdr · #41 · review asked",
+            I::PullRequest,
+            T::Review,
+            "",
+        ),
+        inbox_item(
+            "c3",
+            "Group the inbox",
+            "gerdr · #44 · CI failed",
+            I::PullRequest,
+            T::Failed,
+            "",
+        ),
+        label(I::Ticket, "Tickets", 3, 0),
+        inbox_item(
+            "k1",
+            "Inbox grouping",
+            "o/tickets#12 · In progress",
+            I::Ticket,
+            T::Info,
+            "",
+        ),
+        inbox_item(
+            "k2",
+            "Linear token scope",
+            "ENG-41 · Todo",
+            I::Ticket,
+            T::Info,
+            "",
+        ),
+        inbox_item(
+            "t1",
+            "Check the board read",
+            "gerdr · todo",
+            I::Todo,
+            T::Info,
+            "3d",
+        ),
+    ];
+    if let InboxRow::Item(line) = &mut rows[1] {
+        line.buttons = vec![button("Snooze", "Ctrl+S"), button("Dismiss", "Delete")];
+    }
+    InboxView {
+        project: Some("gerdr".into()),
+        all: Some(true),
+        placeholder: "Filter the inbox…".into(),
+        total: rows.len(),
+        rows,
+        selected: Some(1),
+        detail: Some(InboxDetailView {
+            title: "claude".into(),
+            subtitle: "gerdr · blocked · Allow edit?".into(),
+            icon: InboxIcon::Blocked,
+            tone: InboxTone::Blocked,
+            fields: vec![
+                ("Status".into(), "blocked".into()),
+                ("Workspace".into(), "gerdr".into()),
+                ("Model".into(), "opus".into()),
+            ],
+            block_title: Some("Last output".into()),
+            block: vec![
+                "Edit src/chrome/inbox.rs".into(),
+                "Do you want to make this edit?".into(),
+                "❯ 1. Yes".into(),
+                "  2. No".into(),
+            ],
+            block_tail: true,
+            buttons: vec![
+                button("Go to", "Enter"),
+                button("Snooze", "Ctrl+S"),
+                button("Tomorrow", "Ctrl+Shift+S"),
+                button("Dismiss", "Delete"),
+            ],
+        }),
+        hints: vec![
+            ("Enter".into(), "go to".into()),
+            ("Ctrl+N".into(), "todo".into()),
+            ("Esc".into(), "close".into()),
+        ],
+        empty: "Nothing needs you".into(),
+        ..InboxView::default()
+    }
+}
+
 fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let p = theme.palette();
     let help = help();
@@ -739,6 +905,14 @@ fn dump_overlays() {
             &format!("placeholder_late_{tag}"),
             painter.placeholder(&placeholder(true), Some(PlaceholderButton::Retry), scale, p),
             px(waiting.rect.size.w),
+        );
+        let inbox_size = (1200, 760).into();
+        let inbox_panel = super::inbox_layout(&inbox(), inbox_size).panel;
+        dump(
+            &dir,
+            &format!("inbox_{tag}"),
+            painter.inbox(&inbox(), inbox_size, scale, p),
+            px(inbox_panel.size.w + shadow),
         );
         dump(
             &dir,
