@@ -4395,6 +4395,7 @@ impl Gerdr {
                     WorkspaceKind::Project | WorkspaceKind::Terminal => {}
                 }
                 view.ci = self.ci_view(ws);
+                view.restart = !self.workspace_restarts(w).is_empty();
                 view.more_agents = self
                     .cursor_history(w)
                     .1

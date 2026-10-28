@@ -908,7 +908,66 @@ impl Gerdr {
         if !content.can_restart {
             return self.show_notice("Nothing to restart in this pane".into());
         }
-        self.start_job(pane_id, content.label, true);
+        let captured = self.last_commands.get(pane_id).map(|r| r.captured.clone());
+        self.start_job(pane_id, content.label, captured.as_ref(), true);
+    }
+
+    /// The commands of workspace `w` that run again after a reboot (see
+    /// `PaneRecord::restart_command`), each with its herdr pane: running
+    /// or exited, in the folder and environment it ran with. A pane where
+    /// something else runs in front of its command (an editor, a pager)
+    /// is left alone.
+    pub fn workspace_restarts(&self, w: usize) -> Vec<(String, Captured)> {
+        let Some(ws) = self.workspaces.get(w) else {
+            return Vec::new();
+        };
+        ws.tabs
+            .iter()
+            .flat_map(Tab::herdr_panes)
+            .filter_map(|pane| {
+                let record = self.pane_record(pane)?;
+                let command = record.restart_command()?;
+                let content = self.pane_bar_content(&pane.pane_id);
+                if content.status == BarStatus::Running && !content.can_restart {
+                    return None;
+                }
+                let captured = match self.last_commands.get(&pane.pane_id) {
+                    Some(r) if r.captured.command == command => r.captured.clone(),
+                    _ => Captured {
+                        command: command.to_owned(),
+                        cwd: record.cwd.clone().or_else(|| pane.cwd.clone()),
+                        env: record.env.clone(),
+                    },
+                };
+                Some((pane.pane_id.clone(), captured))
+            })
+            .collect()
+    }
+
+    /// Stop every command of workspace `w` that runs again after a reboot
+    /// and run it again, as a reboot would: after a pull or a checkout,
+    /// for what doesn't reload by itself.
+    pub fn restart_workspace(&mut self, w: usize) {
+        let restarts = self.workspace_restarts(w);
+        if restarts.is_empty() {
+            return self.show_notice("Nothing to restart in this workspace".into());
+        }
+        let count = restarts.len();
+        for (pane_id, captured) in restarts {
+            if let Some(job) = self.pane_jobs.get(&pane_id) {
+                if job.can_rerun {
+                    job.rerun.store(true, Ordering::Relaxed);
+                }
+                continue;
+            }
+            let label =
+                chrome::command_line(&captured.command).unwrap_or_else(|| captured.command.clone());
+            self.start_job(&pane_id, label, Some(&captured), true);
+        }
+        self.show_notice(match count {
+            1 => "Restarting 1 command".to_owned(),
+            n => format!("Restarting {n} commands"),
+        });
     }
 
     /// Stop what runs in herdr pane `pane_id`; while it is being restarted,
@@ -924,12 +983,19 @@ impl Gerdr {
         if !content.can_stop {
             return self.show_notice("Nothing runs in this pane".into());
         }
-        self.start_job(pane_id, content.label, false);
+        let captured = self.last_commands.get(pane_id).map(|r| r.captured.clone());
+        self.start_job(pane_id, content.label, captured.as_ref(), false);
     }
 
-    /// Stop what runs in herdr pane `pane_id`, called `command`, and run its
-    /// last command again if `rerun`.
-    fn start_job(&mut self, pane_id: &str, command: String, rerun: bool) {
+    /// Stop what runs in herdr pane `pane_id`, called `command`, and run
+    /// `captured` (its last command) again if `rerun`.
+    fn start_job(
+        &mut self,
+        pane_id: &str,
+        command: String,
+        captured: Option<&Captured>,
+        rerun: bool,
+    ) {
         let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
             return;
         };
@@ -937,10 +1003,8 @@ impl Gerdr {
             return;
         };
         // No tools: asking poetry or pipenv mustn't hold up the main thread.
-        let line = self
-            .last_commands
-            .get(pane_id)
-            .map(|r| Plan::new(&restart_prep(pane_id, &r.captured), &Tools::default()))
+        let line = captured
+            .map(|c| Plan::new(&restart_prep(pane_id, c), &Tools::default()))
             .filter(|plan| !plan.is_empty());
         let flag = Arc::new(AtomicBool::new(rerun));
         let job = Job {
