@@ -396,9 +396,9 @@ impl Tab {
     }
 
     /// Whether pane `id` has a bar over it: a terminal's, to restart and
-    /// stop what runs in it (see `pane_control`).
+    /// stop what runs in it, or an app's (see `pane_control`).
     fn has_bar(&self, id: u32) -> bool {
-        self.herdr_pane(id).is_some()
+        self.panes.iter().any(|p| p.id == id)
     }
 
     fn window(&self, id: u32) -> Option<&Window> {

@@ -124,6 +124,7 @@ fn pane_bar() -> PaneBarView {
         status: BarStatus::Exited,
         can_restart: true,
         can_stop: false,
+        buttons: true,
         focused: true,
         lit: true,
         hover: Some(BarButton::Restart),

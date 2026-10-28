@@ -140,6 +140,8 @@ pub struct PaneBarView {
     pub status: BarStatus,
     pub can_restart: bool,
     pub can_stop: bool,
+    /// It has the restart and stop buttons: a terminal's bar.
+    pub buttons: bool,
     /// The pane has keyboard focus.
     pub focused: bool,
     /// The pointer is over the bar: its buttons show.
@@ -223,7 +225,7 @@ impl Painter {
         // the buttons hidden, both reach the bar's end.
         let band = (px(up), px(up + full.h));
         let x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
-        let end_x = if view.lit {
+        let end_x = if view.lit && view.buttons {
             buttons[0].1.loc.x
         } else {
             full.w - BAR_INSET
@@ -262,7 +264,7 @@ impl Painter {
             );
         }
 
-        if !view.lit {
+        if !view.lit || !view.buttons {
             return c.into_buffer(true);
         }
         for (button, rect) in buttons {
@@ -314,6 +316,7 @@ mod tests {
             status: BarStatus::Running,
             can_restart: true,
             can_stop: true,
+            buttons: true,
             focused: true,
             lit: true,
             hover: None,
@@ -465,6 +468,7 @@ mod tests {
                             can_restart: i < 2,
                             can_stop: i % 2 == 1,
                             focused: i == 0,
+                            buttons: i != 2,
                             lit: i != 3,
                             hover: Some(BarButton::Restart),
                             slide: [0, 7, PANE_BAR_HEIGHT - 1, PANE_BAR_HEIGHT][i],

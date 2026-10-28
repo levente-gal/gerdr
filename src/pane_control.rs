@@ -21,6 +21,10 @@
 //! `FOCUS_HOLD` after the pane gains focus (see `bar_wanted`). Hidden, it
 //! gives its room to the window. Each bar fades and slides as it shows
 //! and hides (`BarStates`).
+//!
+//! An app's window has a bar too, with its title and no buttons: always
+//! drawn over the window, there to drag the pane by (see `pane_drag`) and
+//! for its menu.
 
 use std::{
     collections::HashMap,
@@ -41,7 +45,7 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr, Tab,
+    Gerdr, Pane, Tab,
     anim::{self, Fade},
     chrome::{self, BarButton, BarHit, BarStatus, Help, PaneBarView, Rect},
     herdr::{Herdr, PaneState, Process, ProcessInfo},
@@ -363,6 +367,32 @@ pub fn bar_content(
     }
 }
 
+/// What the bar over an app's window (`pane`) shows: its title, and
+/// nothing running in it to restart or stop.
+fn app_bar_content(pane: &Pane) -> BarContent {
+    BarContent {
+        label: crate::window_title(&pane.window)
+            .filter(|title| !title.trim().is_empty())
+            .or_else(|| pane.app_command.clone())
+            .unwrap_or_else(|| "app".to_owned()),
+        note: None,
+        status: BarStatus::Idle,
+        can_restart: false,
+        can_stop: false,
+        other_tabs: Vec::new(),
+        pane_count: 0,
+    }
+}
+
+/// What the state of `pane`'s bar is kept by: the herdr pane it shows, for
+/// a terminal, else its own leaf.
+fn bar_key(pane: &Pane) -> String {
+    match &pane.herdr {
+        Some(herdr) => herdr.pane_id.clone(),
+        None => format!("app:{}", pane.id),
+    }
+}
+
 /// How long a pane's bar stays out after the pane gains focus.
 pub const FOCUS_HOLD: Duration = Duration::from_secs(1);
 
@@ -440,7 +470,7 @@ pub struct BarLook {
     pub flipped: bool,
 }
 
-/// The show/hide state of every pane's bar, by herdr pane id, moved on
+/// The show/hide state of every pane's bar, by `bar_key`, moved on
 /// each time the bars are looked at.
 #[derive(Debug, Default)]
 pub struct BarStates(Mutex<HashMap<String, BarState>>);
@@ -727,6 +757,14 @@ impl Gerdr {
         )
     }
 
+    /// What the bar of `pane` shows: what runs in it, for a terminal.
+    fn pane_bar_of(&self, pane: &Pane) -> BarContent {
+        match &pane.herdr {
+            Some(herdr) => self.pane_bar_content(&herdr.pane_id),
+            None => app_bar_content(pane),
+        }
+    }
+
     /// Where the bars stand between hidden and shown.
     fn bar_states(&self) -> &BarStates {
         &self.bar_states
@@ -736,25 +774,29 @@ impl Gerdr {
     /// what `chrome::pane_bar_rects_shown` is given when the panes are
     /// arranged. A bar not looked at yet (a tab not shown) is hidden.
     pub fn pane_bar_shown(&self, tab: &Tab, id: u32) -> bool {
-        tab.herdr_pane(id)
-            .is_some_and(|pane| self.bar_states().shown(&pane.pane_id))
+        tab.panes
+            .iter()
+            .find(|p| p.id == id)
+            .is_some_and(|pane| self.bar_states().shown(&bar_key(pane)))
     }
 
     /// Whether the bar of pane `id` of `tab` is out, with room or over
     /// its window: there to see and to click.
     fn pane_bar_drawn(&self, tab: &Tab, id: u32) -> bool {
-        tab.herdr_pane(id)
-            .is_some_and(|pane| self.bar_states().drawn(&pane.pane_id))
+        tab.panes
+            .iter()
+            .find(|p| p.id == id)
+            .is_some_and(|pane| self.bar_states().drawn(&bar_key(pane)))
     }
 
-    /// The herdr pane ids of every pane in every workspace: the bars
-    /// whose state is kept, shown or not.
-    fn herdr_pane_ids(&self) -> Vec<String> {
+    /// The bar keys of every pane in every workspace: the bars whose
+    /// state is kept, shown or not.
+    fn bar_keys(&self) -> Vec<String> {
         self.workspaces
             .iter()
             .flat_map(|ws| ws.tabs.iter())
             .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.herdr.as_ref().map(|h| h.pane_id.clone()))
+            .map(bar_key)
             .collect()
     }
 
@@ -770,12 +812,12 @@ impl Gerdr {
         }
     }
 
-    /// The bars over the active tab's terminal panes, moved on to now:
+    /// The bars over the active tab's panes, moved on to now:
     /// a hidden one at rest has no height. The other tabs' bars keep
     /// their state meanwhile, so coming back moves nothing.
     pub fn pane_bar_views(&self) -> Vec<PaneBarView> {
         let states = self.bar_states();
-        states.retain(&self.herdr_pane_ids());
+        states.retain(&self.bar_keys());
         let Some(tab) = self.tab() else {
             return Vec::new();
         };
@@ -788,10 +830,10 @@ impl Gerdr {
             .into_iter()
             .filter_map(|(id, rect)| {
                 let pane = tab.panes.iter().find(|p| p.id == id)?;
-                let key = pane.herdr.as_ref()?.pane_id.as_str();
-                let content = self.pane_bar_content(key);
+                let key = bar_key(pane);
+                let content = self.pane_bar_of(pane);
                 let is_focused = focused == Some(id);
-                let look = states.update(key, is_focused, now, |focused_for, out| {
+                let look = states.update(&key, is_focused, now, |focused_for, out| {
                     let near = chrome::pointer_reveals(rect, out, pointer);
                     bar_wanted(content.status, near, focused_for)
                 });
@@ -810,6 +852,7 @@ impl Gerdr {
                     status: content.status,
                     can_restart: content.can_restart,
                     can_stop: content.can_stop,
+                    buttons: pane.herdr.is_some(),
                     focused: is_focused,
                     lit: look.visible && full.to_f64().contains(pointer),
                     hover: self
@@ -829,7 +872,7 @@ impl Gerdr {
     }
 
     /// The pane of the active tab whose bar is at `pos`, and what of it.
-    /// A hidden bar is not there to hit.
+    /// A hidden bar is not there to hit; an app's has no buttons.
     pub fn pane_bar_at(&self, pos: Point<f64, Logical>) -> Option<(u32, BarHit)> {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
@@ -837,7 +880,10 @@ impl Gerdr {
             .filter(|(id, _)| self.pane_bar_drawn(tab, *id))
             .find_map(|(id, rect)| {
                 let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, pos)?;
-                Some((id, hit))
+                Some(match tab.herdr_pane(id) {
+                    Some(_) => (id, hit),
+                    None => (id, BarHit::Label),
+                })
             })
     }
 
@@ -863,8 +909,8 @@ impl Gerdr {
     pub(crate) fn pane_bar_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
         let (id, _) = self.pane_bar_at(pos)?;
         let tab = self.tab()?;
-        let pane_id = &tab.herdr_pane(id)?.pane_id;
-        let mut content = self.pane_bar_content(pane_id);
+        let pane = tab.panes.iter().find(|p| p.id == id)?;
+        let mut content = self.pane_bar_of(pane);
         // Here rather than in `pane_bar_content`, which every bar calls
         // every frame.
         let ws = self.workspace()?;
