@@ -297,7 +297,8 @@ impl Gerdr {
         self.open_cursor(Some(&command));
         self.cursor_opened = Some(id.to_owned());
         // One just started would take the link as its own start.
-        let Some((own, _)) = own_instance(&command).filter(|_| running) else {
+        let Some((own, _)) = own_instance(&command, Some(&self.zed_data)).filter(|_| running)
+        else {
             return;
         };
         let link = format!("{CHAT_LINK}{id}");
@@ -450,7 +451,7 @@ impl Gerdr {
             None => url.unwrap_or_else(|| command.to_owned()),
         };
         let bare_zed = opens_nothing_in_zed(&command);
-        match own_instance(&command) {
+        match own_instance(&command, Some(&self.zed_data)) {
             Some((mut command, profile)) => {
                 if command.contains(BROWSER_APP_ID) {
                     app_id = BROWSER_APP_ID.to_owned();
@@ -492,7 +493,7 @@ impl Gerdr {
         if flatpak || !STEERED.contains(&key.as_str()) {
             return None;
         }
-        let profile = own_instance(web)?.1?;
+        let profile = own_instance(web, None)?.1?;
         let extension = web_control::install(&profile, socket)
             .inspect_err(|err| tracing::warn!("gerdr's extension in {}: {err}", profile.display()))
             .ok()?;
@@ -678,7 +679,7 @@ fn web_app(url: &str, opener: &str) -> Option<(String, String)> {
 pub fn web_profile(command: &str) -> Option<PathBuf> {
     let opener = desktop::url_command(command)?;
     let (web, _) = web_app(command, &opener)?;
-    own_instance(&web)?.1
+    own_instance(&web, None)?.1
 }
 
 /// Editors built on VS Code, by program and Flatpak id.
@@ -723,11 +724,67 @@ fn opens_nothing_in_zed(command: &str) -> bool {
 /// The app_id a Zed window is expected by (see `Expected`).
 pub const ZED_APP_ID: &str = "zed";
 
-/// Zed's data dir of gerdr's: with it, Zed runs its own instance here
-/// instead of handing the windows to a Zed already running on the host.
-/// One for all workspaces, so they run in one Zed process.
-pub fn zed_data_dir(home: &Path) -> PathBuf {
-    home.join(".local/share/gerdr/zed")
+/// What of a Zed data dir is its instance's own; the rest links to the
+/// data dir all of gerdr's Zeds share (see `zed_data_dir`). Its socket
+/// (`zed-<channel>.sock`) is its own too.
+const ZED_OWN: &[&str] = &["db", "logs", "hang_traces"];
+
+/// What all of gerdr's Zeds share even before one has made it.
+const ZED_SHARED: &[&str] = &["config", "extensions"];
+
+/// The data dir of gerdr's Zed for `instance` (the project shown, see
+/// `Gerdr::show_project`), made ready. Zed runs one process per data dir
+/// and hands new windows to it, so with one of gerdr's own it doesn't hand
+/// them to a Zed on the host, and with one per project not to another
+/// gerdr's. Settings, extensions and downloads stay shared: all but its
+/// database, logs and socket link to `~/.local/share/gerdr/zed`.
+pub fn zed_data_dir(home: &Path, instance: &str) -> PathBuf {
+    let shared = home.join(".local/share/gerdr/zed");
+    let dir = home.join(".local/share/gerdr/zed-projects").join(instance);
+    if let Err(err) = link_zed_shared(&shared, &dir) {
+        tracing::warn!("making Zed's data dir {}: {err}", dir.display());
+    }
+    dir
+}
+
+/// Link what Zed data dir `dir` shares to the one in `shared` (see
+/// `zed_data_dir`), leaving what it has already. A new one starts with a
+/// copy of the shared database: the folders trusted and the tabs open in
+/// them are kept there.
+fn link_zed_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let db = dir.join("db");
+    if !db.exists() && shared.join("db").is_dir() {
+        copy_dir(&shared.join("db"), &db)?;
+    }
+    for name in ZED_SHARED {
+        std::fs::create_dir_all(shared.join(name))?;
+    }
+    for entry in std::fs::read_dir(shared)? {
+        let name = entry?.file_name();
+        let own =
+            ZED_OWN.iter().any(|own| name == *own) || name.to_string_lossy().ends_with(".sock");
+        let link = dir.join(&name);
+        if !own && link.symlink_metadata().is_err() {
+            std::os::unix::fs::symlink(shared.join(&name), link)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy folder `from` to `to`, with all in it.
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Ghostty's option for keeping one copy running.
@@ -893,10 +950,11 @@ pub fn cursor_profile() -> Option<PathBuf> {
 
 /// `command` changed to start a copy of its own of an app that hands new
 /// windows to a running one: a browser or a VS Code with gerdr's profile
-/// for it, a Zed with gerdr's data dir (see `zed_data_dir`), and that
+/// for it, a Zed with data dir `zed_data` (see `zed_data_dir`), and that
 /// folder, or a Ghostty told not to (without a folder); `None` when
-/// `command` doesn't start such an app or already picks its profile.
-fn own_instance(command: &str) -> Option<(String, Option<PathBuf>)> {
+/// `command` doesn't start such an app, already picks its profile, or is a
+/// Zed without `zed_data`.
+fn own_instance(command: &str, zed_data: Option<&Path>) -> Option<(String, Option<PathBuf>)> {
     let (key, end, flatpak) = program(command)?;
     if GHOSTTYS.contains(&key.as_str()) {
         let off = format!("{SINGLE_INSTANCE}=false");
@@ -929,7 +987,7 @@ fn own_instance(command: &str) -> Option<(String, Option<PathBuf>)> {
     let profile = if flatpak {
         home.join(".var/app").join(&key).join("gerdr-profile")
     } else if ZEDS.contains(&key.as_str()) {
-        zed_data_dir(&home)
+        zed_data?.to_path_buf()
     } else {
         profile_dir(&home, &key)
     };
@@ -1066,8 +1124,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        alacritty_command, ghostty_command, lineage, log_path, opens_nothing_in_zed, own_instance,
-        vs_code_of, web_app,
+        alacritty_command, ghostty_command, lineage, link_zed_shared, log_path,
+        opens_nothing_in_zed, own_instance, vs_code_of, web_app,
     };
     use crate::home_dir;
 
@@ -1207,10 +1265,65 @@ mod tests {
     }
 
     #[test]
+    fn zed_data_dirs_share_all_but_their_own() {
+        let root = std::env::temp_dir().join(format!("gerdr-zed-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (shared, dir) = (root.join("zed"), root.join("aft"));
+        for name in ["db", "logs", "languages"] {
+            std::fs::create_dir_all(shared.join(name)).unwrap();
+        }
+        std::fs::write(shared.join("db/db.sqlite"), "trusted").unwrap();
+        std::fs::write(shared.join("zed-stable.sock"), "").unwrap();
+        std::fs::create_dir_all(dir.join("node")).unwrap();
+        std::fs::create_dir_all(shared.join("node")).unwrap();
+        link_zed_shared(&shared, &dir).unwrap();
+        // Again: what is linked stays.
+        link_zed_shared(&shared, &dir).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let linked = entry.file_type().unwrap().is_symlink();
+                (entry.file_name().into_string().unwrap(), linked)
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                ("config".to_owned(), true),
+                ("db".to_owned(), false),
+                ("extensions".to_owned(), true),
+                ("languages".to_owned(), true),
+                ("node".to_owned(), false),
+            ]
+        );
+        assert_eq!(
+            std::fs::read_link(dir.join("config")).unwrap(),
+            shared.join("config")
+        );
+        // Copied when new only: its own from then on.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("db/db.sqlite")).unwrap(),
+            "trusted"
+        );
+        std::fs::write(shared.join("db/db.sqlite"), "later").unwrap();
+        link_zed_shared(&shared, &dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("db/db.sqlite")).unwrap(),
+            "trusted"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn browsers_get_their_own_profile() {
-        let home = home_dir().unwrap().to_string_lossy().into_owned();
-        let run =
-            |command: &str| own_instance(command).map(|(command, _)| command.replace(&home, "~"));
+        let home = home_dir().unwrap();
+        let zed_data = home.join(".local/share/gerdr/zed-projects/aft");
+        let home = home.to_string_lossy().into_owned();
+        let run = |command: &str| {
+            own_instance(command, Some(&zed_data)).map(|(command, _)| command.replace(&home, "~"))
+        };
         assert_eq!(
             run("/usr/share/librewolf/librewolf").unwrap(),
             "/usr/share/librewolf/librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/profiles/librewolf --new-window"
@@ -1243,17 +1356,18 @@ mod tests {
         assert_eq!(run("code --user-data-dir=/x ."), None);
         assert_eq!(
             run("/home/me/.local/zed.app/bin/zed").unwrap(),
-            "/home/me/.local/zed.app/bin/zed --user-data-dir=~/.local/share/gerdr/zed"
+            "/home/me/.local/zed.app/bin/zed --user-data-dir=~/.local/share/gerdr/zed-projects/aft"
         );
         assert_eq!(
             run("zeditor -n .").unwrap(),
-            "zeditor --user-data-dir=~/.local/share/gerdr/zed -n ."
+            "zeditor --user-data-dir=~/.local/share/gerdr/zed-projects/aft -n ."
         );
         assert_eq!(
             run("flatpak run dev.zed.Zed").unwrap(),
             "flatpak run dev.zed.Zed --user-data-dir=~/.var/app/dev.zed.Zed/gerdr-profile"
         );
         assert_eq!(run("zed --user-data-dir /x"), None);
+        assert_eq!(own_instance("zed", None), None);
         assert!(opens_nothing_in_zed("/home/me/.local/zed.app/bin/zed"));
         assert!(opens_nothing_in_zed("flatpak run dev.zed.Zed "));
         assert!(!opens_nothing_in_zed("zed -n ."));
