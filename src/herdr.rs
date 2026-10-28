@@ -74,7 +74,7 @@ fn config_home() -> PathBuf {
 /// `$XDG_RUNTIME_DIR`, the user's own private folder for sockets; none
 /// without it (a world-writable temp folder is no place for a config
 /// link another user could plant first).
-fn runtime_dir() -> Option<PathBuf> {
+pub(crate) fn runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

@@ -344,7 +344,10 @@ impl Gerdr {
             .project
             .clone()
             .filter(|id| pre.store.project(id) != self.projects.project(id));
+        let mut lock = None;
         if shown_edited.is_some() {
+            // Its lock stays: another gerdr mustn't take it in the meantime.
+            lock = self.project_lock.take();
             self.detach_project();
             self.project = None;
         } else if self.record_tabs() {
@@ -380,7 +383,10 @@ impl Gerdr {
         self.projects = store;
         self.projects.save();
         match shown_edited {
-            Some(id) if self.projects.project(&id).is_some() => self.show_project(&id, false),
+            Some(id) if self.projects.project(&id).is_some() => {
+                self.project_lock = lock;
+                self.show_project(&id, false);
+            }
             Some(_) => self.open_welcome(false),
             None => {}
         }
