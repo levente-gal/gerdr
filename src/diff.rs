@@ -63,7 +63,8 @@ pub struct Line {
     pub syntax: Spans,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LineKind {
     #[default]
     Context,

@@ -19,16 +19,23 @@
 //! as one diff: per repository a header, per file a header (its checkbox
 //! the same as its tree line's) over its hunks, the words changed within
 //! a line marked. Selecting a line in the tree scrolls it there; the
-//! header of the file in view stays pinned at its top.
+//! header of the file in view stays pinned at its top. Review comments
+//! written on its lines show under them, to copy all at once as Markdown
+//! for an AI agent (see `review`); kept with the project.
 //!
 //! Keys: Tab moves from the tree to the detail to the field. In the tree
 //! Up/Down select, Space checks, Left/Right fold, Enter opens a file in
 //! Zed or folds a repository, and typing goes to the field; Shift with
-//! Up/Down or the pages scrolls the detail. In the detail the arrows and
-//! the pages scroll, Alt+Up/Down go to the file before or after, and for
-//! the file at the top Space checks it, Left/Right fold it and Enter
-//! opens it in Zed at the line in view. Ctrl+N opens the branch picker to
-//! create a branch (in it, Ctrl+Enter creates the one typed), Ctrl+Enter
+//! Up/Down or the pages scrolls the detail. In the diff the arrows and the
+//! pages move a cursor over its rows (with Shift, reaching a range back),
+//! Alt+Up/Down go to the file before or after, and for the cursor's file
+//! Space checks it, Left/Right fold it and Enter opens it in Zed at the
+//! cursor's line. C writes a comment on the range's lines (or edits the
+//! one the cursor is on): Shift+Enter breaks its line, Enter keeps it, Esc
+//! drops it; Delete deletes it, Ctrl+Shift+C copies the review, and
+//! "Clear review" deletes it all, asked first. Ctrl+N opens the branch
+//! picker to create a branch (in it, Ctrl+Enter creates the one typed),
+//! Ctrl+Enter
 //! commits (Ctrl+Shift+Enter then pushes), Ctrl+P pushes (Ctrl+Shift+P force
 //! pushes), Ctrl+F fetches, Ctrl+L pulls, Ctrl+M merges the default
 //! branch in (Ctrl+Shift+M rebases on it), Alt+M merges a branch picked
@@ -59,12 +66,13 @@ use crate::{
     chrome::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, Density,
         DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone, FileLine, Hint,
-        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, SheetView,
-        Tone, TreeLine,
+        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, RowMark,
+        SheetView, Tone, TreeLine,
     },
     diff::FileDiff,
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
+    review::{self, Comment, Quoted, Review},
     text_field::{self, Edit, TextField},
     wheel::Wheel,
 };
@@ -163,6 +171,9 @@ pub struct Ctx<'a> {
     /// The tree's share of the panel's width (`chrome::REPOS_TREE_SHARE`
     /// unless dragged).
     pub tree_share: f64,
+    /// How many characters a review comment's row of the diff holds
+    /// (`chrome::repos_detail_cols`).
+    pub cols: usize,
 }
 
 /// Where the keyboard goes.
@@ -236,6 +247,58 @@ pub struct Panel {
     pub(crate) detail_stale: bool,
     /// The branch picker's menu, while open.
     pub(crate) branch_menu: Option<BranchMenu>,
+    /// The review comments on the diff, to copy for an agent; saved with
+    /// the project when `review_dirty`.
+    pub(crate) review: Review,
+    pub(crate) review_dirty: bool,
+    /// The diff's line cursor, once moved or clicked.
+    cursor: Option<Cursor>,
+    /// The comment being written.
+    editing: Option<Editing>,
+    /// Each comment's rows (by index into `review.comments`) and the
+    /// editor's, as byte ranges into their text, wrapped at `diff_cols`.
+    comment_wraps: Vec<Vec<Range<usize>>>,
+    editor_wrap: Vec<Range<usize>>,
+    diff_cols: usize,
+    /// The comments whose lines are gone from the diff, as the rows were
+    /// last worked out; and the lines comments are on, by `DiffRow::Line`'s
+    /// indices.
+    outdated: HashSet<usize>,
+    noted: HashSet<(usize, usize, usize, usize)>,
+}
+
+/// The diff's line cursor: the row it is on, and the row its range reaches
+/// back to (itself for none).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Cursor {
+    row: usize,
+    from: usize,
+    /// Who they are, to find them again as the rows change.
+    keys: (Option<RowKey>, Option<RowKey>),
+}
+
+/// A comment being written: on these lines of the file at `path` of the
+/// repository at `root`; in place of comment `at` (by index into
+/// `review.comments`) when it is one written before.
+#[derive(Clone, Debug)]
+struct Editing {
+    at: Option<usize>,
+    root: PathBuf,
+    path: String,
+    lines: Vec<Quoted>,
+    field: TextField,
+}
+
+/// A diff row by who it is, to find it again as the rows change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowKey {
+    Repo(PathBuf),
+    File(PathBuf, String),
+    Line(PathBuf, String, Quoted),
+    /// A comment's first row, by index into `review.comments`.
+    Comment(usize),
+    /// Any other row, by index.
+    At(usize),
 }
 
 /// The branch picker's menu: the first branch in view, and the one Enter
@@ -388,6 +451,8 @@ pub enum Sheet {
     },
     /// The panel's keys.
     Help { choice: usize },
+    /// Before dropping the review's comments.
+    ClearReview { choice: usize },
     /// What the check before `kind` found, per repository in `jobs`.
     Preflight {
         kind: BatchKind,
@@ -769,6 +834,11 @@ pub enum Outcome {
     },
     /// Run the last batch again over the repositories it failed in.
     RetryFailed,
+    /// Put the review, as Markdown, on the clipboard: `count` comments.
+    Copy {
+        text: String,
+        count: usize,
+    },
     /// Open these files of the repository at `root` in its workspace's Zed.
     OpenInZed {
         root: PathBuf,
@@ -811,6 +881,25 @@ enum DiffRow {
     Hunk(usize, usize, usize),
     Line(usize, usize, usize, usize),
     Note(usize, usize, usize),
+    /// Row `i` of comment `c` (by index into `review.comments`), in file
+    /// `at` (as `file`), or with the comments whose lines are gone.
+    Comment {
+        at: Option<(usize, usize)>,
+        c: usize,
+        i: usize,
+    },
+    /// Row `i` of the comment being written, and the line under it saying
+    /// what the keys do.
+    Editor {
+        at: Option<(usize, usize)>,
+        i: usize,
+    },
+    EditorHint {
+        at: Option<(usize, usize)>,
+    },
+    /// The heading over the comments whose lines are gone; and over each
+    /// of them, by index into `review.comments`, where it was.
+    Outdated(Option<usize>),
     /// Room before a repository's header.
     Gap,
 }
@@ -823,7 +912,10 @@ impl DiffRow {
             | DiffRow::Hunk(k, f, _)
             | DiffRow::Line(k, f, _, _)
             | DiffRow::Note(k, f, _) => Some((k, f)),
-            DiffRow::Repo(_) | DiffRow::Reading(_) | DiffRow::Gap => None,
+            DiffRow::Comment { at, .. }
+            | DiffRow::Editor { at, .. }
+            | DiffRow::EditorHint { at } => at,
+            DiffRow::Repo(_) | DiffRow::Reading(_) | DiffRow::Outdated(_) | DiffRow::Gap => None,
         }
     }
 
@@ -887,6 +979,7 @@ fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
     let button = match sym {
         Keysym::Return | Keysym::KP_Enter if shift => B::CommitPush,
         Keysym::Return | Keysym::KP_Enter => B::Commit,
+        Keysym::c | Keysym::C if shift => B::CopyReview,
         Keysym::p | Keysym::P if shift => B::ForcePush,
         Keysym::p | Keysym::P => B::Push,
         Keysym::f | Keysym::F => B::Fetch,
@@ -931,6 +1024,7 @@ fn key_name(button: ReposButton) -> &'static str {
         B::Stash => "Alt+S",
         B::StashPop => "Alt+Shift+S",
         B::Help => "F1",
+        B::CopyReview => "Ctrl+Shift+C",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
         B::RunInTerminal
@@ -938,7 +1032,8 @@ fn key_name(button: ReposButton) -> &'static str {
         | B::StashDrop
         | B::DeleteBranch
         | B::SwitchExisting
-        | B::CreateMissing => "",
+        | B::CreateMissing
+        | B::ClearReview => "",
     }
 }
 
@@ -989,6 +1084,7 @@ fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
         ],
         Sheet::Confirm { kind, .. } => vec![confirm_button(kind), ReposButton::Cancel],
         Sheet::Help { .. } => vec![ReposButton::Close],
+        Sheet::ClearReview { .. } => vec![ReposButton::ClearReview, ReposButton::Cancel],
         // Created where missing only when some are.
         Sheet::Exists { jobs, have, .. } => {
             let mut buttons = vec![ReposButton::SwitchExisting];
@@ -1009,13 +1105,25 @@ fn missing(jobs: &[Job], have: &[(PathBuf, Found)]) -> Vec<Job> {
         .collect()
 }
 
+/// Why the review can't be copied or cleared.
+const NO_REVIEW: &str = "No review comments: in the diff, press C on a line";
+
 /// The panel's keys, as the help sheet lists them: the key, what it does.
 const HELP_KEYS: &[(&str, &str)] = &[
     ("Tab", "the tree, the diff, the field"),
-    ("Up / Down", "select a line"),
+    ("Up / Down", "select a line; in the diff, move the cursor"),
     ("PgUp / PgDn", "a page of lines"),
-    ("Shift+Up / Down", "scroll the diff or log"),
+    (
+        "Shift+Up / Down",
+        "scroll the diff or log; in the diff, a range",
+    ),
     ("Alt+Up / Down", "in the diff, the file before or after"),
+    (
+        "C / Del",
+        "in the diff, comment on the lines; delete a comment",
+    ),
+    ("Shift+Enter", "in a comment, a new line; Enter keeps it"),
+    ("Ctrl+Shift+C", "copy the review comments for an AI agent"),
     ("Space", "check the line, or the diff's file"),
     ("Ctrl+A", "check everything, or nothing"),
     ("Left / Right", "fold a repository, or the diff's file"),
@@ -1029,6 +1137,12 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Right click", "the actions, on a line or anywhere"),
     ("Esc", "close"),
 ];
+
+/// Which of the rows `wrap` broke a text into the caret at byte `caret`
+/// is on: where a row ends and the next starts, the next.
+fn caret_row(wrap: &[Range<usize>], caret: usize) -> usize {
+    wrap.iter().rposition(|r| r.start <= caret).unwrap_or(0)
+}
 
 /// `n` repositories, in words.
 fn repos(n: usize) -> String {
@@ -1991,6 +2105,7 @@ impl Panel {
     /// files committed, repositories closed), keep the selection on who it
     /// was, or near where it was.
     pub fn refresh(&mut self, ctx: &Ctx) {
+        self.diff_cols = ctx.cols;
         let items = ctx.items;
         let anchor = self.diff_anchor();
         let roots: HashSet<&Path> = items.iter().map(|i| i.root.as_path()).collect();
@@ -2027,7 +2142,10 @@ impl Panel {
     fn plan(&self, button: ReposButton, ctx: &Ctx) -> Result<Outcome, Why> {
         use ReposButton as B;
         let items = ctx.items;
-        let local = matches!(button, B::OpenInZed | B::RunInTerminal | B::OpenWorkspace);
+        let local = matches!(
+            button,
+            B::OpenInZed | B::RunInTerminal | B::OpenWorkspace | B::CopyReview | B::ClearReview
+        );
         if !local && ctx.batch.is_some_and(|b| !b.finished()) {
             return Err(Why::other("Wait for the batch to finish"));
         }
@@ -2225,6 +2343,9 @@ impl Panel {
                 _ => Err(Why::other("Not checked out elsewhere")),
             },
             B::Help => Err(Why::other("Press F1 for the keys")),
+            B::CopyReview => self.copy_review(ctx),
+            B::ClearReview if self.review.is_empty() => Err(Why::other(NO_REVIEW)),
+            B::ClearReview => Err(Why::other("Asked on a sheet")),
             B::All
             | B::CleanOnly
             | B::Cancel
@@ -2325,7 +2446,17 @@ impl Panel {
     /// about on a sheet first.
     fn act(&mut self, button: ReposButton, ctx: &Ctx) -> Option<Outcome> {
         if self.sheet.is_some() {
-            return self.sheet_press(button);
+            return self.sheet_press(button, ctx);
+        }
+        if button == ReposButton::ClearReview {
+            if self.review.is_empty() {
+                self.error = Some(NO_REVIEW.into());
+            } else {
+                self.error = None;
+                self.branch_menu = None;
+                self.sheet = Some(Sheet::ClearReview { choice: 0 });
+            }
+            return None;
         }
         if button == ReposButton::Help {
             self.branch_menu = None;
@@ -2360,7 +2491,7 @@ impl Panel {
 
     /// Answer the sheet with `button`; it closes, unless `button` isn't
     /// one of its own.
-    fn sheet_press(&mut self, button: ReposButton) -> Option<Outcome> {
+    fn sheet_press(&mut self, button: ReposButton, ctx: &Ctx) -> Option<Outcome> {
         use ReposButton as B;
         let sheet = self.sheet.take()?;
         match (sheet, button) {
@@ -2392,6 +2523,13 @@ impl Panel {
                 Some(Outcome::Batch { kind, jobs })
             }
             (Sheet::Help { .. }, _) => None,
+            (Sheet::ClearReview { .. }, B::ClearReview) => {
+                self.review.comments.clear();
+                self.review_dirty = true;
+                self.editing = None;
+                self.build_rows(ctx.items, self.diff_anchor());
+                None
+            }
             (Sheet::Diverged { roots, .. }, B::PullRebase | B::PullMerge) => {
                 let how = if button == B::PullRebase {
                     Pull::Rebase
@@ -2455,13 +2593,14 @@ impl Panel {
 
     /// A key for the sheet, which takes them all: Left/Right/Tab choose a
     /// button, Enter presses it, Esc cancels.
-    fn sheet_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+    fn sheet_key(&mut self, mods: &ModifiersState, sym: Keysym, ctx: &Ctx) -> Option<Outcome> {
         let sheet = self.sheet.as_mut()?;
         let buttons = sheet_buttons(sheet);
         let (Sheet::Preflight { choice, .. }
         | Sheet::Diverged { choice, .. }
         | Sheet::Confirm { choice, .. }
         | Sheet::Help { choice, .. }
+        | Sheet::ClearReview { choice, .. }
         | Sheet::Exists { choice, .. }) = sheet;
         let n = buttons.len();
         match sym {
@@ -2472,9 +2611,9 @@ impl Panel {
             Keysym::Right | Keysym::KP_Right | Keysym::Tab => *choice = (*choice + 1) % n,
             Keysym::Return | Keysym::KP_Enter => {
                 let button = buttons[(*choice).min(n - 1)];
-                return self.sheet_press(button);
+                return self.sheet_press(button, ctx);
             }
-            Keysym::Escape => return self.sheet_press(ReposButton::Cancel),
+            Keysym::Escape => return self.sheet_press(ReposButton::Cancel, ctx),
             _ => {}
         }
         None
@@ -2504,11 +2643,16 @@ impl Panel {
         if sym.is_modifier_key() {
             return None;
         }
+        self.rewrap(ctx);
         if self.sheet.is_some() {
-            return self.sheet_key(mods, sym);
+            return self.sheet_key(mods, sym, ctx);
         }
         if self.branch_menu.is_some() {
             return self.branch_menu_key(mods, sym, typed, ctx);
+        }
+        // The comment being written takes the keys while the diff has them.
+        if self.editing.is_some() && self.focus == Focus::Detail && self.tab() == DetailTab::Diff {
+            return self.editor_key(mods, sym, typed, ctx);
         }
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         if only_ctrl && matches!(sym, Keysym::s | Keysym::S) {
@@ -2527,8 +2671,10 @@ impl Panel {
             return self.act(button, ctx);
         }
         // Shift with the arrows or the pages scrolls the detail, with
-        // either focus.
-        if plain && mods.shift {
+        // either focus; in the diff, with its own, they reach the cursor's
+        // range further.
+        let in_diff = self.focus == Focus::Detail && self.tab() == DetailTab::Diff;
+        if plain && mods.shift && !in_diff {
             let page = ctx.page.1.max(1) as i64;
             let by = match sym {
                 Keysym::Down | Keysym::KP_Down => 1,
@@ -2673,7 +2819,7 @@ impl Panel {
     pub fn click(&mut self, hit: ReposHit, ctx: &Ctx) -> Option<Outcome> {
         if self.sheet.is_some() {
             return match hit {
-                ReposHit::Button(button) => self.sheet_press(button),
+                ReposHit::Button(button) => self.sheet_press(button, ctx),
                 _ => None,
             };
         }
@@ -2702,6 +2848,30 @@ impl Panel {
                 }
             };
         }
+        self.rewrap(ctx);
+        // A click elsewhere than on the comment being written saves it;
+        // the diff row clicked found again among the rows without it.
+        let diff_row = match hit {
+            ReposHit::DiffRow(i) | ReposHit::DiffCheck(i) | ReposHit::DiffFold(i) => {
+                self.detail_row_at(i, ctx)
+            }
+            _ => None,
+        };
+        let on_editor = diff_row.is_some_and(|r| {
+            matches!(
+                self.diff_rows[r],
+                DiffRow::Editor { .. } | DiffRow::EditorHint { .. }
+            )
+        });
+        if on_editor {
+            self.focus = Focus::Detail;
+            return None;
+        }
+        let key = diff_row.and_then(|r| self.row_key(r));
+        if self.editing.is_some() {
+            self.save_comment(ctx);
+        }
+        let diff_row = key.and_then(|k| self.find_row(&k));
         let items = ctx.items;
         let page = ctx.page.0.max(1);
         let rows = self.rows(items);
@@ -2738,19 +2908,24 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
-            ReposHit::DiffRow(i) => {
+            ReposHit::DiffRow(_) => {
                 self.focus = Focus::Detail;
-                if let Some(r) = self.detail_row_at(i, ctx) {
+                if let Some(r) = diff_row {
+                    self.set_cursor(r, None);
                     self.select_diff_row(r, ctx);
+                    // On a comment, it is edited.
+                    if let Some(c) = self.comment_at(r) {
+                        self.edit_comment(c, ctx);
+                    }
                 }
             }
-            ReposHit::DiffCheck(i) => {
-                let r = self.detail_row_at(i, ctx)?;
+            ReposHit::DiffCheck(_) => {
+                let r = diff_row?;
                 self.select_diff_row(r, ctx);
                 self.toggle_diff_file(r, ctx);
             }
-            ReposHit::DiffFold(i) => {
-                let r = self.detail_row_at(i, ctx)?;
+            ReposHit::DiffFold(_) => {
+                let r = diff_row?;
                 let (root, path) = self.diff_path(r)?;
                 let folded = self.diff_folded.contains(&(root, path));
                 self.fold_diff_file(r, !folded, ctx);
@@ -3100,6 +3275,9 @@ impl Panel {
                 }
             }
         }
+        if !self.review.is_empty() {
+            buttons.extend([B::CopyReview, B::ClearReview]);
+        }
         buttons.push(B::Help);
         buttons
             .into_iter()
@@ -3109,6 +3287,9 @@ impl Panel {
                 key: key_name(button).into(),
                 disabled: match self.plan(button, ctx) {
                     _ if button == ReposButton::Help => None,
+                    _ if button == ReposButton::ClearReview => {
+                        self.review.is_empty().then(|| NO_REVIEW.into())
+                    }
                     _ if menu_integrate(button).is_some() => {
                         self.menu_blocked(ctx).map(String::from)
                     }
@@ -3205,15 +3386,22 @@ impl Panel {
                 .map(|&h| self.diff_row_view(h, true, ctx))
                 .collect();
             rows.extend(range.clone().map(|r| self.diff_row_view(r, false, ctx)));
+            let marks = sticky
+                .into_iter()
+                .chain(range.clone())
+                .map(|r| self.row_mark(r));
+            let mut marks: Vec<RowMark> = marks.collect();
             if self.diff_rows.is_empty() && !ctx.items.is_empty() {
                 let text = "No changes in any repository";
                 rows = vec![DetailRow::Text(detail_line(text, DiffTone::Plain))];
+                marks.clear();
             }
             return DetailView {
                 tab,
                 title: self.diff_title(ctx),
                 rows,
                 sticky: sticky.is_some(),
+                marks,
                 part,
                 first: range.start,
                 total: self.diff_rows.len(),
@@ -3246,6 +3434,7 @@ impl Panel {
                 .map(DetailRow::Text)
                 .collect(),
             sticky: false,
+            marks: Vec::new(),
             part,
             first,
             total,
@@ -3283,8 +3472,29 @@ impl Panel {
     /// Work the diff's rows out again for `items`, scrolled back to
     /// `anchor`: per repository with changes its header, then each file's
     /// header and, unless folded, its hunks (each after a line saying what
-    /// it is in, but the first when git says nothing) and notes.
+    /// it is in, but the first when git says nothing) and notes; under a
+    /// line, the review comments on it, and the comment being written.
+    /// Last, the comments whose lines are gone. The cursor stays on who it
+    /// was on.
     fn build_rows(&mut self, items: &[RepoItem], anchor: Option<Anchor>) {
+        let cols = if self.diff_cols == 0 {
+            80
+        } else {
+            self.diff_cols
+        };
+        let comments = &self.review.comments;
+        self.comment_wraps = comments
+            .iter()
+            .map(|c| review::wrap(&c.text, cols))
+            .collect();
+        self.editor_wrap = self
+            .editing
+            .as_ref()
+            .map(|e| review::wrap(&e.field, cols))
+            .unwrap_or_default();
+        // Shown under their lines, or waiting for their diffs.
+        let mut placed: HashSet<usize> = HashSet::new();
+        let mut noted = HashSet::new();
         let mut rows = Vec::new();
         for (k, item) in items.iter().enumerate() {
             if item.status.changes.is_empty() {
@@ -3296,28 +3506,495 @@ impl Panel {
             rows.push(DiffRow::Repo(k));
             let Some((_, files)) = self.diffs.get(&item.root) else {
                 rows.push(DiffRow::Reading(k));
+                let here = comments
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.root == item.root);
+                placed.extend(here.map(|(c, _)| c));
                 continue;
             };
             for (f, file) in files.iter().enumerate() {
                 rows.push(DiffRow::File(k, f));
+                // The file's comments, by the line they go under.
+                let mut under: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+                for (c, comment) in comments.iter().enumerate() {
+                    if comment.root != item.root || comment.path != file.path {
+                        continue;
+                    }
+                    if let Some(at) = review::locate(file, comment) {
+                        under.entry(at).or_default().push(c);
+                        placed.insert(c);
+                        let lines = comment.lines.iter().filter_map(|q| review::find(file, q));
+                        noted.extend(lines.map(|(h, l)| (k, f, h, l)));
+                    }
+                }
+                let new_at = self
+                    .editing
+                    .as_ref()
+                    .filter(|e| e.at.is_none() && e.root == item.root && e.path == file.path)
+                    .and_then(|e| review::find(file, e.lines.last()?));
                 let key = (item.root.clone(), file.path.clone());
                 if self.diff_folded.contains(&key) {
                     continue;
                 }
+                let at = Some((k, f));
                 for (h, hunk) in file.hunks.iter().enumerate() {
                     if h > 0 || !hunk.context.is_empty() {
                         rows.push(DiffRow::Hunk(k, f, h));
                     }
-                    rows.extend((0..hunk.lines.len()).map(|l| DiffRow::Line(k, f, h, l)));
+                    for l in 0..hunk.lines.len() {
+                        rows.push(DiffRow::Line(k, f, h, l));
+                        for &c in under.get(&(h, l)).into_iter().flatten() {
+                            self.push_comment(&mut rows, at, c);
+                        }
+                        if new_at == Some((h, l)) {
+                            self.push_editor(&mut rows, at);
+                        }
+                    }
                 }
                 rows.extend((0..file.notes.len()).map(|n| DiffRow::Note(k, f, n)));
             }
         }
+        // The comments whose lines are gone, and one being written on a
+        // line gone meanwhile.
+        let gone: Vec<usize> = (0..comments.len())
+            .filter(|c| !placed.contains(c))
+            .collect();
+        let lost = self.editing.as_ref().is_some_and(|e| e.at.is_none())
+            && !rows.iter().any(|r| matches!(r, DiffRow::Editor { .. }));
+        if !gone.is_empty() || lost {
+            if !rows.is_empty() {
+                rows.push(DiffRow::Gap);
+            }
+            rows.push(DiffRow::Outdated(None));
+            for &c in &gone {
+                rows.push(DiffRow::Outdated(Some(c)));
+                self.push_comment(&mut rows, None, c);
+            }
+            if lost {
+                self.push_editor(&mut rows, None);
+            }
+        }
+        self.outdated = gone.into_iter().collect();
+        self.noted = noted;
         self.diff_rows = rows;
         self.diff_roots = items.iter().map(|i| i.root.clone()).collect();
         if let Some(anchor) = anchor.filter(|_| self.tab() == DetailTab::Diff) {
             self.scroll_to(&anchor);
         }
+        if let Some(cursor) = self.cursor.take() {
+            let row = cursor.keys.0.as_ref().and_then(|k| self.find_row(k));
+            let from = cursor.keys.1.as_ref().and_then(|k| self.find_row(k));
+            if let Some(row) = row {
+                self.set_cursor(row, Some(from.unwrap_or(row)));
+            }
+        }
+    }
+
+    /// Comment `c`'s rows, in file `at`; the editor's in its place while
+    /// it is edited.
+    fn push_comment(&self, rows: &mut Vec<DiffRow>, at: Option<(usize, usize)>, c: usize) {
+        if self.editing.as_ref().is_some_and(|e| e.at == Some(c)) {
+            return self.push_editor(rows, at);
+        }
+        let n = self.comment_wraps.get(c).map_or(1, Vec::len);
+        rows.extend((0..n).map(|i| DiffRow::Comment { at, c, i }));
+    }
+
+    /// The editor's rows, in file `at`, and the line saying its keys.
+    fn push_editor(&self, rows: &mut Vec<DiffRow>, at: Option<(usize, usize)>) {
+        rows.extend((0..self.editor_wrap.len().max(1)).map(|i| DiffRow::Editor { at, i }));
+        rows.push(DiffRow::EditorHint { at });
+    }
+
+    /// The rows worked out again when the comments' rows hold another
+    /// number of characters now.
+    fn rewrap(&mut self, ctx: &Ctx) {
+        if ctx.cols == self.diff_cols {
+            return;
+        }
+        self.diff_cols = ctx.cols;
+        if !self.review.is_empty() || self.editing.is_some() {
+            self.build_rows(ctx.items, self.diff_anchor());
+        }
+    }
+
+    /// Diff row `r` by who it is.
+    fn row_key(&self, r: usize) -> Option<RowKey> {
+        Some(match *self.diff_rows.get(r)? {
+            DiffRow::Repo(k) => RowKey::Repo(self.diff_roots.get(k)?.clone()),
+            DiffRow::File(..) => {
+                let (root, path) = self.diff_path(r)?;
+                RowKey::File(root, path)
+            }
+            DiffRow::Line(k, f, h, l) => {
+                let (root, file) = self.diff_file(k, f)?;
+                let line = file.hunks.get(h)?.lines.get(l)?;
+                RowKey::Line(root.to_path_buf(), file.path.clone(), Quoted::of(line))
+            }
+            DiffRow::Comment { c, .. } | DiffRow::Outdated(Some(c)) => RowKey::Comment(c),
+            _ => RowKey::At(r),
+        })
+    }
+
+    /// The row `key` is, or the nearest that is still there: a line's
+    /// file, a file's repository.
+    fn find_row(&self, key: &RowKey) -> Option<usize> {
+        let last = self.diff_rows.len().checked_sub(1)?;
+        match key {
+            RowKey::Repo(root) => self.header_row(root, None),
+            RowKey::File(root, path) => self
+                .header_row(root, Some(path))
+                .or_else(|| self.header_row(root, None)),
+            RowKey::Line(root, path, quoted) => {
+                let head = self.header_row(root, Some(path));
+                let line = head.and_then(|h| {
+                    let DiffRow::File(k, f) = self.diff_rows[h] else {
+                        return None;
+                    };
+                    let (hunk, l) = review::find(self.diff_file(k, f)?.1, quoted)?;
+                    let n = self.diff_rows[h..]
+                        .iter()
+                        .position(|r| *r == DiffRow::Line(k, f, hunk, l))?;
+                    Some(h + n)
+                });
+                line.or(head).or_else(|| self.header_row(root, None))
+            }
+            RowKey::Comment(c) => self.diff_rows.iter().position(|r| {
+                matches!(*r, DiffRow::Comment { c: x, i: 0, .. } | DiffRow::Outdated(Some(x)) if x == *c)
+            }),
+            RowKey::At(r) => Some((*r).min(last)),
+        }
+    }
+
+    /// Put the diff's cursor on row `row`, its range reaching back to
+    /// `from` (none without).
+    fn set_cursor(&mut self, row: usize, from: Option<usize>) {
+        let from = from.unwrap_or(row);
+        let keys = (self.row_key(row), self.row_key(from));
+        self.cursor = Some(Cursor { row, from, keys });
+    }
+
+    /// The comment diff row `r` is of.
+    fn comment_at(&self, r: usize) -> Option<usize> {
+        match *self.diff_rows.get(r)? {
+            DiffRow::Comment { c, .. } | DiffRow::Outdated(Some(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Move the diff's cursor `by` rows (down positive), keeping its range
+    /// when `extend`, the diff scrolled to show it and its file selected
+    /// in the tree. The first move puts it on the first row in view.
+    fn move_cursor(&mut self, by: i64, extend: bool, ctx: &Ctx) {
+        let n = self.diff_rows.len();
+        if n == 0 {
+            return;
+        }
+        let page = ctx.page.1.max(1);
+        let (row, from) = match &self.cursor {
+            Some(c) => (c.row.min(n - 1), c.from.min(n - 1)),
+            None => {
+                let (sticky, range) = self.diff_window(page);
+                let at = if range.is_empty() {
+                    sticky.unwrap_or(0)
+                } else {
+                    range.start
+                };
+                let at = self.cursor_stop(at, 1);
+                if by.abs() == 1 {
+                    self.set_cursor(at, None);
+                    self.select_diff_row(at, ctx);
+                    return;
+                }
+                (at, at)
+            }
+        };
+        let to = (row as i64).saturating_add(by).clamp(0, n as i64 - 1) as usize;
+        let to = self.cursor_stop(to, by.signum());
+        self.set_cursor(to, extend.then_some(from));
+        self.detail_wheel = Wheel::default();
+        self.follow(to, page);
+        self.select_diff_row(to, ctx);
+    }
+
+    /// The row the cursor stops on going `dir` (1 down, -1 up) to row
+    /// `r`: not room between repositories, nor the editor's rows.
+    fn cursor_stop(&self, r: usize, dir: i64) -> usize {
+        let stops = |r: usize| {
+            !matches!(
+                self.diff_rows[r],
+                DiffRow::Gap | DiffRow::Editor { .. } | DiffRow::EditorHint { .. }
+            )
+        };
+        let n = self.diff_rows.len();
+        let ahead = |r: usize| {
+            if dir < 0 {
+                (0..=r).rev().find(|&r| stops(r))
+            } else {
+                (r..n).find(|&r| stops(r))
+            }
+        };
+        let back = |r: usize| {
+            if dir < 0 {
+                (r..n).find(|&r| stops(r))
+            } else {
+                (0..=r).rev().find(|&r| stops(r))
+            }
+        };
+        ahead(r).or_else(|| back(r)).unwrap_or(r)
+    }
+
+    /// Scroll the diff the least to show row `r` on a page of `page`.
+    fn follow(&mut self, r: usize, page: usize) {
+        let page = page.max(1);
+        let (sticky, range) = self.diff_window(page);
+        if range.contains(&r) || sticky == Some(r) {
+            return;
+        }
+        if r < range.start {
+            self.detail_first = r;
+            return;
+        }
+        let last = self.diff_last(page);
+        let mut first = (r + 1).saturating_sub(page).min(last);
+        // One further when a header pins over the rows.
+        while first < last.min(r) {
+            self.detail_first = first;
+            if self.diff_window(page).1.contains(&r) {
+                return;
+            }
+            first += 1;
+        }
+        self.detail_first = first;
+    }
+
+    /// The root and path of the file the cursor is in, and the lines of it
+    /// its range takes in.
+    fn cursor_lines(&self) -> Option<(PathBuf, String, Vec<Quoted>)> {
+        let cursor = self.cursor.as_ref()?;
+        let (k, f) = self.diff_rows.get(cursor.row)?.file()?;
+        let (root, file) = self.diff_file(k, f)?;
+        let (a, b) = (cursor.row.min(cursor.from), cursor.row.max(cursor.from));
+        let lines = self.diff_rows[a..=b.min(self.diff_rows.len() - 1)]
+            .iter()
+            .filter_map(|row| match *row {
+                DiffRow::Line(kk, ff, h, l) if (kk, ff) == (k, f) => {
+                    file.hunks.get(h)?.lines.get(l).map(Quoted::of)
+                }
+                _ => None,
+            })
+            .collect();
+        Some((root.to_path_buf(), file.path.clone(), lines))
+    }
+
+    /// Write a comment on the lines of the cursor's range (C), or edit the
+    /// comment the cursor is on.
+    fn comment_here(&mut self, ctx: &Ctx) {
+        if let Some(c) = self
+            .cursor
+            .as_ref()
+            .and_then(|cur| self.comment_at(cur.row))
+        {
+            return self.edit_comment(c, ctx);
+        }
+        let Some((root, path, lines)) = self.cursor_lines().filter(|(_, _, l)| !l.is_empty())
+        else {
+            self.error = Some("Move the diff's cursor to a line to comment on it".into());
+            return;
+        };
+        self.error = None;
+        self.editing = Some(Editing {
+            at: None,
+            root,
+            path,
+            lines,
+            field: TextField::multiline(""),
+        });
+        self.build_rows(ctx.items, self.diff_anchor());
+        self.follow_editor(ctx);
+    }
+
+    /// Edit comment `c`, in its place.
+    fn edit_comment(&mut self, c: usize, ctx: &Ctx) {
+        let Some(comment) = self.review.comments.get(c) else {
+            return;
+        };
+        self.error = None;
+        self.focus = Focus::Detail;
+        self.editing = Some(Editing {
+            at: Some(c),
+            root: comment.root.clone(),
+            path: comment.path.clone(),
+            lines: comment.lines.clone(),
+            field: TextField::multiline(&comment.text),
+        });
+        self.build_rows(ctx.items, self.diff_anchor());
+        self.follow_editor(ctx);
+    }
+
+    /// Keep the comment being written: a comment written before, emptied,
+    /// is deleted.
+    fn save_comment(&mut self, ctx: &Ctx) {
+        let Some(editing) = self.editing.take() else {
+            return;
+        };
+        let text = editing.field.trim().to_owned();
+        match (editing.at, text.is_empty()) {
+            (Some(c), true) if c < self.review.comments.len() => {
+                self.review.comments.remove(c);
+            }
+            (Some(c), false) if c < self.review.comments.len() => {
+                self.review.comments[c].text = text;
+            }
+            (None, false) => self.review.comments.push(Comment {
+                root: editing.root,
+                path: editing.path,
+                lines: editing.lines,
+                text,
+            }),
+            _ => {}
+        }
+        self.review_dirty = true;
+        self.build_rows(ctx.items, self.diff_anchor());
+    }
+
+    /// Delete the comment the cursor is on, the cursor going to the row
+    /// over it.
+    fn delete_comment(&mut self, ctx: &Ctx) {
+        let Some(cursor) = &self.cursor else {
+            return;
+        };
+        let Some(c) = self.comment_at(cursor.row) else {
+            return;
+        };
+        let first = self.find_row(&RowKey::Comment(c)).unwrap_or(cursor.row);
+        let above = self.cursor_stop(first.saturating_sub(1), -1);
+        self.set_cursor(above, None);
+        // A comment after it is one up now.
+        if let Some(Cursor { keys, .. }) = &mut self.cursor {
+            for key in [&mut keys.0, &mut keys.1].into_iter().flatten() {
+                if let RowKey::Comment(x) = key
+                    && *x > c
+                {
+                    *x -= 1;
+                }
+            }
+        }
+        self.review.comments.remove(c);
+        self.review_dirty = true;
+        self.build_rows(ctx.items, self.diff_anchor());
+    }
+
+    /// Scroll the diff to show the editor's caret, and the line under it
+    /// if it fits.
+    fn follow_editor(&mut self, ctx: &Ctx) {
+        let Some(editing) = &self.editing else {
+            return;
+        };
+        let i = caret_row(&self.editor_wrap, editing.field.line().caret);
+        let page = ctx.page.1;
+        let hint = self
+            .diff_rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::EditorHint { .. }));
+        let caret = self
+            .diff_rows
+            .iter()
+            .position(|r| matches!(*r, DiffRow::Editor { i: j, .. } if j == i));
+        if let Some(hint) = hint {
+            self.follow(hint, page);
+        }
+        if let Some(caret) = caret {
+            self.follow(caret, page);
+        }
+    }
+
+    /// A key while a comment is being written, which takes them all: Enter
+    /// (or Ctrl+Enter) keeps it, Shift+Enter breaks the line, Esc drops
+    /// it; Ctrl+Shift+C copies the review still.
+    fn editor_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        ctx: &Ctx,
+    ) -> Option<Outcome> {
+        let others = mods.alt || mods.logo;
+        let plain = !(mods.ctrl || mods.shift || others);
+        let only_ctrl = mods.ctrl && !(mods.shift || others);
+        let only_shift = mods.shift && !(mods.ctrl || others);
+        if action_key(mods, sym) == Some(ReposButton::CopyReview) {
+            return self.act(ReposButton::CopyReview, ctx);
+        }
+        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+        if sym == Keysym::Escape && plain {
+            self.editing = None;
+            self.build_rows(ctx.items, self.diff_anchor());
+            return None;
+        }
+        if enter && (plain || only_ctrl) {
+            self.save_comment(ctx);
+            return None;
+        }
+        let field = &mut self.editing.as_mut()?.field;
+        let edit = if enter && only_shift {
+            field.newline()
+        } else {
+            field.key(mods, sym, typed)
+        };
+        match edit {
+            Edit::Changed => {
+                self.build_rows(ctx.items, self.diff_anchor());
+                self.follow_editor(ctx);
+            }
+            Edit::Moved => self.follow_editor(ctx),
+            Edit::Ignored => {}
+        }
+        None
+    }
+
+    /// Shift+click on row `i` of the detail pane: the cursor goes there,
+    /// its range reaching back to where it was.
+    pub fn extend_detail_row(&mut self, i: usize, ctx: &Ctx) {
+        self.rewrap(ctx);
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(r) = self.detail_row_at(i, ctx) else {
+            return;
+        };
+        let from = self.cursor.as_ref().map_or(r, |c| c.from);
+        self.focus = Focus::Detail;
+        self.set_cursor(r, Some(from));
+    }
+
+    /// The review as Markdown for an agent, to copy.
+    fn copy_review(&self, ctx: &Ctx) -> Result<Outcome, Why> {
+        if self.review.is_empty() {
+            return Err(Why::other(NO_REVIEW));
+        }
+        let order: Vec<PathBuf> = ctx.items.iter().map(|i| i.root.clone()).collect();
+        let label = |root: &Path| {
+            ctx.items.iter().find(|i| i.root == root).map_or_else(
+                || {
+                    root.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into()
+                },
+                |i| i.label.clone(),
+            )
+        };
+        let comments = &self.review.comments;
+        let outdated = |c: &Comment| {
+            let at = comments.iter().position(|x| std::ptr::eq(x, c));
+            at.is_some_and(|at| self.outdated.contains(&at))
+        };
+        Ok(Outcome::Copy {
+            text: review::markdown(&self.review, &order, label, outdated),
+            count: comments.len(),
+        })
     }
 
     /// File `f` of the diff of repository `k` of `diff_roots`, with its
@@ -3443,9 +4120,12 @@ impl Panel {
             .find(|&h| self.diff_rows[h] == DiffRow::File(k, f))
     }
 
-    /// The header of the file the diff's keys act on: the one at its top,
-    /// else the first in view.
+    /// The header of the file the diff's keys act on: the cursor's, else
+    /// the one at its top, else the first in view.
     fn current_file(&self, page: usize) -> Option<usize> {
+        if let Some(head) = self.cursor.as_ref().and_then(|c| self.file_head(c.row)) {
+            return Some(head);
+        }
         let (_, range) = self.diff_window(page);
         let first = range.start;
         self.file_head(first).or_else(|| {
@@ -3520,7 +4200,86 @@ impl Panel {
                 DetailRow::Line(file.hunks[h].lines[l].clone())
             }
             (DiffRow::Note(_, _, n), Some((_, file))) => DetailRow::Note(file.notes[n].clone()),
+            (DiffRow::Comment { c, i, .. }, _) => {
+                let (Some(comment), Some(wrap)) =
+                    (self.review.comments.get(c), self.comment_wraps.get(c))
+                else {
+                    return blank();
+                };
+                let range = wrap.get(i).cloned().unwrap_or(0..0);
+                DetailRow::Comment {
+                    text: comment.text[range].to_owned(),
+                    first: i == 0,
+                    last: i + 1 >= wrap.len(),
+                }
+            }
+            (DiffRow::Editor { i, .. }, _) => {
+                let Some(editing) = &self.editing else {
+                    return blank();
+                };
+                let line = editing.field.line();
+                let range = self.editor_wrap.get(i).cloned().unwrap_or(0..0);
+                let sel = line.selection();
+                let clip = |b: usize| b.clamp(range.start, range.end) - range.start;
+                let on = caret_row(&self.editor_wrap, line.caret) == i;
+                DetailRow::Editor {
+                    text: line.text[range.clone()].to_owned(),
+                    caret: on.then(|| clip(line.caret)),
+                    selection: clip(sel.start)..clip(sel.end),
+                    first: i == 0,
+                    last: i + 1 >= self.editor_wrap.len(),
+                }
+            }
+            (DiffRow::EditorHint { .. }, _) => {
+                DetailRow::Note("Enter saves · Shift+Enter breaks the line · Esc cancels".into())
+            }
+            (DiffRow::Outdated(None), _) => DetailRow::Hunk {
+                context: "Comments on lines no longer in the diff".into(),
+                number: 0,
+            },
+            (DiffRow::Outdated(Some(c)), _) => {
+                let Some(comment) = self.review.comments.get(c) else {
+                    return blank();
+                };
+                let repo = ctx
+                    .items
+                    .iter()
+                    .find(|i| i.root == comment.root)
+                    .map_or_else(
+                        || {
+                            comment
+                                .root
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into()
+                        },
+                        |i| i.label.clone(),
+                    );
+                DetailRow::Note(format!("{repo} › {}", review::place(comment)))
+            }
             _ => blank(),
+        }
+    }
+
+    /// How diff row `r` is marked: the cursor on it, in its range, a
+    /// comment on it.
+    fn row_mark(&self, r: usize) -> RowMark {
+        let (cursor, range) = match &self.cursor {
+            Some(c) => (
+                c.row == r,
+                c.row != c.from && (c.row.min(c.from)..=c.row.max(c.from)).contains(&r),
+            ),
+            None => (false, false),
+        };
+        let noted = match self.diff_rows.get(r) {
+            Some(&DiffRow::Line(k, f, h, l)) => self.noted.contains(&(k, f, h, l)),
+            _ => false,
+        };
+        RowMark {
+            cursor,
+            range: range && !cursor,
+            noted,
         }
     }
 
@@ -3615,6 +4374,7 @@ impl Panel {
         };
         if let Some(to) = to {
             self.detail_first = to;
+            self.set_cursor(to, None);
             self.select_diff_row(to, ctx);
         }
     }
@@ -3634,6 +4394,10 @@ impl Panel {
         let (root, file) = self.diff_file(k, f)?;
         let number = match row {
             DiffRow::Line(_, _, h, l) => Some(file.hunks[h].lines[l].number),
+            DiffRow::Comment { c, .. } => {
+                let comment = self.review.comments.get(c);
+                comment.and_then(|c| c.lines.last()).map(|q| q.number)
+            }
             DiffRow::Hunk(_, _, h) => file.hunks[h].lines.first().map(|l| l.number),
             _ => file.hunks.first()?.lines.first().map(|l| l.number),
         };
@@ -3648,10 +4412,13 @@ impl Panel {
     }
 
     /// A key while the detail has the keyboard; `None` when it isn't one
-    /// of its own. The arrows, the pages, Home and End scroll it; in the
-    /// diff Alt+Up/Down go to the file before or after, and for the file
-    /// at the top Space checks it, Left and Right fold and unfold it, and
-    /// Enter opens it in Zed at the first line in view.
+    /// of its own. The arrows, the pages, Home and End scroll the log; in
+    /// the diff they move its cursor (with Shift reaching its range
+    /// further), Alt+Up/Down go to the file before or after, and for the
+    /// cursor's file (else the one at the top) Space checks it, Left and
+    /// Right fold and unfold it, and Enter opens it in Zed at the cursor's
+    /// line (else the first in view). C comments on the cursor's lines, or
+    /// edits the comment it is on; Delete deletes that.
     fn detail_press(
         &mut self,
         mods: &ModifiersState,
@@ -3661,8 +4428,10 @@ impl Panel {
         let page = ctx.page.1.max(1);
         let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
         let alt = mods.alt && !(mods.ctrl || mods.logo || mods.shift);
+        let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+        let diff = self.tab() == DetailTab::Diff;
         let by = match sym {
-            _ if !plain => 0,
+            _ if !(plain || diff && shift) => 0,
             Keysym::Down | Keysym::KP_Down => 1,
             Keysym::Up | Keysym::KP_Up => -1,
             Keysym::Page_Down | Keysym::KP_Page_Down => page as i64,
@@ -3672,10 +4441,14 @@ impl Panel {
             _ => 0,
         };
         if by != 0 {
-            self.scroll_by(by, true, ctx);
+            if diff {
+                self.move_cursor(by, shift, ctx);
+            } else {
+                self.scroll_by(by, true, ctx);
+            }
             return Some(None);
         }
-        if self.tab() != DetailTab::Diff {
+        if !diff {
             return None;
         }
         match sym {
@@ -3693,6 +4466,9 @@ impl Panel {
                 }
             }
             Keysym::Return | Keysym::KP_Enter if plain => {
+                if let Some(cursor) = &self.cursor {
+                    return Some(self.open_diff_row(cursor.row));
+                }
                 let head = self.current_file(page)?;
                 let (_, range) = self.diff_window(page);
                 let file = self.diff_rows[head].file();
@@ -3702,6 +4478,8 @@ impl Panel {
                 });
                 return Some(self.open_diff_row(line.unwrap_or(head)));
             }
+            Keysym::c if plain => self.comment_here(ctx),
+            Keysym::Delete | Keysym::KP_Delete if plain => self.delete_comment(ctx),
             _ => return None,
         }
         Some(None)
@@ -3745,6 +4523,7 @@ impl Panel {
         }
         let anchor = self.diff_anchor();
         self.diffs.insert(root, (generation, files));
+        self.diff_cols = ctx.cols;
         self.build_rows(items, anchor);
     }
 
@@ -3891,6 +4670,25 @@ impl Panel {
                 } else {
                     format!("{name} exists in {} of {}", have.len(), repos(jobs.len()))
                 };
+                (title, lines, *choice)
+            }
+            Sheet::ClearReview { choice } => {
+                let mut files: BTreeMap<(String, &str), usize> = BTreeMap::new();
+                for c in &self.review.comments {
+                    *files.entry((label(&c.root), c.path.as_str())).or_default() += 1;
+                }
+                let lines = files
+                    .into_iter()
+                    .map(|((repo, path), n)| {
+                        (
+                            repo,
+                            format!("{path}: {}", count(n, "comment")),
+                            Tone::Warning,
+                        )
+                    })
+                    .collect();
+                let n = self.review.comments.len();
+                let title = format!("Delete the review's {} for good?", count(n, "comment"));
                 (title, lines, *choice)
             }
             Sheet::Help { choice } => {
@@ -4184,6 +4982,7 @@ mod tests {
             top: &TOP,
             density: Density::Comfortable,
             tree_share: crate::chrome::REPOS_TREE_SHARE,
+            cols: 40,
         }
     }
 
@@ -4281,6 +5080,8 @@ mod tests {
                     format!("{sign}{}", line.text)
                 }
                 DetailRow::Note(note) => format!("~ {note}"),
+                DetailRow::Comment { text, .. } => format!("> {text}"),
+                DetailRow::Editor { text, .. } => format!("| {text}"),
             })
             .collect()
     }
@@ -5715,6 +6516,173 @@ mod tests {
         assert_eq!((detail.first, detail.part, detail.rows.len()), (2, 0.0, 4));
     }
 
+    /// The cursor's row, and where its range reaches back to.
+    fn cursor(panel: &Panel) -> Option<(usize, usize)> {
+        panel.cursor.as_ref().map(|c| (c.row, c.from))
+    }
+
+    #[test]
+    fn comments_are_written_on_the_cursors_lines_and_copied() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 30);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        // C needs a line.
+        press(&mut panel, none(), Keysym::c, &ctx);
+        assert!(panel.editing.is_none() && panel.error.is_some());
+        // On a and b, Shift+Down reaching the range.
+        for _ in 0..3 {
+            press(&mut panel, none(), Keysym::Down, &ctx);
+        }
+        press(&mut panel, mods(false, true, false), Keysym::Down, &ctx);
+        assert_eq!(cursor(&panel), Some((3, 2)));
+        // Shift+Down in the diff doesn't scroll it.
+        assert_eq!(panel.detail_first, 0);
+        let marks = panel.view("p", &ctx).detail.marks;
+        assert!(marks[2].range && marks[3].cursor && !marks[4].range);
+        press(&mut panel, none(), Keysym::c, &ctx);
+        type_text(&mut panel, "why", &ctx);
+        press(&mut panel, mods(false, true, false), Keysym::Return, &ctx);
+        type_text(&mut panel, "and b", &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(
+            rows[4..8],
+            [
+                "| why",
+                "| and b",
+                "~ Enter saves · Shift+Enter breaks the line · Esc cancels",
+                "+c"
+            ]
+        );
+        // The editor has the keys: Tab and Up don't leave it.
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        assert_eq!(panel.focus, Focus::Detail);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.editing.is_none() && panel.review_dirty);
+        let comment = &panel.review.comments[0];
+        assert_eq!(comment.text, "why\nand b");
+        assert_eq!(
+            comment
+                .lines
+                .iter()
+                .map(|q| (q.number, q.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "a"), (2, "b")]
+        );
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            detail_rows(&view)[2..7],
+            ["+a", "+b", "> why", "> and b", "+c"]
+        );
+        assert!(view.detail.marks[2].noted && view.detail.marks[3].noted);
+        assert!(!view.detail.marks[6].noted);
+        // Copied for an agent, with Ctrl+Shift+C.
+        let Some(Outcome::Copy { text, count }) = press(&mut panel, ctrl_shift(), Keysym::C, &ctx)
+        else {
+            panic!("not copied");
+        };
+        assert_eq!(count, 1);
+        assert!(text.contains("### `src/git.rs:1-2`\n\n```diff\n+a\n+b\n```\n\nwhy\nand b\n"));
+        assert!(
+            panel
+                .view("p", &ctx)
+                .hints
+                .iter()
+                .any(|h| h.button == ReposButton::CopyReview)
+        );
+
+        // A line added above, it stays under b.
+        let g = panel.diff_gen + 1;
+        panel.diff_gen = g;
+        let moved = vec![added("src/git.rs", 'M', &["x", "a", "b", "c"])];
+        panel.set_diffs(root("gerdr"), g, moved, &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[2..8], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
+
+        // C on it edits it; Esc drops the edit, not the panel.
+        panel.set_cursor(5, None);
+        press(&mut panel, none(), Keysym::c, &ctx);
+        assert_eq!(panel.editing.as_ref().map(|e| e.at), Some(Some(0)));
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert!(panel.editing.is_none());
+        assert_eq!(panel.review.comments[0].text, "why\nand b");
+
+        // b gone, it is listed with those whose lines are gone.
+        let g = g + 1;
+        panel.diff_gen = g;
+        let gone = vec![added("src/git.rs", 'M', &["a", "c"])];
+        panel.set_diffs(root("gerdr"), g, gone, &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        let n = rows.len();
+        assert_eq!(
+            rows[n - 4..],
+            [
+                "@ Comments on lines no longer in the diff",
+                "~ gerdr › src/git.rs:1-2",
+                "> why",
+                "> and b"
+            ]
+        );
+        let Some(Outcome::Copy { text, .. }) = panel.press(ReposButton::CopyReview, &ctx) else {
+            panic!("not copied");
+        };
+        assert!(text.contains("`src/git.rs:1-2` (the code changed since)"));
+
+        // Delete on it deletes it.
+        panel.review_dirty = false;
+        panel.set_cursor(n - 2, None);
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        assert!(panel.review.is_empty() && panel.review_dirty);
+        assert!(
+            !detail_rows(&panel.view("p", &ctx))
+                .iter()
+                .any(|r| r.starts_with('>'))
+        );
+        assert_eq!(press(&mut panel, ctrl_shift(), Keysym::C, &ctx), None);
+        assert_eq!(panel.error.as_deref(), Some(NO_REVIEW));
+    }
+
+    #[test]
+    fn a_long_comment_wraps_and_clearing_asks_first() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 30);
+        ctx.cols = 10;
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        panel.focus = Focus::Detail;
+        panel.set_cursor(2, None);
+        press(&mut panel, none(), Keysym::c, &ctx);
+        type_text(&mut panel, "one two three", &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[3..5], ["| one two ", "| three"]);
+        let DetailRow::Editor { caret, .. } = &panel.view("p", &ctx).detail.rows[4] else {
+            panic!();
+        };
+        assert_eq!(*caret, Some(5));
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        // Wider, it is worked out again.
+        ctx.cols = 40;
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        assert_eq!(detail_rows(&panel.view("p", &ctx))[3], "> one two three");
+        // A click on it edits it.
+        panel.click(ReposHit::DiffRow(3), &ctx);
+        assert_eq!(panel.editing.as_ref().map(|e| e.at), Some(Some(0)));
+        // A click elsewhere keeps the edit.
+        type_text(&mut panel, "!", &ctx);
+        panel.click(ReposHit::Line(0), &ctx);
+        assert!(panel.editing.is_none());
+        assert_eq!(panel.review.comments[0].text, "one two three!");
+        // Clear review asks on a sheet, then deletes them all.
+        panel.press(ReposButton::ClearReview, &ctx);
+        assert!(matches!(panel.sheet, Some(Sheet::ClearReview { .. })));
+        assert_eq!(panel.review.comments.len(), 1);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert!(panel.sheet.is_none() && panel.review.is_empty());
+    }
+
     #[test]
     fn the_diff_has_its_own_keys_and_clicks() {
         let items = items();
@@ -5725,11 +6693,23 @@ mod tests {
         // Tab: the tree, the detail, the field.
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Detail);
-        // Down scrolls; Alt+Down goes to the next file, selected in the
-        // tree, and Alt+Up back.
+        // Down puts the cursor on the first row in view, then moves it,
+        // its file selected in the tree and the diff following it.
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(0));
         assert_eq!(panel.selected, Some(Selected::Repo(root("gerdr"))));
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.detail_first, 0);
+        let git = Selected::File(root("gerdr"), "src/git.rs".into());
+        assert_eq!(panel.selected, Some(git));
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(4));
+        assert_eq!(panel.detail_first, 1);
+        let marks = panel.view("p", &ctx).detail.marks;
+        assert!(marks[3].cursor && !marks[2].cursor);
+        // Alt+Down goes to the next file, and Alt+Up back.
         press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
         assert_eq!(panel.detail_first, 5);
         let notes = Selected::File(root("gerdr"), "notes.md".into());
@@ -5739,7 +6719,8 @@ mod tests {
         press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
         press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
         assert_eq!(panel.detail_first, 1);
-        // Space checks the file at the top, as its tree line.
+        // Space checks the cursor's file, as its tree line.
+        assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(1));
         panel.detail_first = 3;
         press(&mut panel, none(), Keysym::space, &ctx);
         let key = (root("gerdr"), "src/git.rs".to_string());
@@ -5748,7 +6729,11 @@ mod tests {
             panic!();
         };
         assert_eq!(file.check, Check::On);
-        // Enter opens it in Zed at the first line in view.
+        // Enter opens it in Zed at the cursor's line, the diff scrolled
+        // back to show it.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.detail_first, 2);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::OpenInZed {

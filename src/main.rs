@@ -52,6 +52,7 @@ mod reload;
 mod rename;
 mod repo_batches;
 mod repos;
+mod review;
 mod restart;
 mod sidebar;
 mod switcher;

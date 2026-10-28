@@ -20,9 +20,11 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
-    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, mix, phys, plus, rect_px,
-    rounded_rect, trash,
+    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, measure_mono, mix, phys,
+    plus, rect_px, rounded_rect, trash,
 };
+use std::ops::Range;
+
 use crate::diff::LineKind;
 use crate::text_field::Line;
 use crate::wheel;
@@ -95,6 +97,8 @@ const DIFF_CHECK: i32 = 26;
 const DIFF_BADGE: i32 = 18;
 const DIFF_INSET: i32 = 8;
 const DIFF_BAR: i32 = 3;
+/// A review comment's text, in from its card's edge.
+const COMMENT_INDENT: i32 = 12;
 /// How strongly an added or removed line is tinted, and its changed
 /// words.
 const DIFF_TINT: f32 = 0.10;
@@ -363,6 +367,9 @@ pub struct DetailView {
     /// of the file the rest start in, pinned at the top.
     pub rows: Vec<DetailRow>,
     pub sticky: bool,
+    /// How each of `rows` is marked: the diff's cursor, the range it
+    /// reaches back to, a comment on it. Empty for none.
+    pub marks: Vec<RowMark>,
     /// The part of the first row scrolled (under the pinned header, if
     /// any) past, 0 to 1; with some, `rows` has one more under the pane,
     /// shown in part.
@@ -384,6 +391,17 @@ pub enum DetailTab {
     Stashes,
 }
 
+/// How a row of the diff is marked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowMark {
+    /// The cursor is on it.
+    pub cursor: bool,
+    /// Between the cursor and where its range reaches back to.
+    pub range: bool,
+    /// A comment is on it.
+    pub noted: bool,
+}
+
 /// A row of the detail pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetailRow {
@@ -402,6 +420,22 @@ pub enum DetailRow {
     Line(crate::diff::Line),
     /// What isn't a hunk: `Binary file`, an untracked folder's files.
     Note(String),
+    /// A row of a review comment: the first and last of its rows round
+    /// its card.
+    Comment {
+        text: String,
+        first: bool,
+        last: bool,
+    },
+    /// A row of the comment being written: with the caret on it, its byte
+    /// in `text`; the selection on it, by bytes in `text`.
+    Editor {
+        text: String,
+        caret: Option<usize>,
+        selection: Range<usize>,
+        first: bool,
+        last: bool,
+    },
 }
 
 /// A repository's header in the diff.
@@ -506,6 +540,10 @@ pub enum ReposButton {
     SwitchExisting,
     CreateMissing,
     EditName,
+    /// The diff's review comments, copied for an agent; and dropped
+    /// (asked first, on a sheet).
+    CopyReview,
+    ClearReview,
 }
 
 impl ReposButton {
@@ -545,6 +583,8 @@ impl ReposButton {
             ReposButton::SwitchExisting => "Switch to it",
             ReposButton::CreateMissing => "Create where missing",
             ReposButton::EditName => "Edit name",
+            ReposButton::CopyReview => "Copy review",
+            ReposButton::ClearReview => "Clear review",
         }
     }
 }
@@ -942,6 +982,18 @@ pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) 
     let tree = (middle - 2 * REPOS_PAD) / repos_row(density);
     let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
     (tree.max(1) as usize, detail.max(1) as usize)
+}
+
+/// How many characters of the monospace font a review comment's row of
+/// the diff holds, on an output of `size` with the tree's share `share`.
+pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
+    let w = panel_rect(size).size.w;
+    let detail = (w - tree_width(w, share)).max(0);
+    let text = detail - 2 * HELP_PADDING - SCROLLBAR - 2 * DIFF_INSET - COMMENT_INDENT;
+    let advance = measure_mono("0", REPOS_MONO_SIZE)
+        .filter(|a| *a > 0.0)
+        .unwrap_or(REPOS_MONO_SIZE * 0.6);
+    ((text.max(0) as f32 / advance).floor() as usize).max(16)
 }
 
 /// Where the parts of the panel showing `view` go on an output of `size`.
@@ -2339,6 +2391,17 @@ impl Painter {
         let gap = (FIELD_GAP as f32 * s).round();
         let inset = px(DIFF_INSET) as f32;
         let across = |c: &mut Canvas, color: Rgb| c.fill(tint_x, y, tint_end - tint_x, h, color);
+        // The cursor's row and the range it reaches back to, lit.
+        let mark = view.detail.marks.get(i).copied().unwrap_or_default();
+        let lit = (mark.cursor || mark.range).then_some(if mark.cursor { 0.55 } else { 0.45 });
+        if let Some(amount) = lit
+            && matches!(
+                row,
+                DetailRow::Text(_) | DetailRow::Hunk { .. } | DetailRow::Note(_)
+            )
+        {
+            across(c, mix(p.elevated, p.selected, amount));
+        }
         match row {
             DetailRow::Text(line) => {
                 let color = match line.tone {
@@ -2534,8 +2597,15 @@ impl Painter {
                     LineKind::Context => None,
                 };
                 let tx = bx + inset;
+                let lighten = |color: Rgb| match lit {
+                    Some(amount) => mix(color, p.selected, amount),
+                    None => color,
+                };
+                if tone.is_none() && lit.is_some() {
+                    across(c, lighten(p.elevated));
+                }
                 if let Some(tone) = tone {
-                    across(c, mix(p.elevated, tone, DIFF_TINT));
+                    across(c, lighten(mix(p.elevated, tone, DIFF_TINT)));
                     let word = mix(p.elevated, tone, DIFF_WORD_TINT);
                     let upto = |n: usize| {
                         let end = line
@@ -2554,6 +2624,13 @@ impl Painter {
                         c.rounded(x0, wy, x1 - x0, wh, 2.0 * s, word);
                     }
                     c.fill(tint_x, y, px(DIFF_BAR), h, tone);
+                }
+                // A dot in the gutter: a comment is on it.
+                if mark.noted {
+                    let d = (4.0 * s).round();
+                    let dx = tint_x as f32 + px(DIFF_BAR) as f32 + ((inset - d) / 2.0).max(1.0);
+                    let dy = (y as f32 + (h as f32 - d) / 2.0).round();
+                    c.rounded(dx, dy, d, d, d / 2.0, p.accent);
                 }
                 // The code's coloured runs and the plain text between,
                 // each placed by the width of the text before it.
@@ -2595,7 +2672,97 @@ impl Painter {
                     p.placeholder,
                 );
             }
+            DetailRow::Comment { text, first, last } => {
+                let fill = mix(p.elevated, p.accent, if lit.is_some() { 0.2 } else { 0.1 });
+                let tx = self.comment_card(
+                    c,
+                    (bx + inset, bend),
+                    row_band,
+                    (*first, *last),
+                    fill,
+                    scale,
+                );
+                c.fill(
+                    (bx + inset) as i32,
+                    y,
+                    px(2).max(1),
+                    h,
+                    mix(p.elevated, p.accent, 0.7),
+                );
+                self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, p.text);
+            }
+            DetailRow::Editor {
+                text,
+                caret,
+                selection,
+                first,
+                last,
+            } => {
+                let (x0, x1) = (bx + inset, bend);
+                self.comment_card(c, (x0, x1), row_band, (*first, *last), p.accent, scale);
+                let b = border as f32;
+                let (top, bottom) = (if *first { b } else { 0.0 }, if *last { b } else { 0.0 });
+                let inner = (y as f32 + top) as i32..(y as f32 + h as f32 - bottom) as i32;
+                let (iy, ih) = (inner.start, inner.end - inner.start);
+                let tx = self.comment_card(
+                    c,
+                    (x0 + b, x1 - b),
+                    (iy, ih),
+                    (*first, *last),
+                    p.element,
+                    scale,
+                );
+                let at = |byte: usize| {
+                    tx + self.mono_width(&text[..byte.min(text.len())], REPOS_MONO_SIZE, scale)
+                };
+                if !selection.is_empty() {
+                    let (sx, ex) = (at(selection.start), at(selection.end).min(x1));
+                    c.fill(sx as i32, iy, (ex - sx).max(1.0) as i32, ih, p.selected);
+                }
+                self.mono_text(c, text, REPOS_MONO_SIZE, tx, x1, row_band, scale, p.text);
+                if let Some(caret) = caret.filter(|_| view.detail.focused) {
+                    let cx = at(caret).min(x1 - b) as i32;
+                    let pad = px(3);
+                    c.fill(cx, y + pad, px(1).max(1), h - 2 * pad, p.accent);
+                }
+            }
         }
+        // The cursor's row outlined, a bar at its left.
+        if mark.cursor && !matches!(row, DetailRow::File(_)) {
+            let color = if view.detail.focused {
+                p.accent
+            } else {
+                p.muted
+            };
+            c.outline(tint_x, y, tint_end - tint_x, h, border, color);
+            c.fill(tint_x, y, px(DIFF_BAR), h, color);
+        }
+    }
+
+    /// A row of a review comment's card from `x.0` to `x.1` (physical
+    /// pixels) over `band`, in `fill`: its corners rounded at its first
+    /// row and its last. Returns where its text starts.
+    fn comment_card(
+        &self,
+        c: &mut Canvas,
+        (x0, x1): (f32, f32),
+        (y, h): (i32, i32),
+        (first, last): (bool, bool),
+        fill: Rgb,
+        scale: f64,
+    ) -> f32 {
+        let s = scale as f32;
+        let r = (4.0 * s).round();
+        let top = if first { y as f32 } else { y as f32 - r };
+        let bottom = if last {
+            (y + h) as f32
+        } else {
+            (y + h) as f32 + r
+        };
+        c.clipped(x0 as i32, y, (x1 - x0).ceil() as i32, h, |c| {
+            c.rounded(x0, top, x1 - x0, bottom - top, r, fill);
+        });
+        x0 + (COMMENT_INDENT as f32 * s).round()
     }
 
     /// At the right of a header, ending at `right` (physical pixels):
@@ -3160,7 +3327,6 @@ impl Painter {
 mod tests {
     use super::*;
     use crate::chrome::{Theme, inside};
-    use std::ops::Range;
 
     const SIZES: [(i32, i32); 3] = [(800, 600), (1280, 800), (2560, 1440)];
 
@@ -3345,6 +3511,23 @@ mod tests {
                         "    let changes = parse_changes(&out);",
                         &[],
                     ),
+                    DetailRow::Comment {
+                        text: "Why -z here? Paths with newlines".into(),
+                        first: true,
+                        last: false,
+                    },
+                    DetailRow::Comment {
+                        text: "need it, but check the parser.".into(),
+                        first: false,
+                        last: true,
+                    },
+                    DetailRow::Editor {
+                        text: "And the caller".into(),
+                        caret: Some(7),
+                        selection: 4..7,
+                        first: true,
+                        last: true,
+                    },
                     DetailRow::Note("Binary file".into()),
                     DetailRow::Text(detail_line("", DiffTone::Plain)),
                     DetailRow::Repo(DiffRepo {
@@ -3372,6 +3555,13 @@ mod tests {
                     )),
                 ],
                 sticky: true,
+                marks: (0..16)
+                    .map(|i| RowMark {
+                        cursor: i == 4,
+                        range: i == 3,
+                        noted: i == 4,
+                    })
+                    .collect(),
                 part: 0.0,
                 first: 3,
                 total: 40,
