@@ -58,6 +58,8 @@ pub struct Welcome {
     confirm_forget: Option<String>,
     /// herdr wasn't found on `PATH` when the screen opened.
     herdr_missing: bool,
+    /// Why the project asked for isn't shown: another gerdr has it open.
+    pub refused: Option<String>,
 }
 
 /// What the welcome screen asks gerdr to do.
@@ -478,7 +480,8 @@ impl Gerdr {
         // Without herdr, projects live only as long as gerdr.
         let note = welcome
             .herdr_missing
-            .then(|| "herdr isn't installed — projects won't keep running".into());
+            .then(|| "herdr isn't installed — projects won't keep running".into())
+            .or_else(|| welcome.refused.clone());
         // The prefix and the key after it that quit, for the bar at the bottom.
         let help = self.keymap.help();
         let quit_keys = help

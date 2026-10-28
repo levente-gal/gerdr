@@ -42,6 +42,7 @@ mod pane_moves;
 mod paths;
 mod prepare;
 mod project_list;
+mod project_lock;
 mod project_menu;
 mod projects;
 mod quit;
@@ -756,23 +757,63 @@ fn project_detail(dirs: &[&Path], home: Option<&Path>) -> String {
     }
 }
 
-/// The project named with `--project` (`--project <name>` or
-/// `--project=<name>`), and the folders to open.
-fn parse_args(args: impl IntoIterator<Item = OsString>) -> (Option<String>, Vec<PathBuf>) {
-    let mut project = None;
-    let mut folders = Vec::new();
+const USAGE: &str = "\
+usage: gerdr [--project <name>] [--attach] [--] [folder…]
+  --project <name>  show this project (created if new)
+  --attach          join a project even if another gerdr has it open
+  -h, --help        show this help
+  -V, --version     show the version
+";
+
+/// What gerdr was started with.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Args {
+    /// The project named with `--project <name>` or `--project=<name>`.
+    project: Option<String>,
+    /// The folders to open as workspaces in it.
+    folders: Vec<PathBuf>,
+    /// `--attach`: projects another gerdr has open may be shown too.
+    attach: bool,
+}
+
+/// Why gerdr doesn't start from its arguments.
+#[derive(Debug, PartialEq, Eq)]
+enum ArgError {
+    Help,
+    Version,
+    /// A mistake, said this way.
+    Bad(String),
+}
+
+/// The arguments; anything starting with `-` that isn't an option is a
+/// mistake, not a folder, unless it comes after `--`.
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, ArgError> {
+    let mut parsed = Args::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let text = arg.to_string_lossy();
         if text == "--project" {
-            project = args.next().map(|a| a.to_string_lossy().into_owned());
+            let name = args
+                .next()
+                .ok_or_else(|| ArgError::Bad("--project needs a name".into()))?;
+            parsed.project = Some(name.to_string_lossy().into_owned());
         } else if let Some(name) = text.strip_prefix("--project=") {
-            project = Some(name.to_owned());
+            parsed.project = Some(name.to_owned());
+        } else if text == "--attach" {
+            parsed.attach = true;
+        } else if text == "-h" || text == "--help" {
+            return Err(ArgError::Help);
+        } else if text == "-V" || text == "--version" {
+            return Err(ArgError::Version);
+        } else if text == "--" {
+            parsed.folders.extend(args.by_ref().map(PathBuf::from));
+        } else if text.starts_with('-') {
+            return Err(ArgError::Bad(format!("unknown option '{text}'")));
         } else {
-            folders.push(PathBuf::from(arg));
+            parsed.folders.push(PathBuf::from(arg));
         }
     }
-    (project, folders)
+    Ok(parsed)
 }
 
 /// What the folder picker is open for.
@@ -1145,6 +1186,12 @@ pub struct Gerdr {
     pub projects: projects::Store,
     /// The project shown, by id; `None` before one is open.
     pub project: Option<String>,
+    /// The lock that tells other gerdrs the project shown is open here;
+    /// kept while it is shown again after a reload.
+    project_lock: Option<project_lock::ProjectLock>,
+    /// Started with `--attach`: projects another gerdr has open may be
+    /// shown here too.
+    attach: bool,
     /// The welcome screen, while it is shown.
     pub welcome: Option<welcome::Welcome>,
     /// Whether each project's session runs, by id, as last checked.
@@ -4451,6 +4498,10 @@ impl Gerdr {
     /// it; when its session doesn't run and it has start commands, once
     /// they are done (see `hook_done`). The project shown stays meanwhile.
     fn enter_project(&mut self, id: &str, pick: bool, folders: Vec<PathBuf>) {
+        // Not even its start commands: they belong to the gerdr it is open in.
+        if self.open_elsewhere(id) {
+            return self.refuse_open(id);
+        }
         if self.project.as_deref() != Some(id)
             && !self.stopping.contains(id)
             && let Some(project) = self.projects.project(id)
@@ -4491,32 +4542,48 @@ impl Gerdr {
     fn enter_project_now(&mut self, id: &str, pick: bool, folders: Vec<PathBuf>) {
         // Another project was asked for since.
         self.pending_enter = None;
-        self.show_project(id, pick);
+        if !self.show_project(id, pick) {
+            return;
+        }
         for folder in folders {
             self.open_project(folder);
         }
     }
 
     /// Show project `id`; if it has no workspaces and `pick`, ask for a
-    /// folder to open in it.
-    fn show_project(&mut self, id: &str, pick: bool) {
+    /// folder to open in it. Whether it is shown now.
+    fn show_project(&mut self, id: &str, pick: bool) -> bool {
         if self.project.as_deref() == Some(id) {
             self.welcome = None;
-            return;
+            return true;
         }
         let Some((session, name)) = self
             .projects
             .project(id)
             .map(|p| (p.session.clone(), p.name.clone()))
         else {
-            return tracing::warn!("no project {id}");
+            tracing::warn!("no project {id}");
+            return false;
         };
         // Its server is going down: attaching now would lose it.
         if self.stopping.contains(id) {
-            return self.show_notice(format!("{name} is still stopping"));
+            self.show_notice(format!("{name} is still stopping"));
+            return false;
         }
+        if self.open_elsewhere(id) {
+            self.refuse_open(id);
+            return false;
+        }
+        // Taken before the lock held is let go of, so no other gerdr comes
+        // in between when it is this project's (see `reload_projects`).
+        let lock = project_lock::dir().and_then(|dir| {
+            project_lock::ProjectLock::take(&dir, id)
+                .inspect_err(|err| tracing::warn!("locking project {id} open: {err}"))
+                .ok()
+        });
         let left = self.project.clone();
         self.detach_project();
+        self.project_lock = lock;
         self.welcome = None;
         self.quit = None;
         self.project = Some(id.to_owned());
@@ -4546,6 +4613,35 @@ impl Gerdr {
         if pick && self.workspaces.is_empty() {
             self.pick_workspace(WorkspaceKind::Project);
         }
+        true
+    }
+
+    /// Whether project `id` is open in another gerdr, and so not to be
+    /// shown here: never when started with `--attach`.
+    fn open_elsewhere(&self, id: &str) -> bool {
+        !self.attach
+            && self.project.as_deref() != Some(id)
+            && self
+                .project_lock
+                .as_ref()
+                .is_none_or(|lock| lock.id() != id)
+            && project_lock::dir().is_some_and(|dir| project_lock::is_open_elsewhere(&dir, id))
+    }
+
+    /// Say that project `id` isn't shown because another gerdr has it
+    /// open: on the welcome screen when nothing is shown, else in a toast.
+    fn refuse_open(&mut self, id: &str) {
+        let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
+        let why = format!("{name} is open in another gerdr — pick another, or start with --attach");
+        if self.project.is_some() {
+            return self.toast(why, Level::Warning);
+        }
+        if self.welcome.is_none() {
+            self.open_welcome(false);
+        }
+        if let Some(welcome) = self.welcome.as_mut() {
+            welcome.refused = Some(why);
+        }
     }
 
     /// Let go of the project shown: stop following its session, close the
@@ -4561,6 +4657,7 @@ impl Gerdr {
             self.loop_handle.remove(token);
         }
         self.herdr_poke = None;
+        self.project_lock = None;
         let project = self.project.clone().unwrap_or_default();
         let panes: Vec<Pane> = self
             .workspaces
@@ -4974,10 +5071,11 @@ impl Gerdr {
 
     /// Show what gerdr was started for: project `name` (by id or name,
     /// made if there is none), opening `folders` in it; else, with folders,
-    /// the last project shown (or a new one named after the first folder);
-    /// else the last project shown if it was left running, or the welcome
-    /// screen. Without herdr, projects can't run: the welcome screen says
-    /// so.
+    /// the last project shown (or a new one named after the first folder,
+    /// when there is none or another gerdr has it open); else the last
+    /// project shown if it was left running, or the welcome screen. A
+    /// project another gerdr has open isn't shown (see `refuse_open`).
+    /// Without herdr, projects can't run: the welcome screen says so.
     fn start_project(&mut self, name: Option<&str>, folders: Vec<PathBuf>) {
         if !herdr::is_installed() {
             tracing::warn!("herdr isn't installed: projects can't run");
@@ -5000,13 +5098,16 @@ impl Gerdr {
                     None => self.add_project(name),
                 }
             }
-            None if !folders.is_empty() => last.unwrap_or_else(|| {
-                let dir = folders[0].canonicalize().unwrap_or(folders[0].clone());
-                let name = dir
-                    .file_name()
-                    .map_or("project".into(), |n| n.to_string_lossy().into_owned());
-                self.add_project(&name)
-            }),
+            // Not into a project another gerdr has open.
+            None if !folders.is_empty() => last
+                .filter(|id| !self.open_elsewhere(id))
+                .unwrap_or_else(|| {
+                    let dir = folders[0].canonicalize().unwrap_or(folders[0].clone());
+                    let name = dir
+                        .file_name()
+                        .map_or("project".into(), |n| n.to_string_lossy().into_owned());
+                    self.add_project(&name)
+                }),
             None => match last {
                 Some(id)
                     if self
@@ -5297,6 +5398,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    // Before anything starts: a mistyped option must not open a gerdr.
+    let args = match parse_args(std::env::args_os().skip(1)) {
+        Ok(args) => args,
+        Err(ArgError::Help) => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        Err(ArgError::Version) => {
+            println!("gerdr {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Err(ArgError::Bad(why)) => {
+            eprint!("gerdr: {why}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -5307,9 +5424,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The portal can be slow to answer: asked now, alongside the setup.
     let system_theme = system_theme::read();
 
-    // `--project <name>` picks the project; every other argument is a
-    // folder to open as a workspace in it.
-    let (project_arg, folders) = parse_args(std::env::args_os().skip(1));
     // Own data dir so Zed runs its own instance here instead of handing the
     // windows to a Zed already running on the host.
     let zed_data = launch::zed_data_dir(&home_dir().unwrap_or_default());
@@ -5484,6 +5598,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         installed_apps_tx: None,
         projects: projects::Store::default(),
         project: None,
+        project_lock: None,
+        attach: args.attach,
         welcome: None,
         running: HashMap::new(),
         running_status: None,
@@ -5670,7 +5786,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
     state.watch_installed_apps();
-    state.start_project(project_arg.as_deref(), folders);
+    state.start_project(args.project.as_deref(), args.folders);
 
     // Send what the loop queued for the clients (a paste's request to the
     // app that copied, say) right away: drawing, which flushes too, stops
@@ -5922,17 +6038,46 @@ mod tests {
     #[test]
     fn args_name_a_project_and_folders() {
         let args = |list: &[&str]| parse_args(list.iter().map(OsString::from));
-        assert_eq!(args(&[]), (None, vec![]));
+        let folders = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(args(&[]), Ok(Args::default()));
         assert_eq!(
             args(&["--project", "aft", "/a", "b"]),
-            (
-                Some("aft".into()),
-                vec![PathBuf::from("/a"), PathBuf::from("b")]
-            )
+            Ok(Args {
+                project: Some("aft".into()),
+                folders: folders(&["/a", "b"]),
+                attach: false,
+            })
         );
         assert_eq!(
-            args(&["/a", "--project=My work"]),
-            (Some("My work".into()), vec![PathBuf::from("/a")])
+            args(&["/a", "--project=My work", "--attach"]),
+            Ok(Args {
+                project: Some("My work".into()),
+                folders: folders(&["/a"]),
+                attach: true,
+            })
+        );
+        assert_eq!(
+            args(&["--", "--help", "-x"]),
+            Ok(Args {
+                folders: folders(&["--help", "-x"]),
+                ..Args::default()
+            })
+        );
+    }
+
+    #[test]
+    fn options_gerdr_lacks_stop_it_from_starting() {
+        let args = |list: &[&str]| parse_args(list.iter().map(OsString::from));
+        assert_eq!(args(&["--help"]), Err(ArgError::Help));
+        assert_eq!(args(&["/a", "-h"]), Err(ArgError::Help));
+        assert_eq!(args(&["-V"]), Err(ArgError::Version));
+        assert_eq!(
+            args(&["--bogus"]),
+            Err(ArgError::Bad("unknown option '--bogus'".into()))
+        );
+        assert_eq!(
+            args(&["--project"]),
+            Err(ArgError::Bad("--project needs a name".into()))
         );
     }
 }
