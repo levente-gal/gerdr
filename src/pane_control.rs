@@ -66,38 +66,69 @@ const JOB_DEADLINE: Duration = Duration::from_secs(15);
 /// command running again.
 const SETTLE: Duration = Duration::from_millis(1500);
 
+/// How long a command must run to count as a service: one restarting a
+/// workspace runs again after it exited (crashed, say).
+pub const LONG_RUN: Duration = Duration::from_secs(60);
+
 /// A pane's last command, and the process that ran it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remembered {
+    /// 0 while no process has run it yet (see `Remembered::service`).
     pub pid: i32,
     pub captured: Captured,
+    /// When its process was first seen.
+    pub since: Instant,
+    /// Whether it is a service: it ran for `LONG_RUN`, or gerdr ran it
+    /// again (after a reboot, or restarting its workspace), or it is the
+    /// same command as a service before it in the pane (one restarted
+    /// after a crash may crash again before it has run long).
+    pub long: bool,
+}
+
+impl Remembered {
+    /// `captured`, a service about to be run again in its pane.
+    pub fn service(captured: Captured, now: Instant) -> Self {
+        Self {
+            pid: 0,
+            captured,
+            since: now,
+            long: true,
+        }
+    }
 }
 
 /// Bring the last command of herdr pane `pane_id` (in folder `pane_cwd`) up
-/// to date with what runs in it: a new command takes the place of the last,
-/// once per process (some rewrite their command line once running). An
-/// idle shell, a program never run again or one whose command line can't be
-/// read back keeps it.
+/// to date with what runs in it at `now`: a new command takes the place of
+/// the last, once per process (some rewrite their command line once
+/// running). An idle shell, a program never run again or one whose command
+/// line can't be read back keeps it.
 pub fn remember(
     memory: &mut HashMap<String, Remembered>,
     pane_id: &str,
     foreground: Option<&Foreground>,
     pane_cwd: Option<&Path>,
+    now: Instant,
 ) {
     let Some(Foreground::Busy { pid, captured }) = foreground else {
         return;
     };
-    if memory.get(pane_id).is_some_and(|r| r.pid == *pid) {
+    if let Some(r) = memory.get_mut(pane_id).filter(|r| r.pid == *pid) {
+        r.long |= now.duration_since(r.since) >= LONG_RUN;
         return;
     }
     let mut captured = captured.clone();
     // Always where it ran: the shell may have moved since.
     captured.cwd = captured.cwd.or_else(|| pane_cwd.map(Path::to_path_buf));
+    let long = memory
+        .get(pane_id)
+        .is_some_and(|r| r.long && r.captured.command == captured.command);
     memory.insert(
         pane_id.to_owned(),
         Remembered {
             pid: *pid,
             captured,
+            since: now,
+            long,
         },
     );
 }
@@ -688,7 +719,7 @@ impl Gerdr {
     }
 
     /// What the bar of herdr pane `pane_id` shows.
-    fn pane_bar_content(&self, pane_id: &str) -> BarContent {
+    pub(crate) fn pane_bar_content(&self, pane_id: &str) -> BarContent {
         bar_content(
             self.pane_state(pane_id).and_then(|p| p.process.as_ref()),
             self.last_commands.get(pane_id),
@@ -912,11 +943,12 @@ impl Gerdr {
         self.start_job(pane_id, content.label, captured.as_ref(), true);
     }
 
-    /// The commands of workspace `w` that run again after a reboot (see
-    /// `PaneRecord::restart_command`), each with its herdr pane: running
-    /// or exited, in the folder and environment it ran with. A pane where
-    /// something else runs in front of its command (an editor, a pager)
-    /// is left alone.
+    /// The commands of workspace `w` to restart, each with its herdr
+    /// pane, in the folder and environment it ran with: those that run
+    /// again after a reboot (see `PaneRecord::restart_command`), and the
+    /// services that exited since (see `Remembered::long`) unless the
+    /// user said not to run them again. A pane where something else runs
+    /// in front of its command (an editor, a pager) is left alone.
     pub fn workspace_restarts(&self, w: usize) -> Vec<(String, Captured)> {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
@@ -925,21 +957,29 @@ impl Gerdr {
             .iter()
             .flat_map(Tab::herdr_panes)
             .filter_map(|pane| {
-                let record = self.pane_record(pane)?;
-                let command = record.restart_command()?;
                 let content = self.pane_bar_content(&pane.pane_id);
                 if content.status == BarStatus::Running && !content.can_restart {
                     return None;
                 }
-                let captured = match self.last_commands.get(&pane.pane_id) {
-                    Some(r) if r.captured.command == command => r.captured.clone(),
-                    _ => Captured {
-                        command: command.to_owned(),
-                        cwd: record.cwd.clone().or_else(|| pane.cwd.clone()),
-                        env: record.env.clone(),
-                    },
-                };
-                Some((pane.pane_id.clone(), captured))
+                let record = self.pane_record(pane);
+                let remembered = self.last_commands.get(&pane.pane_id);
+                if let Some(record) = record
+                    && let Some(command) = record.restart_command()
+                {
+                    let captured = match remembered {
+                        Some(r) if r.captured.command == command => r.captured.clone(),
+                        _ => Captured {
+                            command: command.to_owned(),
+                            cwd: record.cwd.clone().or_else(|| pane.cwd.clone()),
+                            env: record.env.clone(),
+                        },
+                    };
+                    return Some((pane.pane_id.clone(), captured));
+                }
+                let service = remembered.filter(|r| r.long)?;
+                let skipped = record.is_some_and(|r| r.skip.contains(&service.captured.command));
+                (content.status == BarStatus::Exited && !skipped)
+                    .then(|| (pane.pane_id.clone(), service.captured.clone()))
             })
             .collect()
     }
@@ -953,7 +993,16 @@ impl Gerdr {
             return self.show_notice("Nothing to restart in this workspace".into());
         }
         let count = restarts.len();
+        let now = Instant::now();
         for (pane_id, captured) in restarts {
+            // A service from now on, crashing again or not.
+            match self.last_commands.get_mut(&pane_id) {
+                Some(r) if r.captured.command == captured.command => r.long = true,
+                _ => {
+                    let service = Remembered::service(captured.clone(), now);
+                    self.last_commands.insert(pane_id.clone(), service);
+                }
+            }
             if let Some(job) = self.pane_jobs.get(&pane_id) {
                 if job.can_rerun {
                     job.rerun.store(true, Ordering::Relaxed);
@@ -1227,7 +1276,13 @@ mod tests {
     fn a_new_leader_is_remembered_with_its_folder() {
         let mut memory = HashMap::new();
         let cwd = Path::new("/w/app");
-        remember(&mut memory, "p1", Some(&busy(7, "npm run dev")), Some(cwd));
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "npm run dev")),
+            Some(cwd),
+            Instant::now(),
+        );
         let r = &memory["p1"];
         assert_eq!((r.pid, r.captured.command.as_str()), (7, "npm run dev"));
         assert_eq!(r.captured.cwd.as_deref(), Some(cwd));
@@ -1236,7 +1291,13 @@ mod tests {
             pid: 8,
             captured: captured("make", Some("/w/lib"), &[]),
         };
-        remember(&mut memory, "p1", Some(&elsewhere), Some(cwd));
+        remember(
+            &mut memory,
+            "p1",
+            Some(&elsewhere),
+            Some(cwd),
+            Instant::now(),
+        );
         assert_eq!(
             memory["p1"].captured.cwd.as_deref(),
             Some(Path::new("/w/lib"))
@@ -1244,24 +1305,110 @@ mod tests {
     }
 
     #[test]
+    fn a_command_running_long_is_a_service_and_its_reruns_too() {
+        let mut memory = HashMap::new();
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "celery worker")),
+            None,
+            start,
+        );
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "celery worker")),
+            None,
+            at(59),
+        );
+        assert!(!memory["p1"].long);
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "celery worker")),
+            None,
+            at(60),
+        );
+        assert!(memory["p1"].long);
+        // It crashed; run again, it is one at once, however soon it ends.
+        remember(&mut memory, "p1", Some(&Foreground::Idle), None, at(70));
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(8, "celery worker")),
+            None,
+            at(80),
+        );
+        assert!(memory["p1"].long);
+        // Another command isn't, until it has run long itself.
+        remember(&mut memory, "p1", Some(&busy(9, "git pull")), None, at(90));
+        assert!(!memory["p1"].long);
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(10, "celery worker")),
+            None,
+            at(95),
+        );
+        assert!(!memory["p1"].long);
+    }
+
+    #[test]
+    fn a_service_run_again_by_gerdr_stays_one() {
+        let mut memory = HashMap::new();
+        let now = Instant::now();
+        let service = Remembered::service(captured("npm run dev", None, &[]), now);
+        assert_eq!((service.pid, service.long), (0, true));
+        memory.insert("p1".to_owned(), service);
+        remember(&mut memory, "p1", Some(&busy(7, "npm run dev")), None, now);
+        assert_eq!((memory["p1"].pid, memory["p1"].long), (7, true));
+    }
+
+    #[test]
     fn the_same_leader_keeps_its_first_command() {
         let mut memory = HashMap::new();
-        remember(&mut memory, "p1", Some(&busy(7, "uvicorn app:app")), None);
-        remember(&mut memory, "p1", Some(&busy(7, "uvicorn worker")), None);
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "uvicorn app:app")),
+            None,
+            Instant::now(),
+        );
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "uvicorn worker")),
+            None,
+            Instant::now(),
+        );
         assert_eq!(memory["p1"].captured.command, "uvicorn app:app");
     }
 
     #[test]
     fn idle_and_denied_keep_the_last_command() {
         let mut memory = HashMap::new();
-        remember(&mut memory, "p1", Some(&busy(7, "npm run dev")), None);
-        remember(&mut memory, "p1", Some(&Foreground::Idle), None);
+        remember(
+            &mut memory,
+            "p1",
+            Some(&busy(7, "npm run dev")),
+            None,
+            Instant::now(),
+        );
+        remember(
+            &mut memory,
+            "p1",
+            Some(&Foreground::Idle),
+            None,
+            Instant::now(),
+        );
         let denied = Foreground::Untracked {
             pid: 9,
             denied: true,
         };
-        remember(&mut memory, "p1", Some(&denied), None);
-        remember(&mut memory, "p1", None, None);
+        remember(&mut memory, "p1", Some(&denied), None, Instant::now());
+        remember(&mut memory, "p1", None, None, Instant::now());
         assert_eq!(memory["p1"].captured.command, "npm run dev");
         assert_eq!(memory.len(), 1);
     }
@@ -1308,6 +1455,8 @@ mod tests {
         let remembered = Remembered {
             pid: 7,
             captured: captured("npm run dev", None, &[]),
+            since: Instant::now(),
+            long: false,
         };
         let content = bar_content(
             Some(&running(7, "/usr/bin/npm run dev")),
@@ -1324,6 +1473,8 @@ mod tests {
         let remembered = Remembered {
             pid: 7,
             captured: captured("npm run dev", None, &[]),
+            since: Instant::now(),
+            long: false,
         };
         let content = bar_content(Some(&running(9, "vim notes")), Some(&remembered), None);
         assert_eq!(content.label, "vim notes");
@@ -1342,6 +1493,8 @@ mod tests {
         let remembered = Remembered {
             pid: 7,
             captured: captured("npm run dev", None, &[]),
+            since: Instant::now(),
+            long: false,
         };
         let content = bar_content(Some(&at_prompt()), Some(&remembered), None);
         assert_eq!(
