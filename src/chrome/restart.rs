@@ -185,7 +185,9 @@ impl Painter {
                 (rect.size.w - ROW_INSET, rect.size.h).into(),
             );
             let state = if row.checked { Check::On } else { Check::Off };
-            let box_end = self.checkbox(&mut c, check, state, hovered, scale, p);
+            // Never lit itself: the row is, and a lit box would melt into
+            // it.
+            let box_end = self.checkbox(&mut c, check, state, false, scale, p);
             let end = phys(rect, scale).1 - (ROW_INSET as f32 * s).round();
             let row_band = band(rect, scale);
             let after = self.text(
