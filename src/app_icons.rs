@@ -325,6 +325,35 @@ impl AppIcon {
     }
 }
 
+/// gerdr's own icon for the host window, straight RGBA as winit takes it.
+/// Only X11 reads it; Wayland desktops find `dist/gerdr.svg` through the
+/// window's app_id and `gerdr.desktop`.
+pub fn window_icon() -> Option<smithay::reexports::winit::window::Icon> {
+    const PX: u32 = 128;
+    let tree = usvg::Tree::from_data(
+        include_bytes!("../dist/gerdr.svg"),
+        &usvg::Options::default(),
+    )
+    .ok()?;
+    let size = tree.size();
+    let fit = PX as f32 / size.width().max(size.height());
+    let mut pixmap = tiny_skia::Pixmap::new(PX, PX)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(fit, fit),
+        &mut pixmap.as_mut(),
+    );
+    let rgba = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+    smithay::reexports::winit::window::Icon::from_rgba(rgba, PX, PX).ok()
+}
+
 /// GitHub's mark (Octicons' `mark-github`, MIT licensed), symbolic: the
 /// icon of GitHub workspaces and of the CI card.
 pub fn github_icon() -> Option<AppIcon> {
@@ -337,7 +366,7 @@ pub fn github_icon() -> Option<AppIcon> {
 mod tests {
     use std::path::Path;
 
-    use super::{github_icon, rank, weights};
+    use super::{github_icon, rank, weights, window_icon};
 
     #[test]
     fn ranks_sizes() {
@@ -364,6 +393,11 @@ mod tests {
             let expected = to as f32 / from as f32;
             assert!(per_source.iter().all(|s| (s - expected).abs() < 1e-3));
         }
+    }
+
+    #[test]
+    fn gerdr_draws_its_own_window_icon() {
+        assert!(window_icon().is_some());
     }
 
     #[test]

@@ -5569,6 +5569,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let attrs = WindowAttributes::default()
         .with_title("gerdr")
         .with_name("gerdr", "gerdr")
+        .with_window_icon(app_icons::window_icon())
         .with_inner_size(smithay::reexports::winit::dpi::LogicalSize::new(
             1400.0, 900.0,
         ));

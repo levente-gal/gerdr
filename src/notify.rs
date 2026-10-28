@@ -76,7 +76,7 @@ impl Notifier {
             return;
         };
         let msg = msg
-            .append3("gerdr", replaces, "utilities-terminal")
+            .append3("gerdr", replaces, "gerdr")
             .append3(summary, body, vec!["default", "Show"])
             .append2(PropMap::new(), -1i32);
         match self.channel.send(msg) {
