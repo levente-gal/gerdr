@@ -295,12 +295,15 @@ impl Gerdr {
             .installed_cursor()
             .map(|app| app.command.clone())
             .unwrap_or_else(|| CURSOR.to_owned());
-        let running = self.running_vs_code(&command).is_some();
+        let running = self
+            .running_vs_code(&command)
+            .and_then(|(w, t, leaf)| self.leaf_pid(w, t, leaf));
         self.open_cursor(Some(&command));
         self.cursor_opened = Some(id.to_owned());
-        // One just started would take the link as its own start.
-        let Some((own, _)) = own_instance(&command, Some(&self.instance_dir)).filter(|_| running)
-        else {
+        // One just started would take the link as its own start. To the
+        // one running, by its own profile: by another, the link would
+        // start a second Cursor, which gerdr doesn't keep.
+        let Some(own) = running.and_then(|pid| with_profile_of(&command, pid)) else {
             return;
         };
         let link = format!("{CHAT_LINK}{id}");
@@ -310,6 +313,20 @@ impl Gerdr {
             .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
         let dir = home_dir().unwrap_or_default();
         self.spawn(cmd, &dir, CURSOR);
+    }
+
+    /// The pid of the app shown in leaf `leaf` of tab `t` of workspace `w`,
+    /// or started for it: for a window of an app kept running, the app's
+    /// (its own client's is the server's client).
+    fn leaf_pid(&self, w: usize, t: usize, leaf: u32) -> Option<u32> {
+        let tab = self.workspaces.get(w)?.tabs.get(t)?;
+        match tab.panes.iter().find(|p| p.id == leaf) {
+            Some(pane) if self.is_kept_window(&pane.window) => {
+                self.kept_pid(pane.app_command.as_deref()?)
+            }
+            Some(pane) => self.window_pid(&pane.window),
+            None => tab.expected.iter().find(|e| e.pane == leaf)?.pid,
+        }
     }
 
     /// The installed Cursor, if any.
@@ -1124,6 +1141,43 @@ fn vs_code_of(command: &str) -> Option<String> {
     program_name(command).filter(|key| VS_CODES.contains(&key.as_str()))
 }
 
+/// VS Code `command` with the profile of the one running as `pid`, which
+/// it then hands what it opens: the same `--user-data-dir`, or none for
+/// the default. `None` when `pid` doesn't run (or just started).
+fn with_profile_of(command: &str, pid: u32) -> Option<String> {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> = cmdline
+        .split(|byte| *byte == 0)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    if args.first().is_none_or(String::is_empty) {
+        return None;
+    }
+    if command.contains("--user-data-dir") {
+        return Some(command.to_owned());
+    }
+    let (_, end, _) = program(command)?;
+    let mut command = command.to_owned();
+    if let Some(dir) = user_data_dir(&args) {
+        command.insert_str(end, &format!(" --user-data-dir={}", desktop::shell_quote(&dir)));
+    }
+    Some(command)
+}
+
+/// The `--user-data-dir` among `args`, if any.
+fn user_data_dir(args: &[String]) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if let Some(dir) = arg.strip_prefix("--user-data-dir=") {
+            return Some(dir.to_owned());
+        }
+        if arg == "--user-data-dir" {
+            return args.next().cloned();
+        }
+    }
+    None
+}
+
 /// The profile gerdr keeps for the app of program `key`, which its
 /// projects' profiles share or start from (see `instance_dir`).
 fn profile_dir(home: &Path, key: &str) -> PathBuf {
@@ -1312,9 +1366,35 @@ mod tests {
 
     use super::{
         alacritty_command, copy_browser_profile, ghostty_command, lineage, link_vs_code_shared,
-        link_zed_shared, log_path, opens_nothing_in_zed, own_instance, vs_code_of, web_app,
+        link_zed_shared, log_path, opens_nothing_in_zed, own_instance, user_data_dir, vs_code_of,
+        web_app, with_profile_of,
     };
     use crate::home_dir;
+
+    #[test]
+    fn links_go_to_the_running_profile() {
+        let args = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            user_data_dir(&args("/usr/share/cursor/cursor --user-data-dir=/p/cursor")).as_deref(),
+            Some("/p/cursor")
+        );
+        assert_eq!(
+            user_data_dir(&args("cursor --type=renderer --user-data-dir /p/x")).as_deref(),
+            Some("/p/x")
+        );
+        assert_eq!(user_data_dir(&args("cursor .")), None);
+        // This test's own process runs without one: the default profile.
+        let me = std::process::id();
+        assert_eq!(
+            with_profile_of("/usr/share/cursor/cursor", me).as_deref(),
+            Some("/usr/share/cursor/cursor")
+        );
+        assert_eq!(
+            with_profile_of("cursor --user-data-dir=/x", me).as_deref(),
+            Some("cursor --user-data-dir=/x")
+        );
+        assert_eq!(with_profile_of("cursor", u32::MAX), None);
+    }
 
     #[test]
     fn vs_codes_by_program() {
