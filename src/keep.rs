@@ -490,6 +490,30 @@ impl Gerdr {
         Some(pid)
     }
 
+    /// The pid of an app the shown project's server runs for `command`,
+    /// whose other windows come back to their panes too.
+    pub fn kept_pid(&self, command: &str) -> Option<u32> {
+        let keeper = self.keeper.as_ref()?;
+        read(&keeper.project)
+            .apps
+            .iter()
+            .find(|app| app.command == command.trim())
+            .map(|app| app.process.pid)
+    }
+
+    /// The command that started the app on the shown project's server a
+    /// window of app_id `app_id` belongs to: the one whose program the
+    /// app_id names, else the first.
+    pub fn kept_command(&self, app_id: &str) -> Option<String> {
+        let keeper = self.keeper.as_ref()?;
+        let apps = read(&keeper.project).apps;
+        let named = apps.iter().find(|app| {
+            launch::program_name(&app.command)
+                .is_some_and(|program| app_id.contains(&program.to_ascii_lowercase()))
+        });
+        named.or(apps.first()).map(|app| app.command.clone())
+    }
+
     /// Whether `pid` is an app on the shown project's server.
     pub fn is_kept(&self, pid: Option<u32>) -> bool {
         self.keeper

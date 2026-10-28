@@ -52,8 +52,8 @@ mod reload;
 mod rename;
 mod repo_batches;
 mod repos;
-mod review;
 mod restart;
+mod review;
 mod sidebar;
 mod switcher;
 mod syntax;
@@ -214,6 +214,9 @@ pub struct Pane {
     /// Neither started by gerdr nor by what it started: opened from a shell
     /// of the project's. Held for the project when switching away.
     pub stray: bool,
+    /// Another window of the app kept running that this command started
+    /// (see `keep`), which comes back to the pane by its title.
+    pub window_of: Option<String>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.
@@ -250,6 +253,9 @@ pub struct Expected {
     /// The app runs on the project's server of apps kept running (see
     /// `keep`): its window comes through that server's client.
     pub kept: bool,
+    /// For another window of a kept app (see `Pane::window_of`): the
+    /// command that started the app, and the window's title as saved.
+    pub window_of: Option<(String, String)>,
 }
 
 impl Expected {
@@ -266,6 +272,7 @@ impl Expected {
             timed_out: false,
             closed: false,
             kept: false,
+            window_of: None,
         }
     }
 
@@ -299,6 +306,7 @@ impl Expected {
             "" => self
                 .app_command
                 .as_deref()
+                .or(self.window_of.as_ref().map(|(command, _)| command.as_str()))
                 .and_then(program)
                 .unwrap_or_else(|| "app".into()),
             other => other.to_owned(),
@@ -378,18 +386,30 @@ impl Tab {
     /// fills it. Windows gerdr can't bring back are left out.
     fn save(&self) -> Option<TabRecord> {
         let leaf = |id: u32| match self.panes.iter().find(|p| p.id == id) {
-            Some(p) => saved_leaf(
-                p.herdr.as_ref(),
-                p.app_command.as_deref(),
-                is_zed(&p.window),
-            ),
+            Some(p) => match &p.window_of {
+                Some(command) => Some(SavedLeaf::Window {
+                    command: command.clone(),
+                    title: window_title(&p.window).unwrap_or_default(),
+                }),
+                None => saved_leaf(
+                    p.herdr.as_ref(),
+                    p.app_command.as_deref(),
+                    is_zed(&p.window),
+                ),
+            },
             None => {
                 let e = self.expected.iter().find(|e| e.pane == id)?;
-                saved_leaf(
-                    e.herdr.as_ref(),
-                    e.app_command.as_deref(),
-                    e.app_id == "zed",
-                )
+                match &e.window_of {
+                    Some((command, title)) => Some(SavedLeaf::Window {
+                        command: command.clone(),
+                        title: title.clone(),
+                    }),
+                    None => saved_leaf(
+                        e.herdr.as_ref(),
+                        e.app_command.as_deref(),
+                        e.app_id == "zed",
+                    ),
+                }
             }
         };
         Some(TabRecord {
@@ -570,6 +590,9 @@ struct RestoredTab {
     zed: Vec<u32>,
     /// The leaves kept for apps, with the command to launch into each.
     apps: Vec<(u32, String)>,
+    /// The leaves kept for other windows of apps kept running, with the
+    /// command that started the app and the window's title.
+    windows: Vec<(u32, String, String)>,
 }
 
 /// Rebuild a tab from `saved`: each herdr pane in the leaf `ids` gives it,
@@ -591,6 +614,11 @@ fn restore_tab(saved: &SavedNode, ids: &HashMap<String, u32>, next: &mut u32) ->
         SavedLeaf::App { command } => {
             let id = new_leaf();
             restored.apps.push((id, command.clone()));
+            Some(id)
+        }
+        SavedLeaf::Window { command, title } => {
+            let id = new_leaf();
+            restored.windows.push((id, command.clone(), title.clone()));
             Some(id)
         }
     });
@@ -3126,6 +3154,23 @@ impl Gerdr {
         for (id, command) in restored.apps {
             self.launch_into(w, t, Some(id), &command);
         }
+        // Only an app still running brings back its other windows; their
+        // leaves wait for them, the others go (the caller prunes).
+        for (id, command, title) in restored.windows {
+            let pid = self.kept_pid(&command);
+            let tab = &mut self.workspaces[w].tabs[t];
+            match pid {
+                Some(pid) => {
+                    let mut expected = Expected::new(Some(pid), "", id, false);
+                    expected.kept = true;
+                    expected.window_of = Some((command, title));
+                    tab.expected.push(expected);
+                }
+                None => {
+                    layout::remove(&mut tab.layout, id);
+                }
+            }
+        }
         !restored.zed.is_empty()
     }
 
@@ -3914,6 +3959,12 @@ impl Gerdr {
         for tab in self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs) {
             let mut gone = Vec::new();
             tab.expected.retain_mut(|e| {
+                // Another window of a kept app that didn't come back: the
+                // app closed it meanwhile, nothing to retry.
+                if e.window_of.is_some() && e.is_overdue(now) {
+                    gone.push(e.pane);
+                    return false;
+                }
                 if e.pid.is_some_and(|pid| exited.contains(&pid)) {
                     e.exited = Some(now);
                 }
@@ -4129,10 +4180,24 @@ impl Gerdr {
             let program = |e: &Expected| {
                 e.app_command
                     .as_deref()
+                    .or(e.window_of.as_ref().map(|(command, _)| command.as_str()))
                     .and_then(launch::program_name)
                     .is_some_and(|program| app_id.contains(&program.to_ascii_lowercase()))
             };
-            find(&|e| e.kept && program(e)).or_else(|| find(&|e| e.kept))
+            let other = |e: &Expected| e.window_of.is_some();
+            // Another window back to its leaf by its title; any to the
+            // app's own leaf; one whose title changed to another's leaf.
+            let title = window_title(&window);
+            let titled = |e: &Expected| {
+                e.window_of
+                    .as_ref()
+                    .is_some_and(|(_, saved)| Some(saved) == title.as_ref())
+            };
+            find(&|e| e.kept && titled(e))
+                .or_else(|| find(&|e| e.kept && !other(e) && program(e)))
+                .or_else(|| find(&|e| e.kept && !other(e)))
+                .or_else(|| find(&|e| e.kept && program(e)))
+                .or_else(|| find(&|e| e.kept))
         };
         let ours = || {
             lineage
@@ -4167,7 +4232,13 @@ impl Gerdr {
                 self.held.entry(owner).or_default().push(window);
                 return;
             }
-            return self.place_stray(window, stray);
+            // Another window of an app kept running: it comes back to its
+            // pane after a restart (see `Pane::window_of`).
+            let window_of = self
+                .from_keeper(&lineage)
+                .then(|| self.kept_command(&app_id))
+                .flatten();
+            return self.place_stray(window, stray, window_of);
         };
         let e = self.workspaces[w].tabs[t].expected.remove(e);
         let mut dropped = self.launch_next_zed();
@@ -4178,6 +4249,7 @@ impl Gerdr {
             herdr: e.herdr,
             app_command: e.app_command,
             stray: false,
+            window_of: e.window_of.map(|(command, _)| command),
         };
         self.add_pane(w, t, pane, e.focus);
         if dropped {
@@ -4189,8 +4261,9 @@ impl Gerdr {
     }
 
     /// Show `window`, not one gerdr started, in the shown project: split
-    /// the focused pane of the current tab along its longer side.
-    fn place_stray(&mut self, window: Window, stray: bool) {
+    /// the focused pane of the current tab along its longer side. It may be
+    /// another window of an app kept running (see `Pane::window_of`).
+    fn place_stray(&mut self, window: Window, stray: bool, window_of: Option<String>) {
         if self.workspaces.is_empty() {
             let ws = self.new_workspace(home_dir().unwrap_or_default(), WorkspaceKind::Project);
             self.workspaces.push(ws);
@@ -4210,6 +4283,7 @@ impl Gerdr {
             herdr: None,
             app_command: None,
             stray,
+            window_of,
         };
         self.add_pane(w, t, pane, true);
     }
@@ -4265,7 +4339,7 @@ impl Gerdr {
         let mut windows = self.held.remove(id).unwrap_or_default();
         windows.extend(self.held.remove("").unwrap_or_default());
         for window in windows {
-            self.place_stray(window, true);
+            self.place_stray(window, true, None);
         }
     }
 
@@ -5994,6 +6068,23 @@ mod tests {
         assert_eq!(restored.apps, [(12, "firefox".to_owned())]);
         assert_eq!(next, 12);
         assert_eq!(restored.layout.unwrap().leaves(), [11, 7, 12]);
+    }
+
+    #[test]
+    fn restores_other_windows_of_kept_apps_by_title() {
+        let window = SavedNode::Leaf(SavedLeaf::Window {
+            command: "cursor".into(),
+            title: "ao-app - Cursor".into(),
+        });
+        let saved = split(app("cursor"), window);
+        let mut next = 0;
+        let restored = restore_tab(&saved, &HashMap::new(), &mut next);
+        assert_eq!(restored.apps, [(1, "cursor".to_owned())]);
+        assert_eq!(
+            restored.windows,
+            [(2, "cursor".to_owned(), "ao-app - Cursor".to_owned())]
+        );
+        assert_eq!(restored.layout.unwrap().leaves(), [1, 2]);
     }
 
     #[test]
