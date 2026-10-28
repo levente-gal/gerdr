@@ -2479,7 +2479,8 @@ impl Gerdr {
                     if !panes.is_empty() {
                         state.web_pending = true;
                         let tx = tx.clone();
-                        web_pages::read_all(panes, move |found| {
+                        let instance = state.instance_dir.clone();
+                        web_pages::read_all(panes, instance, move |found| {
                             let _ = tx.send(found);
                         });
                     }
@@ -5212,7 +5213,7 @@ impl Gerdr {
     /// End gerdr, stopping the project's session if `stop`. It counts as
     /// stopped only once it is.
     pub fn quit_app(&mut self, stop: bool) {
-        self.take_web_urls(web_pages::read_now(self.web_panes()));
+        self.take_web_urls(web_pages::read_now(self.web_panes(), &self.instance_dir));
         self.record_tabs();
         self.close_web_control();
         let stopped = stop && self.stop_session();
