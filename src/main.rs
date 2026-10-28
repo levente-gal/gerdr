@@ -49,6 +49,7 @@ mod reload;
 mod rename;
 mod repo_batches;
 mod repos;
+mod restart;
 mod sidebar;
 mod switcher;
 mod syntax;
@@ -1186,6 +1187,8 @@ pub struct Gerdr {
     pub toasts: VecDeque<Toast>,
     /// The quit dialog, while it is open.
     pub quit: Option<quit::QuitDialog>,
+    /// The restart dialog, while it is open.
+    pub restart: Option<restart::RestartDialog>,
     /// The event loop sources following the project's herdr session, removed
     /// when switching to another project.
     pub herdr_sources: Vec<RegistrationToken>,
@@ -1619,6 +1622,7 @@ impl Gerdr {
             tabs: Vec::new(),
             panes: Vec::new(),
             folded: None,
+            restart_choices: Vec::new(),
         });
         self.projects.save();
         id
@@ -1855,7 +1859,7 @@ impl Gerdr {
             }
         }
         // What runs again is a service, should it crash before it has run
-        // long (see `Gerdr::restart_workspace`).
+        // long (see `Gerdr::restart_commands`).
         let now = Instant::now();
         for prep in &preps {
             if let Some(command) = &prep.command {
@@ -4331,6 +4335,7 @@ impl Gerdr {
         let reordering = self.reorder.is_some_and(|r| r.moving);
         // These take every click.
         if self.quit.is_some()
+            || self.restart.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.worktrees.is_open()
@@ -4519,6 +4524,7 @@ impl Gerdr {
         self.detach_project();
         self.welcome = None;
         self.quit = None;
+        self.restart = None;
         self.project = Some(id.to_owned());
         self.load_inbox();
         self.projects.last_active = Some(id.to_owned());
@@ -5176,6 +5182,7 @@ impl Gerdr {
             prefix: (self.prefix_armed || self.help_pinned).then(|| self.keymap.help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
+            restart: self.restart_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
             repos: self.repos_view(),
@@ -5501,6 +5508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         previous_project: None,
         toasts: VecDeque::new(),
         quit: None,
+        restart: None,
         herdr_sources: Vec::new(),
         herdr_poke: None,
         idle_since: HashMap::new(),

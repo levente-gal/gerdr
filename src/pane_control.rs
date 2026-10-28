@@ -1030,14 +1030,10 @@ impl Gerdr {
             .collect()
     }
 
-    /// Stop every command of workspace `w` that runs again after a reboot
-    /// and run it again, as a reboot would: after a pull or a checkout,
-    /// for what doesn't reload by itself.
-    pub fn restart_workspace(&mut self, w: usize) {
-        let restarts = self.workspace_restarts(w);
-        if restarts.is_empty() {
-            return self.show_notice("Nothing to restart in this workspace".into());
-        }
+    /// Stop each of `restarts` (commands, by herdr pane) and run it again,
+    /// as a reboot would: after a pull or a checkout, for what doesn't
+    /// reload by itself (see `restart`).
+    pub fn restart_commands(&mut self, restarts: Vec<(String, Captured)>) {
         let count = restarts.len();
         let now = Instant::now();
         for (pane_id, captured) in restarts {

@@ -41,6 +41,8 @@ pub enum MenuAction {
     /// Restart the commands of workspace `w` that run again after a
     /// reboot.
     RestartWorkspace(usize),
+    /// Choose which of workspace `w`'s commands restarting it runs again.
+    ChooseRestarts(usize),
     /// A new tab in workspace `w`.
     NewTab(usize),
     /// Tab `t` of workspace `w`.
@@ -298,6 +300,7 @@ impl Gerdr {
             MenuAction::CloseWorkspace(w) => self.close_workspace(w),
             MenuAction::RenameWorkspace(w) => self.start_rename(RenameTarget::Workspace(w)),
             MenuAction::RestartWorkspace(w) => self.restart_workspace(w),
+            MenuAction::ChooseRestarts(w) => self.choose_restarts(w),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);
                 self.new_tab();

@@ -30,6 +30,7 @@ mod placeholder;
 mod project_menu;
 mod quit;
 mod repos;
+mod restart;
 mod shapes;
 mod sidebar;
 mod switcher;
@@ -70,6 +71,7 @@ pub use placeholder::*;
 pub use project_menu::*;
 pub use quit::*;
 pub use repos::*;
+pub use restart::*;
 use shapes::*;
 pub use sidebar::*;
 pub use switcher::*;
@@ -128,6 +130,8 @@ pub struct ChromeView {
     pub welcome: Option<WelcomeView>,
     /// Set while the quit dialog is open, over everything.
     pub quit: Option<QuitView>,
+    /// Set while the restart dialog is open, over all but that.
+    pub restart: Option<RestartView>,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
     /// Set while the worktrees popup is open.
@@ -168,6 +172,7 @@ pub struct Chrome {
     switcher: Overlay<(SwitcherView, i32, Theme, f64)>,
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
+    restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
     project_menu: Overlay<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
     worktrees: Overlay<(WorktreesView, Size<i32, Logical>, Theme, f64)>,
     repos: Overlay<(ReposView, Size<i32, Logical>, Theme, f64)>,
@@ -214,6 +219,7 @@ impl Chrome {
             switcher: Overlay::default(),
             welcome: Overlay::default(),
             quit: Overlay::default(),
+            restart: Overlay::default(),
             project_menu: Overlay::default(),
             worktrees: Overlay::default(),
             repos: Overlay::default(),
@@ -323,6 +329,18 @@ impl Chrome {
         parts.extend(self.tooltip.part(tooltip, now, true, |(tip, w, ..)| {
             painter.tooltip(tip, *w, scale, theme.palette())
         }));
+
+        // The restart dialog covers all but the quit dialog.
+        let restart = view.restart.map(|restart| {
+            let (loc, size) = shadowed(restart_layout(output, restart.rows.len()).panel);
+            ((restart, output, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.restart
+                .part(restart, now, true, |(restart, output, ..)| {
+                    painter.restart_dialog(restart, *output, scale, theme.palette())
+                }),
+        );
 
         // The quit dialog covers everything.
         let quit = view.quit.map(|quit| {
@@ -874,6 +892,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(layout.detail_buttons);
         rects.push(layout.query);
         rects.extend(layout.hints.into_iter().map(|(_, rect)| rect));
+    }
+    if let Some(restart) = &view.restart {
+        let layout = restart_layout(output, restart.rows.len());
+        rects.extend(layout.rows);
+        rects.extend(layout.buttons);
     }
     if view.quit.is_some() {
         let quit = quit_layout(output);

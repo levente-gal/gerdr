@@ -47,7 +47,7 @@ use crate::{
     menu::MenuAction,
     project_menu, quit,
     rename::RenameTarget,
-    repos,
+    repos, restart,
     switcher::Target,
     text_field::{self, TextField},
     toast::ToastHit,
@@ -95,6 +95,8 @@ enum Intercepted {
     ProjectMenu(project_menu::Outcome),
     /// The quit dialog asked for this.
     Quit(quit::Outcome),
+    /// The restart dialog asked for this.
+    Restart(restart::Outcome),
     /// The worktrees popup asked for this.
     Worktrees(worktrees::Outcome),
     /// The repositories panel asked for this.
@@ -186,6 +188,7 @@ impl Gerdr {
                         // A key moves what an overlay shows from under
                         // its tooltip.
                         let overlay = state.welcome.is_some()
+                            || state.restart.is_some()
                             || state.project_menu.is_some()
                             || state.worktrees.is_open()
                             || state.repos.is_open()
@@ -198,6 +201,11 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             let out = state.quit_key(mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out.map(Intercepted::Quit));
+                        }
+                        if state.restart.is_some() {
+                            state.suppressed_keys.push(code);
+                            let out = state.restart_key(mods, sym);
+                            return FilterResult::Intercept(out.map(Intercepted::Restart));
                         }
                         // A menu over the repositories panel takes its
                         // keys; any other closes it and goes on.
@@ -417,6 +425,7 @@ impl Gerdr {
                 // grabbing the pointer until it sees the release.
                 if state == ButtonState::Released
                     && (self.quit.is_some()
+                        || self.restart.is_some()
                         || self.welcome.is_some()
                         || self.project_menu.is_some()
                         || self.worktrees.is_open()
@@ -494,7 +503,7 @@ impl Gerdr {
                     }
                     return;
                 }
-                if self.quit.is_some() || self.welcome.is_some() {
+                if self.quit.is_some() || self.restart.is_some() || self.welcome.is_some() {
                     return;
                 }
                 // Over the sidebar, its rows scroll: a notch of the wheel
@@ -556,6 +565,12 @@ impl Gerdr {
         if self.quit.is_some() {
             if button == BTN_LEFT {
                 self.quit_click(location);
+            }
+            return true;
+        }
+        if self.restart.is_some() {
+            if button == BTN_LEFT {
+                self.restart_click(location);
             }
             return true;
         }
@@ -759,6 +774,14 @@ impl Gerdr {
                 RegionHit::Nothing
             };
         }
+        if self.restart.is_some() {
+            let controls = self.restart_controls();
+            return if controls.iter().any(|rect| rect.to_f64().contains(pos)) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
         if self.welcome.is_some() || self.project_menu.is_some() {
             return RegionHit::Nothing;
         }
@@ -912,6 +935,7 @@ impl Gerdr {
         }
         // An overlay takes the hover from everything under it.
         let overlay = self.quit.is_some()
+            || self.restart.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.worktrees.is_open()
@@ -921,6 +945,8 @@ impl Gerdr {
         let mut overlay_tip = None;
         if self.quit.is_some() {
             self.quit_hover(pos);
+        } else if self.restart.is_some() {
+            self.restart_hover(pos);
         } else if self.welcome.is_some() {
             overlay_tip = self.welcome_hover(pos);
         } else if self.project_menu.is_some() {
@@ -1023,6 +1049,7 @@ impl Gerdr {
             Intercepted::Welcome(outcome) => self.apply_welcome(outcome),
             Intercepted::ProjectMenu(outcome) => self.apply_project_menu(outcome),
             Intercepted::Quit(outcome) => self.apply_quit(outcome),
+            Intercepted::Restart(outcome) => self.apply_restart(outcome),
             Intercepted::Worktrees(outcome) => self.apply_worktrees(outcome),
             Intercepted::Repos(outcome) => self.apply_repos(outcome),
             Intercepted::Inbox(outcome) => self.apply_inbox(outcome),
@@ -1032,7 +1059,7 @@ impl Gerdr {
     /// The overlay with text fields that has the keyboard, if any: the quit
     /// dialog, on top, has none.
     fn text_overlay(&self) -> Option<Overlay> {
-        if self.quit.is_some() {
+        if self.quit.is_some() || self.restart.is_some() {
             None
         } else if self.welcome.is_some() {
             Some(Overlay::Welcome)
