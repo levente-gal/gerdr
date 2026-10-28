@@ -214,6 +214,16 @@ pub(super) fn measure(text: &str, size: f32) -> Option<f32> {
     Some(width_in(font, text, size, 1.0))
 }
 
+/// Width of `text` in the monospace font (else the UI font) at `size`,
+/// at scale 1, as `measure` has it.
+pub(super) fn measure_mono(text: &str, size: f32) -> Option<f32> {
+    static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
+    let font = FONT
+        .get_or_init(|| load_font(find_mono_font()).or_else(|| load_font(find_font())))
+        .as_ref()?;
+    Some(width_in(font, text, size, 1.0))
+}
+
 /// Width of `text` in `font` at `size` (logical) and `scale`, in physical
 /// pixels.
 fn width_in(font: &FontVec, text: &str, size: f32, scale: f64) -> f32 {

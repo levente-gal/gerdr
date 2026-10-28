@@ -53,18 +53,30 @@ pub fn is_paste(mods: &ModifiersState, sym: Keysym) -> bool {
 }
 
 /// Run `handle`, an overlay's key handling, on the key `PASTE`, which types
-/// `text` into the first field it reaches: as one line, its line breaks and
-/// tabs as spaces, as the fields are one line.
+/// `text` into the first field it reaches: into a one-line field as one
+/// line, its line breaks and tabs as spaces; into a multi-line one with its
+/// line breaks, tabs as four spaces.
 pub fn pasting<R>(text: &str, handle: impl FnOnce(Keysym) -> R) -> R {
-    let line: String = text
-        .trim()
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    PASTED.set(Some(line));
+    PASTED.set(Some(text.to_owned()));
     let out = handle(PASTE);
     PASTED.take();
     out
+}
+
+/// `text` as a one-line field takes it pasted.
+fn one_line(text: &str) -> String {
+    text.trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// `text` as a multi-line field takes it pasted.
+fn many_lines(text: &str) -> String {
+    let text = text.trim_end().replace("\r\n", "\n").replace('\t', "    ");
+    text.chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect()
 }
 
 /// The text a field copied or cut since this was last asked, for the
@@ -151,6 +163,9 @@ pub struct TextField {
     redo: Vec<Line>,
     /// The last edit typed characters: the next one undoes with it.
     typing: bool,
+    /// It holds lines: Up and Down move between them, Home and End go to
+    /// either end of the caret's, and a paste keeps its line breaks.
+    multiline: bool,
 }
 
 impl Deref for TextField {
@@ -184,6 +199,22 @@ impl From<String> for TextField {
 }
 
 impl TextField {
+    /// A field of lines holding `text`, the caret at its end; a line
+    /// break is typed with `newline`.
+    pub fn multiline(text: &str) -> Self {
+        Self {
+            multiline: true,
+            ..text.into()
+        }
+    }
+
+    /// Break the line at the caret (a multi-line field's Shift+Enter).
+    pub fn newline(&mut self) -> Edit {
+        let edit = self.insert("\n", false);
+        TOOK.set(true);
+        edit
+    }
+
     /// What it shows.
     pub fn line(&self) -> Line {
         self.line.clone()
@@ -251,7 +282,8 @@ impl TextField {
     fn edit(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Edit {
         if sym == PASTE {
             return match PASTED.take() {
-                Some(text) => self.insert(&text, false),
+                Some(text) if self.multiline => self.insert(&many_lines(&text), false),
+                Some(text) => self.insert(&one_line(&text), false),
                 None => Edit::Ignored,
             };
         }
@@ -282,6 +314,24 @@ impl TextField {
                     next_char(text, caret)
                 };
                 self.go(to, shift)
+            }
+            Keysym::Up | Keysym::KP_Up if self.multiline && !ctrl => {
+                match line_above(text, caret) {
+                    Some(to) => self.go(to, shift),
+                    None => Edit::Ignored,
+                }
+            }
+            Keysym::Down | Keysym::KP_Down if self.multiline && !ctrl => {
+                match line_below(text, caret) {
+                    Some(to) => self.go(to, shift),
+                    None => Edit::Ignored,
+                }
+            }
+            Keysym::Home | Keysym::KP_Home if self.multiline && !ctrl => {
+                self.go(line_start(text, caret), shift)
+            }
+            Keysym::End | Keysym::KP_End if self.multiline && !ctrl => {
+                self.go(line_end(text, caret), shift)
             }
             Keysym::Home | Keysym::KP_Home => self.go(0, shift),
             Keysym::End | Keysym::KP_End => self.go(end, shift),
@@ -404,6 +454,44 @@ impl TextField {
         self.typing = false;
         Edit::Changed
     }
+}
+
+/// Where the line byte `at` is on starts.
+fn line_start(text: &str, at: usize) -> usize {
+    text[..at].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// Where the line byte `at` is on ends, before its line break.
+fn line_end(text: &str, at: usize) -> usize {
+    text[at..].find('\n').map_or(text.len(), |i| at + i)
+}
+
+/// Byte `at` moved to the line above, as many characters in as it can;
+/// `None` on the first line.
+fn line_above(text: &str, at: usize) -> Option<usize> {
+    let start = line_start(text, at);
+    let above = line_start(text, start.checked_sub(1)?);
+    Some(column_in(text, above, text[start..at].chars().count()))
+}
+
+/// Byte `at` moved to the line below; `None` on the last line.
+fn line_below(text: &str, at: usize) -> Option<usize> {
+    let end = line_end(text, at);
+    if end == text.len() {
+        return None;
+    }
+    let column = text[line_start(text, at)..at].chars().count();
+    Some(column_in(text, end + 1, column))
+}
+
+/// The byte `column` characters into the line starting at `start`, or its
+/// end.
+fn column_in(text: &str, start: usize, column: usize) -> usize {
+    let end = line_end(text, start);
+    text[start..end]
+        .char_indices()
+        .nth(column)
+        .map_or(end, |(i, _)| start + i)
 }
 
 /// Where the character before `at` starts.
@@ -695,5 +783,36 @@ mod tests {
         assert!(is_paste(&shift, Keysym::Insert));
         assert!(!is_paste(&none(), Keysym::v));
         assert!(!is_paste(&ctrl, Keysym::Insert));
+    }
+
+    #[test]
+    fn a_multiline_field_breaks_lines_and_moves_between_them() {
+        let mut f = TextField::multiline("");
+        type_in(&mut f, "first");
+        assert_eq!(f.newline(), Edit::Changed);
+        type_in(&mut f, "to");
+        assert_eq!(shown(&f), "first\nto|");
+        assert_eq!(press(&mut f, &none(), Keysym::Up), Edit::Moved);
+        assert_eq!(shown(&f), "fi|rst\nto");
+        // On the first line Up is the overlay's.
+        assert_eq!(press(&mut f, &none(), Keysym::Up), Edit::Ignored);
+        assert_eq!(press(&mut f, &none(), Keysym::End), Edit::Moved);
+        assert_eq!(shown(&f), "first|\nto");
+        // The column is kept as far as the line below reaches.
+        assert_eq!(press(&mut f, &none(), Keysym::Down), Edit::Moved);
+        assert_eq!(shown(&f), "first\nto|");
+        assert_eq!(press(&mut f, &none(), Keysym::Down), Edit::Ignored);
+        assert_eq!(press(&mut f, &none(), Keysym::Home), Edit::Moved);
+        assert_eq!(shown(&f), "first\n|to");
+        // A one-line field leaves Up to the overlay.
+        let mut one = TextField::from("a");
+        assert_eq!(press(&mut one, &none(), Keysym::Up), Edit::Ignored);
+    }
+
+    #[test]
+    fn a_paste_keeps_its_line_breaks_in_a_multiline_field() {
+        let mut f = TextField::multiline("");
+        pasting("a\tb\r\nc\n\n", |sym| press(&mut f, &none(), sym));
+        assert_eq!(&*f, "a    b\nc");
     }
 }

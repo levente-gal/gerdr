@@ -28,6 +28,7 @@ use crate::{
         Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
         RunState,
     },
+    review,
     toast::Level,
     tooltip::Tooltip,
 };
@@ -445,10 +446,12 @@ impl Gerdr {
     }
 
     /// What the panel's views and keys need of the chrome: the density,
-    /// and the tree's share of the panel.
-    fn repos_env(&self) -> (Density, f64) {
+    /// the tree's share of the panel, and how many characters a review
+    /// comment's row of the diff holds.
+    fn repos_env(&self) -> (Density, f64, usize) {
         let share = self.repos.tree_share.unwrap_or(chrome::REPOS_TREE_SHARE);
-        (self.density, share)
+        let cols = chrome::repos_detail_cols(self.output_size(), share);
+        (self.density, share, cols)
     }
 
     /// Open the repositories panel: as it was left, for the same project.
@@ -464,7 +467,13 @@ impl Gerdr {
         self.repos.items = self.repo_items();
         let panel = match self.repos.kept.take() {
             Some((project, panel)) if project == self.project => panel,
-            _ => Panel::new(&self.repos.items),
+            _ => {
+                let mut panel = Panel::new(&self.repos.items);
+                if let Some(id) = &self.project {
+                    panel.review = review::load(None, id);
+                }
+                panel
+            }
         };
         self.repos.panel = Some(panel);
         self.repos_refresh();
@@ -472,6 +481,21 @@ impl Gerdr {
         self.refresh_git();
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
+    }
+
+    /// Save the panel's review comments with the project, if they changed.
+    fn repos_save_review(&mut self) {
+        let Some(panel) = self.repos.panel.as_mut().filter(|p| p.review_dirty) else {
+            return;
+        };
+        panel.review_dirty = false;
+        let Some(id) = self.project.as_deref() else {
+            return;
+        };
+        if let Err(err) = review::save(None, id, &panel.review) {
+            tracing::warn!("saving the review: {err}");
+            self.toast(format!("Couldn't save the review: {err}"), Level::Error);
+        }
     }
 
     /// Close the panel, kept as it is for opening again.
@@ -545,7 +569,7 @@ impl Gerdr {
     /// and the detail it wants read.
     fn repos_refresh(&mut self) {
         let page = self.repos_page();
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -566,6 +590,7 @@ impl Gerdr {
                 top: top_branches,
                 density,
                 tree_share,
+                cols,
             };
             panel.refresh(&ctx);
         }
@@ -586,7 +611,7 @@ impl Gerdr {
     /// thread.
     fn repos_detail(&mut self) {
         let page = self.repos_page();
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let Some(panel) = self.repos.panel.as_ref() else {
             return;
         };
@@ -600,6 +625,7 @@ impl Gerdr {
             top: &self.repos.top_branches,
             density,
             tree_share,
+            cols,
         };
         let diffs = panel.diffs_wanted(&ctx);
         let key = panel
@@ -647,7 +673,7 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let page = self.repos_page();
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -667,9 +693,11 @@ impl Gerdr {
             top: top_branches,
             density,
             tree_share,
+            cols,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
+        self.repos_save_review();
         outcome
     }
 
@@ -709,8 +737,13 @@ impl Gerdr {
     /// A click on `hit` in the panel, the second of a double click when
     /// `double`.
     fn repos_hit(&mut self, hit: ReposHit, double: bool) {
+        // Shift+click on a diff row reaches the cursor's range there.
+        let shift = self
+            .seat
+            .get_keyboard()
+            .is_some_and(|k| k.modifier_state().shift);
         let page = self.repos_page();
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -730,8 +763,13 @@ impl Gerdr {
             top: top_branches,
             density,
             tree_share,
+            cols,
         };
         let outcome = panel.as_mut().and_then(|p| {
+            if let (ReposHit::DiffRow(i), true, false) = (hit, shift, double) {
+                p.extend_detail_row(i, &ctx);
+                return None;
+            }
             let outcome = p.click(hit, &ctx);
             match hit {
                 ReposHit::Line(i) if double && p.is_file_line(i, &ctx) => {
@@ -742,6 +780,7 @@ impl Gerdr {
             }
         });
         self.repos_detail();
+        self.repos_save_review();
         if let Some(outcome) = outcome {
             self.apply_repos(outcome);
         }
@@ -797,7 +836,7 @@ impl Gerdr {
     /// Do `button`, as a menu asks.
     pub fn repos_press(&mut self, button: ReposButton) {
         let page = self.repos_page();
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -817,9 +856,11 @@ impl Gerdr {
             top: top_branches,
             density,
             tree_share,
+            cols,
         };
         let outcome = panel.as_mut().and_then(|p| p.press(button, &ctx));
         self.repos_detail();
+        self.repos_save_review();
         if let Some(outcome) = outcome {
             self.apply_repos(outcome);
         }
@@ -927,7 +968,7 @@ impl Gerdr {
             .as_ref()
             .is_some_and(|(menu, _)| menu.to_f64().contains(pos));
         let page = self.repos_page();
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -947,6 +988,7 @@ impl Gerdr {
             top: top_branches,
             density,
             tree_share,
+            cols,
         };
         match panel.as_mut() {
             Some(panel) if over_menu => panel.scroll_branches(rows, &ctx),
@@ -958,7 +1000,7 @@ impl Gerdr {
     /// What the panel shows, while it is open.
     pub fn repos_view(&self) -> Option<ReposView> {
         let panel = self.repos.panel.as_ref()?;
-        let (density, tree_share) = self.repos_env();
+        let (density, tree_share, cols) = self.repos_env();
         let ctx = Ctx {
             items: &self.repos.items,
             batch: self.repos.batch.as_ref(),
@@ -969,6 +1011,7 @@ impl Gerdr {
             top: &self.repos.top_branches,
             density,
             tree_share,
+            cols,
         };
         let title = self
             .project
@@ -1025,6 +1068,15 @@ impl Gerdr {
                 self.start_batch(kind, jobs);
             }
             Outcome::OpenInZed { root, paths } => self.repos_open_in_zed(&root, &paths),
+            Outcome::Copy { text, count } => {
+                self.copy_text(text);
+                let what = if count == 1 {
+                    "1 review comment".to_owned()
+                } else {
+                    format!("{count} review comments")
+                };
+                self.toast(format!("Copied {what} for an AI agent"), Level::Success);
+            }
             Outcome::RunInTerminal(root) => {
                 let Some(item) = self.repos.items.iter().find(|i| i.root == root) else {
                     return;
@@ -1435,7 +1487,7 @@ impl Gerdr {
             } => {
                 self.repos.reading_diffs.remove(&root);
                 let page = self.repos_page();
-                let (density, tree_share) = self.repos_env();
+                let (density, tree_share, cols) = self.repos_env();
                 let Repos {
                     panel,
                     batch,
@@ -1455,6 +1507,7 @@ impl Gerdr {
                     top: top_branches,
                     density,
                     tree_share,
+                    cols,
                 };
                 if let Some(panel) = panel.as_mut() {
                     panel.set_diffs(root, generation, files, &ctx);
