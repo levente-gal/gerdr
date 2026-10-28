@@ -80,6 +80,9 @@ pub enum SavedLeaf {
     Zed,
     /// An app launched from the run prompt, by the command that started it.
     App { command: String },
+    /// Another window of an app kept running (see `keep`): of the app
+    /// `command` started, told apart from its others by its title.
+    Window { command: String, title: String },
 }
 
 impl Node {
@@ -745,7 +748,7 @@ mod tests {
         let restored = saved.restore(&mut |leaf| match leaf {
             SavedLeaf::Herdr { .. } => Some(1),
             SavedLeaf::Zed => Some(2),
-            SavedLeaf::App { .. } => None,
+            SavedLeaf::App { .. } | SavedLeaf::Window { .. } => None,
         });
         assert_eq!(
             restored,
@@ -781,6 +784,20 @@ mod tests {
         );
         assert_eq!(saved.herdr_panes(), ["w1:p2", "w1:p1", "w1:p3"]);
         assert!(SavedNode::Leaf(SavedLeaf::Zed).herdr_panes().is_empty());
+    }
+
+    #[test]
+    fn a_kept_apps_other_window_saves_its_title() {
+        let leaf = SavedLeaf::Window {
+            command: "cursor".into(),
+            title: "ao-app - Cursor".into(),
+        };
+        let json = serde_json::to_string(&leaf).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"window","command":"cursor","title":"ao-app - Cursor"}"#
+        );
+        assert_eq!(serde_json::from_str::<SavedLeaf>(&json).unwrap(), leaf);
     }
 
     #[test]
