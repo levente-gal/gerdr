@@ -127,6 +127,8 @@ pub struct InboxCompose {
     pub workspace: Option<String>,
     /// Editing an existing todo, rather than a new one.
     pub editing: bool,
+    /// A ticket repository being written, not a todo: no workspace chip.
+    pub tickets: bool,
 }
 
 /// A row of the inbox list.
@@ -506,12 +508,12 @@ fn compose_chip(compose: &InboxCompose, query: Rect) -> Rect {
 fn field_text(view: &InboxView, query: Rect, scale: f64) -> (f32, f32) {
     let (x, end) = menu_query_text(query, scale);
     match &view.compose {
-        Some(compose) => {
+        Some(compose) if !compose.tickets => {
             let chip = compose_chip(compose, query);
             let to = ((chip.loc.x - FIELD_GAP) as f64 * scale).round() as f32;
             (x, end.min(to).max(x))
         }
-        None => (x, end),
+        _ => (x, end),
     }
 }
 
@@ -949,8 +951,9 @@ impl Painter {
     }
 
     /// The field in `query`: a magnifier before the filter, or a plus (a
-    /// pencil when editing) before the todo being composed, with the chip
-    /// saying which workspace it is linked to at its end.
+    /// pencil when editing) before the todo or ticket repository being
+    /// composed, a todo with the chip saying which workspace it is linked
+    /// to at its end.
     fn inbox_query(&self, c: &mut Canvas, view: &InboxView, query: Rect, scale: f64, p: &Palette) {
         let s = scale as f32;
         let mark = Rectangle::new(
@@ -988,7 +991,7 @@ impl Painter {
             scale,
             p,
         );
-        let Some(compose) = &view.compose else {
+        let Some(compose) = view.compose.as_ref().filter(|c| !c.tickets) else {
             return;
         };
         let chip = compose_chip(compose, query);
@@ -1649,6 +1652,7 @@ mod tests {
                 text: Line::from(text),
                 workspace: workspace.map(str::to_owned),
                 editing,
+                tickets: false,
             }),
             placeholder: "New todo…".into(),
             ..with_detail(10, todo_detail())
