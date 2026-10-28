@@ -35,17 +35,22 @@ pub struct WebPane {
 
 /// Where the panes' pages are now, by the pane, read off the event loop
 /// (see `read_now`).
-pub fn read_all(panes: Vec<WebPane>, send: impl FnOnce(Vec<(WebPane, String)>) + Send + 'static) {
-    std::thread::spawn(move || send(read_now(panes)));
+pub fn read_all(
+    panes: Vec<WebPane>,
+    instance: PathBuf,
+    send: impl FnOnce(Vec<(WebPane, String)>) + Send + 'static,
+) {
+    std::thread::spawn(move || send(read_now(panes, &instance)));
 }
 
 /// Where the panes' pages are now, by the pane: the browser profile of each
-/// pane's link, then the pages its app windows' session shows, matched to
-/// the panes by title.
-pub fn read_now(panes: Vec<WebPane>) -> Vec<(WebPane, String)> {
+/// pane's link in instance folder `instance` (see `launch::instance_dir`),
+/// then the pages its app windows' session shows, matched to the panes by
+/// title.
+pub fn read_now(panes: Vec<WebPane>, instance: &Path) -> Vec<(WebPane, String)> {
     let mut by_profile: HashMap<PathBuf, Vec<WebPane>> = HashMap::new();
     for pane in panes {
-        if let Some(profile) = launch::web_profile(&pane.command) {
+        if let Some(profile) = launch::web_profile(&pane.command, instance) {
             by_profile.entry(profile).or_default().push(pane);
         }
     }

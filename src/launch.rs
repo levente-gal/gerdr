@@ -15,9 +15,9 @@
 //! are apart from the desktop's. A Firefox locks its profile, so gerdr's
 //! runs under a name of its own, and the next ones hand their window to it:
 //! that window is told by its app_id. A project runs one VS Code of a kind:
-//! starting it again shows the one running (see `running_vs_code`). VS
-//! Codes and Zed get a profile per project, so another gerdr's doesn't take
-//! their windows either (see `instance_dir`).
+//! starting it again shows the one running (see `running_vs_code`).
+//! Browsers, VS Codes and Zed get a profile per project, so another
+//! gerdr's doesn't take their windows either (see `instance_dir`).
 //!
 //! Ghostty and Alacritty can open all their windows from one process.
 //! gerdr keeps one of each for the project shown, apart from the desktop's
@@ -455,12 +455,8 @@ impl Gerdr {
         let bare_zed = opens_nothing_in_zed(&command);
         match own_instance(&command, Some(&self.instance_dir)) {
             Some((mut command, profile)) => {
-                // Not a Flatpak one's, which sees only its own folder.
-                if let (Some(key), Some(profile), Some(home)) =
-                    (vs_code_of(&command), &profile, home_dir())
-                    && profile.starts_with(&self.instance_dir)
-                {
-                    ready_vs_code_profile(&home, &key, profile);
+                if let Some(profile) = &profile {
+                    self.ready_profile(&command, profile);
                 }
                 if command.contains(BROWSER_APP_ID) {
                     app_id = BROWSER_APP_ID.to_owned();
@@ -502,7 +498,9 @@ impl Gerdr {
         if flatpak || !STEERED.contains(&key.as_str()) {
             return None;
         }
-        let profile = own_instance(web, None)?.1?;
+        let profile = own_instance(web, Some(&self.instance_dir))?.1?;
+        // Before the extension goes in, which would count as its start.
+        self.ready_profile(web, &profile);
         let extension = web_control::install(&profile, socket)
             .inspect_err(|err| tracing::warn!("gerdr's extension in {}: {err}", profile.display()))
             .ok()?;
@@ -513,6 +511,24 @@ impl Gerdr {
             desktop::shell_quote(&web_control::boot_url(pane, url.trim()))
         );
         web.contains(&app).then(|| web.replacen(&app, &boot, 1))
+    }
+
+    /// Make `profile`, the one `command` runs with (see `own_instance`),
+    /// ready when it is the project's: not a Flatpak app's, which sees
+    /// only its own folder (see `ready_vs_code_profile` and
+    /// `seed_browser_profile`).
+    fn ready_profile(&self, command: &str, profile: &Path) {
+        let (Some(key), Some(home)) = (program_name(command), home_dir()) else {
+            return;
+        };
+        if !profile.starts_with(&self.instance_dir) {
+            return;
+        }
+        if VS_CODES.contains(&key.as_str()) {
+            ready_vs_code_profile(&home, &key, profile);
+        } else if CHROMIUMS.contains(&key.as_str()) || FIREFOXES.contains(&key.as_str()) {
+            seed_browser_profile(&home, &key, profile);
+        }
     }
 
     /// Start `command` (trimmed) for tab `t` of workspace `w`, in the
@@ -683,12 +699,12 @@ fn web_app(url: &str, opener: &str) -> Option<(String, String)> {
 }
 
 /// The folder of the profile of gerdr's that the browser showing `command`
-/// as a web app runs with (see `web_app` and `own_instance`); `None` when
-/// `command` isn't a web page's link.
-pub fn web_profile(command: &str) -> Option<PathBuf> {
+/// as a web app runs with in instance folder `instance` (see `web_app` and
+/// `own_instance`); `None` when `command` isn't a web page's link.
+pub fn web_profile(command: &str, instance: &Path) -> Option<PathBuf> {
     let opener = desktop::url_command(command)?;
     let (web, _) = web_app(command, &opener)?;
-    own_instance(&web, None)?.1
+    own_instance(&web, Some(instance))?.1
 }
 
 /// Editors built on VS Code, by program and Flatpak id.
@@ -741,12 +757,12 @@ const ZED_OWN: &[&str] = &["db", "logs", "hang_traces"];
 /// What all of gerdr's Zeds share even before one has made it.
 const ZED_SHARED: &[&str] = &["config", "extensions"];
 
-/// The folder of the data of gerdr's Zed and VS Codes for `instance` (the
-/// project shown, see `Gerdr::show_project`). They run one process per
-/// data dir and hand new windows to it: with one per project, not to
-/// another gerdr's. What they keep for all projects (settings, logins,
-/// extensions) links to their shared data dir, see `zed_data_dir` and
-/// `vs_code_profile`.
+/// The folder of the profiles of gerdr's Zed, VS Codes and browsers for
+/// `instance` (the project shown, see `Gerdr::show_project`). They run one
+/// process per profile and hand new windows to it: with one per project,
+/// not to another gerdr's. What they keep for all projects (settings,
+/// logins, extensions) comes from gerdr's shared profile of each, see
+/// `zed_data_dir`, `ready_vs_code_profile` and `seed_browser_profile`.
 pub fn instance_dir(home: &Path, instance: &str) -> PathBuf {
     home.join(".local/share/gerdr/instances").join(instance)
 }
@@ -771,7 +787,7 @@ fn link_zed_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let db = dir.join("db");
     if !db.exists() && shared.join("db").is_dir() {
-        copy_dir(&shared.join("db"), &db)?;
+        copy_tree(&shared.join("db"), &db, &|_| false)?;
     }
     for name in ZED_SHARED {
         std::fs::create_dir_all(shared.join(name))?;
@@ -851,16 +867,107 @@ fn link_vs_code_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::write(state, serde_json::Value::Object(fields).to_string())
 }
 
-/// Copy folder `from` to `to`, with all in it.
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+/// What a browser's new profile leaves out of the copy of gerdr's shared
+/// one, by name: caches, the locks of the browser running on it, and the
+/// windows and tabs it would bring back, which are another project's.
+const BROWSER_UNCOPIED: &[&str] = &[
+    // Chromium
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "DevToolsActivePort",
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "GraphiteDawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GPUPersistentCache",
+    "CacheStorage",
+    "ScriptCache",
+    "component_crx_cache",
+    "extensions_crx_cache",
+    "BrowserMetrics",
+    "DeferredBrowserMetrics",
+    "Sessions",
+    "Current Session",
+    "Current Tabs",
+    "Last Session",
+    "Last Tabs",
+    // Firefox
+    "lock",
+    ".parentlock",
+    "parent.lock",
+    "cache2",
+    "startupCache",
+    "sessionstore.jsonlz4",
+    "sessionstore-backups",
+    "sessionCheckpoints.json",
+];
+
+/// Start browser profile `dir` (see `own_instance`), when it is new, as a
+/// copy of gerdr's profile of browser `key`, so the project's browser
+/// begins with its logins, bookmarks and extensions. A browser locks its
+/// databases while it runs, so profiles can't share them: from then on
+/// each is its own. Copied beside it first, so a copy cut short isn't
+/// taken for one.
+fn seed_browser_profile(home: &Path, key: &str, dir: &Path) {
+    let shared = profile_dir(home, key);
+    if dir.exists() || !shared.is_dir() {
+        return;
+    }
+    if let Err(err) = copy_browser_profile(&shared, dir) {
+        tracing::warn!("copying {} to {}: {err}", shared.display(), dir.display());
+    }
+}
+
+/// See `seed_browser_profile`.
+fn copy_browser_profile(shared: &Path, dir: &Path) -> std::io::Result<()> {
+    let mut new = dir.as_os_str().to_owned();
+    new.push(".new");
+    let new = PathBuf::from(new);
+    let _ = std::fs::remove_dir_all(&new);
+    let skipped = |name: &std::ffi::OsStr| BROWSER_UNCOPIED.iter().any(|skip| name == *skip);
+    let copied = copy_tree(shared, &new, &skipped).and_then(|()| std::fs::rename(&new, dir));
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(&new);
+    }
+    copied
+}
+
+/// Copy folder `from` to `to`, with all in it but the entries `skipped`
+/// picks by name. Links stay links; sockets and what goes while it copies
+/// (an app may be running on `from`) are left out.
+fn copy_tree(
+    from: &Path,
+    to: &Path,
+    skipped: &dyn Fn(&std::ffi::OsStr) -> bool,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target)?;
+        let name = entry.file_name();
+        if skipped(&name) {
+            continue;
+        }
+        let (source, target) = (entry.path(), to.join(&name));
+        let copied = entry.file_type().and_then(|kind| {
+            if kind.is_dir() {
+                copy_tree(&source, &target, skipped)
+            } else if kind.is_symlink() {
+                std::fs::read_link(&source)
+                    .and_then(|link| std::os::unix::fs::symlink(link, &target))
+            } else if kind.is_file() {
+                std::fs::copy(&source, &target).map(drop)
+            } else {
+                Ok(())
+            }
+        });
+        match copied {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            _ => {}
         }
     }
     Ok(())
@@ -1017,8 +1124,8 @@ fn vs_code_of(command: &str) -> Option<String> {
     program_name(command).filter(|key| VS_CODES.contains(&key.as_str()))
 }
 
-/// The profile gerdr keeps for the app of program `key`; for a VS Code, the
-/// one its projects' profiles share (see `ready_vs_code_profile`).
+/// The profile gerdr keeps for the app of program `key`, which its
+/// projects' profiles share or start from (see `instance_dir`).
 fn profile_dir(home: &Path, key: &str) -> PathBuf {
     home.join(".local/share/gerdr/profiles").join(key)
 }
@@ -1029,11 +1136,11 @@ pub fn cursor_profile() -> Option<PathBuf> {
 }
 
 /// `command` changed to start a copy of its own of an app that hands new
-/// windows to a running one: a browser or a VS Code with gerdr's profile
-/// for it (a VS Code's and a Zed's in instance folder `instance`, see
-/// `instance_dir`), and that folder, or a Ghostty told not to (without a
-/// folder); `None` when `command` doesn't start such an app, already picks
-/// its profile, or is a VS Code or Zed without `instance`.
+/// windows to a running one: a browser, a VS Code or a Zed with gerdr's
+/// profile for it in instance folder `instance` (see `instance_dir`; a
+/// Flatpak app's in its own folder), and that folder, or a Ghostty told
+/// not to (without a folder); `None` when `command` doesn't start such an
+/// app, already picks its profile, or needs `instance` and has none.
 fn own_instance(command: &str, instance: Option<&Path>) -> Option<(String, Option<PathBuf>)> {
     let (key, end, flatpak) = program(command)?;
     if GHOSTTYS.contains(&key.as_str()) {
@@ -1068,10 +1175,8 @@ fn own_instance(command: &str, instance: Option<&Path>) -> Option<(String, Optio
         home.join(".var/app").join(&key).join("gerdr-profile")
     } else if ZEDS.contains(&key.as_str()) {
         instance?.join("zed")
-    } else if VS_CODES.contains(&key.as_str()) {
-        instance?.join(&key)
     } else {
-        profile_dir(&home, &key)
+        instance?.join(&key)
     };
     let quoted = desktop::shell_quote(&profile.to_string_lossy());
     let flags = if FIREFOXES.contains(&key.as_str()) {
@@ -1206,8 +1311,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        alacritty_command, ghostty_command, lineage, link_vs_code_shared, link_zed_shared,
-        log_path, opens_nothing_in_zed, own_instance, vs_code_of, web_app,
+        alacritty_command, copy_browser_profile, ghostty_command, lineage, link_vs_code_shared,
+        link_zed_shared, log_path, opens_nothing_in_zed, own_instance, vs_code_of, web_app,
     };
     use crate::home_dir;
 
@@ -1464,6 +1569,57 @@ mod tests {
     }
 
     #[test]
+    fn browser_profiles_start_as_a_copy_without_caches_locks_or_sessions() {
+        let root = std::env::temp_dir().join(format!("gerdr-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (shared, dir) = (root.join("chromium"), root.join("aft"));
+        for folder in ["Default/Cache", "Default/Sessions", "Default/Local Storage"] {
+            std::fs::create_dir_all(shared.join(folder)).unwrap();
+        }
+        std::fs::write(shared.join("Default/Cookies"), "c").unwrap();
+        std::fs::write(shared.join("Local State"), "{}").unwrap();
+        std::os::unix::fs::symlink("host-1234", shared.join("SingletonLock")).unwrap();
+        std::os::unix::fs::symlink("Local State", shared.join("state")).unwrap();
+        copy_browser_profile(&shared, &dir).unwrap();
+        let mut copied: Vec<_> = walk(&dir);
+        copied.sort();
+        assert_eq!(
+            copied,
+            [
+                "Default",
+                "Default/Cookies",
+                "Default/Local Storage",
+                "Local State",
+                "state"
+            ]
+        );
+        assert_eq!(
+            std::fs::read_link(dir.join("state")).unwrap(),
+            Path::new("Local State")
+        );
+        assert!(!root.join("aft.new").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The paths under `dir`, relative to it.
+    fn walk(dir: &Path) -> Vec<String> {
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                paths.extend(
+                    walk(&entry.path())
+                        .into_iter()
+                        .map(|path| format!("{name}/{path}")),
+                );
+            }
+            paths.push(name);
+        }
+        paths
+    }
+
+    #[test]
     fn browsers_get_their_own_profile() {
         let home = home_dir().unwrap();
         let instance = home.join(".local/share/gerdr/instances/aft");
@@ -1473,15 +1629,15 @@ mod tests {
         };
         assert_eq!(
             run("/usr/share/librewolf/librewolf").unwrap(),
-            "/usr/share/librewolf/librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/profiles/librewolf --new-window"
+            "/usr/share/librewolf/librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/instances/aft/librewolf --new-window"
         );
         assert_eq!(
             run("exec firefox https://a.b && true").unwrap(),
-            "exec firefox --name dev.gerdr.browser.firefox --profile ~/.local/share/gerdr/profiles/firefox --new-window https://a.b && true"
+            "exec firefox --name dev.gerdr.browser.firefox --profile ~/.local/share/gerdr/instances/aft/firefox --new-window https://a.b && true"
         );
         assert_eq!(
             run("brave-browser-stable").unwrap(),
-            "brave-browser-stable --user-data-dir=~/.local/share/gerdr/profiles/brave-browser-stable"
+            "brave-browser-stable --user-data-dir=~/.local/share/gerdr/instances/aft/brave-browser-stable"
         );
         assert_eq!(
             run("/usr/bin/flatpak run --branch=stable --command=firefox org.mozilla.firefox")
@@ -1516,6 +1672,7 @@ mod tests {
         assert_eq!(run("zed --user-data-dir /x"), None);
         assert_eq!(own_instance("zed", None), None);
         assert_eq!(own_instance("cursor", None), None);
+        assert_eq!(own_instance("chromium", None), None);
         assert!(opens_nothing_in_zed("/home/me/.local/zed.app/bin/zed"));
         assert!(opens_nothing_in_zed("flatpak run dev.zed.Zed "));
         assert!(!opens_nothing_in_zed("zed -n ."));
@@ -1523,7 +1680,7 @@ mod tests {
         assert!(!opens_nothing_in_zed("code"));
         assert_eq!(
             run("librewolf --private-window").unwrap(),
-            "librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/profiles/librewolf --private-window"
+            "librewolf --name dev.gerdr.browser.librewolf --profile ~/.local/share/gerdr/instances/aft/librewolf --private-window"
         );
         assert_eq!(run("firefox --profile /x"), None);
         assert_eq!(run("nautilus ."), None);
