@@ -448,6 +448,7 @@ mod tests {
             tabs,
             panes: Vec::new(),
             folded: None,
+            restart_choices: Vec::new(),
         }
     }
 

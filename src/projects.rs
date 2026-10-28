@@ -209,6 +209,18 @@ pub struct WorkspaceRecord {
     /// leaves it to fold while quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folded: Option<bool>,
+    /// Whether restarting the workspace runs each command again, as the
+    /// user chose: asked again only once a new command comes (see
+    /// `restart::plan`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_choices: Vec<RestartChoice>,
+}
+
+/// Whether restarting a workspace runs `command` again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartChoice {
+    pub command: String,
+    pub restart: bool,
 }
 
 /// What a workspace opens with: mirrors `WorkspaceKind`.
@@ -1324,6 +1336,7 @@ fn record(herdr_id: String, label: String, kind: Kind, dir: PathBuf) -> Workspac
         tabs: Vec::new(),
         panes: Vec::new(),
         folded: None,
+        restart_choices: Vec::new(),
     }
 }
 
@@ -1465,6 +1478,7 @@ mod tests {
                         skip: vec!["rm -rf build".into()],
                     }],
                     folded: None,
+                    restart_choices: Vec::new(),
                 }],
                 before_start: "docker compose up -d".into(),
                 after_stop: "docker compose down".into(),

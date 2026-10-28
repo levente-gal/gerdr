@@ -1644,6 +1644,7 @@ mod tests {
             tabs: Vec::new(),
             panes: Vec::new(),
             folded: None,
+            restart_choices: Vec::new(),
         };
         Project {
             id: id.into(),

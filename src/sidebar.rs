@@ -128,6 +128,7 @@ impl Gerdr {
     /// Whether something covers the sidebar, taking the pointer from it.
     fn sidebar_covered(&self) -> bool {
         self.quit.is_some()
+            || self.restart.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.switcher.is_some()
@@ -401,8 +402,10 @@ impl Gerdr {
             }
             SidebarHit::Restart(i) => {
                 let rect = layout.rows.get(i)?.restart?;
-                // Each command, where it runs, and whether it has exited.
+                // Each command, where it runs, whether it has exited, and
+                // whether the user chose to leave it alone.
                 let home = home_dir();
+                let choices = self.restart_choices(i);
                 let fields: Vec<_> = self
                     .workspace_restarts(i)
                     .into_iter()
@@ -413,6 +416,12 @@ impl Gerdr {
                         if self.pane_bar_content(&pane_id).status == BarStatus::Exited {
                             place = format!("exited · {place}");
                         }
+                        if choices
+                            .iter()
+                            .any(|ch| ch.command == c.command && !ch.restart)
+                        {
+                            place = format!("skipped · {place}");
+                        }
                         (chrome::command_line(&c.command).unwrap_or(c.command), place)
                     })
                     .collect();
@@ -420,7 +429,8 @@ impl Gerdr {
                     1 => "Restart its command".to_owned(),
                     n => format!("Restart its {n} commands"),
                 };
-                Some(Tooltip::new(&text, rect).fields(fields))
+                let tip = Tooltip::new(&text, rect).fields(fields);
+                Some(tip.key("right click to choose which"))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
@@ -638,8 +648,12 @@ impl Gerdr {
                     let item = MenuItem::new("Worktrees…", MenuAction::Worktrees(dir));
                     items.push(hinted(item, "worktrees"));
                 }
+                let restartable = !self.workspace_restarts(i).is_empty();
                 let restart = MenuItem::new("Restart commands", MenuAction::RestartWorkspace(i));
-                items.push(restart.enabled(!self.workspace_restarts(i).is_empty()));
+                items.push(restart.enabled(restartable));
+                let choose =
+                    MenuItem::new("Choose commands to restart…", MenuAction::ChooseRestarts(i));
+                items.push(choose.enabled(restartable));
                 items.push(hinted(
                     MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
                     "close workspace",
