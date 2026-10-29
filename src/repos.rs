@@ -4178,7 +4178,9 @@ impl Panel {
     }
 
     /// Scroll the diff back to `anchor`, no further than its file's rows;
-    /// to its repository's header when the file is gone.
+    /// to its repository's header when the file is gone. Standing at its
+    /// row already, it keeps the part of it scrolled past and goes on
+    /// moving (the rows read again while it glides, say).
     fn scroll_to(&mut self, anchor: &Anchor) {
         let (head, offset) = match self.header_row(&anchor.root, anchor.path.as_deref()) {
             Some(head) => (head, anchor.offset),
@@ -4191,7 +4193,7 @@ impl Panel {
             .iter()
             .position(|r| r.is_header() || *r == DiffRow::Gap)
             .map_or(self.diff_rows.len(), |n| head + 1 + n);
-        self.detail_scroll.jump((head + offset).min(end - 1) as f64);
+        self.detail_scroll.jump_row((head + offset).min(end - 1));
     }
 
     /// Scroll the diff to the selected line's repository or file.
@@ -6843,6 +6845,44 @@ mod tests {
         swipe_detail(&mut panel, 5.0, &ctx);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!((detail.first, detail.part, detail.rows.len()), (2, 0.0, 4));
+    }
+
+    #[test]
+    fn the_diff_read_again_while_it_moves_moves_on() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 4);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        let now = Instant::now();
+        let line = crate::chrome::repos_detail_line(ctx.density) as f64;
+        panel.scroll(Motion::Notches(3.0), now, true, &ctx);
+        let soon = now + Duration::from_millis(40);
+        panel.scroll_tick(soon, &ctx);
+        let pos = panel.detail_scroll.pos();
+        assert!(pos > 1.0 && pos < 2.0, "{pos}");
+        // A status read, then the diffs read again.
+        panel.refresh(&ctx);
+        read_diffs(&mut panel, &ctx);
+        assert_eq!(panel.detail_scroll.pos(), pos);
+        assert!(panel.scrolling(soon));
+        run_out(&mut panel, soon, &ctx);
+        assert_eq!(panel.detail_scroll.pos(), 3.0);
+        // Under the fingers, it stretches past the end and comes back.
+        panel.scroll(
+            Motion::Finger {
+                px: 20.0 * line,
+                time: 0,
+            },
+            now,
+            true,
+            &ctx,
+        );
+        assert!(panel.view("p", &ctx).detail.over < 0.0);
+        panel.scroll(Motion::Lift { time: 1000 }, now, true, &ctx);
+        run_out(&mut panel, now, &ctx);
+        let view = panel.view("p", &ctx);
+        assert_eq!((view.detail.first, view.detail.over), (6, 0.0));
     }
 
     /// The cursor's row, and where its range reaches back to.
