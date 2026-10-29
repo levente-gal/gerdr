@@ -131,9 +131,10 @@ impl Gerdr {
         let Some(file) = self.inbox_file() else {
             return false;
         };
-        inbox_sources::agent_fingerprint(view, &self.agents, &self.cursor_chats).is_some_and(
-            |print| inbox::hides(&file.triage, &format!("agent:{}", view.key), &print, now),
-        )
+        inbox_sources::agent_fingerprint(view, &self.agents, &self.cursor_chats, &self.test_runs)
+            .is_some_and(|print| {
+                inbox::hides(&file.triage, &format!("agent:{}", view.key), &print, now)
+            })
     }
 
     /// Load the shown project's inbox file, so what it hides is hidden
@@ -197,6 +198,7 @@ impl Gerdr {
             agents,
             herdr_agents: &self.agents,
             cursor_chats: &self.cursor_chats,
+            test_runs: &self.test_runs,
             agent_since: &self.agent_since,
             ci: &self.ci,
             issues: &self.inbox.issues,
@@ -758,7 +760,7 @@ impl Gerdr {
         let key = selected
             .and_then(|id| id.0.strip_prefix("agent:"))
             .map(AgentKey::parse);
-        if let Some(AgentKey::Herdr(pane_id)) = key {
+        if let Some(AgentKey::Herdr(pane_id) | AgentKey::Test(pane_id)) = key {
             self.request_pane_text(&pane_id);
         }
     }

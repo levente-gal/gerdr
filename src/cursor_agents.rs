@@ -1281,6 +1281,7 @@ impl crate::Gerdr {
                     label: card.label(),
                     body: body.join(" · "),
                     seen: self.host_focused && shown,
+                    finished: None,
                 })
             })
             .collect()

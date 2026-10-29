@@ -211,13 +211,16 @@ pub struct AgentView {
     /// The model it runs, as its status line reports it to herdr.
     pub model: Option<String>,
     pub lines: Vec<AgentLine>,
-    /// Whether it is history (a Cursor chat gone idle) that a "×" on the
-    /// row deletes from gerdr.
+    /// Whether it is history (a Cursor chat gone idle, a finished test run)
+    /// that a "×" on the row deletes from gerdr.
     pub deletable: bool,
     /// Its subagents that run.
     pub subagents: Vec<SubagentView>,
     /// Whether it also shows in the "Needs you" list at the top.
     pub inbox: bool,
+    /// For a test run (see `test_runs`), how it went: its mark shows that
+    /// instead of the status.
+    pub test: Option<CiState>,
 }
 
 /// A subagent on its parent's row: what it is on, and the agent a click
@@ -294,6 +297,7 @@ impl AgentView {
             deletable: false,
             subagents: Vec::new(),
             inbox: false,
+            test: None,
         }
     }
 
@@ -352,6 +356,7 @@ impl AgentView {
             deletable: false,
             subagents,
             inbox: false,
+            test: None,
         }
     }
 
@@ -2208,9 +2213,15 @@ impl Painter {
             (rect.loc.x + CHILD_PAD, rect.loc.y).into(),
             (STATUS_WIDTH, first.size.h).into(),
         );
-        icon_sdf(c, mark, scale, status, |x, y| {
-            status_mark(card.status, x, y, s)
-        });
+        match card.test {
+            // A test run's mark says how it went, as a CI chip's does.
+            Some(test) => icon_sdf(c, mark, scale, ci_color(test, p), |x, y| {
+                ci_mark(test, x, y, s)
+            }),
+            None => icon_sdf(c, mark, scale, status, |x, y| {
+                status_mark(card.status, x, y, s)
+            }),
+        }
         let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
         let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
         let end = if card.deletable && hover > 0.0 {
@@ -2573,6 +2584,7 @@ mod tests {
             deletable: false,
             subagents: Vec::new(),
             inbox: false,
+            test: None,
         }
     }
 

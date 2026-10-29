@@ -59,6 +59,7 @@ mod switcher;
 mod syntax;
 mod system_theme;
 mod tab_strip;
+mod test_runs;
 mod text_field;
 mod toast;
 mod tooltip;
@@ -1140,6 +1141,8 @@ pub struct Gerdr {
     /// What herdr reports about the tabs of gerdr's workspaces, by herdr tab
     /// id, shown in the tab strip.
     pub herdr_tabs: HashMap<String, herdr::TabDetail>,
+    /// The test runs seen in herdr's panes, a run each (see `test_runs`).
+    pub test_runs: Vec<test_runs::TestRun>,
     /// The Git status of the workspace folders in a repository, by folder.
     pub git: HashMap<PathBuf, git::GitStatus>,
     /// A read of where the web pages are is under way (see `watch_web_pages`).
@@ -2110,6 +2113,7 @@ impl Gerdr {
             {
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                state.track_tests();
                 for id in state.projects.take_conflicts() {
                     let name = state
                         .projects
@@ -2597,10 +2601,12 @@ impl Gerdr {
                     label: agent.label().to_owned(),
                     body: body.join(" · "),
                     seen: self.host_focused && place.is_some_and(|(w, t)| self.is_visible(w, t)),
+                    finished: None,
                 }
             })
             .collect();
         watched.extend(self.cursor_watched());
+        watched.extend(self.test_watched());
         let news = agents::agent_news(
             &self.agent_statuses,
             &watched,
@@ -2701,30 +2707,42 @@ impl Gerdr {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
             agents::AgentKey::Ci(link) => self.open_ci_link(link.clone()),
+            agents::AgentKey::Test(pane_id) => self.focus_test_run(pane_id),
         }
     }
 
     /// Show the pane agent card `pane_id` stands for: switch to its workspace
     /// and tab and focus its window. herdr counts the agent as seen then.
     fn focus_herdr_agent(&mut self, pane_id: &str) {
-        let shows = |p: &Pane| p.herdr.as_ref().is_some_and(|h| h.pane_id == pane_id);
-        let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
-            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
-                Some((w, t, tab.panes.iter().find(|p| shows(p))?.window.clone()))
-            })
-        });
-        let Some((w, t, window)) = found else { return };
-        self.active_workspace = w;
-        let ws = &mut self.workspaces[w];
-        ws.active_tab = t;
-        ws.tabs[t].focused = Some(window);
-        self.show_active();
+        if !self.show_herdr_pane(pane_id) {
+            return;
+        }
         if let Some(herdr) = self.herdr.as_mut()
             && let Err(err) = herdr.agent_focus(pane_id)
         {
             tracing::debug!("herdr: {err}");
         }
         self.poke_herdr();
+    }
+
+    /// Switch to the workspace and tab of herdr pane `pane_id` and focus its
+    /// window; false if no window shows it.
+    pub(crate) fn show_herdr_pane(&mut self, pane_id: &str) -> bool {
+        let shows = |p: &Pane| p.herdr.as_ref().is_some_and(|h| h.pane_id == pane_id);
+        let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+                Some((w, t, tab.panes.iter().find(|p| shows(p))?.window.clone()))
+            })
+        });
+        let Some((w, t, window)) = found else {
+            return false;
+        };
+        self.active_workspace = w;
+        let ws = &mut self.workspaces[w];
+        ws.active_tab = t;
+        ws.tabs[t].focused = Some(window);
+        self.show_active();
+        true
     }
 
     /// The agent rows of each workspace, in sidebar order. Those of the
@@ -2739,6 +2757,7 @@ impl Gerdr {
             .map(|(w, ws)| {
                 let mut views = self.herdr_cards(ws);
                 views.extend(self.cursor_cards(w));
+                views.extend(self.test_cards(ws));
                 if self.needs_you && w != self.active_workspace {
                     for view in &mut views {
                         view.inbox = matches!(
@@ -5768,6 +5787,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         herdr: None,
         agents: Vec::new(),
         herdr_tabs: HashMap::new(),
+        test_runs: Vec::new(),
         git: HashMap::new(),
         ci: HashMap::new(),
         ci_asked: Vec::new(),

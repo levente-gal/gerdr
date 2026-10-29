@@ -311,8 +311,10 @@ impl Gerdr {
             }
             (SidebarHit::CardClose(i, k), BTN_LEFT) => {
                 let card = self.agent_views().get(i).and_then(|c| c.get(k)).cloned();
-                if let Some(AgentKey::Cursor(chat)) = card.map(|c| c.key) {
-                    self.delete_cursor_chat(&chat);
+                match card.map(|c| c.key) {
+                    Some(AgentKey::Cursor(chat)) => self.delete_cursor_chat(&chat),
+                    Some(AgentKey::Test(pane_id)) => self.dismiss_test(&pane_id),
+                    _ => {}
                 }
             }
             (SidebarHit::Ci(i) | SidebarHit::CiMark(i), BTN_LEFT) => self.focus_repo_tab(i),
@@ -623,9 +625,16 @@ impl Gerdr {
                     Some(cwd) => MenuItem::new("Copy path", MenuAction::CopyPath(cwd)),
                     None => MenuItem::new("Copy path", MenuAction::NewTerminal).enabled(false),
                 });
-                if let (true, AgentKey::Cursor(chat)) = (card.deletable, card.key) {
-                    let delete = MenuAction::DeleteCursorChat(chat);
-                    items.push(MenuItem::new("Delete from gerdr", delete));
+                match (card.deletable, card.key) {
+                    (true, AgentKey::Cursor(chat)) => {
+                        let delete = MenuAction::DeleteCursorChat(chat);
+                        items.push(MenuItem::new("Delete from gerdr", delete));
+                    }
+                    (true, AgentKey::Test(pane_id)) => {
+                        let dismiss = MenuAction::DismissTest(pane_id);
+                        items.push(MenuItem::new("Dismiss", dismiss));
+                    }
+                    _ => {}
                 }
                 Some(MenuSpec { anchor: at, items })
             }
