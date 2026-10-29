@@ -6,7 +6,12 @@ use std::cmp::Reverse;
 
 use smithay::reexports::calloop::channel;
 
-use crate::{Gerdr, chrome::ProjectRow, fuzzy, herdr};
+use crate::{
+    Gerdr,
+    chrome::ProjectRow,
+    fuzzy, herdr,
+    scroll::{Bounds, Scroll},
+};
 
 /// The most characters a path shown in a project row or menu entry takes.
 pub const PATH_CHARS: usize = 40;
@@ -35,6 +40,109 @@ pub fn scrolled(scroll: usize, selected: usize, page: usize) -> usize {
     scroll
         .min(selected)
         .max((selected + 1).saturating_sub(page))
+}
+
+/// Where a scrolled list's rows start down the list, in logical pixels,
+/// and where the last one ends: what a `Scroll` standing in rows of
+/// differing heights shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowTops(Vec<f64>);
+
+impl Default for RowTops {
+    fn default() -> Self {
+        Self(vec![0.0])
+    }
+}
+
+/// How close pixels count as the same, for sums of fractions.
+const NEAR: f64 = 1e-6;
+
+impl RowTops {
+    /// The rows of `heights`, in order.
+    pub fn new(heights: impl IntoIterator<Item = i32>) -> Self {
+        let mut tops = vec![0.0];
+        let mut y = 0.0;
+        for h in heights {
+            y += h as f64;
+            tops.push(y);
+        }
+        Self(tops)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len() - 1
+    }
+
+    /// Where row `i` starts; the list's end for a row past it.
+    pub fn top(&self, i: usize) -> f64 {
+        self.0[i.min(self.len())]
+    }
+
+    /// How high row `i` is; none past the end.
+    pub fn height(&self, i: usize) -> f64 {
+        self.top(i + 1) - self.top(i)
+    }
+
+    /// Where the last row ends.
+    pub fn end(&self) -> f64 {
+        self.top(self.len())
+    }
+
+    /// How far down the list a position in rows stands, in pixels.
+    pub fn px(&self, pos: f64) -> f64 {
+        let pos = pos.max(0.0);
+        let i = pos.floor() as usize;
+        if i >= self.len() {
+            return self.end();
+        }
+        self.top(i) + pos.fract() * self.height(i)
+    }
+
+    /// The position in rows standing `px` pixels down the list.
+    pub fn pos(&self, px: f64) -> f64 {
+        if px <= 0.0 {
+            return 0.0;
+        }
+        let i = self.0[1..].partition_point(|&end| end <= px);
+        if i >= self.len() {
+            return self.len() as f64;
+        }
+        let h = self.height(i);
+        i as f64 + if h > 0.0 { (px - self.top(i)) / h } else { 0.0 }
+    }
+
+    /// What moves a list `view` high standing as `scroll`: a notch moves
+    /// it a row, and it goes down until its end shows at the bottom.
+    pub fn bounds(&self, scroll: &Scroll, view: f64) -> Bounds {
+        Bounds {
+            max: self.pos(self.end() - view),
+            notch: 1.0,
+            unit: self.height(scroll.first()),
+            view,
+        }
+    }
+
+    /// Whether a list `view` high standing at `pos` shows all of the
+    /// pixels from `top` to `bottom` down it.
+    pub fn shows(&self, pos: f64, (top, bottom): (f64, f64), view: f64) -> bool {
+        let at = self.px(pos);
+        top >= at - NEAR && bottom <= at + view + NEAR
+    }
+
+    /// The position nearest `pos` at which a list `view` high shows the
+    /// pixels from `top` to `bottom` down it; the top of them when they
+    /// don't all fit.
+    pub fn reveal(&self, pos: f64, (top, bottom): (f64, f64), view: f64) -> f64 {
+        let at = self.px(pos);
+        let to = if top < at - NEAR || bottom - top > view {
+            top
+        } else if bottom > at + view + NEAR {
+            bottom - view
+        } else {
+            return pos;
+        };
+        self.pos(to.clamp(0.0, (self.end() - view).max(0.0)))
+    }
 }
 
 impl Gerdr {
@@ -113,6 +221,35 @@ mod tests {
         // The hits say which characters matched, in "name detail".
         assert_eq!(matches("aft", &rows), vec![(1, vec![0, 1, 2])]);
         assert_eq!(matches("", &rows)[0].1, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn row_tops_map_positions_to_pixels_and_back() {
+        let tops = RowTops::new([22, 40, 40]);
+        assert_eq!((tops.len(), tops.end()), (3, 102.0));
+        assert_eq!(tops.px(1.5), 42.0);
+        assert_eq!(tops.pos(42.0), 1.5);
+        assert_eq!((tops.px(9.0), tops.pos(500.0)), (102.0, 3.0));
+        assert_eq!(tops.pos(-3.0), 0.0);
+        // The end shows at the bottom of a view 50 high part way into the
+        // second row.
+        let b = tops.bounds(&Scroll::at(1.0), 50.0);
+        assert_eq!((b.max, b.unit), (1.0 + 30.0 / 40.0, 40.0));
+        assert_eq!(tops.bounds(&Scroll::default(), 200.0).max, 0.0);
+    }
+
+    #[test]
+    fn a_reveal_moves_as_little_as_it_can() {
+        let tops = RowTops::new([40; 10]);
+        // Shown already: kept, part of a row and all.
+        assert_eq!(tops.reveal(1.25, (80.0, 120.0), 120.0), 1.25);
+        assert!(tops.shows(1.25, (80.0, 120.0), 120.0));
+        assert!(!tops.shows(1.25, (40.0, 80.0), 120.0));
+        // Above: to its top; below: to its bottom at the view's.
+        assert_eq!(tops.reveal(3.0, (40.0, 80.0), 120.0), 1.0);
+        assert_eq!(tops.reveal(0.0, (200.0, 240.0), 120.0), 3.0);
+        // Never past the end.
+        assert_eq!(tops.reveal(0.0, (360.0, 400.0), 300.0), 2.5);
     }
 
     #[test]

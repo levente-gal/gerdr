@@ -29,7 +29,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
 use smithay::{
@@ -47,12 +47,12 @@ use crate::{
     input::Overlay,
     launch::{self, Place},
     paths::{display, tilde},
-    project_list::scrolled,
+    project_list::RowTops,
     projects::Project,
+    scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
     toast::Level,
     tooltip::Tooltip,
-    wheel::Wheel,
 };
 
 /// How long a path in a row's detail may get.
@@ -235,10 +235,13 @@ pub struct Switcher {
     matches: Vec<Match>,
     /// The selected match.
     selected: usize,
-    /// The first match shown.
-    scroll: usize,
-    /// The wheel's turn not yet a whole row.
-    wheel: Wheel,
+    /// Where the list stands, in matches.
+    scroll: Scroll,
+    /// Where the matches' rows go down the list.
+    places: RowTops,
+    /// How high the list may be, in logical pixels (see
+    /// `chrome::switcher_room`).
+    room: i32,
     /// The shown row the pointer is over.
     hover: Option<usize>,
     /// The sections the items span, but the typed command's: a category
@@ -250,9 +253,6 @@ pub struct Switcher {
     chip_hover: Option<usize>,
     /// The key hint under the pointer, by index into `hints()`.
     hint_hover: Option<usize>,
-    /// How many sections the items in the category span, for the room the
-    /// headings take.
-    sections: usize,
     /// The installed apps' icons by program, for the typed command.
     icons: HashMap<String, AppIcon>,
 }
@@ -268,14 +268,14 @@ impl Switcher {
             items: Vec::new(),
             matches: Vec::new(),
             selected: 0,
-            scroll: 0,
-            wheel: Wheel::default(),
+            scroll: Scroll::default(),
+            places: RowTops::default(),
+            room: i32::MAX,
             hover: None,
             categories: Vec::new(),
             category: None,
             chip_hover: None,
             hint_hover: None,
-            sections: 1,
             icons: HashMap::new(),
         };
         switcher.set_items(items);
@@ -310,6 +310,7 @@ impl Switcher {
         }) {
             self.selected = i;
         }
+        self.reveal();
     }
 
     /// Whether `section` is in the category shown; the typed command's
@@ -327,15 +328,6 @@ impl Switcher {
         if self.run {
             self.items[0] = typed_command(&command, &self.icons, self.place);
         }
-        let mut sections: Vec<Section> = self
-            .items
-            .iter()
-            .map(|item| item.section)
-            .filter(|section| self.shows(*section))
-            .collect();
-        sections.sort();
-        sections.dedup();
-        self.sections = sections.len().max(1);
         let typed = self.run.then(|| self.items[0].target.clone());
         let candidates = self
             .items
@@ -398,10 +390,14 @@ impl Switcher {
         {
             selected = at(&found, best).unwrap_or(0);
         }
+        let sections: Vec<Section> = found.iter().map(|m| self.items[m.item].section).collect();
+        self.places = chrome::switcher_places(
+            (0..sections.len()).map(|i| i == 0 || sections[i - 1] != sections[i]),
+        );
         self.matches = found;
         self.selected = selected;
-        self.scroll = 0;
-        self.wheel = Wheel::default();
+        self.scroll = Scroll::default();
+        self.reveal();
     }
 
     /// Its text field: the query.
@@ -442,8 +438,8 @@ impl Switcher {
     }
 
     /// Handle a key: `sym` is the key's own symbol, `typed` the one with
-    /// Shift and the layout applied. `page` is how many rows are shown.
-    fn key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, page: usize) -> Outcome {
+    /// Shift and the layout applied.
+    fn key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Outcome {
         // The query takes the keys that edit it first.
         match self.query.key(mods, sym, typed) {
             Edit::Changed => {
@@ -454,6 +450,7 @@ impl Switcher {
             Edit::Ignored => {}
         }
         let ctrl = mods.ctrl;
+        let page = self.shown().map_or(1, |(first, last)| last - first + 1) as isize;
         match sym {
             Keysym::Escape => return Outcome::Closed,
             Keysym::c if ctrl => return Outcome::Closed,
@@ -463,72 +460,114 @@ impl Switcher {
                     return Outcome::Picked(target.clone(), place);
                 }
             }
-            Keysym::Up | Keysym::KP_Up => self.step(-1, page),
-            Keysym::Down | Keysym::KP_Down => self.step(1, page),
+            Keysym::Up | Keysym::KP_Up => self.step(-1),
+            Keysym::Down | Keysym::KP_Down => self.step(1),
             Keysym::Tab | Keysym::ISO_Left_Tab if self.chips() => {
                 self.step_category(if mods.shift { -1 } else { 1 })
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab => self.step(if mods.shift { -1 } else { 1 }, page),
-            Keysym::Page_Up => self.step(-(page as isize), page),
-            Keysym::Page_Down => self.step(page as isize, page),
-            Keysym::p if ctrl => self.step(-1, page),
-            Keysym::n if ctrl => self.step(1, page),
+            Keysym::Tab | Keysym::ISO_Left_Tab => self.step(if mods.shift { -1 } else { 1 }),
+            Keysym::Page_Up => self.step(-page),
+            Keysym::Page_Down => self.step(page),
+            Keysym::p if ctrl => self.step(-1),
+            Keysym::n if ctrl => self.step(1),
             _ => {}
         }
         Outcome::Open
     }
 
     /// Move the selection `by` matches, scrolling to keep it shown.
-    fn step(&mut self, by: isize, page: usize) {
+    fn step(&mut self, by: isize) {
         let last = self.matches.len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + by).clamp(0, last) as usize;
-        self.scroll = scrolled(self.scroll, self.selected, page);
+        self.reveal();
     }
 
-    /// Scroll the list `rows` matches (down positive), moving the selection
-    /// only as far as needed to keep it shown.
-    fn scroll_by(&mut self, rows: i32, page: usize) {
-        let page = page.max(1);
-        let last = self.matches.len().saturating_sub(page);
-        let first = scrolled(self.scroll, self.selected, page)
-            .saturating_add_signed(rows as isize)
-            .min(last);
-        let end = (first + page).min(self.matches.len()).max(first + 1);
-        self.scroll = first;
-        self.selected = self.selected.clamp(first, end - 1);
+    /// How high the list is: as its rows, `room` at most.
+    fn list_height(&self) -> f64 {
+        self.places.end().min(self.room as f64)
     }
 
-    /// The wheel turned `rows` rows (down positive): whole rows scroll the
-    /// list, the part of a row left shows it moved by as much.
-    fn wheel_by(&mut self, rows: f64, page: usize) {
-        let first = scrolled(self.scroll, self.selected, page);
-        let whole = self.wheel.turn(rows, first);
-        if whole != 0 {
-            self.scroll_by(whole as i32, page);
+    fn bounds(&self) -> Bounds {
+        self.places.bounds(&self.scroll, self.list_height())
+    }
+
+    /// Let the list be `room` high at most, keeping the selection shown.
+    fn set_room(&mut self, room: i32) {
+        if room != self.room {
+            self.room = room;
+            self.reveal();
         }
-        let last = self.matches.len().saturating_sub(page.max(1));
-        self.wheel.settle(
-            first as i64 + whole,
-            scrolled(self.scroll, self.selected, page),
-            last,
-        );
     }
 
-    /// The rows shown, `page` at most, and one more shown in part under
-    /// them when the wheel left a part of a row.
-    fn view(&self, page: usize) -> SwitcherView {
-        let scroll = scrolled(self.scroll, self.selected, page);
-        // Scrolled part of a row, the list shows one more under it.
-        let part = if scroll + page.max(1) < self.matches.len() {
-            self.wheel.part(scroll)
-        } else {
-            0.0
-        };
+    /// Scroll the list as little as shows the selection whole, at once.
+    fn reveal(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let span = chrome::switcher_row_span(&self.places, self.selected);
+        let to = self
+            .places
+            .reveal(self.scroll.pos(), span, self.list_height());
+        if to != self.scroll.pos() {
+            self.scroll.jump(to);
+        }
+    }
+
+    /// The first and last matches shown whole, if any are.
+    fn shown(&self) -> Option<(usize, usize)> {
+        let (pos, h) = (self.scroll.pos(), self.list_height());
+        let bottom = self.places.px(pos) + h;
+        let mut whole = (self.scroll.first()..self.matches.len())
+            .take_while(|&i| self.places.top(i) < bottom)
+            .filter(|&i| {
+                let span = chrome::switcher_row_span(&self.places, i);
+                self.places.shows(pos, span, h)
+            });
+        let first = whole.next()?;
+        Some((first, whole.last().unwrap_or(first)))
+    }
+
+    /// Move the selection as little as keeps it shown whole: scrolling the
+    /// list drags it along.
+    fn drag(&mut self) {
+        if let Some((first, last)) = self.shown() {
+            self.selected = self.selected.clamp(first, last);
+        }
+    }
+
+    /// The wheel or the touchpad moved the list at `now`. Nothing is
+    /// under the pointer while it moves.
+    fn scroll(&mut self, motion: Motion, now: Instant) {
+        self.scroll.apply(motion, now, self.bounds());
+        self.drag();
+        if self.scroll.moving(now) {
+            self.hover = None;
+        }
+    }
+
+    /// Move the list on to `now`; whether it still moves.
+    fn tick(&mut self, now: Instant) -> bool {
+        let moving = self.scroll.tick(now, self.bounds());
+        self.drag();
+        if moving {
+            self.hover = None;
+        }
+        moving
+    }
+
+    /// The rows in view, from the first one shown at least in part down
+    /// past the list's bottom.
+    fn view(&self) -> SwitcherView {
+        let first = self.scroll.first().min(self.matches.len());
+        let top = self.places.top(first);
+        let part = self.places.px(self.scroll.pos()) - top - self.scroll.overscroll();
+        let reach = self.list_height() + part.max(0.0);
         let mut last: Option<Section> = None;
-        let rows: Vec<SwitcherRow> = self.matches[scroll.min(self.matches.len())..]
+        let rows: Vec<SwitcherRow> = self.matches[first..]
             .iter()
-            .take(page + usize::from(part > 0.0))
-            .map(|m| {
+            .enumerate()
+            .take_while(|(k, _)| self.places.top(first + k) - top < reach)
+            .map(|(_, m)| {
                 let item = &self.items[m.item];
                 // A heading over the first row shown and wherever the
                 // section changes.
@@ -545,7 +584,7 @@ impl Switcher {
                 }
             })
             .collect();
-        let selected = (!self.matches.is_empty()).then(|| self.selected - scroll);
+        let selected = self.selected.checked_sub(first).filter(|i| *i < rows.len());
         let hover = self.hover.filter(|h| *h < rows.len());
         let hint = match (self.run, self.place) {
             (true, Place::Split) => "Command to run in a split…",
@@ -596,10 +635,8 @@ impl Switcher {
     }
 
     /// The target of shown row `row`.
-    fn row_target(&self, row: usize, page: usize) -> Option<&Target> {
-        let m = self
-            .matches
-            .get(scrolled(self.scroll, self.selected, page) + row)?;
+    fn row_target(&self, row: usize) -> Option<&Target> {
+        let m = self.matches.get(self.scroll.first() + row)?;
         Some(&self.items[m.item].target)
     }
 }
@@ -727,7 +764,9 @@ impl Gerdr {
     pub fn open_switcher(&mut self) {
         self.project_menu = None;
         self.inbox.close();
-        self.switcher = Some(Switcher::new(self.switcher_items(), false, Place::Split));
+        let mut switcher = Switcher::new(self.switcher_items(), false, Place::Split);
+        switcher.set_room(self.switcher_room());
+        self.switcher = Some(switcher);
         self.query_zoxide();
     }
 
@@ -752,6 +791,7 @@ impl Gerdr {
         let mut switcher = Switcher::new(Vec::new(), true, place);
         switcher.icons = self.program_icons();
         switcher.set_items(self.run_items());
+        switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
         self.scan_installed_apps();
     }
@@ -845,6 +885,9 @@ impl Gerdr {
             .position(|chip| chip.to_f64().contains(pos));
         let hint = chrome::switcher_hint(&view, &layout, pos);
         if let Some(switcher) = self.switcher.as_mut() {
+            // Rows passing under the pointer don't light up.
+            let moving = switcher.scroll.moving(Instant::now());
+            let hover = hover.filter(|_| !moving);
             switcher.hover = hover;
             switcher.chip_hover = chip;
             switcher.hint_hover = hint;
@@ -874,7 +917,7 @@ impl Gerdr {
 
     /// The switcher's rows, while it is open.
     pub fn switcher_view(&self) -> Option<SwitcherView> {
-        Some(self.switcher.as_ref()?.view(self.switcher_page()))
+        Some(self.switcher.as_ref()?.view())
     }
 
     /// Bring the open switcher's items up to date.
@@ -894,8 +937,10 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<(Target, Place)> {
-        let page = self.switcher_page();
-        match self.switcher.as_mut()?.key(mods, sym, typed, page) {
+        let room = self.switcher_room();
+        let switcher = self.switcher.as_mut()?;
+        switcher.set_room(room);
+        match switcher.key(mods, sym, typed) {
             Outcome::Open => None,
             Outcome::Closed => {
                 self.switcher = None;
@@ -908,27 +953,33 @@ impl Gerdr {
         }
     }
 
-    /// The wheel turned `rows` rows (down positive, parts of a row adding
-    /// up) over the switcher.
-    pub fn switcher_scroll(&mut self, motion: crate::scroll::Motion) {
-        let rows = crate::scroll::Scroll::legacy_rows(motion, 40.0);
-        let page = self.switcher_page();
+    /// The wheel or the touchpad moved the switcher's list.
+    pub fn switcher_scroll(&mut self, motion: Motion) {
+        let room = self.switcher_room();
         if let Some(switcher) = self.switcher.as_mut() {
-            switcher.wheel_by(rows, page);
+            switcher.set_room(room);
+            switcher.scroll(motion, Instant::now());
         }
     }
 
     /// Move the switcher's list on to `now` if it moves on its own; whether it
     /// still moves (see `Scroll::moving`).
-    pub fn switcher_scroll_tick(&mut self, _now: std::time::Instant) -> bool {
-        false
+    pub fn switcher_scroll_tick(&mut self, now: Instant) -> bool {
+        if self.switcher.is_none() {
+            return false;
+        }
+        let room = self.switcher_room();
+        let Some(switcher) = self.switcher.as_mut() else {
+            return false;
+        };
+        switcher.set_room(room);
+        switcher.tick(now)
     }
 
     /// A button pressed while the switcher is open: on a row it switches to
     /// that row's target, on a category chip it shows that category,
     /// outside the panel it closes the switcher.
     pub fn switcher_click(&mut self, pos: Point<f64, Logical>) {
-        let page = self.switcher_page();
         // A key hint: its key, pressed.
         if let Some(view) = self.switcher_view() {
             let layout = chrome::switcher_geometry(&view, self.content_rect());
@@ -942,7 +993,7 @@ impl Gerdr {
         let Some(mut switcher) = self.switcher.take() else {
             return;
         };
-        let layout = chrome::switcher_geometry(&switcher.view(page), self.content_rect());
+        let layout = chrome::switcher_geometry(&switcher.view(), self.content_rect());
         if let Some(chip) = layout
             .chips
             .iter()
@@ -954,7 +1005,7 @@ impl Gerdr {
         }
         match chrome::switcher_row_at(&layout, pos) {
             Some(row) => {
-                if let Some(target) = switcher.row_target(row, page).cloned() {
+                if let Some(target) = switcher.row_target(row).cloned() {
                     self.switch_to(target, switcher.place);
                 }
             }
@@ -1068,12 +1119,9 @@ impl Gerdr {
         }
     }
 
-    fn switcher_page(&self) -> usize {
-        let (sections, chips) = self
-            .switcher
-            .as_ref()
-            .map_or((1, false), |s| (s.sections, s.chips()));
-        chrome::switcher_page(self.content_rect(), sections, chips)
+    /// How high the switcher's list may be.
+    fn switcher_room(&self) -> i32 {
+        chrome::switcher_room(self.content_rect())
     }
 
     /// The apps named in the config file, with the icons of the installed
@@ -1251,6 +1299,23 @@ pub fn remember(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// How high a list of `rows` rows under one heading is.
+    fn room(rows: usize) -> i32 {
+        chrome::switcher_places((0..rows).map(|i| i == 0)).end() as i32
+    }
+
+    /// Move the list by `motion`, then let it come to rest, a frame at a
+    /// time.
+    fn settle(switcher: &mut Switcher, motion: Motion) {
+        let mut now = Instant::now();
+        switcher.scroll(motion, now);
+        for _ in 0..250 {
+            now += Duration::from_millis(8);
+            switcher.tick(now);
+        }
+    }
 
     fn item(label: &str, detail: &str, w: usize) -> Item {
         Item::new(ItemIcon::Tab, label, detail, Target::Workspace(w))
@@ -1259,13 +1324,13 @@ mod tests {
     fn type_in(switcher: &mut Switcher, text: &str) {
         for c in text.chars() {
             let sym = Keysym::from_char(c);
-            switcher.key(&ModifiersState::default(), sym, sym, 5);
+            switcher.key(&ModifiersState::default(), sym, sym);
         }
     }
 
     fn labels(switcher: &Switcher) -> Vec<String> {
         switcher
-            .view(5)
+            .view()
             .rows
             .into_iter()
             .map(|row| row.label)
@@ -1286,14 +1351,14 @@ mod tests {
         assert_eq!(labels(&switcher), ["services-api", "gerdr", "zsh"]);
         type_in(&mut switcher, "gerdr");
         assert_eq!(labels(&switcher), ["gerdr", "zsh"]);
-        let view = switcher.view(5);
+        let view = switcher.view();
         assert_eq!(view.rows[0].label_hits, [0, 1, 2, 3, 4]);
         assert_eq!(view.rows[1].detail_hits, [0, 1, 2, 3, 4]);
         let ctrl = ModifiersState {
             ctrl: true,
             ..Default::default()
         };
-        switcher.key(&ctrl, Keysym::u, Keysym::u, 5);
+        switcher.key(&ctrl, Keysym::u, Keysym::u);
         assert_eq!(labels(&switcher).len(), 3);
     }
 
@@ -1313,7 +1378,7 @@ mod tests {
         );
         let headed = |switcher: &Switcher| -> Vec<(String, &'static str, Option<&'static str>)> {
             switcher
-                .view(10)
+                .view()
                 .rows
                 .into_iter()
                 .map(|row| (row.label, row.kind, row.section))
@@ -1330,15 +1395,15 @@ mod tests {
                 ("Projects…".to_string(), "command", None),
             ]
         );
-        assert_eq!(switcher.sections, 4);
         // Scrolled into a section, the first row shown still has its heading.
-        switcher.scroll_by(1, 2);
-        let rows = switcher.view(2).rows;
+        switcher.set_room(room(2));
+        settle(&mut switcher, Motion::Notches(1.0));
+        let rows = switcher.view().rows;
         assert_eq!(rows[0].section, Some("Workspaces"));
         assert_eq!(rows[1].section, Some("Apps"));
         // A query keeps the sections; the selection goes to the best match.
         type_in(&mut switcher, "sho");
-        let view = switcher.view(10);
+        let view = switcher.view();
         assert_eq!(view.rows[0].section, Some("Commands"));
         assert_eq!(view.selected, Some(0));
     }
@@ -1356,7 +1421,7 @@ mod tests {
             Place::Split,
         );
         // All of them at first.
-        let view = switcher.view(10);
+        let view = switcher.view();
         assert_eq!(view.categories, ["All", "Workspaces", "Apps", "Folders"]);
         assert_eq!(view.category, 0);
         assert_eq!(labels(&switcher), ["gerdr", "aft", "firefox", "herdr"]);
@@ -1367,35 +1432,34 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        switcher.key(&none, Keysym::Tab, Keysym::Tab, 5);
-        assert_eq!(switcher.view(10).category, 1);
+        switcher.key(&none, Keysym::Tab, Keysym::Tab);
+        assert_eq!(switcher.view().category, 1);
         assert_eq!(labels(&switcher), ["gerdr", "aft"]);
-        assert_eq!(switcher.sections, 1);
         type_in(&mut switcher, "af");
         assert_eq!(labels(&switcher), ["aft"]);
         assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
         // Shift+Tab goes back, and wraps around past "All".
-        switcher.key(&shift, Keysym::ISO_Left_Tab, Keysym::ISO_Left_Tab, 5);
-        assert_eq!(switcher.view(10).category, 0);
-        switcher.key(&shift, Keysym::ISO_Left_Tab, Keysym::ISO_Left_Tab, 5);
-        assert_eq!(switcher.view(10).category, 3);
+        switcher.key(&shift, Keysym::ISO_Left_Tab, Keysym::ISO_Left_Tab);
+        assert_eq!(switcher.view().category, 0);
+        switcher.key(&shift, Keysym::ISO_Left_Tab, Keysym::ISO_Left_Tab);
+        assert_eq!(switcher.view().category, 3);
         // A category gone from the items shows all of them again.
         switcher.set_items(vec![
             item("gerdr", "", 0),
             Item::new(ItemIcon::App, "x", "", Target::App("x".into())),
         ]);
-        assert_eq!(switcher.view(10).category, 0);
+        assert_eq!(switcher.view().category, 0);
         // With one category there are no chips, and Tab walks the rows.
         switcher.set_items(vec![item("a", "", 0), item("b", "", 1)]);
         let ctrl = ModifiersState {
             ctrl: true,
             ..Default::default()
         };
-        switcher.key(&ctrl, Keysym::u, Keysym::u, 5);
-        let view = switcher.view(10);
+        switcher.key(&ctrl, Keysym::u, Keysym::u);
+        let view = switcher.view();
         assert!(view.categories.is_empty());
         assert!(view.hints.iter().all(|(k, _)| k != "Tab"));
-        switcher.key(&none, Keysym::Tab, Keysym::Tab, 5);
+        switcher.key(&none, Keysym::Tab, Keysym::Tab);
         assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
     }
 
@@ -1414,11 +1478,11 @@ mod tests {
             true,
             Place::Split,
         );
-        assert_eq!(switcher.view(5).categories, ["All", "Apps", "Commands"]);
+        assert_eq!(switcher.view().categories, ["All", "Apps", "Commands"]);
         switcher.set_category(2);
         type_in(&mut switcher, "f");
         assert_eq!(labels(&switcher), ["f", "fish"]);
-        let hints = switcher.view(5).hints;
+        let hints = switcher.view().hints;
         assert_eq!(hints[0], ("Enter".into(), "run".into()));
         assert_eq!(hints.len(), chrome::SWITCHER_HINTS);
     }
@@ -1449,7 +1513,7 @@ mod tests {
         );
         let labels = |switcher: &Switcher| -> Vec<String> {
             switcher
-                .view(6)
+                .view()
                 .rows
                 .into_iter()
                 .map(|row| row.label)
@@ -1467,7 +1531,7 @@ mod tests {
             labels(&switcher),
             ["alpha", "tablet", "beta", "gamma", "delta", "alphabet"]
         );
-        assert_eq!(switcher.view(6).selected, Some(0));
+        assert_eq!(switcher.view().selected, Some(0));
         // "abet" is whole in "alphabet" and scattered in "tablet": the
         // better match in the later section is selected, though the
         // heavier workspace is listed first.
@@ -1480,7 +1544,7 @@ mod tests {
             ctrl: true,
             ..Default::default()
         };
-        switcher.key(&ctrl, Keysym::u, Keysym::u, 6);
+        switcher.key(&ctrl, Keysym::u, Keysym::u);
         type_in(&mut switcher, "et");
         assert_eq!(labels(&switcher), ["tablet", "beta", "delta", "alphabet"]);
         assert_eq!(switcher.picked(), Some(&Target::Workspace(4)));
@@ -1494,9 +1558,9 @@ mod tests {
             Place::Split,
         );
         switcher.hover = Some(1);
-        assert_eq!(switcher.view(5).hover, Some(1));
+        assert_eq!(switcher.view().hover, Some(1));
         switcher.hover = Some(7);
-        assert_eq!(switcher.view(5).hover, None);
+        assert_eq!(switcher.view().hover, None);
     }
 
     #[test]
@@ -1546,24 +1610,25 @@ mod tests {
             false,
             Place::Split,
         );
+        switcher.set_room(room(5));
         let none = ModifiersState::default();
         for _ in 0..6 {
-            switcher.key(&none, Keysym::Down, Keysym::Down, 5);
+            switcher.key(&none, Keysym::Down, Keysym::Down);
         }
-        let view = switcher.view(5);
+        let view = switcher.view();
         assert_eq!(
             (view.rows[0].label.as_str(), view.selected),
             ("ws2", Some(4))
         );
-        assert_eq!(switcher.row_target(0, 5), Some(&Target::Workspace(2)));
+        assert_eq!(switcher.row_target(0), Some(&Target::Workspace(2)));
         assert!(matches!(
-            switcher.key(&none, Keysym::Return, Keysym::Return, 5),
+            switcher.key(&none, Keysym::Return, Keysym::Return),
             Outcome::Picked(Target::Workspace(6), Place::Split)
         ));
         type_in(&mut switcher, "xyz");
-        assert_eq!(switcher.view(5).selected, None);
+        assert_eq!(switcher.view().selected, None);
         assert!(matches!(
-            switcher.key(&none, Keysym::Return, Keysym::Return, 5),
+            switcher.key(&none, Keysym::Return, Keysym::Return),
             Outcome::Open
         ));
     }
@@ -1575,23 +1640,28 @@ mod tests {
             false,
             Place::Split,
         );
-        switcher.scroll_by(2, 5);
-        let view = switcher.view(5);
+        switcher.set_room(room(5));
+        settle(&mut switcher, Motion::Notches(2.0));
+        let view = switcher.view();
         assert_eq!(
-            (view.rows[0].label.as_str(), view.selected),
-            ("ws2", Some(0))
+            (view.rows[0].label.as_str(), view.selected, view.part),
+            ("ws2", Some(0), 0.0)
         );
-        switcher.scroll_by(10, 5);
-        assert_eq!(switcher.view(5).rows[0].label, "ws3");
-        switcher.scroll_by(-10, 5);
-        let view = switcher.view(5);
+        settle(&mut switcher, Motion::Notches(10.0));
+        assert_eq!(switcher.view().rows[0].label, "ws3");
+        settle(&mut switcher, Motion::Notches(-10.0));
+        let view = switcher.view();
         assert_eq!(
             (view.rows[0].label.as_str(), view.selected),
             ("ws0", Some(3))
         );
+        // Nothing is under the pointer while the list moves.
+        switcher.hover = Some(1);
+        switcher.scroll(Motion::Notches(1.0), Instant::now());
+        assert_eq!(switcher.view().hover, None);
         type_in(&mut switcher, "xyz");
-        switcher.scroll_by(1, 5);
-        assert_eq!(switcher.view(5).selected, None);
+        settle(&mut switcher, Motion::Notches(1.0));
+        assert_eq!(switcher.view().selected, None);
     }
 
     #[test]
@@ -1601,31 +1671,50 @@ mod tests {
             false,
             Place::Split,
         );
-        switcher.wheel_by(1.5, 5);
-        assert_eq!(switcher.view(5).part, 0.5);
-        // The row shown in part under the list too.
+        switcher.set_room(room(5));
+        let now = Instant::now();
+        switcher.scroll(Motion::Finger { px: 60.0, time: 0 }, now);
+        let view = switcher.view();
+        assert_eq!(view.part, 20.0);
+        // The row shown in part under the list too; the selection is
+        // dragged to the first row shown whole.
         assert_eq!(
-            labels(&switcher),
+            labels(&switcher)[..6],
             ["ws1", "ws2", "ws3", "ws4", "ws5", "ws6"]
         );
-        // Down past the end, and up past the top, holds the list whole.
-        switcher.wheel_by(5.0, 5);
-        assert_eq!(switcher.view(5).part, 0.0);
+        assert_eq!(view.selected, Some(1));
+        // Pulled on past the end, the rows go up past it, and come back
+        // once let go.
+        switcher.scroll(Motion::Finger { px: 400.0, time: 8 }, now);
+        let view = switcher.view();
+        assert_eq!(view.rows[0].label, "ws3");
+        assert!(view.part > 0.0 && view.part < 234.0, "{}", view.part);
+        settle(&mut switcher, Motion::Lift { time: 16 });
+        assert_eq!(switcher.view().part, 0.0);
         assert_eq!(labels(&switcher), ["ws3", "ws4", "ws5", "ws6", "ws7"]);
-        switcher.wheel_by(-4.5, 5);
-        assert_eq!(switcher.view(5).part, 0.0);
-        assert_eq!(labels(&switcher).len(), 5);
         // A key moving the list drops the part.
-        switcher.wheel_by(0.5, 5);
-        assert_eq!(switcher.view(5).part, 0.5);
+        switcher.scroll(
+            Motion::Finger {
+                px: -20.0,
+                time: 3000,
+            },
+            now,
+        );
+        assert_eq!(switcher.view().part, 20.0);
         let none = ModifiersState::default();
-        switcher.key(&none, Keysym::Page_Down, Keysym::Page_Down, 5);
-        assert_eq!(switcher.view(5).part, 0.0);
+        switcher.key(&none, Keysym::Page_Up, Keysym::Page_Up);
+        assert_eq!(switcher.view().part, 0.0);
         // As does typing, which starts the list over.
-        switcher.wheel_by(-1.5, 5);
-        assert_eq!(switcher.view(5).part, 0.5);
+        switcher.scroll(
+            Motion::Finger {
+                px: 20.0,
+                time: 3008,
+            },
+            now,
+        );
+        assert_eq!(switcher.view().part, 20.0);
         type_in(&mut switcher, "w");
-        assert_eq!(switcher.view(5).part, 0.0);
+        assert_eq!(switcher.view().part, 0.0);
     }
 
     #[test]
@@ -1635,7 +1724,7 @@ mod tests {
             false,
             Place::Split,
         );
-        switcher.key(&ModifiersState::default(), Keysym::Down, Keysym::Down, 5);
+        switcher.key(&ModifiersState::default(), Keysym::Down, Keysym::Down);
         switcher.set_items(vec![item("c", "", 2), item("a", "", 0), item("b", "", 1)]);
         assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
     }
@@ -1695,7 +1784,7 @@ mod tests {
         assert_eq!(labels(&switcher), ["github.com/o/r"]);
         let none = ModifiersState::default();
         assert!(
-            matches!(switcher.key(&none, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c), Place::Split) if c == "https://github.com/o/r")
+            matches!(switcher.key(&none, Keysym::Return, Keysym::Return), Outcome::Picked(Target::Command(c), Place::Split) if c == "https://github.com/o/r")
         );
     }
 
@@ -1720,7 +1809,7 @@ mod tests {
         assert_eq!(labels(&switcher), ["imv", "imv a.png"]);
         let none = ModifiersState::default();
         assert!(
-            matches!(switcher.key(&none, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c), Place::Split) if c == "imv")
+            matches!(switcher.key(&none, Keysym::Return, Keysym::Return), Outcome::Picked(Target::Command(c), Place::Split) if c == "imv")
         );
         // Alt+Enter runs it in a new tab instead.
         let alt = ModifiersState {
@@ -1728,10 +1817,10 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            matches!(switcher.key(&alt, Keysym::Return, Keysym::Return, 5), Outcome::Picked(Target::Command(c), Place::Tab) if c == "imv")
+            matches!(switcher.key(&alt, Keysym::Return, Keysym::Return), Outcome::Picked(Target::Command(c), Place::Tab) if c == "imv")
         );
         type_in(&mut switcher, " a");
-        switcher.key(&none, Keysym::Down, Keysym::Down, 5);
+        switcher.key(&none, Keysym::Down, Keysym::Down);
         assert_eq!(labels(&switcher), ["imv a", "imv a.png"]);
         assert_eq!(
             switcher.picked(),
@@ -1747,12 +1836,12 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            switcher.key(&ctrl, Keysym::c, Keysym::c, 5),
+            switcher.key(&ctrl, Keysym::c, Keysym::c),
             Outcome::Closed
         ));
         type_in(&mut switcher, "echo ");
         let none = ModifiersState::default();
-        crate::text_field::pasting("a\tb\nc\n", |sym| switcher.key(&none, sym, sym, 5));
+        crate::text_field::pasting("a\tb\nc\n", |sym| switcher.key(&none, sym, sym));
         assert_eq!(&*switcher.query, "echo a b c");
     }
 
@@ -1760,11 +1849,11 @@ mod tests {
     fn run_prompt_in_a_new_tab() {
         let mut switcher = Switcher::new(Vec::new(), true, Place::Tab);
         type_in(&mut switcher, "imv");
-        assert_eq!(switcher.view(5).rows[0].detail, "run in a new tab");
-        assert_eq!(switcher.view(5).hint, "Command to run in a new tab…");
+        assert_eq!(switcher.view().rows[0].detail, "run in a new tab");
+        assert_eq!(switcher.view().hint, "Command to run in a new tab…");
         let none = ModifiersState::default();
         assert!(matches!(
-            switcher.key(&none, Keysym::Return, Keysym::Return, 5),
+            switcher.key(&none, Keysym::Return, Keysym::Return),
             Outcome::Picked(Target::Command(_), Place::Tab)
         ));
     }
@@ -1786,7 +1875,7 @@ mod tests {
         // The typed command stays first, under its own heading; the app
         // named with it is what Enter picks.
         assert_eq!(labels(&switcher), ["fi", "Files", "Firefox"]);
-        let view = switcher.view(5);
+        let view = switcher.view();
         assert_eq!(view.rows[0].section, Some("Run"));
         assert_eq!(view.rows[1].section, Some("Apps"));
         assert_eq!(view.rows[2].section, None);
@@ -1838,14 +1927,14 @@ mod tests {
         assert_eq!(labels(&switcher)[0], "proj");
         let none = ModifiersState::default();
         assert!(matches!(
-            switcher.key(&none, Keysym::Return, Keysym::Return, 5),
+            switcher.key(&none, Keysym::Return, Keysym::Return),
             Outcome::Picked(Target::ProjectFile(id), _) if id == "aft"
         ));
         let ctrl = ModifiersState {
             ctrl: true,
             ..Default::default()
         };
-        switcher.key(&ctrl, Keysym::u, Keysym::u, 5);
+        switcher.key(&ctrl, Keysym::u, Keysym::u);
         type_in(&mut switcher, "reload");
         assert_eq!(switcher.picked(), Some(&Target::ReloadProjects));
     }
