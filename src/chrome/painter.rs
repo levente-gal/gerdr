@@ -9,7 +9,7 @@ use super::{
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use ab_glyph::{Font, FontVec, PxScale, ScaleFont, VariableFont};
 use smithay::utils::{Logical, Rectangle, Size};
 use std::cell::RefCell;
 
@@ -27,6 +27,9 @@ pub(super) struct Painter {
     /// The monospace font, for diffs and logs; `None` when there is none,
     /// and the font above is used instead.
     pub(super) mono: Option<FontVec>,
+    /// The UI font in bold, for names that head a group (a repository's);
+    /// `None` when there is none, and the UI font is used instead.
+    pub(super) bold: Option<FontVec>,
     /// Popup backgrounds drawn lately, the last used first: a popup drawn
     /// again, say as its list scrolls, starts from a copy.
     popups: RefCell<Vec<(PopupKey, Canvas)>>,
@@ -149,6 +152,20 @@ fn find_family(family: &str) -> Option<String> {
     (!path.is_empty()).then_some(path)
 }
 
+/// The UI font in bold: the UI font's own file at a bold weight when it
+/// has a weight axis, else the bold face fontconfig picks.
+fn load_bold() -> Option<FontVec> {
+    if let Some(mut font) = load_font(find_font())
+        && font.set_variation(b"wght", BOLD_WEIGHT)
+    {
+        return Some(font);
+    }
+    load_font(find_family("sans-serif:bold"))
+}
+
+/// The weight bold text is drawn at, from a font with a weight axis.
+const BOLD_WEIGHT: f32 = 650.0;
+
 /// The font in the file at `path`, if it can be read.
 fn load_font(path: Option<String>) -> Option<FontVec> {
     let data = std::fs::read(path?).ok()?;
@@ -216,6 +233,16 @@ fn fallbacks(chars: &[char]) -> Vec<Option<&'static FontVec>> {
 pub(super) fn measure(text: &str, size: f32) -> Option<f32> {
     static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
     let font = FONT.get_or_init(|| load_font(find_font())).as_ref()?;
+    Some(width_in(font, text, size, 1.0))
+}
+
+/// Width of `text` in the bold UI font (else the UI font) at `size`, at
+/// scale 1, as `measure` has it.
+pub(super) fn measure_bold(text: &str, size: f32) -> Option<f32> {
+    static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
+    let font = FONT
+        .get_or_init(|| load_bold().or_else(|| load_font(find_font())))
+        .as_ref()?;
     Some(width_in(font, text, size, 1.0))
 }
 
@@ -305,6 +332,7 @@ impl Painter {
         Self {
             font,
             mono,
+            bold: load_bold(),
             popups: RefCell::default(),
         }
     }
@@ -735,6 +763,19 @@ impl Painter {
         width_in(font, text, size, scale)
     }
 
+    /// The bold UI font, else the UI font.
+    fn bold_font(&self) -> Option<&FontVec> {
+        self.bold.as_ref().or(self.font.as_ref())
+    }
+
+    /// Width of `text` in the bold UI font, in physical pixels.
+    pub(super) fn bold_width(&self, text: &str, size: f32, scale: f64) -> f32 {
+        let Some(font) = self.bold_font() else {
+            return 0.0;
+        };
+        width_in(font, text, size, scale)
+    }
+
     /// Draw `text` centred in a logical rectangle.
     pub(super) fn centered(
         &self,
@@ -888,6 +929,26 @@ impl Painter {
     ) -> f32 {
         let Some(font) = &self.font else { return x };
         text_in(font, c, text, size, x, max_x, (top, height), scale, color)
+    }
+
+    /// Draw `text` in the bold UI font as `text` does. Returns where it
+    /// ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn bold_text(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        size: f32,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        color: Rgb,
+    ) -> f32 {
+        let Some(font) = self.bold_font() else {
+            return x;
+        };
+        text_in(font, c, text, size, x, max_x, band, scale, color)
     }
 
     /// The byte of `line`, drawn by `edit_line` between `x` and `max_x`,

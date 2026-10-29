@@ -1013,14 +1013,15 @@ impl Gerdr {
             }
             ReposHit::Expander(i) => {
                 let rect = layout.lines.get(i)?.2?;
-                let open = match view.lines.get(i)? {
-                    TreeLine::Repo(repo) => repo.expanded?,
-                    TreeLine::Dir(dir) => dir.open,
+                let text = match view.lines.get(i)? {
+                    TreeLine::Clean(clean) if clean.open => {
+                        "Hide the repositories with nothing to do"
+                    }
+                    TreeLine::Clean(_) => "Show the repositories with nothing to do",
+                    TreeLine::Repo(repo) if repo.expanded? => "Hide its changed files",
+                    TreeLine::Dir(dir) if dir.open => "Hide its changed files",
+                    TreeLine::Repo(_) | TreeLine::Dir(_) => "Show its changed files",
                     TreeLine::File(_) => return None,
-                };
-                let text = match open {
-                    true => "Hide its changed files",
-                    false => "Show its changed files",
                 };
                 Some(Tooltip::new(text, rect))
             }
