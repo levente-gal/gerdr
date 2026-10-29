@@ -120,6 +120,24 @@ impl Gerdr {
 
     /// Scroll the sidebar's rows by `dy` logical pixels (down when
     /// positive), as far as they go.
+    pub(crate) fn sidebar_scroll(&mut self, motion: crate::scroll::Motion) {
+        use crate::scroll::Motion;
+        let dy = match motion {
+            Motion::Notches(n) => n * 48.0,
+            Motion::Finger { px, .. } => px,
+            Motion::Lift { .. } => 0.0,
+        };
+        self.sidebar_scroll_by(dy);
+    }
+
+    /// Move the sidebar's rows on to `now` if they move on their own;
+    /// whether they still move (see `Scroll::moving`).
+    pub fn sidebar_scroll_tick(&mut self, _now: std::time::Instant) -> bool {
+        false
+    }
+
+    /// Scroll the sidebar's rows by `dy` logical pixels (down when
+    /// positive), as far as they go.
     pub(crate) fn sidebar_scroll_by(&mut self, dy: f64) {
         let layout = self.sidebar_layout();
         let max = layout.max_scroll(self.output_size().h) as f64;

@@ -351,11 +351,18 @@ impl Gerdr {
     }
 
     /// The wheel turned `rows` rows (down positive) over the panel.
-    pub fn inbox_scroll(&mut self, rows: f64) {
+    pub fn inbox_scroll(&mut self, motion: crate::scroll::Motion) {
+        let rows = crate::scroll::Scroll::legacy_rows(motion, 40.0);
         let parts = self.inbox_parts();
         if let Some(panel) = self.inbox.panel.as_mut() {
             panel.scroll(rows, &parts.listing());
         }
+    }
+
+    /// Move the inbox panel's list on to `now` if it moves on its own; whether it
+    /// still moves (see `Scroll::moving`).
+    pub fn inbox_scroll_tick(&mut self, _now: std::time::Instant) -> bool {
+        false
     }
 
     /// What the inbox panel shows, while it is open.

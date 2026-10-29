@@ -2495,6 +2495,88 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
     }
 }
 
+/// Sidebar inputs: the view (with what moves in it, quantized), theme,
+/// size, scale.
+type SidebarKey = (SidebarView, super::Theme, Size<i32, Logical>, f64);
+
+/// The sidebar as the chrome shows it: its buffer, and the band breathing
+/// over each blocked agent's row.
+#[derive(Default)]
+pub(super) struct SidebarLayers {
+    sidebar: super::Cached<SidebarKey>,
+    /// The band (one size fits all the cards).
+    pulse: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
+}
+
+impl SidebarLayers {
+    /// The parts showing `sidebar`, `width` wide on an `output`, with the
+    /// blocked agents' rows at `pulse`, front to back.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parts(
+        &mut self,
+        sidebar: SidebarView,
+        width: i32,
+        pulse: f32,
+        density: Density,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        painter: &Painter,
+    ) -> Vec<super::layers::Part> {
+        use super::layers::Part;
+        let size: Size<i32, Logical> = (width, output.h).into();
+        let mut parts = Vec::new();
+        // The blocked agents' pulse: one band per row, composed over the
+        // sidebar with the pulse as its opacity, so the sidebar itself is
+        // not redrawn for it.
+        let pulse_alpha = pulse_alpha(pulse);
+        let mut bands = Vec::new();
+        if pulse_alpha > 0.0 {
+            let layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density)
+                .scrolled(sidebar.state.scroll, output.h);
+            let blocked = |i: usize, k: usize| {
+                sidebar
+                    .agents
+                    .get(i)
+                    .and_then(|cards| cards.get(k))
+                    .is_some_and(|card| card.status == crate::herdr::AgentStatus::Blocked)
+            };
+            // The rows in the workspaces, and those in the "Needs you" list.
+            let rows = layout
+                .cards
+                .iter()
+                .enumerate()
+                .flat_map(|(i, rows)| rows.iter().map(move |(k, rect)| (i, *k, *rect)));
+            for (_, _, rect) in rows
+                .chain(layout.inbox.iter().copied())
+                .filter(|(i, k, _)| blocked(*i, *k))
+            {
+                let band = blocked_band(rect, density);
+                // Not on a row scrolled under the header.
+                if band.size.w > 0 && band.size.h > 0 && band.loc.y >= BAR_HEIGHT {
+                    bands.push(band);
+                }
+            }
+        }
+        let buffer = self
+            .sidebar
+            .get((sidebar, theme, size, scale), |(sidebar, ..)| {
+                painter.sidebar_view(sidebar, size, scale, theme.palette())
+            });
+        parts.push(Part::new(buffer, Point::from((0, 0)), size, 1.0));
+        // Every row is as wide as the next, so one band buffer fits all.
+        if let Some(size) = bands.first().map(|band| band.size) {
+            let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
+                painter.pulse_band(*size, scale, theme.palette())
+            });
+            for band in bands.iter().filter(|band| band.size == size) {
+                parts.push(Part::new(buffer, band.loc, size, pulse_alpha));
+            }
+        }
+        parts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

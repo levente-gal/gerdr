@@ -910,11 +910,18 @@ impl Gerdr {
 
     /// The wheel turned `rows` rows (down positive, parts of a row adding
     /// up) over the switcher.
-    pub fn switcher_scroll(&mut self, rows: f64) {
+    pub fn switcher_scroll(&mut self, motion: crate::scroll::Motion) {
+        let rows = crate::scroll::Scroll::legacy_rows(motion, 40.0);
         let page = self.switcher_page();
         if let Some(switcher) = self.switcher.as_mut() {
             switcher.wheel_by(rows, page);
         }
+    }
+
+    /// Move the switcher's list on to `now` if it moves on its own; whether it
+    /// still moves (see `Scroll::moving`).
+    pub fn switcher_scroll_tick(&mut self, _now: std::time::Instant) -> bool {
+        false
     }
 
     /// A button pressed while the switcher is open: on a row it switches to

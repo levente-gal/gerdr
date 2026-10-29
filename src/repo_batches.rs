@@ -1062,7 +1062,8 @@ impl Gerdr {
 
     /// The wheel turned `rows` rows (down positive) over the panel: the
     /// detail under the pointer scrolls, else the tree.
-    pub fn repos_scroll(&mut self, rows: f64) {
+    pub fn repos_scroll(&mut self, motion: crate::scroll::Motion) {
+        let rows = crate::scroll::Scroll::legacy_rows(motion, 40.0);
         let Some(view) = self.repos_view() else {
             return;
         };
@@ -1101,6 +1102,12 @@ impl Gerdr {
             Some(panel) => panel.scroll(rows, over_detail, &ctx),
             None => {}
         }
+    }
+
+    /// Move the repositories panel's list on to `now` if it moves on its own; whether it
+    /// still moves (see `Scroll::moving`).
+    pub fn repos_scroll_tick(&mut self, _now: std::time::Instant) -> bool {
+        false
     }
 
     /// What the panel shows, while it is open.

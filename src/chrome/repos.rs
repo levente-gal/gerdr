@@ -911,10 +911,7 @@ fn hint_width(hint: &Hint) -> i32 {
 }
 
 /// The detail's title row buttons and its rows', as laid out.
-type DetailButtons<'a> = (
-    &'a [(ReposButton, Rect)],
-    &'a [(usize, ReposButton, Rect)],
-);
+type DetailButtons<'a> = (&'a [(ReposButton, Rect)], &'a [(usize, ReposButton, Rect)]);
 
 /// How wide a button on a diff row is: its label, then its key muted.
 fn row_chip_width(hint: &Hint) -> i32 {
@@ -2396,7 +2393,10 @@ impl Painter {
         let title = Rectangle::new(rect.loc, (rect.size.w, REPOS_DETAIL_TITLE).into());
         let (x, mut right) = phys(title, scale);
         let x = x + px(HELP_PADDING) as f32;
-        let first = title_buttons.first().map(|(_, r)| r).or(tabs.first().map(|(_, r)| r));
+        let first = title_buttons
+            .first()
+            .map(|(_, r)| r)
+            .or(tabs.first().map(|(_, r)| r));
         if let Some(first) = first {
             right = px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round();
         }
@@ -2414,7 +2414,12 @@ impl Painter {
             self.tab_segment(c, view, tab, rect, scale, p);
         }
         for &(button, rect) in title_buttons {
-            if let Some(hint) = view.detail.title_buttons.iter().find(|h| h.button == button) {
+            if let Some(hint) = view
+                .detail
+                .title_buttons
+                .iter()
+                .find(|h| h.button == button)
+            {
                 let hit = ReposHit::Button(button);
                 self.hint_button(c, view, hint, hit, rect, scale, p);
             }
@@ -2889,7 +2894,11 @@ impl Painter {
             let b = s.round().max(1.0);
             let hovered = view.hover == Some(ReposHit::Button(hint.button));
             let (fill, label, key) = if k == 0 {
-                let fill = if hovered { mix(p.accent, p.on_accent, 0.15) } else { p.accent };
+                let fill = if hovered {
+                    mix(p.accent, p.on_accent, 0.15)
+                } else {
+                    p.accent
+                };
                 (fill, p.on_accent, mix(p.accent, p.on_accent, 0.7))
             } else {
                 let fill = if hovered { p.selected } else { p.element };
@@ -2915,7 +2924,16 @@ impl Painter {
             );
             if !hint.key.is_empty() {
                 let kx = end + (ROW_CHIP_KEY_GAP as f32 * s).round();
-                self.mixed_text(c, &hint.key, KEY_FONT_SIZE, kx, x + w, chip_band, scale, key);
+                self.mixed_text(
+                    c,
+                    &hint.key,
+                    KEY_FONT_SIZE,
+                    kx,
+                    x + w,
+                    chip_band,
+                    scale,
+                    key,
+                );
             }
         }
     }
@@ -3500,6 +3518,37 @@ impl Painter {
                 p,
             );
         }
+    }
+}
+
+/// The repositories panel as the chrome shows it: its buffer, fading in and out (see
+/// `Overlay`).
+#[derive(Default)]
+pub(super) struct ReposLayers {
+    overlay: super::Overlay<(ReposView, Size<i32, Logical>, super::Theme, f64)>,
+}
+
+impl ReposLayers {
+    /// The parts showing the repositories panel at `now`, front to back.
+    pub(super) fn parts(
+        &mut self,
+        view: Option<ReposView>,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<super::layers::Part> {
+        let placed = view.map(|view| {
+            let (loc, size) = super::shadowed(repos_layout(&view, output).panel);
+            ((view, output, theme, scale), loc, size)
+        });
+        self.overlay
+            .part(placed, now, true, |(view, output, ..)| {
+                painter.repos(view, *output, scale, theme.palette())
+            })
+            .into_iter()
+            .collect()
     }
 }
 

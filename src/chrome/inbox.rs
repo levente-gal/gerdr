@@ -1572,6 +1572,37 @@ impl Painter {
     }
 }
 
+/// The inbox panel as the chrome shows it: its buffer, fading in and out (see
+/// `Overlay`).
+#[derive(Default)]
+pub(super) struct InboxLayers {
+    overlay: super::Overlay<(InboxView, Size<i32, Logical>, super::Theme, f64)>,
+}
+
+impl InboxLayers {
+    /// The parts showing the inbox panel at `now`, front to back.
+    pub(super) fn parts(
+        &mut self,
+        view: Option<InboxView>,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<super::layers::Part> {
+        let placed = view.map(|view| {
+            let (loc, size) = super::shadowed(inbox_layout(&view, output).panel);
+            ((view, output, theme, scale), loc, size)
+        });
+        self.overlay
+            .part(placed, now, true, |(view, output, ..)| {
+                painter.inbox(view, *output, scale, theme.palette())
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

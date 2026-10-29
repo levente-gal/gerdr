@@ -589,6 +589,39 @@ impl Painter {
     }
 }
 
+/// The switcher as the chrome shows it: its buffer, fading in and out (see
+/// `Overlay`).
+#[derive(Default)]
+pub(super) struct SwitcherLayers {
+    overlay: super::Overlay<(SwitcherView, i32, super::Theme, f64)>,
+}
+
+impl SwitcherLayers {
+    /// The parts showing the switcher at the top of the app `area` at
+    /// `now`, front to back.
+    pub(super) fn parts(
+        &mut self,
+        view: Option<SwitcherView>,
+        area: Rect,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<super::layers::Part> {
+        let placed = view.map(|view| {
+            let panel = switcher_geometry(&view, area).panel;
+            let (loc, size) = super::shadowed(panel);
+            ((view, panel.size.w, theme, scale), loc, size)
+        });
+        self.overlay
+            .part(placed, now, true, |(view, w, ..)| {
+                painter.switcher(view, *w, scale, theme.palette())
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -696,6 +696,37 @@ impl Painter {
     }
 }
 
+/// The worktrees popup as the chrome shows it: its buffer, fading in and out
+/// (see `Overlay`).
+#[derive(Default)]
+pub(super) struct WorktreesLayers {
+    overlay: super::Overlay<(WorktreesView, Size<i32, Logical>, super::Theme, f64)>,
+}
+
+impl WorktreesLayers {
+    /// The parts showing the worktrees popup at `now`, front to back.
+    pub(super) fn parts(
+        &mut self,
+        view: Option<WorktreesView>,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<super::layers::Part> {
+        let placed = view.map(|view| {
+            let (loc, size) = super::shadowed(worktrees_layout(&view, output).panel);
+            ((view, output, theme, scale), loc, size)
+        });
+        self.overlay
+            .part(placed, now, true, |(view, output, ..)| {
+                painter.worktrees(view, *output, scale, theme.palette())
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
