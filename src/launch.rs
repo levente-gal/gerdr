@@ -1146,10 +1146,7 @@ fn vs_code_of(command: &str) -> Option<String> {
 /// the default. `None` when `pid` doesn't run (or just started).
 fn with_profile_of(command: &str, pid: u32) -> Option<String> {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let args: Vec<String> = cmdline
-        .split(|byte| *byte == 0)
-        .map(|arg| String::from_utf8_lossy(arg).into_owned())
-        .collect();
+    let args = cmdline_args(&cmdline);
     if args.first().is_none_or(String::is_empty) {
         return None;
     }
@@ -1162,6 +1159,24 @@ fn with_profile_of(command: &str, pid: u32) -> Option<String> {
         command.insert_str(end, &format!(" --user-data-dir={}", desktop::shell_quote(&dir)));
     }
     Some(command)
+}
+
+/// The arguments in `cmdline`, as /proc/<pid>/cmdline holds them. Cursor
+/// (Electron) writes its process title over them: one string, its words
+/// joined by spaces, which are split again.
+fn cmdline_args(cmdline: &[u8]) -> Vec<String> {
+    let mut args: Vec<String> = cmdline
+        .strip_suffix(&[0])
+        .unwrap_or(cmdline)
+        .split(|byte| *byte == 0)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    if let [title] = args.as_slice()
+        && title.contains(" -")
+    {
+        args = title.split_whitespace().map(str::to_owned).collect();
+    }
+    args
 }
 
 /// The `--user-data-dir` among `args`, if any.
@@ -1365,9 +1380,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        alacritty_command, copy_browser_profile, ghostty_command, lineage, link_vs_code_shared,
-        link_zed_shared, log_path, opens_nothing_in_zed, own_instance, user_data_dir, vs_code_of,
-        web_app, with_profile_of,
+        alacritty_command, cmdline_args, copy_browser_profile, ghostty_command, lineage,
+        link_vs_code_shared, link_zed_shared, log_path, opens_nothing_in_zed, own_instance,
+        user_data_dir, vs_code_of, web_app, with_profile_of,
     };
     use crate::home_dir;
 
@@ -1383,6 +1398,18 @@ mod tests {
             Some("/p/x")
         );
         assert_eq!(user_data_dir(&args("cursor .")), None);
+        // Cursor's own, its title written over its arguments.
+        assert_eq!(
+            user_data_dir(&cmdline_args(
+                b"/usr/share/cursor/cursor --user-data-dir=/p/c\0"
+            ))
+            .as_deref(),
+            Some("/p/c")
+        );
+        assert_eq!(
+            cmdline_args(b"cursor\0--user-data-dir\0/p/my dir\0"),
+            ["cursor", "--user-data-dir", "/p/my dir"]
+        );
         // This test's own process runs without one: the default profile.
         let me = std::process::id();
         assert_eq!(
