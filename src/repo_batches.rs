@@ -21,12 +21,14 @@ use smithay::{
 use crate::menu::{MenuAction, MenuItem, MenuSpec};
 use crate::{
     Drag, Gerdr,
-    chrome::{self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, Tone, TreeLine},
+    chrome::{
+        self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, Tone, TreeLine, TreeTool,
+    },
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
-        Batch, BatchKind, Ctx, Found, Grouping, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun,
-        Repos, RunState,
+        Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
+        RunState,
     },
     review,
     toast::Level,
@@ -1022,13 +1024,15 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(text, rect))
             }
-            ReposHit::Grouping(grouping) => {
-                let (_, rect) = layout.tree_tools.iter().find(|(g, _)| *g == grouping)?;
-                let text = match grouping {
-                    Grouping::List => "List the changed files flat, by path",
-                    Grouping::Folders => "List the changed files by folder",
+            ReposHit::Tool(tool) => {
+                let (_, rect) = layout.tree_tools.iter().find(|(t, _)| *t == tool)?;
+                let (text, key) = match tool {
+                    TreeTool::Expand => ("Unfold every repository and folder", "Alt+Right"),
+                    TreeTool::Collapse => ("Fold every repository and folder", "Alt+Left"),
+                    TreeTool::List => ("List the changed files flat, by path", "Alt+F"),
+                    TreeTool::Folders => ("List the changed files by folder", "Alt+F"),
                 };
-                Some(Tooltip::new(text, *rect).key("Alt+F"))
+                Some(Tooltip::new(text, *rect).key(key))
             }
             ReposHit::Chip(i) => {
                 let (_, rect) = layout.chips.iter().find(|(j, _)| *j == i)?;

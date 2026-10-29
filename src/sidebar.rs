@@ -244,6 +244,7 @@ impl Gerdr {
                 hover: quantize(hover.alpha(SidebarHit::Row(i), now)),
                 close: hit == Some(SidebarHit::Close(i)),
                 restart: hit == Some(SidebarHit::Restart(i)),
+                agent: hit == Some(SidebarHit::NewAgent(i)),
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
@@ -387,6 +388,7 @@ impl Gerdr {
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
             (SidebarHit::Restart(i), BTN_LEFT) => self.restart_workspace(i),
+            (SidebarHit::NewAgent(i), BTN_LEFT) => self.new_cursor_agent(i),
             (SidebarHit::Worktrees(i), BTN_LEFT) => {
                 let dir = self.workspaces.get(i).map(|ws| ws.dir.clone());
                 self.open_worktrees(dir);
@@ -456,6 +458,13 @@ impl Gerdr {
             SidebarHit::Close(i) => {
                 let tip = Tooltip::new("Close workspace", layout.rows[i].close);
                 Some(match self.keymap.help().key_for("close workspace", 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
+                })
+            }
+            SidebarHit::NewAgent(i) => {
+                let tip = Tooltip::new("New Cursor agent", layout.rows[i].agent);
+                Some(match self.keymap.help().key_for("new cursor agent", 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -703,6 +712,10 @@ impl Gerdr {
                 };
                 let mut items = vec![
                     hinted(MenuItem::new("New tab", MenuAction::NewTab(i)), "new tab"),
+                    hinted(
+                        MenuItem::new("New Cursor agent", MenuAction::NewCursorAgent(i)),
+                        "new cursor agent",
+                    ),
                     MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
                 ];

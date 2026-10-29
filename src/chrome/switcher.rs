@@ -107,6 +107,8 @@ pub struct SwitcherView {
     /// more while pulled up past the end. The rows reach down past the
     /// list, and one may be shown in part at its bottom.
     pub part: f64,
+    /// Where the list stands, for its scrollbar; none while it all shows.
+    pub bar: Option<super::ListBar>,
 }
 
 /// Where the switcher's parts go: the panel, its query field, a rect per
@@ -248,6 +250,14 @@ pub fn switcher_places(starts: impl IntoIterator<Item = bool>) -> RowTops {
 pub fn switcher_row_span(places: &RowTops, i: usize) -> (f64, f64) {
     let top = places.top(i);
     (top, top + (SECTION_HEIGHT + ROW_HEIGHT) as f64)
+}
+
+/// The scrollbar of the switcher's list laid out as `layout`, in the
+/// gutter right of its rows; none while they all show.
+pub fn switcher_thumb(view: &SwitcherView, layout: &SwitcherLayout) -> Option<super::Thumb> {
+    let list = layout.list;
+    let track = super::gutter_track(list.loc.x + list.size.w, list);
+    super::Thumb::of(track, list.size.h as f64, view.bar?)
 }
 
 /// The most key hints the switcher shows: one footer row's worth.
@@ -764,6 +774,8 @@ pub(super) struct SwitcherLayers {
     rows: RowCache<RowKey>,
     /// By label, width, theme and scale.
     headings: RowCache<(&'static str, i32, super::Theme, f64)>,
+    /// The scrollbar's thumb, by its size.
+    thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
     /// How many frames were drawn.
     #[cfg(test)]
     frames: std::cell::Cell<usize>,
@@ -801,6 +813,7 @@ impl SwitcherLayers {
                 selected: None,
                 hover: None,
                 part: 0.0,
+                bar: None,
                 ..view.clone()
             };
             let (loc, size) = super::shadowed(layout.panel);
@@ -835,6 +848,14 @@ impl SwitcherLayers {
                 let out = |dy: f64, h: i32| top + dy >= bottom || top + dy + h as f64 <= top;
                 let p = theme.palette();
                 let mut parts = Vec::new();
+                if let Some(bar) = switcher_thumb(view, layout) {
+                    let size = Size::from((bar.track.size.w, bar.h as i32));
+                    let buffer = self
+                        .thumb
+                        .get((size, theme, scale), |_| painter.bar_thumb(size, scale, p));
+                    let part = Part::new(buffer, bar.track.loc, size, 1.0);
+                    parts.push(part.at((bar.track.loc.x as f64, bar.top).into()));
+                }
                 let mut heading = |parts: &mut Vec<Part>, (dy, label): (f64, &'static str)| {
                     if out(dy, SECTION_HEIGHT) {
                         return;
@@ -934,6 +955,7 @@ mod tests {
             hints: Vec::new(),
             hint_hover: None,
             part: 0.0,
+            bar: None,
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
@@ -990,6 +1012,7 @@ mod tests {
             hints: vec![("Esc".into(), "close".into())],
             hint_hover: None,
             part: 0.0,
+            bar: None,
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
@@ -1018,6 +1041,7 @@ mod tests {
             hints: Vec::new(),
             hint_hover: None,
             part,
+            bar: None,
         }
     }
 
@@ -1108,6 +1132,53 @@ mod tests {
     }
 
     #[test]
+    fn the_scrollbar_thumb_goes_in_the_gutter_and_moves_alone() {
+        let painter = Painter::new();
+        let area: Rect = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let mut layers = SwitcherLayers::default();
+        let mut sections = vec![None; 8];
+        sections[0] = Some("Workspaces");
+        let view = |down: f64| SwitcherView {
+            bar: Some(crate::chrome::ListBar {
+                down,
+                total: 2000.0,
+            }),
+            ..scrolled(&sections, 0.0)
+        };
+        let start = Instant::now();
+        let mut draw = |down: f64, ms: u64| {
+            let at = start + Duration::from_millis(ms);
+            layers.parts(
+                Some(view(down)),
+                area,
+                Theme::Dark,
+                1.25,
+                at,
+                &painter,
+                None,
+            )
+        };
+        // Faded in first.
+        draw(0.0, 0);
+        let first = draw(0.0, 300);
+        let moved = draw(500.0, 400);
+        assert_eq!(layers.frames.get(), 1);
+        // Right of the rows, within the panel; in front of the rest.
+        let layout = switcher_geometry(&view(0.0), area);
+        let thumb = super::switcher_thumb(&view(0.0), &layout).unwrap();
+        let (list, panel) = (layout.list, layout.panel);
+        assert_eq!(thumb.track.loc.x, list.loc.x + list.size.w + 1);
+        assert!(thumb.track.loc.x + thumb.track.size.w < panel.loc.x + panel.size.w);
+        assert_eq!(first[0].loc, (thumb.track.loc.x as f64, thumb.top).into());
+        assert!(moved[0].loc.y > first[0].loc.y);
+        // All shown, there is none.
+        assert_eq!(
+            super::switcher_thumb(&scrolled(&sections, 0.0), &layout),
+            None
+        );
+    }
+
+    #[test]
     fn chips_too_wide_together_are_narrowed_to_fit() {
         let labels = [
             "All",
@@ -1161,6 +1232,7 @@ mod tests {
             hints: Vec::new(),
             hint_hover: None,
             part: 0.0,
+            bar: None,
         };
         let layout = switcher_geometry(&view, area);
         let dots = super::switcher_blinkers(&view, &layout);

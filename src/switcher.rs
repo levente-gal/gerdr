@@ -40,6 +40,7 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
+    agent_icons::AgentIcon,
     agents::AgentKey,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
@@ -76,6 +77,9 @@ pub enum Target {
     Shortcuts,
     /// The inbox panel.
     Inbox,
+    /// Cursor's agent CLI in a new tab of the shown workspace (see
+    /// `Gerdr::new_cursor_agent`).
+    CursorAgent,
     /// The config file, to edit.
     Settings,
     /// A project's file, by id, to edit in a new tab.
@@ -110,6 +114,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
+            | Target::CursorAgent
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -131,6 +136,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
+            | Target::CursorAgent
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -555,6 +561,14 @@ impl Switcher {
         }
     }
 
+    /// Stand the list `px` pixels down, as its scrollbar's thumb held
+    /// there puts it, the selection dragged along.
+    fn stand_at(&mut self, px: f64) {
+        let max = self.bounds().max.max(0.0);
+        self.scroll.jump(self.places.pos(px).clamp(0.0, max));
+        self.drag();
+    }
+
     /// Move the list on to `now`; whether it still moves.
     fn tick(&mut self, now: Instant) -> bool {
         let moving = self.scroll.tick(now, self.bounds());
@@ -625,6 +639,10 @@ impl Switcher {
             hint_hover: self.hint_hover.filter(|h| *h < hints.len()),
             hints,
             part,
+            bar: (self.places.end() > self.list_height()).then(|| chrome::ListBar {
+                down: self.places.px(self.scroll.pos()),
+                total: self.places.end(),
+            }),
         }
     }
 
@@ -702,6 +720,7 @@ fn frecency_key(
         Target::Workspace(w) => format!("workspace:{}", workspace_dir(*w)?.display()),
         Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
         Target::Agent(key) => format!("agent:{key}"),
+        Target::CursorAgent => "cursor-agent".to_owned(),
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
         Target::App(command) | Target::Command(command) | Target::RepoPage(command) => {
@@ -852,12 +871,30 @@ impl Gerdr {
                 Target::Command(command),
             )
         }));
+        items.extend(self.cursor_agent_entry());
         items.push(self.inbox_entry());
         items.extend(project_file_items(
             self.project.as_deref(),
             home_dir().as_deref(),
         ));
         self.weighed(items)
+    }
+
+    /// The row starting Cursor's agent CLI in the shown workspace, naming
+    /// it; none without one.
+    fn cursor_agent_entry(&self) -> Option<Item> {
+        let ws = self.workspace()?;
+        let icon = AgentIcon::Cursor
+            .picture()
+            .map_or(ItemIcon::Command, |picture| {
+                ItemIcon::Picture(picture.clone())
+            });
+        Some(Item::new(
+            icon,
+            "New Cursor agent",
+            format!("in {}", ws.name),
+            Target::CursorAgent,
+        ))
     }
 
     /// The row opening the inbox, saying how many items its button counts.
@@ -975,6 +1012,16 @@ impl Gerdr {
         }
     }
 
+    /// Stand the switcher's list `px` pixels down, as its scrollbar's
+    /// thumb held there puts it.
+    pub fn switcher_scroll_to(&mut self, px: f64) {
+        let room = self.switcher_room();
+        if let Some(switcher) = self.switcher.as_mut() {
+            switcher.set_room(room);
+            switcher.stand_at(px);
+        }
+    }
+
     /// Move the switcher's list on to `now` if it moves on its own; whether it
     /// still moves (see `Scroll::moving`).
     pub fn switcher_scroll_tick(&mut self, now: Instant) -> bool {
@@ -1054,6 +1101,7 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
+            Target::CursorAgent => self.new_cursor_agent(self.active_workspace),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
@@ -1690,6 +1738,29 @@ mod tests {
         type_in(&mut switcher, "xyz");
         settle(&mut switcher, Motion::Notches(1.0));
         assert_eq!(switcher.view().selected, None);
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_stands_the_list_where_it_is_dragged() {
+        let mut switcher = Switcher::new(
+            (0..8).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        switcher.set_room(room(5));
+        let bar = switcher.view().bar.unwrap();
+        assert_eq!((bar.down, bar.total - switcher.list_height()), (0.0, 120.0));
+        // Part of a row down, the selection dragged along.
+        switcher.stand_at(60.0);
+        let view = switcher.view();
+        assert_eq!((view.rows[0].label.as_str(), view.part), ("ws1", 20.0));
+        assert_eq!((view.selected, view.bar.unwrap().down), (Some(1), 60.0));
+        // No further than the end.
+        switcher.stand_at(1000.0);
+        assert_eq!(labels(&switcher), ["ws3", "ws4", "ws5", "ws6", "ws7"]);
+        // With all of them shown, there is none.
+        switcher.set_room(room(9));
+        assert_eq!(switcher.view().bar, None);
     }
 
     #[test]

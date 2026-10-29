@@ -13,6 +13,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bar {
     Sidebar,
+    ProjectMenu,
+    Switcher,
     Inbox,
     Scrollback,
     ReposTree,
@@ -28,24 +30,25 @@ pub struct ThumbDrag {
 }
 
 impl Gerdr {
-    /// The scrollbar under `pos` that nothing covers, and its thumb.
+    /// The scrollbar under `pos` that nothing covers, and its thumb: the
+    /// popup on top's, as a press finds it.
     fn bar_at(&self, pos: Point<f64, Logical>) -> Option<(Bar, Thumb)> {
-        if self.quit.is_some()
-            || self.restart.is_some()
-            || self.welcome.is_some()
-            || self.project_menu.is_some()
-            || self.worktrees.is_open()
-            || self.context_menu.is_some()
-        {
+        if self.quit.is_some() || self.restart.is_some() || self.welcome.is_some() {
             return None;
         }
-        let bars: &[Bar] = if self.repos.is_open() {
+        let bars: &[Bar] = if self.project_menu.is_some() {
+            &[Bar::ProjectMenu]
+        } else if self.worktrees.is_open() || self.context_menu.is_some() {
+            &[]
+        } else if self.repos.is_open() {
             &[Bar::ReposTree, Bar::ReposDetail]
         } else if self.inbox.is_open() {
             &[Bar::Inbox]
         } else if self.scrollback.is_some() {
             &[Bar::Scrollback]
-        } else if self.switcher.is_some() || self.help_hit(pos).is_some() {
+        } else if self.switcher.is_some() {
+            &[Bar::Switcher]
+        } else if self.help_hit(pos).is_some() {
             &[]
         } else {
             &[Bar::Sidebar]
@@ -68,6 +71,16 @@ impl Gerdr {
                 size,
                 self.sidebar_scroll.pos(),
             ),
+            Bar::ProjectMenu => {
+                let view = self.project_menu_view()?;
+                let layout = chrome::project_menu_layout(&view, size);
+                chrome::project_menu_thumb(&view, &layout)
+            }
+            Bar::Switcher => {
+                let view = self.switcher_view()?;
+                let layout = chrome::switcher_geometry(&view, self.content_rect());
+                chrome::switcher_thumb(&view, &layout)
+            }
             Bar::Inbox => {
                 let view = self.inbox_view()?;
                 let layout = chrome::inbox_layout(&view, size);
@@ -122,6 +135,8 @@ impl Gerdr {
         let at = thumb.pos_at(pos.y - drag.grab);
         match drag.bar {
             Bar::Sidebar => self.sidebar_scroll_to(at),
+            Bar::ProjectMenu => self.project_menu_scroll_to(at),
+            Bar::Switcher => self.switcher_scroll_to(at),
             Bar::Inbox => self.inbox_scroll_to(at),
             Bar::Scrollback => self.scrollback_scroll_to(at),
             Bar::ReposTree => self.repos_scroll_to(at, false),

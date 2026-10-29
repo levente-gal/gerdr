@@ -68,6 +68,8 @@ const REPOS_INDENT: i32 = 24;
 /// of a folder's icon.
 const REPOS_LEVEL: i32 = 20;
 const REPOS_FOLDER: i32 = 20;
+/// The room between the tree's toolbar's groups of buttons.
+const REPOS_TOOL_GAP: i32 = 12;
 /// The scrollbar at the right of the tree and of the detail: its width,
 /// and the shortest its thumb gets.
 const SCROLLBAR: i32 = 6;
@@ -281,6 +283,18 @@ pub struct BranchCreate {
     pub problem: Option<String>,
     /// Enter creates it.
     pub picked: bool,
+}
+
+/// A button of the tree's toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeTool {
+    /// Unfold every repository and folder.
+    Expand,
+    /// Fold every repository and folder.
+    Collapse,
+    /// List the files flat, or by folder.
+    List,
+    Folders,
 }
 
 /// A line of the tree.
@@ -696,8 +710,8 @@ pub enum ReposHit {
     More,
     /// The line between the tree and the detail, to drag.
     Splitter,
-    /// A button of the tree's toolbar: list the files this way.
-    Grouping(Grouping),
+    /// A button of the tree's toolbar.
+    Tool(TreeTool),
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -849,7 +863,7 @@ pub struct ReposLayout {
     /// The tree's area.
     pub tree: Rect,
     /// The buttons of the tree's toolbar, over its lines.
-    pub tree_tools: Vec<(Grouping, Rect)>,
+    pub tree_tools: Vec<(TreeTool, Rect)>,
     /// Per tree line: its rect, its checkbox's, and a repository line's
     /// expander's. A scrolled tree's first and last lines reach out of
     /// `tree_list`.
@@ -1133,21 +1147,26 @@ fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
 }
 
 /// The tree's toolbar over its lines, in `tree`: its buttons at its
-/// right, one per way of listing the files.
-fn tree_tools(tree: Rect) -> Vec<(Grouping, Rect)> {
+/// right, those unfolding and folding everything, then apart from them
+/// one per way of listing the files.
+fn tree_tools(tree: Rect) -> Vec<(TreeTool, Rect)> {
+    use TreeTool::*;
     let y = tree.loc.y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
-    let right = tree.loc.x + tree.size.w - HELP_PADDING;
-    [Grouping::List, Grouping::Folders]
-        .into_iter()
-        .rev()
-        .enumerate()
-        .map(|(k, grouping)| {
-            let x = right - (k as i32 + 1) * ROW_BUTTON - k as i32 * REPOS_TAB_GAP;
-            let rect = Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into());
-            (grouping, rect)
-        })
-        .rev()
-        .collect()
+    let mut x = tree.loc.x + tree.size.w - HELP_PADDING;
+    let mut tools = Vec::new();
+    for tool in [Folders, List, Collapse, Expand] {
+        x -= ROW_BUTTON;
+        tools.push((
+            tool,
+            Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into()),
+        ));
+        x -= match tool {
+            List => REPOS_TOOL_GAP,
+            _ => REPOS_TAB_GAP,
+        };
+    }
+    tools.reverse();
+    tools
 }
 
 /// Where a buffer holding the panel `panel` and its shadow has its top
@@ -1951,8 +1970,8 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if layout.branch_menu.is_some() {
         return Some(ReposHit::Panel);
     }
-    if let Some(&(grouping, _)) = layout.tree_tools.iter().find(|(_, r)| at(r)) {
-        return Some(ReposHit::Grouping(grouping));
+    if let Some(&(tool, _)) = layout.tree_tools.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::Tool(tool));
     }
     // A scrolled tree's lines count only where they show.
     let lines = if at(&layout.tree_list) {
@@ -2040,6 +2059,18 @@ pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> Fi
         area,
         text: field_text(area, scale),
         line: line.clone(),
+    }
+}
+
+/// Signed distance to a square with a "+" in it (unfold everything) or a
+/// "−" (fold everything), centred on the origin.
+fn fold_all_mark(open: bool, x: f32, y: f32, s: f32) -> f32 {
+    let frame = rounded_rect(x, y, -6.5 * s, -6.5 * s, 13.0 * s, 13.0 * s, 2.5 * s).abs() - 0.8 * s;
+    let across = segment(x, y, -3.0 * s, 0.0, 3.0 * s, 0.0) - 0.8 * s;
+    let down = segment(x, y, 0.0, -3.0 * s, 0.0, 3.0 * s) - 0.8 * s;
+    match open {
+        true => frame.min(across).min(down),
+        false => frame.min(across),
     }
 }
 
@@ -3497,7 +3528,7 @@ impl Painter {
         c: &mut Canvas,
         view: &ReposView,
         tree: Rect,
-        tools: &[(Grouping, Rect)],
+        tools: &[(TreeTool, Rect)],
         scale: f64,
         p: &Palette,
     ) {
@@ -3519,8 +3550,8 @@ impl Painter {
             scale,
             p.text,
         );
-        for &(grouping, rect) in tools {
-            self.grouping_button(c, view, grouping, rect, scale, p);
+        for &(tool, rect) in tools {
+            self.tool_button(c, view, tool, rect, scale, p);
         }
         let border = px(1).max(1);
         c.fill(
@@ -3532,13 +3563,13 @@ impl Painter {
         );
     }
 
-    /// A button of the tree's toolbar in `rect`: lit while the files are
-    /// listed its way.
-    fn grouping_button(
+    /// A button of the tree's toolbar in `rect`: a way of listing the
+    /// files lit while they are listed so.
+    fn tool_button(
         &self,
         c: &mut Canvas,
         view: &ReposView,
-        grouping: Grouping,
+        tool: TreeTool,
         rect: Rect,
         scale: f64,
         p: &Palette,
@@ -3547,10 +3578,14 @@ impl Painter {
         let (x, y, w, h) = rect_px(rect, scale);
         let b = ((scale.round() as i32).max(1)) as f32;
         let r = BUTTON_RADIUS * s;
-        let on = view.grouping == grouping;
+        let on = match tool {
+            TreeTool::List => view.grouping == Grouping::List,
+            TreeTool::Folders => view.grouping == Grouping::Folders,
+            TreeTool::Expand | TreeTool::Collapse => false,
+        };
         let fill = if on {
             p.selected
-        } else if view.hover == Some(ReposHit::Grouping(grouping)) {
+        } else if view.hover == Some(ReposHit::Tool(tool)) {
             mix(p.element, p.selected, 0.5)
         } else {
             p.element
@@ -3558,9 +3593,15 @@ impl Painter {
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
         let color = if on { p.text } else { p.muted };
-        match grouping {
-            Grouping::List => icon_sdf(c, rect, scale, color, |x, y| list_mark(x, y, s)),
-            Grouping::Folders => icon_sdf(c, rect, scale, color, |x, y| folder(x, y, 0.8 * s)),
+        match tool {
+            TreeTool::Expand => {
+                icon_sdf(c, rect, scale, color, |x, y| fold_all_mark(true, x, y, s))
+            }
+            TreeTool::Collapse => {
+                icon_sdf(c, rect, scale, color, |x, y| fold_all_mark(false, x, y, s))
+            }
+            TreeTool::List => icon_sdf(c, rect, scale, color, |x, y| list_mark(x, y, s)),
+            TreeTool::Folders => icon_sdf(c, rect, scale, color, |x, y| folder(x, y, 0.8 * s)),
         }
     }
 
@@ -4834,7 +4875,7 @@ mod tests {
         .collect();
         view.grouping = Grouping::Folders;
         view.selected = Some(2);
-        view.hover = Some(ReposHit::Grouping(Grouping::List));
+        view.hover = Some(ReposHit::Tool(TreeTool::Collapse));
         view
     }
 
@@ -4880,15 +4921,23 @@ mod tests {
                 }),
             );
             let l = repos_layout(&view, size);
-            let groupings: Vec<_> = l.tree_tools.iter().map(|(g, _)| *g).collect();
-            assert_eq!(groupings, [Grouping::List, Grouping::Folders]);
-            let (list, folders) = (l.tree_tools[0].1, l.tree_tools[1].1);
-            assert!(list.loc.x + list.size.w <= folders.loc.x);
-            for (grouping, rect) in &l.tree_tools {
+            use TreeTool::*;
+            let tools: Vec<_> = l.tree_tools.iter().map(|(t, _)| *t).collect();
+            assert_eq!(tools, [Expand, Collapse, List, Folders]);
+            // In a row left to right, the two groups further apart.
+            let rects: Vec<Rect> = l.tree_tools.iter().map(|(_, r)| *r).collect();
+            let gap = |k: usize| rects[k + 1].loc.x - (rects[k].loc.x + rects[k].size.w);
+            assert_eq!(
+                (gap(0), gap(1), gap(2)),
+                (REPOS_TAB_GAP, REPOS_TOOL_GAP, REPOS_TAB_GAP)
+            );
+            let right = rects[3].loc.x + rects[3].size.w;
+            assert_eq!(right, l.tree.loc.x + l.tree.size.w - HELP_PADDING);
+            for (tool, rect) in &l.tree_tools {
                 assert!(inside(l.tree, *rect), "{size:?}");
                 assert!(rect.loc.y + rect.size.h <= l.tree_list.loc.y);
                 let at = rect.loc.to_f64() + Point::from((4.0, 4.0));
-                assert_eq!(repos_hit(&l, at), Some(ReposHit::Grouping(*grouping)));
+                assert_eq!(repos_hit(&l, at), Some(ReposHit::Tool(*tool)));
             }
             // A folder's line is indented by its depth, with an expander.
             let (_, check, expander) = l.lines[1];
