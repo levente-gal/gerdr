@@ -887,7 +887,7 @@ fn link_vs_code_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
 /// What a browser's new profile leaves out of the copy of gerdr's shared
 /// one, by name: caches, the locks of the browser running on it, and the
 /// windows and tabs it would bring back, which are another project's.
-const BROWSER_UNCOPIED: &[&str] = &[
+pub(crate) const BROWSER_UNCOPIED: &[&str] = &[
     // Chromium
     "SingletonLock",
     "SingletonSocket",
@@ -957,7 +957,7 @@ fn copy_browser_profile(shared: &Path, dir: &Path) -> std::io::Result<()> {
 /// Copy folder `from` to `to`, with all in it but the entries `skipped`
 /// picks by name. Links stay links; sockets and what goes while it copies
 /// (an app may be running on `from`) are left out.
-fn copy_tree(
+pub(crate) fn copy_tree(
     from: &Path,
     to: &Path,
     skipped: &dyn Fn(&std::ffi::OsStr) -> bool,
@@ -1195,7 +1195,7 @@ fn user_data_dir(args: &[String]) -> Option<String> {
 
 /// The profile gerdr keeps for the app of program `key`, which its
 /// projects' profiles share or start from (see `instance_dir`).
-fn profile_dir(home: &Path, key: &str) -> PathBuf {
+pub(crate) fn profile_dir(home: &Path, key: &str) -> PathBuf {
     home.join(".local/share/gerdr/profiles").join(key)
 }
 
