@@ -47,6 +47,7 @@ use crate::{
     input::Overlay,
     launch::{self, Place},
     paths::{display, tilde},
+    profile_import,
     project_list::scrolled,
     projects::Project,
     text_field::{Edit, TextField},
@@ -92,6 +93,8 @@ pub enum Target {
     /// The repository's page, to show in a tab of the shown workspace (see
     /// `Gerdr::open_page`).
     RepoPage(String),
+    /// An app's own profile, to bring into gerdr's shared one of it.
+    ImportProfile(profile_import::Source),
 }
 
 impl Target {
@@ -111,7 +114,8 @@ impl Target {
             | Target::ProjectFile(_)
             | Target::ReloadProjects
             | Target::Command(_)
-            | Target::RepoPage(_) => Section::Commands,
+            | Target::RepoPage(_)
+            | Target::ImportProfile(_) => Section::Commands,
         }
     }
 
@@ -131,7 +135,8 @@ impl Target {
             | Target::ProjectFile(_)
             | Target::ReloadProjects
             | Target::Command(_)
-            | Target::RepoPage(_) => "command",
+            | Target::RepoPage(_)
+            | Target::ImportProfile(_) => "command",
         }
     }
 }
@@ -665,7 +670,8 @@ fn frecency_key(
         | Target::Inbox
         | Target::Settings
         | Target::ProjectFile(_)
-        | Target::ReloadProjects => return None,
+        | Target::ReloadProjects
+        | Target::ImportProfile(_) => return None,
     })
 }
 
@@ -996,6 +1002,7 @@ impl Gerdr {
                 self.launch(&command, place);
             }
             Target::RepoPage(url) => self.open_page(self.active_workspace, url),
+            Target::ImportProfile(source) => self.import_profile(source),
         }
     }
 
@@ -1166,6 +1173,20 @@ impl Gerdr {
             display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
             Target::Settings,
         ));
+        if let Some(home) = &home {
+            let icons = self.program_icons();
+            items.extend(profile_import::sources(home).into_iter().map(|source| {
+                Item::new(
+                    command_icon(&source.key, &icons),
+                    format!("Import {} profile", source.name),
+                    format!(
+                        "into gerdr, from {}",
+                        display(&source.from, Some(home), DETAIL_CHARS)
+                    ),
+                    Target::ImportProfile(source),
+                )
+            }));
+        }
         items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
         self.weighed(items)
     }

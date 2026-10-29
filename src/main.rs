@@ -44,6 +44,7 @@ mod pane_drag;
 mod pane_moves;
 mod paths;
 mod prepare;
+mod profile_import;
 mod project_list;
 mod project_lock;
 mod project_menu;
@@ -1235,6 +1236,9 @@ pub struct Gerdr {
     pub recent_dirs: Vec<PathBuf>,
     /// Where a read of zoxide's folders sends them; `None` until set up.
     pub zoxide: Option<channel::Sender<Vec<PathBuf>>>,
+    /// Where an import of an app's profile tells how it went; `None` until
+    /// set up (see `profile_import`).
+    pub profile_imports: Option<channel::Sender<profile_import::Imported>>,
     /// The key held over an overlay, and the timer repeating it.
     pub key_repeat: Option<(Keycode, RegistrationToken)>,
     /// The apps named in the config file, to launch into a split.
@@ -5870,6 +5874,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         switcher: None,
         recent_dirs: Vec::new(),
         zoxide: None,
+        profile_imports: None,
         key_repeat: None,
         apps,
         installed_apps: Vec::new(),
@@ -6067,6 +6072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.connect_notifier();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
+    state.watch_profile_imports();
     state.watch_installed_apps();
     state.start_project(args.project.as_deref(), args.folders);
 
