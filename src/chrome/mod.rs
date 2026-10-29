@@ -184,6 +184,9 @@ pub struct Chrome {
     /// One per placeholder, and the spinner they share.
     placeholders: Vec<Cached<PlaceholderKey>>,
     spinner: Cached<(u32, Theme, f64)>,
+    /// The blinking dot of what runs, composed over every surface showing
+    /// one (see `badge`).
+    blink_dot: Cached<(Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
     /// The strip along the focused pane's top edge.
@@ -229,6 +232,7 @@ impl Chrome {
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
+            blink_dot: Cached::default(),
             pane_bars: Vec::new(),
             focus_strip: Cached::default(),
             pane_drop: Cached::default(),
@@ -304,6 +308,10 @@ impl Chrome {
             )
         };
         let spinner_step = self.spinner_step(now);
+        let blink = crate::anim::blink(self.epoch, now);
+        let dot = self.blink_dot.get((theme, scale), |_| {
+            blink_dot(Dot::Working, scale, theme.palette())
+        });
         // Overlays that faded out for good are let go of.
         self.toasts.retain(|(_, toast)| toast.lingers());
 
@@ -546,12 +554,13 @@ impl Chrome {
             parts.push((buffer, rect.loc, rect.size, 1.0));
         }
 
-        // The blocked agents' pulse: one band per row, composed over the
-        // sidebar with the pulse as its opacity, so the sidebar itself is
-        // not redrawn for it.
+        // What moves in the sidebar, composed over it so that it is not
+        // redrawn for it: the blocked agents' pulse, one band per row with
+        // the pulse as its opacity, and the dots of what runs, blinking.
         let pulse_alpha = pulse_alpha(view.pulse);
         let mut bands = Vec::new();
-        if pulse_alpha > 0.0 {
+        let mut sidebar_dots = Vec::new();
+        if view.sidebar.moves() {
             let layout = sidebar_layout_at(
                 &view.sidebar.workspaces,
                 &view.sidebar.agents,
@@ -559,29 +568,32 @@ impl Chrome {
                 view.density,
             )
             .scrolled(view.sidebar.state.scroll, output.h);
-            let blocked = |i: usize, k: usize| {
-                view.sidebar
-                    .agents
-                    .get(i)
-                    .and_then(|cards| cards.get(k))
-                    .is_some_and(|card| card.status == crate::herdr::AgentStatus::Blocked)
-            };
-            // The rows in the workspaces, and those in the "Needs you" list.
-            let rows = layout
-                .cards
-                .iter()
-                .enumerate()
-                .flat_map(|(i, rows)| rows.iter().map(move |(k, rect)| (i, *k, *rect)));
-            for (_, _, rect) in rows
-                .chain(layout.inbox.iter().copied())
-                .filter(|(i, k, _)| blocked(*i, *k))
-            {
-                let band = blocked_band(rect, view.density);
-                // Not on a row scrolled under the header.
-                if band.size.w > 0 && band.size.h > 0 && band.loc.y >= BAR_HEIGHT {
-                    bands.push(band);
+            if pulse_alpha > 0.0 {
+                let blocked = |i: usize, k: usize| {
+                    view.sidebar
+                        .agents
+                        .get(i)
+                        .and_then(|cards| cards.get(k))
+                        .is_some_and(|card| card.status == crate::herdr::AgentStatus::Blocked)
+                };
+                // The rows in the workspaces, and those in the "Needs you" list.
+                let rows = layout
+                    .cards
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, rows)| rows.iter().map(move |(k, rect)| (i, *k, *rect)));
+                for (_, _, rect) in rows
+                    .chain(layout.inbox.iter().copied())
+                    .filter(|(i, k, _)| blocked(*i, *k))
+                {
+                    let band = blocked_band(rect, view.density);
+                    // Not on a row scrolled under the header.
+                    if band.size.w > 0 && band.size.h > 0 && band.loc.y >= BAR_HEIGHT {
+                        bands.push(band);
+                    }
                 }
             }
+            sidebar_dots = sidebar_blinkers(&view.sidebar, &layout, output.h);
         }
 
         // The sidebar and the tab strip.
@@ -594,8 +606,9 @@ impl Chrome {
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
         // Every row is as wide as the next, so one band buffer fits all.
-        // Parts go front to back: the bands before the opaque sidebar, or
-        // they would be under it.
+        // Parts go front to back: the dots and bands before the opaque
+        // sidebar, or they would be under it.
+        push_dots(&mut parts, dot, sidebar_dots, blink);
         if let Some(size) = bands.first().map(|band| band.size) {
             let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
                 painter.pulse_band(*size, scale, theme.palette())
@@ -607,6 +620,21 @@ impl Chrome {
         parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size, 1.0));
         render_parts(renderer, parts, scale)
+    }
+}
+
+/// The blinking `dot` at each of `rects` (output coordinates), `alpha`
+/// opaque: in front of the surface they are on, so pushed before it.
+fn push_dots<'a>(
+    parts: &mut Vec<Part<'a>>,
+    dot: &'a MemoryRenderBuffer,
+    rects: impl IntoIterator<Item = Rect>,
+    alpha: f32,
+) {
+    for rect in rects {
+        if rect.size.w > 0 && rect.size.h > 0 {
+            parts.push((dot, rect.loc, rect.size, alpha));
+        }
     }
 }
 

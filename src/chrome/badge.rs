@@ -103,6 +103,19 @@ pub fn dot_rect(rect: Rect, size: i32) -> Rect {
     )
 }
 
+/// Where the blinking dot of a running mark centred on `mark` goes, as
+/// a CI chip's: a `DOT` square at its middle.
+pub fn centred_dot(mark: Rect) -> Rect {
+    Rectangle::new(
+        (
+            mark.loc.x + (mark.size.w - DOT) / 2,
+            mark.loc.y + (mark.size.h - DOT) / 2,
+        )
+            .into(),
+        (DOT, DOT).into(),
+    )
+}
+
 /// Signed distance to the dot `d` physical pixels across, centred on the
 /// origin: a disc, or a ring for `Dot::Idle`.
 fn dot_shape(dot: Dot, x: f32, y: f32, d: f32) -> f32 {

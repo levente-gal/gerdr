@@ -666,7 +666,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 /// The surfaces the motion work added, apart so the table above keeps
 /// its shape: a menu with hints, a pinned help panel, a toast with a
 /// button, a tooltip, the placeholder waiting and timed out, the spinner.
-const OVERLAYS: [&str; 7] = [
+const OVERLAYS: [&str; 8] = [
     "full_menu",
     "help_pinned",
     "toast_action",
@@ -674,6 +674,7 @@ const OVERLAYS: [&str; 7] = [
     "placeholder",
     "placeholder_timed_out",
     "spinner",
+    "blink_dot",
 ];
 
 fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -690,6 +691,7 @@ fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.placeholder(&placeholder(false), None, scale, p)),
         hash(painter.placeholder(&placeholder(true), Some(PlaceholderButton::Retry), scale, p)),
         hash(painter.spinner(5, scale, p)),
+        hash(super::blink_dot(super::Dot::Working, scale, p)),
     ]
 }
 
@@ -761,7 +763,7 @@ const GOLDEN: [[u64; 11]; 4] = [
 ];
 
 /// The recorded hashes of `OVERLAYS`, per case in `CASES`.
-const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
+const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0xa2b92bfd04e8baf2, // full_menu
@@ -771,6 +773,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0xd5b2438c44e2d360, // placeholder
         0x3f94e9f481ad4ddb, // placeholder_timed_out
         0x7a426c6be23d66a6, // spinner
+        0x1350b48068a33565, // blink_dot
     ],
     // Dark at 2
     [
@@ -781,6 +784,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x94bf628b2c8d8e61, // placeholder
         0x914e6acce8dc1bda, // placeholder_timed_out
         0x2f28c94a7002e520, // spinner
+        0xc9f8767439b30395, // blink_dot
     ],
     // Light at 1
     [
@@ -791,6 +795,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x848913a059883552, // placeholder
         0x8bb8ef097eeae24a, // placeholder_timed_out
         0x4345ed79149d747b, // spinner
+        0x234395617ab53bf5, // blink_dot
     ],
     // Light at 2
     [
@@ -801,6 +806,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x9bc50d6953da1fd5, // placeholder
         0xb6a46ef59a601576, // placeholder_timed_out
         0x883035c0209e314f, // spinner
+        0x1246fc56368dd28d, // blink_dot
     ],
 ];
 

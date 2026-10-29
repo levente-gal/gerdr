@@ -30,8 +30,8 @@ use super::{
     HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING, Painter,
     Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb,
     SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, agent_badge, app,
-    band, chevron_down, ci_mark, cross, distinct, folder, git_branch, icon_sdf, measure, mix,
-    new_tab, physical, rect_px, restart_arrow, status_mark, terminal,
+    band, centred_dot, chevron_down, ci_mark, cross, distinct, dot_rect, folder, git_branch,
+    icon_sdf, measure, mix, new_tab, physical, rect_px, restart_arrow, status_mark, terminal,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -192,6 +192,82 @@ pub fn agent_icon_rect(row: Rect, density: Density) -> Rect {
         (row.loc.x + AGENT_ICON_X, row.loc.y).into(),
         (AGENT_ICON, first.size.h).into(),
     )
+}
+
+/// Where the status mark of a CI chip at `chip` goes: at its start.
+pub fn ci_chip_mark(chip: Rect) -> Rect {
+    Rectangle::new(
+        (chip.loc.x + CI_CHIP_PAD, chip.loc.y).into(),
+        (STATUS_WIDTH, chip.size.h).into(),
+    )
+}
+
+/// Where a workspace header's CI mark goes in its slot `mark`.
+fn header_ci_icon(mark: Rect) -> Rect {
+    Rectangle::new(
+        (mark.loc.x + (CI_SLOT - STATUS_WIDTH) / 2, mark.loc.y).into(),
+        (STATUS_WIDTH, mark.size.h).into(),
+    )
+}
+
+/// Where a workspace header's status mark goes in its status `slot`.
+fn header_status_mark(slot: Rect) -> Rect {
+    Rectangle::new(slot.loc, (STATUS_SLOT, slot.size.h).into())
+}
+
+/// Where the blinking dots of `view` go, laid out (and scrolled) as
+/// `layout` on a sidebar `height` high: one per agent row at work (in a
+/// workspace or the "Needs you" list), per running CI chip, per header
+/// whose CI runs or whose status is working. None on a row scrolled
+/// under the header or past the bottom.
+pub fn sidebar_blinkers(view: &SidebarView, layout: &SidebarLayout, height: i32) -> Vec<Rect> {
+    let card = |i: usize, k: usize| view.agents.get(i).and_then(|cards| cards.get(k));
+    let at_work = |i: usize, k: usize, row: Rect| {
+        card(i, k)
+            .filter(|card| card.badge().dot.blinks())
+            .map(|_| dot_rect(agent_icon_rect(row, view.state.density), AGENT_ICON))
+    };
+    let mut dots: Vec<Rect> = layout
+        .cards
+        .iter()
+        .enumerate()
+        .flat_map(|(i, rows)| rows.iter().filter_map(move |(k, row)| at_work(i, *k, *row)))
+        .chain(
+            layout
+                .inbox
+                .iter()
+                .filter_map(|(i, k, row)| at_work(*i, *k, *row)),
+        )
+        .collect();
+    for (i, ws) in view.workspaces.iter().enumerate() {
+        let Some(row) = layout.rows.get(i) else {
+            continue;
+        };
+        if let (Some(mark), Some(ci)) = (row.ci, &ws.ci)
+            && ci.rollup() == CiState::Running
+        {
+            dots.push(centred_dot(header_ci_icon(mark)));
+        }
+        let cards = view.agents.get(i).map_or(&[][..], |cards| cards.as_slice());
+        if let Some(slot) = row.chip
+            && ws.status == Some(AgentStatus::Working)
+            && blocked_count(cards) == 0
+        {
+            dots.push(centred_dot(header_status_mark(slot)));
+        }
+        let (Some(Some(section)), Some(ci)) = (layout.ci.get(i), &ws.ci) else {
+            continue;
+        };
+        dots.extend(
+            ci.chips
+                .iter()
+                .zip(&section.chips)
+                .filter(|(chip, _)| chip.state == CiState::Running)
+                .map(|(_, rect)| centred_dot(ci_chip_mark(*rect))),
+        );
+    }
+    dots.retain(|dot| dot.loc.y >= BAR_HEIGHT && dot.loc.y + dot.size.h <= height);
+    dots
 }
 
 /// How opaque the pulse band over a blocked agent's row is drawn when the
@@ -901,6 +977,25 @@ pub struct SidebarView {
     pub project: Option<String>,
     pub header_lit: bool,
     pub state: SidebarState,
+}
+
+impl SidebarView {
+    /// Whether anything in it moves: an agent blocked (its pulse), or
+    /// something running (its dot blinks).
+    pub fn moves(&self) -> bool {
+        let cards = self
+            .agents
+            .iter()
+            .flatten()
+            .any(|card| card.status == AgentStatus::Blocked || card.badge().dot.blinks());
+        cards
+            || self.workspaces.iter().any(|ws| {
+                ws.status == Some(AgentStatus::Working)
+                    || ws.ci.as_ref().is_some_and(|ci| {
+                        ci.chips.iter().any(|chip| chip.state == CiState::Running)
+                    })
+            })
+    }
 }
 
 /// Where the parts of a workspace header sit.
@@ -1889,20 +1984,19 @@ impl Painter {
         }
 
         // The mark of its CI, while that needs no look or it is folded.
+        // A running one is a blinking dot, composed over it.
         if let (Some(mark), Some(ci)) = (row.ci, &ws.ci) {
             let state = ci.rollup();
-            let icon = within(
-                mark,
-                mark.loc.x + (CI_SLOT - STATUS_WIDTH) / 2,
-                STATUS_WIDTH,
-            );
+            let icon = header_ci_icon(mark);
             if row_state.ci {
                 let end = icon.loc.x + icon.size.w;
                 self.lit_pill(c, icon.loc.x, end, mark, surface, scale, p);
             }
-            icon_sdf(c, icon, scale, ci_color(state, p), |x, y| {
-                ci_mark(state, x, y, s)
-            });
+            if state != CiState::Running {
+                icon_sdf(c, icon, scale, ci_color(state, p), |x, y| {
+                    ci_mark(state, x, y, s)
+                });
+            }
         }
 
         if let (Some(chip), Some(status)) = (row.chip, ws.status) {
@@ -2086,7 +2180,8 @@ impl Painter {
 
     /// A workspace header's status in `slot`, right-aligned: a filled
     /// warning badge counting `blocked` agents; else `status`'s mark in its
-    /// colour, then how many agents a fold `hidden`.
+    /// colour (none while working: its dot blinks, composed over it), then
+    /// how many agents a fold `hidden`.
     #[allow(clippy::too_many_arguments)]
     fn header_status(
         &self,
@@ -2122,9 +2217,11 @@ impl Painter {
             );
             return;
         }
-        let mark = Rectangle::new(slot.loc, (STATUS_SLOT, slot.size.h).into());
-        let color = p.status(status);
-        icon_sdf(c, mark, scale, color, |x, y| status_mark(status, x, y, s));
+        if status != AgentStatus::Working {
+            let mark = header_status_mark(slot);
+            let color = p.status(status);
+            icon_sdf(c, mark, scale, color, |x, y| status_mark(status, x, y, s));
+        }
         if hidden > 0 {
             let x = px(slot.loc.x + STATUS_SLOT + COUNT_GAP) as f32;
             let end = px(slot.loc.x + slot.size.w) as f32 + 1.0;
@@ -2473,13 +2570,13 @@ impl Painter {
                     mix(fill, p.text, 0.1 * lit),
                 );
             }
-            let mark = Rectangle::new(
-                (rect.loc.x + CI_CHIP_PAD, rect.loc.y).into(),
-                (STATUS_WIDTH, rect.size.h).into(),
-            );
-            icon_sdf(c, mark, scale, ci_color(chip.state, p), |x, y| {
-                ci_mark(chip.state, x, y, s)
-            });
+            // A running chip's mark is a blinking dot, composed over it.
+            let mark = ci_chip_mark(*rect);
+            if chip.state != CiState::Running {
+                icon_sdf(c, mark, scale, ci_color(chip.state, p), |x, y| {
+                    ci_mark(chip.state, x, y, s)
+                });
+            }
             // A pixel past the padding for rounding: a label measured to
             // fit is never cut.
             let end = px(rect.loc.x + rect.size.w - CI_CHIP_PAD) as f32 + 1.0;
@@ -2538,7 +2635,7 @@ mod tests {
         sentence_case, sidebar_layout, sidebar_layout_at, text_extent, workspace_slot,
     };
     use crate::WorkspaceKind;
-    use crate::chrome::{BAR_HEIGHT, TabView};
+    use crate::chrome::{BAR_HEIGHT, Rect, TabView};
     use crate::ci::{CiState, Group};
     use crate::git::{GitStatus, Worktree};
     use crate::herdr::AgentStatus;
@@ -3576,5 +3673,102 @@ mod tests {
             ci.chips[0].loc.x,
             column(text_extent("Review", DETAIL_FONT_SIZE))
         );
+    }
+
+    /// A sidebar of `workspaces` and their `agents`, as drawn 600 high.
+    fn blinkers(workspaces: Vec<WorkspaceView>, agents: Vec<Vec<AgentView>>) -> Vec<Rect> {
+        blinkers_scrolled(workspaces, agents, 0)
+    }
+
+    fn blinkers_scrolled(
+        workspaces: Vec<WorkspaceView>,
+        agents: Vec<Vec<AgentView>>,
+        scroll: i32,
+    ) -> Vec<Rect> {
+        let view = super::SidebarView {
+            workspaces,
+            agents,
+            active: Some(0),
+            project: None,
+            header_lit: false,
+            state: super::SidebarState::default(),
+        };
+        let layout = sidebar_layout_at(&view.workspaces, &view.agents, 240, Density::Comfortable)
+            .scrolled(scroll, 600);
+        super::sidebar_blinkers(&view, &layout, 600)
+    }
+
+    #[test]
+    fn only_what_works_blinks() {
+        // Blocked first: the busy card is the second row.
+        let ws = workspace("gerdr", Some(AgentStatus::Blocked), Some("main"));
+        let agents = vec![
+            agent("p1", AgentStatus::Working, None),
+            agent("p2", AgentStatus::Idle, None),
+            agent("p3", AgentStatus::Done, None),
+            agent("p4", AgentStatus::Blocked, None),
+        ];
+        let layout = sidebar_layout_at(&[ws.clone()], &[agents.clone()], 240, Density::Comfortable);
+        let row = layout.cards[0].iter().find(|(k, _)| *k == 0).unwrap().1;
+        let icon = super::agent_icon_rect(row, Density::Comfortable);
+        assert_eq!(
+            blinkers(vec![ws], vec![agents]),
+            vec![super::dot_rect(icon, super::AGENT_ICON)]
+        );
+        // The dot sits in the badge's corner, on the row's first line.
+        assert!(icon.loc.x >= row.loc.x && icon.loc.y == row.loc.y);
+    }
+
+    #[test]
+    fn a_running_test_blinks_and_a_finished_one_does_not() {
+        let ws = workspace("gerdr", Some(AgentStatus::Done), Some("main"));
+        let mut running = agent("t1", AgentStatus::Working, None);
+        running.test = Some(CiState::Running);
+        let mut failed = agent("t2", AgentStatus::Done, None);
+        failed.test = Some(CiState::Failed);
+        assert_eq!(blinkers(vec![ws.clone()], vec![vec![running]]).len(), 1);
+        assert!(blinkers(vec![ws], vec![vec![failed]]).is_empty());
+    }
+
+    #[test]
+    fn a_folded_workspace_at_work_blinks_on_its_header() {
+        let mut ws = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
+        ws.folded = true;
+        let agents = vec![vec![agent("p1", AgentStatus::Working, None)]];
+        let layout = sidebar_layout_at(&[ws.clone()], &agents, 240, Density::Comfortable);
+        let slot = layout.rows[0].chip.expect("its status shows");
+        let dots = blinkers(vec![ws], agents);
+        assert_eq!(dots.len(), 1);
+        assert!(slot.contains(dots[0].loc) && dots[0].size.w == crate::chrome::DOT);
+    }
+
+    #[test]
+    fn a_running_ci_chip_blinks() {
+        let mut ws = workspace("gerdr", None, Some("main"));
+        // Failed, passed, running: a section, its third chip running.
+        ws.ci = Some(ci_view(&["main", "#41", "#42"], 0));
+        let layout = sidebar_layout_at(&[ws.clone()], &[vec![]], 240, Density::Comfortable);
+        let chip = layout.ci[0].as_ref().expect("a section").chips[2];
+        assert_eq!(
+            blinkers(vec![ws], vec![vec![]]),
+            vec![super::centred_dot(super::ci_chip_mark(chip))]
+        );
+    }
+
+    #[test]
+    fn no_dot_blinks_on_a_row_scrolled_under_the_header() {
+        let many: Vec<_> = (0..40)
+            .map(|k| agent(&format!("p{k}"), AgentStatus::Working, None))
+            .collect();
+        let ws = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
+        let all = blinkers(vec![ws.clone()], vec![many.clone()]);
+        let scrolled = blinkers_scrolled(vec![ws], vec![many], 200);
+        assert!(!scrolled.is_empty() && scrolled.len() < all.len() + 10);
+        for dots in [all, scrolled] {
+            assert!(
+                dots.iter()
+                    .all(|d| d.loc.y >= BAR_HEIGHT && d.loc.y + d.size.h <= 600)
+            );
+        }
     }
 }
