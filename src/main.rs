@@ -1269,6 +1269,9 @@ pub struct Gerdr {
     pub field_clicks: Option<(std::time::Instant, Point<f64, Logical>, u32)>,
     /// A press in an overlay's text field is held: moving selects.
     pub field_drag: bool,
+    /// The left button went down on the repositories panel's diff and is
+    /// held: moving drags the diff cursor's range on.
+    pub repos_rows_drag: bool,
     /// The projects whose sessions are being stopped, by id: not shown
     /// until they have.
     pub stopping: HashSet<String>,
@@ -5827,6 +5830,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         copied: None,
         field_clicks: None,
         field_drag: false,
+        repos_rows_drag: false,
         stopping: HashSet::new(),
         project_menu: None,
         header_hover: false,

@@ -1025,6 +1025,9 @@ fn key_name(button: ReposButton) -> &'static str {
         B::StashPop => "Alt+Shift+S",
         B::Help => "F1",
         B::CopyReview => "Ctrl+Shift+C",
+        B::Comment => "C",
+        B::SaveComment => "Enter",
+        B::DiscardComment => "Esc",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
         B::RunInTerminal
@@ -1033,7 +1036,8 @@ fn key_name(button: ReposButton) -> &'static str {
         | B::DeleteBranch
         | B::SwitchExisting
         | B::CreateMissing
-        | B::ClearReview => "",
+        | B::ClearReview
+        | B::DeleteComment => "",
     }
 }
 
@@ -2144,7 +2148,15 @@ impl Panel {
         let items = ctx.items;
         let local = matches!(
             button,
-            B::OpenInZed | B::RunInTerminal | B::OpenWorkspace | B::CopyReview | B::ClearReview
+            B::OpenInZed
+                | B::RunInTerminal
+                | B::OpenWorkspace
+                | B::CopyReview
+                | B::ClearReview
+                | B::Comment
+                | B::SaveComment
+                | B::DiscardComment
+                | B::DeleteComment
         );
         if !local && ctx.batch.is_some_and(|b| !b.finished()) {
             return Err(Why::other("Wait for the batch to finish"));
@@ -2346,6 +2358,9 @@ impl Panel {
             B::CopyReview => self.copy_review(ctx),
             B::ClearReview if self.review.is_empty() => Err(Why::other(NO_REVIEW)),
             B::ClearReview => Err(Why::other("Asked on a sheet")),
+            B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment => {
+                Err(Why::other("Done on the diff"))
+            }
             B::All
             | B::CleanOnly
             | B::Cancel
@@ -2461,6 +2476,9 @@ impl Panel {
         if button == ReposButton::Help {
             self.branch_menu = None;
             self.sheet = Some(Sheet::Help { choice: 0 });
+            return None;
+        }
+        if self.comment_button(button, ctx) {
             return None;
         }
         if let Some(how) = menu_integrate(button) {
@@ -2866,6 +2884,16 @@ impl Panel {
         if on_editor {
             self.focus = Focus::Detail;
             return None;
+        }
+        // The editor's own buttons act on what it holds.
+        if let ReposHit::Button(
+            button @ (ReposButton::SaveComment
+            | ReposButton::DiscardComment
+            | ReposButton::DeleteComment),
+        ) = hit
+        {
+            self.focus = Focus::Detail;
+            return self.act(button, ctx);
         }
         let key = diff_row.and_then(|r| self.row_key(r));
         if self.editing.is_some() {
@@ -3386,15 +3414,14 @@ impl Panel {
                 .map(|&h| self.diff_row_view(h, true, ctx))
                 .collect();
             rows.extend(range.clone().map(|r| self.diff_row_view(r, false, ctx)));
-            let marks = sticky
-                .into_iter()
-                .chain(range.clone())
-                .map(|r| self.row_mark(r));
-            let mut marks: Vec<RowMark> = marks.collect();
+            let shown: Vec<usize> = sticky.into_iter().chain(range.clone()).collect();
+            let mut marks: Vec<RowMark> = shown.iter().map(|&r| self.row_mark(r)).collect();
+            let mut row_buttons = self.row_buttons(&shown);
             if self.diff_rows.is_empty() && !ctx.items.is_empty() {
                 let text = "No changes in any repository";
                 rows = vec![DetailRow::Text(detail_line(text, DiffTone::Plain))];
                 marks.clear();
+                row_buttons.clear();
             }
             return DetailView {
                 tab,
@@ -3402,6 +3429,8 @@ impl Panel {
                 rows,
                 sticky: sticky.is_some(),
                 marks,
+                title_buttons: self.title_buttons(),
+                row_buttons,
                 part,
                 first: range.start,
                 total: self.diff_rows.len(),
@@ -3435,6 +3464,8 @@ impl Panel {
                 .collect(),
             sticky: false,
             marks: Vec::new(),
+            title_buttons: Vec::new(),
+            row_buttons: Vec::new(),
             part,
             first,
             total,
@@ -3954,6 +3985,50 @@ impl Panel {
         None
     }
 
+    /// Do `button` if it is one of the diff's comment buttons: write a
+    /// comment on the cursor's lines, keep or drop the one being written,
+    /// or delete it. Whether it was.
+    fn comment_button(&mut self, button: ReposButton, ctx: &Ctx) -> bool {
+        use ReposButton as B;
+        match button {
+            B::Comment => {
+                self.focus = Focus::Detail;
+                self.comment_here(ctx);
+            }
+            B::SaveComment => self.save_comment(ctx),
+            B::DiscardComment => {
+                self.editing = None;
+                self.build_rows(ctx.items, self.diff_anchor());
+            }
+            B::DeleteComment => {
+                if let Some(editing) = &mut self.editing {
+                    editing.field = TextField::multiline("");
+                }
+                self.save_comment(ctx);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Whether a press on the diff, held, drags the cursor's range on:
+    /// the cursor is on a row and no comment is being written.
+    pub fn drags_rows(&self) -> bool {
+        self.tab() == DetailTab::Diff
+            && self.focus == Focus::Detail
+            && self.cursor.is_some()
+            && self.editing.is_none()
+    }
+
+    /// The pointer dragged past the diff's rows: the cursor goes on a
+    /// row `by` (up negative), its range kept, the diff scrolled along.
+    pub fn drag_past_rows(&mut self, by: i64, ctx: &Ctx) {
+        self.rewrap(ctx);
+        if self.drags_rows() {
+            self.move_cursor(by, true, ctx);
+        }
+    }
+
     /// Shift+click on row `i` of the detail pane: the cursor goes there,
     /// its range reaching back to where it was.
     pub fn extend_detail_row(&mut self, i: usize, ctx: &Ctx) {
@@ -4231,7 +4306,7 @@ impl Panel {
                 }
             }
             (DiffRow::EditorHint { .. }, _) => {
-                DetailRow::Note("Enter saves · Shift+Enter breaks the line · Esc cancels".into())
+                DetailRow::Note("Shift+Enter breaks the line".into())
             }
             (DiffRow::Outdated(None), _) => DetailRow::Hunk {
                 context: "Comments on lines no longer in the diff".into(),
@@ -4262,25 +4337,87 @@ impl Panel {
         }
     }
 
-    /// How diff row `r` is marked: the cursor on it, in its range, a
-    /// comment on it.
+    /// How diff row `r` is marked: the cursor on it or in its range, the
+    /// range's first or last row (of those lit, not a header), a comment
+    /// on it.
     fn row_mark(&self, r: usize) -> RowMark {
-        let (cursor, range) = match &self.cursor {
-            Some(c) => (
-                c.row == r,
-                c.row != c.from && (c.row.min(c.from)..=c.row.max(c.from)).contains(&r),
-            ),
-            None => (false, false),
-        };
         let noted = match self.diff_rows.get(r) {
             Some(&DiffRow::Line(k, f, h, l)) => self.noted.contains(&(k, f, h, l)),
             _ => false,
         };
+        let Some(c) = &self.cursor else {
+            return RowMark {
+                noted,
+                ..RowMark::default()
+            };
+        };
+        let range = c.row.min(c.from)..=c.row.max(c.from);
+        let lit = |r: &usize| {
+            !matches!(
+                self.diff_rows.get(*r),
+                Some(DiffRow::Repo(_) | DiffRow::File(..)) | None
+            )
+        };
         RowMark {
-            cursor,
-            range: range && !cursor,
+            selected: range.contains(&r),
+            top: range.clone().find(lit) == Some(r),
+            bottom: range.rev().find(lit) == Some(r),
             noted,
         }
+    }
+
+    /// The buttons on the diff rows in view, `shown` (by index among
+    /// them): writing a comment on the cursor's lines, at the cursor; the
+    /// comment being written kept, dropped or deleted, under it.
+    fn row_buttons(&self, shown: &[usize]) -> Vec<(usize, Hint)> {
+        use ReposButton as B;
+        let at = |r: usize| shown.iter().position(|&x| x == r);
+        let hint = |button: B| Hint {
+            button,
+            label: button.label().into(),
+            key: key_name(button).into(),
+            disabled: None,
+        };
+        if let Some(editing) = &self.editing {
+            let Some(i) = self
+                .diff_rows
+                .iter()
+                .position(|r| matches!(r, DiffRow::EditorHint { .. }))
+                .and_then(at)
+            else {
+                return Vec::new();
+            };
+            let mut buttons = vec![(i, hint(B::SaveComment)), (i, hint(B::DiscardComment))];
+            if editing.at.is_some() {
+                buttons.push((i, hint(B::DeleteComment)));
+            }
+            return buttons;
+        }
+        let Some(cursor) = &self.cursor else {
+            return Vec::new();
+        };
+        let lines = self.cursor_lines().is_some_and(|(_, _, l)| !l.is_empty());
+        match at(cursor.row) {
+            Some(i) if lines && self.comment_at(cursor.row).is_none() => {
+                vec![(i, hint(B::Comment))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The title row's button copying the review, while there is one.
+    fn title_buttons(&self) -> Vec<Hint> {
+        let label = match self.review.comments.len() {
+            0 => return Vec::new(),
+            1 => "Copy 1 comment".to_owned(),
+            n => format!("Copy {n} comments"),
+        };
+        vec![Hint {
+            button: ReposButton::CopyReview,
+            label,
+            key: String::new(),
+            disabled: None,
+        }]
     }
 
     /// The diff row shown as row `i` of the detail pane.
@@ -6541,7 +6678,14 @@ mod tests {
         // Shift+Down in the diff doesn't scroll it.
         assert_eq!(panel.detail_first, 0);
         let marks = panel.view("p", &ctx).detail.marks;
-        assert!(marks[2].range && marks[3].cursor && !marks[4].range);
+        assert!(marks[2].selected && marks[2].top && !marks[2].bottom);
+        assert!(marks[3].selected && marks[3].bottom && !marks[4].selected);
+        // The button writing a comment on them, at the cursor.
+        let buttons = panel.view("p", &ctx).detail.row_buttons;
+        assert_eq!(
+            buttons.iter().map(|(i, h)| (*i, h.button)).collect::<Vec<_>>(),
+            [(3, ReposButton::Comment)]
+        );
         press(&mut panel, none(), Keysym::c, &ctx);
         type_text(&mut panel, "why", &ctx);
         press(&mut panel, mods(false, true, false), Keysym::Return, &ctx);
@@ -6552,7 +6696,7 @@ mod tests {
             [
                 "| why",
                 "| and b",
-                "~ Enter saves · Shift+Enter breaks the line · Esc cancels",
+                "~ Shift+Enter breaks the line",
                 "+c"
             ]
         );
@@ -6645,6 +6789,56 @@ mod tests {
     }
 
     #[test]
+    fn comments_are_written_and_copied_with_the_mouse_alone() {
+        use ReposButton as B;
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 30);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        let buttons = |panel: &Panel| -> Vec<(usize, B)> {
+            let view = panel.view("p", &ctx);
+            view.detail.row_buttons.iter().map(|(i, h)| (*i, h.button)).collect()
+        };
+        // A press on a and a drag to b pick them.
+        panel.click(ReposHit::DiffRow(2), &ctx);
+        assert!(panel.drags_rows());
+        panel.extend_detail_row(3, &ctx);
+        assert_eq!(cursor(&panel), Some((3, 2)));
+        assert_eq!(buttons(&panel), [(3, B::Comment)]);
+        assert!(panel.view("p", &ctx).detail.title_buttons.is_empty());
+        // Its button writes on them; Discard drops it, Save keeps it.
+        assert_eq!(panel.click(ReposHit::Button(B::Comment), &ctx), None);
+        assert!(panel.editing.is_some() && !panel.drags_rows());
+        assert_eq!(buttons(&panel), [(5, B::SaveComment), (5, B::DiscardComment)]);
+        type_text(&mut panel, "why", &ctx);
+        panel.click(ReposHit::Button(B::DiscardComment), &ctx);
+        assert!(panel.editing.is_none() && panel.review.is_empty());
+        panel.click(ReposHit::Button(B::Comment), &ctx);
+        type_text(&mut panel, "why", &ctx);
+        panel.click(ReposHit::Button(B::SaveComment), &ctx);
+        assert!(panel.editing.is_none());
+        assert_eq!(panel.review.comments[0].text, "why");
+        // The title row copies it.
+        let title = panel.view("p", &ctx).detail.title_buttons;
+        assert_eq!(title.len(), 1);
+        assert_eq!((title[0].button, title[0].label.as_str()), (B::CopyReview, "Copy 1 comment"));
+        let copied = panel.click(ReposHit::Button(B::CopyReview), &ctx);
+        assert!(matches!(copied, Some(Outcome::Copy { count: 1, .. })));
+        // Edited, it can be deleted.
+        panel.click(ReposHit::DiffRow(4), &ctx);
+        assert_eq!(panel.editing.as_ref().map(|e| e.at), Some(Some(0)));
+        assert!(buttons(&panel).contains(&(5, B::DeleteComment)));
+        panel.click(ReposHit::Button(B::DeleteComment), &ctx);
+        assert!(panel.editing.is_none() && panel.review.is_empty());
+        // Dragged below the rows, the range goes on down.
+        panel.click(ReposHit::DiffRow(2), &ctx);
+        panel.drag_past_rows(1, &ctx);
+        panel.drag_past_rows(1, &ctx);
+        assert_eq!(cursor(&panel), Some((4, 2)));
+    }
+
+    #[test]
     fn a_long_comment_wraps_and_clearing_asks_first() {
         let items = items();
         let mut ctx = ctx(&items, None);
@@ -6708,7 +6902,7 @@ mod tests {
         assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(4));
         assert_eq!(panel.detail_first, 1);
         let marks = panel.view("p", &ctx).detail.marks;
-        assert!(marks[3].cursor && !marks[2].cursor);
+        assert!(marks[3].selected && marks[3].top && marks[3].bottom && !marks[2].selected);
         // Alt+Down goes to the next file, and Alt+Up back.
         press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
         assert_eq!(panel.detail_first, 5);
