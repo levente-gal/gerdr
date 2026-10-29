@@ -540,6 +540,7 @@ impl Chrome {
             if size.w <= 0 || size.h <= 0 {
                 continue;
             }
+            push_dots(&mut parts, dot, bar.blinker(), alpha * blink);
             let buffer = cached.get((bar.still(), theme, scale), |(bar, ..)| {
                 painter.pane_bar(bar, scale, theme.palette())
             });
