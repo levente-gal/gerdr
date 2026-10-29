@@ -724,7 +724,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         view.sidebar_width,
         view.density,
     )
-    .scrolled(view.sidebar.state.scroll, output.h);
+    .scrolled_over(view.sidebar.state.scroll, view.sidebar.state.over, output.h);
     rects.extend([sidebar.header, sidebar.plus, sidebar.repos]);
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);

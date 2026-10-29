@@ -81,15 +81,29 @@ mod tests {
         dir
     }
 
+    /// Whether the lock is let go of within a second: a child another
+    /// test starts meanwhile holds a copy of the lock's file until it runs
+    /// its program, keeping the lock a moment longer.
+    fn let_go(dir: &Path, id: &str) -> bool {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while is_open_elsewhere(dir, id) {
+            if std::time::Instant::now() > until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        true
+    }
+
     #[test]
     fn a_held_lock_makes_the_project_open_elsewhere_until_dropped() {
         let dir = temp_dir("held");
-        assert!(!is_open_elsewhere(&dir, "aft"));
+        assert!(let_go(&dir, "aft"));
         let lock = ProjectLock::take(&dir, "aft").unwrap();
         assert!(is_open_elsewhere(&dir, "aft"));
-        assert!(!is_open_elsewhere(&dir, "other"));
+        assert!(let_go(&dir, "other"));
         drop(lock);
-        assert!(!is_open_elsewhere(&dir, "aft"));
+        assert!(let_go(&dir, "aft"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -101,7 +115,7 @@ mod tests {
         drop(first);
         assert!(is_open_elsewhere(&dir, "aft"));
         drop(second);
-        assert!(!is_open_elsewhere(&dir, "aft"));
+        assert!(let_go(&dir, "aft"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
