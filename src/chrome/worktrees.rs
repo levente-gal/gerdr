@@ -9,13 +9,14 @@ use super::{
     MENU_RADIUS, PADDING, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
     PROJECT_MENU_SECTION, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, SHADOW,
     SMALL_FONT_SIZE, band, footer_height, footer_hint_spots, git_branch, hint_at, hint_strs,
-    icon_sdf, magnifier, measure, mix, phys,
+    icon_sdf,
+    layers::{Part, RowCache},
+    magnifier, measure, mix, phys, physical,
     project_menu::{menu_mark, menu_query_text},
     rect_px,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
-use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -61,6 +62,9 @@ pub struct WorktreesView {
     pub empty: String,
     /// The part of the first worktree scrolled past, 0 to 1.
     pub part: f64,
+    /// How far the entries are moved down (up when negative) past an end
+    /// of the list, in logical pixels, as it stretches or bounces.
+    pub overscroll: f64,
 }
 
 /// An entry of the worktrees popup.
@@ -213,26 +217,18 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         (w - 2 * PROJECT_MENU_PADDING).max(0),
     );
     let start = query.loc.y + query.size.h + PROJECT_MENU_PADDING;
-    let mut y = start;
     let with_buttons = match view.hover {
         Some(WorktreesHit::Entry(i) | WorktreesHit::Button(i, _)) => Some(i),
         _ => view.selected,
     };
-    let (shift, pushed) = scrolled_by(view);
     let entries = view
         .entries
         .iter()
+        .zip(entry_tops(view, start))
         .enumerate()
-        .map(|(i, entry)| {
-            let h = height(entry);
-            // The label on top stays, but for the next one pushing it out.
-            let up = if i == 0 && pinned(view) {
-                pushed
-            } else {
-                shift
-            };
-            let rect = Rectangle::new((row_x, y - up).into(), (row_w, h).into());
-            y += h;
+        .map(|(i, (entry, top))| {
+            let size = (row_w, height(entry)).into();
+            let rect = Rectangle::new((row_x, top.round() as i32).into(), size);
             let buttons = match entry {
                 WorktreeEntry::Worktree(line) if with_buttons == Some(i) => {
                     button_rects(&line.buttons, rect)
@@ -277,27 +273,51 @@ fn pinned(view: &WorktreesView) -> bool {
 
 /// How far up `view`'s entries are moved by the part of its first
 /// worktree scrolled past, and how far its label on top: not at all, but
-/// for the next repository's label pushing it out.
+/// for the next repository's label pushing it out (logical pixels, to the
+/// fraction).
 ///
 /// Scrolling one worktree moves the next one up to where the first is:
 /// the first's height, and the next one's label's when it has one.
-fn scrolled_by(view: &WorktreesView) -> (i32, i32) {
+fn scrolled_by(view: &WorktreesView) -> (f64, f64) {
     let skip = usize::from(pinned(view));
     let mut rest = view.entries.iter().skip(skip);
     let Some(first) = rest.next() else {
-        return (0, 0);
+        return (0.0, 0.0);
     };
     let label = rest
         .next()
         .filter(|entry| matches!(entry, WorktreeEntry::Repo(_)))
         .map_or(0, height);
-    let shift = wheel::shift(view.part, height(first) + label);
+    let shift = view.part.clamp(0.0, 1.0) * (height(first) + label) as f64;
     let pushed = if label > 0 {
-        (shift - height(first)).max(0)
+        (shift - height(first) as f64).max(0.0)
     } else {
-        0
+        0.0
     };
     (shift, pushed)
+}
+
+/// Where the tops of `view`'s entries go, the list starting at `start`
+/// (logical pixels, to the fraction): moved up as scrolled (see
+/// `scrolled_by`) and with the overscroll. The label on top keeps its
+/// place past the end, the worktrees going on under it.
+fn entry_tops(view: &WorktreesView, start: i32) -> Vec<f64> {
+    let (shift, pushed) = scrolled_by(view);
+    let pin = pinned(view);
+    let mut y = start;
+    view.entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let top = if i == 0 && pin {
+                y as f64 - pushed + view.overscroll.max(0.0)
+            } else {
+                y as f64 - shift + view.overscroll
+            };
+            y += height(entry);
+            top
+        })
+        .collect()
 }
 
 /// `buttons` at the right end of a row in `rect`, vertically centred.
@@ -398,9 +418,11 @@ pub fn worktrees_field(view: &WorktreesView, size: Size<i32, Logical>, scale: f6
 }
 
 impl Painter {
-    /// The worktrees popup for an output of `size`, inside a margin of
-    /// `SHADOW` holding its drop shadow.
-    pub(super) fn worktrees(
+    /// The worktrees popup for an output of `size` but its entries, which
+    /// are drawn on their own (see `worktree_row`), inside a margin of
+    /// `SHADOW` holding its drop shadow. `view` is the frame's (see
+    /// `frame_view`): what the list says when it is empty shows in it.
+    fn worktrees_frame(
         &self,
         view: &WorktreesView,
         size: Size<i32, Logical>,
@@ -475,7 +497,7 @@ impl Painter {
         );
         divider(&mut c, px(query.loc.y + query.size.h) - border);
 
-        if view.entries.is_empty() {
+        if !view.empty.is_empty() {
             let first = Rectangle::new(
                 (
                     query.loc.x + PROJECT_MENU_PADDING,
@@ -496,27 +518,6 @@ impl Painter {
                 p.placeholder,
             );
         }
-        // The entries show within the list, the worktrees scrolled under
-        // the label on top below it; then the label.
-        let list = shift(layout.list);
-        let bottom = list.loc.y + list.size.h;
-        let pin = usize::from(pinned(view));
-        let below = match layout.entries.first() {
-            Some((label, _)) if pin > 0 => (label.loc.y + label.size.h + by.y).max(list.loc.y),
-            _ => list.loc.y,
-        };
-        for (top, shown) in [(below, pin..view.entries.len()), (list.loc.y, 0..pin)] {
-            let area = Rectangle::new((list.loc.x, top).into(), (list.size.w, bottom - top).into());
-            let (x, y, w, h) = rect_px(area, scale);
-            c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
-                for i in shown {
-                    let (rect, buttons) = &layout.entries[i];
-                    let rect = shift(*rect);
-                    let buttons: Vec<_> = buttons.iter().map(|(b, r)| (*b, shift(*r))).collect();
-                    self.worktree_entry(c, view, i, &view.entries[i], rect, &buttons, scale, p);
-                }
-            });
-        }
 
         let footer = shift(layout.footer);
         divider(&mut c, px(footer.loc.y));
@@ -529,17 +530,42 @@ impl Painter {
         c.into_buffer(false)
     }
 
-    /// Entry `i` of the worktrees popup in `rect` (buffer coordinates),
-    /// with its `buttons`.
+    /// The row `key` says, on the list's background: a buffer as big as
+    /// the row, at its scale.
+    fn worktree_row(&self, key: &RowKey, p: &Palette) -> MemoryRenderBuffer {
+        let size = physical(key.size, key.scale);
+        let mut c = Canvas::new(size);
+        c.fill(0, 0, size.w, size.h, p.elevated);
+        let rect = Rectangle::from_size(key.size);
+        let buttons = match &key.entry {
+            WorktreeEntry::Worktree(line) if key.buttons => button_rects(&line.buttons, rect),
+            _ => Vec::new(),
+        };
+        self.worktree_entry(
+            &mut c,
+            &key.entry,
+            rect,
+            &buttons,
+            key.selected,
+            key.hover,
+            key.scale,
+            p,
+        );
+        c.into_buffer(false)
+    }
+
+    /// An entry of the worktrees popup in `rect` (buffer coordinates),
+    /// with its `buttons`; under the pointer when `hover`, on the button
+    /// it holds if any.
     #[allow(clippy::too_many_arguments)]
     fn worktree_entry(
         &self,
         c: &mut Canvas,
-        view: &WorktreesView,
-        i: usize,
         entry: &WorktreeEntry,
         rect: Rect,
         buttons: &[(WorktreeButton, Rect)],
+        selected: bool,
+        hover: Option<Option<WorktreeButton>>,
         scale: f64,
         p: &Palette,
     ) {
@@ -570,16 +596,12 @@ impl Painter {
         // The highlight stops short of the rows above and below.
         let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
         let r = (MENU_RADIUS - 2.0) * s;
-        let hovered = matches!(
-            view.hover,
-            Some(WorktreesHit::Entry(j) | WorktreesHit::Button(j, _)) if j == i
-        );
         let armed = matches!(line.state, LineState::Armed(_));
         if armed {
             c.rounded(x, y, w, h, r, mix(p.elevated, p.warning, 0.15));
-        } else if view.selected == Some(i) {
+        } else if selected {
             c.rounded(x, y, w, h, r, p.selected);
-        } else if hovered {
+        } else if hover.is_some() {
             c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
         }
 
@@ -591,7 +613,8 @@ impl Painter {
         icon_sdf(c, mark, scale, mark_color, |x, y| git_branch(x, y, 0.9 * s));
         let mut end = right;
         for &(button, rect) in buttons {
-            self.worktree_button(c, view, i, button, rect, scale, p);
+            let hot = hover == Some(Some(button));
+            self.worktree_button(c, button, rect, hot, scale, p);
         }
         if let Some((_, first)) = buttons.first() {
             end = px(first.loc.x) as f32 - gap;
@@ -667,16 +690,14 @@ impl Painter {
         self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
     }
 
-    /// `button` of entry `i` in `rect`: its label on an outlined pill,
-    /// lighter under the pointer; Delete's in the error colour.
-    #[allow(clippy::too_many_arguments)]
+    /// `button` of a row in `rect`: its label on an outlined pill,
+    /// lighter under the pointer (`hot`); Delete's in the error colour.
     fn worktree_button(
         &self,
         c: &mut Canvas,
-        view: &WorktreesView,
-        i: usize,
         button: WorktreeButton,
         rect: Rect,
+        hot: bool,
         scale: f64,
         p: &Palette,
     ) {
@@ -684,7 +705,6 @@ impl Painter {
         let (x, y, w, h) = rect_px(rect, scale);
         let b = ((scale.round() as i32).max(1)) as f32;
         let r = BUTTON_RADIUS * s;
-        let hot = view.hover == Some(WorktreesHit::Button(i, button));
         let fill = if hot { p.selected } else { p.element };
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
@@ -694,6 +714,144 @@ impl Painter {
         };
         self.centered(c, button.label(), SMALL_FONT_SIZE, rect, scale, color);
     }
+}
+
+/// What a worktree's row (or a repository's label) is drawn from: not
+/// where it is, so scrolling it draws nothing again.
+#[derive(Clone, Debug, PartialEq)]
+struct RowKey {
+    entry: WorktreeEntry,
+    size: Size<i32, Logical>,
+    selected: bool,
+    /// Its buttons show.
+    buttons: bool,
+    /// Under the pointer, on the button it holds if any.
+    hover: Option<Option<WorktreeButton>>,
+    theme: super::Theme,
+    scale: f64,
+}
+
+/// What of `view` the popup's frame shows, as its cache key: neither the
+/// entries nor how far they are scrolled, nor the pointer over them; what
+/// the list says when it is empty only while it is.
+fn frame_view(view: &WorktreesView) -> WorktreesView {
+    WorktreesView {
+        entries: Vec::new(),
+        list_height: view.list_height,
+        selected: None,
+        hover: view
+            .hover
+            .filter(|hit| matches!(hit, WorktreesHit::Scope(_) | WorktreesHit::Hint(_))),
+        hints: view.hints.clone(),
+        query: view.query.clone(),
+        all: view.all,
+        repo: view.repo.clone(),
+        empty: if view.entries.is_empty() {
+            view.empty.clone()
+        } else {
+            String::new()
+        },
+        part: 0.0,
+        overscroll: 0.0,
+    }
+}
+
+/// The worktrees popup as the chrome shows it: its frame, and a buffer per
+/// entry in view placed over it, fading in and out together (see
+/// `Overlay`). Scrolling moves the entries' buffers only.
+#[derive(Default)]
+pub(super) struct WorktreesLayers {
+    overlay: super::Overlay<(WorktreesView, Size<i32, Logical>, super::Theme, f64)>,
+    rows: RowCache<RowKey>,
+    /// How many frames were drawn, for tests.
+    #[cfg(test)]
+    frames: usize,
+}
+
+impl WorktreesLayers {
+    /// The parts showing the worktrees popup at `now`, front to back.
+    pub(super) fn parts(
+        &mut self,
+        view: Option<WorktreesView>,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<Part> {
+        let placed = view.as_ref().map(|view| {
+            let (loc, size) = super::shadowed(worktrees_layout(view, output).panel);
+            ((frame_view(view), output, theme, scale), loc, size)
+        });
+        let rows = &mut self.rows;
+        #[cfg(test)]
+        let frames = &mut self.frames;
+        let parts = self.overlay.parts(
+            placed,
+            now,
+            true,
+            |(frame, output, ..)| {
+                #[cfg(test)]
+                {
+                    *frames += 1;
+                }
+                painter.worktrees_frame(frame, *output, scale, theme.palette())
+            },
+            |_| match &view {
+                Some(view) => row_parts(rows, view, output, theme, scale, painter),
+                None => Vec::new(),
+            },
+        );
+        self.rows.sweep();
+        if !self.overlay.lingers() {
+            self.rows.clear();
+        }
+        parts
+    }
+}
+
+/// The parts of `view`'s entries in view, from `rows`, front to back: the
+/// label on top (the first) over the worktrees scrolled under it.
+fn row_parts(
+    rows: &mut RowCache<RowKey>,
+    view: &WorktreesView,
+    output: Size<i32, Logical>,
+    theme: super::Theme,
+    scale: f64,
+    painter: &Painter,
+) -> Vec<Part> {
+    let layout = worktrees_layout(view, output);
+    let list = layout.list;
+    let tops = entry_tops(view, list.loc.y);
+    let mut parts = Vec::new();
+    for (i, ((rect, buttons), top)) in layout.entries.iter().zip(tops).enumerate() {
+        let (h, bottom) = (rect.size.h as f64, (list.loc.y + list.size.h) as f64);
+        if top + h <= list.loc.y as f64 || top >= bottom {
+            continue;
+        }
+        let hover = match view.hover {
+            Some(WorktreesHit::Entry(j)) if j == i => Some(None),
+            Some(WorktreesHit::Button(j, button)) if j == i => Some(Some(button)),
+            _ => None,
+        };
+        let key = RowKey {
+            entry: view.entries[i].clone(),
+            size: rect.size,
+            selected: view.selected == Some(i),
+            buttons: !buttons.is_empty(),
+            hover,
+            theme,
+            scale,
+        };
+        let buffer = rows.get(key, rect.size, scale, |key| {
+            painter.worktree_row(key, theme.palette())
+        });
+        let part = Part::new(&buffer, rect.loc, rect.size, 1.0)
+            .at((rect.loc.x as f64, top).into())
+            .clipped(list);
+        parts.push(part);
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -729,6 +887,7 @@ mod tests {
             repo: Some("gerdr".into()),
             empty: "No worktrees match".into(),
             part: 0.0,
+            overscroll: 0.0,
         }
     }
 
@@ -931,6 +1090,142 @@ mod tests {
         assert_eq!(tall, WORKTREES_MAX_ROWS as usize);
     }
 
+    /// A list of two repositories' worktrees, longer than it is high, at
+    /// rest.
+    fn long() -> WorktreesView {
+        let label = |name: &str| WorktreeEntry::Repo(name.into());
+        WorktreesView {
+            entries: vec![
+                label("r"),
+                line("wip", Vec::new()),
+                line("done", Vec::new()),
+                line("old", Vec::new()),
+                label("s"),
+                line("other", Vec::new()),
+            ],
+            list_height: 3 * WORKTREES_ROW,
+            selected: Some(1),
+            ..view()
+        }
+    }
+
+    /// The parts `layers` shows `view` with on an output of `size` at
+    /// `scale`, faded in: the rows' (front to back) then the frame's.
+    fn faded_in(
+        layers: &mut WorktreesLayers,
+        view: &WorktreesView,
+        size: Size<i32, Logical>,
+        theme: crate::chrome::Theme,
+        scale: f64,
+        painter: &Painter,
+    ) -> Vec<Part> {
+        let now = std::time::Instant::now();
+        let later = now + std::time::Duration::from_secs(1);
+        let mut parts = Vec::new();
+        for at in [now, later] {
+            parts = layers.parts(Some(view.clone()), size, theme, scale, at, painter);
+        }
+        parts
+    }
+
+    /// `faded_in` on a dark 1080p output at scale 1.
+    fn shown(layers: &mut WorktreesLayers, view: &WorktreesView, painter: &Painter) -> Vec<Part> {
+        let theme = crate::chrome::Theme::Dark;
+        faded_in(layers, view, (1920, 1080).into(), theme, 1.0, painter)
+    }
+
+    #[test]
+    fn scrolling_part_of_a_row_draws_nothing_again() {
+        let painter = Painter::new();
+        let mut layers = WorktreesLayers::default();
+        let rest = long();
+        let parts = shown(&mut layers, &rest, &painter);
+        let drawn = layers.rows.drawn();
+        assert_eq!(layers.frames, 1);
+        // The label on top and the worktrees in view, peeking under the
+        // list too, then the frame.
+        assert_eq!(drawn, parts.len() - 1);
+        assert!(drawn >= 4, "{drawn}");
+        let list = worktrees_layout(&rest, (1920, 1080).into()).list;
+        assert!(parts[..drawn].iter().all(|p| p.clip == Some(list)));
+        for part in [0.1, 0.37, 0.5] {
+            let scrolled = WorktreesView {
+                part,
+                ..rest.clone()
+            };
+            let moved = shown(&mut layers, &scrolled, &painter);
+            assert_eq!((layers.rows.drawn(), layers.frames), (drawn, 1), "{part}");
+            // The label stays on top; the worktrees move up by the part
+            // of the first, to the fraction of a pixel.
+            assert_eq!(moved[0].loc, parts[0].loc);
+            let up = part * WORKTREES_ROW as f64;
+            assert!((parts[1].loc.y - moved[1].loc.y - up).abs() < 1e-9);
+        }
+        // Further, only the next repository's label coming into view is.
+        let further = WorktreesView {
+            part: 0.8,
+            ..rest.clone()
+        };
+        assert_eq!(
+            shown(&mut layers, &further, &painter).len(),
+            parts.len() + 1
+        );
+        assert_eq!((layers.rows.drawn(), layers.frames), (drawn + 1, 1));
+        // Stretched past the start, everything in the list moves down.
+        let over = WorktreesView {
+            overscroll: 12.5,
+            ..rest.clone()
+        };
+        let stretched = shown(&mut layers, &over, &painter);
+        assert_eq!((layers.rows.drawn(), layers.frames), (drawn + 1, 1));
+        assert_eq!(stretched[0].loc.y, parts[0].loc.y + 12.5);
+        assert_eq!(stretched[1].loc.y, parts[1].loc.y + 12.5);
+        // A row selected anew is drawn again, the frame not.
+        let reselected = WorktreesView {
+            selected: Some(2),
+            ..rest
+        };
+        shown(&mut layers, &reselected, &painter);
+        assert_eq!((layers.rows.drawn(), layers.frames), (drawn + 3, 1));
+    }
+
+    #[test]
+    fn the_hits_follow_the_rows_as_they_move() {
+        let size: Size<i32, Logical> = (1920, 1080).into();
+        let rest = long();
+        let still = worktrees_layout(&rest, size);
+        // Stretched down past the start, the rows and their hits move with it.
+        let over = WorktreesView {
+            overscroll: 15.0,
+            ..rest.clone()
+        };
+        let l = worktrees_layout(&over, size);
+        let tops = entry_tops(&over, l.list.loc.y);
+        for (i, ((rect, _), top)) in l.entries.iter().zip(&tops).enumerate() {
+            assert_eq!(rect.loc.y, still.entries[i].0.loc.y + 15);
+            assert_eq!(rect.loc.y, top.round() as i32);
+        }
+        let x = l.list.loc.x as f64 + 40.0;
+        let at = |rect: Rect| (x, rect.loc.y as f64 + 2.0).into();
+        assert_eq!(
+            worktrees_hit(&over, &l, at(still.entries[2].0)),
+            Some(WorktreesHit::Entry(1))
+        );
+        // Past the end, the label stays on top over the worktrees going on
+        // under it.
+        let past = WorktreesView {
+            overscroll: -15.0,
+            ..rest
+        };
+        let l = worktrees_layout(&past, size);
+        assert_eq!(l.entries[0].0, still.entries[0].0);
+        assert_eq!(l.entries[1].0.loc.y, still.entries[1].0.loc.y - 15);
+        assert_eq!(
+            worktrees_hit(&past, &l, at(still.entries[0].0)),
+            Some(WorktreesHit::Entry(0))
+        );
+    }
+
     #[test]
     fn it_paints() {
         let painter = Painter::new();
@@ -938,23 +1233,23 @@ mod tests {
         if let WorktreeEntry::Worktree(line) = &mut v.entries[2] {
             line.state = LineState::Armed("Delete again to delete, with unmerged commits".into());
         }
-        let buffer = painter.worktrees(
-            &v,
-            (1280, 800).into(),
-            1.0,
-            crate::chrome::Theme::Dark.palette(),
-        );
-        let _ = buffer;
+        let mut layers = WorktreesLayers::default();
+        assert_eq!(shown(&mut layers, &v, &painter).len(), 4);
         let empty = WorktreesView {
             entries: Vec::new(),
             selected: None,
             ..view()
         };
-        let _ = painter.worktrees(
+        let mut layers = WorktreesLayers::default();
+        let light = crate::chrome::Theme::Light;
+        let parts = faded_in(
+            &mut layers,
             &empty,
             (1280, 800).into(),
+            light,
             2.0,
-            crate::chrome::Theme::Light.palette(),
+            &painter,
         );
+        assert_eq!(parts.len(), 1);
     }
 }

@@ -32,10 +32,10 @@ use crate::{
     fuzzy, home_dir, hooks,
     input::Overlay,
     paths::{display, tilde},
-    project_list::{self, PATH_CHARS, scrolled},
+    project_list::{self, PATH_CHARS, RowTops},
+    scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, Line, TextField},
     tooltip::Tooltip,
-    wheel::Wheel,
 };
 
 /// How many of zoxide's folders the list offers as new projects.
@@ -48,8 +48,6 @@ const SUGGESTIONS: usize = 5;
 pub struct ProjectMenu {
     /// What the pointer is over, and its pill fading in.
     hover: Hover<MenuHit>,
-    /// The wheel's turn not yet a whole row.
-    wheel: Wheel,
     /// What was typed to filter the projects.
     query: TextField,
     /// The projects, by id, most recently used first.
@@ -69,8 +67,13 @@ pub struct ProjectMenu {
     folders: Vec<PathBuf>,
     /// The selected entry, by index into `items`; never a section.
     selected: usize,
-    /// The first entry shown.
-    scroll: usize,
+    /// Where the list stands, in entries.
+    scroll: Scroll,
+    /// Where the entries go down the list.
+    places: RowTops,
+    /// How high the list may be, in logical pixels (see
+    /// `chrome::project_menu_room`).
+    room: i32,
     /// The project being renamed in place.
     renaming: Option<Renaming>,
     /// The project Delete was pressed on once, by id.
@@ -186,6 +189,7 @@ impl ProjectMenu {
     fn new(home: Option<PathBuf>) -> Self {
         Self {
             home,
+            room: i32::MAX,
             ..Self::default()
         }
     }
@@ -232,6 +236,7 @@ impl ProjectMenu {
                     // It went: select the entry in its place.
                     None => self.selected = self.selectable_near(was),
                 }
+                self.reveal();
             }
         }
     }
@@ -271,6 +276,8 @@ impl ProjectMenu {
         }
         items.push(Item::New);
         items.extend((0..self.folders.len()).map(Item::Folder));
+        self.places =
+            chrome::project_menu_places(items.iter().map(|item| matches!(item, Item::Section(_))));
         self.items = items;
     }
 
@@ -290,7 +297,8 @@ impl ProjectMenu {
                 .or_else(|| position(|_, item| matches!(item, Item::Project(_))))
                 .or_else(|| position(|_, item| item == Item::New))
                 .unwrap_or(0);
-        self.scroll = 0;
+        self.scroll = Scroll::default();
+        self.reveal();
     }
 
     /// What `item` stands for.
@@ -319,14 +327,8 @@ impl ProjectMenu {
     }
 
     /// Handle a key: `sym` is the key's own symbol, `typed` the one with
-    /// Shift and the layout applied. `page` is how many entries are shown.
-    fn key(
-        &mut self,
-        mods: &ModifiersState,
-        sym: Keysym,
-        typed: Keysym,
-        page: usize,
-    ) -> Option<Outcome> {
+    /// Shift and the layout applied.
+    fn key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Option<Outcome> {
         if sym.is_modifier_key() {
             return None;
         }
@@ -351,6 +353,7 @@ impl ProjectMenu {
             Edit::Ignored => {}
         }
         let ctrl = mods.ctrl;
+        let page = self.whole().count().max(1) as isize;
         match sym {
             Keysym::Escape => {
                 if armed.is_some() {
@@ -369,12 +372,12 @@ impl ProjectMenu {
             Keysym::e if ctrl => return self.edit_settings(self.selected),
             Keysym::o if ctrl => return self.project_file(self.selected),
             Keysym::Delete | Keysym::KP_Delete => return self.forget(self.selected, armed),
-            Keysym::Up | Keysym::KP_Up => self.step(-1, page),
-            Keysym::Down | Keysym::KP_Down => self.step(1, page),
-            Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-(page.max(1) as isize), page),
-            Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page.max(1) as isize, page),
-            Keysym::Home | Keysym::KP_Home => self.step(isize::MIN / 2, page),
-            Keysym::End | Keysym::KP_End => self.step(isize::MAX / 2, page),
+            Keysym::Up | Keysym::KP_Up => self.step(-1),
+            Keysym::Down | Keysym::KP_Down => self.step(1),
+            Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-page),
+            Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page),
+            Keysym::Home | Keysym::KP_Home => self.step(isize::MIN / 2),
+            Keysym::End | Keysym::KP_End => self.step(isize::MAX / 2),
             _ if mods.alt && !ctrl && !mods.logo => {
                 let digit = sym.key_char().and_then(|c| c.to_digit(10))?;
                 return self.digit_project(digit).map(Outcome::Switch);
@@ -661,7 +664,7 @@ impl ProjectMenu {
 
     /// Move the selection `by` places among the selectable entries,
     /// scrolling to keep it shown.
-    fn step(&mut self, by: isize, page: usize) {
+    fn step(&mut self, by: isize) {
         let selectable = self.selectable();
         let Some(at) = selectable.iter().position(|&i| i == self.selected) else {
             return;
@@ -669,68 +672,107 @@ impl ProjectMenu {
         let to = (at as isize)
             .saturating_add(by)
             .clamp(0, selectable.len() as isize - 1);
-        self.select(selectable[to as usize], page);
+        self.select(selectable[to as usize]);
     }
 
-    /// Select entry `i`, scrolling to keep it shown, with its section's
-    /// label when it is the section's first.
-    fn select(&mut self, i: usize, page: usize) {
+    /// Select entry `i`, scrolling to keep it shown.
+    fn select(&mut self, i: usize) {
         self.selected = i;
-        let mut scroll = scrolled(self.scroll, i, page.max(1));
-        if scroll == i && i > 0 && page > 1 && matches!(self.items[i - 1], Item::Section(_)) {
-            scroll = i - 1;
+        self.reveal();
+    }
+
+    /// How high the list is: as its entries, `room` at most.
+    fn list_height(&self) -> f64 {
+        self.places.end().min(self.room as f64)
+    }
+
+    fn bounds(&self) -> Bounds {
+        self.places.bounds(&self.scroll, self.list_height())
+    }
+
+    /// Let the list be `room` high at most, keeping the selection shown.
+    fn set_room(&mut self, room: i32) {
+        if room != self.room {
+            self.room = room;
+            self.reveal();
         }
-        self.scroll = scroll;
     }
 
-    /// The first entry shown.
-    fn first_shown(&self, page: usize) -> usize {
-        let page = page.max(1);
-        scrolled(self.scroll, self.selected, page).min(self.items.len().saturating_sub(page))
+    /// How far down the list entry `i` reaches, from its top.
+    fn span(&self, i: usize) -> (f64, f64) {
+        (self.places.top(i), self.places.top(i + 1))
     }
 
-    /// Scroll the list `rows` entries (down positive), moving the selection
-    /// only as far as needed to keep it shown.
-    fn scroll_by(&mut self, rows: i32, page: usize) {
-        if self.form.is_some() {
+    /// Scroll the list as little as shows the selected entry whole, at
+    /// once: with its section's label when it is the section's first, and
+    /// it all fits.
+    fn reveal(&mut self) {
+        let i = self.selected;
+        if i >= self.items.len() {
             return;
         }
-        let page = page.max(1);
-        let last = self.items.len().saturating_sub(page);
-        let first = self
-            .first_shown(page)
-            .saturating_add_signed(rows as isize)
-            .min(last);
-        let end = (first + page).min(self.items.len());
+        let h = self.list_height();
+        let mut span = self.span(i);
+        if i > 0 && matches!(self.items[i - 1], Item::Section(_)) {
+            let label = self.places.top(i - 1);
+            if span.1 - label <= h {
+                span.0 = label;
+            }
+        }
+        let to = self.places.reveal(self.scroll.pos(), span, h);
+        if to != self.scroll.pos() {
+            self.scroll.jump(to);
+        }
+    }
+
+    /// The entries shown whole, in order.
+    fn whole(&self) -> impl Iterator<Item = usize> + '_ {
+        let (pos, h) = (self.scroll.pos(), self.list_height());
+        let bottom = self.places.px(pos) + h;
+        (self.scroll.first()..self.items.len())
+            .take_while(move |&i| self.places.top(i) < bottom)
+            .filter(move |&i| self.places.shows(pos, self.span(i), h))
+    }
+
+    /// Move the selection as little as keeps it shown whole: scrolling the
+    /// list drags it along. With no entry to select shown, it stays.
+    fn drag(&mut self) {
         let selectable = |&i: &usize| !matches!(self.items[i], Item::Section(_));
-        let selected = if self.selected < first {
-            (first..end).find(selectable)
-        } else if self.selected >= end {
-            (first..end).rev().find(selectable)
-        } else {
-            Some(self.selected)
+        let mut whole = self.whole().filter(selectable);
+        let Some(first) = whole.next() else {
+            return;
         };
-        if let Some(selected) = selected {
-            self.selected = selected;
-            self.scroll = first;
+        let last = whole.last().unwrap_or(first);
+        self.selected = self.selected.clamp(first, last);
+    }
+
+    /// The wheel or the touchpad moved the list at `now`. Nothing on it is
+    /// under the pointer while it moves.
+    fn scroll(&mut self, motion: Motion, now: Instant) {
+        if self.form.is_some() || self.settings.is_some() {
+            return;
+        }
+        self.scroll.apply(motion, now, self.bounds());
+        self.drag();
+        if self.scroll.moving(now) {
+            self.set_hover(None, now);
         }
     }
 
-    /// The wheel turned `rows` rows (down positive): whole rows scroll the
-    /// list, the part of a row left shows it moved by as much.
-    fn wheel_by(&mut self, rows: f64, page: usize) {
-        let first = self.first_shown(page);
-        let whole = self.wheel.turn(rows, first);
-        if whole != 0 {
-            self.scroll_by(whole as i32, page);
+    /// Move the list on to `now`; whether it still moves.
+    fn tick(&mut self, now: Instant) -> bool {
+        let moving = self.scroll.tick(now, self.bounds());
+        if self.form.is_none() && self.settings.is_none() {
+            self.drag();
+            if moving {
+                self.set_hover(None, now);
+            }
         }
-        let last = self.items.len().saturating_sub(page.max(1));
-        self.wheel
-            .settle(first as i64 + whole, self.first_shown(page), last);
+        moving
     }
 
-    /// A click on `hit`; `page` is how many entries are shown.
-    fn click(&mut self, hit: MenuHit, page: usize) -> Option<Outcome> {
+    /// A click on `hit`.
+    fn click(&mut self, hit: MenuHit) -> Option<Outcome> {
         if self.form.is_some() {
             return self.form_click(hit);
         }
@@ -738,7 +780,7 @@ impl ProjectMenu {
             return self.settings_click(hit);
         }
         let armed = self.confirm_forget.take();
-        let first = self.first_shown(page);
+        let first = self.scroll.first();
         let entry = |i: usize| (first + i < self.items.len()).then_some(first + i);
         // A click anywhere but in the name being edited ends the renaming.
         let renamed = self.renaming.as_ref().map(|r| r.id.clone());
@@ -756,7 +798,7 @@ impl ProjectMenu {
                 if matches!(self.items[i], Item::Section(_)) {
                     return None;
                 }
-                self.select(i, page);
+                self.select(i);
                 self.enter(i)
             }
             MenuHit::Button(i, button) => {
@@ -764,7 +806,7 @@ impl ProjectMenu {
                 if !on_renamed(self, i) {
                     self.renaming = None;
                 }
-                self.select(i, page);
+                self.select(i);
                 match button {
                     RowButton::Settings => self.edit_settings(i),
                     RowButton::ProjectFile => self.project_file(i),
@@ -944,9 +986,10 @@ impl ProjectMenu {
         }
     }
 
-    /// What is shown: `page` entries at most; `running` says whose sessions
+    /// What is shown: the entries from the first one shown at least in
+    /// part down past the list's bottom; `running` says whose sessions
     /// run, by id.
-    fn view(&self, page: usize, running: &HashMap<String, bool>, now: Instant) -> ProjectMenuView {
+    fn view(&self, running: &HashMap<String, bool>, now: Instant) -> ProjectMenuView {
         let hover = self.hovered();
         let hover_alpha = self.hover.alpha_over(now);
         if let Some(form) = &self.form {
@@ -980,13 +1023,13 @@ impl ProjectMenu {
                 part: 0.0,
             };
         }
-        let first = self.first_shown(page);
-        let end = (first + page.max(1)).min(self.items.len());
-        // Scrolled part of a row, the list shows one more under it.
-        // Asked for always, to drop a part left before the list moved.
-        let part = self.wheel.part(first);
-        let part = if end < self.items.len() { part } else { 0.0 };
-        let shown = end + usize::from(part > 0.0);
+        let first = self.scroll.first().min(self.items.len());
+        let top = self.places.top(first);
+        let part = self.places.px(self.scroll.pos()) - top - self.scroll.overscroll();
+        let reach = self.list_height() + part.max(0.0);
+        let end = (first..self.items.len())
+            .find(|&i| self.places.top(i) - top >= reach)
+            .unwrap_or(self.items.len());
         // The recent projects are numbered from the top, shown or not.
         let mut recent: u8 = 0;
         let entries = self
@@ -999,7 +1042,7 @@ impl ProjectMenu {
                 {
                     recent = recent.saturating_add(1);
                 }
-                if !(first..shown).contains(&i) {
+                if !(first..end).contains(&i) {
                     return None;
                 }
                 Some(match item {
@@ -1273,8 +1316,10 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Outcome> {
-        let page = self.project_menu_page();
-        self.project_menu.as_mut()?.key(mods, sym, typed, page)
+        let room = self.project_menu_room();
+        let menu = self.project_menu.as_mut()?;
+        menu.set_room(room);
+        menu.key(mods, sym, typed)
     }
 
     /// Do what the project menu asked.
@@ -1342,14 +1387,13 @@ impl Gerdr {
         let Some(view) = self.project_menu_view() else {
             return;
         };
-        let page = self.project_menu_page();
         let outcome = match chrome::project_menu_hit(&view, self.output_size(), pos) {
             // A key hint: its key, pressed.
             Some(MenuHit::Hint(i)) => {
                 return self.press_hint(Overlay::ProjectMenu, &view.hints[i].0, pos);
             }
             Some(hit) => match self.project_menu.as_mut() {
-                Some(menu) => menu.click(hit, page),
+                Some(menu) => menu.click(hit),
                 None => None,
             },
             None => Some(Outcome::Closed),
@@ -1364,9 +1408,12 @@ impl Gerdr {
     pub fn project_menu_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.project_menu_view()?;
         let size = self.output_size();
-        let hit = chrome::project_menu_hit(&view, size, pos);
         let now = Instant::now();
         let menu = self.project_menu.as_mut()?;
+        // Entries passing under the pointer don't light up.
+        let moving = menu.scroll.moving(now);
+        let hit = chrome::project_menu_hit(&view, size, pos)
+            .filter(|hit| !moving || !matches!(hit, MenuHit::Entry(_) | MenuHit::Button(..)));
         menu.set_hover(hit, now);
         let layout = chrome::project_menu_layout(&view, size);
         match hit? {
@@ -1403,19 +1450,33 @@ impl Gerdr {
         }
     }
 
-    /// The wheel turned `rows` rows (down positive, parts of a row adding
-    /// up) over the project menu.
-    pub fn project_menu_scroll(&mut self, rows: f64) {
-        let page = self.project_menu_page();
+    /// The wheel or the touchpad moved the project menu's list.
+    pub fn project_menu_scroll(&mut self, motion: Motion) {
+        let room = self.project_menu_room();
         if let Some(menu) = self.project_menu.as_mut() {
-            menu.wheel_by(rows, page);
+            menu.set_room(room);
+            menu.scroll(motion, Instant::now());
         }
+    }
+
+    /// Move the project menu's list on to `now` if it moves on its own; whether it
+    /// still moves (see `Scroll::moving`).
+    pub fn project_menu_scroll_tick(&mut self, now: Instant) -> bool {
+        if self.project_menu.is_none() {
+            return false;
+        }
+        let room = self.project_menu_room();
+        let Some(menu) = self.project_menu.as_mut() else {
+            return false;
+        };
+        menu.set_room(room);
+        menu.tick(now)
     }
 
     /// What the project menu shows, while it is open.
     pub fn project_menu_view(&self) -> Option<ProjectMenuView> {
         let menu = self.project_menu.as_ref()?;
-        Some(menu.view(self.project_menu_page(), &self.running, Instant::now()))
+        Some(menu.view(&self.running, Instant::now()))
     }
 
     /// zenity gave back `dir` for the form's folder.
@@ -1445,14 +1506,16 @@ impl Gerdr {
             .flat_map(|p| p.workspaces.iter().map(|w| w.dir.clone()))
             .collect();
         let recent = self.recent_dirs.clone();
+        let room = self.project_menu_room();
         if let Some(menu) = self.project_menu.as_mut() {
+            menu.set_room(room);
             menu.set_lists(rows, recent, taken);
         }
     }
 
-    /// How many entries the project menu's list shows.
-    fn project_menu_page(&self) -> usize {
-        chrome::project_menu_page(self.output_size())
+    /// How high the project menu's list may be.
+    fn project_menu_room(&self) -> i32 {
+        chrome::project_menu_room(self.output_size())
     }
 }
 
@@ -1498,6 +1561,22 @@ mod tests {
         menu
     }
 
+    /// How high `n` rows are.
+    fn rows(n: i32) -> i32 {
+        n * chrome::project_menu_entry_height(false)
+    }
+
+    /// Move the list by `motion`, then let it come to rest, a frame at a
+    /// time.
+    fn settle(m: &mut ProjectMenu, motion: Motion) {
+        let mut now = Instant::now();
+        m.scroll(motion, now);
+        for _ in 0..250 {
+            now += std::time::Duration::from_millis(8);
+            m.tick(now);
+        }
+    }
+
     fn ctrl() -> ModifiersState {
         ModifiersState {
             ctrl: true,
@@ -1513,27 +1592,27 @@ mod tests {
     }
 
     fn press(m: &mut ProjectMenu, sym: Keysym) -> Option<Outcome> {
-        m.key(&ModifiersState::default(), sym, sym, 10)
+        m.key(&ModifiersState::default(), sym, sym)
     }
 
     fn chord(m: &mut ProjectMenu, mods: ModifiersState, sym: Keysym) -> Option<Outcome> {
-        m.key(&mods, sym, sym, 10)
+        m.key(&mods, sym, sym)
     }
 
     fn type_text(m: &mut ProjectMenu, text: &str) {
         for c in text.chars() {
             let sym = Keysym::from_char(c);
-            assert_eq!(m.key(&ModifiersState::default(), sym, sym, 10), None);
+            assert_eq!(m.key(&ModifiersState::default(), sym, sym), None);
         }
     }
 
-    fn view(m: &ProjectMenu, page: usize) -> ProjectMenuView {
-        m.view(page, &HashMap::new(), Instant::now())
+    fn view(m: &ProjectMenu) -> ProjectMenuView {
+        m.view(&HashMap::new(), Instant::now())
     }
 
     /// The entries in view, as text: "# Current" for a section.
-    fn labels(m: &ProjectMenu, page: usize) -> Vec<String> {
-        view(m, page)
+    fn labels(m: &ProjectMenu) -> Vec<String> {
+        view(m)
             .entries
             .into_iter()
             .map(|entry| match entry {
@@ -1545,20 +1624,20 @@ mod tests {
     }
 
     /// The selected entry, as text.
-    fn selected(m: &ProjectMenu, page: usize) -> String {
-        let i = view(m, page).selected.expect("an entry is selected");
-        labels(m, page)[i].clone()
+    fn selected(m: &ProjectMenu) -> String {
+        let i = view(m).selected.expect("an entry is selected");
+        labels(m)[i].clone()
     }
 
     fn form(m: &ProjectMenu) -> FormView {
-        view(m, 10).form.expect("the form is shown")
+        view(m).form.expect("the form is shown")
     }
 
     #[test]
     fn entries_come_in_sections_and_filter() {
         let mut m = menu(&["gerdr", "blog"]);
         assert_eq!(
-            labels(&m, 10),
+            labels(&m),
             [
                 "# Current",
                 "aft",
@@ -1571,7 +1650,7 @@ mod tests {
         // Without the shown project, and with zoxide's folders no project has.
         type_text(&mut m, "blo");
         assert_eq!(
-            labels(&m, 10),
+            labels(&m),
             [
                 "# Recent",
                 "blog",
@@ -1581,45 +1660,47 @@ mod tests {
                 "~/blot",
             ]
         );
-        m.key(&ctrl(), Keysym::u, Keysym::u, 10);
+        m.key(&ctrl(), Keysym::u, Keysym::u);
         type_text(&mut m, "aft");
-        assert_eq!(labels(&m, 10), ["# Current", "aft", "New project \"aft\"…"]);
-        assert_eq!(selected(&m, 10), "aft");
+        assert_eq!(labels(&m), ["# Current", "aft", "New project \"aft\"…"]);
+        assert_eq!(selected(&m), "aft");
         type_text(&mut m, "zzz");
-        assert_eq!(labels(&m, 10), ["New project \"aftzzz\"…"]);
-        assert_eq!(selected(&m, 10), "New project \"aftzzz\"…");
+        assert_eq!(labels(&m), ["New project \"aftzzz\"…"]);
+        assert_eq!(selected(&m), "New project \"aftzzz\"…");
     }
 
     #[test]
     fn the_selection_skips_sections() {
         let mut m = menu(&["gerdr", "blog"]);
-        assert_eq!(selected(&m, 10), "gerdr");
+        assert_eq!(selected(&m), "gerdr");
         press(&mut m, Keysym::Up);
-        assert_eq!(selected(&m, 10), "aft");
+        assert_eq!(selected(&m), "aft");
         press(&mut m, Keysym::Up);
-        assert_eq!(selected(&m, 10), "aft");
+        assert_eq!(selected(&m), "aft");
         press(&mut m, Keysym::Down);
-        assert_eq!(selected(&m, 10), "gerdr");
+        assert_eq!(selected(&m), "gerdr");
         press(&mut m, Keysym::End);
-        assert_eq!(selected(&m, 10), "New project…");
+        assert_eq!(selected(&m), "New project…");
         press(&mut m, Keysym::Down);
-        assert_eq!(selected(&m, 10), "New project…");
+        assert_eq!(selected(&m), "New project…");
         press(&mut m, Keysym::Home);
-        assert_eq!(selected(&m, 10), "aft");
+        assert_eq!(selected(&m), "aft");
         press(&mut m, Keysym::Page_Down);
-        assert_eq!(selected(&m, 10), "New project…");
+        assert_eq!(selected(&m), "New project…");
     }
 
     #[test]
     fn the_list_scrolls_with_the_selection_and_shows_its_section() {
         let mut m = menu(&["gerdr", "blog"]);
-        let key = |m: &mut ProjectMenu, sym| m.key(&ModifiersState::default(), sym, sym, 3);
+        m.set_room(rows(3));
+        let key = |m: &mut ProjectMenu, sym| m.key(&ModifiersState::default(), sym, sym);
         key(&mut m, Keysym::End);
-        assert_eq!(labels(&m, 3), ["gerdr", "blog", "New project…"]);
+        assert_eq!(labels(&m), ["gerdr", "blog", "New project…"]);
         key(&mut m, Keysym::Up);
         key(&mut m, Keysym::Up);
-        assert_eq!(labels(&m, 3), ["# Recent", "gerdr", "blog"]);
-        assert_eq!(view(&m, 3).selected, Some(1));
+        // The label over it too; the row under them shown in part.
+        assert_eq!(labels(&m), ["# Recent", "gerdr", "blog", "New project…"]);
+        assert_eq!(view(&m).selected, Some(1));
     }
 
     #[test]
@@ -1627,16 +1708,21 @@ mod tests {
         let names: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut m = menu(&refs);
-        assert_eq!(selected(&m, 4), "p0");
-        m.scroll_by(4, 4);
-        assert_eq!(labels(&m, 4), ["p1", "p2", "p3", "p4"]);
-        assert_eq!(selected(&m, 4), "p1");
-        m.scroll_by(100, 4);
-        assert_eq!(labels(&m, 4), ["p5", "p6", "p7", "New project…"]);
-        assert_eq!(selected(&m, 4), "p5");
-        m.scroll_by(-100, 4);
-        assert_eq!(labels(&m, 4)[0], "# Current");
-        assert_eq!(selected(&m, 4), "p0");
+        m.set_room(rows(4));
+        assert_eq!(selected(&m), "p0");
+        settle(&mut m, Motion::Notches(4.0));
+        assert_eq!(labels(&m), ["p1", "p2", "p3", "p4"]);
+        assert_eq!(selected(&m), "p1");
+        settle(&mut m, Motion::Notches(100.0));
+        assert_eq!(labels(&m), ["p5", "p6", "p7", "New project…"]);
+        assert_eq!(selected(&m), "p5");
+        settle(&mut m, Motion::Notches(-100.0));
+        assert_eq!(labels(&m)[0], "# Current");
+        assert_eq!(selected(&m), "p0");
+        // Nothing on the list is under the pointer while it moves.
+        m.set_hover(Some(MenuHit::Entry(1)), Instant::now());
+        m.scroll(Motion::Notches(1.0), Instant::now());
+        assert_eq!(view(&m).hover, None);
     }
 
     #[test]
@@ -1644,26 +1730,40 @@ mod tests {
         let names: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut m = menu(&refs);
-        m.wheel_by(1.5, 4);
-        let v = view(&m, 4);
-        assert_eq!(v.part, 0.5);
-        // The row shown in part under the list too.
-        assert_eq!(labels(&m, 4), ["aft", "# Recent", "p0", "p1", "p2"]);
-        // Up past the top holds the list whole.
-        m.wheel_by(-3.0, 4);
-        assert_eq!(view(&m, 4).part, 0.0);
-        assert_eq!(labels(&m, 4).len(), 4);
+        m.set_room(rows(4));
+        let now = Instant::now();
+        // Half the first entry, a section's label.
+        m.scroll(Motion::Finger { px: 11.0, time: 0 }, now);
+        assert_eq!(view(&m).part, 11.0);
+        // The entries shown in part under the list too.
+        assert_eq!(
+            labels(&m),
+            ["# Current", "aft", "# Recent", "p0", "p1", "p2"]
+        );
+        assert_eq!(selected(&m), "p0");
+        // Pulled down past the start, the entries come down, and go back
+        // once let go.
+        m.scroll(Motion::Finger { px: -50.0, time: 8 }, now);
+        assert!(view(&m).part < 0.0);
+        settle(&mut m, Motion::Lift { time: 16 });
+        assert_eq!(view(&m).part, 0.0);
         // A key moving the list drops the part.
-        m.wheel_by(0.5, 4);
-        assert_eq!(view(&m, 4).part, 0.5);
+        m.scroll(
+            Motion::Finger {
+                px: 20.0,
+                time: 3000,
+            },
+            now,
+        );
+        assert_eq!(view(&m).part, 20.0);
         press(&mut m, Keysym::End);
-        assert_eq!(view(&m, 4).part, 0.0);
+        assert_eq!(view(&m).part, 0.0);
     }
 
     #[test]
     fn alt_digits_open_recent_projects() {
         let mut m = menu(&["gerdr", "blog"]);
-        let digits: Vec<Option<u8>> = view(&m, 10)
+        let digits: Vec<Option<u8>> = view(&m)
             .entries
             .iter()
             .filter_map(|e| match e {
@@ -1702,7 +1802,7 @@ mod tests {
         press(&mut m, Keysym::Escape);
         type_text(&mut m, "blo");
         press(&mut m, Keysym::End);
-        assert_eq!(selected(&m, 10), "~/blot");
+        assert_eq!(selected(&m), "~/blot");
         assert_eq!(press(&mut m, Keysym::Return), None);
         let f = form(&m);
         assert_eq!(
@@ -1710,7 +1810,7 @@ mod tests {
             ("blot", "~/blot", FormField::Folder)
         );
         assert!(f.suggestions.is_empty());
-        assert_eq!(view(&m, 10).hints[0], ("Tab".into(), "next".into()));
+        assert_eq!(view(&m).hints[0], ("Tab".into(), "next".into()));
     }
 
     #[test]
@@ -1730,13 +1830,13 @@ mod tests {
         let mut m = menu(&["gerdr", "blog"]);
         chord(&mut m, ctrl(), Keysym::r);
         let renaming = |m: &ProjectMenu| {
-            view(m, 10).entries.iter().find_map(|e| match e {
+            view(m).entries.iter().find_map(|e| match e {
                 MenuEntry::Project { renaming, .. } => renaming.clone(),
                 _ => None,
             })
         };
         assert_eq!(renaming(&m).as_deref(), Some("gerdr"));
-        assert_eq!(view(&m, 10).hints[0], ("Enter".into(), "save".into()));
+        assert_eq!(view(&m).hints[0], ("Enter".into(), "save".into()));
         // The old name is selected: typing replaces it.
         type_text(&mut m, "x");
         type_text(&mut m, " y");
@@ -1780,27 +1880,24 @@ mod tests {
         press(&mut m, Keysym::Left);
         // With text after the caret, Delete edits the query.
         assert_eq!(press(&mut m, Keysym::Delete), None);
-        assert_eq!(
-            (view(&m, 10).query.as_str(), view(&m, 10).query.caret),
-            ("g", 1)
-        );
-        assert_eq!(selected(&m, 10), "gerdr");
+        assert_eq!((view(&m).query.as_str(), view(&m).query.caret), ("g", 1));
+        assert_eq!(selected(&m), "gerdr");
         // Without, it is the selected project's.
         press(&mut m, Keysym::Delete);
-        let confirming = view(&m, 10)
+        let confirming = view(&m)
             .entries
             .iter()
             .any(|e| matches!(e, MenuEntry::Project { confirm_forget, .. } if *confirm_forget));
         assert!(confirming);
         // So is End with the caret at the end, and Home at the start.
         press(&mut m, Keysym::End);
-        let last = selected(&m, 10);
+        let last = selected(&m);
         assert_ne!(last, "gerdr");
         press(&mut m, Keysym::Home);
-        assert_eq!(view(&m, 10).query.caret, 0);
-        assert_eq!(selected(&m, 10), last);
+        assert_eq!(view(&m).query.caret, 0);
+        assert_eq!(selected(&m), last);
         press(&mut m, Keysym::Home);
-        assert_eq!(selected(&m, 10), "gerdr");
+        assert_eq!(selected(&m), "gerdr");
     }
 
     #[test]
@@ -1809,7 +1906,7 @@ mod tests {
         press(&mut m, Keysym::Down);
         assert_eq!(press(&mut m, Keysym::Delete), None);
         let confirm = |m: &ProjectMenu| {
-            view(m, 10).entries.iter().position(
+            view(m).entries.iter().position(
                 |e| matches!(e, MenuEntry::Project { confirm_forget, .. } if *confirm_forget),
             )
         };
@@ -1846,7 +1943,7 @@ mod tests {
         m.set_lists(rows, Vec::new(), HashSet::new());
         press(&mut m, Keysym::End);
         press(&mut m, Keysym::Up);
-        assert_eq!(selected(&m, 10), "blog");
+        assert_eq!(selected(&m), "blog");
         assert_eq!(chord(&mut m, ctrl(), Keysym::s), None);
     }
 
@@ -1887,12 +1984,12 @@ mod tests {
             Some(Outcome::Settings("aft".into()))
         );
         assert_eq!(
-            m.click(MenuHit::Button(4, RowButton::Settings), 10),
+            m.click(MenuHit::Button(4, RowButton::Settings)),
             Some(Outcome::Settings("blog".into()))
         );
 
         m.open_settings("gerdr", "make up", "", Path::new("/work/gerdr"));
-        let settings = |m: &ProjectMenu| view(m, 10).settings.unwrap();
+        let settings = |m: &ProjectMenu| view(m).settings.unwrap();
         let shown = settings(&m);
         assert_eq!(
             (
@@ -1917,8 +2014,8 @@ mod tests {
             })
         );
         // Back to the list.
-        assert!(view(&m, 10).settings.is_none());
-        assert_eq!(selected(&m, 10), "blog");
+        assert!(view(&m).settings.is_none());
+        assert_eq!(selected(&m), "blog");
     }
 
     #[test]
@@ -1927,7 +2024,7 @@ mod tests {
         m.open_settings("gerdr", "", "", Path::new("/w"));
         type_text(&mut m, "./up.sh");
         assert_eq!(
-            m.click(MenuHit::Setting(SettingsField::Run), 10),
+            m.click(MenuHit::Setting(SettingsField::Run)),
             Some(Outcome::SaveSettings {
                 id: "gerdr".into(),
                 before: "./up.sh".into(),
@@ -1942,10 +2039,10 @@ mod tests {
             press(&mut m, Keysym::ISO_Left_Tab);
         }
         assert_eq!(press(&mut m, Keysym::Return), None);
-        assert!(view(&m, 10).settings.is_none());
+        assert!(view(&m).settings.is_none());
         m.open_settings("gerdr", "", "", Path::new("/w"));
         assert_eq!(press(&mut m, Keysym::Escape), None);
-        assert!(view(&m, 10).settings.is_none());
+        assert!(view(&m).settings.is_none());
         // Esc again closes the menu.
         assert_eq!(press(&mut m, Keysym::Escape), Some(Outcome::Closed));
     }
@@ -1973,7 +2070,7 @@ mod tests {
         assert_eq!(press(&mut m, Keysym::Escape), None);
         assert!(form(&m).suggestions.is_empty());
         assert_eq!(press(&mut m, Keysym::Escape), None);
-        assert_eq!(view(&m, 10).form, None);
+        assert_eq!(view(&m).form, None);
         assert_eq!(m.query, "x");
     }
 
@@ -1995,7 +2092,7 @@ mod tests {
             shift: true,
             ..Default::default()
         };
-        m.key(&shift, Keysym::Tab, Keysym::ISO_Left_Tab, 10);
+        m.key(&shift, Keysym::Tab, Keysym::ISO_Left_Tab);
         assert_eq!(form(&m).focus, Cancel);
         press(&mut m, Keysym::Tab);
         press(&mut m, Keysym::Tab);
@@ -2011,7 +2108,7 @@ mod tests {
         press(&mut m, Keysym::Tab);
         assert_eq!(form(&m).focus, Cancel);
         assert_eq!(press(&mut m, Keysym::Return), None);
-        assert_eq!(view(&m, 10).form, None);
+        assert_eq!(view(&m).form, None);
     }
 
     #[test]
@@ -2064,7 +2161,7 @@ mod tests {
         type_text(&mut m, "~/b");
         assert_eq!(form(&m).suggestions.len(), 5);
         assert_eq!(form(&m).suggestions[0], "~/blob");
-        assert_eq!(m.click(MenuHit::Suggestion(1), 10), None);
+        assert_eq!(m.click(MenuHit::Suggestion(1)), None);
         assert_eq!(form(&m).folder, "~/blot");
         assert!(form(&m).suggestions.is_empty());
     }
@@ -2108,7 +2205,7 @@ mod tests {
     fn matched_characters_reach_the_entries_and_the_hover_fades_in() {
         let mut m = menu(&["gerdr", "blog"]);
         type_text(&mut m, "blo");
-        let hits: Vec<Vec<usize>> = view(&m, 10)
+        let hits: Vec<Vec<usize>> = view(&m)
             .entries
             .iter()
             .filter_map(|e| match e {
@@ -2120,7 +2217,7 @@ mod tests {
         let start = Instant::now();
         m.set_hover(Some(MenuHit::Entry(1)), start);
         let at = |m: &ProjectMenu, now| {
-            let v = m.view(10, &HashMap::new(), now);
+            let v = m.view(&HashMap::new(), now);
             (v.hover, v.hover_alpha)
         };
         assert_eq!(at(&m, start), (Some(MenuHit::Entry(1)), 0));
@@ -2135,14 +2232,14 @@ mod tests {
         m.set_lists(vec![row("aft", true)], vec![long.clone()], HashSet::new());
         chord(&mut m, ctrl(), Keysym::u);
         type_text(&mut m, "x");
-        let folder = view(&m, 10).entries.into_iter().find_map(|e| match e {
+        let folder = view(&m).entries.into_iter().find_map(|e| match e {
             MenuEntry::Folder(f) => Some(f),
             _ => None,
         });
         let squeezed = "~/…/down/into/the/folders/of/this/home/x";
         assert_eq!(folder.as_deref(), Some(squeezed));
         m.open_settings("aft", "", "", &long);
-        assert_eq!(view(&m, 10).settings.unwrap().dir, squeezed);
+        assert_eq!(view(&m).settings.unwrap().dir, squeezed);
     }
 
     #[test]
@@ -2169,7 +2266,7 @@ mod tests {
             kind: WorkspaceKind::Terminal,
         });
         assert_eq!(press(&mut m, Keysym::Return), create);
-        assert_eq!(m.click(MenuHit::Field(FormField::Create), 10), create);
+        assert_eq!(m.click(MenuHit::Field(FormField::Create)), create);
     }
 
     #[test]
@@ -2187,45 +2284,45 @@ mod tests {
         press(&mut m, Keysym::Tab);
         assert_eq!(form(&m).focus, FormField::Browse);
         assert_eq!(press(&mut m, Keysym::Return), browse);
-        assert_eq!(m.click(MenuHit::Field(FormField::Browse), 10), browse);
+        assert_eq!(m.click(MenuHit::Field(FormField::Browse)), browse);
     }
 
     #[test]
     fn clicks_open_rename_stop_and_forget() {
         let mut m = menu(&["gerdr", "blog"]);
         assert_eq!(
-            m.click(MenuHit::Entry(4), 10),
+            m.click(MenuHit::Entry(4)),
             Some(Outcome::Switch("blog".into()))
         );
-        assert_eq!(m.click(MenuHit::Entry(0), 10), None);
-        assert_eq!(m.click(MenuHit::Button(3, RowButton::Forget), 10), None);
+        assert_eq!(m.click(MenuHit::Entry(0)), None);
+        assert_eq!(m.click(MenuHit::Button(3, RowButton::Forget)), None);
         assert_eq!(m.confirm_forget.as_deref(), Some("gerdr"));
         assert_eq!(
-            m.click(MenuHit::Button(3, RowButton::Forget), 10),
+            m.click(MenuHit::Button(3, RowButton::Forget)),
             Some(Outcome::Forget("gerdr".into()))
         );
         // A click elsewhere takes back the first.
-        m.click(MenuHit::Button(3, RowButton::Forget), 10);
-        m.click(MenuHit::Panel, 10);
-        assert_eq!(m.click(MenuHit::Button(3, RowButton::Forget), 10), None);
+        m.click(MenuHit::Button(3, RowButton::Forget));
+        m.click(MenuHit::Panel);
+        assert_eq!(m.click(MenuHit::Button(3, RowButton::Forget)), None);
         assert_eq!(
-            m.click(MenuHit::Button(4, RowButton::Stop), 10),
+            m.click(MenuHit::Button(4, RowButton::Stop)),
             Some(Outcome::Stop("blog".into()))
         );
         assert_eq!(
-            m.click(MenuHit::Button(4, RowButton::ProjectFile), 10),
+            m.click(MenuHit::Button(4, RowButton::ProjectFile)),
             Some(Outcome::ProjectFile("blog".into()))
         );
-        m.click(MenuHit::Button(1, RowButton::Rename), 10);
+        m.click(MenuHit::Button(1, RowButton::Rename));
         assert_eq!(m.renaming.as_ref().map(|r| r.id.as_str()), Some("aft"));
         // Clicking in the name keeps it; elsewhere ends it.
-        m.click(MenuHit::Entry(1), 10);
+        m.click(MenuHit::Entry(1));
         assert!(m.renaming.is_some());
-        m.click(MenuHit::Query, 10);
+        m.click(MenuHit::Query);
         assert!(m.renaming.is_none());
-        assert_eq!(m.click(MenuHit::Entry(5), 10), None);
+        assert_eq!(m.click(MenuHit::Entry(5)), None);
         assert!(m.form.is_some());
-        m.click(MenuHit::Field(FormField::Cancel), 10);
+        m.click(MenuHit::Field(FormField::Cancel));
         assert!(m.form.is_none());
     }
 
@@ -2233,19 +2330,19 @@ mod tests {
     fn refreshing_keeps_the_selection_on_its_project() {
         let mut m = menu(&["gerdr", "blog", "notes"]);
         press(&mut m, Keysym::Down);
-        assert_eq!(selected(&m, 10), "blog");
+        assert_eq!(selected(&m), "blog");
         let mut rows = vec![row("aft", true), row("blog", false), row("gerdr", false)];
         rows[1].1.running = Some(true);
         m.set_lists(rows.clone(), Vec::new(), HashSet::new());
-        assert_eq!(selected(&m, 10), "blog");
+        assert_eq!(selected(&m), "blog");
         // Forgotten, the entry in its place is selected.
         rows.remove(1);
         m.set_lists(rows, Vec::new(), HashSet::new());
-        assert_eq!(selected(&m, 10), "gerdr");
+        assert_eq!(selected(&m), "gerdr");
         // The running status shows from gerdr's.
         let running = HashMap::from([("gerdr".to_string(), false)]);
         let dots: Vec<Option<bool>> = m
-            .view(10, &running, Instant::now())
+            .view(&running, Instant::now())
             .entries
             .into_iter()
             .filter_map(|e| match e {
@@ -2294,7 +2391,7 @@ mod tests {
             press(&mut m, Keysym::Return),
             Some(Outcome::Notice("A project named BLOG exists.".into()))
         );
-        let renaming = view(&m, 10).entries.iter().find_map(|e| match e {
+        let renaming = view(&m).entries.iter().find_map(|e| match e {
             MenuEntry::Project { renaming, .. } => renaming.clone(),
             _ => None,
         });

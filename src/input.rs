@@ -117,13 +117,6 @@ pub enum Overlay {
     Switcher(u64),
 }
 
-/// How far a touchpad scrolls the project menu's or the switcher's list by
-/// a row, in pixels.
-const MENU_SCROLL_ROW: f64 = 40.0;
-
-/// How far a notch of the wheel scrolls the sidebar, in pixels.
-const SIDEBAR_NOTCH: f64 = 48.0;
-
 /// Whether `action`, picked with the prefix, works over the welcome screen:
 /// only what acts on gerdr itself rather than on the project behind (the
 /// welcome screen is already open).
@@ -475,31 +468,26 @@ impl Gerdr {
                     self.close_menu();
                     return;
                 }
-                // Nothing scrolls behind an overlay; the project menu's and
-                // the switcher's lists move a row per notch of the wheel, or
-                // per row's height scrolled on a touchpad.
+                // Nothing scrolls behind an overlay; the open panel's list
+                // moves instead (see `scroll`).
+                let motion = self.scroll_motion::<I>(&event);
                 if self.project_menu.is_some()
                     || self.switcher.is_some()
                     || self.worktrees.is_open()
                     || self.repos.is_open()
                     || self.inbox.is_open()
                 {
-                    let rows = event
-                        .amount_v120(Axis::Vertical)
-                        .map(|v120| v120 / 120.0)
-                        .or_else(|| event.amount(Axis::Vertical).map(|px| px / MENU_SCROLL_ROW))
-                        .unwrap_or(0.0);
-                    if rows != 0.0 {
+                    if let Some(motion) = motion {
                         if self.project_menu.is_some() {
-                            self.project_menu_scroll(rows);
+                            self.project_menu_scroll(motion);
                         } else if self.worktrees.is_open() {
-                            self.worktrees_scroll(rows);
+                            self.worktrees_scroll(motion);
                         } else if self.repos.is_open() {
-                            self.repos_scroll(rows);
+                            self.repos_scroll(motion);
                         } else if self.inbox.is_open() {
-                            self.inbox_scroll(rows);
+                            self.inbox_scroll(motion);
                         } else {
-                            self.switcher_scroll(rows);
+                            self.switcher_scroll(motion);
                         }
                     }
                     return;
@@ -507,16 +495,10 @@ impl Gerdr {
                 if self.quit.is_some() || self.restart.is_some() || self.welcome.is_some() {
                     return;
                 }
-                // Over the sidebar, its rows scroll: a notch of the wheel
-                // by `SIDEBAR_NOTCH`, a touchpad by what it moved.
+                // Over the sidebar, its rows scroll.
                 if self.pointer.x < self.sidebar_width as f64 {
-                    let dy = event
-                        .amount_v120(Axis::Vertical)
-                        .map(|v120| v120 / 120.0 * SIDEBAR_NOTCH)
-                        .or_else(|| event.amount(Axis::Vertical))
-                        .unwrap_or(0.0);
-                    if dy != 0.0 {
-                        self.sidebar_scroll_by(dy);
+                    if let Some(motion) = motion {
+                        self.sidebar_scroll(motion);
                     }
                     return;
                 }

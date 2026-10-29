@@ -1,6 +1,7 @@
 //! The project menu under the sidebar header: its list, the new project
 //! form and the project settings form.
 
+use super::layers::{Part, RowCache};
 use super::{
     BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, CARET_WIDTH, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
     FIELD_GAP, FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING,
@@ -15,8 +16,8 @@ use super::{
     stop,
 };
 use crate::WorkspaceKind;
+use crate::project_list::RowTops;
 use crate::text_field::Line;
-use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -39,8 +40,11 @@ pub struct ProjectMenuView {
     pub hints: Vec<(String, String)>,
     /// How far the hover pill has faded in, 0 to 16.
     pub hover_alpha: u8,
-    /// The part of the first entry scrolled past, 0 to 1; with some, the
-    /// entries take one more under the list, shown in part.
+    /// How far the entries are moved up from resting with the first one at
+    /// the top, in logical pixels: part of the way to the next entry while
+    /// scrolled, less than none while pulled down past the start, and more
+    /// while pulled up past the end. The entries reach down past the list,
+    /// and one may be shown in part at its bottom.
     pub part: f64,
 }
 
@@ -240,8 +244,9 @@ pub struct SettingsLayout {
 
 /// Where the parts of the project menu showing `view` go, on an output of
 /// `size`: below the sidebar header, reaching over the apps. The query field
-/// (the title in form mode), the entries or the form, then the footer. On an
-/// output too short for it all, the entries that don't fit are cut to nothing.
+/// (the title in form mode), the entries or the form, then the footer. The
+/// list is as high as its entries, `project_menu_room` at most; the entries
+/// it doesn't show at all are cut to nothing.
 pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> ProjectMenuLayout {
     let w = PROJECT_MENU_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let (x, top) = (ROW_INSET, PROJECT_MENU_TOP);
@@ -251,7 +256,11 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
     let (mut entries, form, settings) = match (&view.form, &view.settings) {
         (Some(form), _) => (Vec::new(), Some(form_layout(form, x, w, &mut y)), None),
         (None, Some(_)) => (Vec::new(), None, Some(settings_layout(x, w, &mut y))),
-        (None, None) => (menu_entries(view, x, w, &mut y), None, None),
+        (None, None) => {
+            let entries = menu_entries(view, x, w, &mut y);
+            y = y.min(start + project_menu_room(size));
+            (entries, None, None)
+        }
     };
     let footer_h = footer_height(view.hints.len());
     let bottom = (y + PROJECT_MENU_PADDING + footer_h)
@@ -262,17 +271,13 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
     let listed = view.form.is_none() && view.settings.is_none();
     let list_h = if listed { y.min(limit) - start } else { 0 };
     let list = Rectangle::new((x, start).into(), (w, list_h.max(0)).into());
-    // Entries past the bottom are cut to nothing; a scrolled list's are
+    // Entries out of the list are cut to nothing; those at its edges are
     // shown in part, cut by `list`.
+    let end = list.loc.y + list.size.h;
     for (rect, buttons) in &mut entries {
-        let past = if view.part > 0.0 {
-            rect.loc.y >= limit
-        } else {
-            rect.loc.y + rect.size.h > limit
-        };
-        if past {
+        if rect.loc.y >= end || rect.loc.y + rect.size.h <= list.loc.y {
             *rect = Rectangle::new(
-                (rect.loc.x, rect.loc.y.min(limit)).into(),
+                (rect.loc.x, rect.loc.y.clamp(list.loc.y, end)).into(),
                 (rect.size.w, 0).into(),
             );
             buttons.clear();
@@ -299,33 +304,20 @@ pub(super) fn menu_entries(
     w: i32,
     y: &mut i32,
 ) -> Vec<(Rect, Vec<(RowButton, Rect)>)> {
-    let hovered = match view.hover {
-        Some(MenuHit::Entry(i) | MenuHit::Button(i, _)) => Some(i),
-        _ => None,
-    };
     let (x, w) = (
         x + PROJECT_MENU_PADDING,
         (w - 2 * PROJECT_MENU_PADDING).max(0),
     );
     let start = *y;
-    let height = |entry: &MenuEntry| match entry {
-        MenuEntry::Section(_) => PROJECT_MENU_SECTION,
-        _ => PROJECT_MENU_ROW,
-    };
-    // Scrolled part of the first entry, the list starts up by as much and
-    // ends where it would without its last entry, shown in part.
-    let shift = wheel::shift(view.part, view.entries.first().map_or(0, height));
-    let mut top = start - shift;
-    let entries: Vec<_> = view
-        .entries
-        .iter()
+    let entries = entry_tops(view)
+        .into_iter()
+        .zip(&view.entries)
         .enumerate()
-        .map(|(i, entry)| {
-            let h = height(entry);
-            let rect = Rectangle::new((x, top).into(), (w, h).into());
-            top += h;
+        .map(|(i, (top, entry))| {
+            let h = entry_height(entry);
+            let rect = Rectangle::new((x, start + top.round() as i32).into(), (w, h).into());
             let buttons = match entry {
-                MenuEntry::Project { row, .. } if hovered == Some(i) => {
+                MenuEntry::Project { row, .. } if EntryLook::of(view, i).hovered => {
                     row_button_rects(&row_buttons(row), rect)
                 }
                 _ => Vec::new(),
@@ -333,12 +325,73 @@ pub(super) fn menu_entries(
             (rect, buttons)
         })
         .collect();
-    let under = match (view.part > 0.0, view.entries.last()) {
-        (true, Some(last)) => height(last),
-        _ => 0,
-    };
-    *y = (top + shift - under).max(start + PROJECT_MENU_ROW);
+    let height: i32 = view.entries.iter().map(entry_height).sum();
+    *y = start + height.max(PROJECT_MENU_ROW);
     entries
+}
+
+/// How high `entry` is.
+fn entry_height(entry: &MenuEntry) -> i32 {
+    project_menu_entry_height(matches!(entry, MenuEntry::Section(_)))
+}
+
+/// How high an entry of the project menu is: a section's label, or a row.
+pub fn project_menu_entry_height(section: bool) -> i32 {
+    if section {
+        PROJECT_MENU_SECTION
+    } else {
+        PROJECT_MENU_ROW
+    }
+}
+
+/// Where the entries of `view` go down its list, from its top: moved up by
+/// its `part`.
+fn entry_tops(view: &ProjectMenuView) -> Vec<f64> {
+    let mut y = -view.part;
+    view.entries
+        .iter()
+        .map(|entry| {
+            let top = y;
+            y += entry_height(entry) as f64;
+            top
+        })
+        .collect()
+}
+
+/// The places of the project menu's entries down its list, from whether
+/// each is a section's label, in order.
+pub fn project_menu_places(sections: impl IntoIterator<Item = bool>) -> RowTops {
+    RowTops::new(sections.into_iter().map(project_menu_entry_height))
+}
+
+/// What an entry's pixels depend on besides the entry: whether it is
+/// selected, whether the pointer is on it and on which of its buttons, and
+/// how far its hover pill has faded in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct EntryLook {
+    selected: bool,
+    hovered: bool,
+    button: Option<RowButton>,
+    hover_alpha: u8,
+}
+
+impl EntryLook {
+    /// How entry `i` of `view` looks.
+    fn of(view: &ProjectMenuView, i: usize) -> Self {
+        let hovered = matches!(
+            view.hover,
+            Some(MenuHit::Entry(j) | MenuHit::Button(j, _)) if j == i
+        );
+        Self {
+            selected: view.selected == Some(i),
+            hovered,
+            button: match view.hover {
+                Some(MenuHit::Button(j, button)) if j == i => Some(button),
+                _ => None,
+            },
+            hover_alpha: if hovered { view.hover_alpha } else { 0 },
+        }
+    }
 }
 
 /// The buttons a project row shows under the pointer, left to right:
@@ -484,16 +537,30 @@ pub(super) fn settings_layout(x: i32, w: i32, y: &mut i32) -> SettingsLayout {
     }
 }
 
-/// How many entries the project menu's list shows at most on an output of
+/// How many rows the project menu's list holds at most on an output of
 /// `size`: as many full rows as fit above its bottom margin, within bounds.
 pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
-    let room = size.h
+    (project_menu_fits(size) / PROJECT_MENU_ROW).clamp(PROJECT_MENU_MIN_ROWS, PROJECT_MENU_MAX_ROWS)
+        as usize
+}
+
+/// How high the project menu's list may be on an output of `size`: as
+/// high as `project_menu_page` rows, or as fits, a row at the least.
+pub fn project_menu_room(size: Size<i32, Logical>) -> i32 {
+    (project_menu_page(size) as i32 * PROJECT_MENU_ROW)
+        .min(project_menu_fits(size))
+        .max(PROJECT_MENU_ROW)
+}
+
+/// The room above the project menu's bottom margin for its list, with the
+/// footer at its tallest.
+fn project_menu_fits(size: Size<i32, Logical>) -> i32 {
+    size.h
         - HELP_MARGIN
         - PROJECT_MENU_TOP
         - PROJECT_MENU_INPUT
         - 2 * PROJECT_MENU_PADDING
-        - footer_height(usize::MAX);
-    (room / PROJECT_MENU_ROW).clamp(PROJECT_MENU_MIN_ROWS, PROJECT_MENU_MAX_ROWS) as usize
+        - footer_height(usize::MAX)
 }
 
 /// What `pos` is over in the project menu showing `view` on an output of
@@ -638,10 +705,42 @@ pub fn project_menu_field(
     })
 }
 
+/// Whether an entry of `view` is being renamed.
+fn renaming(view: &ProjectMenuView) -> bool {
+    view.entries.iter().any(|e| {
+        matches!(
+            e,
+            MenuEntry::Project {
+                renaming: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+/// Whether entry `i` of `view` starts the rows starting new projects, right
+/// after a project: a line goes over it.
+fn under_projects(view: &ProjectMenuView, i: usize) -> bool {
+    let after_project = i
+        .checked_sub(1)
+        .is_some_and(|j| matches!(view.entries[j], MenuEntry::Project { .. }));
+    matches!(view.entries[i], MenuEntry::New(_)) && after_project
+}
+
+/// A line across a panel `w` wide whose left edge is `x` physical pixels
+/// in, at `y`, inside the panel's border.
+fn menu_divider(c: &mut Canvas, x: i32, y: i32, w: i32, scale: f64, p: &Palette) {
+    let px = |v: i32| (v as f64 * scale).round() as i32;
+    let border = px(1).max(1);
+    c.fill(x + border, y, px(w) - 2 * border, border, p.border_variant);
+}
+
 impl Painter {
     /// The project menu for an output of `size`, inside a margin of `SHADOW`
-    /// holding its drop shadow: the query field and the entries, or the
-    /// form under its title; then the key hints.
+    /// holding its drop shadow, in one buffer: the query field and the
+    /// entries, or the form under its title; then the key hints. The chrome
+    /// shows it in parts (see `ProjectMenuLayers`).
+    #[cfg(test)]
     pub(super) fn project_menu(
         &self,
         view: &ProjectMenuView,
@@ -650,6 +749,49 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let layout = project_menu_layout(view, size);
+        let empty = view.entries.is_empty();
+        let mut c = self.project_menu_frame(view, &layout, empty, renaming(view), scale, p);
+        if layout.form.is_some() || layout.settings.is_some() {
+            return c.into_buffer(false);
+        }
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let panel = layout.panel;
+        // Rects relative to the buffer, which starts `SHADOW` before the panel.
+        let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
+        let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
+        let (x, y, w, h) = rect_px(shift(layout.list), scale);
+        c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
+            for (i, ((rect, buttons), entry)) in
+                layout.entries.iter().zip(&view.entries).enumerate()
+            {
+                if rect.size.h == 0 {
+                    continue;
+                }
+                let rect = shift(*rect);
+                let buttons: Vec<_> = buttons.iter().map(|(b, r)| (*b, shift(*r))).collect();
+                if under_projects(view, i) {
+                    menu_divider(c, px(SHADOW), px(rect.loc.y), panel.size.w, scale, p);
+                }
+                let look = EntryLook::of(view, i);
+                self.menu_entry(c, entry, look, rect, &buttons, scale, p);
+            }
+        });
+        c.into_buffer(false)
+    }
+
+    /// The project menu laid out as `layout` but its entries, inside a
+    /// margin of `SHADOW` holding its drop shadow: the query field of
+    /// `view` (focused unless an entry is `renaming`), "Nothing matches"
+    /// when `empty`, or the form under its title; then the key hints.
+    fn project_menu_frame(
+        &self,
+        view: &ProjectMenuView,
+        layout: &ProjectMenuLayout,
+        empty: bool,
+        renaming: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> Canvas {
         let panel = layout.panel;
         let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -660,13 +802,7 @@ impl Painter {
         let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
         // A line across the panel, at `y` physical pixels.
         let divider = |c: &mut Canvas, y: i32| {
-            c.fill(
-                px(SHADOW) + border,
-                y,
-                px(panel.size.w) - 2 * border,
-                border,
-                p.border_variant,
-            );
+            menu_divider(c, px(SHADOW), y, panel.size.w, scale, p);
         };
 
         let query = shift(layout.query);
@@ -704,17 +840,8 @@ impl Painter {
                 }
             }
             (None, None) => {
-                let renaming = view.entries.iter().any(|e| {
-                    matches!(
-                        e,
-                        MenuEntry::Project {
-                            renaming: Some(_),
-                            ..
-                        }
-                    )
-                });
                 self.menu_query(&mut c, &view.query, !renaming, query, scale, p);
-                if view.entries.is_empty() {
+                if empty {
                     let first = Rectangle::new(
                         (
                             query.loc.x,
@@ -735,27 +862,6 @@ impl Painter {
                         p.placeholder,
                     );
                 }
-                let (x, y, w, h) = rect_px(shift(layout.list), scale);
-                c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
-                    for (i, ((rect, buttons), entry)) in
-                        layout.entries.iter().zip(&view.entries).enumerate()
-                    {
-                        if rect.size.h == 0 {
-                            continue;
-                        }
-                        let rect = shift(*rect);
-                        let buttons: Vec<_> =
-                            buttons.iter().map(|(b, r)| (*b, shift(*r))).collect();
-                        // A line between the projects and the rows starting new ones.
-                        let after_project = i
-                            .checked_sub(1)
-                            .is_some_and(|j| matches!(view.entries[j], MenuEntry::Project { .. }));
-                        if matches!(entry, MenuEntry::New(_)) && after_project {
-                            divider(c, px(rect.loc.y));
-                        }
-                        self.menu_entry(c, view, i, entry, rect, &buttons, scale, p);
-                    }
-                });
             }
         }
         divider(&mut c, px(query.loc.y + query.size.h) - border);
@@ -768,7 +874,31 @@ impl Painter {
             _ => None,
         };
         self.hints(&mut c, &hint_strs(&view.hints), &spots, hover, scale, p);
-        c.into_buffer(false)
+        c
+    }
+
+    /// `entry` drawn alone, `size` big on the panel's colour, looking as
+    /// `look` says.
+    fn menu_entry_buffer(
+        &self,
+        entry: &MenuEntry,
+        size: Size<i32, Logical>,
+        look: EntryLook,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(super::physical(size, scale));
+        let (w, h) = (c.w, c.h);
+        c.fill(0, 0, w, h, p.elevated);
+        let rect = Rectangle::from_size(size);
+        let buttons = match entry {
+            MenuEntry::Project { row, .. } if look.hovered => {
+                row_button_rects(&row_buttons(row), rect)
+            }
+            _ => Vec::new(),
+        };
+        self.menu_entry(&mut c, entry, look, rect, &buttons, scale, p);
+        c.into_buffer(true)
     }
 
     /// The project menu's query field in `rect`: a magnifier, then `query`
@@ -805,15 +935,14 @@ impl Painter {
         );
     }
 
-    /// Entry `i` of the project menu in `rect` (buffer coordinates), with
-    /// the row `buttons` it shows under the pointer.
+    /// `entry` of the project menu in `rect` (buffer coordinates), looking
+    /// as `look` says, with the row `buttons` it shows under the pointer.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn menu_entry(
         &self,
         c: &mut Canvas,
-        view: &ProjectMenuView,
-        i: usize,
         entry: &MenuEntry,
+        look: EntryLook,
         rect: Rect,
         buttons: &[(RowButton, Rect)],
         scale: f64,
@@ -845,10 +974,6 @@ impl Painter {
         // The highlight stops short of the rows above and below.
         let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
         let r = (MENU_RADIUS - 2.0) * s;
-        let hovered = matches!(
-            view.hover,
-            Some(MenuHit::Entry(j) | MenuHit::Button(j, _)) if j == i
-        );
         let confirm = matches!(
             entry,
             MenuEntry::Project {
@@ -858,10 +983,10 @@ impl Painter {
         );
         if confirm {
             c.rounded(x, y, w, h, r, mix(p.elevated, p.warning, 0.15));
-        } else if view.selected == Some(i) {
+        } else if look.selected {
             c.rounded(x, y, w, h, r, p.selected);
-        } else if hovered {
-            let t = 0.5 * view.hover_alpha as f32 / 16.0;
+        } else if look.hovered {
+            let t = 0.5 * look.hover_alpha as f32 / 16.0;
             c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, t));
         }
 
@@ -890,7 +1015,7 @@ impl Painter {
                 }
                 let mut end = right;
                 if let Some((_, first)) = buttons.first() {
-                    self.row_buttons(c, view, i, buttons, confirm, scale, p);
+                    self.row_buttons(c, look, buttons, confirm, scale, p);
                     end = px(first.loc.x) as f32 - gap;
                 } else if !confirm && renaming.is_none() {
                     if let Some(digit) = digit {
@@ -992,15 +1117,13 @@ impl Painter {
         }
     }
 
-    /// The `buttons` of entry `i`: icons, the one under the pointer on a
-    /// rounded square; forget in the warning colour while it asks to be
-    /// confirmed.
-    #[allow(clippy::too_many_arguments)]
+    /// The `buttons` of an entry looking as `look` says: icons, the one
+    /// under the pointer on a rounded square; forget in the warning colour
+    /// while it asks to be confirmed.
     pub(super) fn row_buttons(
         &self,
         c: &mut Canvas,
-        view: &ProjectMenuView,
-        i: usize,
+        look: EntryLook,
         buttons: &[(RowButton, Rect)],
         confirm: bool,
         scale: f64,
@@ -1008,7 +1131,7 @@ impl Painter {
     ) {
         let s = scale as f32;
         for &(button, rect) in buttons {
-            let hot = view.hover == Some(MenuHit::Button(i, button));
+            let hot = look.button == Some(button);
             if hot {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, CAP_RADIUS * s, mix(p.selected, p.text, 0.12));
@@ -1284,12 +1407,143 @@ impl Painter {
     }
 }
 
+/// What the project menu's frame is drawn from: its view without the
+/// entries and what only they show, its layout without them, whether there
+/// are none, whether one is renamed, the theme and the scale.
+type FrameKey = (
+    ProjectMenuView,
+    ProjectMenuLayout,
+    bool,
+    bool,
+    super::Theme,
+    f64,
+);
+
+/// What an entry's buffer is drawn from: the entry, its size, how it
+/// looks, the theme and the scale.
+type EntryKey = (MenuEntry, Size<i32, Logical>, EntryLook, super::Theme, f64);
+
+/// The project menu as the chrome shows it, fading in and out (see
+/// `Overlay`): a frame buffer with what stays put, and a buffer per entry,
+/// which scrolling only moves.
+#[derive(Default)]
+pub(super) struct ProjectMenuLayers {
+    overlay: super::Overlay<FrameKey>,
+    entries: RowCache<EntryKey>,
+    /// The line between the projects and the rows starting new ones, by
+    /// the panel's width, the theme and the scale.
+    divider: super::Cached<(i32, super::Theme, f64)>,
+    /// How many frames were drawn.
+    #[cfg(test)]
+    frames: std::cell::Cell<usize>,
+}
+
+impl ProjectMenuLayers {
+    /// The parts showing the project menu at `now`, front to back.
+    pub(super) fn parts(
+        &mut self,
+        view: Option<ProjectMenuView>,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<Part> {
+        let shown = view.map(|view| {
+            let layout = project_menu_layout(&view, output);
+            (view, layout)
+        });
+        let placed = shown.as_ref().map(|(view, layout)| {
+            let listed = layout.form.is_none() && layout.settings.is_none();
+            let still = ProjectMenuView {
+                entries: Vec::new(),
+                selected: None,
+                // In the list, only the key hints light up in the frame.
+                hover: view
+                    .hover
+                    .filter(|hit| !listed || matches!(hit, MenuHit::Hint(_))),
+                hover_alpha: 0,
+                part: 0.0,
+                ..view.clone()
+            };
+            let frame = ProjectMenuLayout {
+                entries: Vec::new(),
+                ..layout.clone()
+            };
+            let (loc, size) = super::shadowed(layout.panel);
+            let key = (
+                still,
+                frame,
+                view.entries.is_empty(),
+                renaming(view),
+                theme,
+                scale,
+            );
+            (key, loc, size)
+        });
+        let parts = self.overlay.parts(
+            placed,
+            now,
+            true,
+            |(view, layout, empty, renaming, ..)| {
+                #[cfg(test)]
+                self.frames.set(self.frames.get() + 1);
+                painter
+                    .project_menu_frame(view, layout, *empty, *renaming, scale, theme.palette())
+                    .into_buffer(false)
+            },
+            |_| {
+                let Some((view, layout)) = &shown else {
+                    return Vec::new();
+                };
+                let p = theme.palette();
+                let (list, panel) = (layout.list, layout.panel);
+                let top = list.loc.y as f64;
+                let mut parts = Vec::new();
+                let tops = entry_tops(view);
+                for (i, ((rect, _), entry)) in layout.entries.iter().zip(&view.entries).enumerate()
+                {
+                    if rect.size.h == 0 {
+                        continue;
+                    }
+                    let y = top + tops[i];
+                    if under_projects(view, i) {
+                        let size = Size::from((panel.size.w, 1));
+                        let buffer = self.divider.get((panel.size.w, theme, scale), |_| {
+                            let mut c = Canvas::new(super::physical(size, scale));
+                            menu_divider(&mut c, 0, 0, panel.size.w, scale, p);
+                            c.into_buffer(false)
+                        });
+                        let part = Part::new(buffer, panel.loc, size, 1.0);
+                        parts.push(part.at((panel.loc.x as f64, y).into()).clipped(list));
+                    }
+                    let look = EntryLook::of(view, i);
+                    let key = (entry.clone(), rect.size, look, theme, scale);
+                    let buffer = self
+                        .entries
+                        .get(key, rect.size, scale, |(entry, size, ..)| {
+                            painter.menu_entry_buffer(entry, *size, look, scale, p)
+                        });
+                    let part = Part::new(&buffer, rect.loc, rect.size, 1.0);
+                    parts.push(part.at((rect.loc.x as f64, y).into()).clipped(list));
+                }
+                parts
+            },
+        );
+        self.entries.sweep();
+        if !self.overlay.lingers() {
+            self.entries.clear();
+        }
+        parts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FormField, FormView, MenuEntry, MenuHit, PROJECT_MENU_ROW, PROJECT_MENU_SECTION,
+        FormField, FormView, MenuEntry, MenuHit, PROJECT_MENU_SECTION, ProjectMenuLayers,
         ProjectMenuView, RowButton, SettingsField, SettingsView, project_menu_field,
-        project_menu_hit, project_menu_layout, project_menu_page,
+        project_menu_hit, project_menu_layout, project_menu_page, project_menu_room,
     };
     use crate::WorkspaceKind;
     use crate::chrome::{
@@ -1548,38 +1802,83 @@ mod tests {
         assert!(project_menu_page((800, 600).into()) > 3);
     }
 
+    /// The list with more projects than fit, `part` scrolled.
+    fn long_view(part: f64) -> ProjectMenuView {
+        let mut view = list_view();
+        let more = (0..20).map(|i| project(menu_row(&format!("p{i}"), None, false), None));
+        view.entries.splice(3..3, more);
+        view.part = part;
+        view
+    }
+
     #[test]
-    fn a_scrolled_list_moves_up_and_shows_its_last_entry_in_part() {
+    fn a_scrolled_list_moves_up_and_keeps_its_height() {
         let size: Size<i32, Logical> = (1280, 800).into();
-        let whole = list_view();
-        let mut scrolled = list_view();
-        scrolled
-            .entries
-            .insert(0, MenuEntry::Section("Earlier".into()));
-        scrolled.part = 0.5;
         let (a, b) = (
-            project_menu_layout(&whole, size),
-            project_menu_layout(&scrolled, size),
+            project_menu_layout(&long_view(0.0), size),
+            project_menu_layout(&long_view(30.0), size),
         );
-        // As tall as its entries but the last, shown in part, and moved up
-        // half the first one.
+        // As high as the room, whatever the scroll; the entries moved up.
+        assert_eq!((a.list, a.panel), (b.list, b.panel));
+        assert_eq!(a.list.size.h, project_menu_room(size));
+        let bottom = b.list.loc.y + b.list.size.h;
+        for ((ra, _), (rb, _)) in a.entries.iter().zip(&b.entries) {
+            if ra.size.h > 0 && rb.size.h > 0 {
+                assert_eq!(rb.loc.y, ra.loc.y - 30);
+            }
+        }
+        // The first entry, a section's label, went up out of the list and is
+        // cut to nothing; the next one reaches up out of it, and one is
+        // shown in part at its bottom; those under it are cut to nothing.
+        let cut = |(rect, _): &(Rect, _)| rect.size.h == 0;
+        assert!(cut(&b.entries[0]));
         assert_eq!(
-            a.list.size.h + PROJECT_MENU_SECTION - PROJECT_MENU_ROW,
-            b.list.size.h
+            b.entries[1].0.loc.y,
+            b.list.loc.y + PROJECT_MENU_SECTION - 30
         );
-        assert_eq!(
-            b.entries[0].0.loc.y,
-            b.list.loc.y - PROJECT_MENU_SECTION / 2
-        );
-        let (last, _) = b.entries.last().unwrap();
-        assert!(last.loc.y < b.list.loc.y + b.list.size.h);
-        assert!(last.loc.y + last.size.h > b.list.loc.y + b.list.size.h);
+        let last = b.entries.iter().rposition(|e| !cut(e)).unwrap();
+        let (rect, _) = b.entries[last];
+        assert!(rect.loc.y < bottom && rect.loc.y + rect.size.h > bottom);
+        assert!(b.entries[last + 1..].iter().all(cut));
         // Above the list, the first entry is not hit.
         let above = (b.list.loc.x as f64 + 40.0, b.list.loc.y as f64 - 2.0);
-        assert_ne!(
-            project_menu_hit(&scrolled, size, above.into()),
-            Some(MenuHit::Entry(0))
-        );
+        let hit = project_menu_hit(&long_view(30.0), size, above.into());
+        assert_ne!(hit, Some(MenuHit::Entry(0)));
+        // Pulled down past the start, the entries come down.
+        let c = project_menu_layout(&long_view(-20.0), size);
+        assert_eq!(c.entries[1].0.loc.y, a.entries[1].0.loc.y + 20);
+    }
+
+    #[test]
+    fn scrolling_by_part_of_a_row_draws_nothing_again() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let mut layers = ProjectMenuLayers::default();
+        let start = std::time::Instant::now();
+        let draw = |layers: &mut ProjectMenuLayers, part: f64, ms: u64| {
+            let view = ProjectMenuView {
+                hover: Some(MenuHit::Entry(3)),
+                part,
+                ..list_view()
+            };
+            let at = start + std::time::Duration::from_millis(ms);
+            layers.parts(Some(view), size, Theme::Dark, 1.25, at, &painter)
+        };
+        // Faded in first.
+        draw(&mut layers, 0.0, 0);
+        let first = draw(&mut layers, 5.0, 300);
+        let (frames, entries) = (layers.frames.get(), layers.entries.drawn());
+        assert_eq!(frames, 1);
+        let moved = draw(&mut layers, 17.5, 400);
+        assert_eq!(layers.frames.get(), frames);
+        assert_eq!(layers.entries.drawn(), entries);
+        // Only the entries and the line over the new ones moved, by as
+        // much; the frame stayed.
+        assert_eq!(moved.len(), first.len());
+        assert_eq!(moved.last().unwrap().loc, first.last().unwrap().loc);
+        for (a, b) in first.iter().zip(&moved).take(first.len() - 1) {
+            assert_eq!(b.loc.y, a.loc.y - 12.5);
+        }
     }
 
     #[test]

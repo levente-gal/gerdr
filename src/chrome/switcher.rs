@@ -7,6 +7,8 @@
 //! muted text on the second, with a small pill at the right naming its
 //! kind. The key hints go in a footer, as in the project menu.
 
+use super::Rgb;
+use super::layers::{Part, RowCache};
 use super::{
     AGENT_ICON, BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
@@ -18,10 +20,10 @@ use super::{
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
 use crate::herdr::AgentStatus;
+use crate::project_list::RowTops;
 use crate::text_field::Line;
-use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-use smithay::utils::{Logical, Point, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A row: two lines of text.
 const ROW_HEIGHT: i32 = 40;
@@ -99,8 +101,11 @@ pub struct SwitcherView {
     pub hints: Vec<(String, String)>,
     /// The key hint under the pointer, by index into `hints`.
     pub hint_hover: Option<usize>,
-    /// The part of the first row scrolled past, 0 to 1; with some, the
-    /// rows take one more under the list, shown in part.
+    /// How far the rows are moved up from resting with the first one at
+    /// the top, in logical pixels: part of the way to the next row while
+    /// scrolled, less than none while pulled down past the start, and
+    /// more while pulled up past the end. The rows reach down past the
+    /// list, and one may be shown in part at its bottom.
     pub part: f64,
 }
 
@@ -115,7 +120,11 @@ pub struct SwitcherLayout {
     /// A scrolled list's first and last rows, and their headings, reach
     /// out of `list`.
     pub rows: Vec<Rect>,
+    /// The headings over the rows starting a section, but the first row.
     pub sections: Vec<(Rect, &'static str)>,
+    /// The first row's heading, kept at the top of the list over the rows
+    /// scrolled under it until the next heading pushes it out.
+    pub kept: Option<(Rect, &'static str)>,
     /// Where the rows and their headings show.
     pub list: Rect,
     pub footer: Rect,
@@ -126,8 +135,9 @@ pub struct SwitcherLayout {
 /// Where the blinking dots of `view`'s agents at work go, laid out as
 /// `layout`: one per such row, where the list shows it.
 pub fn switcher_blinkers(view: &SwitcherView, layout: &SwitcherLayout) -> Vec<Rect> {
+    // A row the list cuts shows the part of its dot it shows of it.
     let list = layout.list;
-    let shows = |r: &Rect| r.loc.y >= list.loc.y && r.loc.y + r.size.h <= list.loc.y + list.size.h;
+    let shows = |r: &Rect| r.overlaps(list);
     view.rows
         .iter()
         .zip(&layout.rows)
@@ -162,7 +172,12 @@ pub fn switcher_icon(row: Rect) -> Rect {
 
 /// The switcher showing `view` in the app `area` (window coordinates).
 pub fn switcher_geometry(view: &SwitcherView, area: Rect) -> SwitcherLayout {
-    switcher_parts(view, panel_origin(area), panel_width(area))
+    switcher_parts(
+        view,
+        panel_origin(area),
+        panel_width(area),
+        Some(switcher_room(area)),
+    )
 }
 
 /// The switcher showing `rows` rows without any section heading, category
@@ -175,6 +190,7 @@ pub fn switcher_layout(rows: usize, area: Rect) -> (Rect, Rect, Vec<Rect>) {
         &[],
         0,
         0.0,
+        Some(switcher_room(area)),
         panel_origin(area),
         panel_width(area),
     );
@@ -193,29 +209,57 @@ fn panel_origin(area: Rect) -> Point<i32, Logical> {
         .into()
 }
 
-/// How many rows the switcher shows at most in the app `area`, keeping
-/// room for the headings of `sections` sections, the category chips (when
-/// there are `chips`) and the footer.
-pub fn switcher_page(area: Rect, sections: usize, chips: bool) -> usize {
-    let room = area.size.h
+/// How high the switcher's list may be in the app `area`: as high as fits
+/// above the footer, keeping room for the category chips, up to
+/// `SWITCHER_ROWS` rows under two headings; a row under its heading at the
+/// least.
+pub fn switcher_room(area: Rect) -> i32 {
+    let fits = area.size.h
         - SWITCHER_TOP
         - SWITCHER_INPUT
         - 2 * SWITCHER_PADDING
         - HELP_MARGIN
-        - if chips { CHIPS_ROW } else { 0 }
+        - CHIPS_ROW
         - footer_height(SWITCHER_HINTS);
-    let headings = (sections.min(SWITCHER_ROWS as usize) as i32) * SECTION_HEIGHT;
-    ((room - headings) / ROW_HEIGHT).clamp(1, SWITCHER_ROWS) as usize
+    fits.clamp(
+        SECTION_HEIGHT + ROW_HEIGHT,
+        SWITCHER_ROWS * ROW_HEIGHT + 2 * SECTION_HEIGHT,
+    )
+}
+
+/// The places of the switcher's rows down its scrolled list, from whether
+/// each row starts a section, in order. A row's place is the band over it
+/// (its heading, or the first row's kept at the top) and the row, up to
+/// where the next row's band would be: a list standing at a row shows it
+/// under its band.
+pub fn switcher_places(starts: impl IntoIterator<Item = bool>) -> RowTops {
+    let starts: Vec<bool> = starts.into_iter().collect();
+    RowTops::new((0..starts.len()).map(|i| {
+        ROW_HEIGHT
+            + match starts.get(i + 1) {
+                Some(false) => 0,
+                Some(true) | None => SECTION_HEIGHT,
+            }
+    }))
+}
+
+/// How far down the switcher's list of `places` row `i` shows whole: its
+/// band and the row.
+pub fn switcher_row_span(places: &RowTops, i: usize) -> (f64, f64) {
+    let top = places.top(i);
+    (top, top + (SECTION_HEIGHT + ROW_HEIGHT) as f64)
 }
 
 /// The most key hints the switcher shows: one footer row's worth.
 pub const SWITCHER_HINTS: usize = 4;
 
-/// `switcher_geometry` for a panel `w` wide at `loc`.
+/// `switcher_geometry` for a panel `w` wide at `loc`, its list `room`
+/// high at most (as high as its rows without).
 pub(super) fn switcher_parts(
     view: &SwitcherView,
     loc: Point<i32, Logical>,
     w: i32,
+    room: Option<i32>,
 ) -> SwitcherLayout {
     let sections: Vec<_> = view.rows.iter().map(|row| row.section).collect();
     let mut layout = parts(
@@ -223,6 +267,7 @@ pub(super) fn switcher_parts(
         &view.categories,
         view.hints.len(),
         view.part,
+        room,
         loc,
         w,
     );
@@ -231,9 +276,13 @@ pub(super) fn switcher_parts(
 }
 
 /// The row of the switcher laid out as `layout` under `pos`, by index into
-/// its rows: none outside the list, where a scrolled list's rows reach.
+/// its rows: none outside the list, where a scrolled list's rows reach, nor
+/// under the heading kept over them.
 pub fn switcher_row_at(layout: &SwitcherLayout, pos: Point<f64, Logical>) -> Option<usize> {
-    if !layout.list.to_f64().contains(pos) {
+    let kept = layout
+        .kept
+        .is_some_and(|(rect, _)| rect.to_f64().contains(pos));
+    if kept || !layout.list.to_f64().contains(pos) {
         return None;
     }
     layout
@@ -274,16 +323,70 @@ fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
         .collect()
 }
 
+/// Where the rows of `sections` (the heading over each, if any) go down
+/// the list, moved up by `part` logical pixels, from the list's top: each
+/// row's top, each heading's but the first row's, and the first row's
+/// heading kept at the top, pushed up by the next one coming up.
+struct Placed {
+    rows: Vec<f64>,
+    headings: Vec<(f64, &'static str)>,
+    kept: Option<(f64, &'static str)>,
+    /// How high the rows and their headings are, at rest.
+    height: i32,
+}
+
+fn place(sections: &[Option<&'static str>], part: f64) -> Placed {
+    let band = |i: usize| match sections.get(i) {
+        Some(Some(_)) => SECTION_HEIGHT,
+        _ => 0,
+    };
+    let mut y = band(0) as f64 - part;
+    let mut rows = Vec::with_capacity(sections.len());
+    let mut headings = Vec::new();
+    for (i, section) in sections.iter().enumerate() {
+        if let (true, Some(label)) = (i > 0, section) {
+            headings.push((y, *label));
+            y += SECTION_HEIGHT as f64;
+        }
+        rows.push(y);
+        y += ROW_HEIGHT as f64;
+    }
+    let height = band(0)
+        + (1..sections.len()).map(band).sum::<i32>()
+        + ROW_HEIGHT * sections.len().max(1) as i32;
+    // Pulled down past the start, the kept heading comes down with the rows.
+    let top = (-part).max(0.0);
+    let kept = sections.first().copied().flatten().map(|label| {
+        let mut kept = (top, label);
+        for &(y, label) in &headings {
+            if y <= top {
+                kept = (top, label);
+            } else {
+                kept.0 = kept.0.min(y - SECTION_HEIGHT as f64);
+                break;
+            }
+        }
+        kept
+    });
+    Placed {
+        rows,
+        headings,
+        kept,
+        height,
+    }
+}
+
 /// The panel `w` wide at `loc`, with the chips of `categories` (none
 /// without any), a row per entry of `sections` (the heading over it, if
 /// any) and a footer for `hints` key hints; it keeps room for one row
-/// without any. With `part` of the first row scrolled past, the rows are
-/// moved up by as much and the last one is shown in part.
+/// without any. The list is as high as its rows at rest, `room` at most;
+/// they are moved up by `part` logical pixels.
 fn parts(
     sections: &[Option<&'static str>],
     categories: &[&str],
     hints: usize,
     part: f64,
+    room: Option<i32>,
     loc: Point<i32, Logical>,
     w: i32,
 ) -> SwitcherLayout {
@@ -295,43 +398,19 @@ fn parts(
         y += CHIPS_ROW;
     }
     let start = y;
-    let heading = |i: usize| match sections.get(i) {
-        Some(Some(_)) => SECTION_HEIGHT,
-        _ => 0,
-    };
-    // Scrolled part of the first row, the list starts up by as much of the
-    // way to the second row (the first row's heading goes up with it, to
-    // be shown again over the second row once scrolled whole), and ends
-    // where it would without its last row and that row's heading.
-    let scrolled = part > 0.0 && sections.len() > 1;
-    let shift = if scrolled {
-        wheel::shift(part, ROW_HEIGHT + heading(1))
-    } else {
-        0
-    };
-    let under = if scrolled {
-        ROW_HEIGHT + heading(sections.len() - 1)
-    } else {
-        0
-    };
-    y -= shift;
-    let mut rows = Vec::with_capacity(sections.len());
-    let mut headings = Vec::new();
-    for section in sections {
-        if let Some(label) = section {
-            headings.push((
-                Rectangle::new((x, y).into(), (row_w, SECTION_HEIGHT).into()),
-                *label,
-            ));
-            y += SECTION_HEIGHT;
-        }
-        rows.push(Rectangle::new((x, y).into(), (row_w, ROW_HEIGHT).into()));
-        y += ROW_HEIGHT;
-    }
-    if sections.is_empty() {
-        y += ROW_HEIGHT;
-    }
-    y += shift - under;
+    let placed = place(sections, part);
+    let at = |dy: f64| start + dy.round() as i32;
+    let rect = |dy: f64, h: i32| Rectangle::new((x, at(dy)).into(), (row_w, h).into());
+    let rows = placed.rows.iter().map(|&dy| rect(dy, ROW_HEIGHT)).collect();
+    let headings = placed
+        .headings
+        .iter()
+        .map(|&(dy, label)| (rect(dy, SECTION_HEIGHT), label))
+        .collect();
+    let kept = placed
+        .kept
+        .map(|(dy, label)| (rect(dy, SECTION_HEIGHT), label));
+    y += placed.height.min(room.unwrap_or(i32::MAX));
     let list = Rectangle::new((x, start).into(), (row_w, y - start).into());
     let footer_h = footer_height(hints);
     let footer = Rectangle::new((loc.x, y + SWITCHER_PADDING).into(), (w, footer_h).into());
@@ -342,6 +421,7 @@ fn parts(
         chips,
         rows,
         sections: headings,
+        kept,
         list,
         footer,
         hints: Vec::new(),
@@ -370,8 +450,10 @@ pub fn switcher_field(view: &SwitcherView, area: Rect, scale: f64) -> FieldSpot 
 
 impl Painter {
     /// The switcher `w` wide inside a margin of `SHADOW` holding its drop
-    /// shadow: the query (or what to type) with a caret, the category
-    /// chips, the rows under their section headings, then the key hints.
+    /// shadow, in one buffer: the query (or what to type) with a caret, the
+    /// category chips, the rows under their section headings, then the key
+    /// hints. The chrome shows it in parts (see `SwitcherLayers`).
+    #[cfg(test)]
     pub(super) fn switcher(
         &self,
         view: &SwitcherView,
@@ -379,7 +461,38 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = switcher_parts(view, (SHADOW, SHADOW).into(), w);
+        let layout = switcher_parts(view, (SHADOW, SHADOW).into(), w, None);
+        let mut c = self.switcher_frame(view, &layout, view.rows.is_empty(), scale, p);
+        // The rows and their headings, cut to the list as it scrolls.
+        let (x, y, w, h) = rect_px(layout.list, scale);
+        c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
+            for (rect, label) in &layout.sections {
+                self.switcher_heading(c, label, *rect, scale, p);
+            }
+            for (i, (slot, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
+                let fill = row_fill(view.selected == Some(i), view.hover == Some(i), p);
+                self.switcher_row(c, row, fill, *slot, scale, p);
+            }
+            if let Some((rect, label)) = layout.kept {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.fill(x as i32, y as i32, w as i32, h as i32, p.elevated);
+                self.switcher_heading(c, label, rect, scale, p);
+            }
+        });
+        c.into_buffer(false)
+    }
+
+    /// The switcher laid out as `layout` (in buffer coordinates) but its
+    /// rows and headings: the query of `view` with a caret, the category
+    /// chips, "Nothing matches" when `empty`, then the key hints.
+    fn switcher_frame(
+        &self,
+        view: &SwitcherView,
+        layout: &SwitcherLayout,
+        empty: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> Canvas {
         let (panel, input) = (layout.panel, layout.input);
         let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -413,16 +526,8 @@ impl Painter {
             self.category_chip(&mut c, view, i, label, *rect, scale, p);
         }
 
-        if view.rows.is_empty() {
-            let empty = parts(
-                &[None],
-                &view.categories,
-                view.hints.len(),
-                0.0,
-                (SHADOW, SHADOW).into(),
-                w,
-            );
-            let slot = empty.rows[0];
+        if empty {
+            let slot = Rectangle::new(layout.list.loc, (layout.list.size.w, ROW_HEIGHT).into());
             let band = (px(slot.loc.y), px(slot.size.h));
             self.text(
                 &mut c,
@@ -435,45 +540,56 @@ impl Painter {
                 p.placeholder,
             );
         }
-        // The rows and their headings, cut to the list as it scrolls.
-        let (x, y, w, h) = rect_px(layout.list, scale);
-        c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
-            for (rect, label) in &layout.sections {
-                let band = (
-                    px(rect.loc.y + rect.size.h - SECTION_TEXT),
-                    px(SECTION_TEXT),
-                );
-                self.text(
-                    c,
-                    &label.to_uppercase(),
-                    TINY_FONT_SIZE,
-                    px(rect.loc.x) as f32 + PADDING * s,
-                    px(rect.loc.x + rect.size.w) as f32 - PADDING * s,
-                    band,
-                    scale,
-                    p.placeholder,
-                );
-            }
-            for (i, (slot, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
-                self.switcher_row(c, view, i, row, *slot, scale, p);
-            }
-        });
         divider(&mut c, px(layout.footer.loc.y));
         let hints = hint_strs(&view.hints);
         self.hints(&mut c, &hints, &layout.hints, view.hint_hover, scale, p);
-        c.into_buffer(false)
+        c
     }
 
-    /// Row `i` of the switcher showing `view`, `row`, in `slot`: its icon,
-    /// its two lines of text and the kind pill, on a pill when selected or
-    /// under the pointer.
-    #[allow(clippy::too_many_arguments)]
+    /// A section's heading, `label`, in `rect`: upper case, muted, in the
+    /// lower part of its band.
+    fn switcher_heading(&self, c: &mut Canvas, label: &str, rect: Rect, scale: f64, p: &Palette) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let band = (
+            px(rect.loc.y + rect.size.h - SECTION_TEXT),
+            px(SECTION_TEXT),
+        );
+        self.text(
+            c,
+            &label.to_uppercase(),
+            TINY_FONT_SIZE,
+            px(rect.loc.x) as f32 + PADDING * s,
+            px(rect.loc.x + rect.size.w) as f32 - PADDING * s,
+            band,
+            scale,
+            p.placeholder,
+        );
+    }
+
+    /// A buffer of `size` on the panel's colour, drawn into with `draw` at
+    /// the rect it fills.
+    fn switcher_piece(
+        &self,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+        draw: impl FnOnce(&mut Canvas, Rect),
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(super::physical(size, scale));
+        let (w, h) = (c.w, c.h);
+        c.fill(0, 0, w, h, p.elevated);
+        draw(&mut c, Rectangle::from_size(size));
+        c.into_buffer(true)
+    }
+
+    /// `row` in `slot`: its icon, its two lines of text and the kind
+    /// pill, on a pill of `fill` (when selected or under the pointer).
     fn switcher_row(
         &self,
         c: &mut Canvas,
-        view: &SwitcherView,
-        i: usize,
         row: &SwitcherRow,
+        fill: Option<Rgb>,
         slot: Rect,
         scale: f64,
         p: &Palette,
@@ -486,13 +602,6 @@ impl Painter {
             px(slot.size.w),
             px(slot.size.h),
         );
-        let fill = if view.selected == Some(i) {
-            Some(p.selected)
-        } else if view.hover == Some(i) {
-            Some(p.element)
-        } else {
-            None
-        };
         if let Some(fill) = fill {
             c.rounded(
                 x as f32,
@@ -625,14 +734,178 @@ impl Painter {
     }
 }
 
+/// The pill under a switcher row: selected, else under the pointer.
+fn row_fill(selected: bool, hovered: bool, p: &Palette) -> Option<Rgb> {
+    if selected {
+        Some(p.selected)
+    } else if hovered {
+        Some(p.element)
+    } else {
+        None
+    }
+}
+
+/// What the switcher's frame is drawn from: its view without the rows,
+/// its layout (in buffer coordinates) without them, whether nothing
+/// matches, the theme and the scale.
+type FrameKey = (SwitcherView, SwitcherLayout, bool, super::Theme, f64);
+
+/// What a row's buffer is drawn from: the row without its heading, its
+/// width, whether it is selected and under the pointer, the theme and the
+/// scale.
+type RowKey = (SwitcherRow, i32, bool, bool, super::Theme, f64);
+
+/// The switcher as the chrome shows it, fading in and out (see
+/// `Overlay`): a frame buffer with what stays put, and a buffer per row
+/// and per heading, which scrolling only moves.
+#[derive(Default)]
+pub(super) struct SwitcherLayers {
+    overlay: super::Overlay<FrameKey>,
+    rows: RowCache<RowKey>,
+    /// By label, width, theme and scale.
+    headings: RowCache<(&'static str, i32, super::Theme, f64)>,
+    /// How many frames were drawn.
+    #[cfg(test)]
+    frames: std::cell::Cell<usize>,
+}
+
+impl SwitcherLayers {
+    /// The parts showing the switcher at the top of the app `area` at
+    /// `now`, front to back.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parts(
+        &mut self,
+        view: Option<SwitcherView>,
+        area: Rect,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+        blink: super::layers::Blink,
+    ) -> Vec<Part> {
+        let shown = view.map(|view| {
+            let layout = switcher_geometry(&view, area);
+            (view, layout)
+        });
+        let placed = shown.as_ref().map(|(view, layout)| {
+            let w = layout.panel.size.w;
+            let room = Some(switcher_room(area));
+            let frame = SwitcherLayout {
+                rows: Vec::new(),
+                sections: Vec::new(),
+                kept: None,
+                ..switcher_parts(view, (SHADOW, SHADOW).into(), w, room)
+            };
+            let still = SwitcherView {
+                rows: Vec::new(),
+                selected: None,
+                hover: None,
+                part: 0.0,
+                ..view.clone()
+            };
+            let (loc, size) = super::shadowed(layout.panel);
+            (
+                (still, frame, view.rows.is_empty(), theme, scale),
+                loc,
+                size,
+            )
+        });
+        let parts = self.overlay.parts(
+            placed,
+            now,
+            true,
+            |(view, layout, empty, ..)| {
+                #[cfg(test)]
+                self.frames.set(self.frames.get() + 1);
+                painter
+                    .switcher_frame(view, layout, *empty, scale, theme.palette())
+                    .into_buffer(false)
+            },
+            |_| {
+                let Some((view, layout)) = &shown else {
+                    return Vec::new();
+                };
+                let placed = place(
+                    &view.rows.iter().map(|row| row.section).collect::<Vec<_>>(),
+                    view.part,
+                );
+                let (x, top) = (layout.list.loc.x, layout.list.loc.y as f64);
+                let (w, bottom) = (layout.list.size.w, top + layout.list.size.h as f64);
+                // Only what the list shows of the rows and headings.
+                let out = |dy: f64, h: i32| top + dy >= bottom || top + dy + h as f64 <= top;
+                let p = theme.palette();
+                let mut parts = Vec::new();
+                let mut heading = |parts: &mut Vec<Part>, (dy, label): (f64, &'static str)| {
+                    if out(dy, SECTION_HEIGHT) {
+                        return;
+                    }
+                    let size = Size::from((w, SECTION_HEIGHT));
+                    let buffer = self
+                        .headings
+                        .get((label, w, theme, scale), size, scale, |_| {
+                            painter.switcher_piece(size, scale, p, |c, rect| {
+                                painter.switcher_heading(c, label, rect, scale, p)
+                            })
+                        });
+                    let part = Part::new(&buffer, (x, 0).into(), size, 1.0);
+                    parts.push(part.at((x as f64, top + dy).into()).clipped(layout.list));
+                };
+                if let Some(kept) = placed.kept {
+                    heading(&mut parts, kept);
+                }
+                for &kept in &placed.headings {
+                    heading(&mut parts, kept);
+                }
+                // The dots of the agents at work, in front of their rows.
+                let at: Vec<_> = (layout.rows.iter())
+                    .zip(&placed.rows)
+                    .map(|(slot, &dy)| (*slot, Point::from((x as f64, top + dy))))
+                    .collect();
+                let dots = switcher_blinkers(view, layout);
+                parts.extend(super::layers::dot_parts(blink, dots, &at, layout.list));
+                for (i, (row, &dy)) in view.rows.iter().zip(&placed.rows).enumerate() {
+                    if out(dy, ROW_HEIGHT) {
+                        continue;
+                    }
+                    let (selected, hovered) = (view.selected == Some(i), view.hover == Some(i));
+                    let size = Size::from((w, ROW_HEIGHT));
+                    let row = SwitcherRow {
+                        section: None,
+                        ..row.clone()
+                    };
+                    let key = (row, w, selected, hovered, theme, scale);
+                    let buffer = self.rows.get(key, size, scale, |(row, ..)| {
+                        painter.switcher_piece(size, scale, p, |c, rect| {
+                            let fill = row_fill(selected, hovered, p);
+                            painter.switcher_row(c, row, fill, rect, scale, p)
+                        })
+                    });
+                    let part = Part::new(&buffer, (x, 0).into(), size, 1.0);
+                    parts.push(part.at((x as f64, top + dy).into()).clipped(layout.list));
+                }
+                parts
+            },
+        );
+        self.rows.sweep();
+        self.headings.sweep();
+        if !self.overlay.lingers() {
+            self.rows.clear();
+            self.headings.clear();
+        }
+        parts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CHIP_GAP, CHIP_HEIGHT, CHIPS_ROW, ItemIcon, ROW_HEIGHT, SECTION_HEIGHT, SWITCHER_INPUT,
-        SWITCHER_PADDING, SwitcherRow, SwitcherView, chip_rects, footer_height, switcher_geometry,
-        switcher_layout, switcher_page, switcher_row_at,
+        SWITCHER_PADDING, SwitcherLayers, SwitcherRow, SwitcherView, chip_rects, footer_height,
+        switcher_geometry, switcher_layout, switcher_places, switcher_room, switcher_row_at,
     };
+    use crate::chrome::{Painter, Rect, Theme};
     use smithay::utils::Rectangle;
+    use std::time::{Duration, Instant};
 
     fn row(section: Option<&'static str>) -> SwitcherRow {
         SwitcherRow {
@@ -664,13 +937,13 @@ mod tests {
         };
         let layout = switcher_geometry(&view, area);
         let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
-        assert_eq!(layout.sections.len(), 2);
-        assert_eq!(layout.sections[0].0.loc.y, top);
-        assert_eq!(layout.sections[0].1, "Workspaces");
+        let (kept, label) = layout.kept.unwrap();
+        assert_eq!((kept.loc.y, label), (top, "Workspaces"));
         assert_eq!(layout.rows[0].loc.y, top + SECTION_HEIGHT);
         assert_eq!(layout.rows[1].loc.y, top + SECTION_HEIGHT + ROW_HEIGHT);
+        assert_eq!(layout.sections.len(), 1);
         assert_eq!(
-            layout.sections[1].0.loc.y,
+            layout.sections[0].0.loc.y,
             top + SECTION_HEIGHT + 2 * ROW_HEIGHT
         );
         assert_eq!(
@@ -727,50 +1000,111 @@ mod tests {
         for pair in layout.chips.windows(2) {
             assert_eq!(pair[0].loc.x + pair[0].size.w + CHIP_GAP, pair[1].loc.x);
         }
-        assert_eq!(layout.sections[0].0.loc.y, top + CHIPS_ROW);
+        assert_eq!(layout.kept.unwrap().0.loc.y, top + CHIPS_ROW);
         assert_eq!(layout.rows[0].loc.y, top + CHIPS_ROW + SECTION_HEIGHT);
     }
 
-    #[test]
-    fn a_scrolled_list_moves_up_and_shows_its_last_row_in_part() {
-        let area = Rectangle::new((200, 36).into(), (1000, 800).into());
-        let whole = SwitcherView {
+    /// Rows of tabs under `sections`, a row each, `part` scrolled.
+    fn scrolled(sections: &[Option<&'static str>], part: f64) -> SwitcherView {
+        SwitcherView {
             query: "".into(),
             hint: "",
             categories: Vec::new(),
             category: 0,
             category_hover: None,
-            rows: vec![row(Some("Workspaces")), row(Some("Tabs")), row(None)],
+            rows: sections.iter().map(|section| row(*section)).collect(),
             selected: Some(0),
             hover: None,
             hints: Vec::new(),
             hint_hover: None,
-            part: 0.0,
-        };
-        let mut scrolled = whole.clone();
-        scrolled.rows.push(row(None));
-        scrolled.part = 0.5;
+            part,
+        }
+    }
+
+    #[test]
+    fn a_scrolled_list_moves_up_under_the_heading_kept_at_its_top() {
+        // A room for three rows and a heading more than shows.
+        let area = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let room = switcher_room(area);
+        let n = (room / ROW_HEIGHT) as usize + 2;
+        let mut sections = vec![None; n];
+        sections[0] = Some("Workspaces");
+        sections[2] = Some("Tabs");
         let (a, b) = (
-            switcher_geometry(&whole, area),
-            switcher_geometry(&scrolled, area),
+            switcher_geometry(&scrolled(&sections, 0.0), area),
+            switcher_geometry(&scrolled(&sections, 30.0), area),
         );
-        // As tall as without its last row, shown in part; moved up half
-        // the way to the second row, under its heading.
+        // As high as the room, whatever the scroll; the rows moved up and
+        // the heading kept where it was, over them.
         assert_eq!((a.list, a.panel), (b.list, b.panel));
-        let shift = (ROW_HEIGHT + SECTION_HEIGHT) / 2;
-        assert_eq!(b.rows[0].loc.y, a.rows[0].loc.y - shift);
-        assert_eq!(b.sections[1].0.loc.y, a.sections[1].0.loc.y - shift);
+        assert_eq!(a.list.size.h, room);
+        assert_eq!(b.rows[0].loc.y, a.rows[0].loc.y - 30);
+        assert_eq!(b.sections[0].0.loc.y, a.sections[0].0.loc.y - 30);
+        assert_eq!(a.kept, b.kept);
         let bottom = b.list.loc.y + b.list.size.h;
-        let last = b.rows[3];
-        assert!(last.loc.y < bottom && last.loc.y + last.size.h > bottom);
-        // Only the rows' parts within the list are hit.
+        let last = b.rows.iter().find(|r| r.loc.y + r.size.h > bottom).unwrap();
+        assert!(last.loc.y < bottom);
+        // Only the rows' parts within the list and below the kept heading
+        // are hit.
         let x = b.list.loc.x as f64 + 40.0;
         let at = |y: i32| switcher_row_at(&b, (x, y as f64 + 0.5).into());
-        assert!(b.rows[0].loc.y < b.list.loc.y);
-        assert_eq!(at(b.list.loc.y - 1), None);
-        assert_eq!(at(b.list.loc.y), Some(0));
-        assert_eq!(at(bottom - 1), Some(3));
+        let under = b.list.loc.y + SECTION_HEIGHT;
+        assert_eq!(at(b.list.loc.y), None);
+        assert_eq!(at(under - 1), None);
+        assert_eq!(at(under), Some(0));
+        assert_eq!(at(bottom - 1), b.rows.iter().position(|r| r == last));
         assert_eq!(at(bottom), None);
+        // Scrolled near the next heading, it pushes the kept one up.
+        let near = (ROW_HEIGHT + SECTION_HEIGHT + ROW_HEIGHT - 10) as f64;
+        let c = switcher_geometry(&scrolled(&sections, near), area);
+        let (kept, label) = c.kept.unwrap();
+        assert_eq!(label, "Workspaces");
+        assert_eq!(kept.loc.y + kept.size.h, c.sections[0].0.loc.y);
+        // Pulled down past the start, it comes down with the rows.
+        let d = switcher_geometry(&scrolled(&sections, -20.0), area);
+        assert_eq!(d.kept.unwrap().0.loc.y, a.list.loc.y + 20);
+        assert_eq!(d.rows[0].loc.y, a.rows[0].loc.y + 20);
+    }
+
+    #[test]
+    fn places_hold_a_row_and_the_band_over_the_next() {
+        let places = switcher_places([true, false, true, false]);
+        let (row, band) = (ROW_HEIGHT as f64, SECTION_HEIGHT as f64);
+        assert_eq!(places.height(0), row);
+        assert_eq!(places.height(1), row + band);
+        assert_eq!(places.end(), 4.0 * row + 2.0 * band);
+    }
+
+    #[test]
+    fn scrolling_by_part_of_a_row_draws_nothing_again() {
+        let painter = Painter::new();
+        let area: Rect = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let mut layers = SwitcherLayers::default();
+        let mut sections = vec![None; 8];
+        sections[0] = Some("Workspaces");
+        sections[5] = Some("Tabs");
+        let start = Instant::now();
+        let draw = |layers: &mut SwitcherLayers, part: f64, ms: u64| {
+            let at = start + Duration::from_millis(ms);
+            let view = Some(scrolled(&sections, part));
+            layers.parts(view, area, Theme::Dark, 1.25, at, &painter, None)
+        };
+        // Faded in first.
+        draw(&mut layers, 0.0, 0);
+        let first = draw(&mut layers, 0.0, 300);
+        let (frames, rows) = (layers.frames.get(), layers.rows.drawn());
+        let headings = layers.headings.drawn();
+        assert_eq!(frames, 1);
+        let moved = draw(&mut layers, 17.5, 400);
+        assert_eq!(layers.frames.get(), frames);
+        assert_eq!(layers.rows.drawn(), rows);
+        assert_eq!(layers.headings.drawn(), headings);
+        // Only the rows moved, by as much; the frame stayed.
+        assert_eq!(moved.len(), first.len());
+        let frame = |parts: &[crate::chrome::layers::Part]| parts.last().unwrap().loc;
+        assert_eq!(frame(&moved), frame(&first));
+        assert_eq!(moved[2].loc.y, first[2].loc.y - 17.5);
+        assert_eq!(moved[0].loc, first[0].loc);
     }
 
     #[test]
@@ -792,19 +1126,11 @@ mod tests {
     }
 
     #[test]
-    fn the_page_keeps_room_for_the_headings() {
-        let area = Rectangle::new((0, 0).into(), (1000, 600).into());
-        assert!(switcher_page(area, 7, false) < switcher_page(area, 1, false));
-        assert!(switcher_page(area, 1, true) <= switcher_page(area, 1, false));
-        assert!(switcher_page(area, 7, true) >= 1);
-        assert_eq!(
-            switcher_page(Rectangle::new((0, 0).into(), (1000, 100).into()), 7, true),
-            1
-        );
-        assert_eq!(
-            switcher_page(Rectangle::new((0, 0).into(), (1000, 2000).into()), 7, true),
-            12
-        );
+    fn the_room_fits_the_area_within_bounds() {
+        let room = |h: i32| switcher_room(Rectangle::new((0, 0).into(), (1000, h).into()));
+        assert!(room(600) < room(800));
+        assert_eq!(room(100), SECTION_HEIGHT + ROW_HEIGHT);
+        assert_eq!(room(2000), 12 * ROW_HEIGHT + 2 * SECTION_HEIGHT);
     }
 
     #[test]

@@ -55,6 +55,8 @@ mod repo_batches;
 mod repos;
 mod restart;
 mod review;
+mod scroll;
+mod scrolling;
 mod sidebar;
 mod switcher;
 mod syntax;
@@ -67,7 +69,6 @@ mod tooltip;
 mod web_control;
 mod web_pages;
 mod welcome;
-mod wheel;
 mod worktrees;
 
 use std::{
@@ -95,10 +96,7 @@ use rename::Rename;
 use smithay::{
     backend::{
         egl::EGLDevice,
-        renderer::{
-            ImportDma, damage::OutputDamageTracker,
-            element::memory::MemoryRenderBufferRenderElement, gles::GlesRenderer,
-        },
+        renderer::{ImportDma, damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
@@ -1122,8 +1120,11 @@ pub struct Gerdr {
     pub sidebar_hover: anim::Hover<chrome::SidebarHit>,
     /// How far the sidebar's rows are scrolled up, in logical pixels, and
     /// the active workspace they were last scrolled to show.
-    pub sidebar_scroll: f64,
+    pub sidebar_scroll: scroll::Scroll,
     pub sidebar_shown: Option<usize>,
+    /// Whether a scrolled list moved on its own or under the fingers at the
+    /// last frame (see `tick_scrolls`).
+    pub scrolling: bool,
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
@@ -5478,6 +5479,7 @@ impl Gerdr {
     /// stay) is moved on here first.
     fn chrome_view(&mut self) -> ChromeView {
         let now = Instant::now();
+        self.tick_scrolls(now);
         self.tooltip.tick(now);
         self.expire_toasts(now);
         let tab_strip = self.tab_hover_tick(now);
@@ -5813,7 +5815,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rename: None,
         tab_hover: anim::Hover::default(),
         sidebar_hover: anim::Hover::default(),
-        sidebar_scroll: 0.0,
+        sidebar_scroll: scroll::Scroll::default(),
+        scrolling: false,
         sidebar_shown: None,
         frecency: Frecency::load(),
         bar_states: pane_control::BarStates::default(),
@@ -5989,7 +5992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let chrome = state.chrome.elements(renderer, view);
                     let _ = smithay::desktop::space::render_output::<
                         _,
-                        MemoryRenderBufferRenderElement<GlesRenderer>,
+                        chrome::ChromeElement,
                         _,
                         _,
                     >(

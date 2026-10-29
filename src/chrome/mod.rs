@@ -24,6 +24,7 @@ mod golden;
 mod help;
 mod hints;
 mod inbox;
+mod layers;
 mod menu;
 mod painter;
 mod pane_bar;
@@ -45,13 +46,7 @@ mod worktrees;
 use std::time::Instant;
 
 use smithay::{
-    backend::renderer::{
-        element::{
-            Kind,
-            memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-        },
-        gles::GlesRenderer,
-    },
+    backend::renderer::{element::memory::MemoryRenderBuffer, gles::GlesRenderer},
     utils::{Logical, Point, Rectangle, Size},
 };
 
@@ -66,6 +61,8 @@ pub use drop::*;
 pub use help::*;
 pub use hints::*;
 pub use inbox::*;
+pub use layers::ChromeElement;
+use layers::*;
 pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
@@ -153,32 +150,25 @@ pub struct ChromeView {
     pub scale: f64,
 }
 
-/// Sidebar inputs: the view (with what moves in it, quantized), theme,
-/// size, scale.
-type SidebarKey = (SidebarView, Theme, Size<i32, Logical>, f64);
-
 pub struct Chrome {
     painter: Painter,
     /// When the chrome was made: what spins is timed from it.
     epoch: Instant,
     /// Outline every hit rect in red (`DEBUG_HITS` in the environment).
     debug_hits: bool,
-    sidebar: Cached<SidebarKey>,
-    /// The band breathing over a blocked card's header (one size fits all
-    /// the cards).
-    pulse: Cached<(Size<i32, Logical>, Theme, f64)>,
+    sidebar: SidebarLayers,
     tabs: Cached<(TabStripView, Theme, i32, f64)>,
     help: Overlay<(HelpLayout, Option<HelpHit>, Theme, f64)>,
     menu: Overlay<(MenuView, Theme, f64)>,
     tooltip: Overlay<(TooltipView, i32, Theme, f64)>,
-    switcher: Overlay<(SwitcherView, i32, Theme, f64)>,
+    switcher: SwitcherLayers,
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
     restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
-    project_menu: Overlay<(ProjectMenuView, Size<i32, Logical>, Theme, f64)>,
-    worktrees: Overlay<(WorktreesView, Size<i32, Logical>, Theme, f64)>,
-    repos: Overlay<(ReposView, Size<i32, Logical>, Theme, f64)>,
-    inbox: Overlay<(InboxView, Size<i32, Logical>, Theme, f64)>,
+    project_menu: ProjectMenuLayers,
+    worktrees: WorktreesLayers,
+    repos: ReposLayers,
+    inbox: InboxLayers,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -215,20 +205,19 @@ impl Chrome {
             painter: Painter::new(),
             epoch: Instant::now(),
             debug_hits: std::env::var_os(DEBUG_HITS).is_some_and(|v| v == "1"),
-            sidebar: Cached::default(),
-            pulse: Cached::default(),
+            sidebar: SidebarLayers::default(),
             tabs: Cached::default(),
             help: Overlay::default(),
             menu: Overlay::default(),
             tooltip: Overlay::default(),
-            switcher: Overlay::default(),
+            switcher: SwitcherLayers::default(),
             welcome: Overlay::default(),
             quit: Overlay::default(),
             restart: Overlay::default(),
-            project_menu: Overlay::default(),
-            worktrees: Overlay::default(),
-            repos: Overlay::default(),
-            inbox: Overlay::default(),
+            project_menu: ProjectMenuLayers::default(),
+            worktrees: WorktreesLayers::default(),
+            repos: ReposLayers::default(),
+            inbox: InboxLayers::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -284,14 +273,13 @@ impl Chrome {
         &mut self,
         renderer: &mut GlesRenderer,
         view: ChromeView,
-    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    ) -> Vec<ChromeElement> {
         let now = view.now;
         let scale = view.scale;
         let theme = view.theme;
         let sidebar_w = view.sidebar_width;
         let strip_h = tab_strip_height(view.density);
         let output: Size<i32, Logical> = (view.size.w.max(1), view.size.h.max(1)).into();
-        let sidebar_size: Size<i32, Logical> = (sidebar_w, output.h).into();
         let strip_size: Size<i32, Logical> = ((view.size.w - sidebar_w).max(1), strip_h).into();
         // The app area, under the tab strip and right of the sidebar.
         let area = Rectangle::new(
@@ -300,13 +288,6 @@ impl Chrome {
         );
         let pointer = view.pointer;
         let painter = &self.painter;
-        // A popup's buffer reaches past its panel by the shadow on every side.
-        let shadowed = |panel: Rect| {
-            (
-                panel.loc - Point::from((SHADOW, SHADOW)),
-                Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW)),
-            )
-        };
         let spinner_step = self.spinner_step(now);
         let blink = crate::anim::blink(self.epoch, now);
         let dot = self.blink_dot.get((theme, scale), |_| {
@@ -325,7 +306,7 @@ impl Chrome {
             let buffer = self.hits.get((rects, output, scale), |(rects, output, _)| {
                 hit_outlines(rects, *output, scale)
             });
-            parts.push((buffer, Point::from((0, 0)), output, 1.0));
+            parts.push(Part::new(buffer, Point::from((0, 0)), output, 1.0));
         }
 
         // The tooltip, by what it is about, over all else: it is offered
@@ -371,7 +352,7 @@ impl Chrome {
                 .part_over(welcome, now, SLOW, false, |(welcome, output, ..)| {
                     painter.welcome(welcome, *output, scale, theme.palette())
                 });
-        let covered = welcome_part.as_ref().is_some_and(|part| part.3 >= 1.0);
+        let covered = welcome_part.as_ref().is_some_and(|part| part.alpha >= 1.0);
         parts.extend(welcome_part);
         if covered {
             return render_parts(renderer, parts, scale);
@@ -389,67 +370,48 @@ impl Chrome {
         }));
 
         // The worktrees popup, over the sidebar and the apps.
-        let worktrees = view.worktrees.map(|popup| {
-            let (loc, size) = shadowed(worktrees_layout(&popup, output).panel);
-            ((popup, output, theme, scale), loc, size)
-        });
         parts.extend(
             self.worktrees
-                .part(worktrees, now, true, |(popup, output, ..)| {
-                    painter.worktrees(popup, *output, scale, theme.palette())
-                }),
+                .parts(view.worktrees, output, theme, scale, now, painter),
         );
 
         // The repositories panel, over nearly everything.
-        let repos = view.repos.map(|panel| {
-            let (loc, size) = shadowed(repos_layout(&panel, output).panel);
-            ((panel, output, theme, scale), loc, size)
-        });
-        parts.extend(self.repos.part(repos, now, true, |(panel, output, ..)| {
-            painter.repos(panel, *output, scale, theme.palette())
-        }));
-
-        // The inbox panel, as high, its agents' dots blinking in front of
-        // it.
-        let mut inbox_dots = None;
-        let inbox = view.inbox.map(|panel| {
-            let layout = inbox_layout(&panel, output);
-            let (loc, size) = shadowed(layout.panel);
-            inbox_dots = Some((loc, inbox_blinkers(&panel, &layout)));
-            ((panel, output, theme, scale), loc, size)
-        });
-        let part = self.inbox.part(inbox, now, true, |(panel, output, ..)| {
-            painter.inbox(panel, *output, scale, theme.palette())
-        });
-        push_popup(&mut parts, part, dot, inbox_dots, blink);
-
-        // The project menu reaches over the sidebar and the apps.
-        let project_menu = view.project_menu.map(|menu| {
-            let (loc, size) = shadowed(project_menu_layout(&menu, output).panel);
-            ((menu, output, theme, scale), loc, size)
-        });
         parts.extend(
-            self.project_menu
-                .part(project_menu, now, true, |(menu, output, ..)| {
-                    painter.project_menu(menu, *output, scale, theme.palette())
-                }),
+            self.repos
+                .parts(view.repos, output, theme, scale, now, painter),
         );
 
-        // The switcher at the top of the app area, its agents' dots
-        // blinking in front of it.
-        let mut switcher_dots = None;
-        let switcher = view.switcher.map(|switcher| {
-            let geometry = switcher_geometry(&switcher, area);
-            let (loc, size) = shadowed(geometry.panel);
-            switcher_dots = Some((loc, switcher_blinkers(&switcher, &geometry)));
-            ((switcher, geometry.panel.size.w, theme, scale), loc, size)
-        });
-        let part = self
-            .switcher
-            .part(switcher, now, true, |(switcher, w, ..)| {
-                painter.switcher(switcher, *w, scale, theme.palette())
-            });
-        push_popup(&mut parts, part, dot, switcher_dots, blink);
+        // The inbox panel, as high.
+        parts.extend(self.inbox.parts(
+            view.inbox,
+            output,
+            theme,
+            scale,
+            now,
+            painter,
+            Some((dot, blink)),
+        ));
+
+        // The project menu reaches over the sidebar and the apps.
+        parts.extend(self.project_menu.parts(
+            view.project_menu,
+            output,
+            theme,
+            scale,
+            now,
+            painter,
+        ));
+
+        // The switcher at the top of the app area.
+        parts.extend(self.switcher.parts(
+            view.switcher,
+            area,
+            theme,
+            scale,
+            now,
+            painter,
+            Some((dot, blink)),
+        ));
 
         // The help panel, centred at the bottom of the app area.
         let pinned = view.help_pinned;
@@ -516,7 +478,7 @@ impl Chrome {
             }
             let layout = placeholder_layout(rect, placeholder.timed_out);
             if let Some(spot) = layout.spinner {
-                parts.push((spinner, spot.loc, spot.size, 1.0));
+                parts.push(Part::new(spinner, spot.loc, spot.size, 1.0));
             }
             let hovered = layout.button_at(pointer);
             let buffer = cached.get(
@@ -525,7 +487,7 @@ impl Chrome {
                     painter.placeholder(placeholder, *hovered, scale, theme.palette())
                 },
             );
-            parts.push((buffer, rect.loc, rect.size, 1.0));
+            parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
         }
 
         // The strip marking the focused pane, then the pane bars, both on
@@ -538,7 +500,7 @@ impl Chrome {
                     .get((strip.size, theme, scale), |(size, ..)| {
                         focus_strip(*size, scale, theme.palette())
                     });
-                parts.push((buffer, strip.loc, strip.size, 1.0));
+                parts.push(Part::new(buffer, strip.loc, strip.size, 1.0));
             }
         }
         self.pane_bars
@@ -552,7 +514,7 @@ impl Chrome {
             let buffer = cached.get((bar.still(), theme, scale), |(bar, ..)| {
                 painter.pane_bar(bar, scale, theme.palette())
             });
-            parts.push((buffer, loc, size, alpha));
+            parts.push(Part::new(buffer, loc, size, alpha));
         }
         // Where a pane held by its bar would land: over the apps and the
         // tab strip, after the bars so it goes under them.
@@ -560,56 +522,10 @@ impl Chrome {
             let buffer = self.pane_drop.get((rect.size, theme, scale), |(size, ..)| {
                 pane_drop_highlight(*size, scale, theme.palette())
             });
-            parts.push((buffer, rect.loc, rect.size, 1.0));
-        }
-
-        // What moves in the sidebar, composed over it so that it is not
-        // redrawn for it: the blocked agents' pulse, one band per row with
-        // the pulse as its opacity, and the dots of what runs, blinking.
-        let pulse_alpha = pulse_alpha(view.pulse);
-        let mut bands = Vec::new();
-        let mut sidebar_dots = Vec::new();
-        if view.sidebar.moves() {
-            let layout = sidebar_layout_at(
-                &view.sidebar.workspaces,
-                &view.sidebar.agents,
-                sidebar_w,
-                view.density,
-            )
-            .scrolled(view.sidebar.state.scroll, output.h);
-            if pulse_alpha > 0.0 {
-                let blocked = |i: usize, k: usize| {
-                    view.sidebar
-                        .agents
-                        .get(i)
-                        .and_then(|cards| cards.get(k))
-                        .is_some_and(|card| card.status == crate::herdr::AgentStatus::Blocked)
-                };
-                // The rows in the workspaces, and those in the "Needs you" list.
-                let rows = layout
-                    .cards
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, rows)| rows.iter().map(move |(k, rect)| (i, *k, *rect)));
-                for (_, _, rect) in rows
-                    .chain(layout.inbox.iter().copied())
-                    .filter(|(i, k, _)| blocked(*i, *k))
-                {
-                    let band = blocked_band(rect, view.density);
-                    // Not on a row scrolled under the header.
-                    if band.size.w > 0 && band.size.h > 0 && band.loc.y >= BAR_HEIGHT {
-                        bands.push(band);
-                    }
-                }
-            }
-            sidebar_dots = sidebar_blinkers(&view.sidebar, &layout, output.h);
+            parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
         }
 
         // The sidebar and the tab strip.
-        let sidebar = self.sidebar.get(
-            (view.sidebar, theme, sidebar_size, scale),
-            |(sidebar, ..)| painter.sidebar_view(sidebar, sidebar_size, scale, theme.palette()),
-        );
         // The tab strip's blinking dots, moved onto the output.
         let strip_dots: Vec<Rect> = tab_blinkers(&view.tab_strip, strip_size)
             .into_iter()
@@ -619,98 +535,50 @@ impl Chrome {
             (view.tab_strip, theme, strip_size.w, scale),
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
-        // Every row is as wide as the next, so one band buffer fits all.
-        // Parts go front to back: the dots and bands before the opaque
-        // sidebar, or they would be under it.
-        push_dots(&mut parts, dot, sidebar_dots, blink);
-        if let Some(size) = bands.first().map(|band| band.size) {
-            let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
-                painter.pulse_band(*size, scale, theme.palette())
-            });
-            for band in bands.iter().filter(|band| band.size == size) {
-                parts.push((buffer, band.loc, size, pulse_alpha));
-            }
-        }
-        parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
+        parts.extend(self.sidebar.parts(
+            view.sidebar,
+            sidebar_w,
+            view.pulse,
+            view.density,
+            output,
+            theme,
+            scale,
+            painter,
+            Some((dot, blink)),
+        ));
         push_dots(&mut parts, dot, strip_dots, blink);
-        parts.push((strip, Point::from((sidebar_w, 0)), strip_size, 1.0));
+        parts.push(Part::new(
+            strip,
+            Point::from((sidebar_w, 0)),
+            strip_size,
+            1.0,
+        ));
         render_parts(renderer, parts, scale)
     }
 }
 
+/// Where a popup's buffer goes for its `panel`: it reaches past the panel
+/// by the shadow on every side.
+fn shadowed(panel: Rect) -> (Point<i32, Logical>, Size<i32, Logical>) {
+    (
+        panel.loc - Point::from((SHADOW, SHADOW)),
+        Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW)),
+    )
+}
+
 /// The blinking `dot` at each of `rects` (output coordinates), `alpha`
 /// opaque: in front of the surface they are on, so pushed before it.
-fn push_dots<'a>(
-    parts: &mut Vec<Part<'a>>,
-    dot: &'a MemoryRenderBuffer,
+fn push_dots(
+    parts: &mut Vec<Part>,
+    dot: &MemoryRenderBuffer,
     rects: impl IntoIterator<Item = Rect>,
     alpha: f32,
 ) {
     for rect in rects {
         if rect.size.w > 0 && rect.size.h > 0 {
-            parts.push((dot, rect.loc, rect.size, alpha));
+            parts.push(Part::new(dot, rect.loc, rect.size, alpha));
         }
     }
-}
-
-/// A popup's `part`, if it shows, with the blinking `dot` in front of it
-/// at each of `dots`: the rects laid out for the popup placed at a point,
-/// moved with it as it slides and faded with it. A popup fading out has
-/// none.
-fn push_popup<'a>(
-    parts: &mut Vec<Part<'a>>,
-    part: Option<Part<'a>>,
-    dot: &'a MemoryRenderBuffer,
-    dots: Option<(Point<i32, Logical>, Vec<Rect>)>,
-    blink: f32,
-) {
-    let Some(part) = part else {
-        return;
-    };
-    if let Some((at, dots)) = dots {
-        let by = part.1 - at;
-        let moved = dots
-            .into_iter()
-            .map(|dot| Rectangle::new(dot.loc + by, dot.size));
-        push_dots(parts, dot, moved, part.3 * blink);
-    }
-    parts.push(part);
-}
-
-/// A drawn buffer, where it goes on the output, the logical size it covers
-/// and its opacity (0 to 1).
-type Part<'a> = (
-    &'a MemoryRenderBuffer,
-    Point<i32, Logical>,
-    Size<i32, Logical>,
-    f32,
-);
-
-/// Render elements for buffers of physical pixels, each covering a logical
-/// size at a logical place on the output.
-fn render_parts(
-    renderer: &mut GlesRenderer,
-    parts: Vec<Part<'_>>,
-    scale: f64,
-) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
-    parts
-        .into_iter()
-        .filter_map(|(buffer, loc, size, alpha)| {
-            // The buffer holds physical pixels at buffer scale 1: sample all of it
-            // and squeeze it into the logical size.
-            let src = Rectangle::from_size(physical(size, scale).to_f64());
-            MemoryRenderBufferRenderElement::from_buffer(
-                renderer,
-                loc.to_f64().to_physical(scale),
-                buffer,
-                Some(alpha),
-                Some(src),
-                Some(size),
-                Kind::Unspecified,
-            )
-            .ok()
-        })
-        .collect()
 }
 
 /// A buffer plus the inputs it was drawn from.
@@ -749,6 +617,8 @@ struct Overlay<K> {
     fade: Option<Fade>,
     /// Whether the view was there the last time it was asked for.
     present: bool,
+    /// The parts over it last worked out (see `parts`).
+    more: Vec<Part>,
 }
 
 /// A toast's overlay: the toast, its width, whether its button is lit,
@@ -766,6 +636,7 @@ impl<K> Default for Overlay<K> {
             place: None,
             fade: None,
             present: false,
+            more: Vec::new(),
         }
     }
 }
@@ -786,7 +657,7 @@ impl<K: PartialEq> Overlay<K> {
         now: Instant,
         slide: bool,
         draw: impl FnOnce(&K) -> MemoryRenderBuffer,
-    ) -> Option<Part<'_>> {
+    ) -> Option<Part> {
         self.part_over(view, now, FAST, slide, draw)
     }
 
@@ -798,7 +669,49 @@ impl<K: PartialEq> Overlay<K> {
         dur: std::time::Duration,
         slide: bool,
         draw: impl FnOnce(&K) -> MemoryRenderBuffer,
-    ) -> Option<Part<'_>> {
+    ) -> Option<Part> {
+        self.fade_part(view, now, dur, slide, draw)
+            .map(|(part, ..)| part)
+    }
+
+    /// `part`, and `more` parts over it (a list's rows, say: worked out
+    /// only while the view is there), front to back, going up and fading
+    /// with it. Those last worked out fade out with it.
+    fn parts(
+        &mut self,
+        view: Placed<K>,
+        now: Instant,
+        slide: bool,
+        draw: impl FnOnce(&K) -> MemoryRenderBuffer,
+        more: impl FnOnce(&K) -> Vec<Part>,
+    ) -> Vec<Part> {
+        if let Some((key, ..)) = &view {
+            self.more = more(key);
+        }
+        let Some((part, rise, alpha)) = self.fade_part(view, now, FAST, slide, draw) else {
+            if !self.present {
+                self.more.clear();
+            }
+            return Vec::new();
+        };
+        let mut parts: Vec<Part> = self
+            .more
+            .iter()
+            .map(|p| p.clone().with(rise, alpha))
+            .collect();
+        parts.push(part);
+        parts
+    }
+
+    /// `part_over`, and how far the part is moved down and its opacity.
+    fn fade_part(
+        &mut self,
+        view: Placed<K>,
+        now: Instant,
+        dur: std::time::Duration,
+        slide: bool,
+        draw: impl FnOnce(&K) -> MemoryRenderBuffer,
+    ) -> Option<(Part, i32, f32)> {
         let present = view.is_some();
         if present != self.present {
             let from = match self.fade {
@@ -837,7 +750,11 @@ impl<K: PartialEq> Overlay<K> {
         } else {
             0
         };
-        Some((buffer, (loc.x, loc.y + rise).into(), size, alpha))
+        Some((
+            Part::new(buffer, (loc.x, loc.y + rise).into(), size, alpha),
+            rise,
+            alpha,
+        ))
     }
 }
 
@@ -850,7 +767,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         view.sidebar_width,
         view.density,
     )
-    .scrolled(view.sidebar.state.scroll, output.h);
+    .scrolled_over(view.sidebar.state.scroll, view.sidebar.state.over, output.h);
     rects.extend([sidebar.header, sidebar.plus, sidebar.repos]);
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);

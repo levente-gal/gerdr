@@ -23,6 +23,8 @@
 //! pulse on a blocked agent, a name being renamed) comes in through
 //! `SidebarState`.
 
+use super::layers::{Part, RowCache};
+#[cfg(test)]
 use super::repos::scrollbar;
 use super::{
     AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
@@ -952,8 +954,12 @@ pub struct SidebarState {
     /// The workspace being renamed, and the name typed so far.
     pub rename: Option<(usize, Line)>,
     /// How far the rows are scrolled up under the header, in logical
-    /// pixels.
-    pub scroll: i32,
+    /// pixels, to the fraction (within what they can scroll).
+    pub scroll: f64,
+    /// How far the rows are moved down past where `scroll` puts them, in
+    /// logical pixels, while they stretch past an end (see
+    /// `Scroll::overscroll`).
+    pub over: f64,
 }
 
 impl SidebarState {
@@ -1186,6 +1192,11 @@ impl SidebarHit {
         }
     }
 
+    /// Whether it moves as the rows scroll: all but the header's parts.
+    pub fn scrolls(self) -> bool {
+        !matches!(self, Self::Header | Self::Plus | Self::Repos)
+    }
+
     /// What lights up under this hit: a header for any part of it, an
     /// agent row for its "×"; anything else (a GitHub chip, its count, an
     /// inbox row) itself.
@@ -1298,10 +1309,26 @@ impl SidebarLayout {
             .clamp(0, self.max_scroll(height))
     }
 
-    /// This layout with everything under the header moved up by `scroll`,
-    /// held to what a sidebar `height` tall can scroll (`max_scroll`).
-    pub fn scrolled(mut self, scroll: i32, height: i32) -> Self {
-        let by = scroll.clamp(0, self.max_scroll(height)) - self.scroll;
+    /// This layout with everything under the header moved up by `scroll`
+    /// (to the nearest pixel), held to what a sidebar `height` tall can
+    /// scroll (`max_scroll`).
+    pub fn scrolled(self, scroll: impl Into<f64>, height: i32) -> Self {
+        let scroll = (scroll.into().round() as i32).clamp(0, self.max_scroll(height));
+        let by = scroll - self.scroll;
+        self.shifted(by)
+    }
+
+    /// This layout scrolled as `scrolled` has it, and moved down by `over`
+    /// more while the rows stretch past an end: both to the nearest pixel
+    /// together.
+    pub fn scrolled_over(self, scroll: f64, over: f64, height: i32) -> Self {
+        let scroll = scroll.clamp(0.0, self.max_scroll(height) as f64);
+        let by = (scroll - over).round() as i32 - self.scroll;
+        self.shifted(by)
+    }
+
+    /// This layout with everything under the header moved up by `by`.
+    fn shifted(mut self, by: i32) -> Self {
         if by == 0 {
             return self;
         }
@@ -1376,13 +1403,9 @@ fn status_extent(ws: &WorkspaceView, cards: &[AgentView]) -> Option<i32> {
     })
 }
 
-/// `sidebar_layout` at `density`.
-pub fn sidebar_layout_at(
-    workspaces: &[WorkspaceView],
-    agents: &[Vec<AgentView>],
-    width: i32,
-    density: Density,
-) -> SidebarLayout {
+/// Where the header's parts sit in a sidebar `width` wide: the project's
+/// name, the repositories button and the "+".
+fn header_rects(width: i32) -> (Rect, Rect, Rect) {
     let plus = Rectangle::new(
         (
             width - GAP - HEADER_MARGIN - HEADER_BUTTON,
@@ -1403,30 +1426,50 @@ pub fn sidebar_layout_at(
         )
             .into(),
     );
+    (header, repos, plus)
+}
+
+/// Where the "Needs you" list of `n` agents sits from `y` down in a
+/// sidebar `width` wide: its heading and its rows, none when it is empty,
+/// and where what follows it starts.
+fn inbox_rects(n: usize, y: i32, width: i32, density: Density) -> (Option<Rect>, Vec<Rect>, i32) {
+    if n == 0 {
+        return (None, Vec::new(), y);
+    }
+    let title = Rectangle::new((0, y).into(), (width - GAP, INBOX_TITLE).into());
+    let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
+    let mut y = y + INBOX_TITLE;
+    let rows = (0..n)
+        .map(|_| {
+            let rect = Rectangle::new((CHILD_X, y).into(), (child_w, agent_row(density)).into());
+            y += rect.size.h + CHILD_GAP;
+            rect
+        })
+        .collect();
+    (Some(title), rows, y + INBOX_GAP)
+}
+
+/// `sidebar_layout` at `density`.
+pub fn sidebar_layout_at(
+    workspaces: &[WorkspaceView],
+    agents: &[Vec<AgentView>],
+    width: i32,
+    density: Density,
+) -> SidebarLayout {
+    let (header, repos, plus) = header_rects(width);
     let right = width - GAP - ROW_INSET;
     let child_w = (right - CHILD_X).max(0);
     let child = |y: i32, h: i32| Rectangle::new((CHILD_X, y).into(), (child_w, h).into());
-    let mut y = ROWS_TOP;
     let none = Vec::new();
 
     // The "Needs you" list: a heading, then a one-line row per agent.
     let entries = inbox_order(agents);
-    let inbox_title = (!entries.is_empty()).then(|| {
-        let title = Rectangle::new((0, y).into(), (width - GAP, INBOX_TITLE).into());
-        y += INBOX_TITLE;
-        title
-    });
+    let (inbox_title, inbox_rows, mut y) = inbox_rects(entries.len(), ROWS_TOP, width, density);
     let inbox = entries
         .into_iter()
-        .map(|(i, k)| {
-            let rect = child(y, agent_row(density));
-            y += rect.size.h + CHILD_GAP;
-            (i, k, rect)
-        })
+        .zip(inbox_rows)
+        .map(|((i, k), rect)| (i, k, rect))
         .collect();
-    if inbox_title.is_some() {
-        y += INBOX_GAP;
-    }
 
     let (mut rows, mut card_rects, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
     let (mut card_closes, mut more, mut ci) = (Vec::new(), Vec::new(), Vec::new());
@@ -1672,7 +1715,9 @@ fn alpha(step: u8) -> f32 {
 impl Painter {
     /// The sidebar: the header (project name and "+"), the "Needs you"
     /// list, a header per workspace and what is under it, with what moves
-    /// in `view.state`.
+    /// in `view.state`. The chrome shows the same in parts (see
+    /// `SidebarLayers`), drawn by the same code.
+    #[cfg(test)]
     pub(super) fn sidebar_view(
         &self,
         view: &SidebarView,
@@ -1681,77 +1726,83 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(size, scale));
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
-        let line = px(1).max(1);
         c.fill(0, 0, c.w, c.h, p.panel);
 
         let state = &view.state;
         let density = state.density;
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
-            .scrolled(state.scroll, size.h);
+            .scrolled_over(state.scroll, state.over, size.h);
         self.sidebar_inbox(&mut c, view, &layout, scale, p);
-        self.sidebar_rows(&mut c, view, &layout, scale, p);
+        for i in 0..layout.rows.len().min(view.workspaces.len()) {
+            self.workspace_block(&mut c, view, &layout, i, scale, p);
+        }
 
         // The header over the rows scrolled under it.
+        self.sidebar_head(&mut c, &SidebarHead::of(view), size.w, scale, p);
+
+        // Where the rows are scrolled to, when they do not all fit.
+        let shown = size.h - BAR_HEIGHT;
+        let total = shown + layout.max_scroll(size.h);
+        let first = layout.scroll.max(0) as usize;
+        scrollbar(
+            &mut c,
+            scroll_track(size),
+            (first, shown.max(0) as usize, total.max(0) as usize),
+            scale,
+            p,
+        );
+        sidebar_edge(&mut c, scale, p);
+        c.into_buffer(true)
+    }
+
+    /// The sidebar's header, `width` wide, as `head` has it: its band and
+    /// the line under it, the project's name, and the repositories and "+"
+    /// buttons.
+    fn sidebar_head(
+        &self,
+        c: &mut Canvas,
+        head: &SidebarHead,
+        width: i32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let line = px(1).max(1);
+        let (header, repos, plus) = header_rects(width);
         c.fill(0, 0, c.w, px(BAR_HEIGHT), p.panel);
         c.fill(0, px(BAR_HEIGHT) - line, c.w, line, p.border);
-        match &view.project {
-            Some(name) => self.header_name(&mut c, name, view.header_lit, layout.header, scale, p),
+        match &head.project {
+            Some(name) => self.header_name(c, name, head.lit, header, scale, p),
             None => {
                 self.text(
-                    &mut c,
+                    c,
                     "Workspaces",
                     SMALL_FONT_SIZE,
                     px(ROW_INSET) as f32 + PADDING * s,
-                    px(layout.header.loc.x + layout.header.size.w) as f32,
+                    px(header.loc.x + header.size.w) as f32,
                     (0, px(BAR_HEIGHT)),
                     scale,
                     p.muted,
                 );
             }
         }
-        let plus = (alpha(state.plus), state.plus_open);
-        self.header_button(&mut c, layout.plus, plus, scale, p, |x, y| {
-            new_tab(x, y, 0.9 * s)
-        });
-        let repos = (alpha(state.repos), state.repos_open);
-        self.header_button(&mut c, layout.repos, repos, scale, p, |x, y| {
-            git_branch(x, y, 1.05 * s)
-        });
-        if state.repos_changed > 0 {
-            let fill = if state.repos_stuck { p.error } else { p.accent };
+        let lit = (alpha(head.plus), head.plus_open);
+        self.header_button(c, plus, lit, scale, p, |x, y| new_tab(x, y, 0.9 * s));
+        let lit = (alpha(head.repos), head.repos_open);
+        self.header_button(c, repos, lit, scale, p, |x, y| git_branch(x, y, 1.05 * s));
+        if head.repos_changed > 0 {
+            let fill = if head.repos_stuck { p.error } else { p.accent };
             let colors = (p.panel, fill, p.on_accent);
-            let (rect, n) = (layout.repos, state.repos_changed);
-            self.count_badge(&mut c, rect, n, 9, REPOS_BADGE_OUT, colors, scale);
+            let n = head.repos_changed;
+            self.count_badge(c, repos, n, 9, REPOS_BADGE_OUT, colors, scale);
         }
-
-        // Where the rows are scrolled to, when they do not all fit.
-        let shown = size.h - BAR_HEIGHT;
-        let total = shown + layout.max_scroll(size.h);
-        let track = Rectangle::new(
-            (
-                size.w - GAP - SCROLLBAR_INSET - SCROLLBAR_WIDTH,
-                BAR_HEIGHT + SCROLLBAR_INSET,
-            )
-                .into(),
-            (SCROLLBAR_WIDTH, shown - 2 * SCROLLBAR_INSET).into(),
-        );
-        let first = layout.scroll as usize;
-        scrollbar(
-            &mut c,
-            track,
-            (first, shown.max(0) as usize, total.max(0) as usize),
-            scale,
-            p,
-        );
-        c.fill(c.w - px(GAP).max(1), 0, px(GAP).max(1), c.h, p.border);
-        c.into_buffer(true)
     }
 
     /// The "Needs you" list where `layout` has it: a muted heading, then
     /// a row per agent of another workspace that is blocked or done, with
     /// its workspace's name at the right.
+    #[cfg(test)]
     fn sidebar_inbox(
         &self,
         c: &mut Canvas,
@@ -1763,6 +1814,28 @@ impl Painter {
         let Some(title) = layout.inbox_title else {
             return;
         };
+        let rows: Vec<_> = (layout.inbox.iter().enumerate())
+            .filter_map(|(n, (i, k, rect))| {
+                let card = view.agents.get(*i)?.get(*k)?;
+                let ws = view.workspaces.get(*i)?;
+                Some((card, ws.name.as_str(), view.state.inbox(n), *rect))
+            })
+            .collect();
+        self.inbox_rows(c, title, &rows, view.state.density, scale, p);
+    }
+
+    /// The "Needs you" list's heading at `title`, then its `rows`: each
+    /// an agent, its workspace's name, its hover alpha and where it goes.
+    #[allow(clippy::too_many_arguments)]
+    fn inbox_rows(
+        &self,
+        c: &mut Canvas,
+        title: Rect,
+        rows: &[(&AgentView, &str, u8, Rect)],
+        density: Density,
+        scale: f64,
+        p: &Palette,
+    ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         self.text(
             c,
@@ -1774,30 +1847,33 @@ impl Painter {
             scale,
             p.muted,
         );
-        let density = view.state.density;
-        for (n, (i, k, rect)) in layout.inbox.iter().enumerate() {
-            let (Some(card), Some(ws)) = (
-                view.agents.get(*i).and_then(|cards| cards.get(*k)),
-                view.workspaces.get(*i),
-            ) else {
-                continue;
-            };
+        for (card, place, hover, rect) in rows {
             let state = CardState {
-                hover: view.state.inbox(n),
+                hover: *hover,
                 ..CardState::default()
             };
-            let place = Some(ws.name.as_str());
-            self.agent_row(c, card, *rect, state, p.panel, place, density, scale, p);
+            self.agent_row(
+                c,
+                card,
+                *rect,
+                state,
+                p.panel,
+                Some(place),
+                density,
+                scale,
+                p,
+            );
         }
     }
 
-    /// The sidebar's workspace headers and what is under them, where
-    /// `layout` has them.
-    fn sidebar_rows(
+    /// Workspace `i`'s header and what is under it, where `layout` has
+    /// them.
+    fn workspace_block(
         &self,
         c: &mut Canvas,
         view: &SidebarView,
         layout: &SidebarLayout,
+        i: usize,
         scale: f64,
         p: &Palette,
     ) {
@@ -1806,56 +1882,57 @@ impl Painter {
         let state = &view.state;
         let density = state.density;
         let none = Vec::new();
-        for (i, (row, ws)) in layout.rows.iter().zip(&view.workspaces).enumerate() {
-            let is_active = Some(i) == view.active;
-            let cards = view.agents.get(i).unwrap_or(&none);
-            // The active workspace's block, tinted from edge to edge of
-            // what it holds; what lies on it mixes from the tint.
-            let under = if is_active {
-                mix(p.panel, p.selected, ACTIVE_TINT)
-            } else {
-                p.panel
-            };
-            if is_active && let Some(block) = layout.blocks.get(i) {
-                let h = (block.size.h - layout.block_gap).max(0);
-                let inner = Rectangle::new(block.loc, (block.size.w, h).into());
-                let (x, y, w, h) = rect_px(inner, scale);
-                let inset = px(ROW_INSET) as f32;
-                c.rounded(x + inset, y, w - 2.0 * inset, h, ROW_RADIUS * s, under);
-            }
-            let row_state = state.row(i);
-            let hover = alpha(row_state.hover);
-            let fill = (hover > 0.0).then(|| mix(under, p.element, hover));
-            if let Some(fill) = fill {
-                let (x, y, w, h) = rect_px(row.rect, scale);
-                let inset = px(ROW_INSET) as f32;
-                c.rounded(x + inset, y, w - 2.0 * inset, h, ROW_RADIUS * s, fill);
-            }
-            let surface = fill.unwrap_or(under);
-            self.workspace_header(c, ws, cards, row, row_state, i, surface, scale, view, p);
+        let (Some(row), Some(ws)) = (layout.rows.get(i), view.workspaces.get(i)) else {
+            return;
+        };
+        let is_active = Some(i) == view.active;
+        let cards = view.agents.get(i).unwrap_or(&none);
+        // The active workspace's block, tinted from edge to edge of
+        // what it holds; what lies on it mixes from the tint.
+        let under = if is_active {
+            mix(p.panel, p.selected, ACTIVE_TINT)
+        } else {
+            p.panel
+        };
+        if is_active && let Some(block) = layout.blocks.get(i) {
+            let h = (block.size.h - layout.block_gap).max(0);
+            let inner = Rectangle::new(block.loc, (block.size.w, h).into());
+            let (x, y, w, h) = rect_px(inner, scale);
+            let inset = px(ROW_INSET) as f32;
+            c.rounded(x + inset, y, w - 2.0 * inset, h, ROW_RADIUS * s, under);
+        }
+        let row_state = state.row(i);
+        let hover = alpha(row_state.hover);
+        let fill = (hover > 0.0).then(|| mix(under, p.element, hover));
+        if let Some(fill) = fill {
+            let (x, y, w, h) = rect_px(row.rect, scale);
+            let inset = px(ROW_INSET) as f32;
+            c.rounded(x + inset, y, w - 2.0 * inset, h, ROW_RADIUS * s, fill);
+        }
+        let surface = fill.unwrap_or(under);
+        self.workspace_header(c, ws, cards, row, row_state, i, surface, scale, view, p);
 
-            for (k, rect) in layout.cards.get(i).unwrap_or(&Vec::new()) {
-                let card_state = state.card(i, *k);
-                self.agent_row(
-                    c, &cards[*k], *rect, card_state, under, None, density, scale, p,
-                );
-            }
-            if let Some(Some(line)) = layout.more.get(i) {
-                let n = ws.more_agents.len();
-                self.text(
-                    c,
-                    &format!("+{n} more"),
-                    DETAIL_FONT_SIZE,
-                    px(line.loc.x + CHILD_TEXT_X - CHILD_X) as f32,
-                    px(line.loc.x + line.size.w) as f32,
-                    band(*line, scale),
-                    scale,
-                    p.placeholder,
-                );
-            }
-            if let (Some(Some(ci)), Some(ci_view)) = (layout.ci.get(i), ws.ci.as_ref()) {
-                self.ci_section(c, ci_view, ci, &state.ci(i), under, scale, p);
-            }
+        for (k, rect) in layout.cards.get(i).unwrap_or(&Vec::new()) {
+            let card_state = state.card(i, *k);
+            self.agent_row(
+                c, &cards[*k], *rect, card_state, under, None, density, scale, p,
+            );
+        }
+        if let Some(Some(line)) = layout.more.get(i) {
+            let n = ws.more_agents.len();
+            self.text(
+                c,
+                &format!("+{n} more"),
+                DETAIL_FONT_SIZE,
+                px(line.loc.x + CHILD_TEXT_X - CHILD_X) as f32,
+                px(line.loc.x + line.size.w) as f32,
+                band(*line, scale),
+                scale,
+                p.placeholder,
+            );
+        }
+        if let (Some(Some(ci)), Some(ci_view)) = (layout.ci.get(i), ws.ci.as_ref()) {
+            self.ci_section(c, ci_view, ci, &state.ci(i), under, scale, p);
         }
     }
 
@@ -2628,6 +2705,386 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
         area,
         text: (x + pad, x + w - pad),
         line: line.clone(),
+    }
+}
+
+/// What the sidebar's header shows: the project's name and whether it is
+/// lit, the "+" and repositories buttons' hover alphas and whether what
+/// they open is, and the repositories button's badge.
+#[derive(Clone, Debug, PartialEq)]
+struct SidebarHead {
+    project: Option<String>,
+    lit: bool,
+    plus: u8,
+    plus_open: bool,
+    repos: u8,
+    repos_open: bool,
+    repos_changed: usize,
+    repos_stuck: bool,
+}
+
+impl SidebarHead {
+    fn of(view: &SidebarView) -> Self {
+        let state = &view.state;
+        Self {
+            project: view.project.clone(),
+            lit: view.header_lit,
+            plus: state.plus,
+            plus_open: state.plus_open,
+            repos: state.repos,
+            repos_open: state.repos_open,
+            repos_changed: state.repos_changed,
+            repos_stuck: state.repos_stuck,
+        }
+    }
+}
+
+/// Where the scrollbar of a sidebar `size` big runs: along its right
+/// edge, under the header.
+fn scroll_track(size: Size<i32, Logical>) -> Rect {
+    Rectangle::new(
+        (
+            size.w - GAP - SCROLLBAR_INSET - SCROLLBAR_WIDTH,
+            BAR_HEIGHT + SCROLLBAR_INSET,
+        )
+            .into(),
+        (SCROLLBAR_WIDTH, size.h - BAR_HEIGHT - 2 * SCROLLBAR_INSET).into(),
+    )
+}
+
+/// The line closing the sidebar at its right edge, down all of `c`.
+fn sidebar_edge(c: &mut Canvas, scale: f64, p: &Palette) {
+    let w = ((GAP as f64 * scale).round() as i32).max(1);
+    c.fill(c.w - w, 0, w, c.h, p.border);
+}
+
+/// How far above its top a workspace's block buffer reaches: a name being
+/// renamed stands out of a compact header's band.
+const BLOCK_OVER: i32 = 2;
+/// The shortest the scrollbar's thumb gets, as in the repositories panel.
+const THUMB_MIN: i32 = 24;
+
+/// What a workspace's block is drawn from: its view and its agents',
+/// whether it is the active one, what moves in it, the name typed while
+/// it is renamed, the density, the sidebar's width, the theme and the
+/// scale. Not where it is.
+#[derive(Clone, Debug, PartialEq)]
+struct BlockKey {
+    ws: WorkspaceView,
+    cards: Vec<AgentView>,
+    active: bool,
+    row: RowState,
+    states: Vec<CardState>,
+    ci: CiCardState,
+    rename: Option<Line>,
+    density: Density,
+    width: i32,
+    theme: super::Theme,
+    scale: f64,
+}
+
+impl BlockKey {
+    /// A sidebar of this workspace alone, as the key has it.
+    fn view(&self) -> SidebarView {
+        SidebarView {
+            workspaces: vec![self.ws.clone()],
+            agents: vec![self.cards.clone()],
+            active: self.active.then_some(0),
+            project: None,
+            header_lit: false,
+            state: SidebarState {
+                density: self.density,
+                rows: vec![self.row],
+                cards: vec![self.states.clone()],
+                ci: vec![self.ci.clone()],
+                rename: self.rename.clone().map(|line| (0, line)),
+                ..SidebarState::default()
+            },
+        }
+    }
+}
+
+/// What the "Needs you" list is drawn from: each row's agent, its
+/// workspace's name and its hover alpha; then as `BlockKey`.
+#[derive(Clone, Debug, PartialEq)]
+struct InboxKey {
+    rows: Vec<(AgentView, String, u8)>,
+    density: Density,
+    width: i32,
+    theme: super::Theme,
+    scale: f64,
+}
+
+/// What the sidebar's frame is drawn from: its header, its size, the theme
+/// and the scale.
+type FrameKey = (SidebarHead, Size<i32, Logical>, super::Theme, f64);
+
+impl Painter {
+    /// The sidebar's frame, `size` big: what stays put while its rows
+    /// scroll (the background, the header, the line at its right edge).
+    fn sidebar_frame(
+        &self,
+        head: &SidebarHead,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        c.fill(0, 0, c.w, c.h, p.panel);
+        self.sidebar_head(&mut c, head, size.w, scale, p);
+        sidebar_edge(&mut c, scale, p);
+        c.into_buffer(true)
+    }
+
+    /// The block of the workspace `key` has, its top `BLOCK_OVER` down
+    /// the buffer (what is above it clear), as the sidebar draws it.
+    fn sidebar_block(&self, key: &BlockKey) -> MemoryRenderBuffer {
+        let (scale, p) = (key.scale, key.theme.palette());
+        let view = key.view();
+        let layout = sidebar_layout_at(&view.workspaces, &view.agents, key.width, key.density);
+        let Some(block) = layout.blocks.first().copied() else {
+            return MemoryRenderBuffer::default();
+        };
+        let layout = layout.shifted(block.loc.y - BLOCK_OVER);
+        let size = (key.width, block.size.h + BLOCK_OVER).into();
+        let mut c = Canvas::new(physical(size, scale));
+        let top = (BLOCK_OVER as f64 * scale).round() as i32;
+        c.fill(0, top, c.w, c.h - top, p.panel);
+        sidebar_edge(&mut c, scale, p);
+        self.workspace_block(&mut c, &view, &layout, 0, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// The "Needs you" list `key` has, from its heading's top, as the
+    /// sidebar draws it.
+    fn sidebar_inbox_part(&self, key: &InboxKey) -> MemoryRenderBuffer {
+        let (scale, p) = (key.scale, key.theme.palette());
+        let (title, rects, end) = inbox_rects(key.rows.len(), 0, key.width, key.density);
+        let Some(title) = title else {
+            return MemoryRenderBuffer::default();
+        };
+        let mut c = Canvas::new(physical((key.width, end).into(), scale));
+        c.fill(0, 0, c.w, c.h, p.panel);
+        sidebar_edge(&mut c, scale, p);
+        let rows: Vec<_> = (key.rows.iter().zip(rects))
+            .map(|((card, place, hover), rect)| (card, place.as_str(), *hover, rect))
+            .collect();
+        self.inbox_rows(&mut c, title, &rows, key.density, scale, p);
+        c.into_buffer(true)
+    }
+
+    /// The sidebar scrollbar's thumb, `size` big.
+    fn scroll_thumb(
+        &self,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let (w, h) = (c.w as f32, c.h as f32);
+        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        c.into_buffer(false)
+    }
+}
+
+/// The sidebar as the chrome shows it: its frame (the header and what
+/// else stays put), the "Needs you" list and a buffer per workspace block
+/// moved under the header as the rows scroll, the scrollbar's thumb, and
+/// the band breathing over each blocked agent's row. Scrolling only moves
+/// the buffers: nothing is drawn again but the blocks coming into view.
+#[derive(Default)]
+pub(super) struct SidebarLayers {
+    frame: super::Cached<FrameKey>,
+    inbox: RowCache<InboxKey>,
+    blocks: RowCache<BlockKey>,
+    thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
+    /// The band (one size fits all the cards).
+    pulse: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
+    /// How many times the frame was drawn, for tests.
+    #[cfg(test)]
+    frames: usize,
+}
+
+impl SidebarLayers {
+    /// The parts showing `sidebar`, `width` wide on an `output`, with the
+    /// blocked agents' rows at `pulse`, front to back.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parts(
+        &mut self,
+        sidebar: SidebarView,
+        width: i32,
+        pulse: f32,
+        density: Density,
+        output: Size<i32, Logical>,
+        theme: super::Theme,
+        scale: f64,
+        painter: &Painter,
+        blink: super::layers::Blink,
+    ) -> Vec<Part> {
+        let size: Size<i32, Logical> = (width, output.h).into();
+        let state = &sidebar.state;
+        let layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density);
+        let max = layout.max_scroll(output.h);
+        let scroll = state.scroll.clamp(0.0, max as f64);
+        // How far the rows go down from where the layout has them.
+        let dy = state.over - scroll;
+        let area = Rectangle::new(
+            (0, BAR_HEIGHT).into(),
+            (width, (output.h - BAR_HEIGHT).max(0)).into(),
+        );
+        let shows = |top: i32, h: i32| {
+            let y = top as f64 + dy;
+            y < output.h as f64 && y + h as f64 > BAR_HEIGHT as f64
+        };
+        let moved = |buffer: &MemoryRenderBuffer, (x, y): (i32, i32), size| {
+            Part::new(buffer, (x, y).into(), size, 1.0)
+                .at((x as f64, y as f64 + dy).into())
+                .clipped(area)
+        };
+        let mut parts = Vec::new();
+
+        // The dots of what runs, blinking in front of the rows they are on.
+        if let Some((dot, alpha)) = blink.filter(|(_, alpha)| *alpha > 0.0)
+            && sidebar.moves()
+        {
+            for rect in sidebar_blinkers(&sidebar, &layout, i32::MAX) {
+                if rect.size.w > 0 && rect.size.h > 0 && shows(rect.loc.y, rect.size.h) {
+                    let part = moved(dot, rect.loc.into(), rect.size);
+                    parts.push(Part { alpha, ..part });
+                }
+            }
+        }
+
+        // Where the rows are scrolled to, when they do not all fit.
+        let shown = output.h - BAR_HEIGHT;
+        let track = scroll_track(size);
+        let room = track.size.h as f64;
+        if max > 0 && shown > 0 && room > 0.0 {
+            let total = (shown + max) as f64;
+            let h = (room * shown as f64 / total)
+                .max((THUMB_MIN as f64).min(room))
+                .min(room)
+                .round() as i32;
+            let y = track.loc.y as f64 + (room - h as f64) * scroll / max as f64;
+            let thumb = (SCROLLBAR_WIDTH, h).into();
+            let buffer = self.thumb.get((thumb, theme, scale), |(size, ..)| {
+                painter.scroll_thumb(*size, scale, theme.palette())
+            });
+            parts.push(Part::new(buffer, track.loc, thumb, 1.0).at((track.loc.x as f64, y).into()));
+        }
+
+        // The blocked agents' pulse: one band per row, composed over the
+        // rows with the pulse as its opacity, so they are not redrawn for
+        // it.
+        let pulse_alpha = pulse_alpha(pulse);
+        if pulse_alpha > 0.0 {
+            let blocked = |i: usize, k: usize| {
+                sidebar
+                    .agents
+                    .get(i)
+                    .and_then(|cards| cards.get(k))
+                    .is_some_and(|card| card.status == crate::herdr::AgentStatus::Blocked)
+            };
+            // The rows in the workspaces, and those in the "Needs you" list.
+            let rows = layout
+                .cards
+                .iter()
+                .enumerate()
+                .flat_map(|(i, rows)| rows.iter().map(move |(k, rect)| (i, *k, *rect)));
+            let bands: Vec<_> = rows
+                .chain(layout.inbox.iter().copied())
+                .filter(|(i, k, _)| blocked(*i, *k))
+                .map(|(_, _, rect)| blocked_band(rect, density))
+                .filter(|b| b.size.w > 0 && b.size.h > 0 && shows(b.loc.y, b.size.h))
+                .collect();
+            // Every row is as wide as the next, so one band buffer fits all.
+            if let Some(size) = bands.first().map(|band| band.size) {
+                let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
+                    painter.pulse_band(*size, scale, theme.palette())
+                });
+                for band in bands.iter().filter(|band| band.size == size) {
+                    let part = moved(buffer, band.loc.into(), size);
+                    parts.push(Part {
+                        alpha: pulse_alpha,
+                        ..part
+                    });
+                }
+            }
+        }
+
+        if let Some(title) = layout.inbox_title {
+            let (.., end) = inbox_rects(layout.inbox.len(), title.loc.y, width, density);
+            let h = end - title.loc.y;
+            if shows(title.loc.y, h) {
+                let rows = (layout.inbox.iter().enumerate())
+                    .filter_map(|(n, (i, k, _))| {
+                        let card = sidebar.agents.get(*i)?.get(*k)?.clone();
+                        let place = sidebar.workspaces.get(*i)?.name.clone();
+                        Some((card, place, state.inbox(n)))
+                    })
+                    .collect();
+                let key = InboxKey {
+                    rows,
+                    density,
+                    width,
+                    theme,
+                    scale,
+                };
+                let buffer = self.inbox.get(key, (width, h).into(), scale, |key| {
+                    painter.sidebar_inbox_part(key)
+                });
+                parts.push(moved(&buffer, (0, title.loc.y), (width, h).into()));
+            }
+        }
+
+        // A block in front of the one above it, which its top may reach
+        // over.
+        for (i, (block, ws)) in layout
+            .blocks
+            .iter()
+            .zip(&sidebar.workspaces)
+            .enumerate()
+            .rev()
+        {
+            let (top, h) = (block.loc.y - BLOCK_OVER, block.size.h + BLOCK_OVER);
+            if !shows(top, h) {
+                continue;
+            }
+            let key = BlockKey {
+                ws: ws.clone(),
+                cards: sidebar.agents.get(i).cloned().unwrap_or_default(),
+                active: sidebar.active == Some(i),
+                row: state.row(i),
+                states: state.cards.get(i).cloned().unwrap_or_default(),
+                ci: state.ci(i),
+                rename: (state.rename.as_ref())
+                    .filter(|(w, _)| *w == i)
+                    .map(|(_, line)| line.clone()),
+                density,
+                width,
+                theme,
+                scale,
+            };
+            let buffer = self.blocks.get(key, (width, h).into(), scale, |key| {
+                painter.sidebar_block(key)
+            });
+            parts.push(moved(&buffer, (0, top), (width, h).into()));
+        }
+        self.inbox.sweep();
+        self.blocks.sweep();
+
+        let head = SidebarHead::of(&sidebar);
+        #[cfg(test)]
+        let frames = &mut self.frames;
+        let buffer = self.frame.get((head, size, theme, scale), |(head, ..)| {
+            #[cfg(test)]
+            {
+                *frames += 1;
+            }
+            painter.sidebar_frame(head, size, scale, theme.palette())
+        });
+        parts.push(Part::new(buffer, Point::from((0, 0)), size, 1.0));
+        parts
     }
 }
 
@@ -3682,6 +4139,207 @@ mod tests {
             ci.chips[0].loc.x,
             column(text_extent("Review", DETAIL_FONT_SIZE))
         );
+    }
+
+    /// A sidebar of twelve workspaces of two agents each, the fourth's
+    /// second blocked (so in the "Needs you" list too), scrolled to
+    /// `scroll`.
+    fn scrolled_view(scroll: f64) -> super::SidebarView {
+        let workspaces = (0..12)
+            .map(|i| workspace(&format!("w{i}"), None, Some("main")))
+            .collect();
+        let agents = (0..12)
+            .map(|i| {
+                let mut second = agent(&format!("{i}b"), AgentStatus::Idle, Some("~/src"));
+                if i == 3 {
+                    second.status = AgentStatus::Blocked;
+                    second.inbox = true;
+                }
+                vec![agent(&format!("{i}a"), AgentStatus::Working, None), second]
+            })
+            .collect();
+        super::SidebarView {
+            workspaces,
+            agents,
+            active: Some(0),
+            project: Some("gerdr".into()),
+            header_lit: false,
+            state: super::SidebarState {
+                scroll,
+                ..super::SidebarState::default()
+            },
+        }
+    }
+
+    /// The parts `layers` shows for `view`, 240 wide on a 400 tall output,
+    /// with the pulse at `pulse`.
+    fn sidebar_parts(
+        layers: &mut super::SidebarLayers,
+        view: super::SidebarView,
+        pulse: f32,
+    ) -> Vec<crate::chrome::layers::Part> {
+        let painter = super::Painter::new();
+        let output = (1000, 400).into();
+        let theme = crate::chrome::Theme::Dark;
+        layers.parts(
+            view,
+            240,
+            pulse,
+            Density::Comfortable,
+            output,
+            theme,
+            1.0,
+            &painter,
+            None,
+        )
+    }
+
+    #[test]
+    fn scrolling_by_a_fraction_of_a_row_draws_nothing_again() {
+        let mut layers = super::SidebarLayers::default();
+        let first = sidebar_parts(&mut layers, scrolled_view(30.0), 0.0);
+        let drawn = (layers.blocks.drawn(), layers.inbox.drawn(), layers.frames);
+        assert!(drawn.0 > 0);
+        assert_eq!((drawn.1, drawn.2), (1, 1));
+        let ys = |parts: &[crate::chrome::layers::Part]| -> Vec<f64> {
+            parts.iter().map(|part| part.loc.y).collect()
+        };
+        for scroll in [30.5, 31.25, 29.75] {
+            let parts = sidebar_parts(&mut layers, scrolled_view(scroll), 0.0);
+            let now = (layers.blocks.drawn(), layers.inbox.drawn(), layers.frames);
+            assert_eq!(now, drawn, "redrawn at {scroll}");
+            // The rows moved by the fraction; the frame stayed put, and
+            // the thumb is first.
+            assert_eq!(parts.len(), first.len());
+            let (was, are) = (ys(&first), ys(&parts));
+            let n = parts.len() - 1;
+            for (was, are) in was[1..n].iter().zip(&are[1..n]) {
+                assert!((was - are - (scroll - 30.0)).abs() < 1e-9, "{was} {are}");
+            }
+            assert_eq!(are[n], 0.0);
+        }
+        // Blocks coming into view are drawn, the rest kept.
+        let parts = sidebar_parts(&mut layers, scrolled_view(200.0), 0.0);
+        let blocks = parts.len() - 2;
+        assert!(layers.blocks.drawn() > drawn.0);
+        assert!(layers.blocks.drawn() < drawn.0 + blocks);
+        assert_eq!(layers.frames, 1);
+        // What moves in a block draws that block again, and only it.
+        let mut view = scrolled_view(200.0);
+        view.state.rows = vec![super::RowState::default(); 12];
+        view.state.rows[3].hover = 16;
+        let before = layers.blocks.drawn();
+        sidebar_parts(&mut layers, view, 0.0);
+        assert_eq!(layers.blocks.drawn(), before + 1);
+    }
+
+    #[test]
+    fn the_rows_are_drawn_where_they_are_hit() {
+        let mut layers = super::SidebarLayers::default();
+        let (scroll, over) = (10.4, 12.6);
+        let mut view = scrolled_view(scroll);
+        view.state.over = over;
+        let parts = sidebar_parts(&mut layers, view.clone(), 1.0);
+        let layout = sidebar_layout(&view.workspaces, &view.agents, 240);
+        let hit =
+            sidebar_layout(&view.workspaces, &view.agents, 240).scrolled_over(scroll, over, 400);
+        // The pulse band over the blocked row in the "Needs you" list
+        // moves with it, cut to the room under the header.
+        let band = super::blocked_band(layout.inbox[0].2, Density::Comfortable);
+        let y = band.loc.y as f64 + over - scroll;
+        let pulse = (parts.iter())
+            .find(|part| part.alpha < 1.0 && (part.loc.y - y).abs() < 1e-9)
+            .expect("a pulse band");
+        let shown = super::blocked_band(hit.inbox[0].2, Density::Comfortable);
+        assert_eq!(pulse.loc.y.round() as i32, shown.loc.y);
+        let area = Rectangle::new((0, BAR_HEIGHT).into(), (240, 400 - BAR_HEIGHT).into());
+        assert_eq!(pulse.clip, Some(area));
+        // Each block's buffer stands where its hit rects are.
+        let mut checked = 0;
+        for (i, block) in layout.blocks.iter().enumerate() {
+            let y = (block.loc.y - super::BLOCK_OVER) as f64 + over - scroll;
+            let Some(part) = (parts.iter()).find(|p| {
+                (p.loc.y - y).abs() < 1e-9 && p.size.h == block.size.h + super::BLOCK_OVER
+            }) else {
+                continue;
+            };
+            checked += 1;
+            let top = part.loc.y + super::BLOCK_OVER as f64;
+            assert_eq!(top.round() as i32, hit.blocks[i].loc.y);
+            assert_eq!(part.clip, Some(area));
+        }
+        assert!(checked >= 3, "{checked}");
+    }
+
+    /// The bytes of `buffer`, 240 logical pixels wide at `scale`, from
+    /// logical row `from` for `rows` rows.
+    fn rows_of(
+        mut buffer: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+        scale: f64,
+        from: i32,
+        rows: i32,
+    ) -> Vec<u8> {
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let mut out = Vec::new();
+        let _ = buffer.render().draw(|mem| {
+            let row = px(240) * 4;
+            out = mem[px(from) * row..(px(from) + px(rows)) * row].to_vec();
+            Ok::<_, ()>(Vec::new())
+        });
+        out
+    }
+
+    #[test]
+    fn the_parts_draw_what_the_whole_sidebar_does() {
+        let painter = super::Painter::new();
+        let theme = crate::chrome::Theme::Dark;
+        let mut view = scrolled_view(0.0);
+        view.workspaces.truncate(3);
+        view.agents.truncate(3);
+        view.agents[1][1].status = AgentStatus::Blocked;
+        view.agents[1][1].inbox = true;
+        view.state.rows = vec![super::RowState::default(); 3];
+        view.state.rows[1].hover = 9;
+        view.header_lit = true;
+        let layout = sidebar_layout(&view.workspaces, &view.agents, 240);
+        for scale in [1.0, 2.0] {
+            let whole = painter.sidebar_view(&view, (240, 600).into(), scale, theme.palette());
+            let mut layers = super::SidebarLayers::default();
+            let parts = layers.parts(
+                view.clone(),
+                240,
+                0.0,
+                Density::Comfortable,
+                (1000, 600).into(),
+                theme,
+                scale,
+                &painter,
+                None,
+            );
+            let n = parts.len() - 1;
+            // The frame: the header.
+            assert_eq!(
+                rows_of(parts[n].buffer.clone(), scale, 0, BAR_HEIGHT),
+                rows_of(whole.clone(), scale, 0, BAR_HEIGHT)
+            );
+            // The "Needs you" list, then the blocks from the last.
+            let title = layout.inbox_title.unwrap();
+            let inbox = &parts[0];
+            assert_eq!(inbox.loc.y, title.loc.y as f64);
+            assert_eq!(
+                rows_of(inbox.buffer.clone(), scale, 0, inbox.size.h),
+                rows_of(whole.clone(), scale, title.loc.y, inbox.size.h)
+            );
+            assert_eq!(n, 1 + layout.blocks.len());
+            for (part, block) in parts[1..n].iter().zip(layout.blocks.iter().rev()) {
+                let over = super::BLOCK_OVER;
+                assert_eq!(part.loc.y, (block.loc.y - over) as f64);
+                assert_eq!(
+                    rows_of(part.buffer.clone(), scale, over, block.size.h),
+                    rows_of(whole.clone(), scale, block.loc.y, block.size.h)
+                );
+            }
+        }
     }
 
     /// A sidebar of `workspaces` and their `agents`, as drawn 600 high.

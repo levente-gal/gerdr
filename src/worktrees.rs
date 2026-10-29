@@ -16,6 +16,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use smithay::{
@@ -35,10 +36,10 @@ use crate::{
     input::Overlay,
     menu::MenuAction,
     paths,
+    scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
     toast::Level,
     tooltip::Tooltip,
-    wheel::Wheel,
 };
 
 /// The worktrees popup, while open, and what is being done to worktrees.
@@ -74,9 +75,10 @@ impl Worktrees {
 #[derive(Debug, Default)]
 struct Popup {
     selected: Option<PathBuf>,
-    /// The first worktree in view, by index into the list; its
-    /// repository's label stays above it.
-    first: usize,
+    /// Where the list stands, in worktrees: its first in view (by index
+    /// into the list; its repository's label stays above it) and the part
+    /// of that one scrolled past.
+    scroll: Scroll,
     hover: Option<WorktreesHit>,
     armed: Option<Armed>,
     /// The main worktree of the repository listed first.
@@ -84,8 +86,6 @@ struct Popup {
     /// Where the selected worktree was in the list: what is selected once
     /// it is gone.
     selected_at: usize,
-    /// The wheel's turn not yet a whole worktree.
-    wheel: Wheel,
     /// What the list is filtered by.
     query: TextField,
     /// Every repository's worktrees, not just the focused one's.
@@ -229,14 +229,7 @@ fn under(items: &[Item], shown: &[Entry], page: usize) -> Vec<Entry> {
     ) else {
         return Vec::new();
     };
-    // Scrolling the first worktree brings the next one up to its place.
-    let step = match items.get(first + 1) {
-        Some(next) if next.repo != items[first].repo => {
-            chrome::WORKTREES_ROW + chrome::WORKTREES_LABEL
-        }
-        _ => chrome::WORKTREES_ROW,
-    };
-    let reach = room(page) + step;
+    let reach = room(page) + step(items, first);
     let mut h: i32 = shown.iter().copied().map(height).sum();
     let mut under = Vec::new();
     for (k, item) in items.iter().enumerate().skip(last + 1) {
@@ -251,6 +244,18 @@ fn under(items: &[Item], shown: &[Entry], page: usize) -> Vec<Entry> {
         h += chrome::WORKTREES_ROW;
     }
     under
+}
+
+/// How far scrolling past worktree `first` of `items` moves the list:
+/// the next one comes up to its place, with its repository's label when it
+/// has one.
+fn step(items: &[Item], first: usize) -> i32 {
+    match (items.get(first), items.get(first + 1)) {
+        (Some(this), Some(next)) if next.repo != this.repo => {
+            chrome::WORKTREES_ROW + chrome::WORKTREES_LABEL
+        }
+        _ => chrome::WORKTREES_ROW,
+    }
 }
 
 /// The furthest worktree a view of `page` rows scrolls to: the first from
@@ -382,15 +387,16 @@ impl Popup {
         let Some(item) = items.get(k) else { return };
         self.selected = Some(item.wt.path.clone());
         self.selected_at = k;
-        self.first = self.first_shown(items, page);
+        let mut first = self.first_shown(items, page);
         // The first worktree, partly scrolled past, is shown whole.
-        if k <= self.first {
-            self.first = k;
-            self.wheel = Wheel::default();
+        if k <= first {
+            self.scroll.jump(k as f64);
+            return;
         }
-        while !shown(items, self.first, page).contains(&Entry::Item(k)) {
-            self.first += 1;
+        while !shown(items, first, page).contains(&Entry::Item(k)) {
+            first += 1;
         }
+        self.scroll.jump_row(first);
     }
 
     /// With the selected worktree gone from `items` (deleted), select the
@@ -406,37 +412,56 @@ impl Popup {
     /// still listed.
     fn refilter(&mut self, items: &[Item], page: usize) {
         self.armed = None;
-        self.first = 0;
-        self.wheel = Wheel::default();
+        self.scroll.jump(0.0);
         let kept = self.selected(items).filter(|_| self.query.is_empty());
         if let Some(k) = kept.or((!items.is_empty()).then_some(0)) {
             self.select(items, k, page);
         }
     }
 
-    /// Scroll by `rows` worktrees, within the list.
-    fn scroll(&mut self, items: &[Item], rows: i64, page: usize) {
-        let last = last_first(items, page);
-        let first = self.first_shown(items, page) as i64;
-        self.first = (first + rows).clamp(0, last as i64) as usize;
+    /// The list as it stands for `motion`s in a view of `page` rows of
+    /// `items`: in worktrees, a notch one, as high as from its first to
+    /// the next.
+    fn bounds(&self, items: &[Item], page: usize) -> Bounds {
+        Bounds {
+            max: last_first(items, page) as f64,
+            notch: 1.0,
+            unit: step(items, self.first_shown(items, page)) as f64,
+            view: list_height(items, page) as f64,
+        }
     }
 
-    /// The wheel turned `rows` worktrees (down positive): whole ones
-    /// scroll the list, the part of one left shows it moved by as much.
-    fn wheel_by(&mut self, items: &[Item], rows: f64, page: usize) {
-        let first = self.first_shown(items, page);
-        let whole = self.wheel.turn(rows, first);
-        if whole != 0 {
-            self.scroll(items, whole, page);
+    /// The wheel or the touchpad moved the list of `items` at `now`.
+    fn scroll_by(&mut self, motion: Motion, now: Instant, items: &[Item], page: usize) {
+        let bounds = self.bounds(items, page);
+        self.scroll.apply(motion, now, bounds);
+        self.calm(now);
+    }
+
+    /// Move the list on to `now`; whether it still moves.
+    fn tick(&mut self, now: Instant, items: &[Item], page: usize) -> bool {
+        let bounds = self.bounds(items, page);
+        let moving = self.scroll.tick(now, bounds);
+        self.calm(now);
+        moving
+    }
+
+    /// Nothing is under the pointer on the entries while they move under
+    /// it: their highlight would flicker.
+    fn calm(&mut self, now: Instant) {
+        if self.scroll.moving(now)
+            && matches!(
+                self.hover,
+                Some(WorktreesHit::Entry(_) | WorktreesHit::Button(..))
+            )
+        {
+            self.hover = None;
         }
-        let last = last_first(items, page);
-        self.wheel
-            .settle(first as i64 + whole, self.first_shown(items, page), last);
     }
 
     /// The first worktree in a view of `page` rows, as scrolled.
     fn first_shown(&self, items: &[Item], page: usize) -> usize {
-        self.first.min(last_first(items, page))
+        self.scroll.first().min(last_first(items, page))
     }
 
     /// The entries a view of `page` rows shows, then those under it shown
@@ -447,7 +472,7 @@ impl Popup {
         let mut shown = shown(items, first, page);
         // None once the list shows its end.
         let part = if first < last_first(items, page) {
-            self.wheel.part(first)
+            self.scroll.part()
         } else {
             0.0
         };
@@ -703,6 +728,7 @@ impl Popup {
             }),
             empty: empty.into(),
             part,
+            overscroll: self.scroll.overscroll(),
         }
     }
 }
@@ -916,9 +942,11 @@ impl Gerdr {
     pub fn worktrees_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.worktrees_view()?;
         let layout = chrome::worktrees_layout(&view, self.output_size());
-        let hit = chrome::worktrees_hit(&view, &layout, pos);
+        let mut hit = chrome::worktrees_hit(&view, &layout, pos);
         if let Some(popup) = self.worktrees.popup.as_mut() {
             popup.hover = hit;
+            popup.calm(Instant::now());
+            hit = popup.hover;
         }
         // A row's marks say what they mean.
         let Some(WorktreesHit::Entry(i)) = hit else {
@@ -934,13 +962,29 @@ impl Gerdr {
             .map(|(r, text)| Tooltip::new(text, r))
     }
 
-    /// The wheel turned `rows` rows (down positive) over the popup.
-    pub fn worktrees_scroll(&mut self, rows: f64) {
+    /// The wheel or the touchpad moved over the popup.
+    pub fn worktrees_scroll(&mut self, motion: Motion) {
         let (_, items) = self.popup_items();
         let page = self.worktrees_page();
         if let Some(popup) = self.worktrees.popup.as_mut() {
-            popup.wheel_by(&items, rows, page);
+            popup.scroll_by(motion, Instant::now(), &items, page);
         }
+    }
+
+    /// Move the worktrees popup's list on to `now` if it moves on its own;
+    /// whether it still moves (see `Scroll::moving`).
+    pub fn worktrees_scroll_tick(&mut self, now: Instant) -> bool {
+        // At rest, it is left to stand where it is.
+        match &self.worktrees.popup {
+            Some(popup) if popup.scroll.moving(now) || popup.scroll.overscroll() != 0.0 => {}
+            _ => return false,
+        }
+        let (_, items) = self.popup_items();
+        let page = self.worktrees_page();
+        self.worktrees
+            .popup
+            .as_mut()
+            .is_some_and(|popup| popup.tick(now, &items, page))
     }
 
     /// What the worktrees popup shows, while it is open.
@@ -1413,7 +1457,7 @@ mod tests {
         let height = view(&popup).list_height;
         assert_eq!(height, 3 * chrome::WORKTREES_ROW);
         // Scrolled to the second worktree, its repository's label stays on top.
-        popup.scroll(&items, 1, 3);
+        popup.scroll.jump(1.0);
         let scrolled = view(&popup);
         assert_eq!(scrolled.entries[0], WorktreeEntry::Repo("r".into()));
         assert!(matches!(&scrolled.entries[1], WorktreeEntry::Worktree(l) if l.name == "wip"));
@@ -1457,33 +1501,45 @@ mod tests {
         let key = |popup: &mut Popup, sym: Keysym| {
             popup.key(&ModifiersState::default(), sym, &items, 3);
         };
+        let (t, row) = (Instant::now(), chrome::WORKTREES_ROW as f64);
+        let finger = |popup: &mut Popup, rows: f64, time: u32| {
+            let motion = Motion::Finger {
+                px: rows * row,
+                time,
+            };
+            popup.scroll_by(motion, t, &items, 3);
+        };
         let mut popup = Popup::default();
         popup.select(&items, 0, 3);
         // Under the page, already at rest, what shows in its last rows'
         // room and as it scrolls part of a row.
         assert_eq!(shown(&popup), ["# r", "main", "wip", "done", "a"]);
         assert_eq!(view(&popup).part, 0.0);
-        popup.wheel_by(&items, 1.5, 3);
+        finger(&mut popup, 1.5, 0);
         assert_eq!(view(&popup).part, 0.5);
         assert_eq!(shown(&popup), ["# r", "wip", "done", "a", "b"]);
         assert_eq!(view(&popup).list_height, 3 * chrome::WORKTREES_ROW);
         // The next repository's label and worktree come with it.
-        popup.scroll(&items, 3, 3);
+        popup.scroll.jump(4.0);
         assert_eq!(shown(&popup), ["# r", "b", "# s", "other"]);
-        // Up past the top holds the list whole, and so does its end.
-        popup.wheel_by(&items, -9.0, 3);
+        // Up past the top holds the list whole, stretched down; so does
+        // its end, stretched up.
+        finger(&mut popup, -9.0, 8);
         assert_eq!(view(&popup).part, 0.0);
+        assert!(view(&popup).overscroll > 0.0);
         assert_eq!(shown(&popup), ["# r", "main", "wip", "done", "a"]);
-        popup.wheel_by(&items, 9.5, 3);
+        popup.scroll.jump(0.0);
+        finger(&mut popup, 9.5, 16);
         assert_eq!(view(&popup).part, 0.0);
+        assert!(view(&popup).overscroll < 0.0);
         assert_eq!(shown(&popup), ["# s", "other"]);
         // Keys moving the list, or selecting the worktree scrolled past
         // in part, drop the part.
-        popup.wheel_by(&items, -2.5, 3);
+        popup.scroll.jump(2.5);
         assert_eq!(view(&popup).part, 0.5);
         key(&mut popup, Keysym::End);
         assert_eq!(view(&popup).part, 0.0);
-        popup.wheel_by(&items, -2.5, 3);
+        popup.scroll.jump(2.5);
         assert_eq!(view(&popup).part, 0.5);
         key(&mut popup, Keysym::Home);
         assert_eq!(view(&popup).part, 0.0);
@@ -1495,11 +1551,50 @@ mod tests {
         assert_eq!(view(&popup).selected, Some(2));
         // So is one clicked.
         key(&mut popup, Keysym::Home);
-        popup.wheel_by(&items, 0.5, 3);
+        finger(&mut popup, 0.5, 24);
         popup.click(WorktreesHit::Entry(3), &items, 3);
         assert_eq!(popup.selected(&items), Some(2));
         assert_eq!(popup.first_shown(&items, 3), 1);
         assert_eq!(view(&popup).part, 0.0);
+    }
+
+    #[test]
+    fn a_moving_list_glides_settles_and_shows_no_hover_meanwhile() {
+        let mut items = items();
+        items.push(item(0, "a", false, false, false));
+        let mut other = item(1, "other", true, false, false);
+        (other.main, other.wt.path) = ("/src/s".into(), "/src/s".into());
+        items.push(other);
+        let mut popup = Popup {
+            hover: Some(WorktreesHit::Entry(2)),
+            ..Popup::default()
+        };
+        // From the last worktree of a repository, a notch scrolls to the
+        // next one's first, its label and all.
+        popup.scroll.jump(3.0);
+        assert_eq!(
+            popup.bounds(&items, 3).unit,
+            (chrome::WORKTREES_ROW + chrome::WORKTREES_LABEL) as f64
+        );
+        let t = Instant::now();
+        popup.scroll_by(Motion::Notches(1.0), t, &items, 3);
+        assert_eq!(popup.hover, None);
+        let mut now = t;
+        let mut moving = true;
+        for _ in 0..60 {
+            now += std::time::Duration::from_millis(8);
+            moving = popup.tick(now, &items, 3);
+            if !moving {
+                break;
+            }
+            assert!(popup.scroll.part() > 0.0);
+        }
+        assert!(!moving);
+        assert_eq!((popup.scroll.first(), popup.scroll.part()), (4, 0.0));
+        // At rest, the pointer finds the rows again.
+        popup.hover = Some(WorktreesHit::Entry(1));
+        popup.calm(now);
+        assert_eq!(popup.hover, Some(WorktreesHit::Entry(1)));
     }
 
     /// Two repositories: gerdr at /src/r (main, wip, done) and herdr at

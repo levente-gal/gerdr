@@ -12,7 +12,7 @@ use crate::{
     agents::AgentKey,
     anim::quantize,
     chrome::{
-        self, AgentView, BarStatus, CardState, CiCardState, Rect, RowState, SidebarHit,
+        self, AgentView, BAR_HEIGHT, BarStatus, CardState, CiCardState, Rect, RowState, SidebarHit,
         SidebarLayout, SidebarState, TooltipRow, WorkspaceView,
     },
     ci::{self, Subject},
@@ -26,8 +26,13 @@ use crate::{
     paths,
     rename::RenameTarget,
     repo_batches::repos_tip,
+    scroll::{Bounds, Motion},
     tooltip::Tooltip,
 };
+
+/// How far a notch of the wheel scrolls the sidebar's rows, in logical
+/// pixels.
+const SIDEBAR_NOTCH: f64 = 48.0;
 
 /// The tooltip listing a workspace's other `worktrees`, about `anchor`:
 /// how many, then a line each with its state and where it is, from `root`
@@ -79,7 +84,11 @@ impl Gerdr {
             .map(|(ws, _)| ws)
             .collect();
         chrome::sidebar_layout_at(&workspaces, &agents, self.sidebar_width, self.density)
-            .scrolled(self.sidebar_scroll.round() as i32, self.output_size().h)
+            .scrolled_over(
+                self.sidebar_scroll.pos(),
+                self.sidebar_scroll.overscroll(),
+                self.output_size().h,
+            )
     }
 
     /// Whether workspace `w` was folded or unfolded by hand: this run, else
@@ -118,12 +127,33 @@ impl Gerdr {
         }
     }
 
-    /// Scroll the sidebar's rows by `dy` logical pixels (down when
-    /// positive), as far as they go.
-    pub(crate) fn sidebar_scroll_by(&mut self, dy: f64) {
-        let layout = self.sidebar_layout();
-        let max = layout.max_scroll(self.output_size().h) as f64;
-        self.sidebar_scroll = (self.sidebar_scroll + dy).clamp(0.0, max);
+    /// Move the sidebar's rows as `motion` has it, under the header.
+    pub(crate) fn sidebar_scroll(&mut self, motion: Motion) {
+        let bounds = self.sidebar_bounds(&self.sidebar_layout());
+        self.sidebar_scroll.apply(motion, Instant::now(), bounds);
+    }
+
+    /// Move the sidebar's rows on to `now` if they move on their own;
+    /// whether they still move (see `Scroll::moving`).
+    pub fn sidebar_scroll_tick(&mut self, now: Instant) -> bool {
+        let scroll = &self.sidebar_scroll;
+        if !scroll.moving(now) && scroll.overscroll() == 0.0 {
+            return false;
+        }
+        let bounds = self.sidebar_bounds(&self.sidebar_layout());
+        self.sidebar_scroll.tick(now, bounds)
+    }
+
+    /// What the sidebar's rows scroll within, laid out as `layout`: by
+    /// pixels, under the header.
+    fn sidebar_bounds(&self, layout: &SidebarLayout) -> Bounds {
+        let height = self.output_size().h;
+        Bounds {
+            max: layout.max_scroll(height) as f64,
+            notch: SIDEBAR_NOTCH,
+            unit: 1.0,
+            view: (height - BAR_HEIGHT).max(0) as f64,
+        }
     }
 
     /// Whether something covers the sidebar, taking the pointer from it.
@@ -141,7 +171,9 @@ impl Gerdr {
         if self.sidebar_covered() || pos.x >= self.sidebar_width as f64 {
             return None;
         }
-        layout.hit(pos)
+        // Rows passing under a still pointer don't light up.
+        let moving = self.sidebar_scroll.moving(Instant::now());
+        layout.hit(pos).filter(|hit| !(moving && hit.scrolls()))
     }
 
     /// The agent whose pane has the keyboard in the shown tab: herdr's in
@@ -174,16 +206,22 @@ impl Gerdr {
         let layout =
             chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density);
         // Held to what the rows now take, and moved to show the active
-        // workspace when another becomes it.
-        let mut scroll = (self.sidebar_scroll.round() as i32).clamp(0, layout.max_scroll(height));
-        if self.sidebar_shown != Some(self.active_workspace) {
-            self.sidebar_shown = Some(self.active_workspace);
-            scroll = layout.showing(self.active_workspace, scroll, height);
+        // workspace when another becomes it: gliding there, or at once
+        // the first time.
+        let bounds = self.sidebar_bounds(&layout);
+        self.sidebar_scroll.tick(now, bounds);
+        let shown = self.sidebar_shown.replace(self.active_workspace);
+        if shown != Some(self.active_workspace) {
+            let scroll = self.sidebar_scroll.pos().round() as i32;
+            let to = layout.showing(self.active_workspace, scroll, height);
+            match shown {
+                _ if to == scroll => {}
+                Some(_) => self.sidebar_scroll.glide_to(to as f64, now, bounds),
+                None => self.sidebar_scroll.jump(to as f64),
+            }
         }
-        if scroll != self.sidebar_scroll.round() as i32 {
-            self.sidebar_scroll = scroll as f64;
-        }
-        let layout = layout.scrolled(scroll, height);
+        let (scroll, over) = (self.sidebar_scroll.pos(), self.sidebar_scroll.overscroll());
+        let layout = layout.scrolled_over(scroll, over, height);
         let hit = self.sidebar_hit(&layout, self.pointer);
         self.sidebar_hover.track(hit.map(SidebarHit::pill), now);
         let hover = &self.sidebar_hover;
@@ -261,7 +299,8 @@ impl Gerdr {
             repos_changed,
             repos_stuck: repos_stuck > 0,
             rename,
-            scroll: layout.scroll,
+            scroll,
+            over,
         }
     }
 

@@ -331,9 +331,8 @@ impl Gerdr {
         let view = self.inbox_view()?;
         let layout = chrome::inbox_layout(&view, self.output_size());
         let hit = chrome::inbox_hit(&view, &layout, pos);
-        if let Some(panel) = self.inbox.panel.as_mut() {
-            panel.hover(hit);
-        }
+        // What the panel keeps of it: no row while the list moves.
+        let hit = self.inbox.panel.as_mut()?.hover(hit, Instant::now());
         let (button, rect) = match hit? {
             InboxHit::Button(i, k) => {
                 let InboxRow::Item(line) = view.rows.get(i)? else {
@@ -350,11 +349,23 @@ impl Gerdr {
         Some(Tooltip::new(&button.label, rect).key(&button.key))
     }
 
-    /// The wheel turned `rows` rows (down positive) over the panel.
-    pub fn inbox_scroll(&mut self, rows: f64) {
+    /// The wheel or the touchpad moved the panel's list.
+    pub fn inbox_scroll(&mut self, motion: crate::scroll::Motion) {
+        if self.inbox.panel.is_none() {
+            return;
+        }
         let parts = self.inbox_parts();
         if let Some(panel) = self.inbox.panel.as_mut() {
-            panel.scroll(rows, &parts.listing());
+            panel.scroll(motion, Instant::now(), &parts.listing());
+        }
+    }
+
+    /// Move the inbox panel's list on to `now` if it moves on its own;
+    /// whether it still moves (see `Scroll::moving`).
+    pub fn inbox_scroll_tick(&mut self, now: Instant) -> bool {
+        match self.inbox.panel.as_mut() {
+            Some(panel) => panel.tick(now),
+            None => false,
         }
     }
 
