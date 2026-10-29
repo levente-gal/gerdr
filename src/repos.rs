@@ -984,12 +984,14 @@ fn in_dir(path: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// A folder of changed files: the folders in it, and its files by name
-/// with their index into the changes.
+/// A folder of changed files: the folders in it, its files by name with
+/// their index into the changes, and the same for the folders git lists
+/// whole, as one change (untracked ones, `new/`).
 #[derive(Default)]
 struct Folder<'a> {
     folders: BTreeMap<&'a str, Folder<'a>>,
     files: Vec<(&'a str, usize)>,
+    whole: Vec<(&'a str, usize)>,
 }
 
 /// Names in the order the tree lists them: letter case aside first.
@@ -1007,15 +1009,20 @@ fn file_rows(k: usize, changes: &[Change], grouping: Grouping) -> Vec<Row> {
     }
     let mut top = Folder::default();
     for (c, change) in changes.iter().enumerate() {
-        let (dirs, name) = match change.path.rsplit_once('/') {
+        let path = change.path.strip_suffix('/');
+        let whole = path.is_some();
+        let (dirs, name) = match path.unwrap_or(&change.path).rsplit_once('/') {
             Some((dirs, name)) => (Some(dirs), name),
-            None => (None, change.path.as_str()),
+            None => (None, path.unwrap_or(&change.path)),
         };
         let mut folder = &mut top;
         for part in dirs.into_iter().flat_map(|d| d.split('/')) {
             folder = folder.folders.entry(part).or_default();
         }
-        folder.files.push((name, c));
+        match whole {
+            true => folder.whole.push((name, c)),
+            false => folder.files.push((name, c)),
+        }
     }
     let mut rows = Vec::new();
     folder_rows(&top, k, (0, 0), &mut rows);
@@ -1035,11 +1042,23 @@ fn tree_order(changes: &[Change], grouping: Grouping) -> Vec<usize> {
 /// The lines of `folder` of repository `k`, `at` parts down its paths
 /// and `depth` folders in, onto `rows`.
 fn folder_rows(folder: &Folder, k: usize, (at, depth): (usize, usize), rows: &mut Vec<Row>) {
-    let mut folders: Vec<_> = folder.folders.iter().collect();
+    // The folders git lists whole go by name among the others, a line
+    // each.
+    let mut folders: Vec<(&str, Option<&Folder>, usize)> = folder
+        .folders
+        .iter()
+        .map(|(name, sub)| (*name, Some(sub), 0))
+        .chain(folder.whole.iter().map(|&(name, c)| (name, None, c)))
+        .collect();
     folders.sort_by(|a, b| by_name(a.0, b.0));
-    for (_, mut sub) in folders {
+    for (_, sub, c) in folders {
+        let Some(mut sub) = sub else {
+            rows.push(Row::File(k, c, depth));
+            continue;
+        };
         let mut to = at + 1;
         while sub.files.is_empty()
+            && sub.whole.is_empty()
             && sub.folders.len() == 1
             && let Some(only) = sub.folders.values().next()
         {
@@ -1396,7 +1415,11 @@ fn file_name_text(change: &Change) -> String {
             None => (String::new(), path.to_owned()),
         }
     };
-    let (dir, name) = split(&change.path);
+    // A folder git lists whole keeps its `/`.
+    let (dir, mut name) = split(change.path.trim_end_matches('/'));
+    if change.path.ends_with('/') {
+        name.push('/');
+    }
     match &change.orig {
         Some(orig) if split(orig).0 == dir => format!("{} → {name}", split(orig).1),
         Some(orig) => format!("{orig} → {name}"),
@@ -8728,6 +8751,32 @@ mod tests {
             Some(Selected::File(root("app"), "src/main.rs".into()))
         );
         assert!(panel.folded_dirs.is_empty());
+    }
+
+    #[test]
+    fn a_folder_git_lists_whole_is_one_line_among_the_folders() {
+        let changes = vec![
+            change("src/main.rs", 'M'),
+            change("assets/", '?'),
+            change("src/new/", '?'),
+            change("zed.toml", '?'),
+            change("only/", '?'),
+        ];
+        let items = vec![repo("app", "main", changes)];
+        let ctx = ctx(&items, None);
+        let panel = by_folder(&items);
+        assert_eq!(
+            texts(&panel.view("p", &ctx)),
+            [
+                "app",
+                "assets/",
+                "only/",
+                "src/",
+                "  new/",
+                "  main.rs",
+                "zed.toml"
+            ]
+        );
     }
 
     #[test]
