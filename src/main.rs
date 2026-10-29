@@ -8,6 +8,7 @@
 //! other Wayland app can be launched into a split too (see `launch`); some,
 //! Cursor by default, keep running when gerdr quits as well (see `keep`).
 
+mod agent_icons;
 mod agents;
 mod anim;
 mod app_icons;
