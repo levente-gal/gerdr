@@ -82,7 +82,7 @@ const CHILD_X: i32 = NAME_X - CHILD_PAD;
 /// row's accent bar.
 const AGENT_ICON_X: i32 = CHILD_PAD - 1;
 /// Where a row's text starts under a header: after an agent's badge.
-const CHILD_TEXT_X: i32 = NAME_X - 1 + AGENT_ICON + STATUS_GAP - 2;
+const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
 /// The "×" at the right end of a header, and of a deletable agent row.
 const CLOSE_SLOT: i32 = 22;
 /// The restart button left of a header's "×".
@@ -2338,8 +2338,8 @@ impl Painter {
 
         let line_band = band(first, scale);
         let tint = match card.status {
-            AgentStatus::Idle | AgentStatus::Unknown => p.muted,
-            _ => p.text,
+            AgentStatus::Idle | AgentStatus::Unknown => p.placeholder,
+            _ => p.muted,
         };
         agent_badge(
             c,

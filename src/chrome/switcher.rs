@@ -8,12 +8,12 @@
 //! kind. The key hints go in a footer, as in the project menu.
 
 use super::{
-    BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
-    HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_ICON_GAP,
-    ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS,
-    SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_badge, app, dot_rect,
-    folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix,
-    pencil, prompt, rect_px, tab, terminal,
+    AGENT_ICON, BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN,
+    HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
+    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
+    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_badge,
+    app, dot_rect, folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs,
+    icon_sdf, mix, pencil, prompt, rect_px, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -132,7 +132,7 @@ pub fn switcher_blinkers(view: &SwitcherView, layout: &SwitcherLayout) -> Vec<Re
         .iter()
         .zip(&layout.rows)
         .filter(|(row, _)| matches!(row.icon, ItemIcon::Agent(badge, _) if badge.dot.blinks()))
-        .map(|(_, slot)| dot_rect(switcher_icon(*slot), ROW_ICON_WIDTH))
+        .map(|(_, slot)| dot_rect(switcher_icon(*slot), AGENT_ICON))
         .filter(shows)
         .collect()
 }
@@ -503,7 +503,7 @@ impl Painter {
             ItemIcon::Tab => icon_sdf(c, icon, scale, p.placeholder, |x, y| tab(x, y, small)),
             &ItemIcon::Agent(badge, _) => {
                 let ground = fill.unwrap_or(p.elevated);
-                agent_badge(c, icon, ROW_ICON_WIDTH, badge, p.text, ground, scale, p);
+                agent_badge(c, icon, AGENT_ICON, badge, p.placeholder, ground, scale, p);
             }
             ItemIcon::Folder => icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                 folder_plus(x, y, small)
@@ -820,10 +820,7 @@ mod tests {
         let dots = super::switcher_blinkers(&view, &layout);
         assert_eq!(dots.len(), 1);
         let icon = super::switcher_icon(layout.rows[0]);
-        assert_eq!(
-            dots[0],
-            crate::chrome::dot_rect(icon, super::ROW_ICON_WIDTH)
-        );
+        assert_eq!(dots[0], crate::chrome::dot_rect(icon, super::AGENT_ICON));
         assert!(inside(layout.rows[0], dots[0]));
         // Scrolled: a dot shows only where the list does.
         view.rows.extend((0..20).map(|_| agent(Dot::Working)));
