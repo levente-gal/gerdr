@@ -213,8 +213,8 @@ pub struct Panel {
     pub(crate) folded: HashSet<PathBuf>,
     /// Where the tree stands, in lines.
     pub(crate) tree_scroll: Scroll,
-    /// The first detail line in view.
-    pub(crate) detail_first: usize,
+    /// Where the detail stands, in rows.
+    pub(crate) detail_scroll: Scroll,
     /// The tab asked for with Ctrl+D / Ctrl+T, else the diff.
     pub(crate) tab: Option<DetailTab>,
     /// The log or stashes read for, and what they say.
@@ -236,8 +236,6 @@ pub struct Panel {
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
     pub(crate) sheet: Option<Sheet>,
-    /// The wheel's turn not yet a whole line, over the detail.
-    pub(crate) detail_wheel: Wheel,
     /// Where the selected line was among the tree's lines: what is
     /// selected once it is gone.
     pub(crate) selected_at: usize,
@@ -1407,8 +1405,7 @@ impl Panel {
         if moved && self.tab() == DetailTab::Diff {
             self.show_selected();
         } else if moved {
-            self.detail_first = 0;
-            self.detail_wheel = Wheel::default();
+            self.detail_scroll.jump(0.0);
         }
         self.selected_at = k;
         let to = showing(self.tree_scroll.pos(), (k, k), page);
@@ -2680,8 +2677,7 @@ impl Panel {
     fn set_tab(&mut self, tab: DetailTab) {
         if self.tab() != tab {
             self.tab = Some(tab);
-            self.detail_first = 0;
-            self.detail_wheel = Wheel::default();
+            self.detail_scroll.jump(0.0);
             self.show_selected();
         }
     }
@@ -3042,23 +3038,13 @@ impl Panel {
         Some(Outcome::Batch { kind, jobs })
     }
 
-    /// The wheel turned `rows` rows (down positive) over the detail pane:
-    /// whole lines scroll it, the part of a line left shows it moved by as
-    /// much.
-    pub fn scroll_detail(&mut self, rows: f64, ctx: &Ctx) {
-        let (first, last) = self.scrolled(true, ctx);
-        let wheel = &mut self.detail_wheel;
-        let whole = wheel.turn(rows, first);
-        let wanted = first as i64 + whole;
-        let to = wanted.clamp(0, last as i64) as usize;
-        wheel.settle(wanted, to, last);
-        self.detail_first = to;
-    }
-
-    /// The tree moved by `motion` at `now`.
-    pub fn scroll(&mut self, motion: Motion, now: Instant, ctx: &Ctx) {
-        let b = self.tree_bounds(ctx);
-        self.tree_scroll.apply(motion, now, b);
+    /// The detail pane, or else the tree, moved by `motion` at `now`.
+    pub fn scroll(&mut self, motion: Motion, now: Instant, over_detail: bool, ctx: &Ctx) {
+        let b = self.scroll_bounds(over_detail, ctx);
+        match over_detail {
+            true => self.detail_scroll.apply(motion, now, b),
+            false => self.tree_scroll.apply(motion, now, b),
+        }
     }
 
     /// Move the lists moving on their own on to `now`; whether one still
@@ -3066,21 +3052,29 @@ impl Panel {
     pub fn scroll_tick(&mut self, now: Instant, ctx: &Ctx) -> bool {
         let mut moving = false;
         if self.tree_scroll.moving(now) {
-            let b = self.tree_bounds(ctx);
+            let b = self.scroll_bounds(false, ctx);
             moving |= self.tree_scroll.tick(now, b);
+        }
+        if self.detail_scroll.moving(now) {
+            let b = self.scroll_bounds(true, ctx);
+            moving |= self.detail_scroll.tick(now, b);
         }
         moving
     }
 
     /// Whether a list moves on its own or under the fingers at `now`.
     pub fn scrolling(&self, now: Instant) -> bool {
-        self.tree_scroll.moving(now)
+        self.tree_scroll.moving(now) || self.detail_scroll.moving(now)
     }
 
-    /// The tree's lines as a list scrolled.
-    fn tree_bounds(&self, ctx: &Ctx) -> Bounds {
-        let len = self.rows(ctx.items).len();
-        bounds(len, ctx.page.0, crate::chrome::repos_row(ctx.density))
+    /// The detail's rows, or else the tree's lines, as a list scrolled.
+    fn scroll_bounds(&self, over_detail: bool, ctx: &Ctx) -> Bounds {
+        let (_, last) = self.scrolled(over_detail, ctx);
+        let (page, unit) = match over_detail {
+            true => (ctx.page.1, crate::chrome::repos_detail_line(ctx.density)),
+            false => (ctx.page.0, crate::chrome::repos_row(ctx.density)),
+        };
+        bounds(last + page.max(1), page, unit)
     }
 
     /// Scroll the detail, or else the tree, by `whole` lines (down
@@ -3089,7 +3083,7 @@ impl Panel {
         let (first, last) = self.scrolled(over_detail, ctx);
         let to = (first as i64).saturating_add(whole).clamp(0, last as i64) as usize;
         if over_detail {
-            self.detail_first = to;
+            self.detail_scroll.jump(to as f64);
         } else {
             self.tree_scroll.jump(to as f64);
         }
@@ -3108,7 +3102,7 @@ impl Panel {
             len.saturating_sub(ctx.page.1.max(1))
         };
         let first = if over_detail {
-            self.detail_first
+            self.detail_scroll.first()
         } else {
             self.tree_scroll.first()
         };
@@ -3475,6 +3469,9 @@ impl Panel {
             let shown: Vec<usize> = sticky.into_iter().chain(range.clone()).collect();
             let mut marks: Vec<RowMark> = shown.iter().map(|&r| self.row_mark(r)).collect();
             let mut row_buttons = self.row_buttons(&shown);
+            let line_h = crate::chrome::repos_detail_line(ctx.density);
+            let pin = |h| self.diff_pin(h, page, line_h);
+            let (pin, stuck) = sticky.map_or((0.0, false), pin);
             if self.diff_rows.is_empty() && !ctx.items.is_empty() {
                 let text = "No changes in any repository";
                 rows = vec![DetailRow::Text(detail_line(text, DiffTone::Plain))];
@@ -3490,6 +3487,9 @@ impl Panel {
                 title_buttons: self.title_buttons(),
                 row_buttons,
                 part,
+                over: self.detail_scroll.overscroll(),
+                pin,
+                stuck,
                 first: range.start,
                 total: self.diff_rows.len(),
                 focused,
@@ -3504,13 +3504,8 @@ impl Panel {
         };
         let lines = self.detail_lines(ctx);
         let total = lines.len();
-        let first = self.detail_first.min(total.saturating_sub(page));
         // Scrolled part of a line, the pane shows one more under it.
-        let part = if first + page < total {
-            self.detail_wheel.part(first)
-        } else {
-            0.0
-        };
+        let (first, part) = standing(&self.detail_scroll, total, page);
         DetailView {
             tab,
             title: ctx.items[k].label.clone(),
@@ -3525,6 +3520,9 @@ impl Panel {
             title_buttons: Vec::new(),
             row_buttons: Vec::new(),
             part,
+            over: self.detail_scroll.overscroll(),
+            pin: 0.0,
+            stuck: false,
             first,
             total,
             focused,
@@ -3793,6 +3791,7 @@ impl Panel {
                 let at = self.cursor_stop(at, 1);
                 if by.abs() == 1 {
                     self.set_cursor(at, None);
+                    self.follow(at, page);
                     self.select_diff_row(at, ctx);
                     return;
                 }
@@ -3802,7 +3801,6 @@ impl Panel {
         let to = (row as i64).saturating_add(by).clamp(0, n as i64 - 1) as usize;
         let to = self.cursor_stop(to, by.signum());
         self.set_cursor(to, extend.then_some(from));
-        self.detail_wheel = Wheel::default();
         self.follow(to, page);
         self.select_diff_row(to, ctx);
     }
@@ -3834,28 +3832,17 @@ impl Panel {
         ahead(r).or_else(|| back(r)).unwrap_or(r)
     }
 
-    /// Scroll the diff the least to show row `r` on a page of `page`.
+    /// Scroll the diff the least to show row `r` whole on a page of
+    /// `page`: in a file, under its header pinned over the row above it.
     fn follow(&mut self, r: usize, page: usize) {
         let page = page.max(1);
-        let (sticky, range) = self.diff_window(page);
-        if range.contains(&r) || sticky == Some(r) {
-            return;
-        }
-        if r < range.start {
-            self.detail_first = r;
-            return;
-        }
-        let last = self.diff_last(page);
-        let mut first = (r + 1).saturating_sub(page).min(last);
-        // One further when a header pins over the rows.
-        while first < last.min(r) {
-            self.detail_first = first;
-            if self.diff_window(page).1.contains(&r) {
-                return;
-            }
-            first += 1;
-        }
-        self.detail_first = first;
+        let top = match self.file_head(r) {
+            Some(h) if h < r && page > 1 => r - 1,
+            _ => r,
+        };
+        let last = self.diff_last(page) as f64;
+        let to = showing(self.detail_scroll.pos().min(last), (top, r), page);
+        move_to(&mut self.detail_scroll, to.min(last));
     }
 
     /// The root and path of the file the cursor is in, and the lines of it
@@ -4147,7 +4134,7 @@ impl Panel {
 
     /// Where the diff is scrolled to, by who it is.
     fn diff_anchor(&self) -> Option<Anchor> {
-        let first = self.detail_first.min(self.diff_rows.len().checked_sub(1)?);
+        let first = (self.detail_scroll.first()).min(self.diff_rows.len().checked_sub(1)?);
         let head = (0..=first).rev().find(|&r| self.diff_rows[r].is_header())?;
         let (root, path) = match self.diff_rows[head] {
             DiffRow::Repo(k) => (self.diff_roots.get(k)?.clone(), None),
@@ -4188,7 +4175,7 @@ impl Panel {
             .iter()
             .position(|r| r.is_header() || *r == DiffRow::Gap)
             .map_or(self.diff_rows.len(), |n| head + 1 + n);
-        self.detail_first = (head + offset).min(end - 1);
+        self.detail_scroll.jump((head + offset).min(end - 1) as f64);
     }
 
     /// Scroll the diff to the selected line's repository or file.
@@ -4204,45 +4191,62 @@ impl Panel {
             None => None,
         };
         if let Some(head) = head {
-            self.detail_first = head;
+            self.detail_scroll.jump(head as f64);
         }
     }
 
-    /// The first row the diff can be scrolled to on a page of `page`: the
-    /// last row shows under the header pinned at the top.
+    /// The furthest row the diff can be scrolled to on a page of `page`:
+    /// its last row shows at the bottom.
     fn diff_last(&self, page: usize) -> usize {
-        let (total, page) = (self.diff_rows.len(), page.max(1));
-        if total > page { total - page + 1 } else { 0 }
+        self.diff_rows.len().saturating_sub(page.max(1))
     }
 
     /// The diff in view on a page of `page`: the header of the file its
-    /// first row is in, pinned at the top unless that row is the header,
-    /// and the rows under it.
+    /// first row is in, pinned at the top over that row, and the rows
+    /// shown whole under it.
     fn diff_window(&self, page: usize) -> (Option<usize>, Range<usize>) {
         let page = page.max(1);
-        let first = self.detail_first.min(self.diff_last(page));
-        let sticky = self.file_head(first).filter(|&h| h < first && page > 1);
-        let room = page - usize::from(sticky.is_some());
-        (sticky, first..(first + room).min(self.diff_rows.len()))
+        let (sticky, rows, _) = self.diff_shown(page);
+        let first = rows.start;
+        let start = match sticky {
+            Some(h) if h < first => first + 1,
+            _ => first,
+        };
+        let end = (first + page).min(self.diff_rows.len());
+        (sticky, start..end.max(start))
     }
 
-    /// The diff in view on a page of `page` as `diff_window` has it, with
-    /// one more row under it when scrolled part of a row; and that part.
-    /// A file's header at the top shows none: a row further pins it there,
-    /// with the rows under it where they are, so they stay put meanwhile.
+    /// The diff's rows in view on a page of `page`, from the first, with
+    /// one more under them when scrolled part of a row; the header of the
+    /// file the first is in, pinned at the top over them (unless the page
+    /// is a row); and the part of the first row scrolled past.
     fn diff_shown(&self, page: usize) -> (Option<usize>, Range<usize>, f64) {
-        let (sticky, range) = self.diff_window(page);
-        let first = range.start;
-        let pins = page > 1
-            && matches!(self.diff_rows.get(first), Some(DiffRow::File(..)))
-            && self.file_head(first + 1) == Some(first);
-        let part = if range.end < self.diff_rows.len() && !pins {
-            self.detail_wheel.part(first)
-        } else {
-            0.0
-        };
-        let end = range.end + usize::from(part > 0.0);
+        let page = page.max(1);
+        let total = self.diff_rows.len();
+        let (first, part) = standing(&self.detail_scroll, total, page);
+        let end = (first + page + usize::from(part > 0.0)).min(total);
+        let sticky = self.file_head(first).filter(|_| page > 1);
         (sticky, first..end, part)
+    }
+
+    /// Where the header `head` pinned at the top of the diff on a page of
+    /// `page` is, logical pixels down from the top of its rows `line_h`
+    /// high (as CSS's sticky has it): at the top, pushed up by the next header as it comes, down
+    /// with the rows pulled past the start; and whether it is scrolled
+    /// past its own place.
+    fn diff_pin(&self, head: usize, page: usize, line_h: i32) -> (f64, bool) {
+        let file = self.diff_rows[head].file();
+        let total = self.diff_rows.len();
+        let next = (head + 1..total)
+            .find(|&r| self.diff_rows[r].file() != file)
+            .unwrap_or(total);
+        let (first, part) = standing(&self.detail_scroll, total, page);
+        let pos = first as f64 + part;
+        let over = self.detail_scroll.overscroll();
+        let line = line_h as f64;
+        let place = (head as f64 - pos) * line + over;
+        let pushed = (next as f64 - pos) * line + over - line;
+        (place.max(0.0).min(pushed), place < 0.0)
     }
 
     /// The header row of the file diff row `r` is in.
@@ -4516,9 +4520,9 @@ impl Panel {
         let at = self.selected_row(&rows, items);
         self.selected = old;
         if let Some(t) = at {
-            let keep = self.detail_first;
+            let keep = self.detail_scroll.clone();
             self.select(&rows, t, items, ctx.page.0);
-            self.detail_first = keep;
+            self.detail_scroll = keep;
         }
     }
 
@@ -4568,7 +4572,8 @@ impl Panel {
             (0..first).rev().find(|&r| is_file(&self.diff_rows[r]))
         };
         if let Some(to) = to {
-            self.detail_first = to;
+            let last = self.diff_last(ctx.page.1);
+            self.detail_scroll.jump(to.min(last) as f64);
             self.set_cursor(to, None);
             self.select_diff_row(to, ctx);
         }
@@ -4982,8 +4987,7 @@ impl Panel {
             return;
         }
         if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
-            self.detail_first = 0;
-            self.detail_wheel = Wheel::default();
+            self.detail_scroll.jump(0.0);
         }
         self.detail = Some((key, text));
         self.detail_stale = false;
@@ -5357,17 +5361,29 @@ mod tests {
     /// Fingers moving the tree by `rows` of its lines, then lifted at
     /// rest: it stands as far as that goes.
     fn swipe_tree(panel: &mut Panel, rows: f64, ctx: &Ctx) {
-        let now = Instant::now();
         let px = rows * crate::chrome::repos_row(ctx.density) as f64;
-        panel.scroll(Motion::Finger { px, time: 0 }, now, ctx);
-        panel.scroll(Motion::Lift { time: 1000 }, now, ctx);
+        swipe(panel, px, false, ctx);
+    }
+
+    /// `swipe_tree` over the detail, by its rows.
+    fn swipe_detail(panel: &mut Panel, rows: f64, ctx: &Ctx) {
+        let px = rows * crate::chrome::repos_detail_line(ctx.density) as f64;
+        swipe(panel, px, true, ctx);
+    }
+
+    /// Fingers moving the detail, or else the tree, by `px`, then lifted
+    /// at rest.
+    fn swipe(panel: &mut Panel, px: f64, over_detail: bool, ctx: &Ctx) {
+        let now = Instant::now();
+        panel.scroll(Motion::Finger { px, time: 0 }, now, over_detail, ctx);
+        panel.scroll(Motion::Lift { time: 1000 }, now, over_detail, ctx);
         panel.scroll_tick(later(now), ctx);
     }
 
     /// The wheel turned `n` notches over the tree, and its glide done.
     fn wheel_tree(panel: &mut Panel, n: f64, ctx: &Ctx) {
         let now = Instant::now();
-        panel.scroll(Motion::Notches(n), now, ctx);
+        panel.scroll(Motion::Notches(n), now, false, ctx);
         panel.scroll_tick(later(now), ctx);
     }
 
@@ -5943,33 +5959,33 @@ mod tests {
         );
         // The diff, ten rows, two in view: Shift+Down scrolls it.
         read_diffs(&mut panel, &ctx);
-        panel.detail_first = 0;
+        panel.detail_scroll.jump(0.0);
         let view = panel.view("p", &ctx);
         assert_eq!((view.detail.first, view.detail.total), (0, 10));
         assert_eq!(
             press(&mut panel, mods(false, true, false), Keysym::Down, &ctx),
             None
         );
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
         let page_down = |panel: &mut Panel| {
             press(panel, mods(false, true, false), Keysym::Page_Down, &ctx);
         };
         page_down(&mut panel);
-        assert_eq!(panel.detail_first, 3);
+        assert_eq!(panel.detail_scroll.pos(), 3.0);
         page_down(&mut panel);
-        assert_eq!(panel.detail_first, 5);
+        assert_eq!(panel.detail_scroll.pos(), 5.0);
         press(&mut panel, mods(false, true, false), Keysym::Up, &ctx);
-        assert_eq!(panel.detail_first, 4);
+        assert_eq!(panel.detail_scroll.pos(), 4.0);
         // With the field focused too.
         panel.focus = Focus::Field;
         press(&mut panel, mods(false, true, false), Keysym::Page_Up, &ctx);
-        assert_eq!(panel.detail_first, 2);
+        assert_eq!(panel.detail_scroll.pos(), 2.0);
         assert_eq!(panel.view("p", &ctx).detail.first, 2);
-        // As far as the last row, under the header pinned at the top.
-        panel.scroll_detail(100.0, &ctx);
-        assert_eq!(panel.detail_first, 9);
+        // As far as the last row, at the bottom.
+        swipe_detail(&mut panel, 100.0, &ctx);
+        assert_eq!(panel.detail_scroll.pos(), 8.0);
         let view = panel.view("p", &ctx);
-        assert_eq!(detail_rows(&view), ["= old.rs → new.rs"]);
+        assert_eq!(detail_rows(&view), ["# zed", "= old.rs → new.rs"]);
         assert!(!view.detail.sticky);
     }
 
@@ -6428,12 +6444,12 @@ mod tests {
         let mut panel = Panel::new(&items);
         let now = Instant::now();
         // Pulled down at the top: the lines move down, less than the pull.
-        panel.scroll(Motion::Finger { px: -row, time: 0 }, now, &ctx);
+        panel.scroll(Motion::Finger { px: -row, time: 0 }, now, false, &ctx);
         let view = panel.view("p", &ctx);
         assert!(view.over > 0.0 && view.over < row, "{}", view.over);
         assert!(panel.scrolling(now));
         // Let go, it springs back.
-        panel.scroll(Motion::Lift { time: 1000 }, now, &ctx);
+        panel.scroll(Motion::Lift { time: 1000 }, now, false, &ctx);
         assert!(panel.scroll_tick(now + Duration::from_millis(16), &ctx));
         assert!(!panel.scroll_tick(later(now), &ctx));
         assert_eq!(panel.view("p", &ctx).over, 0.0);
@@ -6442,10 +6458,10 @@ mod tests {
         for k in 0..5 {
             let at = now + Duration::from_millis(8 * k as u64);
             let time = 2000 + 8 * k;
-            panel.scroll(Motion::Finger { px: 8.0, time }, at, &ctx);
+            panel.scroll(Motion::Finger { px: 8.0, time }, at, false, &ctx);
         }
         let lift = now + Duration::from_millis(40);
-        panel.scroll(Motion::Lift { time: 2040 }, lift, &ctx);
+        panel.scroll(Motion::Lift { time: 2040 }, lift, false, &ctx);
         let before = panel.tree_scroll.pos();
         panel.scroll_tick(lift + Duration::from_millis(50), &ctx);
         assert!(panel.tree_scroll.pos() > before);
@@ -6626,19 +6642,27 @@ mod tests {
                 "= old.rs → new.rs",
             ]
         );
-        // Scrolled into a file, its header is pinned at the top, with its
-        // repository's name.
+        // Scrolled into a file, its header is pinned at the top over the
+        // first row, with its repository's name.
         let paged = super::Ctx {
             page: (20, 4),
             ..ctx
         };
-        panel.detail_first = 3;
+        panel.detail_scroll.jump(3.0);
         let view = panel.view("p", &paged);
-        assert!(view.detail.sticky);
+        assert!(view.detail.sticky && view.detail.stuck);
         assert_eq!(
             detail_rows(&view),
-            ["= src/git.rs", "+b", "+c", "= notes.md"]
+            ["= src/git.rs", "+b", "+c", "= notes.md", "+n"]
         );
+        // The next file's header pushes it up as it comes.
+        let line = crate::chrome::repos_detail_line(paged.density) as f64;
+        assert_eq!(view.detail.pin, 0.0);
+        panel.detail_scroll.jump(4.25);
+        let view = panel.view("p", &paged);
+        assert_eq!(view.detail.pin, -0.25 * line);
+        assert_eq!(detail_rows(&view)[..2], ["= src/git.rs", "+c"]);
+        panel.detail_scroll.jump(3.0);
         let DetailRow::File(file) = &view.detail.rows[0] else {
             panic!("{:?}", view.detail.rows[0]);
         };
@@ -6655,7 +6679,7 @@ mod tests {
             vec![added("src/git.rs", 'M', &["a", "c"])],
             &ctx,
         );
-        assert_eq!(panel.detail_first, 3);
+        assert_eq!(panel.detail_scroll.pos(), 3.0);
         assert_eq!(detail_rows(&panel.view("p", &paged))[1], "+c");
         // A read for an earlier status read, coming late, is dropped.
         panel.set_diffs(root("gerdr"), 0, vec![], &ctx);
@@ -6665,9 +6689,9 @@ mod tests {
         panel.focus = Focus::Tree;
         select(&mut panel, "gerdr");
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 5);
+        assert_eq!(panel.detail_scroll.pos(), 5.0);
         let view = panel.view("p", &ctx);
         let DetailRow::File(file) = &view.detail.rows[5] else {
             panic!("{:?}", view.detail.rows[5]);
@@ -6684,7 +6708,7 @@ mod tests {
         assert_eq!(panel.detail_wanted(&ctx), Some(log.clone()));
         assert!(panel.diffs_wanted(&ctx).is_empty());
         panel.set_detail(log.clone(), "abc1234 Read the branch".into());
-        assert_eq!(panel.detail_first, 0);
+        assert_eq!(panel.detail_scroll.pos(), 0.0);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!(detail.title, "gerdr");
         assert_eq!(detail.tab, DetailTab::Log);
@@ -6714,7 +6738,7 @@ mod tests {
         // Ctrl+D, the diff again, where the selection is.
         press(&mut panel, ctrl(), Keysym::d, &ctx);
         assert_eq!(panel.detail_wanted(&ctx), None);
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
     }
 
     #[test]
@@ -6726,38 +6750,55 @@ mod tests {
         read_diffs(&mut panel, &ctx);
         // Part of the repository's header scrolled past, one more row
         // under the pane.
-        panel.scroll_detail(0.5, &ctx);
+        swipe_detail(&mut panel, 0.5, &ctx);
         let view = panel.view("p", &ctx);
         assert_eq!((view.detail.first, view.detail.part), (0, 0.5));
         assert_eq!(
             detail_rows(&view),
             ["# gerdr", "= src/git.rs", "+a", "+b", "+c"]
         );
-        // A file's header at the top stays put: a row further pins it.
-        panel.scroll_detail(1.0, &ctx);
+        // A file's header scrolled past its place stays at the top, pinned
+        // over itself and the rows moving under it.
+        swipe_detail(&mut panel, 1.0, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.first, view.detail.part), (1, 0.0));
-        assert_eq!(detail_rows(&view).len(), 4);
+        assert_eq!((view.detail.first, view.detail.part), (1, 0.5));
+        assert!(view.detail.sticky && view.detail.stuck);
+        assert_eq!(view.detail.pin, 0.0);
+        assert_eq!(
+            detail_rows(&view),
+            [
+                "= src/git.rs",
+                "= src/git.rs",
+                "+a",
+                "+b",
+                "+c",
+                "= notes.md"
+            ]
+        );
         // Under the pinned header, the rows move by the part.
-        panel.scroll_detail(0.75, &ctx);
+        swipe_detail(&mut panel, 0.75, &ctx);
         let view = panel.view("p", &ctx);
         assert!(view.detail.sticky);
         assert_eq!((view.detail.first, view.detail.part), (2, 0.25));
         assert_eq!(
             detail_rows(&view),
-            ["= src/git.rs", "+a", "+b", "+c", "= notes.md"]
+            ["= src/git.rs", "+a", "+b", "+c", "= notes.md", "+n"]
         );
         // A click on the row shown in part under the pane selects it.
         panel.click(ReposHit::DiffRow(4), &ctx);
         let notes = Selected::File(root("gerdr"), "notes.md".into());
         assert_eq!(panel.selected, Some(notes));
-        // The end holds the diff whole.
-        panel.scroll_detail(10.5, &ctx);
+        // The end holds the diff whole, its last row at the bottom.
+        swipe_detail(&mut panel, 10.5, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.first, view.detail.part), (7, 0.0));
-        assert_eq!(detail_rows(&view), ["", "# zed", "= old.rs → new.rs"]);
-        // A key moving the diff drops the part.
-        panel.scroll_detail(-2.5, &ctx);
+        assert_eq!((view.detail.first, view.detail.part), (6, 0.0));
+        assert_eq!(
+            detail_rows(&view),
+            ["= notes.md", "+n", "", "# zed", "= old.rs → new.rs"]
+        );
+        // A key moving the cursor drops the part, the row it goes on
+        // shown whole.
+        swipe_detail(&mut panel, -2.5, &ctx);
         assert_eq!(panel.view("p", &ctx).detail.part, 0.5);
         panel.focus = Focus::Detail;
         press(&mut panel, none(), Keysym::Up, &ctx);
@@ -6771,10 +6812,10 @@ mod tests {
             tab: DetailTab::Log,
         };
         panel.set_detail(log, "a\nb\nc\nd\ne\nf".into());
-        panel.scroll_detail(0.5, &ctx);
+        swipe_detail(&mut panel, 0.5, &ctx);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!((detail.first, detail.part, detail.rows.len()), (0, 0.5, 5));
-        panel.scroll_detail(5.0, &ctx);
+        swipe_detail(&mut panel, 5.0, &ctx);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!((detail.first, detail.part, detail.rows.len()), (2, 0.0, 4));
     }
@@ -6802,7 +6843,7 @@ mod tests {
         press(&mut panel, mods(false, true, false), Keysym::Down, &ctx);
         assert_eq!(cursor(&panel), Some((3, 2)));
         // Shift+Down in the diff doesn't scroll it.
-        assert_eq!(panel.detail_first, 0);
+        assert_eq!(panel.detail_scroll.pos(), 0.0);
         let marks = panel.view("p", &ctx).detail.marks;
         assert!(marks[2].selected && marks[2].top && !marks[2].bottom);
         assert!(marks[3].selected && marks[3].bottom && !marks[4].selected);
@@ -7028,28 +7069,29 @@ mod tests {
         assert_eq!(panel.selected, Some(Selected::Repo(root("gerdr"))));
         press(&mut panel, none(), Keysym::Down, &ctx);
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 0);
+        assert_eq!(panel.detail_scroll.pos(), 0.0);
         let git = Selected::File(root("gerdr"), "src/git.rs".into());
         assert_eq!(panel.selected, Some(git));
         press(&mut panel, none(), Keysym::Down, &ctx);
         press(&mut panel, none(), Keysym::Down, &ctx);
         assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(4));
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
+        // Its header at the top, pinned over itself.
         let marks = panel.view("p", &ctx).detail.marks;
-        assert!(marks[3].selected && marks[3].top && marks[3].bottom && !marks[2].selected);
+        assert!(marks[4].selected && marks[4].top && marks[4].bottom && !marks[3].selected);
         // Alt+Down goes to the next file, and Alt+Up back.
         press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 5);
+        assert_eq!(panel.detail_scroll.pos(), 5.0);
         let notes = Selected::File(root("gerdr"), "notes.md".into());
         assert_eq!(panel.selected, Some(notes));
         press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 9);
+        assert_eq!(panel.detail_scroll.pos(), 6.0);
         press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
         press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
         // Space checks the cursor's file, as its tree line.
         assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(1));
-        panel.detail_first = 3;
+        panel.detail_scroll.jump(3.0);
         press(&mut panel, none(), Keysym::space, &ctx);
         let key = (root("gerdr"), "src/git.rs".to_string());
         assert!(panel.checked_files.contains(&key));
@@ -7061,7 +7103,7 @@ mod tests {
         // back to show it.
         press(&mut panel, none(), Keysym::Down, &ctx);
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(panel.detail_first, 2);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::OpenInZed {
@@ -7071,7 +7113,7 @@ mod tests {
         );
         // Left folds it, its header at the top; Right unfolds it.
         press(&mut panel, none(), Keysym::Left, &ctx);
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
         assert_eq!(panel.view("p", &ctx).detail.total, 7);
         press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(panel.view("p", &ctx).detail.total, 10);
@@ -7082,21 +7124,21 @@ mod tests {
         assert_eq!(panel.focus, Focus::Tree);
 
         // Clicks: on a file's checkbox, its chevron, a row.
-        panel.detail_first = 0;
+        panel.detail_scroll.jump(0.0);
         panel.click(ReposHit::DiffCheck(1), &ctx);
         assert!(!panel.checked_files.contains(&key));
         panel.click(ReposHit::DiffFold(1), &ctx);
         assert_eq!(panel.view("p", &ctx).detail.total, 7);
         // Folded, its header went to the top.
-        assert_eq!(panel.detail_first, 1);
+        assert_eq!(panel.detail_scroll.pos(), 1.0);
         panel.click(ReposHit::DiffFold(0), &ctx);
         assert_eq!(panel.view("p", &ctx).detail.total, 10);
-        panel.detail_first = 0;
+        panel.detail_scroll.jump(0.0);
         panel.click(ReposHit::DiffRow(3), &ctx);
         assert_eq!(panel.focus, Focus::Detail);
         let git = Selected::File(root("gerdr"), "src/git.rs".into());
         assert_eq!(panel.selected, Some(git));
-        assert_eq!(panel.detail_first, 0);
+        assert_eq!(panel.detail_scroll.pos(), 0.0);
         assert_eq!(
             panel.open_detail_row(3, &ctx),
             Some(Outcome::OpenInZed {
@@ -7105,11 +7147,11 @@ mod tests {
             })
         );
         // Under the pinned header, rows are one down.
-        panel.detail_first = 3;
+        panel.detail_scroll.jump(3.0);
         assert_eq!(panel.detail_row_at(0, &ctx), Some(1));
         assert_eq!(panel.detail_row_at(1, &ctx), Some(3));
-        assert_eq!(panel.detail_row_at(3, &ctx), Some(5));
-        assert_eq!(panel.detail_row_at(4, &ctx), None);
+        assert_eq!(panel.detail_row_at(4, &ctx), Some(6));
+        assert_eq!(panel.detail_row_at(5, &ctx), None);
     }
 
     #[test]

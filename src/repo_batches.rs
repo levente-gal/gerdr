@@ -1111,10 +1111,8 @@ impl Gerdr {
         };
         if over_menu {
             panel.scroll_branches(rows, &ctx);
-        } else if over_detail {
-            panel.scroll_detail(rows, &ctx);
         } else {
-            panel.scroll(motion, now, &ctx);
+            panel.scroll(motion, now, over_detail, &ctx);
         }
         if panel.scrolling(now) {
             panel.hover = None;

@@ -99,6 +99,8 @@ const DIFF_INSET: i32 = 8;
 const DIFF_BAR: i32 = 3;
 /// A review comment's text, in from its card's edge.
 const COMMENT_INDENT: i32 = 12;
+/// How far the line and shadow under the pinned header reach down.
+const PIN_SHADOW: i32 = 5;
 /// A button on a diff row: its padding, the gap before its key, the gap
 /// between two, and how far in from the row's ends and edges it sits.
 const ROW_CHIP_PAD: i32 = 8;
@@ -373,9 +375,16 @@ pub struct DetailView {
     /// repository's name.
     pub title: String,
     /// The rows in view, scrolled; with `sticky`, the first is the header
-    /// of the file the rest start in, pinned at the top.
+    /// of the file the rest start in, pinned at the top over them.
     pub rows: Vec<DetailRow>,
     pub sticky: bool,
+    /// Where the pinned header is, logical pixels down from the top of the
+    /// rows: 0 pinned there, less while the next file's header pushes it
+    /// up, more while the rows are pulled down past the start.
+    pub pin: f64,
+    /// The pinned header is scrolled past its own place: it casts a
+    /// shadow on the rows under it.
+    pub stuck: bool,
     /// How each of `rows` is marked: the diff's cursor, the range it
     /// reaches back to, a comment on it. Empty for none.
     pub marks: Vec<RowMark>,
@@ -388,6 +397,9 @@ pub struct DetailView {
     /// any) past, 0 to 1; with some, `rows` has one more under the pane,
     /// shown in part.
     pub part: f64,
+    /// How far the rows are moved down (up when negative), logical
+    /// pixels, while the pane is pulled past an end.
+    pub over: f64,
     /// Where the rows start among them all, and how many there are: where
     /// the scrollbar stands.
     pub first: usize,
@@ -865,8 +877,6 @@ struct Parts {
     layout: ReposLayout,
     /// The line under the field saying what went wrong.
     error: Option<Rect>,
-    /// Where the detail pane's lines go, under its title row.
-    body: Rect,
     /// The result bar's buttons, by index into `ResultBar::buttons`.
     result_buttons: Vec<(usize, Rect)>,
     /// The footer's buttons, by index into `ReposView::hints`.
@@ -913,9 +923,6 @@ fn hint_width(hint: &Hint) -> i32 {
         + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
-/// The detail's title row buttons and its rows', as laid out.
-type DetailButtons<'a> = (&'a [(ReposButton, Rect)], &'a [(usize, ReposButton, Rect)]);
-
 /// How wide a button on a diff row is: its label, then its key muted.
 fn row_chip_width(hint: &Hint) -> i32 {
     let key = match hint.key.is_empty() {
@@ -923,6 +930,26 @@ fn row_chip_width(hint: &Hint) -> i32 {
         false => ROW_CHIP_KEY_GAP + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR),
     };
     2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR) + key
+}
+
+/// Where the buttons `widths` wide go on a diff row in `row`: in order,
+/// right-aligned on it.
+fn chip_rects(row: Rect, widths: impl DoubleEndedIterator<Item = i32>) -> Vec<Rect> {
+    let mut end = row.loc.x + row.size.w - ROW_CHIP_INSET;
+    let mut rects: Vec<Rect> = widths
+        .rev()
+        .map(|w| {
+            end -= w;
+            let rect = Rectangle::new(
+                (end, row.loc.y + ROW_CHIP_INSET).into(),
+                (w, (row.size.h - 2 * ROW_CHIP_INSET).max(1)).into(),
+            );
+            end -= ROW_CHIP_GAP;
+            rect
+        })
+        .collect();
+    rects.reverse();
+    rects
 }
 
 /// What the footer's "more" button says with `n` actions behind it.
@@ -1113,6 +1140,73 @@ fn thumb_place(track: Rect, pos: f64, shown: usize, total: usize) -> Option<(f64
     Some((top, thumb as i32))
 }
 
+/// How wide the detail's rows are in a pane `w` wide: short of its
+/// padding and its scrollbar.
+fn body_width(w: i32) -> i32 {
+    (w - 2 * HELP_PADDING - SCROLLBAR).max(0)
+}
+
+/// The detail's scrollbar in `layout`, and how many of `view`'s rows it
+/// shows: a page.
+fn detail_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
+    let pane = layout.detail;
+    let line_h = repos_detail_line(view.density);
+    let track = Rectangle::new(
+        (
+            pane.loc.x + pane.size.w - HELP_PADDING / 2 - SCROLLBAR,
+            pane.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
+        )
+            .into(),
+        (
+            SCROLLBAR,
+            (pane.size.h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
+        )
+            .into(),
+    );
+    let shown = layout.detail_list.size.h / line_h.max(1);
+    (track, shown.max(1) as usize)
+}
+
+/// A row of the detail as drawn: what its pixels come from, but its
+/// place.
+#[derive(Clone, Debug, PartialEq)]
+struct DetailLook {
+    row: DetailRow,
+    mark: RowMark,
+    /// Its buttons, in order.
+    buttons: Vec<Hint>,
+    /// What the pointer is over on it, as on the first row.
+    hover: Option<ReposHit>,
+    /// The detail has the keyboard.
+    focused: bool,
+}
+
+/// Row `i` of `view`'s detail, as drawn.
+fn detail_look(view: &ReposView, i: usize) -> DetailLook {
+    use ReposHit::*;
+    let buttons: Vec<Hint> = view
+        .detail
+        .row_buttons
+        .iter()
+        .filter(|(j, _)| *j == i)
+        .map(|(_, hint)| hint.clone())
+        .collect();
+    let hover = match view.hover {
+        Some(DiffRow(j)) if j == i => Some(DiffRow(0)),
+        Some(DiffCheck(j)) if j == i => Some(DiffCheck(0)),
+        Some(DiffFold(j)) if j == i => Some(DiffFold(0)),
+        Some(Button(b)) if buttons.iter().any(|h| h.button == b) => Some(Button(b)),
+        _ => None,
+    };
+    DetailLook {
+        row: view.detail.rows[i].clone(),
+        mark: view.detail.marks.get(i).copied().unwrap_or_default(),
+        buttons,
+        hover,
+        focused: view.detail.focused,
+    }
+}
+
 /// A tree line as drawn: what its pixels come from, but its place.
 #[derive(Clone, Debug, PartialEq)]
 struct TreeRow {
@@ -1200,7 +1294,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     // Scrolled part of the first line, the lines start up by as much and
     // the last is shown in part, cut at where the others end; pulled past
     // an end, they move with the pull.
-    let tree_shift = scrolled_by(view.part, view.over, row_h).round() as i32;
+    let tree_shift = scrolled_by(view.part, view.over, row_h);
     let whole_lines = view
         .lines
         .len()
@@ -1213,7 +1307,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             break;
         }
         tree_shown += usize::from(i < whole_lines);
-        let ly = at - tree_shift;
+        let ly = (at as f64 - tree_shift).round() as i32;
         let rect = Rectangle::new((line_x, ly).into(), (line_w, row_h).into());
         let (_, check, expander) = line_rects(line, rect);
         if let TreeLine::Repo(repo) = line {
@@ -1264,7 +1358,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (tab, Rectangle::new((tx, tab_y).into(), size.into()))
         })
         .collect();
-    let body = Rectangle::new(
+    let body: Rect = Rectangle::new(
         (
             detail.loc.x + HELP_PADDING,
             middle_y + REPOS_DETAIL_TITLE + REPOS_PAD,
@@ -1280,21 +1374,27 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     // The detail's rows; a file header's chevron, then its checkbox.
     let (mut detail_rows, mut detail_checks, mut detail_folds) =
         (Vec::new(), Vec::new(), Vec::new());
-    // Scrolled part of the first row under the pinned header, the rows
-    // start up by as much (under the header) and the last is shown in
-    // part, cut at where the others end.
+    // Scrolled part of the first row, the rows start up by as much and the
+    // last is shown in part, cut at where the others end; pulled past an
+    // end, they move with the pull. The header pinned at the top goes over
+    // them, where its pin has it.
     let pinned = usize::from(view.detail.sticky);
-    let detail_shift = wheel::shift(view.detail.part, line_h);
+    let detail_shift = scrolled_by(view.detail.part, view.detail.over, line_h);
     let under = usize::from(view.detail.part > 0.0);
-    let whole_rows = view.detail.rows.len().saturating_sub(under);
+    let whole_rows = view.detail.rows.len().saturating_sub(pinned + under);
     let mut detail_shown = 0;
     for (i, row) in view.detail.rows.iter().enumerate() {
-        let at = body.loc.y + i as i32 * line_h;
-        if i < whole_rows && at + line_h > body.loc.y + body.size.h {
-            break;
-        }
-        detail_shown += usize::from(i < whole_rows);
-        let ry = if i < pinned { at } else { at - detail_shift };
+        let ry = match i.checked_sub(pinned) {
+            None => (body.loc.y as f64 + view.detail.pin).round() as i32,
+            Some(j) => {
+                let at = body.loc.y + j as i32 * line_h;
+                if j < whole_rows && at + line_h > body.loc.y + body.size.h {
+                    break;
+                }
+                detail_shown += usize::from(j < whole_rows);
+                (at as f64 - detail_shift).round() as i32
+            }
+        };
         if let DetailRow::File(_) = row {
             let fold = Rectangle::new((body.loc.x, ry).into(), (DIFF_FOLD, line_h).into());
             let check = Rectangle::new(
@@ -1309,14 +1409,10 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (body.size.w, line_h).into(),
         ));
     }
-    let detail_list = {
-        let top = body.loc.y + pinned.min(detail_shown) as i32 * line_h;
-        let bottom = body.loc.y + detail_shown as i32 * line_h;
-        Rectangle::new(
-            (detail.loc.x, top).into(),
-            (detail.size.w, bottom - top).into(),
-        )
-    };
+    let detail_list = Rectangle::new(
+        (detail.loc.x, body.loc.y).into(),
+        (detail.size.w, detail_shown as i32 * line_h).into(),
+    );
     // The title row's buttons left of the tabs, the rows' at their right,
     // each right-aligned in order; none on a title too narrow for them.
     let mut detail_title_buttons = Vec::new();
@@ -1333,28 +1429,19 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     }
     detail_title_buttons.reverse();
     let mut detail_row_buttons = Vec::new();
-    let mut ends: Vec<(usize, i32)> = Vec::new();
-    for (i, hint) in view.detail.row_buttons.iter().rev() {
-        let Some(row) = detail_rows.get(*i) else {
-            continue;
-        };
-        let end = match ends.iter_mut().find(|(j, _)| j == i) {
-            Some((_, end)) => end,
-            None => {
-                ends.push((*i, row.loc.x + row.size.w - ROW_CHIP_INSET));
-                &mut ends.last_mut().expect("just pushed").1
-            }
-        };
-        let bw = row_chip_width(hint);
-        *end -= bw;
-        let rect = Rectangle::new(
-            (*end, row.loc.y + ROW_CHIP_INSET).into(),
-            (bw, (row.size.h - 2 * ROW_CHIP_INSET).max(1)).into(),
-        );
-        detail_row_buttons.push((*i, hint.button, rect));
-        *end -= ROW_CHIP_GAP;
+    for (i, row) in detail_rows.iter().enumerate() {
+        let hints: Vec<&Hint> = view
+            .detail
+            .row_buttons
+            .iter()
+            .filter(|(j, _)| *j == i)
+            .map(|(_, hint)| hint)
+            .collect();
+        let rects = chip_rects(*row, hints.iter().map(|h| row_chip_width(h)));
+        for (hint, rect) in hints.iter().zip(rects) {
+            detail_row_buttons.push((i, hint.button, rect));
+        }
     }
-    detail_row_buttons.reverse();
 
     // The result bar's buttons, right-aligned.
     let mut result_buttons = Vec::new();
@@ -1569,7 +1656,6 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             branch_list,
         },
         error,
-        body,
         result_buttons,
         hints,
         sheet_title,
@@ -1711,16 +1797,10 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if let Some((button, _)) = layout.detail_title_buttons.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::Button(*button));
     }
-    // A scrolled pane's rows count only where they show, but for the
-    // header pinned above them.
+    // A scrolled pane's rows count only where they show; the header
+    // pinned at the top, the first, over those under it.
     let list = layout.detail_list;
-    let shown = |i: usize| {
-        at(&list)
-            || layout
-                .detail_rows
-                .get(i)
-                .is_some_and(|r| r.loc.y + r.size.h <= list.loc.y)
-    };
+    let shown = |_: usize| at(&list);
     let row_button = layout
         .detail_row_buttons
         .iter()
@@ -2008,6 +2088,7 @@ impl Painter {
         let (track, shown) = tree_bar(view, layout);
         let at = (view.first, shown, view.total);
         scrollbar(&mut c, shift(track), at, scale, p);
+        self.detail_rows(&mut c, view, layout, by, scale, p);
         self.repos_menu(&mut c, view, layout, by, scale, p);
         if let Some(sheet) = &view.sheet {
             self.sheet(&mut c, view, sheet, &parts, shift, scale, p);
@@ -2113,20 +2194,12 @@ impl Painter {
             .iter()
             .map(|(t, r)| (*t, shift(*r)))
             .collect();
-        let rows: Vec<Rect> = layout.detail_rows.iter().map(|r| shift(*r)).collect();
-        let body = (shift(parts.body), shift(layout.detail_list), &rows[..]);
         let title_buttons: Vec<_> = layout
             .detail_title_buttons
             .iter()
             .map(|&(b, r)| (b, shift(r)))
             .collect();
-        let row_buttons: Vec<_> = layout
-            .detail_row_buttons
-            .iter()
-            .map(|&(i, b, r)| (i, b, shift(r)))
-            .collect();
-        let buttons = (&title_buttons[..], &row_buttons[..]);
-        self.detail_pane(&mut c, view, detail, body, &tabs, buttons, scale, p);
+        self.detail_title(&mut c, view, detail, &tabs, &title_buttons, scale, p);
 
         // The field, what went wrong, the result bar and the footer.
         let field = shift(layout.field);
@@ -2491,19 +2564,16 @@ impl Painter {
         }
     }
 
-    /// The detail pane in `rect`: its title, its buttons and tabs, then
-    /// its lines in `body` in the monospace font, added and removed ones
-    /// on a tint: each in its rect of `rows`, the scrolled ones cut to
-    /// `list`, with their buttons.
+    /// The detail pane's title row in `rect`, the pane's: its title, its
+    /// buttons in `title_buttons` and its tabs in `tabs`, a line under it.
     #[allow(clippy::too_many_arguments)]
-    fn detail_pane(
+    fn detail_title(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         rect: Rect,
-        (body, list, rows): (Rect, Rect, &[Rect]),
         tabs: &[(DetailTab, Rect)],
-        (title_buttons, row_buttons): DetailButtons,
+        title_buttons: &[(ReposButton, Rect)],
         scale: f64,
         p: &Palette,
     ) {
@@ -2551,70 +2621,121 @@ impl Painter {
             border,
             p.border_variant,
         );
-
-        let line_h = repos_detail_line(view.density);
-        // Tints reach across the pane, short of its edges.
-        let tint = (
-            px(rect.loc.x) + border,
-            px(rect.loc.x + rect.size.w) - border,
-        );
-        // The rows scrolled, cut to where they show; then the header
-        // pinned at the top, over them.
-        let pinned = usize::from(view.detail.sticky);
-        let shown = rows.iter().zip(&view.detail.rows).enumerate();
-        let (lx, ly, lw, lh) = rect_px(list, scale);
-        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
-            for (i, (at, row)) in shown.clone().skip(pinned) {
-                self.detail_row(c, view, i, row, *at, tint, scale, p);
-                self.row_chips(c, view, i, row_buttons, scale, p);
-            }
-        });
-        for (i, (at, row)) in shown.take(pinned) {
-            self.detail_row(c, view, i, row, *at, tint, scale, p);
-            self.row_chips(c, view, i, row_buttons, scale, p);
-        }
-        // The header pinned at the top casts a shadow on what scrolls under.
-        if view.detail.sticky && !rows.is_empty() {
-            let (y, h) = band(
-                Rectangle::new(body.loc, (body.size.w, line_h).into()),
-                scale,
-            );
-            c.fill(tint.0, y + h - border, tint.1 - tint.0, border, p.border);
-            let depth = px(4).max(1);
-            for dy in 0..depth {
-                let fade = 1.0 - dy as f32 / depth as f32;
-                for x in tint.0..tint.1 {
-                    c.blend(x, y + h + dy, [0, 0, 0], p.shadow * 0.35 * fade * fade);
-                }
-            }
-        }
-        let track = Rectangle::new(
-            (
-                rect.loc.x + rect.size.w - HELP_PADDING / 2 - SCROLLBAR,
-                body.loc.y,
-            )
-                .into(),
-            (SCROLLBAR, body.size.h).into(),
-        );
-        let (first, total) = (view.detail.first, view.detail.total);
-        let under = usize::from(view.detail.part > 0.0);
-        let whole = view.detail.rows.len().saturating_sub(under);
-        let shown = rows.len().min(whole).saturating_sub(pinned);
-        scrollbar(c, track, (first, shown.max(1), total), scale, p);
     }
 
-    /// Row `i` of the detail in `rect`; its tint across the pane from
+    /// The detail's rows of `view` as `layout` has them, moved by `by`
+    /// onto the buffer: those scrolled cut to where they show, the header
+    /// pinned at the top over them with its shadow, then the scrollbar.
+    #[cfg(test)]
+    fn detail_rows(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        layout: &ReposLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let pane = moved(layout.detail, by);
+        let border = px(1).max(1);
+        // Tints reach across the pane, short of its edges.
+        let tint = (
+            px(pane.loc.x) + border,
+            px(pane.loc.x + pane.size.w) - border,
+        );
+        let pinned = usize::from(view.detail.sticky);
+        let rows: Vec<(usize, Rect)> = layout
+            .detail_rows
+            .iter()
+            .map(|r| moved(*r, by))
+            .enumerate()
+            .collect();
+        let (lx, ly, lw, lh) = rect_px(moved(layout.detail_list, by), scale);
+        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
+            for &(i, rect) in rows[pinned.min(rows.len())..].iter().chain(&rows[..pinned]) {
+                self.detail_line(c, &detail_look(view, i), rect, tint, scale, p);
+            }
+            if let (true, Some(&(_, head))) = (view.detail.stuck, rows.first()) {
+                let (y, h) = band(head, scale);
+                self.pin_shadow(c, tint, y + h - border, scale, p);
+            }
+        });
+        let (track, shown) = detail_bar(view, layout);
+        let at = (view.detail.first, shown, view.detail.total);
+        scrollbar(c, moved(track, by), at, scale, p);
+    }
+
+    /// The detail's row `look` in `rect`, its tint across the pane from
+    /// `tint.0` to `tint.1` (physical pixels), with its buttons.
+    fn detail_line(
+        &self,
+        c: &mut Canvas,
+        look: &DetailLook,
+        rect: Rect,
+        tint: (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        self.detail_row(c, look, rect, tint, scale, p);
+        let rects = chip_rects(rect, look.buttons.iter().map(row_chip_width));
+        self.row_chips(c, look, &rects, scale, p);
+    }
+
+    /// A detail row across a pane `size` big, in a buffer of its own.
+    fn detail_row_buffer(
+        &self,
+        look: &DetailLook,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let border = ((scale.round() as i32).max(1)).min(c.w);
+        let rect = Rectangle::new(
+            (HELP_PADDING, 0).into(),
+            (body_width(size.w), size.h).into(),
+        );
+        let tint = (border, c.w - border);
+        self.detail_line(&mut c, look, rect, tint, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// Under the header pinned at the top of the diff, from `x.0` to `x.1`
+    /// and from `y` down (physical pixels): a line, then the shadow it
+    /// casts on what scrolls under it.
+    fn pin_shadow(&self, c: &mut Canvas, (x0, x1): (i32, i32), y: i32, scale: f64, p: &Palette) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let border = px(1).max(1);
+        c.fill(x0, y, x1 - x0, border, p.border);
+        let depth = px(PIN_SHADOW - 1).max(1);
+        for dy in 0..depth {
+            let fade = 1.0 - dy as f32 / depth as f32;
+            for x in x0..x1 {
+                c.blend(x, y + border + dy, [0, 0, 0], p.shadow * 0.35 * fade * fade);
+            }
+        }
+    }
+
+    /// The pinned header's line and shadow across a pane `w` wide, in a
+    /// buffer of its own.
+    fn pin_shadow_buffer(&self, w: i32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical((w, PIN_SHADOW).into(), scale));
+        let border = ((scale.round() as i32).max(1)).min(c.w);
+        let x1 = c.w - border;
+        self.pin_shadow(&mut c, (border, x1), 0, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// A row of the detail in `rect`; its tint across the pane from
     /// `tint.0` to `tint.1` (physical pixels). A repository's header and a
     /// file's are banded, a hunk is a rule with what it is in, an added or
     /// removed line is tinted with a bar at its left and its changed words
     /// tinted more.
-    #[allow(clippy::too_many_arguments)]
     fn detail_row(
         &self,
         c: &mut Canvas,
-        view: &ReposView,
-        i: usize,
-        row: &DetailRow,
+        look: &DetailLook,
         rect: Rect,
         (tint_x, tint_end): (i32, i32),
         scale: f64,
@@ -2631,7 +2752,7 @@ impl Painter {
         let across = |c: &mut Canvas, color: Rgb| c.fill(tint_x, y, tint_end - tint_x, h, color);
         // The cursor's row and the range it reaches back to, lit as one;
         // not a file's header, pinned or not, which shows its own.
-        let mark = view.detail.marks.get(i).copied().unwrap_or_default();
+        let (row, mark) = (&look.row, look.mark);
         let picked = mark.selected && !matches!(row, DetailRow::File(_));
         let lit = picked.then_some(0.5);
         if let Some(amount) = lit
@@ -2710,10 +2831,7 @@ impl Painter {
                 }
             }
             DetailRow::File(file) => {
-                let hovered = matches!(
-                    view.hover,
-                    Some(ReposHit::DiffRow(j) | ReposHit::DiffCheck(j) | ReposHit::DiffFold(j)) if j == i
-                );
+                let hovered = look.hover.is_some();
                 let fill = if file.selected {
                     mix(p.elevated, p.selected, 0.75)
                 } else if hovered {
@@ -2723,11 +2841,11 @@ impl Painter {
                 };
                 across(c, fill);
                 c.fill(tint_x, y, tint_end - tint_x, border, p.border_variant);
-                if file.selected && view.detail.focused {
+                if file.selected && look.focused {
                     c.fill(tint_x, y, px(2), h, p.accent);
                 }
                 let fold = Rectangle::new(rect.loc, (DIFF_FOLD, rect.size.h).into());
-                let color = if view.hover == Some(ReposHit::DiffFold(i)) {
+                let color = if look.hover == Some(ReposHit::DiffFold(0)) {
                     p.text
                 } else {
                     p.muted
@@ -2740,7 +2858,7 @@ impl Painter {
                     (rect.loc.x + DIFF_FOLD + (DIFF_CHECK - side) / 2, rect.loc.y).into(),
                     (side, rect.size.h).into(),
                 );
-                let check_hovered = view.hover == Some(ReposHit::DiffCheck(i));
+                let check_hovered = look.hover == Some(ReposHit::DiffCheck(0));
                 self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
                 // The status letter on a pill of its colour.
                 let tone = code_color(file.code, p);
@@ -2960,7 +3078,7 @@ impl Painter {
                     c.fill(sx as i32, iy, (ex - sx).max(1.0) as i32, ih, p.selected);
                 }
                 self.mono_text(c, text, REPOS_MONO_SIZE, tx, x1, row_band, scale, p.text);
-                if let Some(caret) = caret.filter(|_| view.detail.focused) {
+                if let Some(caret) = caret.filter(|_| look.focused) {
                     let cx = at(caret).min(x1 - b) as i32;
                     let pad = px(3);
                     c.fill(cx, y + pad, px(1).max(1), h - 2 * pad, p.accent);
@@ -2969,11 +3087,7 @@ impl Painter {
         }
         // The rows picked outlined as one, a bar down their left.
         if picked {
-            let color = if view.detail.focused {
-                p.accent
-            } else {
-                p.muted
-            };
+            let color = if look.focused { p.accent } else { p.muted };
             let w = tint_end - tint_x;
             c.fill(tint_x, y, px(DIFF_BAR), h, color);
             c.fill(tint_end - border, y, border, h, color);
@@ -2986,32 +3100,24 @@ impl Painter {
         }
     }
 
-    /// The buttons on row `i` of the detail, of those in `buttons`: the
-    /// first of them (keeping the comment written, writing one) in the
-    /// accent, the others plain; lighter under the pointer, with their
-    /// key muted after their label.
+    /// The buttons of the detail's row `look`, each in its rect of
+    /// `rects`: the first of them (keeping the comment written, writing
+    /// one) in the accent, the others plain; lighter under the pointer,
+    /// with their key muted after their label.
     fn row_chips(
         &self,
         c: &mut Canvas,
-        view: &ReposView,
-        i: usize,
-        buttons: &[(usize, ReposButton, Rect)],
+        look: &DetailLook,
+        rects: &[Rect],
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
-        let hints = view.detail.row_buttons.iter().filter(|(j, _)| *j == i);
-        for (k, (_, hint)) in hints.enumerate() {
-            let Some(&(.., rect)) = buttons
-                .iter()
-                .find(|&&(j, b, _)| j == i && b == hint.button)
-            else {
-                continue;
-            };
+        for (k, (hint, &rect)) in look.buttons.iter().zip(rects).enumerate() {
             let (x, y, w, h) = rect_px(rect, scale);
             let r = (h / 2.0).min(BUTTON_RADIUS * s);
             let b = s.round().max(1.0);
-            let hovered = view.hover == Some(ReposHit::Button(hint.button));
+            let hovered = look.hover == Some(ReposHit::Button(hint.button));
             let (fill, label, key) = if k == 0 {
                 let fill = if hovered {
                     mix(p.accent, p.on_accent, 0.15)
@@ -3641,25 +3747,31 @@ impl Painter {
 }
 
 /// What of `view` the panel's frame is drawn from: all but the tree's
-/// lines and where it stands, the branch menu (but that it is open), the
-/// sheet, and the pointer on what those show. `empty` is what the tree
-/// says, empty while it has lines.
+/// lines and the detail's rows and where they stand, the branch menu (but
+/// that it is open), the sheet, and the pointer on what those show.
+/// `empty` is what the tree says, empty while it has lines.
 fn frame_view(view: &ReposView) -> ReposView {
     use ReposHit::*;
-    let hover = view.hover.filter(|hit| {
-        !matches!(
+    let on_row = |b: ReposButton| view.detail.row_buttons.iter().any(|(_, h)| h.button == b);
+    let hover = view.hover.filter(|hit| match *hit {
+        Button(b) => !on_row(b),
+        hit => !matches!(
             hit,
             Line(_)
                 | Check(_)
                 | Expander(_)
                 | Chip(_)
                 | Mark(..)
+                | DiffRow(_)
+                | DiffCheck(_)
+                | DiffFold(_)
                 | BranchRow(_)
                 | BranchDelete(_)
                 | BranchCreate
                 | BranchMenu
-        )
+        ),
     });
+    let detail = &view.detail;
     let menu = view.branch.menu.as_ref().map(|_| BranchMenuView::default());
     ReposView {
         title: view.title.clone(),
@@ -3677,7 +3789,13 @@ fn frame_view(view: &ReposView) -> ReposView {
         error: view.error.clone(),
         result: view.result.clone(),
         hints: view.hints.clone(),
-        detail: view.detail.clone(),
+        detail: DetailView {
+            tab: detail.tab,
+            title: detail.title.clone(),
+            title_buttons: detail.title_buttons.clone(),
+            focused: detail.focused,
+            ..DetailView::default()
+        },
         sheet: None,
         empty: match view.lines.is_empty() {
             true => view.empty.clone(),
@@ -3699,7 +3817,10 @@ fn frame_view(view: &ReposView) -> ReposView {
 type FrameKey = (ReposView, Size<i32, Logical>, super::Theme, f64);
 /// A tree line's: the line as drawn, its size, the theme and the scale.
 type TreeKey = (TreeRow, Size<i32, Logical>, super::Theme, f64);
-/// A scrollbar thumb's: its size, the theme and the scale.
+/// A detail row's: the row as drawn, its size, the theme and the scale.
+type DetailKey = (DetailLook, Size<i32, Logical>, super::Theme, f64);
+/// A scrollbar thumb's, and the pinned header's shadow's: its size, the
+/// theme and the scale.
 type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
 /// The branch menu's: the menu, what the pointer is over, its card, the
 /// density, the theme and the scale.
@@ -3723,14 +3844,18 @@ type SheetKey = (
 );
 
 /// The repositories panel as the chrome shows it, fading in and out (see
-/// `Overlay`): its frame; over it each of the tree's lines in a buffer of
-/// its own and the thumb of its scrollbar, so that scrolling the tree only
-/// moves them; then the branch menu and the sheet over all.
+/// `Overlay`): its frame; over it each of the tree's lines and of the
+/// detail's rows in a buffer of its own, the detail's pinned header with
+/// its shadow and the thumbs of their scrollbars, so that scrolling them
+/// only moves those; then the branch menu and the sheet over all.
 #[derive(Default)]
 pub(super) struct ReposLayers {
     overlay: super::Overlay<FrameKey>,
     tree: super::RowCache<TreeKey>,
     tree_thumb: super::Cached<ThumbKey>,
+    detail: super::RowCache<DetailKey>,
+    detail_thumb: super::Cached<ThumbKey>,
+    pin_shadow: super::Cached<ThumbKey>,
     menu: super::Cached<MenuKey>,
     sheet: super::Cached<SheetKey>,
     /// How many times the frame was drawn, for tests.
@@ -3757,6 +3882,9 @@ impl ReposLayers {
             overlay,
             tree,
             tree_thumb,
+            detail,
+            detail_thumb,
+            pin_shadow,
             menu,
             sheet,
             #[cfg(test)]
@@ -3802,6 +3930,13 @@ impl ReposLayers {
                 });
                 over.push(super::Part::new(buffer, loc, size, 1.0));
             }
+            over.extend(detail_parts(
+                view,
+                layout,
+                (detail, detail_thumb, pin_shadow),
+                (theme, scale),
+                painter,
+            ));
             let (track, shown) = tree_bar(view, layout);
             let pos = view.first as f64 + view.part;
             if let Some((top, h)) = thumb_place(track, pos, shown, view.total) {
@@ -3827,11 +3962,74 @@ impl ReposLayers {
         };
         let parts = overlay.parts(placed, now, true, draw, over);
         tree.sweep();
+        detail.sweep();
         if !overlay.lingers() {
             tree.clear();
+            detail.clear();
         }
         parts
     }
+}
+
+/// The detail's parts over the frame, front to back: its scrollbar's
+/// thumb, the pinned header's shadow and the header, and its rows, each
+/// of its own buffer from `caches` (the rows', the thumb's and the
+/// shadow's).
+fn detail_parts(
+    view: &ReposView,
+    layout: &ReposLayout,
+    (rows, thumb, shadow): (
+        &mut super::RowCache<DetailKey>,
+        &mut super::Cached<ThumbKey>,
+        &mut super::Cached<ThumbKey>,
+    ),
+    (theme, scale): (super::Theme, f64),
+    painter: &Painter,
+) -> Vec<super::Part> {
+    use super::Part;
+    let p = theme.palette();
+    let mut parts = Vec::new();
+    let detail = &view.detail;
+    let (track, shown) = detail_bar(view, layout);
+    let pos = detail.first as f64 + detail.part;
+    if let Some((top, h)) = thumb_place(track, pos, shown, detail.total) {
+        let size = Size::from((SCROLLBAR, h));
+        let buffer = thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
+        let at = Point::from((track.loc.x as f64, top));
+        parts.push(Part::new(buffer, track.loc, size, 1.0).at(at));
+    }
+    let list = layout.detail_list;
+    let line_h = repos_detail_line(view.density);
+    let size = Size::from((layout.detail.size.w, line_h));
+    let x = layout.detail.loc.x;
+    let pinned = usize::from(detail.sticky);
+    let mut row = |i: usize, y: f64| {
+        let key = (detail_look(view, i), size, theme, scale);
+        let buffer = rows.get(key, size, scale, |(look, size, ..)| {
+            painter.detail_row_buffer(look, *size, scale, p)
+        });
+        let at = Point::from((x as f64, y));
+        Part::new(&buffer, list.loc, size, 1.0).at(at).clipped(list)
+    };
+    if pinned == 1 && !layout.detail_rows.is_empty() {
+        let y = list.loc.y as f64 + detail.pin;
+        if detail.stuck {
+            let shadow_size = Size::from((size.w, PIN_SHADOW));
+            let buffer = shadow.get((shadow_size, theme, scale), |_| {
+                painter.pin_shadow_buffer(size.w, scale, p)
+            });
+            let at = Point::from((x as f64, y + (line_h - 1) as f64));
+            let part = Part::new(buffer, list.loc, shadow_size, 1.0).at(at);
+            parts.push(part.clipped(list));
+        }
+        parts.push(row(0, y));
+    }
+    let shift = scrolled_by(detail.part, detail.over, line_h);
+    for i in pinned..layout.detail_rows.len() {
+        let y = (list.loc.y + (i - pinned) as i32 * line_h) as f64 - shift;
+        parts.push(row(i, y));
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -4085,6 +4283,9 @@ mod tests {
                     (9, hint(DeleteComment, "", None)),
                 ],
                 part: 0.0,
+                over: 0.0,
+                pin: 0.0,
+                stuck: true,
                 first: 3,
                 total: 40,
                 focused: true,
@@ -4437,7 +4638,14 @@ mod tests {
                     assert_eq!(hit(*r), Some(ReposHit::DetailTab(*t)));
                 }
                 assert_eq!(hit(l.field), Some(ReposHit::Field));
+                // The pinned header is over the row it covers.
+                let pinned = view.detail.sticky as usize;
+                let covered = |i: usize| i >= pinned && l.detail_rows[i].overlaps(l.detail_rows[0]);
                 for (i, r) in l.detail_rows.iter().enumerate() {
+                    if pinned == 1 && covered(i) {
+                        assert_eq!(hit(*r), Some(ReposHit::DiffRow(0)));
+                        continue;
+                    }
                     // Past a file header's chevron and checkbox.
                     let end = Rectangle::new(
                         (r.loc.x + r.size.w - 4, r.loc.y).into(),
@@ -4610,25 +4818,34 @@ mod tests {
         assert_eq!(hit((x, bottom(b.tree_list) - 2)), Some(ReposHit::Line(n)));
         assert_ne!(hit((x, bottom(b.tree_list) + 2)), Some(ReposHit::Line(n)));
 
-        // The detail: its pinned header stays, the rows under it move up
-        // half the first, under the header; the last is shown in part.
+        // The detail: its pinned header stays at the top, the rows under
+        // it move up half the first; the last is shown in part.
         assert!(scrolled.detail.sticky);
         assert_eq!(a.detail_list, b.detail_list);
         assert_eq!(a.detail_rows[0], b.detail_rows[0]);
-        assert_eq!(b.detail_list.loc.y, bottom(b.detail_rows[0]));
+        assert_eq!(b.detail_list.loc.y, b.detail_rows[0].loc.y);
         assert_eq!(b.detail_rows[1].loc.y, b.detail_list.loc.y - line_h / 2);
         let last = *b.detail_rows.last().unwrap();
         assert!(last.loc.y < bottom(b.detail_list) && bottom(last) > bottom(b.detail_list));
-        // Over the pinned header, the row under it is not hit.
+        // On the pinned header, the row under it is not hit.
         let x = b.detail_list.loc.x + b.detail_list.size.w / 2;
-        assert_eq!(
+        let under = bottom(b.detail_rows[0]);
+        assert_eq!(hit((x, under - 2)), Some(ReposHit::DiffRow(0)));
+        assert_eq!(hit((x, under + 2)), Some(ReposHit::DiffRow(2)));
+        assert_ne!(
             hit((x, b.detail_list.loc.y - 2)),
             Some(ReposHit::DiffRow(0))
         );
-        assert_eq!(
-            hit((x, b.detail_list.loc.y + 2)),
-            Some(ReposHit::DiffRow(1))
-        );
+        // Pushed up by the next file's header, only what shows of it is.
+        let mut pushed = scrolled.clone();
+        pushed.detail.pin = -(line_h / 4) as f64;
+        let c = repos_layout(&pushed, size);
+        let top = c.detail_list.loc.y;
+        assert_eq!(c.detail_rows[0].loc.y, top - line_h / 4);
+        assert_eq!(c.detail_rows[1], b.detail_rows[1]);
+        let hit_c = |p: (i32, i32)| repos_hit(&c, (p.0 as f64, p.1 as f64).into());
+        assert_ne!(hit_c((x, top - 2)), Some(ReposHit::DiffRow(0)));
+        assert_eq!(hit_c((x, top + 2)), Some(ReposHit::DiffRow(0)));
         let n = b.detail_rows.len() - 1;
         assert_eq!(
             hit((x, bottom(b.detail_list) - 2)),
@@ -4748,7 +4965,8 @@ mod tests {
                 let parts = parts(&view, size);
                 if h >= 600 {
                     assert_eq!(parts.layout.lines.len(), tree_rows, "{size:?}");
-                    assert!(parts.body.size.h >= detail_rows as i32 * repos_detail_line(DENSITY));
+                    let (track, _) = detail_bar(&view, &parts.layout);
+                    assert!(track.size.h >= detail_rows as i32 * repos_detail_line(DENSITY));
                 }
             }
         }
@@ -4834,6 +5052,67 @@ mod tests {
         // The lines come with the frame, front to back.
         assert!(a.len() > fits + 1);
         assert_eq!(a.last().map(|p| p.clip), Some(None));
+    }
+
+    #[test]
+    fn scrolling_the_diff_by_part_of_a_row_draws_nothing_again() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let line_h = repos_detail_line(DENSITY) as f64;
+        let opened = std::time::Instant::now();
+        let now = opened + std::time::Duration::from_secs(1);
+        // More rows than fit under the pinned header, scrolled part of a
+        // row: one more shown in part under those that fit.
+        let mut view = ReposView {
+            hover: None,
+            ..full()
+        };
+        let fits = repos_page(size, DENSITY).1;
+        let detail = &mut view.detail;
+        detail.rows = detail.rows.iter().cycle().take(60).cloned().collect();
+        detail.rows.truncate(1 + fits + 1);
+        detail.part = 0.2;
+        let mut layers = ReposLayers::default();
+        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
+        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        let (frames, rows) = (layers.frames, layers.detail.drawn());
+        assert_eq!(frames, 1);
+        assert!(rows > 1);
+        let list = repos_layout(&view, size).detail_list;
+        let in_list = |parts: &[crate::chrome::Part]| -> Vec<f64> {
+            let ys = parts.iter().filter(|p| p.clip == Some(list));
+            ys.map(|p| p.loc.y).collect()
+        };
+        // The shadow under the pinned header, the header, the rows.
+        let ys_a = in_list(&a);
+        assert_eq!(ys_a.len(), 2 + fits + 1);
+        // Further by part of a row; the header pushed up by the next;
+        // pulled down past the start with the header in its place.
+        let cases = [
+            (0.7, 0.0, 0.0, true),
+            (0.7, 0.0, -7.5, true),
+            (0.0, 9.0, 9.0, false),
+        ];
+        for (part, over, pin, stuck) in cases {
+            let mut moved = view.clone();
+            moved.detail.part = part;
+            moved.detail.over = over;
+            moved.detail.pin = pin;
+            moved.detail.stuck = stuck;
+            let layout = repos_layout(&moved, size);
+            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            assert_eq!((layers.frames, layers.detail.drawn()), (frames, rows));
+            let ys_b = in_list(&b);
+            let shadow = usize::from(stuck);
+            let header = ys_b[shadow];
+            assert_eq!(header, list.loc.y as f64 + pin);
+            assert_eq!(layout.detail_rows[0].loc.y, header.round() as i32);
+            let by = (part - 0.2) * line_h - over;
+            for (k, y) in ys_b[shadow + 1..].iter().enumerate() {
+                assert!((ys_a[2 + k] - y - by).abs() < 1e-9, "{k}: {y}");
+                assert_eq!(layout.detail_rows[k + 1].loc.y, y.round() as i32);
+            }
+        }
     }
 
     #[test]
