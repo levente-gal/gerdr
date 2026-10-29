@@ -67,6 +67,27 @@ async function boot(tab, url = tab.url || tab.pendingUrl) {
   return true;
 }
 
+// A browser started for a pane opens its page before its extensions are
+// there at times, and refuses the boot page then: it is loaded again once
+// the worker runs, once. A boot page that did load is one of the
+// extension's pages in the tab. A refused one tells of no change when it
+// is done loading: one still loading is looked at again a while later.
+const retried = new Set();
+async function retry(tab, looks = 5) {
+  if (!tab.url || !tab.url.startsWith(BOOT) || retried.has(tab.id)) return;
+  if (tab.status !== "complete") {
+    if (looks > 0) {
+      const again = (tab) => retry(tab, looks - 1);
+      setTimeout(() => chrome.tabs.get(tab.id).then(again, () => {}), 1000);
+    }
+    return;
+  }
+  const pages = await chrome.runtime.getContexts({ contextTypes: ["TAB"], tabIds: [tab.id] });
+  if (pages.length) return;
+  retried.add(tab.id);
+  await chrome.tabs.reload(tab.id);
+}
+
 // open.html asks to be taken before it goes on to its page.
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (message.type !== "boot" || !sender.tab) return false;
@@ -128,6 +149,7 @@ async function connect() {
   await save();
   for (const tab of tabs) {
     await boot(tab);
+    await retry(tab);
     await report(tab);
   }
 }
@@ -140,6 +162,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
   await loaded;
   await boot(tab);
+  if (change.status === "complete") await retry(tab);
   // A load done is when the page's history can be asked for sure.
   if (change.url || change.title || change.status === "complete") await report(tab);
 });
