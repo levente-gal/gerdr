@@ -330,8 +330,10 @@ impl Gerdr {
             return false;
         };
         viewer.fit(fit);
+        let before = (viewer.first(), viewer.part());
         let moving = viewer.tick(now, fit, edge);
-        if moving && viewer.dragging() {
+        // Moved at all, the last step of a glide too.
+        if viewer.dragging() && (viewer.first(), viewer.part()) != before {
             self.scrollback_drag(self.pointer);
         }
         moving
