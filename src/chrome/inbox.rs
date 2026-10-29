@@ -8,13 +8,14 @@
 //! its items into an `InboxView`.
 
 use super::{
-    BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, Dot, FIELD_GAP, FONT_SIZE, FOOTER_ROW,
-    FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE,
+    BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
+    FOOTER_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE,
     MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, STROKE, agent_badge, band, cross, dot_rect, folder, footer_height,
+    SMALL_FONT_SIZE, STROKE, agent_icon, band, cross, dot_slot, folder, footer_height,
     footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil,
-    phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, segment, tray,
+    phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, row_dot, segment,
+    status_dot, tray,
 };
 use crate::text_field::Line;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -673,7 +674,9 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
             let rect = Rectangle::new((row_x, top.round() as i32).into(), (row_w, h).into());
             let buttons = match row {
                 _ if !shown => Vec::new(),
-                InboxRow::Item(line) if with_buttons == Some(i) => row_buttons(&line.buttons, rect),
+                InboxRow::Item(line) if with_buttons == Some(i) => {
+                    row_buttons(&line.buttons, item_line(rect))
+                }
                 _ => Vec::new(),
             };
             (rect, buttons)
@@ -790,6 +793,37 @@ fn row_badge(rect: Rect) -> Rect {
     )
 }
 
+/// What of the item row at `rect` its buttons take, `ROW_BUTTON_INSET`
+/// in from its end: all but the dot's column at its right end and the
+/// padding past it, which every item keeps, so that their ages line up.
+fn item_line(rect: Rect) -> Rect {
+    let keep = DOT_SLOT + PADDING as i32 - ROW_BUTTON_INSET;
+    Rectangle::new(rect.loc, ((rect.size.w - keep).max(0), rect.size.h).into())
+}
+
+/// Where the dot of the agent's item row at `rect` goes: at its right
+/// end, inside its padding.
+fn item_dot(rect: Rect) -> Rect {
+    row_dot(item_dot_line(rect))
+}
+
+fn item_dot_line(rect: Rect) -> Rect {
+    Rectangle::new(
+        rect.loc,
+        ((rect.size.w - PADDING as i32).max(0), rect.size.h).into(),
+    )
+}
+
+/// Where the dot of the detail at `rect` whose title is at `title` goes:
+/// at the title's right end, centred on its mark.
+fn detail_dot(rect: Rect, title: Rect) -> Rect {
+    let badge = detail_badge(rect, title);
+    row_dot(Rectangle::new(
+        (title.loc.x, badge.loc.y).into(),
+        ((title.size.w - HELP_PADDING).max(0), badge.size.h).into(),
+    ))
+}
+
 /// Where the detail's mark goes, in the detail at `rect` whose title is
 /// at `title`: at its left, centred on the title.
 fn detail_badge(rect: Rect, title: Rect) -> Rect {
@@ -817,7 +851,7 @@ pub fn inbox_blinkers(view: &InboxView, layout: &InboxLayout) -> Vec<Rect> {
         .zip(&view.rows)
         .filter_map(|((rect, _), row)| match row {
             InboxRow::Item(line) if !line.hidden && blinks(line.icon) && rect.size.h > 0 => {
-                Some(dot_rect(row_badge(*rect), logo_size(1.0)))
+                Some(item_dot(*rect))
             }
             _ => None,
         })
@@ -825,8 +859,7 @@ pub fn inbox_blinkers(view: &InboxView, layout: &InboxLayout) -> Vec<Rect> {
         .collect();
     if let Some(detail) = view.detail.as_ref().filter(|d| blinks(d.icon)) {
         let title = detail_parts(detail, layout.detail).title;
-        let badge = detail_badge(layout.detail, title);
-        dots.push(dot_rect(badge, logo_size(DETAIL_GROW)));
+        dots.push(detail_dot(layout.detail, title));
     }
     dots
 }
@@ -1064,7 +1097,8 @@ impl Painter {
 
     /// An item's mark in `rect` (logical, buffer coordinates): `icon` in
     /// `color` on a rounded square of `ground` tinted with it, the icon
-    /// grown by `grow`. An agent's badge is `BADGE_LOGO` big, grown.
+    /// grown by `grow`. An agent's logo is `BADGE_LOGO` big, grown; its
+    /// dot goes elsewhere.
     #[allow(clippy::too_many_arguments)]
     fn inbox_badge(
         &self,
@@ -1075,14 +1109,13 @@ impl Painter {
         ground: Rgb,
         grow: f32,
         scale: f64,
-        p: &Palette,
     ) {
         let (x, y, w, h) = rect_px(rect, scale);
         let r = BADGE_RADIUS * grow * scale as f32;
         let fill = mix(ground, color, BADGE_TINT);
         c.rounded(x, y, w, h, r, fill);
         if let InboxIcon::Badge(badge) = icon {
-            agent_badge(c, rect, logo_size(grow), badge, color, fill, scale, p);
+            agent_icon(c, rect, logo_size(grow), badge.icon, color, scale);
             return;
         }
         let s = grow * scale as f32;
@@ -1419,7 +1452,10 @@ impl Painter {
             icon => icon,
         };
         let badge = row_badge(rect);
-        self.inbox_badge(c, badge, icon, mark_color, ground, 1.0, scale, p);
+        self.inbox_badge(c, badge, icon, mark_color, ground, 1.0, scale);
+        if let InboxIcon::Badge(badge) = icon {
+            status_dot(c, item_dot(rect), badge.dot, scale, p);
+        }
 
         for (k, &button) in buttons.iter().enumerate() {
             let label = line.buttons.get(k).map_or("", |b| b.label.as_str());
@@ -1430,7 +1466,7 @@ impl Painter {
         }
         let end = match buttons.first() {
             Some(first) => px(first.loc.x) as f32 - gap,
-            None => right,
+            None => px(dot_slot(item_dot_line(rect)).loc.x) as f32,
         };
         let (title_color, subtitle_color) = if line.hidden {
             (p.placeholder, p.placeholder)
@@ -1507,9 +1543,16 @@ impl Painter {
         let badge = detail_badge(rect, title);
         let color = tone_color(detail.tone, p);
         let grow = DETAIL_GROW;
-        self.inbox_badge(c, badge, detail.icon, color, p.elevated, grow, scale, p);
+        self.inbox_badge(c, badge, detail.icon, color, p.elevated, grow, scale);
         let text_x = tx + px(HELP_PADDING + DETAIL_BADGE) as f32 + gap * 1.5;
-        let text_end = tright - px(HELP_PADDING) as f32;
+        let text_end = match detail.icon {
+            InboxIcon::Badge(b) => {
+                let dot = detail_dot(rect, title);
+                status_dot(c, dot, b.dot, scale, p);
+                px(dot.loc.x) as f32 - gap
+            }
+            _ => tright - px(HELP_PADDING) as f32,
+        };
         // The title over the subtitle, the two centred on the mark.
         let (title_band, subtitle_band) = if detail.subtitle.is_empty() {
             (band(title, scale), None)
@@ -2134,11 +2177,11 @@ mod tests {
         let output = (1400, 900).into();
         let layout = inbox_layout(&v, output);
         let dots = inbox_blinkers(&v, &layout);
-        assert_eq!(
-            dots,
-            vec![dot_rect(row_badge(layout.rows[1].0), logo_size(1.0))]
-        );
-        assert!(inside(row_badge(layout.rows[1].0), dots[0]));
+        assert_eq!(dots, vec![item_dot(layout.rows[1].0)]);
+        // At the row's right end, clear of its buttons.
+        let (row, buttons) = &layout.rows[1];
+        assert!(inside(*row, dots[0]) && dots[0].loc.x > row.loc.x + row.size.w / 2);
+        assert!(buttons.iter().all(|b| b.loc.x + b.size.w <= dots[0].loc.x));
         // The detail of one at work blinks on its mark too.
         v.detail = Some(InboxDetailView {
             icon: working,

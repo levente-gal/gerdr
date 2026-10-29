@@ -28,12 +28,13 @@ use super::layers::{Part, RowCache};
 use super::repos::scrollbar;
 use super::{
     AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
-    Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
+    Canvas, DETAIL_FONT_SIZE, DOT_SLOT, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
     HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING, Painter,
     Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb,
-    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, agent_badge, app,
-    band, centred_dot, chevron_down, ci_mark, cross, distinct, dot_rect, folder, git_branch,
-    icon_sdf, measure, mix, new_tab, physical, rect_px, restart_arrow, status_mark, terminal,
+    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, agent_icon, app,
+    band, centred_dot, chevron_down, ci_mark, cross, distinct, folder, git_branch, icon_sdf,
+    measure, mix, new_tab, physical, rect_px, restart_arrow, row_dot, status_dot, status_mark,
+    terminal,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -79,14 +80,17 @@ const NAME_X: i32 = ICON_X + ROW_ICON_WIDTH + 7;
 /// sits under the header's name; and where the row starts.
 const CHILD_PAD: i32 = 6;
 const CHILD_X: i32 = NAME_X - CHILD_PAD;
-/// Where an agent row's badge starts on its row: a little left of the
+/// Where an agent row's icon starts on its row: a little left of the
 /// status marks of the other rows, as it is wider, clear of the open
 /// row's accent bar.
 const AGENT_ICON_X: i32 = CHILD_PAD - 1;
-/// Where a row's text starts under a header: after an agent's badge.
+/// Where a row's text starts under a header: after an agent's icon.
 const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
-/// The "×" at the right end of a header, and of a deletable agent row.
+/// The "×" at the right end of a header, and left of a deletable agent
+/// row's dot.
 const CLOSE_SLOT: i32 = 22;
+/// How far in from an agent row's right end its dot's column ends.
+const AGENT_DOT_INSET: i32 = 4;
 /// The restart button left of a header's "×".
 const RESTART_SLOT: i32 = 22;
 /// The room of the header's CI mark.
@@ -187,7 +191,7 @@ pub fn blocked_band(row: Rect, density: Density) -> Rect {
     )
 }
 
-/// Where the badge of the agent row at `row` goes: at its start, on its
+/// Where the icon of the agent row at `row` goes: at its start, on its
 /// first line, `AGENT_ICON` wide.
 pub fn agent_icon_rect(row: Rect, density: Density) -> Rect {
     let first = blocked_band(row, density);
@@ -195,6 +199,16 @@ pub fn agent_icon_rect(row: Rect, density: Density) -> Rect {
         (row.loc.x + AGENT_ICON_X, row.loc.y).into(),
         (AGENT_ICON, first.size.h).into(),
     )
+}
+
+/// Where the status dot of the agent row at `row` goes: in the dot's
+/// column at its first line's right end, as far in as the "×".
+pub fn agent_dot(row: Rect, density: Density) -> Rect {
+    let first = blocked_band(row, density);
+    row_dot(Rectangle::new(
+        first.loc,
+        (first.size.w - AGENT_DOT_INSET, first.size.h).into(),
+    ))
 }
 
 /// Where the status mark of a CI chip at `chip` goes: at its start.
@@ -228,7 +242,7 @@ pub fn sidebar_blinkers(view: &SidebarView, layout: &SidebarLayout, height: i32)
     let at_work = |i: usize, k: usize, row: Rect| {
         card(i, k)
             .filter(|card| card.badge().dot.blinks())
-            .map(|_| dot_rect(agent_icon_rect(row, view.state.density), AGENT_ICON))
+            .map(|_| agent_dot(row, view.state.density))
     };
     let mut dots: Vec<Rect> = layout
         .cards
@@ -1116,7 +1130,11 @@ pub struct CiLayout {
 /// first line.
 pub fn card_close(row: Rect, density: Density) -> Rect {
     Rectangle::new(
-        (row.loc.x + row.size.w - CLOSE_SLOT, row.loc.y).into(),
+        (
+            row.loc.x + row.size.w - AGENT_DOT_INSET - DOT_SLOT - CLOSE_SLOT,
+            row.loc.y,
+        )
+            .into(),
         (CLOSE_SLOT, agent_row(density)).into(),
     )
 }
@@ -2418,18 +2436,15 @@ impl Painter {
             AgentStatus::Idle | AgentStatus::Unknown => p.placeholder,
             _ => p.muted,
         };
-        agent_badge(
-            c,
-            agent_icon_rect(rect, density),
-            AGENT_ICON,
-            card.badge(),
-            tint,
-            surface,
-            scale,
-            p,
-        );
+        let badge = card.badge();
+        let icon = agent_icon_rect(rect, density);
+        agent_icon(c, icon, AGENT_ICON, badge.icon, tint, scale);
+        let dot = agent_dot(rect, density);
+        status_dot(c, dot, badge.dot, scale, p);
         let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
         let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
+        // The first line stops before the dot's column.
+        let line_right = px(rect.loc.x + rect.size.w - AGENT_DOT_INSET - DOT_SLOT) as f32;
         let end = if card.deletable && hover > 0.0 {
             let close = card_close(rect, density);
             let color = if state.close {
@@ -2442,13 +2457,13 @@ impl Painter {
         } else if let Some(place) = place {
             let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
             let w = self.text_width(place, DETAIL_FONT_SIZE, scale).min(most);
-            let x = (right - w).round();
+            let x = (line_right - w).round();
             self.text(
                 c,
                 place,
                 DETAIL_FONT_SIZE,
                 x,
-                right + 1.0,
+                line_right + 1.0,
                 line_band,
                 scale,
                 p.placeholder,
@@ -2459,7 +2474,7 @@ impl Painter {
             let pill_w =
                 self.text_width(label, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
             let pill_h = px(PILL_HEIGHT) as f32;
-            let pill_x = (right - pill_w).round();
+            let pill_x = (line_right - pill_w).round();
             let pill_y = (line_band.0 as f32 + (line_band.1 as f32 - pill_h) / 2.0).round();
             let pill_fill = mix(surface, p.warning, 0.25);
             c.rounded(
@@ -2484,7 +2499,7 @@ impl Painter {
             );
             pill_x - px(TITLE_GAP) as f32
         } else {
-            right
+            line_right
         };
         let (heading_color, title_color) = match card.status {
             AgentStatus::Idle | AgentStatus::Unknown => (p.muted, p.placeholder),
@@ -4375,13 +4390,13 @@ mod tests {
             Density::Comfortable,
         );
         let row = layout.cards[0].iter().find(|(k, _)| *k == 0).unwrap().1;
-        let icon = super::agent_icon_rect(row, Density::Comfortable);
-        assert_eq!(
-            blinkers(vec![ws], vec![agents]),
-            vec![super::dot_rect(icon, super::AGENT_ICON)]
-        );
-        // The dot sits in the badge's corner, on the row's first line.
-        assert!(icon.loc.x >= row.loc.x && icon.loc.y == row.loc.y);
+        let dot = super::agent_dot(row, Density::Comfortable);
+        assert_eq!(blinkers(vec![ws], vec![agents]), vec![dot]);
+        // The dot sits at the right end of the row's first line.
+        let first = super::blocked_band(row, Density::Comfortable);
+        assert!(dot.loc.x > row.loc.x + row.size.w / 2);
+        assert!(dot.loc.x + dot.size.w <= row.loc.x + row.size.w);
+        assert!(dot.loc.y > first.loc.y && dot.loc.y + dot.size.h < first.loc.y + first.size.h);
     }
 
     #[test]
