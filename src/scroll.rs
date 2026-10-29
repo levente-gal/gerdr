@@ -40,9 +40,41 @@ pub struct Bounds {
     /// Logical pixels in the unit where the list stands: the first row's
     /// height for a list of rows, 1 for one of pixels.
     pub unit: f64,
+    /// Logical pixels in the units after and before it (the rows under and
+    /// over the first): fingers moving the list into one go by its own
+    /// height.
+    pub next: f64,
+    pub prev: f64,
     /// The list's height in logical pixels, which a stretch past an end
     /// pulls against.
     pub view: f64,
+}
+
+impl Bounds {
+    /// How many units `px` logical pixels move a list standing at `pos`
+    /// (down positive): by the height of each unit they cross, into the
+    /// next or the one before (further ones taken as high as those).
+    fn units(&self, pos: f64, px: f64) -> f64 {
+        let (h, part) = (self.unit.max(1.0), pos - pos.floor());
+        let room = if px >= 0.0 { 1.0 - part } else { -part };
+        if (px / h).abs() <= room.abs() {
+            return px / h;
+        }
+        let beyond = if px >= 0.0 { self.next } else { self.prev };
+        room + (px - room * h) / beyond.max(1.0)
+    }
+
+    /// The logical pixels moving a list from `from` to `to` takes: the
+    /// inverse of `units`.
+    fn px(&self, from: f64, to: f64) -> f64 {
+        let (h, part) = (self.unit.max(1.0), from - from.floor());
+        let (by, room) = (to - from, if to >= from { 1.0 - part } else { -part });
+        if by.abs() <= room.abs() {
+            return by * h;
+        }
+        let beyond = if to >= from { self.next } else { self.prev };
+        room * h + (by - room) * beyond.max(1.0)
+    }
 }
 
 /// How far a notch of the wheel scrolls, logical pixels, at least.
@@ -292,11 +324,12 @@ impl Scroll {
             self.over = 0.0;
         }
         let max = b.max.max(0.0);
-        let pos = self.pos + px / b.unit.max(1.0);
+        let (from, pos) = (self.pos, self.pos + b.units(self.pos, px));
         self.pos = pos.clamp(0.0, max);
         // A list that fits doesn't stretch.
         if max > 0.0 && pos != self.pos {
-            self.pull = (pos - self.pos) * b.unit.max(1.0);
+            // What is left of the move once at the end.
+            self.pull = px - b.px(from, self.pos);
             self.over = band(self.pull, b.view);
         }
     }
@@ -400,6 +433,8 @@ mod tests {
             max,
             notch: 1.0,
             unit: 40.0,
+            next: 40.0,
+            prev: 40.0,
             view: 400.0,
         }
     }
@@ -506,6 +541,36 @@ mod tests {
         s.apply(Motion::Finger { px: 40.0, time: 8 }, t, rows(10.0));
         assert_eq!((s.first(), s.part()), (1, 0.25));
         assert!(s.moving(t));
+    }
+
+    #[test]
+    fn fingers_crossing_into_a_row_of_another_height_go_by_its_height() {
+        let t = Instant::now();
+        // A 40 high row between a 20 high label above and an 80 high
+        // row under.
+        let b = Bounds {
+            next: 80.0,
+            prev: 20.0,
+            ..rows(10.0)
+        };
+        let mut s = Scroll::at(3.5);
+        // 20 pixels to the next row, 40 more half of it.
+        s.apply(Motion::Finger { px: 60.0, time: 0 }, t, b);
+        assert_eq!(s.pos(), 4.5);
+        let mut s = Scroll::at(3.5);
+        // 20 pixels to the row's top, 10 more half the label.
+        s.apply(Motion::Finger { px: -30.0, time: 0 }, t, b);
+        assert_eq!(s.pos(), 2.5);
+        // Within the row, by its own height.
+        let mut s = Scroll::at(3.5);
+        s.apply(Motion::Finger { px: 10.0, time: 0 }, t, b);
+        assert_eq!(s.pos(), 3.75);
+        // Past an end, the pull is what the move had left.
+        let mut s = Scroll::at(9.5);
+        s.apply(Motion::Finger { px: 50.0, time: 0 }, t, b);
+        assert_eq!(s.pos(), 10.0);
+        assert!((b.px(9.5, 10.0) - 20.0).abs() < 1e-9);
+        assert!((s.overscroll() + band(30.0, b.view)).abs() < 1e-9);
     }
 
     #[test]

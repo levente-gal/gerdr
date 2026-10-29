@@ -758,6 +758,8 @@ impl Default for Panel {
                 max: 0.0,
                 notch: 1.0,
                 unit: chrome::INBOX_ROW as f64,
+                next: chrome::INBOX_ROW as f64,
+                prev: chrome::INBOX_ROW as f64,
                 view: 0.0,
             }),
             all: true,
@@ -988,14 +990,17 @@ impl Panel {
     /// notch one, the first in view as high as it is.
     fn list_bounds(&self, listed: &Listed, page: usize) -> Bounds {
         let page = page.max(1);
-        let unit = match listed.rows.get(self.scroll.first()) {
-            Some(Entry::Label(..)) => chrome::INBOX_LABEL,
-            _ => chrome::INBOX_ROW,
+        let height = |i: usize| match listed.rows.get(i) {
+            Some(Entry::Label(..)) => chrome::INBOX_LABEL as f64,
+            _ => chrome::INBOX_ROW as f64,
         };
+        let first = self.scroll.first();
         Bounds {
             max: listed.rows.len().saturating_sub(page) as f64,
             notch: 1.0,
-            unit: unit as f64,
+            unit: height(first),
+            next: height(first + 1),
+            prev: first.checked_sub(1).map_or(height(first), height),
             // A page of items is about as high as the list.
             view: (page as i32 * chrome::INBOX_ROW) as f64,
         }
