@@ -410,6 +410,7 @@ impl Gerdr {
                 if crate::is_web_link(&url) {
                     self.set_web_page(pane, url);
                 }
+                self.place_booting();
             }
         }
     }

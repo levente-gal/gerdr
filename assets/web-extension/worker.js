@@ -31,7 +31,12 @@ function send(message) {
 // can't be reached (the browser's own pages, error pages).
 async function inPage(tab, func, fallback) {
   try {
-    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, func });
+    // Not waiting for the page to load: gerdr shows the pane once told.
+    const [frame] = await chrome.scripting.executeScript({
+      target: { tabId: tab },
+      func,
+      injectImmediately: true,
+    });
     return frame.result;
   } catch {
     return fallback;
