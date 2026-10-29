@@ -14,13 +14,10 @@ use super::{
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, STROKE, band, check, cross, folder, footer_height, footer_hint_spots,
     git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil, phys, plus,
-    project_menu::menu_query_text, rect_px, repos::scrollbar, rounded_rect, segment, status_mark,
-    tray,
+    project_menu::menu_query_text, rect_px, rounded_rect, segment, status_mark, tray,
 };
 use crate::herdr::AgentStatus;
 use crate::text_field::Line;
-use crate::wheel;
-use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The panel: at most this wide and high, a margin in from the output's
@@ -39,9 +36,11 @@ const INBOX_LIST_SHARE: f64 = 0.4;
 const INBOX_LIST_MIN: i32 = 260;
 /// The room above and below the list's rows, and beside them.
 const INBOX_PAD: i32 = PROJECT_MENU_PADDING;
-/// The list's scrollbar, and the gap before it.
+/// The list's scrollbar, and the gap before it; its thumb is never
+/// shorter than `THUMB_MIN`.
 const SCROLLBAR: i32 = 6;
 const SCROLLBAR_GAP: i32 = 4;
+const THUMB_MIN: i32 = 24;
 /// The scope toggle's segments in the title row: "This workspace" and
 /// "All", and how far it keeps from the right edge.
 const SCOPE_OWN: i32 = 124;
@@ -111,7 +110,8 @@ pub struct InboxView {
     pub placeholder: String,
     /// A todo being written (Ctrl+N, Ctrl+E): it takes the field's place.
     pub compose: Option<InboxCompose>,
-    /// The list's rows in view, scrolled: section labels and items.
+    /// The list's rows from `first` on, as many as may show: section
+    /// labels and items.
     pub rows: Vec<InboxRow>,
     /// Where `rows` start among all the list's rows, and how many there
     /// are: where the list's scrollbar stands.
@@ -128,9 +128,12 @@ pub struct InboxView {
     pub empty: String,
     /// Hidden (dismissed, snoozed) items are listed too (Ctrl+H).
     pub show_hidden: bool,
-    /// The part of the first row scrolled past, 0 to 1; with some, `rows`
-    /// take one more under the page, shown in part.
+    /// The part of the first row scrolled past, 0 up to 1.
     pub part: f64,
+    /// How far the rows are moved down past where `first` and `part` put
+    /// them (up, negative), in logical pixels: the list stretched past an
+    /// end.
+    pub over: f64,
 }
 
 /// A todo being written in the inbox panel.
@@ -338,6 +341,63 @@ fn body(panel: Rect, footer_h: i32) -> (Rect, Rect) {
 fn row_span(list: Rect) -> (i32, i32) {
     let w = list.size.w - INBOX_PAD - 2 * SCROLLBAR_GAP - SCROLLBAR;
     (list.loc.x + INBOX_PAD, w.max(0))
+}
+
+/// How high `row` is.
+fn row_height(row: &InboxRow) -> i32 {
+    match row {
+        InboxRow::Label { .. } => INBOX_LABEL,
+        InboxRow::Item(_) => INBOX_ROW,
+    }
+}
+
+/// Where the rows show in `list`: inside its padding, above and below.
+fn list_window(list: Rect) -> Rect {
+    Rectangle::new(
+        (list.loc.x, list.loc.y + INBOX_PAD).into(),
+        (list.size.w, (list.size.h - 2 * INBOX_PAD).max(0)).into(),
+    )
+}
+
+/// The top of each of `view`'s rows down `window`, in logical pixels to
+/// a fraction: the first scrolled up by its part, all moved by the
+/// stretch past an end.
+fn row_tops(view: &InboxView, window: Rect) -> Vec<f64> {
+    let first = view.rows.first().map_or(0, row_height) as f64;
+    let mut y = window.loc.y as f64 - view.part * first + view.over;
+    view.rows
+        .iter()
+        .map(|row| {
+            let top = y;
+            y += row_height(row) as f64;
+            top
+        })
+        .collect()
+}
+
+/// Where the scrollbar's thumb goes along `track` for `view`, `page`
+/// rows shown at once: its top left (to a fraction) and its size. None
+/// while the whole list shows.
+fn thumb_place(
+    view: &InboxView,
+    track: Rect,
+    page: usize,
+) -> Option<(Point<f64, Logical>, Size<i32, Logical>)> {
+    if view.total <= page || page == 0 || track.size.h <= 0 {
+        return None;
+    }
+    let h = track.size.h as f64;
+    let thumb_h = (h * page as f64 / view.total as f64)
+        .max((THUMB_MIN as f64).min(h))
+        .min(h)
+        .round();
+    let last = (view.total - page) as f64;
+    let pos = (view.first as f64 + view.part).min(last);
+    let y = track.loc.y as f64 + (h - thumb_h) * pos / last;
+    Some((
+        (track.loc.x as f64, y).into(),
+        (track.size.w, thumb_h as i32).into(),
+    ))
 }
 
 /// The list's scrollbar track, at the right of `list`.
@@ -597,19 +657,9 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     );
     let (list, detail) = body(panel, footer_h);
 
+    let window = list_window(list);
     let (row_x, row_w) = row_span(list);
-    let start = list.loc.y + INBOX_PAD;
-    let list_end = list.loc.y + list.size.h - INBOX_PAD;
-    let height = |row: &InboxRow| match row {
-        InboxRow::Label { .. } => INBOX_LABEL,
-        InboxRow::Item(_) => INBOX_ROW,
-    };
-    // Scrolled part of the first row, the rows start up by as much and
-    // show where they would without the last, shown in part.
-    let scrolled = view.part > 0.0;
-    let shift = wheel::shift(view.part, view.rows.first().map_or(0, height));
-    let mut y = start - shift;
-    let mut full = false;
+    let (start, end) = (window.loc.y as f64, (window.loc.y + window.size.h) as f64);
     let with_buttons = match view.hover {
         Some(InboxHit::Row(i) | InboxHit::Button(i, _)) => Some(i),
         _ => view.selected,
@@ -617,36 +667,23 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let rows = view
         .rows
         .iter()
+        .zip(row_tops(view, window))
         .enumerate()
-        .map(|(i, row)| {
-            let h = height(row);
-            // More rows than fit (more than a page) take no room; a
-            // scrolled list's last is shown in part, cut by `window`.
-            full |= if scrolled {
-                y >= list_end
-            } else {
-                y + h > list_end
-            };
-            let h = if full { 0 } else { h };
-            let rect = Rectangle::new((row_x, y).into(), (row_w, h).into());
-            y += h;
+        .map(|(i, (row, top))| {
+            let h = row_height(row);
+            // Rows out of the window take no room; those cut by it reach
+            // out of it.
+            let shown = top < end && top + h as f64 > start;
+            let h = if shown { h } else { 0 };
+            let rect = Rectangle::new((row_x, top.round() as i32).into(), (row_w, h).into());
             let buttons = match row {
-                _ if h == 0 => Vec::new(),
+                _ if !shown => Vec::new(),
                 InboxRow::Item(line) if with_buttons == Some(i) => row_buttons(&line.buttons, rect),
                 _ => Vec::new(),
             };
             (rect, buttons)
         })
         .collect();
-    let under = usize::from(scrolled);
-    let rows_h: i32 = view.rows[..view.rows.len().saturating_sub(under)]
-        .iter()
-        .map(height)
-        .sum();
-    let window = Rectangle::new(
-        (list.loc.x, start).into(),
-        (list.size.w, ((start + rows_h).min(list_end) - start).max(0)).into(),
-    );
     let detail_buttons = view
         .detail
         .as_ref()
@@ -793,14 +830,52 @@ fn link_arrow(x: f32, y: f32, s: f32) -> f32 {
 
 impl Painter {
     /// The inbox panel for an output of `size`, inside a margin of `SHADOW`
-    /// holding its drop shadow.
+    /// holding its drop shadow: its frame with the rows in view and the
+    /// scrollbar's thumb drawn in, as `InboxLayers` shows them.
+    #[cfg(test)]
     pub(super) fn inbox(
         &self,
         view: &InboxView,
         size: Size<i32, Logical>,
         scale: f64,
         p: &Palette,
-    ) -> MemoryRenderBuffer {
+    ) -> smithay::backend::renderer::element::memory::MemoryRenderBuffer {
+        let mut c = self.inbox_frame(&frame_view(view), size, scale, p);
+        let layout = inbox_layout(view, size);
+        let (origin, _) = super::shadowed(layout.panel);
+        // Where a part at `loc` (output coordinates) lands in the buffer,
+        // rounded as the renderer rounds it, and the window the rows are
+        // cut to.
+        let px = |v: f64| (v * scale).round() as i32;
+        let (ox, oy) = (px(origin.x as f64), px(origin.y as f64));
+        let at = |loc: Point<f64, Logical>| (px(loc.x) - ox, px(loc.y) - oy);
+        let window: Rectangle<i32, smithay::utils::Physical> =
+            layout.window.to_physical_precise_round(scale);
+        let (wx, wy) = (window.loc.x - ox, window.loc.y - oy);
+        let clip = [wx, wy, wx + window.size.w, wy + window.size.h];
+        for (key, loc) in row_keys(view, &layout) {
+            let row = self.inbox_row_canvas(&key, scale, p);
+            let (x, y) = at(loc);
+            blit(&mut c, &row, x, y, clip);
+        }
+        if let Some((loc, size)) = thumb_place(view, scroll_track(layout.list), inbox_page(size)) {
+            let thumb = self.inbox_thumb(size, scale, p);
+            let (x, y) = at(loc);
+            let all = [0, 0, c.w, c.h];
+            blit(&mut c, &thumb, x, y, all);
+        }
+        c.into_buffer(false)
+    }
+
+    /// The inbox panel's frame: all but its list's rows and the
+    /// scrollbar's thumb, from `view` as `frame_view` keeps it.
+    fn inbox_frame(
+        &self,
+        view: &InboxView,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> Canvas {
         let layout = inbox_layout(view, size);
         let panel = layout.panel;
         let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
@@ -825,28 +900,10 @@ impl Painter {
         divider(&mut c, px(query.loc.y + query.size.h) - border);
 
         let list = shift(layout.list);
-        if view.rows.is_empty() {
+        let listed = view.total > 0;
+        if !listed {
             self.centered(&mut c, &view.empty, FONT_SIZE, list, scale, p.placeholder);
         }
-        let (x, y, w, h) = rect_px(shift(layout.window), scale);
-        c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
-            for (i, ((rect, buttons), row)) in layout.rows.iter().zip(&view.rows).enumerate() {
-                if rect.size.h == 0 {
-                    continue;
-                }
-                let buttons: Vec<_> = buttons.iter().map(|r| shift(*r)).collect();
-                self.inbox_row(c, view, i, row, shift(*rect), &buttons, scale, p);
-            }
-        });
-        // The scrollbar goes by whole rows, the one shown in part not one.
-        let shown = view.rows.len().saturating_sub(usize::from(view.part > 0.0));
-        scrollbar(
-            &mut c,
-            scroll_track(list),
-            (view.first, shown, view.total.max(shown)),
-            scale,
-            p,
-        );
         // The line between the list and the detail.
         c.fill(
             px(list.loc.x + list.size.w) - border,
@@ -859,7 +916,7 @@ impl Painter {
         let detail = shift(layout.detail);
         match &view.detail {
             Some(d) => self.inbox_detail(&mut c, view, d, detail, scale, p),
-            None if !view.rows.is_empty() => {
+            None if listed => {
                 self.centered(
                     &mut c,
                     "Nothing selected",
@@ -880,7 +937,25 @@ impl Painter {
             _ => None,
         };
         self.hints(&mut c, &hint_strs(&view.hints), &spots, hover, scale, p);
-        c.into_buffer(false)
+        c
+    }
+
+    /// A row of the list drawn from `key`, on the list's ground.
+    fn inbox_row_canvas(&self, key: &RowKey, scale: f64, p: &Palette) -> Canvas {
+        let size = Size::from((key.w, row_height(&key.row)));
+        let mut c = Canvas::new(super::physical(size, scale));
+        let (w, h) = (c.w, c.h);
+        c.fill(0, 0, w, h, p.elevated);
+        self.inbox_row(&mut c, key, Rectangle::from_size(size), scale, p);
+        c
+    }
+
+    /// The scrollbar's thumb, of `size`.
+    fn inbox_thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> Canvas {
+        let mut c = Canvas::new(super::physical(size, scale));
+        let (w, h) = (c.w as f32, c.h as f32);
+        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        c
     }
 
     /// Draw `text` as `text` does, but the runs of characters the UI font
@@ -1153,37 +1228,32 @@ impl Painter {
         );
     }
 
-    /// Row `i` of the list in `rect` (buffer coordinates), with its
-    /// `buttons`: a section's label (its icon, title and count, under a
-    /// rule unless first), or an item's mark, title and age over its
-    /// subtitle, on the selection's ground when selected and a lighter one
-    /// under the pointer; a hidden item's muted.
-    #[allow(clippy::too_many_arguments)]
-    fn inbox_row(
-        &self,
-        c: &mut Canvas,
-        view: &InboxView,
-        i: usize,
-        row: &InboxRow,
-        rect: Rect,
-        buttons: &[Rect],
-        scale: f64,
-        p: &Palette,
-    ) {
+    /// A row of the list drawn from `key` in `rect` (buffer coordinates,
+    /// its buttons' as offset from there): a section's label (its icon,
+    /// title and count, under a rule unless first), or an item's mark,
+    /// title and age over its subtitle, on the selection's ground when
+    /// selected and a lighter one under the pointer; a hidden item's
+    /// muted.
+    fn inbox_row(&self, c: &mut Canvas, key: &RowKey, rect: Rect, scale: f64, p: &Palette) {
+        let buttons: Vec<Rect> = key
+            .buttons
+            .iter()
+            .map(|b| Rectangle::new(b.loc + rect.loc, b.size))
+            .collect();
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let gap = (FIELD_GAP as f32 * s).round();
         let (x, y, w, h) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let text_x = px(rect.loc.x + BADGE_INSET + BADGE + BADGE_GAP) as f32;
-        let line = match row {
+        let line = match &key.row {
             InboxRow::Label {
                 icon,
                 title,
                 count,
                 hidden,
             } => {
-                if i > 0 {
+                if !key.top {
                     let border = px(1).max(1);
                     let inset = px(BADGE_INSET);
                     c.fill(
@@ -1256,13 +1326,9 @@ impl Painter {
         // The highlight stops short of the rows above and below.
         let (hy, hh) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
         let r = (MENU_RADIUS + 2.0) * s;
-        let hovered = matches!(
-            view.hover,
-            Some(InboxHit::Row(j) | InboxHit::Button(j, _)) if j == i
-        );
-        let ground = if view.selected == Some(i) {
+        let ground = if key.selected {
             p.selected
-        } else if hovered {
+        } else if key.hovered {
             mix(p.elevated, p.selected, 0.5)
         } else {
             p.elevated
@@ -1304,7 +1370,7 @@ impl Painter {
 
         for (k, &button) in buttons.iter().enumerate() {
             let label = line.buttons.get(k).map_or("", |b| b.label.as_str());
-            let hot = view.hover == Some(InboxHit::Button(i, k));
+            let hot = key.hot == Some(k);
             let fill = if hot { p.selected } else { p.element };
             self.inbox_pill(c, button, fill, scale, p);
             self.centered(c, label, SMALL_FONT_SIZE, button, scale, p.text);
@@ -1572,11 +1638,109 @@ impl Painter {
     }
 }
 
-/// The inbox panel as the chrome shows it: its buffer, fading in and out (see
-/// `Overlay`).
+/// What a row of the list is drawn from, but where it goes: the key of
+/// its buffer.
+#[derive(Clone, Debug, PartialEq)]
+struct RowKey {
+    row: InboxRow,
+    /// How wide it is; it is as high as its kind of row.
+    w: i32,
+    /// The list's first row: a label there has no rule over it.
+    top: bool,
+    selected: bool,
+    hovered: bool,
+    /// Its buttons, from its top left.
+    buttons: Vec<Rect>,
+    /// The one under the pointer.
+    hot: Option<usize>,
+}
+
+/// The rows of `view` that show in `layout`, each with where it goes (its
+/// top left, to a fraction).
+fn row_keys(view: &InboxView, layout: &InboxLayout) -> Vec<(RowKey, Point<f64, Logical>)> {
+    let tops = row_tops(view, layout.window);
+    view.rows
+        .iter()
+        .zip(&layout.rows)
+        .zip(tops)
+        .enumerate()
+        .filter(|(_, ((_, (rect, _)), _))| rect.size.h > 0)
+        .map(|(i, ((row, (rect, buttons)), top))| {
+            let item = matches!(row, InboxRow::Item(_));
+            let hovered = matches!(
+                view.hover,
+                Some(InboxHit::Row(j) | InboxHit::Button(j, _)) if j == i
+            );
+            let key = RowKey {
+                row: row.clone(),
+                w: rect.size.w,
+                top: view.first + i == 0,
+                selected: item && view.selected == Some(i),
+                hovered: item && hovered,
+                buttons: buttons
+                    .iter()
+                    .map(|b| Rectangle::new(b.loc - rect.loc, b.size))
+                    .collect(),
+                hot: match view.hover {
+                    Some(InboxHit::Button(j, k)) if j == i => Some(k),
+                    _ => None,
+                },
+            };
+            (key, (rect.loc.x as f64, top).into())
+        })
+        .collect()
+}
+
+/// `view` as the panel's frame shows it: without its rows, where it is
+/// scrolled, or which row is selected or under the pointer; whether it
+/// lists anything is kept, as a `total` of 0 or 1.
+fn frame_view(view: &InboxView) -> InboxView {
+    InboxView {
+        rows: Vec::new(),
+        first: 0,
+        total: usize::from(!view.rows.is_empty()),
+        selected: None,
+        hover: view
+            .hover
+            .filter(|h| !matches!(h, InboxHit::Row(_) | InboxHit::Button(..))),
+        part: 0.0,
+        over: 0.0,
+        ..view.clone()
+    }
+}
+
+/// Draw `src` over `c` with its top left at (`x`, `y`), only within
+/// `clip` (left, top, right and bottom edges); physical pixels.
+#[cfg(test)]
+fn blit(c: &mut Canvas, src: &Canvas, x: i32, y: i32, [left, top, right, bottom]: [i32; 4]) {
+    let (x0, x1) = (x.max(left).max(0), (x + src.w).min(right).min(c.w));
+    let (y0, y1) = (y.max(top).max(0), (y + src.h).min(bottom).min(c.h));
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let from = (((py - y) * src.w + px - x) * 4) as usize;
+            let to = ((py * c.w + px) * 4) as usize;
+            let keep = 255 - src.px[from + 3] as u32;
+            for k in 0..4 {
+                let under = c.px[to + k] as u32 * keep / 255;
+                c.px[to + k] = (src.px[from + k] as u32 + under).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// What the inbox panel's frame is drawn from: the view as `frame_view`
+/// keeps it, the output's size, the theme and the scale.
+type FrameKey = (InboxView, Size<i32, Logical>, super::Theme, f64);
+
+/// The inbox panel as the chrome shows it, fading in and out (see
+/// `Overlay`): its frame, a buffer per row of the list in view, and the
+/// scrollbar's thumb, so scrolling the list only moves buffers.
 #[derive(Default)]
 pub(super) struct InboxLayers {
-    overlay: super::Overlay<(InboxView, Size<i32, Logical>, super::Theme, f64)>,
+    overlay: super::Overlay<FrameKey>,
+    rows: super::layers::RowCache<(RowKey, super::Theme, f64)>,
+    /// The thumb, by its size.
+    thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
 }
 
 impl InboxLayers {
@@ -1590,16 +1754,53 @@ impl InboxLayers {
         now: std::time::Instant,
         painter: &Painter,
     ) -> Vec<super::layers::Part> {
-        let placed = view.map(|view| {
-            let (loc, size) = super::shadowed(inbox_layout(&view, output).panel);
-            ((view, output, theme, scale), loc, size)
+        use super::layers::Part;
+        let placed = view.as_ref().map(|view| {
+            let (loc, size) = super::shadowed(inbox_layout(view, output).panel);
+            ((frame_view(view), output, theme, scale), loc, size)
         });
-        self.overlay
-            .part(placed, now, true, |(view, output, ..)| {
-                painter.inbox(view, *output, scale, theme.palette())
-            })
-            .into_iter()
-            .collect()
+        let (rows, thumb) = (&mut self.rows, &mut self.thumb);
+        let p = theme.palette();
+        let more = |_: &FrameKey| {
+            let Some(view) = &view else {
+                return Vec::new();
+            };
+            let layout = inbox_layout(view, output);
+            let mut parts = Vec::new();
+            let track = scroll_track(layout.list);
+            if let Some((loc, size)) = thumb_place(view, track, inbox_page(output)) {
+                let buffer = thumb.get((size, theme, scale), |(size, ..)| {
+                    painter.inbox_thumb(*size, scale, p).into_buffer(false)
+                });
+                parts.push(Part::new(buffer, track.loc, size, 1.0).at(loc));
+            }
+            for (key, loc) in row_keys(view, &layout) {
+                let size = Size::from((key.w, row_height(&key.row)));
+                let buffer = rows.get((key, theme, scale), size, scale, |(key, ..)| {
+                    painter.inbox_row_canvas(key, scale, p).into_buffer(true)
+                });
+                let part = Part::new(&buffer, track.loc, size, 1.0);
+                parts.push(part.at(loc).clipped(layout.window));
+            }
+            parts
+        };
+        let parts = self.overlay.parts(
+            placed,
+            now,
+            true,
+            |(frame, output, ..)| {
+                painter
+                    .inbox_frame(frame, *output, scale, p)
+                    .into_buffer(false)
+            },
+            more,
+        );
+        self.rows.sweep();
+        // Gone for good: so are its rows.
+        if view.is_none() && parts.is_empty() {
+            self.rows.clear();
+        }
+        parts
     }
 }
 
@@ -1872,6 +2073,7 @@ mod tests {
             empty: "Nothing needs you".into(),
             show_hidden: false,
             part: 0.0,
+            over: 0.0,
         }
     }
 
@@ -2028,7 +2230,16 @@ mod tests {
                     assert!(inside(l.title, *r), "{what}");
                 }
                 for (rect, buttons) in &l.rows {
-                    assert!(inside(l.list, *rect), "{what}: {rect:?}");
+                    // In the window, or cut by it.
+                    let across = Rectangle::new(
+                        (l.list.loc.x, rect.loc.y).into(),
+                        (l.list.size.w, rect.size.h).into(),
+                    );
+                    assert!(inside(across, *rect), "{what}: {rect:?}");
+                    assert!(
+                        rect.size.h == 0 || !apart(*rect, l.window),
+                        "{what}: {rect:?}"
+                    );
                     for b in buttons {
                         assert!(inside(*rect, *b), "{what}");
                     }
@@ -2141,41 +2352,215 @@ mod tests {
         assert_eq!(inbox_hit(&v, &l, below), Some(InboxHit::Panel));
     }
 
+    /// A label, then `n` items.
+    fn long_rows(n: usize) -> Vec<InboxRow> {
+        std::iter::once(label("Git", n, 0))
+            .chain((0..n).map(|n| item(&n.to_string(), "t", "s", InboxTone::Info, "")))
+            .collect()
+    }
+
     #[test]
-    fn a_scrolled_list_moves_up_and_shows_its_last_row_in_part() {
+    fn a_scrolled_list_moves_up_by_part_of_its_first_row_cut_by_its_window() {
         let size: Size<i32, Logical> = (1280, 800).into();
         let page = inbox_page(size);
-        let rows: Vec<_> = std::iter::once(label("Git", page, 0))
-            .chain((0..page).map(|n| item(&n.to_string(), "t", "s", InboxTone::Info, "")))
-            .collect();
         let whole = InboxView {
-            rows: rows[..page].to_vec(),
+            rows: long_rows(2 * page),
             selected: None,
             ..view()
         };
         let scrolled = InboxView {
-            rows,
-            selected: None,
             part: 0.5,
-            ..view()
+            ..whole.clone()
         };
         let (a, b) = (inbox_layout(&whole, size), inbox_layout(&scrolled, size));
-        // As high as its rows but the last, shown in part, and moved up
-        // half the first one.
         assert_eq!(a.window, b.window);
-        assert_eq!(b.rows[0].0.loc.y, b.window.loc.y - INBOX_LABEL / 2);
-        let last = b.rows[page].0;
-        let bottom = b.window.loc.y + b.window.size.h;
-        assert!(last.size.h == INBOX_ROW && last.loc.y < bottom);
-        assert!(last.loc.y + last.size.h > bottom);
         assert!(inside(b.list, b.window));
+        // Up half the first row, all of them.
+        assert_eq!(b.rows[0].0.loc.y, b.window.loc.y - INBOX_LABEL / 2);
+        for ((ra, _), (rb, _)) in a.rows.iter().zip(&b.rows) {
+            if ra.size.h > 0 && rb.size.h > 0 {
+                assert_eq!(rb.loc.y, ra.loc.y - INBOX_LABEL / 2);
+            }
+        }
+        // The last row showing is cut by the window's bottom, and those
+        // under it take no room.
+        let bottom = b.window.loc.y + b.window.size.h;
+        let shown: Vec<_> = b.rows.iter().filter(|(r, _)| r.size.h > 0).collect();
+        let last = shown.last().unwrap().0;
+        assert!(last.loc.y < bottom && last.loc.y + last.size.h >= bottom);
+        assert!(shown.len() < b.rows.len());
         // Above the window, the first row is not hit; at its bottom, the
         // last is.
         let x = b.window.loc.x as f64 + 40.0;
         let above = (x, b.window.loc.y as f64 - 2.0).into();
         assert_eq!(inbox_hit(&scrolled, &b, above), Some(InboxHit::Panel));
         let low = (x, bottom as f64 - 2.0).into();
-        assert_eq!(inbox_hit(&scrolled, &b, low), Some(InboxHit::Row(page)));
+        assert_eq!(
+            inbox_hit(&scrolled, &b, low),
+            Some(InboxHit::Row(shown.len() - 1))
+        );
+        // To the nearest pixel, and moved by a stretch past an end.
+        let fraction = InboxView {
+            part: 0.3,
+            ..whole.clone()
+        };
+        let l = inbox_layout(&fraction, size);
+        assert_eq!(l.rows[0].0.loc.y, b.window.loc.y - 10);
+        for over in [20.0, -20.0] {
+            let stretched = InboxView {
+                over,
+                ..whole.clone()
+            };
+            let l = inbox_layout(&stretched, size);
+            assert_eq!(l.rows[0].0.loc.y, l.window.loc.y + over as i32);
+            assert_eq!(l.rows[0].0.size.h, INBOX_LABEL);
+        }
+    }
+
+    #[test]
+    fn the_thumb_goes_along_the_track_with_the_list() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let page = inbox_page(size);
+        let track = scroll_track(inbox_layout(&view(), size).list);
+        let at = |first: usize, part: f64| {
+            let v = InboxView {
+                rows: long_rows(page),
+                total: 4 * page,
+                first,
+                part,
+                ..view()
+            };
+            thumb_place(&v, track, page).unwrap()
+        };
+        let (top, size_top) = at(0, 0.0);
+        assert_eq!(top.y, track.loc.y as f64);
+        assert_eq!(size_top.h, track.size.h / 4);
+        let (end, _) = at(3 * page, 0.0);
+        assert_eq!(
+            end.y + size_top.h as f64,
+            (track.loc.y + track.size.h) as f64
+        );
+        // A part of a row moves it a part of the way.
+        let (a, _) = at(2, 0.0);
+        let (b, _) = at(2, 0.5);
+        let (c, _) = at(3, 0.0);
+        assert!(a.y < b.y && b.y < c.y);
+        assert!((b.y - (a.y + c.y) / 2.0).abs() < 1e-9);
+        // A list that fits has none.
+        let fits = InboxView {
+            total: page,
+            ..view()
+        };
+        assert_eq!(thumb_place(&fits, track, page), None);
+    }
+
+    #[test]
+    fn scrolling_by_part_of_a_row_draws_nothing_again() {
+        let painter = Painter::new();
+        let mut layers = InboxLayers::default();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let page = inbox_page(size);
+        let all = long_rows(4 * page);
+        let at = |first: usize, part: f64| InboxView {
+            rows: all[first..].to_vec(),
+            total: all.len(),
+            first,
+            part,
+            // Row 3, an item.
+            selected: Some(3 - first),
+            ..view()
+        };
+        // The rows showing, by index into all of them.
+        let shown = |v: &InboxView| -> Vec<usize> {
+            let l = inbox_layout(v, size);
+            (0..v.rows.len())
+                .filter(|&i| l.rows[i].0.size.h > 0)
+                .map(|i| v.first + i)
+                .collect()
+        };
+        let window = inbox_layout(&view(), size).window;
+        let t = std::time::Instant::now();
+        // Opened, then faded in.
+        let mut was = at(2, 0.25);
+        layers.parts(Some(was.clone()), size, Theme::Dark, 1.0, t, &painter);
+        let later = t + std::time::Duration::from_secs(1);
+        let parts = layers.parts(Some(was.clone()), size, Theme::Dark, 1.0, later, &painter);
+        let frame = layers.overlay.cached.key.clone();
+        let mut drawn = layers.rows.drawn();
+        assert_eq!(drawn, shown(&was).len());
+        // The thumb, a part per row showing, the frame.
+        assert_eq!(parts.len(), shown(&was).len() + 2);
+        // A part of a row on, then on past a row, then still: only the
+        // rows coming into view are drawn, and the frame not again.
+        for (first, part) in [(2, 0.6), (3, 0.1), (3, 0.1)] {
+            let v = at(first, part);
+            let parts = layers.parts(Some(v.clone()), size, Theme::Dark, 1.0, later, &painter);
+            let before = shown(&was);
+            let new = shown(&v).iter().filter(|r| !before.contains(r)).count();
+            assert_eq!(layers.rows.drawn(), drawn + new, "at {first} {part}");
+            assert_eq!(layers.overlay.cached.key, frame);
+            // The first row up by its part, to the fraction, in the window.
+            let row = &parts[1];
+            let want = window.loc.y as f64 - part * INBOX_ROW as f64;
+            assert!((row.loc.y - want).abs() < 1e-9, "{} {want}", row.loc.y);
+            assert_eq!(row.clip, Some(window));
+            drawn = layers.rows.drawn();
+            was = v;
+        }
+        // Closed and faded out, its rows are let go of.
+        layers.parts(None, size, Theme::Dark, 1.0, later, &painter);
+        let gone = later + std::time::Duration::from_secs(1);
+        assert!(
+            layers
+                .parts(None, size, Theme::Dark, 1.0, gone, &painter)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_buffer_shows_the_rows_where_the_layers_put_them() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let page = inbox_page(size);
+        let v = InboxView {
+            rows: long_rows(2 * page),
+            total: 2 * page + 1,
+            part: 0.5,
+            ..view()
+        };
+        // Drawn either way, the panel buffer and the frame differ only
+        // where rows or the thumb go.
+        let p = Theme::Dark.palette();
+        let mut whole = painter.inbox(&v, size, 1.0, p);
+        let mut frame = painter
+            .inbox_frame(&frame_view(&v), size, 1.0, p)
+            .into_buffer(false);
+        let pixels = |b: &mut smithay::backend::renderer::element::memory::MemoryRenderBuffer| {
+            let mut out = Vec::new();
+            let _ = b.render().draw(|mem| {
+                out.extend_from_slice(mem);
+                Ok::<_, ()>(Vec::new())
+            });
+            out
+        };
+        let (a, b) = (pixels(&mut whole), pixels(&mut frame));
+        assert_eq!(a.len(), b.len());
+        let layout = inbox_layout(&v, size);
+        let (origin, outer) = super::super::shadowed(layout.panel);
+        let track = scroll_track(layout.list);
+        let mut differ = 0;
+        for (i, (x, y)) in a.chunks(4).zip(b.chunks(4)).enumerate() {
+            if x != y {
+                let at = Point::from((
+                    (i as i32 % outer.w) + origin.x,
+                    (i as i32 / outer.w) + origin.y,
+                ));
+                let on = |r: Rect| r.contains(at);
+                assert!(on(layout.window) || on(track), "{at:?}");
+                differ += 1;
+            }
+        }
+        assert!(differ > 0);
     }
 
     #[test]
