@@ -1316,6 +1316,7 @@ fn untracked(top: &Path, change: &Change) -> FileDiff {
     let mut file = diff::parse(&diff).pop().unwrap_or_default();
     file.path = path.into();
     file.code = change.code;
+    diff::colour_file(&mut file);
     file
 }
 
@@ -2426,6 +2427,11 @@ mod tests {
         let d = repo_diff(dir, &[change("big", None, '?')]);
         assert_eq!(d[0].added, 6000);
         assert_eq!(d[0].notes, ["… 4000 more lines"]);
+
+        // A new file's code is coloured as its own language.
+        write(dir, "new.rs", "fn main() {}\n");
+        let d = repo_diff(dir, &[change("new.rs", None, '?')]);
+        assert!(!d[0].hunks[0].lines[0].syntax.is_empty(), "{:?}", d[0]);
 
         git(&fx.root, &["init", "-q", "-b", "main", "unborn"]);
         let unborn = fx.root.join("unborn");

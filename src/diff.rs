@@ -213,14 +213,22 @@ impl Section {
             let more = format!("… {} more lines", self.dropped);
             self.diff.notes.insert(0, more);
         }
-        let lang = syntax::lang(&self.diff.path);
         for hunk in &mut self.diff.hunks {
             pair_words(&mut hunk.lines);
-            if let Some(lang) = lang {
-                colour(lang, &mut hunk.lines);
-            }
         }
+        colour_file(&mut self.diff);
         self.diff
+    }
+}
+
+/// Each of `file`'s hunks coloured as the language of its `path`; left
+/// as it is when that isn't known.
+pub fn colour_file(file: &mut FileDiff) {
+    let Some(lang) = syntax::lang(&file.path) else {
+        return;
+    };
+    for hunk in &mut file.hunks {
+        colour(lang, &mut hunk.lines);
     }
 }
 
