@@ -202,6 +202,25 @@ pub(super) fn chevron_down(x: f32, y: f32, s: f32) -> f32 {
     left.min(right) - 0.75 * s
 }
 
+/// Signed distance to a chevron centred on the origin, pointing left for
+/// back, else right for forward.
+pub(super) fn chevron_side(left: bool, x: f32, y: f32, s: f32) -> f32 {
+    let x = if left { x } else { -x };
+    let top = segment(x, y, 1.8 * s, -3.8 * s, -1.8 * s, 0.0);
+    let bottom = segment(x, y, -1.8 * s, 0.0, 1.8 * s, 3.8 * s);
+    top.min(bottom) - STROKE * s
+}
+
+/// Signed distance to two pages, one over the other's top left, centred
+/// on the origin: copy.
+pub(super) fn copy(x: f32, y: f32, s: f32) -> f32 {
+    let front = rounded_rect(x, y, -1.6 * s, -1.6 * s, 6.0 * s, 6.0 * s, 1.2 * s);
+    let back = rounded_rect(x, y, -4.4 * s, -4.4 * s, 6.0 * s, 6.0 * s, 1.2 * s);
+    // The back page shows only where the front one doesn't cover it.
+    let back = (back.abs() - STROKE * s).max(-(front - STROKE * s));
+    (front.abs() - STROKE * s).min(back)
+}
+
 /// Signed distance to a magnifying glass centred on the origin: a ring and
 /// its handle to the bottom right.
 pub(super) fn magnifier(x: f32, y: f32, s: f32) -> f32 {

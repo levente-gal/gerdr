@@ -6,9 +6,9 @@
 use std::time::Instant;
 
 use super::{
-    AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, HelpHit, HelpPress,
-    InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView, ItemIcon,
-    MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
+    AgentLine, AgentView, BarButton, BarButtons, BarStatus, FormField, FormView, Help, HelpHit,
+    HelpPress, InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView,
+    ItemIcon, MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
     PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState,
     SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView,
     TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
@@ -175,7 +175,9 @@ fn pane_bar() -> PaneBarView {
         status: BarStatus::Exited,
         can_restart: true,
         can_stop: false,
-        buttons: true,
+        can_back: false,
+        can_forward: false,
+        buttons: BarButtons::Terminal,
         focused: true,
         lit: true,
         hover: Some(BarButton::Restart),

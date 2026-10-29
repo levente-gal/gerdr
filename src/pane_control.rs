@@ -47,13 +47,15 @@ use smithay::{
 use crate::{
     Gerdr, Pane, Tab,
     anim::{self, Fade},
-    chrome::{self, BarButton, BarHit, BarStatus, Help, PaneBarView, Rect},
+    chrome::{self, BarButton, BarButtons, BarHit, BarStatus, Help, PaneBarView, Rect},
     herdr::{Herdr, PaneState, Process, ProcessInfo},
     layout::Dir,
     menu::{MenuAction, MenuItem, MenuSpec},
     prepare::{self, Plan, Prep, Shell, Step, Tools},
     projects::{Captured, Foreground, VenvSetting},
+    toast::Level,
     tooltip::Tooltip,
+    web_control::WebStep,
 };
 
 /// How often a pane is asked about while it is stopped.
@@ -274,8 +276,13 @@ pub struct BarContent {
     pub label: String,
     pub note: Option<&'static str>,
     pub status: BarStatus,
+    /// Run again: a terminal's command, or a web page loaded again.
     pub can_restart: bool,
     pub can_stop: bool,
+    /// A web page's history goes back, or forward, from where it is.
+    pub can_back: bool,
+    pub can_forward: bool,
+    pub buttons: BarButtons,
     /// The workspace's other tabs, by index, with their titles: where the
     /// menu can move the pane. Only the menu fills it in.
     pub other_tabs: Vec<(usize, String)>,
@@ -324,6 +331,9 @@ pub fn bar_content(
             status: BarStatus::Working,
             can_restart: !settling && !rerun && job.can_rerun,
             can_stop: !settling && rerun,
+            can_back: false,
+            can_forward: false,
+            buttons: BarButtons::Terminal,
             other_tabs: Vec::new(),
             pane_count: 0,
         };
@@ -337,6 +347,9 @@ pub fn bar_content(
             // again, run in front of the last command.
             can_restart: remembered.is_some_and(|r| r.pid == leader.pid),
             can_stop: true,
+            can_back: false,
+            can_forward: false,
+            buttons: BarButtons::Terminal,
             other_tabs: Vec::new(),
             pane_count: 0,
         };
@@ -349,6 +362,9 @@ pub fn bar_content(
             status: BarStatus::Exited,
             can_restart: true,
             can_stop: false,
+            can_back: false,
+            can_forward: false,
+            buttons: BarButtons::Terminal,
             other_tabs: Vec::new(),
             pane_count: 0,
         };
@@ -362,6 +378,9 @@ pub fn bar_content(
         status: BarStatus::Idle,
         can_restart: false,
         can_stop: false,
+        can_back: false,
+        can_forward: false,
+        buttons: BarButtons::Terminal,
         other_tabs: Vec::new(),
         pane_count: 0,
     }
@@ -379,8 +398,28 @@ fn app_bar_content(pane: &Pane) -> BarContent {
         status: BarStatus::Idle,
         can_restart: false,
         can_stop: false,
+        can_back: false,
+        can_forward: false,
+        buttons: BarButtons::None,
         other_tabs: Vec::new(),
         pane_count: 0,
+    }
+}
+
+/// The address of the web page `pane` shows, if it shows one.
+fn web_page(pane: &Pane) -> Option<&str> {
+    let url = pane.app_command.as_deref()?;
+    (pane.herdr.is_none() && crate::is_web_link(url)).then_some(url)
+}
+
+/// Which buttons `pane`'s bar has.
+fn bar_buttons(pane: &Pane) -> BarButtons {
+    if pane.herdr.is_some() {
+        BarButtons::Terminal
+    } else if web_page(pane).is_some() {
+        BarButtons::Web
+    } else {
+        BarButtons::None
     }
 }
 
@@ -571,18 +610,24 @@ fn hint_for(help: &Help, (own, group, index): (&str, &str, usize)) -> Option<Str
 /// What a bar button says when the pointer rests on it at `rect`.
 pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
     let (text, what) = match button {
-        BarButton::Restart => ("Restart", RESTART_HELP),
-        BarButton::Stop => ("Stop", STOP_HELP),
+        BarButton::Restart => ("Restart", Some(RESTART_HELP)),
+        BarButton::Stop => ("Stop", Some(STOP_HELP)),
+        BarButton::Back => ("Back", None),
+        BarButton::Forward => ("Forward", None),
+        // The restart key loads a web page again.
+        BarButton::Reload => ("Reload", Some(RESTART_HELP)),
+        BarButton::CopyUrl => ("Copy URL", None),
     };
     let tip = Tooltip::new(text, rect);
-    match hint_for(help, what) {
+    match what.and_then(|what| hint_for(help, what)) {
         Some(key) => tip.key(&key),
         None => tip,
     }
 }
 
 /// The menu a right press at `at` on the bar of pane `id` (showing
-/// `content`) opens: splits, moves to other tabs, then what runs in it.
+/// `content`) opens: splits, moves to other tabs, then what runs in it or
+/// where its web page goes.
 pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &Help) -> MenuSpec {
     let item = |label: &str, action, what, enabled| {
         let item = MenuItem::new(label, action).enabled(enabled);
@@ -624,26 +669,40 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             MenuAction::PaneToTab(id, Some(*t)),
         )
     }));
-    items.extend([
-        item(
-            "Restart",
-            MenuAction::RestartPane(id),
-            RESTART_HELP,
-            content.can_restart,
-        ),
-        item(
-            "Stop",
-            MenuAction::StopPane(id),
-            STOP_HELP,
-            content.can_stop,
-        ),
-        item(
-            "Close pane",
-            MenuAction::ClosePane(id),
-            CLOSE_PANE_HELP,
-            true,
-        ),
-    ]);
+    match content.buttons {
+        BarButtons::Web => items.extend([
+            MenuItem::new("Back", MenuAction::WebStep(id, WebStep::Back)).enabled(content.can_back),
+            MenuItem::new("Forward", MenuAction::WebStep(id, WebStep::Forward))
+                .enabled(content.can_forward),
+            item(
+                "Reload",
+                MenuAction::WebStep(id, WebStep::Reload),
+                RESTART_HELP,
+                content.can_restart,
+            ),
+            MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)),
+        ]),
+        _ => items.extend([
+            item(
+                "Restart",
+                MenuAction::RestartPane(id),
+                RESTART_HELP,
+                content.can_restart,
+            ),
+            item(
+                "Stop",
+                MenuAction::StopPane(id),
+                STOP_HELP,
+                content.can_stop,
+            ),
+        ]),
+    }
+    items.push(item(
+        "Close pane",
+        MenuAction::ClosePane(id),
+        CLOSE_PANE_HELP,
+        true,
+    ));
     MenuSpec {
         anchor: Rectangle::new(at.to_i32_round(), (0, 0).into()),
         items,
@@ -757,11 +816,26 @@ impl Gerdr {
         )
     }
 
-    /// What the bar of `pane` shows: what runs in it, for a terminal.
+    /// What the bar of `pane` shows: what runs in it, for a terminal;
+    /// where its page can go, for a web page the extension follows (one it
+    /// doesn't can only have its address copied).
     fn pane_bar_of(&self, pane: &Pane) -> BarContent {
-        match &pane.herdr {
-            Some(herdr) => self.pane_bar_content(&herdr.pane_id),
-            None => app_bar_content(pane),
+        if let Some(herdr) = &pane.herdr {
+            return self.pane_bar_content(&herdr.pane_id);
+        }
+        let content = app_bar_content(pane);
+        if web_page(pane).is_none() {
+            return content;
+        }
+        let follows = self.web_control.follows(pane.id);
+        // Where the page couldn't say, the way is left open.
+        let history = self.web_control.history(pane.id);
+        BarContent {
+            can_restart: follows,
+            can_back: follows && history.back != Some(false),
+            can_forward: follows && history.forward != Some(false),
+            buttons: BarButtons::Web,
+            ..content
         }
     }
 
@@ -852,7 +926,9 @@ impl Gerdr {
                     status: content.status,
                     can_restart: content.can_restart,
                     can_stop: content.can_stop,
-                    buttons: pane.herdr.is_some(),
+                    can_back: content.can_back,
+                    can_forward: content.can_forward,
+                    buttons: content.buttons,
                     focused: is_focused,
                     lit: look.visible && full.to_f64().contains(pointer),
                     hover: self
@@ -879,11 +955,9 @@ impl Gerdr {
             .into_iter()
             .filter(|(id, _)| self.pane_bar_drawn(tab, *id))
             .find_map(|(id, rect)| {
-                let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, pos)?;
-                Some(match tab.herdr_pane(id) {
-                    Some(_) => (id, hit),
-                    None => (id, BarHit::Label),
-                })
+                let kind = tab.panes.iter().find(|p| p.id == id).map(bar_buttons)?;
+                let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, kind, pos)?;
+                Some((id, hit))
             })
     }
 
@@ -894,12 +968,13 @@ impl Gerdr {
             return None;
         };
         let tab = self.tab()?;
+        let kind = tab.panes.iter().find(|p| p.id == id).map(bar_buttons)?;
         let (_, rect) = tab
             .shown_rects(self.content_rect())
             .into_iter()
             .find(|(pane, _)| *pane == id)?;
         let bar = chrome::pane_bar_rects(rect).0;
-        let (_, rect) = chrome::pane_bar_buttons(bar)
+        let (_, rect) = chrome::pane_bar_buttons(bar, kind)
             .into_iter()
             .find(|(b, _)| *b == button)?;
         Some(button_tooltip(button, rect, &self.keymap.help()))
@@ -942,13 +1017,40 @@ impl Gerdr {
         let BarHit::Button(button) = hit else {
             return;
         };
-        let Some(pane_id) = self.tab().and_then(|tab| tab.herdr_pane(id)) else {
-            return;
+        let step = match button {
+            BarButton::Back => WebStep::Back,
+            BarButton::Forward => WebStep::Forward,
+            BarButton::Reload => WebStep::Reload,
+            BarButton::CopyUrl => return self.copy_pane_url(id),
+            BarButton::Restart | BarButton::Stop => {
+                let Some(pane_id) = self.tab().and_then(|tab| tab.herdr_pane(id)) else {
+                    return;
+                };
+                let pane_id = pane_id.pane_id.clone();
+                if button == BarButton::Restart {
+                    self.restart_pane(&pane_id);
+                } else {
+                    self.stop_pane(&pane_id);
+                }
+                return;
+            }
         };
-        let pane_id = pane_id.pane_id.clone();
-        match button {
-            BarButton::Restart => self.restart_pane(&pane_id),
-            BarButton::Stop => self.stop_pane(&pane_id),
+        self.web_pane_step(id, step);
+    }
+
+    /// Copy the address of the web page pane `id` of the active tab shows.
+    pub fn copy_pane_url(&mut self, id: u32) {
+        let url = self
+            .tab()
+            .and_then(|tab| tab.panes.iter().find(|p| p.id == id))
+            .and_then(web_page)
+            .map(str::to_owned);
+        match url {
+            Some(url) => {
+                self.copy_text(url);
+                self.toast("Copied the link".into(), Level::Info);
+            }
+            None => self.show_notice("Not a web page".into()),
         }
     }
 
@@ -958,9 +1060,23 @@ impl Gerdr {
         tab.herdr_pane(tab.focused_id()?).map(|p| p.pane_id.clone())
     }
 
+    /// Run the focused terminal's command again, or load the focused web
+    /// page again.
     pub fn restart_focused_pane(&mut self) {
-        match self.focused_terminal() {
-            Some(pane_id) => self.restart_pane(&pane_id),
+        if let Some(pane_id) = self.focused_terminal() {
+            return self.restart_pane(&pane_id);
+        }
+        let page = self.tab().and_then(|tab| {
+            let id = tab.focused_id()?;
+            tab.panes
+                .iter()
+                .find(|p| p.id == id)
+                .filter(|p| web_page(p).is_some())?;
+            Some(id)
+        });
+        match page {
+            Some(id) if self.web_pane_step(id, WebStep::Reload) => {}
+            Some(_) => self.show_notice("gerdr can't reload this page".into()),
             None => self.show_notice("Not a terminal pane".into()),
         }
     }
@@ -1806,5 +1922,34 @@ mod tests {
         assert!(!menu.items[2].enabled);
         assert_eq!(menu.items[4].label, "Restart");
         assert!(!menu.items[4].enabled && menu.items[5].enabled);
+    }
+
+    #[test]
+    fn a_web_pages_bar_menu_goes_back_forward_and_copies() {
+        let help = crate::keys::Keymap::default().help();
+        let content = BarContent {
+            can_restart: true,
+            can_back: true,
+            can_forward: false,
+            buttons: BarButtons::Web,
+            ..bar_content(None, None, None)
+        };
+        let menu = bar_menu((0.0, 0.0).into(), 3, &content, &help);
+        let tail: Vec<(&str, &MenuAction, bool)> = menu.items[4..]
+            .iter()
+            .map(|i| (i.label.as_str(), &i.action, i.enabled))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                ("Back", &MenuAction::WebStep(3, WebStep::Back), true),
+                ("Forward", &MenuAction::WebStep(3, WebStep::Forward), false),
+                ("Reload", &MenuAction::WebStep(3, WebStep::Reload), true),
+                ("Copy URL", &MenuAction::CopyPaneUrl(3), true),
+                ("Close pane", &MenuAction::ClosePane(3), true),
+            ]
+        );
+        // Reload is what the restart key does on a web page.
+        assert_eq!(menu.items[6].hint.as_deref(), Some("Ctrl+B A"));
     }
 }
