@@ -263,6 +263,29 @@ fn step(items: &[Item], first: usize) -> i32 {
     }
 }
 
+/// How far down a list of `items` standing at `pos` (in worktrees, to the
+/// fraction) is scrolled, in logical pixels: each worktree scrolled past
+/// as far as it moves the list (see `step`).
+fn scrolled_px(items: &[Item], pos: f64) -> f64 {
+    let first = pos.max(0.0).floor() as usize;
+    let past: i32 = (0..first.min(items.len())).map(|i| step(items, i)).sum();
+    past as f64 + pos.max(0.0).fract() * step(items, first) as f64
+}
+
+/// Where a list of `items` scrolled `px` logical pixels down stands, in
+/// worktrees (see `scrolled_px`).
+fn standing_at(items: &[Item], px: f64) -> f64 {
+    let mut down = 0.0;
+    for i in 0..items.len() {
+        let h = step(items, i) as f64;
+        if px < down + h {
+            return i as f64 + (px - down).max(0.0) / h;
+        }
+        down += h;
+    }
+    items.len() as f64
+}
+
 /// The furthest worktree a view of `page` rows scrolls to: the first from
 /// which the rest all fit.
 fn last_first(items: &[Item], page: usize) -> usize {
@@ -450,6 +473,13 @@ impl Popup {
         let bounds = self.bounds(items, page);
         self.scroll.apply(motion, now, bounds);
         self.calm(now);
+    }
+
+    /// Stand the list of `items` `px` pixels down, as its scrollbar's
+    /// thumb held there puts it.
+    fn stand_at(&mut self, px: f64, items: &[Item], page: usize) {
+        let max = last_first(items, page) as f64;
+        self.scroll.jump(standing_at(items, px).clamp(0.0, max));
     }
 
     /// Move the list on to `now`; whether it still moves.
@@ -743,6 +773,14 @@ impl Popup {
             empty: empty.into(),
             part,
             overscroll: self.scroll.overscroll(),
+            bar: {
+                let max = last_first(items, page);
+                (max > 0).then(|| {
+                    let down = scrolled_px(items, self.scroll.pos().clamp(0.0, max as f64));
+                    let total = scrolled_px(items, max as f64) + list_height(items, page) as f64;
+                    chrome::ListBar { down, total }
+                })
+            },
         }
     }
 }
@@ -982,6 +1020,16 @@ impl Gerdr {
         let page = self.worktrees_page();
         if let Some(popup) = self.worktrees.popup.as_mut() {
             popup.scroll_by(motion, Instant::now(), &items, page);
+        }
+    }
+
+    /// Stand the popup's list `px` pixels down, as its scrollbar's thumb
+    /// held there puts it.
+    pub fn worktrees_scroll_to(&mut self, px: f64) {
+        let (_, items) = self.popup_items();
+        let page = self.worktrees_page();
+        if let Some(popup) = self.worktrees.popup.as_mut() {
+            popup.stand_at(px, &items, page);
         }
     }
 
@@ -1490,6 +1538,38 @@ mod tests {
         let v = view(&popup);
         assert_eq!(v.entries[0], WorktreeEntry::Repo("r".into()));
         assert_eq!(v.selected, Some(1));
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_stands_the_list_where_it_is_dragged() {
+        let mut items = items();
+        items.push(item(0, "a", false, false, false));
+        items.push(item(0, "b", false, false, false));
+        let mut other = item(1, "other", true, false, false);
+        (other.main, other.wt.path) = ("/src/s".into(), "/src/s".into());
+        items.push(other);
+        let names = vec!["r".to_owned(), "s".to_owned()];
+        let view = |popup: &Popup| popup.view(&items, &names, &HashMap::new(), 3);
+        let (row, label) = (chrome::WORKTREES_ROW as f64, chrome::WORKTREES_LABEL as f64);
+        // Past "b", the next repository's label comes up with "other".
+        assert_eq!(scrolled_px(&items, 5.0), 5.0 * row + label);
+        assert_eq!(scrolled_px(&items, 4.5), 4.0 * row + (row + label) / 2.0);
+        assert_eq!(standing_at(&items, 4.0 * row + (row + label) / 2.0), 4.5);
+        let mut popup = Popup::default();
+        popup.select(&items, 0, 3);
+        assert_eq!(view(&popup).bar.unwrap().down, 0.0);
+        // Part of a row down.
+        popup.stand_at(1.5 * row, &items, 3);
+        let v = view(&popup);
+        assert_eq!((v.part, v.bar.unwrap().down), (0.5, 1.5 * row));
+        // No further than the end.
+        popup.stand_at(1e6, &items, 3);
+        let bar = view(&popup).bar.unwrap();
+        assert_eq!(bar.down, bar.total - view(&popup).list_height as f64);
+        // All shown, there is none.
+        let few = &items[..2];
+        let fits = popup.view(few, &names, &HashMap::new(), 3);
+        assert_eq!(fits.bar, None);
     }
 
     #[test]

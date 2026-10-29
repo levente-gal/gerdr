@@ -65,6 +65,8 @@ pub struct WorktreesView {
     /// How far the entries are moved down (up when negative) past an end
     /// of the list, in logical pixels, as it stretches or bounces.
     pub overscroll: f64,
+    /// Where the list stands, for its scrollbar; none while it all shows.
+    pub bar: Option<super::ListBar>,
 }
 
 /// An entry of the worktrees popup.
@@ -255,6 +257,14 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         footer,
         hints: footer_hint_spots(&hint_strs(&view.hints), footer),
     }
+}
+
+/// The scrollbar of the popup's list laid out as `layout`, in the gutter
+/// right of its entries; none while they all show.
+pub fn worktrees_thumb(view: &WorktreesView, layout: &WorktreesLayout) -> Option<super::Thumb> {
+    let list = layout.list;
+    let track = super::gutter_track(list.loc.x + list.size.w, list);
+    super::Thumb::of(track, list.size.h as f64, view.bar?)
 }
 
 /// How high `entry` is in the list.
@@ -753,6 +763,7 @@ fn frame_view(view: &WorktreesView) -> WorktreesView {
         },
         part: 0.0,
         overscroll: 0.0,
+        bar: None,
     }
 }
 
@@ -763,6 +774,8 @@ fn frame_view(view: &WorktreesView) -> WorktreesView {
 pub(super) struct WorktreesLayers {
     overlay: super::Overlay<(WorktreesView, Size<i32, Logical>, super::Theme, f64)>,
     rows: RowCache<RowKey>,
+    /// The scrollbar's thumb, by its size.
+    thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
     /// How many frames were drawn, for tests.
     #[cfg(test)]
     frames: usize,
@@ -783,7 +796,7 @@ impl WorktreesLayers {
             let (loc, size) = super::shadowed(worktrees_layout(view, output).panel);
             ((frame_view(view), output, theme, scale), loc, size)
         });
-        let rows = &mut self.rows;
+        let (rows, thumb) = (&mut self.rows, &mut self.thumb);
         #[cfg(test)]
         let frames = &mut self.frames;
         let parts = self.overlay.parts(
@@ -797,9 +810,22 @@ impl WorktreesLayers {
                 }
                 painter.worktrees_frame(frame, *output, scale, theme.palette())
             },
-            |_| match &view {
-                Some(view) => row_parts(rows, view, output, theme, scale, painter),
-                None => Vec::new(),
+            |_| {
+                let Some(view) = &view else {
+                    return Vec::new();
+                };
+                let mut parts = Vec::new();
+                let layout = worktrees_layout(view, output);
+                if let Some(bar) = worktrees_thumb(view, &layout) {
+                    let size = Size::from((bar.track.size.w, bar.h as i32));
+                    let buffer = thumb.get((size, theme, scale), |_| {
+                        painter.bar_thumb(size, scale, theme.palette())
+                    });
+                    let part = Part::new(buffer, bar.track.loc, size, 1.0);
+                    parts.push(part.at((bar.track.loc.x as f64, bar.top).into()));
+                }
+                parts.extend(row_parts(rows, view, output, theme, scale, painter));
+                parts
             },
         );
         self.rows.sweep();
@@ -888,6 +914,7 @@ mod tests {
             empty: "No worktrees match".into(),
             part: 0.0,
             overscroll: 0.0,
+            bar: None,
         }
     }
 
@@ -1187,6 +1214,31 @@ mod tests {
         };
         shown(&mut layers, &reselected, &painter);
         assert_eq!((layers.rows.drawn(), layers.frames), (drawn + 3, 1));
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_goes_in_the_gutter_and_moves_alone() {
+        let painter = Painter::new();
+        let mut layers = WorktreesLayers::default();
+        let at = |down: f64| WorktreesView {
+            bar: Some(crate::chrome::ListBar {
+                down,
+                total: 2000.0,
+            }),
+            ..long()
+        };
+        let first = shown(&mut layers, &at(0.0), &painter);
+        let moved = shown(&mut layers, &at(500.0), &painter);
+        assert_eq!(layers.frames, 1);
+        // Right of the entries, within the panel; in front of the rest.
+        let layout = worktrees_layout(&at(0.0), (1920, 1080).into());
+        let thumb = super::worktrees_thumb(&at(0.0), &layout).unwrap();
+        let (list, panel) = (layout.list, layout.panel);
+        assert_eq!(thumb.track.loc.x, list.loc.x + list.size.w + 1);
+        assert!(thumb.track.loc.x + thumb.track.size.w < panel.loc.x + panel.size.w);
+        assert_eq!(first[0].loc, (thumb.track.loc.x as f64, thumb.top).into());
+        assert!(moved[0].loc.y > first[0].loc.y);
+        assert_eq!(super::worktrees_thumb(&long(), &layout), None);
     }
 
     #[test]

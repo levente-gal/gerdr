@@ -15,6 +15,7 @@ pub enum Bar {
     Sidebar,
     ProjectMenu,
     Switcher,
+    Worktrees,
     Inbox,
     ReposTree,
     ReposDetail,
@@ -37,7 +38,9 @@ impl Gerdr {
         }
         let bars: &[Bar] = if self.project_menu.is_some() {
             &[Bar::ProjectMenu]
-        } else if self.worktrees.is_open() || self.context_menu.is_some() {
+        } else if self.worktrees.is_open() {
+            &[Bar::Worktrees]
+        } else if self.context_menu.is_some() {
             &[]
         } else if self.repos.is_open() {
             &[Bar::ReposTree, Bar::ReposDetail]
@@ -77,6 +80,11 @@ impl Gerdr {
                 let view = self.switcher_view()?;
                 let layout = chrome::switcher_geometry(&view, self.content_rect());
                 chrome::switcher_thumb(&view, &layout)
+            }
+            Bar::Worktrees => {
+                let view = self.worktrees_view()?;
+                let layout = chrome::worktrees_layout(&view, size);
+                chrome::worktrees_thumb(&view, &layout)
             }
             Bar::Inbox => {
                 let view = self.inbox_view()?;
@@ -129,6 +137,7 @@ impl Gerdr {
             Bar::Sidebar => self.sidebar_scroll_to(at),
             Bar::ProjectMenu => self.project_menu_scroll_to(at),
             Bar::Switcher => self.switcher_scroll_to(at),
+            Bar::Worktrees => self.worktrees_scroll_to(at),
             Bar::Inbox => self.inbox_scroll_to(at),
             Bar::ReposTree => self.repos_scroll_to(at, false),
             Bar::ReposDetail => self.repos_scroll_to(at, true),
