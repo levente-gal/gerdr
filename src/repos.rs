@@ -1293,6 +1293,18 @@ fn retryable(batch: Option<&Batch>) -> bool {
 }
 
 impl Panel {
+    /// Stop any of the lists flung; whether it was.
+    pub fn stop_fling(&mut self) -> bool {
+        let menu = (self.branch_menu.as_mut()).is_some_and(|menu| menu.scroll.stop_fling());
+        // Every one of them, not just up to the first flung.
+        [
+            self.tree_scroll.stop_fling(),
+            self.detail_scroll.stop_fling(),
+            menu,
+        ]
+        .contains(&true)
+    }
+
     /// A panel over `items`, nothing checked: repositories with changes
     /// unfolded unless they have `FOLD_FILES` or more, the first selected.
     pub fn new(items: &[RepoItem]) -> Panel {

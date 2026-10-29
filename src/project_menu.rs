@@ -185,6 +185,11 @@ pub enum Outcome {
 }
 
 impl ProjectMenu {
+    /// Stop the list flung; whether it was.
+    pub fn stop_fling(&mut self) -> bool {
+        self.scroll.stop_fling()
+    }
+
     /// An empty menu; `home` is written "~".
     fn new(home: Option<PathBuf>) -> Self {
         Self {

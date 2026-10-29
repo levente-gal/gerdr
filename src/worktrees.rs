@@ -56,6 +56,11 @@ pub struct Worktrees {
 }
 
 impl Worktrees {
+    /// Stop the popup's list flung; whether it was.
+    pub fn stop_fling(&mut self) -> bool {
+        self.popup.as_mut().is_some_and(Popup::stop_fling)
+    }
+
     pub fn is_open(&self) -> bool {
         self.popup.is_some()
     }
@@ -375,6 +380,11 @@ fn diff_command(item: &Item) -> String {
 }
 
 impl Popup {
+    /// Stop the list flung; whether it was.
+    pub fn stop_fling(&mut self) -> bool {
+        self.scroll.stop_fling()
+    }
+
     /// The selected worktree, by index into `items`.
     fn selected(&self, items: &[Item]) -> Option<usize> {
         let path = self.selected.as_ref()?;

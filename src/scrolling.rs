@@ -36,6 +36,20 @@ impl Gerdr {
         })
     }
 
+    /// Stop every list flung, where it stands; whether one was.
+    pub(crate) fn stop_flings(&mut self) -> bool {
+        // Every one of them, not just up to the first flung.
+        [
+            self.sidebar_scroll.stop_fling(),
+            (self.project_menu.as_mut()).is_some_and(|menu| menu.stop_fling()),
+            (self.switcher.as_mut()).is_some_and(|switcher| switcher.stop_fling()),
+            self.worktrees.stop_fling(),
+            (self.repos.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
+            (self.inbox.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
+        ]
+        .contains(&true)
+    }
+
     /// Move every list moving on its own on to `now`, before the frame
     /// shows them. Once the last stops, what is under the pointer is found
     /// again: the lists leave it as it was while they move.
