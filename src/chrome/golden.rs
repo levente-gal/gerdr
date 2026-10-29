@@ -498,24 +498,33 @@ fn inbox() -> InboxView {
         label: label.into(),
         key: key.into(),
     };
+    use crate::agent_icons::AgentIcon;
     use InboxIcon as I;
     use InboxTone as T;
+    let badge = |icon, dot| I::Badge(super::Badge { icon, dot });
     let mut rows = vec![
         label(I::Agent, "Agents", 3, 0),
         inbox_item(
             "a1",
             "claude",
             "gerdr · blocked · Allow edit?",
-            I::Blocked,
+            badge(AgentIcon::Claude, super::Dot::Blocked),
             T::Blocked,
             "2m",
         ),
-        inbox_item("a2", "codex", "gerdr-inbox · done", I::Done, T::Done, "14m"),
+        inbox_item(
+            "a2",
+            "codex",
+            "gerdr-inbox · done",
+            badge(AgentIcon::Codex, super::Dot::Done),
+            T::Done,
+            "14m",
+        ),
         inbox_item(
             "a3",
             "claude",
             "aft · working",
-            I::Working,
+            badge(AgentIcon::Claude, super::Dot::Working),
             T::Working,
             "1h",
         ),
@@ -600,7 +609,10 @@ fn inbox() -> InboxView {
         detail: Some(InboxDetailView {
             title: "claude".into(),
             subtitle: "gerdr · blocked · Allow edit?".into(),
-            icon: InboxIcon::Blocked,
+            icon: InboxIcon::Badge(super::Badge {
+                icon: crate::agent_icons::AgentIcon::Claude,
+                dot: super::Dot::Blocked,
+            }),
             tone: InboxTone::Blocked,
             fields: vec![
                 ("Status".into(), "blocked".into()),

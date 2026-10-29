@@ -409,14 +409,19 @@ impl Chrome {
             painter.repos(panel, *output, scale, theme.palette())
         }));
 
-        // The inbox panel, as high.
+        // The inbox panel, as high, its agents' dots blinking in front of
+        // it.
+        let mut inbox_dots = None;
         let inbox = view.inbox.map(|panel| {
-            let (loc, size) = shadowed(inbox_layout(&panel, output).panel);
+            let layout = inbox_layout(&panel, output);
+            let (loc, size) = shadowed(layout.panel);
+            inbox_dots = Some((loc, inbox_blinkers(&panel, &layout)));
             ((panel, output, theme, scale), loc, size)
         });
-        parts.extend(self.inbox.part(inbox, now, true, |(panel, output, ..)| {
+        let part = self.inbox.part(inbox, now, true, |(panel, output, ..)| {
             painter.inbox(panel, *output, scale, theme.palette())
-        }));
+        });
+        push_popup(&mut parts, part, dot, inbox_dots, blink);
 
         // The project menu reaches over the sidebar and the apps.
         let project_menu = view.project_menu.map(|menu| {
