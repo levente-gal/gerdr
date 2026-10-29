@@ -25,6 +25,7 @@ use crate::{
     menu::{MenuAction, MenuItem, MenuSpec},
     paths,
     rename::RenameTarget,
+    repo_batches::repos_tip,
     tooltip::Tooltip,
 };
 
@@ -258,7 +259,7 @@ impl Gerdr {
             repos,
             repos_open,
             repos_changed,
-            repos_stuck,
+            repos_stuck: repos_stuck > 0,
             rename,
             scroll: layout.scroll,
         }
@@ -390,7 +391,8 @@ impl Gerdr {
                 })
             }
             SidebarHit::Repos => {
-                let tip = Tooltip::new("Repositories", layout.repos);
+                let (changed, stuck) = self.repos_changed();
+                let tip = Tooltip::new(&repos_tip(changed, stuck), layout.repos);
                 Some(match self.keymap.help().key_for("repositories", 0) {
                     Some(key) => tip.key(&key),
                     None => tip,

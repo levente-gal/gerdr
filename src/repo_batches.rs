@@ -409,11 +409,11 @@ fn files(paths: &[String]) -> String {
 
 /// How many of the repositories of `statuses` (one per root, however many
 /// checkouts share it) have uncommitted changes or are stopped half-way (a
-/// merge, rebase or the like, or a conflicted file), and whether any is
+/// merge, rebase or the like, or a conflicted file), and how many are
 /// stopped.
-fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> (usize, bool) {
+fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> (usize, usize) {
     let mut roots: Vec<&Path> = Vec::new();
-    let (mut changed, mut stuck) = (0, false);
+    let (mut changed, mut stuck) = (0, 0);
     for status in statuses {
         let Some(root) = status.root.as_deref() else {
             continue;
@@ -424,9 +424,22 @@ fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> (usize, b
         roots.push(root);
         let stopped = status.op.is_some() || status.changes.iter().any(Change::conflicted);
         changed += (status.dirty || stopped) as usize;
-        stuck |= stopped;
+        stuck += stopped as usize;
     }
     (changed, stuck)
+}
+
+/// The repositories button's tooltip, with `changed` repositories changed
+/// and `stuck` of them stopped half-way.
+pub(crate) fn repos_tip(changed: usize, stuck: usize) -> String {
+    let mut text = "Repositories".to_owned();
+    if changed > 0 {
+        text.push_str(&format!(": {changed} with changes"));
+    }
+    if stuck > 0 {
+        text.push_str(&format!(", {stuck} stopped half-way"));
+    }
+    text
 }
 
 fn level(tone: Tone) -> Level {
@@ -464,9 +477,9 @@ impl Gerdr {
     }
 
     /// How many of the project's repositories have uncommitted changes or
-    /// are stopped half-way, and whether any is stopped: the sidebar's
-    /// badge on the repositories button.
-    pub(crate) fn repos_changed(&self) -> (usize, bool) {
+    /// are stopped half-way, and how many are stopped: the sidebar's badge
+    /// on the repositories button.
+    pub(crate) fn repos_changed(&self) -> (usize, usize) {
         let statuses = self
             .workspaces
             .iter()
@@ -1779,8 +1792,8 @@ mod tests {
             status("/c", true),
             GitStatus::default(),
         ];
-        assert_eq!(changed_repos(statuses.iter()), (2, false));
-        assert_eq!(changed_repos(std::iter::empty()), (0, false));
+        assert_eq!(changed_repos(statuses.iter()), (2, 0));
+        assert_eq!(changed_repos(std::iter::empty()), (0, 0));
     }
 
     #[test]
@@ -1794,7 +1807,17 @@ mod tests {
             code: 'U',
         });
         let statuses = [merging, status("/c", false)];
-        assert_eq!(changed_repos(statuses.iter()), (1, true));
-        assert_eq!(changed_repos([conflicted].iter()), (1, true));
+        assert_eq!(changed_repos(statuses.iter()), (1, 1));
+        assert_eq!(changed_repos([conflicted].iter()), (1, 1));
+    }
+
+    #[test]
+    fn the_repos_tip_counts_changed_and_stopped() {
+        assert_eq!(repos_tip(0, 0), "Repositories");
+        assert_eq!(repos_tip(2, 0), "Repositories: 2 with changes");
+        assert_eq!(
+            repos_tip(3, 1),
+            "Repositories: 3 with changes, 1 stopped half-way"
+        );
     }
 }
