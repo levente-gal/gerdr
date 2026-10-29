@@ -8,7 +8,7 @@
 //! its items into an `InboxView`.
 
 use super::{
-    BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
+    BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
     FOOTER_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE,
     MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
@@ -776,14 +776,37 @@ fn item_dot_line(rect: Rect) -> Rect {
     )
 }
 
-/// Where the dot of the detail at `rect` whose title is at `title` goes:
-/// at the title's right end, centred on its mark.
-fn detail_dot(rect: Rect, title: Rect) -> Rect {
-    let badge = detail_badge(rect, title);
-    row_dot(Rectangle::new(
-        (title.loc.x, badge.loc.y).into(),
-        ((title.size.w - HELP_PADDING).max(0), badge.size.h).into(),
-    ))
+/// The gap between the detail's title and its dot.
+const DETAIL_DOT_GAP: i32 = 8;
+
+/// The line of `detail`'s title, in the detail at `rect` whose title row
+/// is at `title`: the row, or with a subtitle its top part, the two
+/// centred on the mark.
+fn detail_title_line(detail: &InboxDetailView, rect: Rect, title: Rect) -> Rect {
+    if detail.subtitle.is_empty() {
+        return title;
+    }
+    let top = detail_badge(rect, title).loc.y - 2;
+    Rectangle::new((title.loc.x, top).into(), (title.size.w, 22).into())
+}
+
+/// Where the text of the detail's title starts, in its title row at
+/// `title`: after its mark.
+fn detail_text_x(title: Rect) -> i32 {
+    title.loc.x + HELP_PADDING + DETAIL_BADGE + FIELD_GAP * 3 / 2
+}
+
+/// Where the dot of `detail` goes, in the detail at `rect` whose title
+/// row is at `title`: just after its title, centred on the title's line;
+/// at the row's end when the title reaches it.
+fn detail_dot(detail: &InboxDetailView, rect: Rect, title: Rect) -> Rect {
+    let line = detail_title_line(detail, rect, title);
+    let after = detail_text_x(title) + extent(&detail.title, LABEL_FONT_SIZE) + DETAIL_DOT_GAP;
+    let most = title.loc.x + title.size.w - HELP_PADDING - DOT;
+    Rectangle::new(
+        (after.min(most), line.loc.y + (line.size.h - DOT) / 2).into(),
+        (DOT, DOT).into(),
+    )
 }
 
 /// Where the detail's mark goes, in the detail at `rect` whose title is
@@ -821,7 +844,7 @@ pub fn inbox_blinkers(view: &InboxView, layout: &InboxLayout) -> Vec<Rect> {
         .collect();
     if let Some(detail) = view.detail.as_ref().filter(|d| blinks(d.icon)) {
         let title = detail_parts(detail, layout.detail).title;
-        dots.push(detail_dot(layout.detail, title));
+        dots.push(detail_dot(detail, layout.detail, title));
     }
     dots
 }
@@ -1472,35 +1495,38 @@ impl Painter {
         let parts = detail_parts(detail, rect);
 
         let title = parts.title;
-        let (tx, tright) = phys(title, scale);
+        let (_, tright) = phys(title, scale);
         let badge = detail_badge(rect, title);
         let color = tone_color(detail.tone, p);
         let grow = DETAIL_GROW;
         self.inbox_badge(c, badge, detail.icon, color, p.elevated, grow, scale);
-        let text_x = tx + px(HELP_PADDING + DETAIL_BADGE) as f32 + gap * 1.5;
-        let text_end = match detail.icon {
+        let text_x = px(detail_text_x(title)) as f32;
+        let text_end = tright - px(HELP_PADDING) as f32;
+        // An agent's dot after its title, which stops short of it.
+        let title_end = match detail.icon {
             InboxIcon::Badge(b) => {
-                let dot = detail_dot(rect, title);
+                let dot = detail_dot(detail, rect, title);
                 status_dot(c, dot, b.dot, scale, p);
-                px(dot.loc.x) as f32 - gap
+                px(dot.loc.x - DETAIL_DOT_GAP / 2) as f32
             }
-            _ => tright - px(HELP_PADDING) as f32,
+            _ => text_end,
         };
         // The title over the subtitle, the two centred on the mark.
-        let (title_band, subtitle_band) = if detail.subtitle.is_empty() {
-            (band(title, scale), None)
-        } else {
-            let top = badge.loc.y - 2;
-            let t = Rectangle::new((title.loc.x, top).into(), (title.size.w, 22).into());
-            let st = Rectangle::new((title.loc.x, top + 22).into(), (title.size.w, 18).into());
-            (band(t, scale), Some(band(st, scale)))
-        };
+        let line = detail_title_line(detail, rect, title);
+        let title_band = band(line, scale);
+        let subtitle_band = (!detail.subtitle.is_empty()).then(|| {
+            let st = Rectangle::new(
+                (title.loc.x, line.loc.y + line.size.h).into(),
+                (title.size.w, 18).into(),
+            );
+            band(st, scale)
+        });
         self.any_text(
             c,
             &detail.title,
             LABEL_FONT_SIZE,
             text_x,
-            text_end,
+            title_end,
             title_band,
             scale,
             p.text,
@@ -1950,6 +1976,10 @@ mod tests {
         let dots = inbox_blinkers(&v, &layout);
         assert_eq!(dots.len(), 2);
         assert!(inside(layout.detail, dots[1]));
+        // Just after the title, not at the row's end.
+        let title = detail_parts(v.detail.as_ref().unwrap(), layout.detail).title;
+        assert!(dots[1].loc.x > detail_text_x(title));
+        assert!(dots[1].loc.x < title.loc.x + title.size.w - HELP_PADDING - DOT);
     }
 
     fn view() -> InboxView {
