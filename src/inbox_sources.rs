@@ -19,6 +19,7 @@ use crate::{
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
     inbox_store::InboxFile,
     issues::{Issue, IssueSource, IssuesRead, IssuesState, TicketRepo},
+    test_runs::TestRun,
 };
 
 /// What the items are built from.
@@ -42,6 +43,8 @@ pub struct Sources<'a> {
     pub herdr_agents: &'a [AgentInfo],
     /// Cursor's chats shown as cards (`Gerdr::cursor_chats`).
     pub cursor_chats: &'a [CursorChat],
+    /// The test runs shown as cards (`Gerdr::test_runs`).
+    pub test_runs: &'a [TestRun],
     /// Since when each agent has been as it is (`Gerdr::agent_since`).
     pub agent_since: &'a HashMap<AgentKey, (AgentStatus, Instant)>,
     /// The CI of the project's repositories, by root (`Gerdr::ci`).
@@ -142,12 +145,14 @@ impl<'a> Sources<'a> {
 }
 
 /// An agent card's fingerprint: its status and herdr's count of its
-/// state changes (a Cursor chat's last update), so it changes whenever
-/// the agent moves on. `None` for what is not an agent (a CI card).
+/// state changes (a Cursor chat's last update, a test run's process), so
+/// it changes whenever the agent moves on. `None` for what is not an agent
+/// (a CI card).
 pub fn agent_fingerprint(
     view: &AgentView,
     herdr_agents: &[AgentInfo],
     cursor_chats: &[CursorChat],
+    test_runs: &[TestRun],
 ) -> Option<String> {
     let status = status_label(view.status);
     match &view.key {
@@ -160,6 +165,11 @@ pub fn agent_fingerprint(
             let chat = cursor_chats.iter().find(|c| &c.row.id == chat);
             let updated = chat.map_or(0, |c| c.row.updated_ms);
             Some(format!("{status}#{updated}"))
+        }
+        AgentKey::Test(pane_id) => {
+            let run = test_runs.iter().find(|r| &r.pane_id == pane_id);
+            let pid = run.map_or(0, |r| r.pid);
+            Some(format!("{status}#{pid}"))
         }
         AgentKey::Ci(_) => None,
     }
@@ -181,12 +191,15 @@ pub fn agent_items(src: &Sources) -> Vec<InboxItem> {
             if !listed.insert(view.key.clone()) {
                 continue;
             }
-            let Some(fingerprint) = agent_fingerprint(view, src.herdr_agents, src.cursor_chats)
+            let Some(fingerprint) =
+                agent_fingerprint(view, src.herdr_agents, src.cursor_chats, src.test_runs)
             else {
                 continue;
             };
             let pane = match &view.key {
-                AgentKey::Herdr(pane_id) => src.pane_text.get(pane_id).map(|p| p.text.clone()),
+                AgentKey::Herdr(pane_id) | AgentKey::Test(pane_id) => {
+                    src.pane_text.get(pane_id).map(|p| p.text.clone())
+                }
                 _ => None,
             };
             let age = src
@@ -666,6 +679,7 @@ mod tests {
                 agents: &self.agents,
                 herdr_agents: &self.herdr_agents,
                 cursor_chats: &self.cursor_chats,
+                test_runs: &[],
                 agent_since: &self.agent_since,
                 ci: &self.ci,
                 issues: &self.issues,
@@ -712,6 +726,7 @@ mod tests {
             deletable: false,
             subagents: Vec::new(),
             inbox: false,
+            test: None,
         }
     }
 
@@ -825,7 +840,7 @@ mod tests {
         let after = agent_items(&f.sources());
         assert_ne!(before[0].fingerprint, after[0].fingerprint);
         // The sidebar's check of a card agrees with the inbox's item.
-        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats);
+        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats, &[]);
         assert_eq!(print.as_ref(), Some(&after[0].fingerprint));
     }
 

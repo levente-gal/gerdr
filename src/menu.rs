@@ -67,6 +67,8 @@ pub enum MenuAction {
     FocusAgent(crate::agents::AgentKey),
     /// Delete idle or done Cursor chat (by id) from gerdr.
     DeleteCursorChat(String),
+    /// Take the finished test run in herdr pane `id` off the sidebar.
+    DismissTest(String),
     CopyPath(PathBuf),
     Theme(ThemeMode),
     /// Start again what pane `id` of the active tab waits for, after it
@@ -332,6 +334,7 @@ impl Gerdr {
             }
             MenuAction::FocusAgent(key) => self.focus_agent(&key),
             MenuAction::DeleteCursorChat(id) => self.delete_cursor_chat(&id),
+            MenuAction::DismissTest(id) => self.dismiss_test(&id),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
             MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),

@@ -90,6 +90,7 @@ fn agents() -> Vec<Vec<AgentView>> {
             deletable: false,
             subagents: Vec::new(),
             inbox: false,
+            test: None,
         }],
         vec![],
     ]

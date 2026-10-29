@@ -12,12 +12,13 @@ use crate::herdr::AgentStatus;
 
 /// Which agent: the herdr pane it runs in, or the Cursor chat it is. Or,
 /// for a notification about the CI (see `ci_watch`), the GitHub page it
-/// opens.
+/// opens; for a test run (see `test_runs`), the herdr pane it runs in.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AgentKey {
     Herdr(String),
     Cursor(String),
     Ci(String),
+    Test(String),
 }
 
 /// What a Cursor key's text starts with; a herdr key is its bare pane id,
@@ -25,6 +26,8 @@ pub enum AgentKey {
 const CURSOR_PREFIX: &str = "cursor:";
 /// What a CI key's text starts with.
 const CI_PREFIX: &str = "ci:";
+/// What a test run's key's text starts with.
+const TEST_PREFIX: &str = "test:";
 
 impl fmt::Display for AgentKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -32,6 +35,7 @@ impl fmt::Display for AgentKey {
             AgentKey::Herdr(pane_id) => f.write_str(pane_id),
             AgentKey::Cursor(chat) => write!(f, "{CURSOR_PREFIX}{chat}"),
             AgentKey::Ci(link) => write!(f, "{CI_PREFIX}{link}"),
+            AgentKey::Test(pane_id) => write!(f, "{TEST_PREFIX}{pane_id}"),
         }
     }
 }
@@ -41,6 +45,9 @@ impl AgentKey {
     pub fn parse(text: &str) -> Self {
         if let Some(link) = text.strip_prefix(CI_PREFIX) {
             return AgentKey::Ci(link.to_owned());
+        }
+        if let Some(pane_id) = text.strip_prefix(TEST_PREFIX) {
+            return AgentKey::Test(pane_id.to_owned());
         }
         match text.strip_prefix(CURSOR_PREFIX) {
             Some(chat) => AgentKey::Cursor(chat.to_owned()),
@@ -60,6 +67,8 @@ pub struct Watched {
     pub body: String,
     /// Whether the user can see it now.
     pub seen: bool,
+    /// What a notification says it did once finished, if not "is done".
+    pub finished: Option<&'static str>,
 }
 
 /// A notification to send: its key, summary and body.
@@ -107,7 +116,7 @@ pub fn agent_news(
                 blocked_since.insert(agent.key.clone(), now);
                 what
             }
-            (Some(Working), Idle | Done) if !agent.seen => "is done",
+            (Some(Working), Idle | Done) if !agent.seen => agent.finished.unwrap_or("is done"),
             _ => continue,
         };
         news.push(News {
@@ -133,6 +142,7 @@ mod tests {
             label: "claude".into(),
             body: "gerdr".into(),
             seen,
+            finished: None,
         }
     }
 
@@ -146,7 +156,11 @@ mod tests {
 
     #[test]
     fn keys_read_back_as_written() {
-        for key in [herdr("p1"), cursor("6898cc4e-5cb2")] {
+        for key in [
+            herdr("p1"),
+            cursor("6898cc4e-5cb2"),
+            AgentKey::Test("w1:p2".into()),
+        ] {
             assert_eq!(AgentKey::parse(&key.to_string()), key);
         }
         // herdr's stay bare pane ids, as saved frecency has them.
@@ -212,5 +226,22 @@ mod tests {
         let one = [watched(a.clone(), AgentStatus::Working, false)];
         agent_news(&before, &one, &mut blocked, soon, REMINDER);
         assert!(blocked.is_empty());
+    }
+
+    #[test]
+    fn a_finished_test_run_says_how_it_went() {
+        let key = AgentKey::Test("w1:p2".into());
+        let before = HashMap::from([(key.clone(), AgentStatus::Working)]);
+        let mut done = watched(key, AgentStatus::Done, false);
+        done.label = "cargo test".into();
+        done.finished = Some("failed");
+        let news = agent_news(
+            &before,
+            &[done],
+            &mut HashMap::new(),
+            Instant::now(),
+            REMINDER,
+        );
+        assert_eq!(news[0].summary, "cargo test failed");
     }
 }
