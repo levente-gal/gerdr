@@ -1,8 +1,8 @@
 //! What an agent's mark is, wherever it shows: its icon (see
-//! `agent_icons`) and, on the icon's bottom right corner, a dot for where
-//! it stands. The dot of something at work blinks: it is left out of the
-//! cached buffers and composed over them on its own (`blink_dot`, see
-//! `Chrome::elements`).
+//! `agent_icons`) at the start of its row and, in a column at the row's
+//! right end, a dot for where it stands. The dot of something at work
+//! blinks: it is left out of the cached buffers and composed over them on
+//! its own (`blink_dot`, see `Chrome::elements`).
 
 use super::{Canvas, Palette, Rect, Rgb, flask, icon_sdf, physical, robot};
 use crate::agent_icons::AgentIcon;
@@ -12,11 +12,9 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Rectangle, Size};
 
 /// The dot's diameter, logical pixels.
-pub const DOT: i32 = 5;
-/// How far round the dot the icon is cut away, logical pixels.
-const DOT_RING: f32 = 1.5;
-/// How far the dot sticks out past the icon's corner, logical pixels.
-const DOT_OUT: i32 = 1;
+pub const DOT: i32 = 7;
+/// The column the dot takes at the right end of a row, logical pixels.
+pub const DOT_SLOT: i32 = 14;
 
 /// Where an agent, a test run or a CI run stands, as its dot shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -88,19 +86,19 @@ fn icon_box(rect: Rect, size: i32) -> Rect {
     )
 }
 
-/// Where the dot of an icon `size` big centred on `rect` goes: on its
-/// bottom right corner, a little past it. Whole logical pixels, so that
-/// the painted icon and the composed dot agree.
-pub fn dot_rect(rect: Rect, size: i32) -> Rect {
-    let icon = icon_box(rect, size);
+/// The dot's column at the right end of `line`, as high as it.
+pub fn dot_slot(line: Rect) -> Rect {
     Rectangle::new(
-        (
-            icon.loc.x + size - DOT + DOT_OUT,
-            icon.loc.y + size - DOT + DOT_OUT,
-        )
-            .into(),
-        (DOT, DOT).into(),
+        (line.loc.x + line.size.w - DOT_SLOT, line.loc.y).into(),
+        (DOT_SLOT, line.size.h).into(),
     )
+}
+
+/// Where the dot of a row whose first line is `line` goes: centred in its
+/// column at the line's right end. Whole logical pixels, so that the
+/// painted row and the composed dot agree.
+pub fn row_dot(line: Rect) -> Rect {
+    centred_dot(dot_slot(line))
 }
 
 /// Where the blinking dot of a running mark centred on `mark` goes, as
@@ -126,43 +124,38 @@ fn dot_shape(dot: Dot, x: f32, y: f32, d: f32) -> f32 {
     }
 }
 
-/// `badge` `size` big, centred on `rect`: its icon (a logo in its own
-/// colours, its text-coloured part and a drawn icon in `tint`), the
-/// corner cut away round the dot in `ground` (what it is drawn on), then
-/// the dot, unless it blinks.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn agent_badge(
+/// `icon` `size` big, centred on `rect`: a logo or a drawn icon, in
+/// `tint`.
+pub(super) fn agent_icon(
     c: &mut Canvas,
     rect: Rect,
     size: i32,
-    badge: Badge,
+    icon: AgentIcon,
     tint: Rgb,
-    ground: Rgb,
     scale: f64,
-    p: &Palette,
 ) {
     let s = scale as f32;
-    let icon = icon_box(rect, size);
-    match (badge.icon, badge.icon.picture()) {
-        (_, Some(picture)) => c.picture_sized(picture, icon, scale, tint, size),
+    let at = icon_box(rect, size);
+    match (icon, icon.picture()) {
+        (_, Some(picture)) => c.picture_sized(picture, at, scale, tint, size),
         (AgentIcon::Test, None) => {
             let k = size as f32 / 14.0 * s;
-            icon_sdf(c, icon, scale, tint, |x, y| flask(x, y, k));
+            icon_sdf(c, at, scale, tint, |x, y| flask(x, y, k));
         }
         _ => {
             let k = size as f32 / 14.0 * s;
-            icon_sdf(c, icon, scale, tint, |x, y| robot(x, y, k));
+            icon_sdf(c, at, scale, tint, |x, y| robot(x, y, k));
         }
     }
-    let spot = dot_rect(rect, size);
-    let d = DOT as f32 * s;
-    icon_sdf(c, spot, scale, ground, |x, y| {
-        x.hypot(y) - (d / 2.0 + DOT_RING * s)
-    });
-    if !badge.dot.blinks() {
-        let color = badge.dot.color(p);
-        icon_sdf(c, spot, scale, color, |x, y| dot_shape(badge.dot, x, y, d));
+}
+
+/// `dot` in `spot` (`DOT` square, see `row_dot`), unless it blinks.
+pub(super) fn status_dot(c: &mut Canvas, spot: Rect, dot: Dot, scale: f64, p: &Palette) {
+    if dot.blinks() {
+        return;
     }
+    let d = DOT as f32 * scale as f32;
+    icon_sdf(c, spot, scale, dot.color(p), |x, y| dot_shape(dot, x, y, d));
 }
 
 /// A blinking dot on its own, `DOT` across on a clear buffer: composed
@@ -192,14 +185,14 @@ mod tests {
 
     const GROUND: Rgb = [40, 44, 52];
 
-    /// `badge` drawn 16 big at scale 1 on `GROUND`, and its dot's rect.
-    fn drawn(badge: Badge) -> (Canvas, Rect) {
+    /// `dot` drawn at scale 1 on `GROUND`, and its rect.
+    fn drawn(dot: Dot) -> (Canvas, Rect) {
         let p = Theme::Dark.palette();
         let mut c = Canvas::new((24, 24).into());
         c.fill(0, 0, 24, 24, GROUND);
-        let rect = Rectangle::new((4, 4).into(), (16, 16).into());
-        agent_badge(&mut c, rect, 16, badge, p.text, GROUND, 1.0, p);
-        (c, dot_rect(rect, 16))
+        let spot = row_dot(Rectangle::new((0, 0).into(), (24, 24).into()));
+        status_dot(&mut c, spot, dot, 1.0, p);
+        (c, spot)
     }
 
     fn rgb(c: &Canvas, x: i32, y: i32) -> Rgb {
@@ -212,11 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn the_dot_sits_on_the_icons_corner() {
-        let rect = Rectangle::new((10, 20).into(), (16, 24).into());
-        let dot = dot_rect(rect, 16);
-        // The icon spans 10..26 across and 24..40 down.
-        assert_eq!(dot.loc, (22, 36).into());
+    fn the_dot_sits_in_the_column_at_the_lines_end() {
+        let line = Rectangle::new((10, 20).into(), (100, 24).into());
+        let dot = row_dot(line);
+        // The column spans 96..110 across.
+        assert_eq!(
+            dot.loc,
+            (96 + (DOT_SLOT - DOT) / 2, 20 + (24 - DOT) / 2).into()
+        );
         assert_eq!(dot.size, (DOT, DOT).into());
     }
 
@@ -228,18 +224,12 @@ mod tests {
             (Dot::Blocked, p.warning),
             (Dot::Failed, p.error),
         ] {
-            let (c, spot) = drawn(Badge {
-                icon: AgentIcon::Claude,
-                dot,
-            });
+            let (c, spot) = drawn(dot);
             let (x, y) = centre(spot);
             assert_eq!(rgb(&c, x, y), color, "{dot:?}");
         }
-        // A blinking one leaves its place cut out, for the composed dot.
-        let (c, spot) = drawn(Badge {
-            icon: AgentIcon::Claude,
-            dot: Dot::Working,
-        });
+        // A blinking one leaves its place empty, for the composed dot.
+        let (c, spot) = drawn(Dot::Working);
         let (x, y) = centre(spot);
         assert_eq!(rgb(&c, x, y), GROUND);
     }
@@ -247,10 +237,7 @@ mod tests {
     #[test]
     fn an_idle_dot_is_a_ring() {
         let p = Theme::Dark.palette();
-        let (c, spot) = drawn(Badge {
-            icon: AgentIcon::Generic,
-            dot: Dot::Idle,
-        });
+        let (c, spot) = drawn(Dot::Idle);
         let (x, y) = centre(spot);
         let hole = rgb(&c, x, y);
         assert!(
@@ -265,10 +252,11 @@ mod tests {
     #[test]
     fn a_test_run_is_a_flask_and_an_agent_without_a_logo_a_robot() {
         for icon in [AgentIcon::Test, AgentIcon::Generic] {
-            let (c, _) = drawn(Badge {
-                icon,
-                dot: Dot::Done,
-            });
+            let p = Theme::Dark.palette();
+            let mut c = Canvas::new((24, 24).into());
+            c.fill(0, 0, 24, 24, GROUND);
+            let rect = Rectangle::new((4, 4).into(), (16, 16).into());
+            agent_icon(&mut c, rect, 16, icon, p.text, 1.0);
             // Something of it shows in the icon's middle column.
             let lit = (4..20).filter(|y| rgb(&c, 12, *y) != GROUND).count();
             assert!(lit >= 3, "{icon:?}");

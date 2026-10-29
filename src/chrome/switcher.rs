@@ -11,9 +11,9 @@ use super::{
     AGENT_ICON, BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
     ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
-    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_badge,
-    app, dot_rect, folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs,
-    icon_sdf, mix, pencil, prompt, rect_px, tab, terminal,
+    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app,
+    dot_slot, folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf,
+    mix, pencil, prompt, rect_px, row_dot, status_dot, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -132,9 +132,24 @@ pub fn switcher_blinkers(view: &SwitcherView, layout: &SwitcherLayout) -> Vec<Re
         .iter()
         .zip(&layout.rows)
         .filter(|(row, _)| matches!(row.icon, ItemIcon::Agent(badge, _) if badge.dot.blinks()))
-        .map(|(_, slot)| dot_rect(switcher_icon(*slot), AGENT_ICON))
+        .map(|(_, slot)| switcher_dot(*slot))
         .filter(shows)
         .collect()
+}
+
+/// The line an agent's row in `row` puts its dot at the end of: the row,
+/// but its padding at the right.
+fn switcher_dot_line(row: Rect) -> Rect {
+    Rectangle::new(
+        row.loc,
+        ((row.size.w - PADDING as i32).max(0), row.size.h).into(),
+    )
+}
+
+/// Where the dot of an agent's switcher row in `row` goes: at its right
+/// end, right of its kind pill.
+pub fn switcher_dot(row: Rect) -> Rect {
+    row_dot(switcher_dot_line(row))
 }
 
 /// Where the icon of the switcher row in `row` goes.
@@ -502,8 +517,8 @@ impl Painter {
             }
             ItemIcon::Tab => icon_sdf(c, icon, scale, p.placeholder, |x, y| tab(x, y, small)),
             &ItemIcon::Agent(badge, _) => {
-                let ground = fill.unwrap_or(p.elevated);
-                agent_badge(c, icon, AGENT_ICON, badge, p.placeholder, ground, scale, p);
+                agent_icon(c, icon, AGENT_ICON, badge.icon, p.placeholder, scale);
+                status_dot(c, switcher_dot(slot), badge.dot, scale, p);
             }
             ItemIcon::Folder => icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                 folder_plus(x, y, small)
@@ -518,10 +533,15 @@ impl Painter {
             }
         }
 
-        // The kind pill at the right; the text stops before it.
+        // The kind pill at the right, an agent's left of its dot; the text
+        // stops before it.
         let pill_w =
             self.text_width(row.kind, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
-        let pill_x = ((x + w) as f32 - PADDING * s - pill_w).round();
+        let pill_end = match row.icon {
+            ItemIcon::Agent(..) => px(dot_slot(switcher_dot_line(slot)).loc.x) as f32,
+            _ => (x + w) as f32 - PADDING * s,
+        };
+        let pill_x = (pill_end - pill_w).round();
         let pill_h = px(PILL_HEIGHT) as f32;
         let pill_y = (y as f32 + (h as f32 - pill_h) / 2.0).round();
         c.rounded(
@@ -819,9 +839,11 @@ mod tests {
         let layout = switcher_geometry(&view, area);
         let dots = super::switcher_blinkers(&view, &layout);
         assert_eq!(dots.len(), 1);
-        let icon = super::switcher_icon(layout.rows[0]);
-        assert_eq!(dots[0], crate::chrome::dot_rect(icon, super::AGENT_ICON));
+        assert_eq!(dots[0], super::switcher_dot(layout.rows[0]));
         assert!(inside(layout.rows[0], dots[0]));
+        // At the row's right end.
+        let row = layout.rows[0];
+        assert!(dots[0].loc.x > row.loc.x + row.size.w - 2 * crate::chrome::DOT_SLOT);
         // Scrolled: a dot shows only where the list does.
         view.rows.extend((0..20).map(|_| agent(Dot::Working)));
         view.part = 0.5;
