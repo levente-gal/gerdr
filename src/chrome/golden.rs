@@ -725,7 +725,7 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0x4087d4468d21db1c, // sidebar
+        0x8d159368190faebc, // sidebar
         0x0769bf25f49d539d, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
@@ -739,7 +739,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Dark at 2
     [
-        0x4c191a7f2df1eb9b, // sidebar
+        0x427b53d760efe49b, // sidebar
         0xd0dce344d6d0b1d1, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
@@ -753,7 +753,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 1
     [
-        0x047108c61ea45cc0, // sidebar
+        0x5767fd7701edfd30, // sidebar
         0x2e31bd93352f7a4f, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
@@ -767,7 +767,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 2
     [
-        0x36e0ac8566eb4f8d, // sidebar
+        0x4dd19b4e95abb6bd, // sidebar
         0xb38843d4ac4bbe22, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help

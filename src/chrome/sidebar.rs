@@ -78,10 +78,11 @@ const NAME_X: i32 = ICON_X + ROW_ICON_WIDTH + 7;
 const CHILD_PAD: i32 = 6;
 const CHILD_X: i32 = NAME_X - CHILD_PAD;
 /// Where an agent row's badge starts on its row: a little left of the
-/// status marks of the other rows, as it is wider.
-const AGENT_ICON_X: i32 = CHILD_PAD - 3;
+/// status marks of the other rows, as it is wider, clear of the open
+/// row's accent bar.
+const AGENT_ICON_X: i32 = CHILD_PAD - 1;
 /// Where a row's text starts under a header: after an agent's badge.
-const CHILD_TEXT_X: i32 = NAME_X - 3 + AGENT_ICON + STATUS_GAP;
+const CHILD_TEXT_X: i32 = NAME_X - 1 + AGENT_ICON + STATUS_GAP - 2;
 /// The "×" at the right end of a header, and of a deletable agent row.
 const CLOSE_SLOT: i32 = 22;
 /// The restart button left of a header's "×".
@@ -3709,7 +3710,12 @@ mod tests {
             agent("p3", AgentStatus::Done, None),
             agent("p4", AgentStatus::Blocked, None),
         ];
-        let layout = sidebar_layout_at(&[ws.clone()], &[agents.clone()], 240, Density::Comfortable);
+        let layout = sidebar_layout_at(
+            std::slice::from_ref(&ws),
+            std::slice::from_ref(&agents),
+            240,
+            Density::Comfortable,
+        );
         let row = layout.cards[0].iter().find(|(k, _)| *k == 0).unwrap().1;
         let icon = super::agent_icon_rect(row, Density::Comfortable);
         assert_eq!(
