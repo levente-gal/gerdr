@@ -226,6 +226,9 @@ pub struct Panel {
     pub(crate) diff_gen: u64,
     /// Files folded in the diff, by (root, path).
     pub(crate) diff_folded: HashSet<(PathBuf, String)>,
+    /// Rows the diff can be scrolled past its end: a file folded near it
+    /// keeps its header where it was. Scrolling back takes them away.
+    pub(crate) diff_slack: usize,
     /// The diff's rows, worked out as what they show changes, not with
     /// every frame; and the roots of the repositories they index, in
     /// `Ctx::items`' order as it was.
@@ -3020,6 +3023,7 @@ impl Panel {
         wheel.settle(wanted, to, last);
         if over_detail {
             self.detail_first = to;
+            self.take_slack(ctx.page.1);
         } else {
             self.first = to;
         }
@@ -3032,6 +3036,7 @@ impl Panel {
         let to = (first as i64).saturating_add(whole).clamp(0, last as i64) as usize;
         if over_detail {
             self.detail_first = to;
+            self.take_slack(ctx.page.1);
         } else {
             self.first = to;
         }
@@ -4151,10 +4156,47 @@ impl Panel {
     }
 
     /// The first row the diff can be scrolled to on a page of `page`: the
-    /// last row shows under the header pinned at the top.
+    /// last row shows under the header pinned at the top, or as many rows
+    /// further as there is slack.
     fn diff_last(&self, page: usize) -> usize {
+        let last = self.diff_end(page) + self.diff_slack;
+        last.min(self.diff_rows.len().saturating_sub(1))
+    }
+
+    /// The first row the diff shows its last row from, without slack.
+    fn diff_end(&self, page: usize) -> usize {
         let (total, page) = (self.diff_rows.len(), page.max(1));
         if total > page { total - page + 1 } else { 0 }
+    }
+
+    /// The diff scrolled: the slack it is scrolled back from is gone.
+    fn take_slack(&mut self, page: usize) {
+        let past = self.detail_first.saturating_sub(self.diff_end(page));
+        self.diff_slack = self.diff_slack.min(past);
+    }
+
+    /// Where in view diff row `r` is on a page of `page`: its row in the
+    /// pane, the pinned header's first.
+    fn shown_at(&self, r: usize, page: usize) -> Option<usize> {
+        let (sticky, range) = self.diff_window(page);
+        if sticky == Some(r) {
+            return Some(0);
+        }
+        let pinned = usize::from(sticky.is_some());
+        range.contains(&r).then(|| r - range.start + pinned)
+    }
+
+    /// Scroll the diff to show row `r` as the pane's row `at`, past the
+    /// end if need be; as near as it goes when a header pinned or not
+    /// moves it a row.
+    fn show_at(&mut self, r: usize, at: usize, page: usize) {
+        for first in [r.saturating_sub(at), (r + 1).saturating_sub(at).min(r)] {
+            self.detail_first = first;
+            self.diff_slack = first.saturating_sub(self.diff_end(page));
+            if self.shown_at(r, page) == Some(at) {
+                return;
+            }
+        }
     }
 
     /// The diff in view on a page of `page`: the header of the file its
@@ -4478,24 +4520,29 @@ impl Panel {
         }
     }
 
-    /// Fold the file diff row `r` is in, or unfold it, its header then at
-    /// the top.
+    /// Fold the file diff row `r` is in, or unfold it, its header staying
+    /// where it shows (at the top when out of view): what is under the
+    /// pointer then is still that header.
     fn fold_diff_file(&mut self, r: usize, fold: bool, ctx: &Ctx) {
         let Some((root, path)) = self.diff_path(r) else {
             return;
         };
+        let page = ctx.page.1.max(1);
+        let at = self
+            .file_head(r)
+            .and_then(|h| self.shown_at(h, page))
+            .unwrap_or(0);
         let key = (root.clone(), path.clone());
         if fold {
             self.diff_folded.insert(key);
         } else {
             self.diff_folded.remove(&key);
         }
-        let anchor = Anchor {
-            root,
-            path: Some(path),
-            offset: 0,
-        };
-        self.build_rows(ctx.items, Some(anchor));
+        self.build_rows(ctx.items, None);
+        if let Some(head) = self.header_row(&root, Some(&path)) {
+            self.detail_wheel = Wheel::default();
+            self.show_at(head, at, page);
+        }
     }
 
     /// Scroll the diff to the next file's header (`by` 1) or the one
@@ -6878,6 +6925,39 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_file_keeps_its_header_under_the_pointer() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        // Under src/git.rs pinned, notes.md folds and unfolds in place.
+        panel.detail_first = 3;
+        panel.click(ReposHit::DiffFold(3), &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[..4], ["= src/git.rs", "+b", "+c", "= notes.md"]);
+        panel.click(ReposHit::DiffFold(3), &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[3..5], ["= notes.md", "+n"]);
+        // At the end, the diff goes past it rather than pull the rows
+        // above down under the pointer.
+        panel.scroll(10.0, true, &ctx);
+        assert_eq!(panel.detail_first, 5);
+        panel.click(ReposHit::DiffFold(0), &ctx);
+        let view = panel.view("p", &ctx);
+        assert_eq!((view.detail.total, view.detail.first), (9, 5));
+        assert_eq!(detail_rows(&view)[0], "= notes.md");
+        panel.click(ReposHit::DiffFold(0), &ctx);
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[..2], ["= notes.md", "+n"]);
+        // Scrolled back, the rows past the end are gone.
+        panel.click(ReposHit::DiffFold(0), &ctx);
+        panel.scroll(-1.0, true, &ctx);
+        panel.scroll(1.0, true, &ctx);
+        assert_eq!(panel.detail_first, 4);
+    }
+
+    #[test]
     fn the_diff_has_its_own_keys_and_clicks() {
         let items = items();
         let mut ctx = ctx(&items, None);
@@ -6953,9 +7033,9 @@ mod tests {
         assert!(!panel.checked_files.contains(&key));
         panel.click(ReposHit::DiffFold(1), &ctx);
         assert_eq!(panel.view("p", &ctx).detail.total, 7);
-        // Folded, its header went to the top.
-        assert_eq!(panel.detail_first, 1);
-        panel.click(ReposHit::DiffFold(0), &ctx);
+        // Folded, its header stayed where it was.
+        assert_eq!(panel.detail_first, 0);
+        panel.click(ReposHit::DiffFold(1), &ctx);
         assert_eq!(panel.view("p", &ctx).detail.total, 10);
         panel.detail_first = 0;
         panel.click(ReposHit::DiffRow(3), &ctx);
