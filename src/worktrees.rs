@@ -855,6 +855,7 @@ impl Gerdr {
         self.switcher = None;
         self.repos.close();
         self.inbox.close();
+        self.scrollback = None;
         self.project_menu = None;
         self.stop_key_repeat();
         self.close_menu();

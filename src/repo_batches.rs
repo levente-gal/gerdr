@@ -506,6 +506,7 @@ impl Gerdr {
         self.project_menu = None;
         self.worktrees.close();
         self.inbox.close();
+        self.scrollback = None;
         self.stop_key_repeat();
         self.close_menu();
         self.tooltip.hide();

@@ -232,6 +232,13 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("worktrees", Action::Worktrees, "worktrees", "w"),
     ("repos", Action::Repos, "repositories", "g"),
     ("inbox", Action::Inbox, "inbox", "i"),
+    // tmux's copy-mode.
+    (
+        "scrollback",
+        Action::Scrollback,
+        "select and copy the scrollback",
+        "[",
+    ),
     (
         "reload-projects",
         Action::ReloadProjects,
@@ -302,6 +309,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("worktrees", &["worktrees"]),
     ("repositories", &["repos"]),
     ("inbox", &["inbox"]),
+    ("select and copy the scrollback", &["scrollback"]),
     ("reload the project file", &["reload-projects"]),
     ("quit…", &["quit"]),
 ];
@@ -736,6 +744,7 @@ mod tests {
                 "W: worktrees",
                 "G: repositories",
                 "I: inbox",
+                "[: select and copy the scrollback",
                 "Alt+R: reload the project file",
                 "Shift+Q: quit…",
                 "Ctrl+B: send Ctrl+B to the app",
@@ -763,6 +772,10 @@ mod tests {
             Some(Action::CyclePane(-1))
         );
         assert_eq!(keymap.action(&mods(false, true), Keysym::c), None);
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::bracketleft),
+            Some(Action::Scrollback)
+        );
         // Shift tells the project keys from the tab and run keys.
         assert_eq!(
             keymap.action(&mods(false, true), Keysym::p),

@@ -775,6 +775,7 @@ impl Gerdr {
     pub fn open_switcher(&mut self) {
         self.project_menu = None;
         self.inbox.close();
+        self.scrollback = None;
         let mut switcher = Switcher::new(self.switcher_items(), false, Place::Split);
         switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
@@ -786,6 +787,7 @@ impl Gerdr {
     pub fn open_run_prompt(&mut self, place: Place) {
         self.project_menu = None;
         self.inbox.close();
+        self.scrollback = None;
         // The commands run before there was frecency start it off, once.
         let history: Vec<String> = launch::history()
             .iter()

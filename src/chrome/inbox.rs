@@ -1845,7 +1845,13 @@ fn frame_view(view: &InboxView) -> InboxView {
 /// Draw `src` over `c` with its top left at (`x`, `y`), only within
 /// `clip` (left, top, right and bottom edges); physical pixels.
 #[cfg(test)]
-fn blit(c: &mut Canvas, src: &Canvas, x: i32, y: i32, [left, top, right, bottom]: [i32; 4]) {
+pub(super) fn blit(
+    c: &mut Canvas,
+    src: &Canvas,
+    x: i32,
+    y: i32,
+    [left, top, right, bottom]: [i32; 4],
+) {
     let (x0, x1) = (x.max(left).max(0), (x + src.w).min(right).min(c.w));
     let (y0, y1) = (y.max(top).max(0), (y + src.h).min(bottom).min(c.h));
     for py in y0..y1 {
