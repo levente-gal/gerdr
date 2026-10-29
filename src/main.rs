@@ -68,7 +68,6 @@ mod tooltip;
 mod web_control;
 mod web_pages;
 mod welcome;
-mod wheel;
 mod worktrees;
 
 use std::{

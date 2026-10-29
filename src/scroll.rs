@@ -200,16 +200,6 @@ impl Scroll {
         self.moving(now)
     }
 
-    /// What a wave-0 panel still scrolling by whole rows of `row_px`
-    /// makes of `motion`, in rows.
-    pub fn legacy_rows(motion: Motion, row_px: f64) -> f64 {
-        match motion {
-            Motion::Notches(n) => n,
-            Motion::Finger { px, .. } => px / row_px,
-            Motion::Lift { .. } => 0.0,
-        }
-    }
-
     /// The fingers' speed when they left at `time`, logical pixels a second.
     fn speed(&self, time: u32) -> f64 {
         let (Some(&(first, _)), Some(&(last, _))) = (self.samples.front(), self.samples.back())

@@ -1967,7 +1967,9 @@ fn expander_mark(open: bool, x: f32, y: f32, s: f32) -> f32 {
 
 /// A scrollbar in `track` (buffer coordinates) for a list of `total`
 /// lines showing `shown` from `first`: its thumb where they are, nothing
-/// when they all fit.
+/// when they all fit. Only the single-buffer drawings (for tests) draw it
+/// in place; the panels place theirs as parts of their own.
+#[cfg(test)]
 pub(super) fn scrollbar(
     c: &mut Canvas,
     track: Rect,
