@@ -1112,7 +1112,7 @@ pub struct Gerdr {
     pub sidebar_hover: anim::Hover<chrome::SidebarHit>,
     /// How far the sidebar's rows are scrolled up, in logical pixels, and
     /// the active workspace they were last scrolled to show.
-    pub sidebar_scroll: f64,
+    pub sidebar_scroll: scroll::Scroll,
     pub sidebar_shown: Option<usize>,
     /// Whether a scrolled list moved on its own or under the fingers at the
     /// last frame (see `tick_scrolls`).
@@ -5778,7 +5778,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rename: None,
         tab_hover: anim::Hover::default(),
         sidebar_hover: anim::Hover::default(),
-        sidebar_scroll: 0.0,
+        sidebar_scroll: scroll::Scroll::default(),
         scrolling: false,
         sidebar_shown: None,
         frecency: Frecency::load(),
