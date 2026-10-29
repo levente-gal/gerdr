@@ -4,11 +4,12 @@
 //! so a click lands where the pill is.
 
 use super::{
-    Canvas, Density, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING, Painter,
-    Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH, Theme,
-    ThemeMode, cross, eye, field_text, icon_sdf, mix, moon, new_tab, no_restart, physical,
-    rounded_rect, segment, status_label, status_mark, sun, tab_strip_height, tray,
+    Badge, Canvas, Density, Dot, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING,
+    Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
+    Theme, ThemeMode, agent_badge, cross, dot_rect, eye, field_text, icon_sdf, mix, moon, new_tab,
+    no_restart, physical, rounded_rect, segment, status_label, sun, tab_strip_height, tray,
 };
+use crate::agent_icons::AgentIcon;
 use crate::app_icons::github_icon;
 use crate::herdr::{AgentInfo, AgentStatus, PaneState, Process, TabDetail};
 use crate::paths::{repo_root, short_path, tidy_title};
@@ -37,6 +38,9 @@ pub struct TabView {
     /// Whether its focused pane shows a GitHub page: its tab carries
     /// GitHub's mark.
     pub github: bool,
+    /// The icon of the agent its status is of: the one in its focused
+    /// pane, else the first standing as the tab does.
+    pub agent: Option<AgentIcon>,
 }
 
 impl TabView {
@@ -79,6 +83,24 @@ impl TabView {
             .or_else(|| window_title(window))
             .unwrap_or_else(|| "terminal".into());
         let status = (tab.agent_status != AgentStatus::Unknown).then_some(tab.agent_status);
+        // The agent the status is of: in the focused pane, else the first
+        // standing as the tab does, else any; known by herdr's id, else by
+        // name.
+        let has_agent = |p: &&PaneState| p.agent.is_some();
+        let standing = |p: &&PaneState| has_agent(p) && p.agent_status == tab.agent_status;
+        let agent = focused
+            .filter(standing)
+            .or_else(|| panes.iter().find(standing))
+            .or_else(|| focused.filter(has_agent))
+            .or_else(|| panes.iter().find(has_agent))
+            .map(|pane| {
+                agents
+                    .iter()
+                    .find(|a| a.pane_id == pane.pane_id)
+                    .map(AgentIcon::from_info)
+                    .filter(|icon| *icon != AgentIcon::Generic)
+                    .unwrap_or_else(|| AgentIcon::from_agent(pane.agent.as_deref().unwrap_or("")))
+            });
         let branch = distinct(panes.iter().filter_map(|p| {
             let worktree = p.worktree.as_ref()?;
             let name = match (&worktree.branch, worktree.is_detached) {
@@ -119,6 +141,7 @@ impl TabView {
             activity: activity.join("  |  "),
             restart: None,
             github: false,
+            agent,
         }
     }
 
@@ -662,29 +685,29 @@ impl Painter {
                 });
                 right = px(mark.loc.x) as f32 - px(STATUS_GAP) as f32;
             }
-            // Before the number, a mark: its agents' status when it says
-            // something, else GitHub's when the tab shows a GitHub page.
+            // Before the number, a mark: its agent's badge when its status
+            // says something, else GitHub's when the tab shows a GitHub page.
             let mut text_x = x as f32 + pad;
             let mark = Rectangle::new(
                 (rect.loc.x + PADDING as i32, 0).into(),
                 (STATUS_WIDTH, size.h).into(),
             );
-            let status = tab.status.filter(|s| {
-                matches!(
-                    s,
-                    AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done
-                )
-            });
             let github = tab.github.then(github_icon).flatten();
-            if let Some(status) = status {
-                icon_sdf(&mut c, mark, scale, p.status(status), |x, y| {
-                    status_mark(status, x, y, s)
-                });
+            if let Some(badge) = tab_badge(tab) {
+                let ground = if is_active {
+                    p.tab_active
+                } else if hovered {
+                    mix(p.tab_bar, p.element, alpha)
+                } else {
+                    p.tab_bar
+                };
+                let tint = if is_active { p.text } else { p.muted };
+                let icon = tab_icon_rect(*rect, size.h);
+                agent_badge(&mut c, icon, TAB_ICON, badge, tint, ground, scale, p);
+                text_x += ((TAB_ICON + STATUS_GAP) as f32 * s).round();
             } else if let Some(icon) = &github {
                 let tint = if is_active { p.muted } else { p.placeholder };
                 c.picture_sized(icon, mark, scale, tint, GITHUB_ICON_SIZE);
-            }
-            if status.is_some() || github.is_some() {
                 text_x += ((STATUS_WIDTH + STATUS_GAP) as f32 * s).round();
             }
             let number = (i + 1).to_string();
@@ -891,6 +914,62 @@ impl Painter {
 
 /// Where the strip's tabs are hit, for the `hover` of a `TabStripView`:
 /// `pos` in strip coordinates.
+/// How big an agent's badge is on its tab.
+const TAB_ICON: i32 = 14;
+
+/// The status a tab's mark shows: one that says something.
+fn tab_status(tab: &TabView) -> Option<AgentStatus> {
+    tab.status.filter(|s| {
+        matches!(
+            s,
+            AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done
+        )
+    })
+}
+
+/// The badge a tab shows before its number, while its status says
+/// something: its agent's icon (a generic one if not known) and dot.
+fn tab_badge(tab: &TabView) -> Option<Badge> {
+    tab_status(tab).map(|status| Badge {
+        icon: tab.agent.unwrap_or(AgentIcon::Generic),
+        dot: Dot::of_status(status),
+    })
+}
+
+/// Where the badge of the tab at `rect` goes on a strip `h` high.
+fn tab_icon_rect(rect: Rect, h: i32) -> Rect {
+    Rectangle::new(
+        (rect.loc.x + PADDING as i32, 0).into(),
+        (TAB_ICON, h).into(),
+    )
+}
+
+/// Where the blinking dots of `view`'s tabs go on its strip, `size` big
+/// (strip coordinates): one per tab at work, but the one being renamed.
+pub fn tab_blinkers(view: &TabStripView, size: Size<i32, Logical>) -> Vec<Rect> {
+    let layout = tab_layout(
+        view.tabs.len(),
+        size,
+        view.prefix,
+        view.overflow(),
+        view.watch.is_some(),
+        view.inbox.is_some(),
+    );
+    let renaming = view.renaming.as_ref().map(|(i, _)| *i);
+    layout
+        .tabs
+        .iter()
+        .zip(&view.tabs)
+        .enumerate()
+        .filter(|(i, (rect, tab))| {
+            Some(*i) != renaming
+                && rect.size.w > TAB_ICON
+                && tab_badge(tab).is_some_and(|b| b.dot.blinks())
+        })
+        .map(|(_, (rect, _))| dot_rect(tab_icon_rect(*rect, size.h), TAB_ICON))
+        .collect()
+}
+
 pub fn tab_strip_hit(
     view: &TabStripView,
     size: Size<i32, Logical>,
@@ -911,8 +990,9 @@ pub fn tab_strip_hit(
 mod tests {
     use super::{
         CHIP_GAP, CLOSE, EDGE, PILL, PLUS_GAP, TAB_MAX_WIDTH, TabHit, TabStripView, TabView,
-        WATCH_WIDTH, tab_layout, tab_rename_field, tab_slot,
+        WATCH_WIDTH, tab_blinkers, tab_layout, tab_rename_field, tab_slot,
     };
+    use crate::agent_icons::AgentIcon;
     use crate::chrome::{
         Density, Painter, Rect, Rgb, Theme, ThemeMode, inside, mix, tab_strip_height,
     };
@@ -1019,6 +1099,7 @@ mod tests {
         let view = TabView::derive(None, Some("Alacritty"), Some(&d), &[]);
         assert_eq!(view.title, "claude");
         assert_eq!(view.status, Some(AgentStatus::Working));
+        assert_eq!(view.agent, Some(AgentIcon::Claude));
         // A pane with no folder yet falls back to the window.
         let d = detail(vec![pane(None, true)], AgentStatus::Unknown);
         assert_eq!(title(None, Some("Alacritty"), Some(&d)), "terminal");
@@ -1428,5 +1509,32 @@ mod tests {
         // Painted at twice the scale and in the light look too.
         let view = TabStripView::plain(vec![github, working], 1, false, ThemeMode::Light);
         painter.tab_strip_view(&view, Theme::Light, size, 2.0);
+    }
+
+    #[test]
+    fn a_working_tab_blinks_its_badges_dot_but_not_while_renamed() {
+        let size = (900, tab_strip_height(Density::Comfortable)).into();
+        let working = TabView {
+            title: "gerdr".into(),
+            status: Some(AgentStatus::Working),
+            agent: Some(AgentIcon::Codex),
+            ..TabView::default()
+        };
+        let done = TabView {
+            status: Some(AgentStatus::Done),
+            ..working.clone()
+        };
+        let mut view = TabStripView::plain(
+            vec![done, working.clone(), working],
+            0,
+            false,
+            ThemeMode::Dark,
+        );
+        let dots = tab_blinkers(&view, size);
+        let l = tab_layout(3, size, false, false, false, false);
+        assert_eq!(dots.len(), 2);
+        assert!(inside(l.tabs[1], dots[0]) && inside(l.tabs[2], dots[1]));
+        view.renaming = Some((1, Line::default()));
+        assert_eq!(tab_blinkers(&view, size).len(), 1);
     }
 }

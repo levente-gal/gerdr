@@ -4,8 +4,8 @@
 
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
-    PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, icon_sdf, mix, physical,
-    rect_px, restart_arrow, status_mark, stop,
+    PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, centred_dot, icon_sdf, mix,
+    physical, rect_px, restart_arrow, status_mark, stop,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -167,6 +167,27 @@ impl PaneBarView {
         (self.rect.loc, (self.rect.size.w, h).into(), self.alpha)
     }
 
+    /// Where its mark goes on the output: at its start, `slide` up with
+    /// the rest of it.
+    fn mark(&self) -> Rect {
+        Rectangle::new(
+            (
+                self.rect.loc.x + PADDING as i32,
+                self.rect.loc.y - self.slide,
+            )
+                .into(),
+            (STATUS_WIDTH, self.rect.size.h).into(),
+        )
+    }
+
+    /// Where its blinking dot goes on the output, while its command runs
+    /// and the dot is not slid under its pane's top edge.
+    pub fn blinker(&self) -> Option<Rect> {
+        let dot = centred_dot(self.mark());
+        (self.status == BarStatus::Running && self.rect.size.h > 0 && dot.loc.y >= self.rect.loc.y)
+            .then_some(dot)
+    }
+
     /// The same bar at full opacity: what its buffer looks like, for a
     /// cache key (the alpha is applied when it is composed).
     pub fn still(&self) -> Self {
@@ -206,13 +227,11 @@ impl Painter {
         let bar = Rectangle::new((0, up).into(), full);
         let buttons = pane_bar_buttons(bar);
         let mark = Rectangle::new((PADDING as i32, up).into(), (STATUS_WIDTH, full.h).into());
-        // The marks the sidebar's agent chips use: a dot for alive, a ring
-        // for waiting, an open ring for busy.
+        // The marks the sidebar's agent chips use: a ring for waiting, an
+        // open ring for busy. A running command's is a blinking dot,
+        // composed over the bar (see `blinker`).
         match view.status {
-            BarStatus::Idle => {}
-            BarStatus::Running => icon_sdf(&mut c, mark, scale, p.success, |x, y| {
-                status_mark(AgentStatus::Done, x, y, s)
-            }),
+            BarStatus::Idle | BarStatus::Running => {}
             BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
                 status_mark(AgentStatus::Idle, x, y, s)
             }),
@@ -447,6 +466,26 @@ mod tests {
         // The cache key forgets the alpha, not the slide.
         let still = v.still();
         assert_eq!((still.alpha, still.slide), (1.0, PANE_BAR_HEIGHT + 5));
+    }
+
+    #[test]
+    fn a_running_bar_blinks_its_dot_where_its_mark_is() {
+        let mut v = view(600);
+        v.rect.loc = (200, 50).into();
+        v.status = BarStatus::Running;
+        let dot = v.blinker().expect("a running bar blinks");
+        assert_eq!(dot.size, (crate::chrome::DOT, crate::chrome::DOT).into());
+        assert!(dot.loc.x > 200 && dot.loc.x < 200 + super::PADDING as i32 + super::STATUS_WIDTH);
+        let mid = dot.loc.y + dot.size.h / 2;
+        assert!((mid - (50 + PANE_BAR_HEIGHT / 2)).abs() <= 1);
+        // Slid up with the bar, while it stays past the edge.
+        v.slide = 2;
+        assert_eq!(v.blinker().map(|d| d.loc.y), Some(dot.loc.y - 2));
+        v.slide = PANE_BAR_HEIGHT / 2;
+        assert_eq!(v.blinker(), None);
+        v.slide = 0;
+        v.status = BarStatus::Exited;
+        assert_eq!(v.blinker(), None);
     }
 
     #[test]

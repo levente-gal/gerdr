@@ -53,6 +53,11 @@ impl AppIcon {
         self.0.symbolic
     }
 
+    /// Whether it draws nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.0.rgba.chunks(4).all(|p| p[3] == 0)
+    }
+
     /// The icon scaled to fit `size` × `size` pixels, keeping its shape:
     /// its width, height and RGBA pixels, premultiplied.
     pub fn scaled(&self, size: usize) -> (usize, usize, Vec<u8>) {

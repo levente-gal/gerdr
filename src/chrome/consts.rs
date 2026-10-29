@@ -66,6 +66,9 @@ pub(super) const GAP: i32 = 1;
 pub(super) const CARD_LINE: i32 = 17;
 /// Room for the status mark left of the agent's name.
 pub(super) const STATUS_WIDTH: i32 = 10;
+/// How big an agent's badge (its icon) is on a row of the sidebar or the
+/// switcher.
+pub(super) const AGENT_ICON: i32 = 16;
 pub(super) const STATUS_GAP: i32 = 7;
 /// The status pill at the right of a card's header.
 pub(super) const PILL_HEIGHT: i32 = 16;
