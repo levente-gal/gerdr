@@ -7,15 +7,24 @@
 //!
 //! Lines are wrapped at the viewer's width (herdr joins those it wrapped),
 //! and a place in them is a character of a line (see `Spot`).
+//!
+//! `/` or Ctrl+F searches it: every place found is tinted, the one gone
+//! to more, Enter goes to the next (Shift+Enter, the one before), round
+//! past the ends, and ticks on the scrollbar say where they all are.
 
-use std::time::Instant;
+use std::{ops::Range, time::Instant};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
     utils::{Logical, Point},
 };
 
-use crate::scroll::{Bounds, Motion, Scroll};
+use crate::{
+    chrome::{self, ScrollbackHit, SearchBar, SearchPart},
+    find,
+    scroll::{Bounds, Motion, Scroll},
+    text_field::{Edit, TextField},
+};
 
 /// Rows a notch of the wheel scrolls.
 const NOTCH_ROWS: f64 = 3.0;
@@ -101,6 +110,21 @@ impl Selection {
     }
 }
 
+/// The search, while open.
+#[derive(Debug, Default)]
+struct Find {
+    field: TextField,
+    /// It has the keyboard (else the list has, the places still tinted).
+    focused: bool,
+    /// Every place found, in order: a line, and characters of it.
+    hits: Vec<(usize, Range<usize>)>,
+    /// The place gone to, by index into `hits`.
+    current: Option<usize>,
+    /// The first and the last line in view as the search opened: typing
+    /// goes to the first place found there, else the nearest above.
+    shown: (usize, usize),
+}
+
 /// What a key or a click asks of gerdr.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -131,12 +155,13 @@ pub struct Scrollback {
     /// the list is first fitted: it stands as far up.
     from_bottom: Option<usize>,
     selection: Option<Selection>,
+    find: Option<Find>,
     /// The left button is held from a press on the text.
     dragging: bool,
     /// When the last frame moved a drag past an edge on.
     edge_at: Option<Instant>,
-    /// The key hint under the pointer.
-    pub hover: Option<usize>,
+    /// What of the viewer is under the pointer.
+    pub hover: Option<ScrollbackHit>,
     /// The last press on the text: when, where, and how many came in a
     /// row, for double and triple clicks.
     pub clicks: Option<(Instant, Point<f64, Logical>, u8)>,
@@ -163,6 +188,7 @@ impl Scrollback {
             scroll: Scroll::default(),
             from_bottom: Some(from_bottom as usize),
             selection: None,
+            find: None,
             dragging: false,
             edge_at: None,
             hover: None,
@@ -386,14 +412,19 @@ impl Scrollback {
         });
     }
 
-    /// Take a key, with the list as `fit` lays it out.
+    /// Take a key, `typed` with Shift and the layout applied, with the
+    /// list as `fit` lays it out. The search takes it first.
     pub fn key(
         &mut self,
         mods: &ModifiersState,
         sym: Keysym,
+        typed: Keysym,
         now: Instant,
         fit: Fit,
     ) -> Option<Outcome> {
+        if self.find_key(mods, sym, typed, fit) {
+            return None;
+        }
         let copy = |close| match (self.selected_text(), self.selected_lines()) {
             (Some(text), Some(lines)) => Outcome::Copy { text, lines, close },
             _ if close => Outcome::Close,
@@ -423,6 +454,258 @@ impl Scrollback {
         let to = (self.scroll.pos().round() + by).clamp(0.0, b.max);
         self.scroll.glide_to(to, now, b);
         None
+    }
+
+    /// Whether the search took a key: `/` or Ctrl+F open it (or give it
+    /// the keyboard back), Enter or F3 go to the next place (with Shift
+    /// the one before; `n` and `N` while the list has the keyboard), Esc
+    /// closes it, Tab gives the keyboard to the list. While it has the
+    /// keyboard its field takes every other key but those that scroll
+    /// the list and, when it has nothing for them, those with Ctrl.
+    fn find_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, fit: Fit) -> bool {
+        let others = mods.ctrl || mods.alt || mods.logo;
+        let plain = !(others || mods.shift);
+        let only_shift = mods.shift && !others;
+        let focused = self.find_focused();
+        let opens = match sym {
+            Keysym::f | Keysym::F => mods.ctrl && !(mods.alt || mods.logo),
+            // Typed into the field, it is the field's.
+            Keysym::slash => plain && !focused,
+            _ => false,
+        };
+        if opens {
+            self.open_find(fit);
+            return true;
+        }
+        let Some(find) = self.find.as_mut() else {
+            return false;
+        };
+        let next = match sym {
+            Keysym::Return | Keysym::KP_Enter => focused,
+            Keysym::n | Keysym::N => !focused,
+            Keysym::F3 => true,
+            _ => false,
+        };
+        if next && (plain || only_shift) {
+            self.step_find(if mods.shift { -1 } else { 1 }, fit);
+            return true;
+        }
+        match sym {
+            Keysym::Escape if plain => {
+                self.close_find();
+                return true;
+            }
+            _ if !focused => return false,
+            Keysym::Tab if plain => {
+                find.focused = false;
+                return true;
+            }
+            _ => {}
+        }
+        match find.field.key(mods, sym, typed) {
+            Edit::Changed => {
+                self.find_hits();
+                self.find_near(fit);
+                true
+            }
+            Edit::Moved => true,
+            Edit::Ignored => {
+                let scrolls = matches!(
+                    sym,
+                    Keysym::Up
+                        | Keysym::Down
+                        | Keysym::KP_Up
+                        | Keysym::KP_Down
+                        | Keysym::Page_Up
+                        | Keysym::Page_Down
+                );
+                !(scrolls || mods.ctrl)
+            }
+        }
+    }
+
+    /// Whether the search has the keyboard.
+    pub fn find_focused(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.focused)
+    }
+
+    /// The search's field, while it has the keyboard.
+    pub fn field_mut(&mut self) -> Option<&mut TextField> {
+        self.find
+            .as_mut()
+            .filter(|f| f.focused)
+            .map(|f| &mut f.field)
+    }
+
+    /// Open the search, or give it the keyboard back with what it has
+    /// typed selected: it looks around what is in view, the list as
+    /// `fit` lays it out.
+    pub fn open_find(&mut self, fit: Fit) {
+        let first = self.scroll.first();
+        let line = |row: usize| self.rows.get(row).map_or(0, |r| r.line);
+        let last = (first + fit.page.max(1))
+            .min(self.rows.len())
+            .saturating_sub(1);
+        let shown = (line(first), line(last));
+        let find = self.find.get_or_insert_with(Find::default);
+        find.focused = true;
+        find.shown = shown;
+        find.field.select_all();
+    }
+
+    /// Close the search: nothing is tinted any more.
+    pub fn close_find(&mut self) {
+        self.find = None;
+    }
+
+    /// Give the keyboard to the list, the places found still tinted.
+    pub fn blur_find(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.focused = false;
+        }
+    }
+
+    /// A click on a part of the search.
+    pub fn find_click(&mut self, part: SearchPart, fit: Fit) {
+        match part {
+            SearchPart::Open => self.open_find(fit),
+            SearchPart::Field => {
+                if let Some(find) = self.find.as_mut() {
+                    find.focused = true;
+                }
+            }
+            SearchPart::Prev => self.step_find(-1, fit),
+            SearchPart::Next => self.step_find(1, fit),
+            SearchPart::Close => self.close_find(),
+        }
+    }
+
+    /// Find what is typed, none gone to yet.
+    fn find_hits(&mut self) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let query = find.field.line().text;
+        find.hits = self
+            .lines
+            .iter()
+            .enumerate()
+            .flat_map(|(n, line)| {
+                find::find_all(line, &query)
+                    .into_iter()
+                    .map(move |r| (n, r))
+            })
+            .collect();
+        find.current = None;
+    }
+
+    /// Go to the place found nearest what was in view as the search
+    /// opened: the first in it, else the last above it (output read up
+    /// from the newest), else the first below.
+    fn find_near(&mut self, fit: Fit) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        let (top, bottom) = find.shown;
+        let above = find.hits.partition_point(|(line, _)| *line < top);
+        let at = match find.hits.get(above) {
+            Some((line, _)) if *line <= bottom => Some(above),
+            _ if above > 0 => Some(above - 1),
+            _ => find.hits.first().map(|_| 0),
+        };
+        if let Some(at) = at {
+            self.go_to_found(at, fit);
+        }
+    }
+
+    /// Go `by` places on from the one gone to (back, for negative), round
+    /// past the ends, or to the nearest with none gone to yet.
+    fn step_find(&mut self, by: isize, fit: Fit) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        let n = find.hits.len() as isize;
+        match find.current {
+            _ if n == 0 => {}
+            Some(i) => self.go_to_found((i as isize + by).rem_euclid(n) as usize, fit),
+            None => self.find_near(fit),
+        }
+    }
+
+    /// Go to place `at` found: out of view, it is scrolled to a third down
+    /// the list.
+    fn go_to_found(&mut self, at: usize, fit: Fit) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        find.current = Some(at);
+        let (line, ch) = (find.hits[at].0, find.hits[at].1.start);
+        let row = self.row_of(Spot { line, ch });
+        let (first, page) = (self.scroll.first(), fit.page.max(1));
+        if row < first || row >= first + page {
+            let max = fit.bounds(self.rows.len()).max;
+            self.scroll
+                .jump((row.saturating_sub(page / 3) as f64).min(max));
+        }
+    }
+
+    /// The search as its bar shows it, while open.
+    pub fn find_bar(&self) -> Option<SearchBar> {
+        let find = self.find.as_ref()?;
+        let query = find.field.line();
+        let n = find.hits.len();
+        Some(SearchBar {
+            count: chrome::search_count(!query.text.is_empty(), n, find.current),
+            query,
+            placeholder: "Find in the scrollback".into(),
+            found: n > 0,
+            focused: find.focused,
+        })
+    }
+
+    /// The places found on row `i`, by character of it, each with whether
+    /// it is the one gone to.
+    pub fn row_found(&self, i: usize) -> Vec<(Range<usize>, bool)> {
+        let (Some(row), Some(find)) = (self.rows.get(i), &self.find) else {
+            return Vec::new();
+        };
+        let from = find.hits.partition_point(|(line, _)| *line < row.line);
+        find.hits[from..]
+            .iter()
+            .take_while(|(line, _)| *line == row.line)
+            .enumerate()
+            .filter_map(|(j, (_, r))| {
+                let (a, b) = (r.start.max(row.start), r.end.min(row.end));
+                (a < b).then(|| (a - row.start..b - row.start, find.current == Some(from + j)))
+            })
+            .collect()
+    }
+
+    /// Where the places found are on the scrollbar: shares of all the
+    /// rows from the top, one per row, each with whether it has the one
+    /// gone to.
+    pub fn find_ticks(&self) -> Vec<(f64, bool)> {
+        let Some(find) = &self.find else {
+            return Vec::new();
+        };
+        let total = self.rows.len().max(1) as f64;
+        let row = |(line, chars): &(usize, Range<usize>)| {
+            self.row_of(Spot {
+                line: *line,
+                ch: chars.start,
+            })
+        };
+        let current = find.current.and_then(|i| find.hits.get(i)).map(row);
+        let mut ticks: Vec<(f64, bool)> = Vec::new();
+        let mut last = None;
+        for hit in &find.hits {
+            let at = row(hit);
+            if last != Some(at) {
+                ticks.push((at as f64 / total, current == Some(at)));
+                last = Some(at);
+            }
+        }
+        ticks
     }
 
     /// The wheel or the touchpad moved the list.
@@ -652,22 +935,139 @@ mod tests {
         let now = Instant::now();
         let f = fit(80, 10);
         assert_eq!(
-            s.key(&ctrl, Keysym::c, now, f),
+            s.key(&ctrl, Keysym::c, Keysym::c, now, f),
             Some(Outcome::NothingSelected)
         );
-        assert_eq!(s.key(&none, Keysym::Return, now, f), Some(Outcome::Close));
-        assert_eq!(s.key(&ctrl, Keysym::a, now, f), None);
+        assert_eq!(
+            s.key(&none, Keysym::Return, Keysym::Return, now, f),
+            Some(Outcome::Close)
+        );
+        assert_eq!(s.key(&ctrl, Keysym::a, Keysym::a, now, f), None);
         let all = Outcome::Copy {
             text: "a\nb".into(),
             lines: 2,
             close: false,
         };
-        assert_eq!(s.key(&ctrl, Keysym::c, now, f), Some(all));
+        assert_eq!(s.key(&ctrl, Keysym::c, Keysym::c, now, f), Some(all));
         assert!(matches!(
-            s.key(&none, Keysym::Return, now, f),
+            s.key(&none, Keysym::Return, Keysym::Return, now, f),
             Some(Outcome::Copy { close: true, .. })
         ));
-        assert_eq!(s.key(&none, Keysym::Escape, now, f), Some(Outcome::Close));
+        assert_eq!(
+            s.key(&none, Keysym::Escape, Keysym::Escape, now, f),
+            Some(Outcome::Close)
+        );
+    }
+
+    /// Type `text` into what has the keyboard.
+    fn type_in(s: &mut Scrollback, text: &str, f: Fit) -> Option<Outcome> {
+        let none = ModifiersState::default();
+        let mut out = None;
+        for c in text.chars() {
+            let k = Keysym::from_char(c);
+            out = s.key(&none, k, k, Instant::now(), f);
+        }
+        out
+    }
+
+    fn count(s: &Scrollback) -> String {
+        s.find_bar().map(|b| b.count).unwrap_or_default()
+    }
+
+    #[test]
+    fn slash_finds_what_is_typed_and_enter_goes_round_the_places() {
+        let text: String = (0..60)
+            .map(|n| match n % 10 {
+                3 => format!("error {n}\n"),
+                _ => format!("ok {n}\n"),
+            })
+            .collect();
+        let mut s = viewer(&text, 80, 10);
+        let f = fit(80, 10);
+        let none = ModifiersState::default();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        assert_eq!(s.first(), 50);
+        type_in(&mut s, "/", f);
+        assert!(s.find_focused());
+        // Typed, it goes to the first place in view.
+        assert_eq!(type_in(&mut s, "error", f), None);
+        assert_eq!(count(&s), "6 of 6");
+        assert_eq!(s.row_found(53), [(0..5, true)]);
+        assert_eq!(s.row_found(43), [(0..5, false)]);
+        assert!(s.row_found(52).is_empty());
+        // Round past the end, to the top; and back.
+        s.key(&none, Keysym::Return, Keysym::Return, now, f);
+        assert_eq!(count(&s), "1 of 6");
+        assert_eq!(s.first(), 0);
+        s.key(&shift, Keysym::Return, Keysym::Return, now, f);
+        assert_eq!(count(&s), "6 of 6");
+        assert_eq!(s.first(), 50);
+        // A capital matches only as typed.
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        s.key(&ctrl, Keysym::a, Keysym::a, now, f);
+        type_in(&mut s, "Error", f);
+        assert_eq!(count(&s), "No matches");
+        s.key(&ctrl, Keysym::a, Keysym::a, now, f);
+        type_in(&mut s, "error", f);
+        assert_eq!(count(&s), "6 of 6");
+        // With none in view (five rows of it), the nearest above.
+        let f = fit(80, 5);
+        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
+        s.scroll_to(25.0, f);
+        type_in(&mut s, "/", f);
+        s.key(&ctrl, Keysym::a, Keysym::a, now, f);
+        type_in(&mut s, "error", f);
+        assert_eq!(count(&s), "3 of 6");
+        assert_eq!(s.first(), 22);
+        // Tab gives the keys to the list: `n` goes on, `N` back.
+        s.key(&none, Keysym::Tab, Keysym::Tab, now, f);
+        assert!(!s.find_focused());
+        s.key(&none, Keysym::n, Keysym::n, now, f);
+        assert_eq!(count(&s), "4 of 6");
+        assert_eq!(s.first(), 32);
+        s.key(&shift, Keysym::N, Keysym::N, now, f);
+        assert_eq!(count(&s), "3 of 6");
+        // Esc closes the search first, then the viewer.
+        assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
+        assert!(s.find_bar().is_none());
+        assert!(s.row_found(53).is_empty());
+        assert_eq!(
+            s.key(&none, Keysym::Escape, Keysym::Escape, now, f),
+            Some(Outcome::Close)
+        );
+    }
+
+    #[test]
+    fn a_place_wrapped_over_two_rows_is_tinted_on_both_and_ticked_once() {
+        let mut s = viewer("abcdefgh\nxx\ndefdef", 4, 10);
+        let f = fit(4, 10);
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        s.key(&ctrl, Keysym::f, Keysym::f, now, f);
+        type_in(&mut s, "def", f);
+        // Rows: "abcd", "efgh", "xx", "defd", "ef".
+        assert_eq!(count(&s), "1 of 3");
+        assert_eq!(s.row_found(0), [(3..4, true)]);
+        assert_eq!(s.row_found(1), [(0..2, true)]);
+        assert_eq!(s.row_found(3), [(0..3, false), (3..4, false)]);
+        assert_eq!(s.row_found(4), [(0..2, false)]);
+        assert_eq!(s.find_ticks(), [(0.0, true), (0.6, false)]);
+        // Ctrl+C copies the selection with nothing selected in the field.
+        s.select_all();
+        assert!(matches!(
+            s.key(&ctrl, Keysym::c, Keysym::c, now, f),
+            Some(Outcome::Copy { lines: 3, .. })
+        ));
     }
 
     #[test]

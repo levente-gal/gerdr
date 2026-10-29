@@ -115,8 +115,7 @@ pub enum Overlay {
     Worktrees,
     Repos,
     Inbox,
-    /// The scrollback viewer, which has no field but takes its keys
-    /// the same way.
+    /// The scrollback viewer, whose search has a field.
     Scrollback,
     /// The switcher of this serial: not one opened after it.
     Switcher(u64),
@@ -236,8 +235,10 @@ impl Gerdr {
                         // clipboard's text comes back as a key for it.
                         if !state.prefix_armed
                             && text_field::is_paste(mods, sym)
-                            && let Some(overlay) =
-                                state.text_overlay().filter(|o| *o != Overlay::Scrollback)
+                            && let Some(overlay) = state.text_overlay().filter(|o| {
+                                *o != Overlay::Scrollback
+                                    || state.scrollback.as_ref().is_some_and(|s| s.find_focused())
+                            })
                         {
                             state.suppressed_keys.push(code);
                             state.paste_clipboard(overlay);
@@ -349,8 +350,11 @@ impl Gerdr {
                                 state.prefix_armed = true;
                                 return FilterResult::Intercept(None);
                             }
-                            let out = state.scrollback_key(mods, sym);
-                            state.repeat_key(code, *mods, sym, handle.modified_sym(), false);
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.scrollback_key(mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::Scrollback));
                         }
                         if state.switcher.is_some() {
@@ -657,6 +661,7 @@ impl Gerdr {
         if self.scrollback.is_some() {
             if button == BTN_LEFT {
                 self.scrollback_click(location);
+                self.press_field(location);
             }
             return true;
         }
@@ -1167,7 +1172,9 @@ impl Gerdr {
                 .map(Intercepted::Worktrees),
             Overlay::Repos => self.repos_key(mods, sym, typed).map(Intercepted::Repos),
             Overlay::Inbox => self.inbox_key(mods, sym, typed).map(Intercepted::Inbox),
-            Overlay::Scrollback => self.scrollback_key(mods, sym).map(Intercepted::Scrollback),
+            Overlay::Scrollback => self
+                .scrollback_key(mods, sym, typed)
+                .map(Intercepted::Scrollback),
             Overlay::Switcher(_) => self
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
@@ -1214,7 +1221,7 @@ impl Gerdr {
             )),
             Overlay::Repos => Some(chrome::repos_field(&self.repos_view()?, size, scale)),
             Overlay::Inbox => Some(chrome::inbox_field(&self.inbox_view()?, size, scale)),
-            Overlay::Scrollback => None,
+            Overlay::Scrollback => chrome::scrollback_field(&self.scrollback_view()?, scale),
             Overlay::Switcher(_) => Some(chrome::switcher_field(
                 &self.switcher_view()?,
                 self.content_rect(),
@@ -1231,7 +1238,7 @@ impl Gerdr {
             Overlay::Worktrees => self.worktrees.field_mut(),
             Overlay::Repos => self.repos.field_mut(),
             Overlay::Inbox => self.inbox.field_mut(),
-            Overlay::Scrollback => None,
+            Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
         }
     }

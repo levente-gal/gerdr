@@ -1,12 +1,15 @@
 //! The scrollback viewer over a terminal pane (see `crate::scrollback`):
 //! a title row, the pane's output in the monospace font on the terminal's
 //! own colours, and the key hints under it. Each row is a buffer of its
-//! own, so scrolling only moves them.
+//! own, so scrolling only moves them. The search (see `search`) goes in
+//! the title row, its ticks over the scrollbar.
+
+use std::ops::Range;
 
 use super::{
-    FONT_SIZE, HELP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band,
-    footer_hint_spots, hint_at, hint_strs, layers::Part, measure, measure_mono, mix, phys,
-    physical, rect_px,
+    FIELD_GAP, FONT_SIZE, FieldSpot, HELP_RADIUS, Painter, Palette, ROW_BUTTON, Rect, SHADOW,
+    SMALL_FONT_SIZE, SearchBar, SearchPart, band, field_text, footer_hint_spots, hint_at,
+    hint_strs, layers::Part, measure, measure_mono, mix, phys, physical, rect_px, search_spots,
 };
 use crate::scrollback::Fit;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -28,6 +31,8 @@ const SCROLLBAR_GAP: i32 = 4;
 const THUMB_MIN: i32 = 24;
 /// The title's room from the panel's sides.
 const TITLE_INSET: i32 = 14;
+/// The most the open search takes of the title row, its buttons too.
+const SEARCH_MAX: i32 = 520;
 
 /// What the scrollback viewer shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,8 +52,13 @@ pub struct ScrollbackView {
     /// How many rows there are in all.
     pub total: usize,
     pub hints: Vec<(String, String)>,
-    /// The hint under the pointer.
-    pub hover: Option<usize>,
+    /// What is under the pointer.
+    pub hover: Option<ScrollbackHit>,
+    /// The search, in the title row in place of the title while open.
+    pub search: Option<SearchBar>,
+    /// Where the places it found are on the scrollbar: shares of all the
+    /// rows from the top, each with whether it is the one gone to.
+    pub ticks: Vec<(f64, bool)>,
 }
 
 /// A row of the viewer's text.
@@ -58,6 +68,9 @@ pub struct ScrollbackRow {
     /// From and to which of its characters it is selected, and whether
     /// the selection goes on past its end (see `Scrollback::row_selection`).
     pub selected: Option<(usize, usize, bool)>,
+    /// The places the search found on it, by character of it, each with
+    /// whether it is the one gone to.
+    pub found: Vec<(Range<usize>, bool)>,
 }
 
 /// Where the viewer's parts go, in output coordinates.
@@ -78,6 +91,7 @@ pub struct ScrollbackLayout {
 pub enum ScrollbackHit {
     Text,
     Hint(usize),
+    Search(SearchPart),
     /// Anywhere else on it.
     Panel,
 }
@@ -140,6 +154,49 @@ pub fn scrollback_shown(panel: Rect) -> usize {
     (scrollback_layout(panel, &[]).text.size.h / ROW) as usize + 2
 }
 
+/// Where the search's parts go in the title row, left of the note (see
+/// `search_spots`): its button while closed; open, its field (as wide as
+/// there is room for, up to `SEARCH_MAX` with the rest), its buttons,
+/// and where its count goes.
+pub fn scrollback_search(
+    view: &ScrollbackView,
+    layout: &ScrollbackLayout,
+) -> (Vec<(SearchPart, Rect)>, Option<Rect>) {
+    let title = layout.title;
+    let note = measure(&view.note, SMALL_FONT_SIZE).unwrap_or(0.0).ceil() as i32;
+    let right = title.loc.x + title.size.w - TITLE_INSET - note - FIELD_GAP;
+    let left = (title.loc.x + TITLE_INSET).max(right - SEARCH_MAX);
+    let y = title.loc.y + (TITLE - ROW_BUTTON) / 2;
+    match &view.search {
+        None => {
+            let open = Rectangle::new(
+                (right - ROW_BUTTON, y).into(),
+                (ROW_BUTTON, ROW_BUTTON).into(),
+            );
+            (vec![(SearchPart::Open, open)], None)
+        }
+        Some(_) => {
+            let (parts, count) = search_spots(left, right, y, ROW_BUTTON);
+            (parts, Some(count))
+        }
+    }
+}
+
+/// The search's field, for the caret and selection, while it has the
+/// keyboard.
+pub fn scrollback_field(view: &ScrollbackView, scale: f64) -> Option<FieldSpot> {
+    let bar = view.search.as_ref().filter(|bar| bar.focused)?;
+    let layout = scrollback_layout(view.panel, &view.hints);
+    let (parts, _) = scrollback_search(view, &layout);
+    let &(_, area) = parts.iter().find(|(part, _)| *part == SearchPart::Field)?;
+    Some(FieldSpot {
+        size: FONT_SIZE,
+        area,
+        text: field_text(area, scale),
+        line: bar.query.clone(),
+    })
+}
+
 /// What of the viewer is at `pos`, if it is on it.
 pub fn scrollback_hit(
     view: &ScrollbackView,
@@ -151,6 +208,10 @@ pub fn scrollback_hit(
     }
     if layout.list.to_f64().contains(pos) {
         return Some(ScrollbackHit::Text);
+    }
+    let (search, _) = scrollback_search(view, layout);
+    if let Some(&(part, _)) = search.iter().find(|(_, r)| r.to_f64().contains(pos)) {
+        return Some(ScrollbackHit::Search(part));
     }
     let hints = hint_strs(&view.hints);
     Some(match hint_at(&hints, &layout.hints, pos) {
@@ -230,6 +291,7 @@ fn frame_view(view: &ScrollbackView) -> ScrollbackView {
         first: 0,
         part: 0.0,
         overscroll: 0.0,
+        ticks: Vec::new(),
         ..view.clone()
     }
 }
@@ -255,6 +317,12 @@ impl Painter {
         let inset = (TITLE_INSET as f32 * s).round();
         let note_w = (measure(&view.note, SMALL_FONT_SIZE).unwrap_or(0.0) * s).ceil();
         let note_x = right - inset - note_w;
+        let (search, count) = scrollback_search(view, &layout);
+        // Left of the search, open or not, if there is room.
+        let title_end = match search.first() {
+            Some((_, r)) => (shift(*r).loc.x as f64 * scale) as f32 - inset,
+            None => note_x - inset,
+        };
         self.text(
             &mut c,
             &view.note,
@@ -265,15 +333,34 @@ impl Painter {
             scale,
             p.muted,
         );
-        self.text(
+        if title_end > left + inset {
+            self.text(
+                &mut c,
+                &view.title,
+                FONT_SIZE,
+                left + inset,
+                title_end,
+                band(title, scale),
+                scale,
+                p.text,
+            );
+        }
+        let search: Vec<(SearchPart, Rect)> = search
+            .into_iter()
+            .map(|(part, r)| (part, shift(r)))
+            .collect();
+        let hover = match view.hover {
+            Some(ScrollbackHit::Search(part)) => Some(part),
+            _ => None,
+        };
+        self.search_bar(
             &mut c,
-            &view.title,
-            FONT_SIZE,
-            left + inset,
-            note_x - inset,
-            band(title, scale),
+            view.search.as_ref(),
+            &search,
+            count.map(shift),
+            hover,
             scale,
-            p.text,
+            p,
         );
 
         let (x, y, w, h) = rect_px(shift(layout.list), scale);
@@ -281,12 +368,17 @@ impl Painter {
 
         let hints = hint_strs(&view.hints);
         let spots: Vec<(usize, Rect)> = layout.hints.iter().map(|(i, r)| (*i, shift(*r))).collect();
-        self.hints(&mut c, &hints, &spots, view.hover, scale, p);
+        let hover = match view.hover {
+            Some(ScrollbackHit::Hint(i)) => Some(i),
+            _ => None,
+        };
+        self.hints(&mut c, &hints, &spots, hover, scale, p);
         c
     }
 
     /// A row of the text, `w` wide: on the terminal's background, the
-    /// selected part of it on the selection's.
+    /// selected part of it on the selection's, the places the search
+    /// found tinted.
     fn scrollback_row(
         &self,
         row: &ScrollbackRow,
@@ -305,6 +397,22 @@ impl Painter {
             c.fill(x as i32, 0, (end - x) as i32, c.h, selection_color(p));
         }
         let rect = Rectangle::from_size(size);
+        if !row.found.is_empty() {
+            let width = |t: &str| t.chars().count() as f32 * adv;
+            let ground = p.terminal_background;
+            let x = (0.0, c.w as f32);
+            self.found_tints(
+                &mut c,
+                &row.text,
+                &row.found,
+                x,
+                band(rect, scale),
+                width,
+                ground,
+                scale,
+                p,
+            );
+        }
         self.mono_text(
             &mut c,
             &row.text,
@@ -355,6 +463,11 @@ impl Painter {
             );
             super::inbox::blit(&mut c, &thumb, x, y, clip);
         }
+        if !view.ticks.is_empty() {
+            let t = track(&layout);
+            let at = Rectangle::new(t.loc - origin, t.size);
+            self.search_ticks(&mut c, &view.ticks, at, p.terminal_background, scale, p);
+        }
         let text = layout.text;
         let top = text.loc.y as f64 - view.part * ROW as f64 + view.overscroll;
         for (i, row) in view.rows.iter().enumerate() {
@@ -373,14 +486,17 @@ impl Painter {
 }
 
 type FrameKey = (ScrollbackView, super::Theme, f64);
+type TicksKey = (Vec<(f64, bool)>, Size<i32, Logical>, super::Theme, f64);
 
 /// The viewer as the chrome shows it, fading in and out (see `Overlay`):
-/// its frame, a buffer per row in view and the scrollbar's thumb.
+/// its frame, a buffer per row in view, the scrollbar's thumb and the
+/// search's ticks over it.
 #[derive(Default)]
 pub(super) struct ScrollbackLayers {
     overlay: super::Overlay<FrameKey>,
     rows: super::layers::RowCache<(ScrollbackRow, i32, super::Theme, f64)>,
     thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
+    ticks: super::Cached<TicksKey>,
 }
 
 impl ScrollbackLayers {
@@ -397,7 +513,7 @@ impl ScrollbackLayers {
             let (loc, size) = super::shadowed(view.panel);
             ((frame_view(view), theme, scale), loc, size)
         });
-        let (rows, thumb) = (&mut self.rows, &mut self.thumb);
+        let (rows, thumb, ticks) = (&mut self.rows, &mut self.thumb, &mut self.ticks);
         let p = theme.palette();
         let more = |_: &FrameKey| {
             let Some(view) = &view else {
@@ -405,6 +521,15 @@ impl ScrollbackLayers {
             };
             let layout = scrollback_layout(view.panel, &view.hints);
             let mut parts = Vec::new();
+            if !view.ticks.is_empty() {
+                let track = track(&layout);
+                let key = (view.ticks.clone(), track.size, theme, scale);
+                let buffer = ticks.get(key, |(t, size, ..)| {
+                    let ground = p.terminal_background;
+                    painter.search_ticks_buffer(t, *size, ground, scale, p)
+                });
+                parts.push(Part::new(buffer, track.loc, track.size, 1.0));
+            }
             if let Some(t) = scrollback_thumb(view, &layout) {
                 let size = Size::from((t.track.size.w, t.h as i32));
                 let buffer = thumb.get((size, theme, scale), |(size, ..)| {
@@ -466,6 +591,8 @@ mod tests {
                 ("Esc".into(), "close".into()),
             ],
             hover: None,
+            search: None,
+            ticks: Vec::new(),
         }
     }
 
@@ -517,6 +644,48 @@ mod tests {
         assert_eq!(scrollback_hit(&v, &layout, (10.0, 10.0).into()), None);
     }
 
+    #[test]
+    fn the_search_sits_in_the_title_row_and_takes_the_field_spot() {
+        let closed = view(500, 0);
+        let layout = scrollback_layout(closed.panel, &closed.hints);
+        let centre =
+            |r: Rect| r.to_f64().loc + Point::from((r.size.w as f64 / 2.0, r.size.h as f64 / 2.0));
+        let (parts, count) = scrollback_search(&closed, &layout);
+        assert_eq!(parts.len(), 1);
+        assert!(count.is_none());
+        let (part, open) = parts[0];
+        assert_eq!(part, SearchPart::Open);
+        assert!(layout.title.contains(open.loc));
+        assert_eq!(
+            scrollback_hit(&closed, &layout, centre(open)),
+            Some(ScrollbackHit::Search(SearchPart::Open))
+        );
+        assert!(scrollback_field(&closed, 1.0).is_none());
+        let bar = SearchBar {
+            focused: true,
+            ..Default::default()
+        };
+        let searching = ScrollbackView {
+            search: Some(bar),
+            ..closed.clone()
+        };
+        let (parts, _) = scrollback_search(&searching, &layout);
+        let order: Vec<SearchPart> = parts.iter().map(|p| p.0).collect();
+        use SearchPart::*;
+        assert_eq!(order, [Field, Prev, Next, Close]);
+        for (part, rect) in &parts {
+            assert!(layout.title.contains(rect.loc));
+            let hit = scrollback_hit(&searching, &layout, centre(*rect));
+            assert_eq!(hit, Some(ScrollbackHit::Search(*part)));
+        }
+        let field = scrollback_field(&searching, 1.0).unwrap();
+        assert_eq!(field.area, parts[0].1);
+        // Clicked away, the field leaves the keyboard and the caret.
+        let mut blurred = searching.clone();
+        blurred.search.as_mut().unwrap().focused = false;
+        assert!(scrollback_field(&blurred, 1.0).is_none());
+    }
+
     /// With `GERDR_DUMP_DIR` set, write the viewer there as images to look
     /// at (both themes, scale 1 and 2).
     #[test]
@@ -549,10 +718,26 @@ mod tests {
                     7 => Some((0, 3, false)),
                     _ => None,
                 },
+                found: match i % lines.len() {
+                    2 | 4 => vec![(17..23, i == 4)],
+                    _ => Vec::new(),
+                },
             })
             .collect();
         v.part = 0.4;
-        v.hover = Some(1);
+        v.hover = Some(ScrollbackHit::Hint(1));
+        v.search = Some(SearchBar {
+            query: crate::text_field::Line {
+                text: "app.py".into(),
+                caret: 6,
+                anchor: 6,
+            },
+            placeholder: "Find in the scrollback".into(),
+            count: "2 of 9".into(),
+            found: true,
+            focused: true,
+        });
+        v.ticks = vec![(0.1, false), (0.32, true), (0.33, false), (0.8, false)];
         for (theme, scale) in [
             (Theme::Dark, 1.0),
             (Theme::Light, 1.0),

@@ -374,12 +374,7 @@ impl Panel {
         let search = self.search.as_ref()?;
         let query = search.field.line();
         let n = search.hits.len();
-        let count = match (query.text.is_empty(), search.current) {
-            (true, _) => String::new(),
-            _ if n == 0 => "No matches".into(),
-            (_, Some(i)) => format!("{} of {n}", i + 1),
-            (_, None) => format!("{n} found"),
-        };
+        let count = chrome::search_count(!query.text.is_empty(), n, search.current);
         Some(SearchBar {
             query,
             placeholder: "Find in the diff".into(),
