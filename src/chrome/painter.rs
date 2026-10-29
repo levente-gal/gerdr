@@ -4,14 +4,19 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SHADOW, arrow, check, coverage,
-    cross, mix, segment,
+    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SHADOW, TINY_FONT_SIZE, arrow,
+    check, coverage, cross, mix, segment,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use smithay::utils::{Logical, Rectangle, Size};
 use std::cell::RefCell;
+
+/// A button's count badge: its height, and the least room on each side of
+/// the number.
+const BADGE_HEIGHT: i32 = 15;
+const BADGE_PAD: i32 = 4;
 
 /// How many bytes of popup backgrounds `Painter` keeps, besides the last
 /// one drawn.
@@ -754,6 +759,49 @@ impl Painter {
             scale,
             color,
         );
+    }
+
+    /// A badge of `fill` with `count` (past `max`, "`max`+") on the top
+    /// right corner of the button at `rect`, sticking `out` past it, in a
+    /// ring of `ground` setting it off the button's icon.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn count_badge(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        count: usize,
+        max: usize,
+        out: i32,
+        (ground, fill, ink): (Rgb, Rgb, Rgb),
+        scale: f64,
+    ) {
+        let s = scale as f32;
+        let label = if count > max {
+            format!("{max}+")
+        } else {
+            count.to_string()
+        };
+        let text_w = (self.text_width(&label, TINY_FONT_SIZE, scale) / s).ceil() as i32;
+        let w = (text_w + 2 * BADGE_PAD).max(BADGE_HEIGHT);
+        let badge = Rectangle::new(
+            (
+                rect.loc.x + rect.size.w + out - w,
+                (rect.loc.y - out).max(0),
+            )
+                .into(),
+            (w, BADGE_HEIGHT).into(),
+        );
+        let pill = |c: &mut Canvas, rect: Rect, color: Rgb| {
+            let (x, y, w, h) = rect_px(rect, scale);
+            c.rounded(x, y, w, h, h / 2.0, color);
+        };
+        let ring = Rectangle::new(
+            (badge.loc.x - 1, badge.loc.y - 1).into(),
+            (w + 2, BADGE_HEIGHT + 2).into(),
+        );
+        pill(c, ring, ground);
+        pill(c, badge, fill);
+        self.centered(c, &label, TINY_FONT_SIZE, badge, scale, ink);
     }
 
     /// The marks after a branch: a red cross for a merge, rebase or the

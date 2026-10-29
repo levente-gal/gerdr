@@ -103,6 +103,9 @@ const ATTENTION_BOTTOM: i32 = 4;
 /// and between that and the "+".
 const HEADER_GAP: i32 = 4;
 const HEADER_BUTTON_GAP: i32 = 2;
+/// How far the repositories button's count badge sticks out of its top
+/// right corner: up only, the "+" being right next to it.
+const REPOS_BADGE_OUT: i32 = 1;
 /// The field a header's name turns into while renaming: its height and
 /// how far it reaches left of the name.
 const RENAME_HEIGHT: i32 = 24;
@@ -816,6 +819,11 @@ pub struct SidebarState {
     /// open.
     pub repos: u8,
     pub repos_open: bool,
+    /// How many of the project's repositories have uncommitted changes or
+    /// are stopped half-way (a merge, a rebase, a conflict), the button's
+    /// badge; and whether any is stopped, which turns it red.
+    pub repos_changed: usize,
+    pub repos_stuck: bool,
     /// The workspace being renamed, and the name typed so far.
     pub rename: Option<(usize, Line)>,
     /// How far the rows are scrolled up under the header, in logical
@@ -1567,6 +1575,12 @@ impl Painter {
         self.header_button(&mut c, layout.repos, repos, scale, p, |x, y| {
             git_branch(x, y, 1.05 * s)
         });
+        if state.repos_changed > 0 {
+            let fill = if state.repos_stuck { p.error } else { p.accent };
+            let colors = (p.panel, fill, p.on_accent);
+            let (rect, n) = (layout.repos, state.repos_changed);
+            self.count_badge(&mut c, rect, n, 9, REPOS_BADGE_OUT, colors, scale);
+        }
 
         // Where the rows are scrolled to, when they do not all fit.
         let shown = size.h - BAR_HEIGHT;

@@ -242,6 +242,7 @@ impl Gerdr {
             .is_some_and(|menu| menu.spec.anchor == layout.plus);
         let repos = quantize(hover.alpha(SidebarHit::Repos, now));
         let repos_open = self.repos.panel.is_some();
+        let (repos_changed, repos_stuck) = self.repos_changed();
         let rename = self.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Workspace(w) => Some((w, r.field.line())),
             RenameTarget::Tab(..) => None,
@@ -256,6 +257,8 @@ impl Gerdr {
             plus_open,
             repos,
             repos_open,
+            repos_changed,
+            repos_stuck,
             rename,
             scroll: layout.scroll,
         }

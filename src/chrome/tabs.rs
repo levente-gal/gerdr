@@ -5,10 +5,9 @@
 
 use super::{
     Canvas, Density, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING, Painter,
-    Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
-    TINY_FONT_SIZE, Theme, ThemeMode, cross, eye, field_text, icon_sdf, mix, moon, new_tab,
-    no_restart, physical, rounded_rect, segment, status_label, status_mark, sun, tab_strip_height,
-    tray,
+    Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH, Theme,
+    ThemeMode, cross, eye, field_text, icon_sdf, mix, moon, new_tab, no_restart, physical,
+    rounded_rect, segment, status_label, status_mark, sun, tab_strip_height, tray,
 };
 use crate::app_icons::github_icon;
 use crate::herdr::{AgentInfo, AgentStatus, PaneState, Process, TabDetail};
@@ -375,11 +374,8 @@ const PREFIX_HEIGHT: i32 = 20;
 const WATCH_WIDTH: i32 = 96;
 const WATCH_ICON: i32 = 16;
 const WATCH_GAP: i32 = 5;
-/// The inbox button's count badge: its height, the least room on each
-/// side of the number, and how far it sticks out of the button's top
-/// right corner.
-const BADGE_HEIGHT: i32 = 15;
-const BADGE_PAD: i32 = 4;
+/// How far the inbox button's count badge sticks out of its top right
+/// corner.
 const BADGE_OUT: i32 = 4;
 /// The "×" of a tab: its square, and its inset from the tab's right edge.
 const CLOSE: i32 = 22;
@@ -882,29 +878,8 @@ impl Painter {
         if count == 0 {
             return;
         }
-        let label = if count > 99 {
-            "99+".to_owned()
-        } else {
-            count.to_string()
-        };
-        let text_w = (self.text_width(&label, TINY_FONT_SIZE, scale) / s).ceil() as i32;
-        let w = (text_w + 2 * BADGE_PAD).max(BADGE_HEIGHT);
-        let badge = Rectangle::new(
-            (
-                rect.loc.x + rect.size.w + BADGE_OUT - w,
-                (rect.loc.y - BADGE_OUT).max(0),
-            )
-                .into(),
-            (w, BADGE_HEIGHT).into(),
-        );
-        // A ring of the strip's colour sets it off the tray.
-        let ring = Rectangle::new(
-            (badge.loc.x - 1, badge.loc.y - 1).into(),
-            (w + 2, BADGE_HEIGHT + 2).into(),
-        );
-        self.pill(c, ring, (BADGE_HEIGHT + 2) as f32 / 2.0, p.tab_bar, scale);
-        self.pill(c, badge, BADGE_HEIGHT as f32 / 2.0, p.accent, scale);
-        self.centered(c, &label, TINY_FONT_SIZE, badge, scale, p.on_accent);
+        let colors = (p.tab_bar, p.accent, p.on_accent);
+        self.count_badge(c, rect, count, 99, BADGE_OUT, colors, scale);
     }
 
     /// A rounded pill filling `rect` (logical) with corners of `radius`.

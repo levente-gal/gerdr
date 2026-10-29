@@ -22,7 +22,7 @@ use crate::menu::{MenuAction, MenuItem, MenuSpec};
 use crate::{
     Drag, Gerdr,
     chrome::{self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, Tone, TreeLine},
-    git::{GitStatus, InProgress},
+    git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
         Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
@@ -407,6 +407,28 @@ fn files(paths: &[String]) -> String {
     text
 }
 
+/// How many of the repositories of `statuses` (one per root, however many
+/// checkouts share it) have uncommitted changes or are stopped half-way (a
+/// merge, rebase or the like, or a conflicted file), and whether any is
+/// stopped.
+fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> (usize, bool) {
+    let mut roots: Vec<&Path> = Vec::new();
+    let (mut changed, mut stuck) = (0, false);
+    for status in statuses {
+        let Some(root) = status.root.as_deref() else {
+            continue;
+        };
+        if roots.contains(&root) {
+            continue;
+        }
+        roots.push(root);
+        let stopped = status.op.is_some() || status.changes.iter().any(Change::conflicted);
+        changed += (status.dirty || stopped) as usize;
+        stuck |= stopped;
+    }
+    (changed, stuck)
+}
+
 fn level(tone: Tone) -> Level {
     match tone {
         Tone::Success => Level::Success,
@@ -439,6 +461,17 @@ impl Gerdr {
             });
         }
         items
+    }
+
+    /// How many of the project's repositories have uncommitted changes or
+    /// are stopped half-way, and whether any is stopped: the sidebar's
+    /// badge on the repositories button.
+    pub(crate) fn repos_changed(&self) -> (usize, bool) {
+        let statuses = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| self.git.get(&ws.dir));
+        changed_repos(statuses)
     }
 
     fn repos_page(&self) -> (usize, usize) {
@@ -1723,4 +1756,45 @@ fn above(button: chrome::Rect, spec: &MenuSpec, output: Size<i32, Logical>) -> c
         return button;
     }
     chrome::Rect::new((button.loc.x, y).into(), (button.size.w, 1).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(root: &str, dirty: bool) -> GitStatus {
+        GitStatus {
+            root: Some(PathBuf::from(root)),
+            dirty,
+            ..GitStatus::default()
+        }
+    }
+
+    #[test]
+    fn changed_repos_count_each_root_once() {
+        let statuses = [
+            status("/a", true),
+            status("/a", true),
+            status("/b", false),
+            status("/c", true),
+            GitStatus::default(),
+        ];
+        assert_eq!(changed_repos(statuses.iter()), (2, false));
+        assert_eq!(changed_repos(std::iter::empty()), (0, false));
+    }
+
+    #[test]
+    fn a_stopped_repo_counts_and_marks_the_badge() {
+        let mut merging = status("/a", false);
+        merging.op = Some(InProgress::Merge);
+        let mut conflicted = status("/b", true);
+        conflicted.changes.push(Change {
+            path: "f".into(),
+            orig: None,
+            code: 'U',
+        });
+        let statuses = [merging, status("/c", false)];
+        assert_eq!(changed_repos(statuses.iter()), (1, true));
+        assert_eq!(changed_repos([conflicted].iter()), (1, true));
+    }
 }
