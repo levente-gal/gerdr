@@ -14,8 +14,8 @@ use super::{
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, STROKE, band, check, cross, folder, footer_height, footer_hint_spots,
     git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil, phys, plus,
-    project_menu::menu_query_text, rect_px, repos::scrollbar, rounded_rect, segment, status_mark,
-    tray,
+    project_menu::menu_query_text, rect_px, repos::scrollbar, robot, rounded_rect, segment,
+    status_mark, tray,
 };
 use crate::herdr::AgentStatus;
 use crate::text_field::Line;
@@ -747,13 +747,7 @@ fn icon_shape(icon: InboxIcon, x: f32, y: f32, s: f32) -> f32 {
     };
     match icon {
         // A head with two eyes and an antenna.
-        InboxIcon::Agent => {
-            let head = rounded_rect(x, y, -5.5 * s, -3.0 * s, 11.0 * s, 8.5 * s, 2.5 * s).abs()
-                - STROKE * s;
-            let eyes = (x.abs() - 2.3 * s).hypot(y - 1.2 * s) - 1.1 * s;
-            let antenna = line(0.0, -3.0, 0.0, -5.0).min(x.hypot(y + 5.6 * s) - 1.1 * s);
-            head.min(eyes).min(antenna)
-        }
+        InboxIcon::Agent => robot(x, y, s),
         InboxIcon::Blocked => {
             let bar = segment(x, y, 0.0, -4.6 * s, 0.0, 0.8 * s) - 1.1 * s;
             bar.min(x.hypot(y - 4.0 * s) - 1.25 * s)

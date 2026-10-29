@@ -243,11 +243,17 @@ mod tests {
         use AgentIcon::*;
         for icon in [Cursor, OpenCode, Copilot, Grok, Cline, Mastra] {
             let picture = icon.picture().unwrap();
-            assert!(picture.mono.is_some() && picture.color.is_none(), "{icon:?}");
+            assert!(
+                picture.mono.is_some() && picture.color.is_none(),
+                "{icon:?}"
+            );
         }
         for icon in [Claude, Codex, Gemini, Amp, Qwen, Kiro, Devin, Antigravity] {
             let picture = icon.picture().unwrap();
-            assert!(picture.mono.is_none() && picture.color.is_some(), "{icon:?}");
+            assert!(
+                picture.mono.is_none() && picture.color.is_some(),
+                "{icon:?}"
+            );
         }
         // Kimi's "K" is in the text's colour, its dot in blue.
         let kimi = Kimi.picture().unwrap();
@@ -264,7 +270,10 @@ mod tests {
             };
             let (_, _, rgba) = color.scaled(16);
             let drawn: Vec<_> = rgba.chunks(4).filter(|p| p[3] > 128).collect();
-            let black = drawn.iter().filter(|p| p[..3].iter().all(|c| *c < 40)).count();
+            let black = drawn
+                .iter()
+                .filter(|p| p[..3].iter().all(|c| *c < 40))
+                .count();
             assert!(black * 10 < drawn.len(), "{icon:?}");
         }
     }

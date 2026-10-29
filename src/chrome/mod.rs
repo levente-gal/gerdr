@@ -15,6 +15,7 @@
 //!
 //! The look follows Zed's default themes, One Dark and One Light.
 
+mod badge;
 mod canvas;
 mod consts;
 mod drop;
@@ -58,6 +59,7 @@ use crate::anim::{FAST, Fade, SLOW, phase};
 
 // One surface per module; the rest of gerdr reaches all of it as
 // `chrome::X`. The canvas and the shapes stay inside.
+pub use badge::*;
 use canvas::*;
 pub use consts::*;
 pub use drop::*;
