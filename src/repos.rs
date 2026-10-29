@@ -23,9 +23,14 @@
 //! written on its lines show under them, to copy all at once as Markdown
 //! for an AI agent (see `review`); kept with the project.
 //!
+//! The tree lists a repository's files flat, by their whole paths, or
+//! under their folders (a folder holding only a folder one line with it),
+//! as the buttons over it or Alt+F pick, for every repository; the diff
+//! goes in the same order. A folder checks and folds as a whole.
+//!
 //! Keys: Tab moves from the tree to the detail to the field. In the tree
 //! Up/Down select, Space checks, Left/Right fold, Enter opens a file in
-//! Zed or folds a repository, and typing goes to the field; Shift with
+//! Zed or folds a repository or folder, and typing goes to the field; Shift with
 //! Up/Down or the pages scrolls the detail. In the diff the arrows and the
 //! pages move a cursor over its rows (with Shift, reaching a range back),
 //! Alt+Up/Down go to the file before or after, and for the cursor's file
@@ -50,13 +55,14 @@
 //! count lists its stashes; a right click offers the actions.
 
 use std::{
-    cmp::Reverse,
+    cmp::{Ordering, Reverse},
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     time::{Instant, SystemTime},
 };
 
+use serde::{Deserialize, Serialize};
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
     reexports::calloop::channel,
@@ -65,9 +71,9 @@ use smithay::{
 use crate::{
     chrome::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, Density,
-        DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone, FileLine, Hint,
-        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, RowMark,
-        SheetView, Tone, TreeLine,
+        DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone, DirLine,
+        FileLine, Hint, LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar,
+        RowMark, SheetView, Tone, TreeLine,
     },
     diff::FileDiff,
     git::{Change, GitStatus, InProgress},
@@ -179,6 +185,31 @@ pub struct Ctx<'a> {
     pub cols: usize,
 }
 
+/// How the tree lists a repository's changed files: a line each with its
+/// whole path, or under a line per folder. One for every repository, kept
+/// in `state.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Grouping {
+    #[default]
+    List,
+    Folders,
+}
+
+impl Grouping {
+    pub fn is_list(&self) -> bool {
+        *self == Grouping::List
+    }
+
+    /// The other one.
+    fn other(self) -> Grouping {
+        match self {
+            Grouping::List => Grouping::Folders,
+            Grouping::Folders => Grouping::List,
+        }
+    }
+}
+
 /// Where the keyboard goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Focus {
@@ -194,6 +225,8 @@ pub enum Focus {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Selected {
     Repo(PathBuf),
+    /// A folder, by its repository's root and its path.
+    Dir(PathBuf, String),
     /// A file, by its repository's root and its path.
     File(PathBuf, String),
 }
@@ -213,6 +246,10 @@ pub struct Panel {
     /// Repositories unfolded, and folded, against their default.
     pub(crate) unfolded: HashSet<PathBuf>,
     pub(crate) folded: HashSet<PathBuf>,
+    /// How the files are listed.
+    pub(crate) grouping: Grouping,
+    /// Folders folded, by (root, path).
+    pub(crate) folded_dirs: HashSet<(PathBuf, String)>,
     /// Where the tree stands, in lines.
     pub(crate) tree_scroll: Scroll,
     /// Where the detail stands, in rows.
@@ -888,23 +925,147 @@ pub enum Outcome {
     /// Show the workspace of the worktree at this path (where a branch is
     /// checked out already).
     OpenWorkspace(PathBuf),
+    /// The files are listed this way now: remember it.
+    Grouping(Grouping),
 }
 
-/// A tree line, by index: a repository of `Ctx::items`, or one of its
-/// changes, by index into its `GitStatus::changes`.
+/// A tree line, by index: a repository of `Ctx::items`, a folder of its
+/// changes, or one of its changes, by index into its `GitStatus::changes`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
     Repo(usize),
-    File(usize, usize),
+    /// A folder of repository `k`, `depth` folders in: the first `to`
+    /// parts of the path of change `c` (the first file under it), shown
+    /// as its parts `from..to`, as a folder holding nothing but one folder
+    /// is one line with it.
+    Dir {
+        k: usize,
+        c: usize,
+        from: usize,
+        to: usize,
+        depth: usize,
+    },
+    /// Change `c` of repository `k`, `depth` folders in.
+    File(usize, usize, usize),
 }
 
 impl Row {
     /// The repository it is, or is under.
     fn item(self) -> usize {
         match self {
-            Row::Repo(k) | Row::File(k, _) => k,
+            Row::Repo(k) | Row::Dir { k, .. } | Row::File(k, ..) => k,
         }
     }
+
+    /// How many folders in it is; a repository is none.
+    fn depth(self) -> usize {
+        match self {
+            Row::Repo(_) => 0,
+            Row::Dir { depth, .. } | Row::File(.., depth) => depth,
+        }
+    }
+}
+
+/// Parts `from..to` of `path`, split at `/`.
+fn path_parts(path: &str, from: usize, to: usize) -> &str {
+    // Where part `n` starts.
+    let cut = |n: usize| match n {
+        0 => Some(0),
+        n => path.match_indices('/').nth(n - 1).map(|(i, _)| i + 1),
+    };
+    let start = cut(from).unwrap_or(path.len());
+    let end = cut(to).map_or(path.len(), |i| i - 1);
+    &path[start..end.max(start)]
+}
+
+/// Whether `path` is under folder `dir`.
+fn in_dir(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A folder of changed files: the folders in it, and its files by name
+/// with their index into the changes.
+#[derive(Default)]
+struct Folder<'a> {
+    folders: BTreeMap<&'a str, Folder<'a>>,
+    files: Vec<(&'a str, usize)>,
+}
+
+/// Names in the order the tree lists them: letter case aside first.
+fn by_name(a: &str, b: &str) -> Ordering {
+    let lower = |s: &str| s.to_lowercase();
+    lower(a).cmp(&lower(b)).then_with(|| a.cmp(b))
+}
+
+/// Repository `k`'s file lines, folded or not: as `file_order` has them;
+/// or by folder, each folder's folders before its files, by name.
+fn file_rows(k: usize, changes: &[Change], grouping: Grouping) -> Vec<Row> {
+    if grouping == Grouping::List {
+        let order = file_order(changes).into_iter();
+        return order.map(|c| Row::File(k, c, 0)).collect();
+    }
+    let mut top = Folder::default();
+    for (c, change) in changes.iter().enumerate() {
+        let (dirs, name) = match change.path.rsplit_once('/') {
+            Some((dirs, name)) => (Some(dirs), name),
+            None => (None, change.path.as_str()),
+        };
+        let mut folder = &mut top;
+        for part in dirs.into_iter().flat_map(|d| d.split('/')) {
+            folder = folder.folders.entry(part).or_default();
+        }
+        folder.files.push((name, c));
+    }
+    let mut rows = Vec::new();
+    folder_rows(&top, k, (0, 0), &mut rows);
+    rows
+}
+
+/// The order of `changes` in the tree, by index, folded or not.
+fn tree_order(changes: &[Change], grouping: Grouping) -> Vec<usize> {
+    let rows = file_rows(0, changes, grouping).into_iter();
+    rows.filter_map(|r| match r {
+        Row::File(_, c, _) => Some(c),
+        _ => None,
+    })
+    .collect()
+}
+
+/// The lines of `folder` of repository `k`, `at` parts down its paths
+/// and `depth` folders in, onto `rows`.
+fn folder_rows(folder: &Folder, k: usize, (at, depth): (usize, usize), rows: &mut Vec<Row>) {
+    let mut folders: Vec<_> = folder.folders.iter().collect();
+    folders.sort_by(|a, b| by_name(a.0, b.0));
+    for (_, mut sub) in folders {
+        let mut to = at + 1;
+        while sub.files.is_empty()
+            && sub.folders.len() == 1
+            && let Some(only) = sub.folders.values().next()
+        {
+            sub = only;
+            to += 1;
+        }
+        let line = rows.len();
+        rows.push(Row::Dir {
+            k,
+            c: 0,
+            from: at,
+            to,
+            depth,
+        });
+        folder_rows(sub, k, (to, depth + 1), rows);
+        let first = rows[line..].iter().find_map(|r| match r {
+            Row::File(_, c, _) => Some(*c),
+            _ => None,
+        });
+        if let (Row::Dir { c, .. }, Some(first)) = (&mut rows[line], first) {
+            *c = first;
+        }
+    }
+    let mut files = folder.files.clone();
+    files.sort_by(|a, b| by_name(a.0, b.0));
+    rows.extend(files.into_iter().map(|(_, c)| Row::File(k, c, depth)));
 }
 
 /// A row of the diff, by index: repository `k` of `Panel::diff_roots`,
@@ -1168,8 +1329,12 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Ctrl+Shift+C", "copy the review comments for an AI agent"),
     ("Space", "check the line, or the diff's file"),
     ("Ctrl+A", "check everything, or nothing"),
-    ("Left / Right", "fold a repository, or the diff's file"),
-    ("Enter", "open the file in Zed; fold a repository"),
+    (
+        "Left / Right",
+        "fold a repository or folder, or the diff's file",
+    ),
+    ("Enter", "open the file in Zed; fold a repository or folder"),
+    ("Alt+F", "list the files by folder, or flat"),
     ("Ctrl+D / Ctrl+T", "the diff, the log"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
@@ -1219,6 +1384,23 @@ fn change_text(change: &Change) -> String {
     match &change.orig {
         Some(orig) => format!("{orig} → {}", change.path),
         None => change.path.clone(),
+    }
+}
+
+/// How a change is shown under its folder: its name, a rename as
+/// `old → new`, the old one by its name too when in the same folder.
+fn file_name_text(change: &Change) -> String {
+    let split = |path: &str| -> (String, String) {
+        match path.rsplit_once('/') {
+            Some((dir, name)) => (dir.to_owned(), name.to_owned()),
+            None => (String::new(), path.to_owned()),
+        }
+    };
+    let (dir, name) = split(&change.path);
+    match &change.orig {
+        Some(orig) if split(orig).0 == dir => format!("{} → {name}", split(orig).1),
+        Some(orig) => format!("{orig} → {name}"),
+        None => name,
     }
 }
 
@@ -1342,25 +1524,93 @@ impl Panel {
     }
 
     /// The tree's lines, in `items`' order: each repository, then its
-    /// files when unfolded, conflicted ones first. Never sorted by state,
-    /// so that lines don't jump as a batch goes.
+    /// files when unfolded, as `file_rows` has them, but those in folded
+    /// folders. Never sorted by state, so that lines don't jump as a batch
+    /// goes.
     fn rows(&self, items: &[RepoItem]) -> Vec<Row> {
         let mut rows = Vec::new();
         for (k, item) in items.iter().enumerate() {
             rows.push(Row::Repo(k));
-            if self.open(item) {
-                let order = file_order(&item.status.changes);
-                rows.extend(order.into_iter().map(|c| Row::File(k, c)));
+            if !self.open(item) {
+                continue;
+            }
+            // The depth of the folded folder whose lines are skipped.
+            let mut hiding = None;
+            for row in file_rows(k, &item.status.changes, self.grouping) {
+                if hiding.is_some_and(|d| row.depth() > d) {
+                    continue;
+                }
+                hiding = None;
+                if !self.dir_open(row, items) {
+                    hiding = Some(row.depth());
+                }
+                rows.push(row);
             }
         }
         rows
+    }
+
+    /// The path of folder line `row`.
+    fn dir_path(row: Row, items: &[RepoItem]) -> Option<&str> {
+        let Row::Dir { k, c, to, .. } = row else {
+            return None;
+        };
+        Some(path_parts(&items[k].status.changes[c].path, 0, to))
+    }
+
+    /// Whether `row`, a folder's line, shows its files; true of any other.
+    fn dir_open(&self, row: Row, items: &[RepoItem]) -> bool {
+        if self.folded_dirs.is_empty() {
+            return true;
+        }
+        match Panel::dir_path(row, items) {
+            Some(path) => {
+                let key = (items[row.item()].root.clone(), path.to_owned());
+                !self.folded_dirs.contains(&key)
+            }
+            None => true,
+        }
+    }
+
+    /// Show or hide the files of folder line `row`.
+    fn set_dir_open(&mut self, row: Row, items: &[RepoItem], open: bool) {
+        let Some(path) = Panel::dir_path(row, items) else {
+            return;
+        };
+        let key = (items[row.item()].root.clone(), path.to_owned());
+        if open {
+            self.folded_dirs.remove(&key);
+        } else {
+            self.folded_dirs.insert(key);
+        }
+    }
+
+    /// Unfold the folders the file at `path` of the repository at `root`
+    /// is in.
+    fn reveal(&mut self, root: &Path, path: &str) {
+        self.folded_dirs
+            .retain(|(r, dir)| !(r == root && in_dir(path, dir)));
+    }
+
+    /// The line over line `at` of `rows`: its folder's, or its
+    /// repository's.
+    fn parent(rows: &[Row], at: usize) -> Option<usize> {
+        let depth = rows[at].depth();
+        rows[..at].iter().rposition(|r| match r {
+            Row::Repo(_) => true,
+            Row::Dir { depth: d, .. } => *d < depth,
+            Row::File(..) => false,
+        })
     }
 
     /// Whether `row` is the selected line.
     fn is_selected(&self, row: Row, items: &[RepoItem]) -> bool {
         match (&self.selected, row) {
             (Some(Selected::Repo(root)), Row::Repo(k)) => items[k].root == *root,
-            (Some(Selected::File(root, path)), Row::File(k, c)) => {
+            (Some(Selected::Dir(root, path)), Row::Dir { k, .. }) => {
+                items[k].root == *root && Panel::dir_path(row, items) == Some(path)
+            }
+            (Some(Selected::File(root, path)), Row::File(k, c, _)) => {
                 items[k].root == *root && items[k].status.changes[c].path == *path
             }
             _ => false,
@@ -1376,7 +1626,7 @@ impl Panel {
     /// file, by index into its changes.
     fn selection(&self, items: &[RepoItem]) -> Option<(usize, Option<usize>)> {
         let (root, path) = match self.selected.as_ref()? {
-            Selected::Repo(root) => (root, None),
+            Selected::Repo(root) | Selected::Dir(root, _) => (root, None),
             Selected::File(root, path) => (root, Some(path)),
         };
         let k = items.iter().position(|i| i.root == *root)?;
@@ -1395,22 +1645,26 @@ impl Panel {
         self.selection(items).map(|(k, _)| &items[k])
     }
 
-    /// The root of the selected repository, or of the selected file's.
-    pub fn selected_root(&self) -> Option<PathBuf> {
+    /// Where the selected line is on disk: a file's or folder's path, else
+    /// its repository's root.
+    pub fn selected_path(&self) -> Option<PathBuf> {
         match self.selected.as_ref()? {
-            Selected::Repo(root) | Selected::File(root, _) => Some(root.clone()),
+            Selected::Repo(root) => Some(root.clone()),
+            Selected::Dir(root, path) | Selected::File(root, path) => Some(root.join(path)),
         }
     }
 
     /// Select line `k` of `rows`, scrolling it into a view of `page`.
     fn select(&mut self, rows: &[Row], k: usize, items: &[RepoItem], page: usize) {
         let Some(&row) = rows.get(k) else { return };
+        let root = items[row.item()].root.clone();
         let id = match row {
-            Row::Repo(k) => Selected::Repo(items[k].root.clone()),
-            Row::File(k, c) => {
-                let path = items[k].status.changes[c].path.clone();
-                Selected::File(items[k].root.clone(), path)
+            Row::Repo(_) => Selected::Repo(root),
+            Row::Dir { .. } => {
+                let path = Panel::dir_path(row, items).unwrap_or_default();
+                Selected::Dir(root, path.to_owned())
             }
+            Row::File(k, c, _) => Selected::File(root, items[k].status.changes[c].path.clone()),
         };
         let moved = self.selected.as_ref() != Some(&id);
         self.selected = Some(id);
@@ -1487,28 +1741,97 @@ impl Panel {
         }
     }
 
-    /// Check line `row`, or uncheck it: a repository partly checked is
-    /// unchecked.
+    /// The checkbox of folder `dir` of `item`: on when all its files are
+    /// checked, partly when some are, else off.
+    fn dir_check(&self, item: &RepoItem, dir: &str) -> Check {
+        let (mut all, mut some) = (true, false);
+        for change in item.status.changes.iter().filter(|c| in_dir(&c.path, dir)) {
+            let on = self.file_checked(item, change);
+            all &= on;
+            some |= on;
+        }
+        match (all, some) {
+            (true, true) => Check::On,
+            (false, true) => Check::Partial,
+            _ => Check::Off,
+        }
+    }
+
+    /// Check line `row`, or uncheck it: a repository or folder partly
+    /// checked is unchecked.
     fn toggle(&mut self, row: Row, items: &[RepoItem]) {
+        let item = &items[row.item()];
         match row {
-            Row::Repo(k) => {
-                let on = self.check(&items[k]) == Check::Off;
-                self.set_checked(&items[k], on);
+            Row::Repo(_) => {
+                let on = self.check(item) == Check::Off;
+                self.set_checked(item, on);
+                return;
             }
-            Row::File(k, c) => {
-                let item = &items[k];
+            Row::Dir { .. } => {
+                let dir = Panel::dir_path(row, items).unwrap_or_default();
+                let on = self.dir_check(item, dir) == Check::Off;
+                for change in item.status.changes.iter().filter(|c| in_dir(&c.path, dir)) {
+                    let key = (item.root.clone(), change.path.clone());
+                    if on {
+                        self.checked_files.insert(key);
+                    } else {
+                        self.checked_files.remove(&key);
+                    }
+                }
+            }
+            Row::File(_, c, _) => {
                 let key = (item.root.clone(), item.status.changes[c].path.clone());
                 if !self.checked_files.remove(&key) {
                     self.checked_files.insert(key);
                 }
-                // The repository is whole while all its files are.
-                let changes = &item.status.changes;
-                if changes.iter().all(|c| self.file_checked(item, c)) {
-                    self.checked_repos.insert(item.root.clone());
-                } else {
-                    self.checked_repos.remove(&item.root);
-                }
             }
+        }
+        // The repository is whole while all its files are.
+        let changes = &item.status.changes;
+        if changes.iter().all(|c| self.file_checked(item, c)) {
+            self.checked_repos.insert(item.root.clone());
+        } else {
+            self.checked_repos.remove(&item.root);
+        }
+    }
+
+    /// List the files as `grouping` says, for every repository: the diff
+    /// in the tree's order, the selection kept (a folder's line, gone from
+    /// a list, gives way to its repository's) and in view.
+    fn set_grouping(&mut self, grouping: Grouping, ctx: &Ctx) -> Option<Outcome> {
+        if self.grouping == grouping {
+            return None;
+        }
+        let items = ctx.items;
+        self.grouping = grouping;
+        if let Some(Selected::Dir(root, _)) = &self.selected {
+            self.selected = Some(Selected::Repo(root.clone()));
+        }
+        self.order_diffs(items);
+        self.build_rows(items, self.diff_anchor());
+        let page = ctx.page.0.max(1);
+        self.settle(items, page);
+        let rows = self.rows(items);
+        if let Some(k) = self.selected_row(&rows, items) {
+            let to = showing(self.tree_scroll.pos(), (k, k), page);
+            move_to(&mut self.tree_scroll, to);
+        }
+        Some(Outcome::Grouping(grouping))
+    }
+
+    /// The diffs read put in the tree's order.
+    fn order_diffs(&mut self, items: &[RepoItem]) {
+        for item in items {
+            let Some((_, files)) = self.diffs.get_mut(&item.root) else {
+                continue;
+            };
+            let changes = &item.status.changes;
+            let rank: HashMap<&str, usize> = tree_order(changes, self.grouping)
+                .into_iter()
+                .enumerate()
+                .map(|(n, c)| (changes[c].path.as_str(), n))
+                .collect();
+            files.sort_by_key(|f| rank.get(f.path.as_str()).copied().unwrap_or(usize::MAX));
         }
     }
 
@@ -2734,6 +3057,10 @@ impl Panel {
             self.open_create_menu(ctx);
             return None;
         }
+        let only_alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
+        if only_alt && matches!(sym, Keysym::f | Keysym::F) {
+            return self.set_grouping(self.grouping.other(), ctx);
+        }
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         if sym == Keysym::Escape && plain {
             return Some(Outcome::Close);
@@ -2846,33 +3173,33 @@ impl Panel {
             Keysym::a | Keysym::A if mods.ctrl && !mods.alt && !mods.logo => {
                 self.toggle_all(items);
             }
-            Keysym::Right | Keysym::KP_Right if plain => {
-                if let Some(Row::Repo(k)) = row {
-                    self.set_open(&items[k], true);
-                }
-            }
-            Keysym::Left | Keysym::KP_Left if plain => match row {
-                Some(Row::Repo(k)) => {
+            Keysym::Right | Keysym::KP_Right if plain => match row {
+                Some(Row::Repo(k)) => self.set_open(&items[k], true),
+                Some(row @ Row::Dir { .. }) => self.set_dir_open(row, items, true),
+                _ => {}
+            },
+            // A line folds, else the one over it is selected.
+            Keysym::Left | Keysym::KP_Left if plain => match (row, at) {
+                (Some(Row::Repo(k)), _) => {
                     self.set_open(&items[k], false);
                     self.settle(items, page);
                 }
-                Some(Row::File(k, _)) => {
-                    let repo = rows.iter().position(|&r| r == Row::Repo(k));
-                    if let Some(repo) = repo {
-                        self.select(&rows, repo, items, page);
-                    }
-                }
-                None => {}
-            },
-            Keysym::Return | Keysym::KP_Enter if plain => match row {
-                Some(Row::Repo(k)) => {
-                    let open = !self.open(&items[k]);
-                    self.set_open(&items[k], open);
+                (Some(row @ Row::Dir { .. }), _) if self.dir_open(row, items) => {
+                    self.set_dir_open(row, items, false);
                     self.settle(items, page);
                 }
-                Some(Row::File(..)) => return self.act(ReposButton::OpenInZed, ctx),
-                None => {}
+                (Some(_), Some(at)) => {
+                    if let Some(up) = Panel::parent(&rows, at) {
+                        self.select(&rows, up, items, page);
+                    }
+                }
+                _ => {}
             },
+            Keysym::Return | Keysym::KP_Enter if plain => {
+                if let Some(row) = row {
+                    return self.fold_line(row, ctx);
+                }
+            }
             _ => {
                 let printable = typed.key_char().is_some_and(|c| !c.is_control());
                 if sym == text_field::PASTE || (plain && printable) {
@@ -2980,12 +3307,11 @@ impl Panel {
             ReposHit::Expander(i) => {
                 let k = at(i)?;
                 self.select(&rows, k, items, page);
-                if let Row::Repo(r) = rows[k] {
-                    let open = !self.open(&items[r]);
-                    self.set_open(&items[r], open);
-                    self.settle(items, page);
+                if !matches!(rows[k], Row::File(..)) {
+                    return self.fold_line(rows[k], ctx);
                 }
             }
+            ReposHit::Grouping(grouping) => return self.set_grouping(grouping, ctx),
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
@@ -3021,6 +3347,25 @@ impl Panel {
             | ReposHit::BranchCreate
             | ReposHit::BranchMenu => {}
         }
+        None
+    }
+
+    /// Enter on tree line `row`: a repository or a folder folds, or
+    /// unfolds; a file opens in Zed.
+    fn fold_line(&mut self, row: Row, ctx: &Ctx) -> Option<Outcome> {
+        let (items, page) = (ctx.items, ctx.page.0.max(1));
+        match row {
+            Row::Repo(k) => {
+                let open = !self.open(&items[k]);
+                self.set_open(&items[k], open);
+            }
+            Row::Dir { .. } => {
+                let open = !self.dir_open(row, items);
+                self.set_dir_open(row, items, open);
+            }
+            Row::File(..) => return self.act(ReposButton::OpenInZed, ctx),
+        }
+        self.settle(items, page);
         None
     }
 
@@ -3272,7 +3617,19 @@ impl Panel {
     fn tree_line(&self, row: Row, ctx: &Ctx) -> TreeLine {
         let item = &ctx.items[row.item()];
         let status = &item.status;
-        let Row::File(_, c) = row else {
+        if let Row::Dir {
+            from, to, depth, ..
+        } = row
+        {
+            let path = Panel::dir_path(row, ctx.items).unwrap_or_default();
+            return TreeLine::Dir(DirLine {
+                check: self.dir_check(item, path),
+                open: self.dir_open(row, ctx.items),
+                name: path_parts(path, from, to).to_owned(),
+                depth,
+            });
+        }
+        let Row::File(_, c, depth) = row else {
             let chip = self.chip(item, ctx.batch);
             let run = ctx.batch.and_then(|b| b.run(&item.root));
             let state = match run.map(|r| &r.state) {
@@ -3308,8 +3665,12 @@ impl Panel {
                 Check::Off
             },
             code: change.code,
-            path: change_text(change),
+            path: match self.grouping {
+                Grouping::List => change_text(change),
+                Grouping::Folders => file_name_text(change),
+            },
             conflicted: change.conflicted(),
+            depth,
         })
     }
 
@@ -3427,7 +3788,7 @@ impl Panel {
     /// diff, read per repository.
     fn detail_key(&self) -> Option<DetailKey> {
         let root = match self.selected.as_ref()? {
-            Selected::Repo(root) | Selected::File(root, _) => root,
+            Selected::Repo(root) | Selected::Dir(root, _) | Selected::File(root, _) => root,
         };
         let tab = self.tab();
         (tab != DetailTab::Diff).then(|| DetailKey {
@@ -4228,6 +4589,17 @@ impl Panel {
             Some(Selected::File(root, path)) => self
                 .header_row(root, Some(path))
                 .or_else(|| self.header_row(root, None)),
+            // Its first file.
+            Some(Selected::Dir(root, dir)) => self
+                .diff_rows
+                .iter()
+                .position(|&row| match row {
+                    DiffRow::File(k, f) => self
+                        .diff_file(k, f)
+                        .is_some_and(|(r, file)| r == root && in_dir(&file.path, dir)),
+                    _ => false,
+                })
+                .or_else(|| self.header_row(root, None)),
             None => None,
         };
         if let Some(head) = head {
@@ -4594,10 +4966,11 @@ impl Panel {
                 None => return,
             },
         };
-        if let Selected::File(root, _) = &id
+        if let Selected::File(root, path) = &id
             && let Some(item) = items.iter().find(|i| i.root == *root)
         {
             self.set_open(item, true);
+            self.reveal(root, path);
         }
         let rows = self.rows(items);
         let old = self.selected.replace(id);
@@ -4620,7 +4993,7 @@ impl Panel {
             return;
         };
         if let Some(c) = items[k].status.changes.iter().position(|c| c.path == path) {
-            self.toggle(Row::File(k, c), items);
+            self.toggle(Row::File(k, c, 0), items);
         }
     }
 
@@ -4790,7 +5163,7 @@ impl Panel {
             })
             .map(|i| {
                 let changes = &i.status.changes;
-                let order = file_order(changes);
+                let order = tree_order(changes, self.grouping);
                 let changes = order.into_iter().map(|c| changes[c].clone()).collect();
                 (i.root.clone(), changes, self.diff_gen)
             })
@@ -4811,6 +5184,8 @@ impl Panel {
         }
         let anchor = self.diff_anchor();
         self.diffs.insert(root, (generation, files));
+        // Read in another order, if the files were listed another way since.
+        self.order_diffs(items);
         self.diff_cols = ctx.cols;
         self.build_rows(items, anchor);
     }
@@ -5057,6 +5432,7 @@ impl Panel {
             empty: "No git repositories in this project: add a workspace in a git checkout".into(),
             density: ctx.density,
             tree_share: ctx.tree_share,
+            grouping: self.grouping,
         }
     }
 
@@ -5408,7 +5784,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 TreeLine::Repo(r) => Some(r),
-                TreeLine::File(_) => None,
+                TreeLine::Dir(_) | TreeLine::File(_) => None,
             })
             .collect()
     }
@@ -5418,13 +5794,15 @@ mod tests {
         repo_lines(&view).iter().map(|r| r.check).collect()
     }
 
-    /// The tree's lines as text: a repository's label, a file's path.
+    /// The tree's lines as text: a repository's label, a folder's name
+    /// (with `/` after it), a file's path, indented two spaces a folder.
     fn texts(view: &ReposView) -> Vec<String> {
         view.lines
             .iter()
             .map(|l| match l {
                 TreeLine::Repo(r) => r.label.clone(),
-                TreeLine::File(f) => f.path.clone(),
+                TreeLine::Dir(d) => format!("{}{}/", "  ".repeat(d.depth), d.name),
+                TreeLine::File(f) => format!("{}{}", "  ".repeat(f.depth), f.path),
             })
             .collect()
     }
@@ -8139,5 +8517,215 @@ mod tests {
             sheet.buttons,
             [ReposButton::SwitchExisting, ReposButton::EditName]
         );
+    }
+
+    /// A repository with files in folders, nested and not.
+    fn foldered() -> Vec<RepoItem> {
+        let paths = [
+            "src/chrome/repos.rs",
+            "src/chrome/mod.rs",
+            "src/main.rs",
+            "README.md",
+            "docs/deep/only/a.md",
+            "Cargo.toml",
+            "assets/Logo.png",
+            "assets/icon.svg",
+        ];
+        let changes = paths.iter().map(|p| change(p, 'M')).collect();
+        vec![repo("app", "main", changes), repo("lib", "main", vec![])]
+    }
+
+    /// The tree of `foldered()` by folder.
+    const FOLDERS: [&str; 14] = [
+        "app",
+        "assets/",
+        "  icon.svg",
+        "  Logo.png",
+        "docs/deep/only/",
+        "  a.md",
+        "src/",
+        "  chrome/",
+        "    mod.rs",
+        "    repos.rs",
+        "  main.rs",
+        "Cargo.toml",
+        "README.md",
+        "lib",
+    ];
+
+    fn by_folder(items: &[RepoItem]) -> Panel {
+        let mut panel = Panel::new(items);
+        panel.grouping = Grouping::Folders;
+        panel
+    }
+
+    #[test]
+    fn path_parts_cut_at_slashes() {
+        assert_eq!(path_parts("a/b/c.rs", 0, 2), "a/b");
+        assert_eq!(path_parts("a/b/c.rs", 1, 2), "b");
+        assert_eq!(path_parts("a/b/c.rs", 2, 3), "c.rs");
+        assert_eq!(path_parts("a/b/c.rs", 0, 3), "a/b/c.rs");
+        assert!(in_dir("a/b/c.rs", "a/b"));
+        assert!(!in_dir("a/bc.rs", "a/b"));
+        assert!(!in_dir("a/b", "a/b"));
+    }
+
+    #[test]
+    fn by_folder_folders_come_first_by_name_and_lone_folders_join() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let panel = by_folder(&items);
+        assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
+        // Flat, every path whole, as git lists them.
+        let list = Panel::new(&items);
+        let view = list.view("p", &ctx);
+        assert_eq!(
+            texts(&view)[1..4],
+            ["src/chrome/repos.rs", "src/chrome/mod.rs", "src/main.rs"]
+        );
+        assert_eq!(view.grouping, Grouping::List);
+    }
+
+    #[test]
+    fn a_folder_folds_and_left_climbs_to_the_line_over() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let mut panel = by_folder(&items);
+        panel.selected = Some(Selected::File(root("app"), "src/chrome/mod.rs".into()));
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(
+            panel.selected,
+            Some(Selected::Dir(root("app"), "src/chrome".into()))
+        );
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        let texts_now = texts(&panel.view("p", &ctx));
+        assert_eq!(texts_now[7..9], ["  chrome/", "  main.rs"]);
+        // Folded, Left goes up again; Right unfolds it.
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(
+            panel.selected,
+            Some(Selected::Dir(root("app"), "src".into()))
+        );
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(texts(&panel.view("p", &ctx))[6..8], ["src/", "Cargo.toml"]);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            texts(&panel.view("p", &ctx))[6..9],
+            ["src/", "  chrome/", "  main.rs"]
+        );
+    }
+
+    #[test]
+    fn a_folder_checks_its_files() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let mut panel = by_folder(&items);
+        panel.selected = Some(Selected::Dir(root("app"), "src".into()));
+        press(&mut panel, none(), Keysym::space, &ctx);
+        let checked = |panel: &Panel, path: &str| {
+            let key = (root("app"), path.to_owned());
+            panel.checked_files.contains(&key)
+        };
+        assert!(checked(&panel, "src/main.rs") && checked(&panel, "src/chrome/mod.rs"));
+        assert!(!checked(&panel, "README.md"));
+        let view = panel.view("p", &ctx);
+        let dir = |i: usize| match &view.lines[i] {
+            TreeLine::Dir(d) => d.check,
+            _ => panic!("not a folder"),
+        };
+        assert_eq!((dir(6), dir(7), dir(1)), (Check::On, Check::On, Check::Off));
+        assert_eq!(checks(&panel, &ctx)[0], Check::Partial);
+        panel.selected = Some(Selected::File(root("app"), "src/main.rs".into()));
+        press(&mut panel, none(), Keysym::space, &ctx);
+        let view = panel.view("p", &ctx);
+        assert!(matches!(&view.lines[6], TreeLine::Dir(d) if d.check == Check::Partial));
+        // Partly checked, it is unchecked.
+        panel.selected = Some(Selected::Dir(root("app"), "src".into()));
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert!(panel.checked_files.is_empty());
+    }
+
+    #[test]
+    fn alt_f_lists_by_folder_or_flat_and_says_so() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let outcome = press(&mut panel, alt(), Keysym::f, &ctx);
+        assert_eq!(outcome, Some(Outcome::Grouping(Grouping::Folders)));
+        assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
+        // A folder's line is gone from the list: its repository's is
+        // selected.
+        panel.selected = Some(Selected::Dir(root("app"), "src".into()));
+        let outcome = panel.click(ReposHit::Grouping(Grouping::List), &ctx);
+        assert_eq!(outcome, Some(Outcome::Grouping(Grouping::List)));
+        assert_eq!(panel.selected, Some(Selected::Repo(root("app"))));
+        assert_eq!(panel.click(ReposHit::Grouping(Grouping::List), &ctx), None);
+    }
+
+    #[test]
+    fn the_diff_goes_in_the_trees_order() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let wanted = panel.diffs_wanted(&ctx);
+        let paths: Vec<_> = wanted[0].1.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths[0], "src/chrome/repos.rs");
+        let files = wanted[0]
+            .1
+            .iter()
+            .map(|c| added(&c.path, 'M', &["x"]))
+            .collect();
+        panel.set_diffs(root("app"), wanted[0].2, files, &ctx);
+        panel.set_grouping(Grouping::Folders, &ctx);
+        let order: Vec<_> = panel.diffs[&root("app")]
+            .1
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        let tree: Vec<_> = tree_order(&items[0].status.changes, Grouping::Folders)
+            .into_iter()
+            .map(|c| items[0].status.changes[c].path.as_str())
+            .collect();
+        assert_eq!(order, tree);
+        assert_eq!(order[..2], ["assets/icon.svg", "assets/Logo.png"]);
+        // Selecting a folder scrolls the diff to its first file.
+        panel.selected = Some(Selected::Dir(root("app"), "src".into()));
+        panel.show_selected();
+        let head = panel.header_row(&root("app"), Some("src/chrome/mod.rs"));
+        assert_eq!(Some(panel.detail_scroll.pos() as usize), head);
+    }
+
+    #[test]
+    fn a_diff_row_selects_its_file_in_folded_folders() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let mut panel = by_folder(&items);
+        let wanted = panel.diffs_wanted(&ctx);
+        let files = wanted[0]
+            .1
+            .iter()
+            .map(|c| added(&c.path, 'M', &["x"]))
+            .collect();
+        panel.set_diffs(root("app"), wanted[0].2, files, &ctx);
+        panel.folded_dirs.insert((root("app"), "src".into()));
+        let r = panel.header_row(&root("app"), Some("src/main.rs")).unwrap();
+        panel.select_diff_row(r, &ctx);
+        assert_eq!(
+            panel.selected,
+            Some(Selected::File(root("app"), "src/main.rs".into()))
+        );
+        assert!(panel.folded_dirs.is_empty());
+    }
+
+    #[test]
+    fn under_its_folder_a_file_shows_by_name() {
+        let rename = |orig: &str| Change {
+            path: "src/new.rs".into(),
+            orig: Some(orig.into()),
+            code: 'R',
+        };
+        assert_eq!(file_name_text(&change("src/a/b.rs", 'M')), "b.rs");
+        assert_eq!(file_name_text(&rename("src/old.rs")), "old.rs → new.rs");
+        assert_eq!(file_name_text(&rename("lib/old.rs")), "lib/old.rs → new.rs");
     }
 }
