@@ -555,6 +555,14 @@ impl Switcher {
         }
     }
 
+    /// Stand the list `px` pixels down, as its scrollbar's thumb held
+    /// there puts it, the selection dragged along.
+    fn stand_at(&mut self, px: f64) {
+        let max = self.bounds().max.max(0.0);
+        self.scroll.jump(self.places.pos(px).clamp(0.0, max));
+        self.drag();
+    }
+
     /// Move the list on to `now`; whether it still moves.
     fn tick(&mut self, now: Instant) -> bool {
         let moving = self.scroll.tick(now, self.bounds());
@@ -625,6 +633,10 @@ impl Switcher {
             hint_hover: self.hint_hover.filter(|h| *h < hints.len()),
             hints,
             part,
+            bar: (self.places.end() > self.list_height()).then(|| chrome::ListBar {
+                down: self.places.px(self.scroll.pos()),
+                total: self.places.end(),
+            }),
         }
     }
 
@@ -970,6 +982,16 @@ impl Gerdr {
         if let Some(switcher) = self.switcher.as_mut() {
             switcher.set_room(room);
             switcher.scroll(motion, Instant::now());
+        }
+    }
+
+    /// Stand the switcher's list `px` pixels down, as its scrollbar's
+    /// thumb held there puts it.
+    pub fn switcher_scroll_to(&mut self, px: f64) {
+        let room = self.switcher_room();
+        if let Some(switcher) = self.switcher.as_mut() {
+            switcher.set_room(room);
+            switcher.stand_at(px);
         }
     }
 
@@ -1688,6 +1710,29 @@ mod tests {
         type_in(&mut switcher, "xyz");
         settle(&mut switcher, Motion::Notches(1.0));
         assert_eq!(switcher.view().selected, None);
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_stands_the_list_where_it_is_dragged() {
+        let mut switcher = Switcher::new(
+            (0..8).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        switcher.set_room(room(5));
+        let bar = switcher.view().bar.unwrap();
+        assert_eq!((bar.down, bar.total - switcher.list_height()), (0.0, 120.0));
+        // Part of a row down, the selection dragged along.
+        switcher.stand_at(60.0);
+        let view = switcher.view();
+        assert_eq!((view.rows[0].label.as_str(), view.part), ("ws1", 20.0));
+        assert_eq!((view.selected, view.bar.unwrap().down), (Some(1), 60.0));
+        // No further than the end.
+        switcher.stand_at(1000.0);
+        assert_eq!(labels(&switcher), ["ws3", "ws4", "ws5", "ws6", "ws7"]);
+        // With all of them shown, there is none.
+        switcher.set_room(room(9));
+        assert_eq!(switcher.view().bar, None);
     }
 
     #[test]

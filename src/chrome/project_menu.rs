@@ -46,6 +46,9 @@ pub struct ProjectMenuView {
     /// while pulled up past the end. The entries reach down past the list,
     /// and one may be shown in part at its bottom.
     pub part: f64,
+    /// Where the list stands, for its scrollbar; none while it all shows,
+    /// and in form and settings mode.
+    pub bar: Option<super::ListBar>,
 }
 
 /// An entry of the project menu's list.
@@ -356,6 +359,21 @@ fn entry_tops(view: &ProjectMenuView) -> Vec<f64> {
             top
         })
         .collect()
+}
+
+/// The scrollbar of the project menu's list laid out as `layout`, in the
+/// gutter right of its entries; none while they all show.
+pub fn project_menu_thumb(
+    view: &ProjectMenuView,
+    layout: &ProjectMenuLayout,
+) -> Option<super::Thumb> {
+    let list = layout.list;
+    let right = list.loc.x + list.size.w - PROJECT_MENU_PADDING;
+    super::Thumb::of(
+        super::gutter_track(right, list),
+        list.size.h as f64,
+        view.bar?,
+    )
 }
 
 /// The places of the project menu's entries down its list, from whether
@@ -1433,6 +1451,8 @@ pub(super) struct ProjectMenuLayers {
     /// The line between the projects and the rows starting new ones, by
     /// the panel's width, the theme and the scale.
     divider: super::Cached<(i32, super::Theme, f64)>,
+    /// The scrollbar's thumb, by its size.
+    thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
     /// How many frames were drawn.
     #[cfg(test)]
     frames: std::cell::Cell<usize>,
@@ -1464,6 +1484,7 @@ impl ProjectMenuLayers {
                     .filter(|hit| !listed || matches!(hit, MenuHit::Hint(_))),
                 hover_alpha: 0,
                 part: 0.0,
+                bar: None,
                 ..view.clone()
             };
             let frame = ProjectMenuLayout {
@@ -1500,6 +1521,14 @@ impl ProjectMenuLayers {
                 let (list, panel) = (layout.list, layout.panel);
                 let top = list.loc.y as f64;
                 let mut parts = Vec::new();
+                if let Some(bar) = project_menu_thumb(view, layout) {
+                    let size = Size::from((bar.track.size.w, bar.h as i32));
+                    let buffer = self
+                        .thumb
+                        .get((size, theme, scale), |_| painter.bar_thumb(size, scale, p));
+                    let part = Part::new(buffer, bar.track.loc, size, 1.0);
+                    parts.push(part.at((bar.track.loc.x as f64, bar.top).into()));
+                }
                 let tops = entry_tops(view);
                 for (i, ((rect, _), entry)) in layout.entries.iter().zip(&view.entries).enumerate()
                 {
@@ -1605,6 +1634,7 @@ mod tests {
             ],
             hover_alpha: 16,
             part: 0.0,
+            bar: None,
         }
     }
 
@@ -1633,6 +1663,7 @@ mod tests {
             ],
             hover_alpha: 0,
             part: 0.0,
+            bar: None,
         }
     }
 
@@ -1653,6 +1684,7 @@ mod tests {
             hints: vec![("Esc".into(), "back".into())],
             hover_alpha: 0,
             part: 0.0,
+            bar: None,
         }
     }
 
@@ -1847,6 +1879,29 @@ mod tests {
         // Pulled down past the start, the entries come down.
         let c = project_menu_layout(&long_view(-20.0), size);
         assert_eq!(c.entries[1].0.loc.y, a.entries[1].0.loc.y + 20);
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_goes_in_the_gutter_right_of_the_entries() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let view = ProjectMenuView {
+            bar: Some(super::super::ListBar {
+                down: 0.0,
+                total: 2000.0,
+            }),
+            ..long_view(0.0)
+        };
+        let layout = project_menu_layout(&view, size);
+        let thumb = super::project_menu_thumb(&view, &layout).unwrap();
+        let (entry, panel) = (layout.entries[3].0, layout.panel);
+        assert_eq!(thumb.track.loc.x, entry.loc.x + entry.size.w + 1);
+        assert!(thumb.track.loc.x + thumb.track.size.w < panel.loc.x + panel.size.w);
+        assert_eq!(thumb.track.loc.y, layout.list.loc.y);
+        // In form mode, there is none.
+        assert_eq!(
+            super::project_menu_thumb(&form_view(0, false), &layout),
+            None
+        );
     }
 
     #[test]
