@@ -191,6 +191,10 @@ const ZED_EXIT_WAIT: Duration = Duration::from_secs(3);
 /// How long a window started for a tab may take to show up before the
 /// placeholder kept for it says so.
 pub const EXPECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a web page's window opened through gerdr's extension stays out
+/// of sight, its placeholder shown, for the extension to say the page is
+/// on its way (see `Gerdr::booting`).
+const WEB_PAGE_WAIT: Duration = Duration::from_secs(5);
 /// How long an agent stays blocked, out of sight, before its notification
 /// is sent again.
 const BLOCKED_REMINDER: Duration = Duration::from_secs(60);
@@ -574,14 +578,18 @@ fn window_title(window: &Window) -> Option<String> {
     })
 }
 
-/// Whether `window` is a Zed window.
-fn is_zed(window: &Window) -> bool {
+/// The app_id `window` goes by, empty without one.
+fn window_app_id(window: &Window) -> String {
     with_states(window.toplevel().unwrap().wl_surface(), |states| {
         let data = states.data_map.get::<XdgToplevelSurfaceData>()?;
-        let app_id = data.lock().unwrap().app_id.clone()?;
-        Some(app_id.to_ascii_lowercase().contains("zed"))
+        data.lock().unwrap().app_id.clone()
     })
-    .unwrap_or(false)
+    .unwrap_or_default()
+}
+
+/// Whether `window` is a Zed window.
+fn is_zed(window: &Window) -> bool {
+    window_app_id(window).to_ascii_lowercase().contains("zed")
 }
 
 /// A tab rebuilt from its saved layout.
@@ -1345,6 +1353,12 @@ pub struct Gerdr {
     /// (`""` for windows of no known project while none is shown): shown
     /// once their project is.
     pub held: HashMap<String, Vec<Window>>,
+    /// Windows of web pages opened through gerdr's extension, and since
+    /// when, kept out of sight until the extension says where their page
+    /// is: until then the browser shows its boot page, or a refusal of it
+    /// when it starts (see `web_control`). Placed then, or once
+    /// `WEB_PAGE_WAIT` is up (see `place_booting`).
+    pub booting: Vec<(Window, Instant)>,
     /// Windows of panes gerdr was asked to close (see `close_panes`): a Zed
     /// one leaves no placeholder when it goes (see `remove_window`).
     pub closing: Vec<Window>,
@@ -4180,6 +4194,8 @@ impl Gerdr {
     /// First commit of a toplevel: put it in the workspace, tab and pane it was started for.
     pub fn place(&mut self, window: Window, app_id: &str) {
         self.unplaced.retain(|w| w != &window);
+        let booting = self.booting.iter().position(|(w, _)| w == &window);
+        let booting = booting.map(|i| self.booting.remove(i).1);
         let pid = self.window_pid(&window);
         let app_id = app_id.to_ascii_lowercase();
         tracing::debug!("new window app_id={app_id} pid={pid:?}");
@@ -4264,6 +4280,15 @@ impl Gerdr {
                 .flatten();
             return self.place_stray(window, stray, window_of);
         };
+        let expected = &self.workspaces[w].tabs[t].expected[e];
+        let since = booting.unwrap_or_else(Instant::now);
+        if expected.app_id.contains(web_control::EXTENSION_ID)
+            && !self.web_control.follows(expected.pane)
+            && since.elapsed() < WEB_PAGE_WAIT
+        {
+            self.booting.push((window, since));
+            return;
+        }
         let e = self.workspaces[w].tabs[t].expected.remove(e);
         let mut dropped = self.launch_next_zed();
         dropped |= self.launch_next_apps();
@@ -4281,6 +4306,16 @@ impl Gerdr {
             // tab, empty.
             self.prune();
             self.arrange();
+        }
+    }
+
+    /// Place the windows kept out of sight (see `booting`) whose page the
+    /// extension now follows, or that waited long enough.
+    pub(crate) fn place_booting(&mut self) {
+        for (window, since) in std::mem::take(&mut self.booting) {
+            let app_id = window_app_id(&window);
+            self.booting.push((window.clone(), since));
+            self.place(window, &app_id);
         }
     }
 
@@ -4466,6 +4501,7 @@ impl Gerdr {
         self.pending_place.remove(&surface.id());
         let not_it = |w: &Window| w.toplevel().unwrap().wl_surface() != surface;
         self.unplaced.retain(not_it);
+        self.booting.retain(|(w, _)| not_it(w));
         for windows in self.held.values_mut() {
             windows.retain(not_it);
         }
@@ -4522,6 +4558,7 @@ impl Gerdr {
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
         self.unplaced
             .iter()
+            .chain(self.booting.iter().map(|(w, _)| w))
             .chain(self.held.values().flatten())
             .chain(
                 self.workspaces
@@ -5878,6 +5915,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         restored_at: None,
         replay_pending: HashSet::new(),
         held: HashMap::new(),
+        booting: Vec::new(),
         closing: Vec::new(),
         zed_groups: Vec::new(),
         old_zed: Vec::new(),
@@ -5999,6 +6037,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .handle()
         .insert_source(Timer::from_duration(REAP_INTERVAL), |_, _, state| {
             state.reap_children();
+            state.place_booting();
             TimeoutAction::ToDuration(REAP_INTERVAL)
         })?;
 
