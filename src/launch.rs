@@ -57,6 +57,9 @@ const BROWSER_APP_ID: &str = "dev.gerdr.browser";
 /// (see `Gerdr::open_cursor`).
 const CURSOR: &str = "cursor";
 
+/// The command of Cursor's agent CLI (see `Gerdr::new_cursor_agent`).
+const CURSOR_AGENT: &str = "cursor-agent";
+
 /// The name of the Cursor workspace.
 const CURSOR_WORKSPACE: &str = "Cursor";
 
@@ -285,6 +288,15 @@ impl Gerdr {
             self.forget_workspace(&record);
         }
         self.show_active();
+    }
+
+    /// Start Cursor's agent CLI in a new tab of workspace `w`, in its
+    /// folder: herdr shows it as an agent like any other.
+    pub fn new_cursor_agent(&mut self, w: usize) {
+        let Some(dir) = self.workspaces.get(w).map(|ws| ws.dir.clone()) else {
+            return;
+        };
+        self.new_tab_running(w, &dir, CURSOR_AGENT.to_owned());
     }
 
     /// Show Cursor chat `id`: the project's Cursor, started if it isn't
@@ -1164,7 +1176,7 @@ fn with_profile_of(command: &str, pid: u32) -> Option<String> {
 /// The arguments in `cmdline`, as /proc/<pid>/cmdline holds them. Cursor
 /// (Electron) writes its process title over them: one string, its words
 /// joined by spaces, which are split again.
-fn cmdline_args(cmdline: &[u8]) -> Vec<String> {
+pub(crate) fn cmdline_args(cmdline: &[u8]) -> Vec<String> {
     let mut args: Vec<String> = cmdline
         .strip_suffix(&[0])
         .unwrap_or(cmdline)

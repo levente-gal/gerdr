@@ -34,6 +34,12 @@ const DEFAULT_PREFIX: &str = "Ctrl+B";
 /// it, default key).
 const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("new-tab", Action::NewTab, "new tab", "c"),
+    (
+        "new-cursor-agent",
+        Action::NewCursorAgent,
+        "new cursor agent",
+        "Shift+A",
+    ),
     ("next-tab", Action::NextTab, "next tab", "n"),
     ("previous-tab", Action::PrevTab, "previous tab", "p"),
     ("go-to-tab-1", Action::GotoTab(0), "go to tab 1", "1"),
@@ -245,6 +251,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
 /// has exactly one key (else each gets its own), under one label.
 const HELP_LINES: &[(&str, &[&str])] = &[
     ("new tab", &["new-tab"]),
+    ("new cursor agent", &["new-cursor-agent"]),
     ("next / previous tab", &["next-tab", "previous-tab"]),
     (
         "go to tab",
@@ -707,6 +714,7 @@ mod tests {
             rows,
             [
                 "C: new tab",
+                "Shift+A: new cursor agent",
                 "N / P: next / previous tab",
                 "1–9: go to tab",
                 "Shift+X: close tab",
