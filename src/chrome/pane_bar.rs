@@ -5,7 +5,7 @@
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
     PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, centred_dot, chevron_side,
-    copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop,
+    copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop, text_lines,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -110,6 +110,7 @@ pub fn pane_bar_hit(bar: Rect, kind: BarButtons, pos: Point<f64, Logical>) -> Op
 /// A button in a pane's bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarButton {
+    Scrollback,
     Restart,
     Stop,
     Back,
@@ -124,7 +125,7 @@ pub enum BarButtons {
     /// An app's window: none.
     #[default]
     None,
-    /// A terminal: restart and stop what runs in it.
+    /// A terminal: its scrollback, and restart and stop what runs in it.
     Terminal,
     /// A web page: back, forward, reload, and copy its address.
     Web,
@@ -135,7 +136,7 @@ impl BarButtons {
     pub fn buttons(self) -> &'static [BarButton] {
         match self {
             Self::None => &[],
-            Self::Terminal => &[BarButton::Restart, BarButton::Stop],
+            Self::Terminal => &[BarButton::Scrollback, BarButton::Restart, BarButton::Stop],
             Self::Web => &[
                 BarButton::Back,
                 BarButton::Forward,
@@ -332,7 +333,7 @@ impl Painter {
                 BarButton::Stop => view.can_stop,
                 BarButton::Back => view.can_back,
                 BarButton::Forward => view.can_forward,
-                BarButton::Reload | BarButton::CopyUrl => true,
+                BarButton::Scrollback | BarButton::Reload | BarButton::CopyUrl => true,
             };
             let hovered = enabled && view.hover == Some(button);
             if hovered {
@@ -362,6 +363,9 @@ impl Painter {
                     })
                 }
                 BarButton::CopyUrl => icon_sdf(&mut c, rect, scale, color, |x, y| copy(x, y, s)),
+                BarButton::Scrollback => {
+                    icon_sdf(&mut c, rect, scale, color, |x, y| text_lines(x, y, s))
+                }
             }
         }
         c.into_buffer(true)

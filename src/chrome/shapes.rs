@@ -211,6 +211,17 @@ pub(super) fn chevron_side(left: bool, x: f32, y: f32, s: f32) -> f32 {
     top.min(bottom) - STROKE * s
 }
 
+/// Signed distance to lines of text centred on the origin, the middle one
+/// cut short by a text cursor: the scrollback, to select in.
+pub(super) fn text_lines(x: f32, y: f32, s: f32) -> f32 {
+    let line = |y0: f32, x1: f32| segment(x, y, -5.5 * s, y0 * s, x1 * s, y0 * s) - STROKE * s;
+    let cursor = segment(x, y, 3.5 * s, -2.0 * s, 3.5 * s, 2.0 * s) - STROKE * s;
+    line(-4.5, 5.5)
+        .min(line(0.0, 1.0))
+        .min(line(4.5, 3.0))
+        .min(cursor)
+}
+
 /// Signed distance to two pages, one over the other's top left, centred
 /// on the origin: copy.
 pub(super) fn copy(x: f32, y: f32, s: f32) -> f32 {

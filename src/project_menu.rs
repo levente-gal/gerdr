@@ -1311,6 +1311,7 @@ impl Gerdr {
     pub fn open_project_menu(&mut self) {
         self.switcher = None;
         self.inbox.close();
+        self.scrollback = None;
         self.stop_key_repeat();
         self.close_menu();
         self.project_menu = Some(ProjectMenu::new(home_dir()));

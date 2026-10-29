@@ -57,6 +57,8 @@ mod repos;
 mod restart;
 mod review;
 mod scroll;
+mod scrollback;
+mod scrollback_panel;
 mod scrollbars;
 mod scrolling;
 mod sidebar;
@@ -1025,6 +1027,9 @@ pub enum Action {
     /// Open the inbox, to go through what wants the user across the
     /// project, or close it again.
     Inbox,
+    /// Open the scrollback viewer over the focused terminal, to select
+    /// and copy more of its output than a screen.
+    Scrollback,
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -1189,6 +1194,8 @@ pub struct Gerdr {
     pub repos: repos::Repos,
     /// The inbox panel and what it reads for itself (see `inbox`).
     pub inbox: inbox::Inbox,
+    /// The scrollback viewer, while it is open over a terminal pane.
+    pub scrollback: Option<scrollback::Scrollback>,
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
@@ -3785,6 +3792,8 @@ impl Gerdr {
             Action::Repos => self.open_repos(),
             Action::Inbox if self.inbox.is_open() => self.close_inbox(),
             Action::Inbox => self.open_inbox(None),
+            Action::Scrollback if self.scrollback.is_some() => self.close_scrollback(),
+            Action::Scrollback => self.open_focused_scrollback(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(false),
             Action::Quit => self.open_quit(),
@@ -4600,6 +4609,7 @@ impl Gerdr {
             || self.worktrees.is_open()
             || self.repos.is_open()
             || self.inbox.is_open()
+            || self.scrollback.is_some()
         {
             return None;
         }
@@ -4969,6 +4979,7 @@ impl Gerdr {
         self.worktrees.close();
         self.repos.close();
         self.inbox.close();
+        self.scrollback = None;
         self.header_hover = false;
         self.project = None;
         self.focus(None);
@@ -5565,6 +5576,7 @@ impl Gerdr {
             worktrees: self.worktrees_view(),
             repos: self.repos_view(),
             inbox,
+            scrollback: self.scrollback_view(),
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
             theme: self.theme(),
@@ -5904,6 +5916,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         field_clicks: None,
         field_drag: false,
         repos_rows_drag: false,
+        scrollback: None,
         thumb_drag: None,
         stopping: HashSet::new(),
         project_menu: None,

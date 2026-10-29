@@ -47,7 +47,7 @@ use crate::{
     menu::MenuAction,
     project_menu, quit,
     rename::RenameTarget,
-    repos, restart,
+    repos, restart, scrollback,
     switcher::Target,
     text_field::{self, TextField},
     toast::ToastHit,
@@ -81,8 +81,8 @@ pub(crate) const BTN_RIGHT: u32 = 0x111;
 pub(crate) const BTN_MIDDLE: u32 = 0x112;
 /// Presses closer together than this, in time and place, count as a
 /// double (or triple) click.
-const MULTI_CLICK: Duration = Duration::from_millis(400);
-const MULTI_CLICK_SLOP: f64 = 4.0;
+pub(crate) const MULTI_CLICK: Duration = Duration::from_millis(400);
+pub(crate) const MULTI_CLICK_SLOP: f64 = 4.0;
 
 /// What a key gerdr kept from the apps does, once the keyboard is free again.
 enum Intercepted {
@@ -103,6 +103,8 @@ enum Intercepted {
     Repos(repos::Outcome),
     /// The inbox panel asked for this.
     Inbox(inbox::Outcome),
+    /// The scrollback viewer asked for this.
+    Scrollback(scrollback::Outcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -113,6 +115,9 @@ pub enum Overlay {
     Worktrees,
     Repos,
     Inbox,
+    /// The scrollback viewer, which has no field but takes its keys
+    /// the same way.
+    Scrollback,
     /// The switcher of this serial: not one opened after it.
     Switcher(u64),
 }
@@ -133,6 +138,12 @@ fn over_project_menu(action: &Action) -> bool {
         action,
         Action::ToggleTheme | Action::Quit | Action::Projects | Action::Inbox
     )
+}
+
+/// Whether `action`, picked with the prefix, works over the scrollback
+/// viewer: as over the project menu, and the viewer's key, to close it.
+fn over_scrollback(action: &Action) -> bool {
+    over_project_menu(action) || *action == Action::Scrollback
 }
 
 fn drag_cursor(drag: &Drag) -> CursorIcon {
@@ -186,6 +197,7 @@ impl Gerdr {
                             || state.worktrees.is_open()
                             || state.repos.is_open()
                             || state.inbox.is_open()
+                            || state.scrollback.is_some()
                             || state.switcher.is_some();
                         if overlay {
                             state.tooltip.hide();
@@ -224,7 +236,8 @@ impl Gerdr {
                         // clipboard's text comes back as a key for it.
                         if !state.prefix_armed
                             && text_field::is_paste(mods, sym)
-                            && let Some(overlay) = state.text_overlay()
+                            && let Some(overlay) =
+                                state.text_overlay().filter(|o| *o != Overlay::Scrollback)
                         {
                             state.suppressed_keys.push(code);
                             state.paste_clipboard(overlay);
@@ -325,6 +338,21 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out.map(Intercepted::Inbox));
                         }
+                        if state.scrollback.is_some() {
+                            state.suppressed_keys.push(code);
+                            if state.prefix_armed {
+                                state.prefix_armed = false;
+                                let action = state.keymap.action(mods, sym).filter(over_scrollback);
+                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                            }
+                            if state.keymap.is_prefix(mods, sym) {
+                                state.prefix_armed = true;
+                                return FilterResult::Intercept(None);
+                            }
+                            let out = state.scrollback_key(mods, sym);
+                            state.repeat_key(code, *mods, sym, handle.modified_sym(), false);
+                            return FilterResult::Intercept(out.map(Intercepted::Scrollback));
+                        }
                         if state.switcher.is_some() {
                             state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
@@ -393,6 +421,7 @@ impl Gerdr {
                 if state == ButtonState::Released {
                     self.field_drag = false;
                     self.repos_rows_drag = false;
+                    self.scrollback_release();
                     if self.thumb_drag.take().is_some() {
                         return;
                     }
@@ -427,7 +456,8 @@ impl Gerdr {
                         || self.project_menu.is_some()
                         || self.worktrees.is_open()
                         || self.repos.is_open()
-                        || self.inbox.is_open())
+                        || self.inbox.is_open()
+                        || self.scrollback.is_some())
                 {
                     if pointer.is_grabbed() {
                         pointer.button(
@@ -497,6 +527,7 @@ impl Gerdr {
                     || self.worktrees.is_open()
                     || self.repos.is_open()
                     || self.inbox.is_open()
+                    || self.scrollback.is_some()
                 {
                     if let Some(motion) = motion {
                         if self.project_menu.is_some() {
@@ -507,6 +538,8 @@ impl Gerdr {
                             self.repos_scroll(motion);
                         } else if self.inbox.is_open() {
                             self.inbox_scroll(motion);
+                        } else if self.scrollback.is_some() {
+                            self.scrollback_scroll(motion);
                         } else {
                             self.switcher_scroll(motion);
                         }
@@ -618,6 +651,12 @@ impl Gerdr {
             if button == BTN_LEFT {
                 self.inbox_click(location);
                 self.press_field(location);
+            }
+            return true;
+        }
+        if self.scrollback.is_some() {
+            if button == BTN_LEFT {
+                self.scrollback_click(location);
             }
             return true;
         }
@@ -940,6 +979,9 @@ impl Gerdr {
         if self.repos_rows_drag {
             self.repos_drag_rows(pos);
         }
+        if self.scrollback_dragging() {
+            self.scrollback_drag(pos);
+        }
         if self.thumb_drag.is_some() {
             self.drag_thumb(pos);
         }
@@ -950,7 +992,8 @@ impl Gerdr {
             || self.project_menu.is_some()
             || self.worktrees.is_open()
             || self.repos.is_open()
-            || self.inbox.is_open();
+            || self.inbox.is_open()
+            || self.scrollback.is_some();
         // An overlay's icons have tooltips of their own.
         let mut overlay_tip = None;
         if self.quit.is_some() {
@@ -969,6 +1012,8 @@ impl Gerdr {
             overlay_tip = self.repos_hover(pos);
         } else if self.inbox.is_open() {
             overlay_tip = self.inbox_hover(pos);
+        } else if self.scrollback.is_some() {
+            overlay_tip = self.scrollback_hover(pos);
         } else if self.switcher.is_some() {
             overlay_tip = self.switcher_motion(pos);
         }
@@ -1001,7 +1046,8 @@ impl Gerdr {
             let over_field = (overlay || self.switcher.is_some())
                 && self
                     .field_spot()
-                    .is_some_and(|field| field.area.to_f64().contains(pos));
+                    .is_some_and(|field| field.area.to_f64().contains(pos))
+                || self.on_scrollback_text(pos);
             let icon = if over_field {
                 CursorIcon::Text
             } else if self.reorder.is_some_and(|r| r.moving) {
@@ -1063,6 +1109,7 @@ impl Gerdr {
             Intercepted::Worktrees(outcome) => self.apply_worktrees(outcome),
             Intercepted::Repos(outcome) => self.apply_repos(outcome),
             Intercepted::Inbox(outcome) => self.apply_inbox(outcome),
+            Intercepted::Scrollback(outcome) => self.apply_scrollback(outcome),
         }
     }
 
@@ -1081,6 +1128,8 @@ impl Gerdr {
             Some(Overlay::Repos)
         } else if self.inbox.is_open() {
             Some(Overlay::Inbox)
+        } else if self.scrollback.is_some() {
+            Some(Overlay::Scrollback)
         } else {
             self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial))
         }
@@ -1118,6 +1167,7 @@ impl Gerdr {
                 .map(Intercepted::Worktrees),
             Overlay::Repos => self.repos_key(mods, sym, typed).map(Intercepted::Repos),
             Overlay::Inbox => self.inbox_key(mods, sym, typed).map(Intercepted::Inbox),
+            Overlay::Scrollback => self.scrollback_key(mods, sym).map(Intercepted::Scrollback),
             Overlay::Switcher(_) => self
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
@@ -1142,6 +1192,7 @@ impl Gerdr {
             Some(Overlay::Worktrees) => self.worktrees_hover(pos),
             Some(Overlay::Repos) => self.repos_hover(pos),
             Some(Overlay::Inbox) => self.inbox_hover(pos),
+            Some(Overlay::Scrollback) => self.scrollback_hover(pos),
             Some(Overlay::Switcher(_)) => self.switcher_motion(pos),
             None => None,
         };
@@ -1163,6 +1214,7 @@ impl Gerdr {
             )),
             Overlay::Repos => Some(chrome::repos_field(&self.repos_view()?, size, scale)),
             Overlay::Inbox => Some(chrome::inbox_field(&self.inbox_view()?, size, scale)),
+            Overlay::Scrollback => None,
             Overlay::Switcher(_) => Some(chrome::switcher_field(
                 &self.switcher_view()?,
                 self.content_rect(),
@@ -1179,6 +1231,7 @@ impl Gerdr {
             Overlay::Worktrees => self.worktrees.field_mut(),
             Overlay::Repos => self.repos.field_mut(),
             Overlay::Inbox => self.inbox.field_mut(),
+            Overlay::Scrollback => None,
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
         }
     }

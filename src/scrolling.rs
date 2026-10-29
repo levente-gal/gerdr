@@ -46,6 +46,7 @@ impl Gerdr {
             self.worktrees.stop_fling(),
             (self.repos.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
             (self.inbox.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
+            (self.scrollback.as_mut()).is_some_and(|viewer| viewer.stop_fling()),
         ]
         .contains(&true)
     }
@@ -61,6 +62,7 @@ impl Gerdr {
             self.worktrees_scroll_tick(now),
             self.repos_scroll_tick(now),
             self.inbox_scroll_tick(now),
+            self.scrollback_scroll_tick(now),
             self.sidebar_scroll_tick(now),
         ]
         .contains(&true);

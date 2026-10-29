@@ -33,6 +33,7 @@ mod project_menu;
 mod quit;
 mod repos;
 mod restart;
+mod scrollback;
 mod shapes;
 mod sidebar;
 mod switcher;
@@ -72,6 +73,7 @@ pub use project_menu::*;
 pub use quit::*;
 pub use repos::*;
 pub use restart::*;
+pub use scrollback::*;
 use shapes::*;
 pub use sidebar::*;
 pub use switcher::*;
@@ -141,6 +143,8 @@ pub struct ChromeView {
     pub repos: Option<ReposView>,
     /// Set while the inbox panel is open.
     pub inbox: Option<InboxView>,
+    /// Set while the scrollback viewer is open over a terminal pane.
+    pub scrollback: Option<ScrollbackView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
@@ -171,6 +175,7 @@ pub struct Chrome {
     worktrees: WorktreesLayers,
     repos: ReposLayers,
     inbox: InboxLayers,
+    scrollback: ScrollbackLayers,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -220,6 +225,7 @@ impl Chrome {
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
             inbox: InboxLayers::default(),
+            scrollback: ScrollbackLayers::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -393,6 +399,12 @@ impl Chrome {
             painter,
             Some((dot, blink)),
         ));
+
+        // The scrollback viewer, over its pane.
+        parts.extend(
+            self.scrollback
+                .parts(view.scrollback, theme, scale, now, painter),
+        );
 
         // The project menu reaches over the sidebar and the apps.
         parts.extend(self.project_menu.parts(
@@ -886,6 +898,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(layout.scope.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_buttons);
         rects.push(layout.query);
+        rects.extend(layout.hints.into_iter().map(|(_, rect)| rect));
+    }
+    if let Some(panel) = &view.scrollback {
+        let layout = scrollback_layout(panel.panel, &panel.hints);
+        rects.push(layout.list);
         rects.extend(layout.hints.into_iter().map(|(_, rect)| rect));
     }
     if let Some(restart) = &view.restart {

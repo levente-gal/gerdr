@@ -1024,6 +1024,38 @@ impl Herdr {
         }
     }
 
+    /// All that pane `pane_id` keeps of its output, oldest first, the lines
+    /// it wrapped joined again; and how many rows up from the bottom its
+    /// view stands. Read as a selection of every row, as `pane.read` gives
+    /// no more than its last 1000 lines.
+    pub fn pane_scrollback(&mut self, pane_id: &str) -> Result<(String, u64), String> {
+        let pane: PaneState = self.get("pane.get", json!({"pane_id": pane_id}), "pane")?;
+        let scroll = pane.scroll.ok_or("pane.get: no scroll")?;
+        let last = (scroll.max_offset_from_bottom + scroll.viewport_rows).saturating_sub(1);
+        // A column past the row's end is refused: up to its last character.
+        let end = self.call(
+            "pane.copy_motion",
+            json!({
+                "pane_id": pane_id,
+                "cursor": {"row": last, "col": 0},
+                "motion": "line_end",
+            }),
+        )?;
+        let col = end["cursor"]["col"].as_u64().unwrap_or(0);
+        let mut result = self.call(
+            "pane.selection.read",
+            json!({
+                "pane_id": pane_id,
+                "anchor": {"row": 0, "col": 0},
+                "cursor": {"row": last, "col": col},
+            }),
+        )?;
+        match result["text"].take() {
+            Value::String(text) => Ok((text, scroll.offset_from_bottom)),
+            _ => Err("pane.selection.read: no text in the reply".into()),
+        }
+    }
+
     /// Mark the agent in `pane_id` as seen, turning `done` into `idle`.
     pub fn agent_focus(&mut self, pane_id: &str) -> Result<(), String> {
         self.call("agent.focus", json!({"target": pane_id}))

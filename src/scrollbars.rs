@@ -17,6 +17,7 @@ pub enum Bar {
     Switcher,
     Worktrees,
     Inbox,
+    Scrollback,
     ReposTree,
     ReposDetail,
 }
@@ -46,6 +47,8 @@ impl Gerdr {
             &[Bar::ReposTree, Bar::ReposDetail]
         } else if self.inbox.is_open() {
             &[Bar::Inbox]
+        } else if self.scrollback.is_some() {
+            &[Bar::Scrollback]
         } else if self.switcher.is_some() {
             &[Bar::Switcher]
         } else if self.help_hit(pos).is_some() {
@@ -90,6 +93,11 @@ impl Gerdr {
                 let view = self.inbox_view()?;
                 let layout = chrome::inbox_layout(&view, size);
                 chrome::inbox_thumb(&view, &layout, size)
+            }
+            Bar::Scrollback => {
+                let view = self.scrollback_view()?;
+                let layout = chrome::scrollback_layout(view.panel, &view.hints);
+                chrome::scrollback_thumb(&view, &layout)
             }
             Bar::ReposTree | Bar::ReposDetail => {
                 let view = self.repos_view()?;
@@ -139,6 +147,7 @@ impl Gerdr {
             Bar::Switcher => self.switcher_scroll_to(at),
             Bar::Worktrees => self.worktrees_scroll_to(at),
             Bar::Inbox => self.inbox_scroll_to(at),
+            Bar::Scrollback => self.scrollback_scroll_to(at),
             Bar::ReposTree => self.repos_scroll_to(at, false),
             Bar::ReposDetail => self.repos_scroll_to(at, true),
         }

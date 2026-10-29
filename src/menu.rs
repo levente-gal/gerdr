@@ -64,6 +64,8 @@ pub enum MenuAction {
     /// Move pane `id` of the active tab to tab `t` of the workspace, or a
     /// new tab (`None`).
     PaneToTab(u32, Option<usize>),
+    /// Open the scrollback viewer over terminal pane `id`.
+    Scrollback(u32),
     RestartPane(u32),
     StopPane(u32),
     /// Take the web page in pane `id` of the active tab back, forward, or
@@ -333,6 +335,7 @@ impl Gerdr {
             MenuAction::SwapPane(id, side) => self.swap_pane(id, side),
             MenuAction::FlipPane(id) => self.flip_pane(id),
             MenuAction::PaneToTab(id, to) => self.move_pane_to_tab(id, to),
+            MenuAction::Scrollback(id) => self.open_scrollback(id),
             MenuAction::RestartPane(id) => {
                 self.focus_pane(|_| Some(id));
                 self.restart_focused_pane();

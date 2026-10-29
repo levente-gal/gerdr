@@ -732,7 +732,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0xe8b1959bc938f770, // sidebar
         0x6f51308dd7cdce6c, // tab_strip
-        0x3439cb7d3306236f, // pane_bar
+        0xa4fde3b4641a36cf, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
         0x1abd611161da9a5d, // switcher
@@ -746,7 +746,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0x38c5ddcf14f79f97, // sidebar
         0x16e4f5440b99562b, // tab_strip
-        0xfc4e33dc6b28947e, // pane_bar
+        0x9aae4769e03fabaa, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
         0x256730c796797af7, // switcher
@@ -760,7 +760,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0x15840963c4e44961, // sidebar
         0x4a807baae40c759e, // tab_strip
-        0xa03863dc2beb5821, // pane_bar
+        0xe86fa3dfe9b27e8b, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
         0x8ebdb3ee4ddea3a3, // switcher
@@ -774,7 +774,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     [
         0x2a0eceb7e43deab0, // sidebar
         0x8ef3bfabf0e0d845, // tab_strip
-        0xa042d2689e70b1ce, // pane_bar
+        0x0fbae14a0ea86452, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
         0xd9a115e473634844, // switcher

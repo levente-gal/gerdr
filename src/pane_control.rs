@@ -596,6 +596,11 @@ const STOP_HELP: (&str, &str, usize) = (
     1,
 );
 const CLOSE_PANE_HELP: (&str, &str, usize) = ("close pane", "close pane", 0);
+const SCROLLBACK_HELP: (&str, &str, usize) = (
+    "select and copy the scrollback",
+    "select and copy the scrollback",
+    0,
+);
 const FLIP_HELP: (&str, &str, usize) = ("flip the pane's split", "flip the pane's split", 0);
 const PANE_TO_NEW_TAB_HELP: (&str, &str, usize) =
     ("move pane to a new tab", "move pane to a new tab", 0);
@@ -610,6 +615,7 @@ fn hint_for(help: &Help, (own, group, index): (&str, &str, usize)) -> Option<Str
 /// What a bar button says when the pointer rests on it at `rect`.
 pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
     let (text, what) = match button {
+        BarButton::Scrollback => ("Select and copy", Some(SCROLLBACK_HELP)),
         BarButton::Restart => ("Restart", Some(RESTART_HELP)),
         BarButton::Stop => ("Stop", Some(STOP_HELP)),
         BarButton::Back => ("Back", None),
@@ -683,6 +689,12 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)),
         ]),
         _ => items.extend([
+            item(
+                "Select and copy…",
+                MenuAction::Scrollback(id),
+                SCROLLBACK_HELP,
+                true,
+            ),
             item(
                 "Restart",
                 MenuAction::RestartPane(id),
@@ -1022,6 +1034,7 @@ impl Gerdr {
             BarButton::Forward => WebStep::Forward,
             BarButton::Reload => WebStep::Reload,
             BarButton::CopyUrl => return self.copy_pane_url(id),
+            BarButton::Scrollback => return self.open_scrollback(id),
             BarButton::Restart | BarButton::Stop => {
                 let Some(pane_id) = self.tab().and_then(|tab| tab.herdr_pane(id)) else {
                     return;
@@ -1886,6 +1899,7 @@ mod tests {
                 "Move to new tab",
                 "Move to tab: zsh",
                 "Move to tab: vim notes",
+                "Select and copy…",
                 "Restart",
                 "Stop",
                 "Close pane"
@@ -1901,6 +1915,7 @@ mod tests {
                 &MenuAction::PaneToTab(7, None),
                 &MenuAction::PaneToTab(7, Some(0)),
                 &MenuAction::PaneToTab(7, Some(2)),
+                &MenuAction::Scrollback(7),
                 &MenuAction::RestartPane(7),
                 &MenuAction::StopPane(7),
                 &MenuAction::ClosePane(7),
@@ -1909,19 +1924,19 @@ mod tests {
         let enabled: Vec<bool> = menu.items.iter().map(|i| i.enabled).collect();
         assert_eq!(
             enabled,
-            [true, true, true, true, true, true, false, false, true]
+            [true, true, true, true, true, true, true, false, false, true]
         );
         let hints: Vec<Option<&str>> = menu.items.iter().map(|i| i.hint.as_deref()).collect();
         assert_eq!(hints[2..4], [Some("Ctrl+B Space"), Some("Ctrl+B !")]);
         assert_eq!(hints[4..6], [None, None]);
-        assert_eq!(hints[6], Some("Ctrl+B A"));
+        assert_eq!(hints[6..8], [Some("Ctrl+B ["), Some("Ctrl+B A")]);
         // With a command running: stop; with one exited: restart. A pane
         // alone in its tab has no split to flip, and no other tab to go to.
         let running = bar_content(Some(&running(9, "npm run dev")), None, None);
         let menu = bar_menu((0.0, 0.0).into(), 1, &running, &help);
         assert!(!menu.items[2].enabled);
-        assert_eq!(menu.items[4].label, "Restart");
-        assert!(!menu.items[4].enabled && menu.items[5].enabled);
+        assert_eq!(menu.items[5].label, "Restart");
+        assert!(!menu.items[5].enabled && menu.items[6].enabled);
     }
 
     #[test]
