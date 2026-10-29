@@ -144,6 +144,17 @@ impl Scroll {
         }
     }
 
+    /// Glide to `pos` from `now`, as a notch would: the list was asked to
+    /// show something (the active workspace, say) without a jump.
+    pub fn glide_to(&mut self, pos: f64, now: Instant, b: Bounds) {
+        self.advance(now, b);
+        self.unpull();
+        self.samples.clear();
+        self.touched = None;
+        let target = pos.clamp(0.0, b.max.max(0.0));
+        self.moving = (target != self.pos).then_some(Moving::Glide { target, at: now });
+    }
+
     /// Take `motion` at `now`.
     pub fn apply(&mut self, motion: Motion, now: Instant, b: Bounds) {
         self.advance(now, b);
@@ -531,6 +542,15 @@ mod tests {
         s.jump_row(3);
         assert_eq!(s.pos(), 3.0);
         assert!(!s.moving(t));
+    }
+
+    #[test]
+    fn a_glide_to_a_place_gets_there() {
+        let (mut s, t) = (Scroll::default(), Instant::now());
+        s.glide_to(4.0, t, rows(10.0));
+        assert!(s.moving(t));
+        run(&mut s, t, 400, rows(10.0));
+        assert_eq!(s.pos(), 4.0);
     }
 
     #[test]
