@@ -311,7 +311,13 @@ fn switcher() -> SwitcherView {
             ),
             row(ItemIcon::Tab, "2 zsh", "gerdr", "tab", Some("Tabs"), &[]),
             row(
-                ItemIcon::Agent(AgentStatus::Working),
+                ItemIcon::Agent(
+                    super::Badge {
+                        icon: crate::agent_icons::AgentIcon::Claude,
+                        dot: super::Dot::Working,
+                    },
+                    AgentStatus::Working,
+                ),
                 "claude",
                 "gerdr",
                 "agent",
@@ -712,7 +718,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
-        0x9ff4f582252e5a7d, // switcher
+        0x76a9cb7d0b096ad0, // switcher
         0xe4d55e0a322e116f, // welcome
         0x59378f4fb455dd74, // quit
         0xd5fbf9747a465bfc, // project_menu
@@ -726,7 +732,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
-        0x5f7bff6c609f26be, // switcher
+        0x473f6be20d8ad3c1, // switcher
         0xc6a2b9324f6b7b75, // welcome
         0xca6aac6e936af23a, // quit
         0xde799af24ea3160e, // project_menu
@@ -740,7 +746,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
-        0x38ffd61880514d09, // switcher
+        0xe1503c56f070d5ca, // switcher
         0x0bf38b649779155b, // welcome
         0x9141f1eb6dfa4384, // quit
         0xa0b64fb50d67fbc2, // project_menu
@@ -754,7 +760,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
-        0x7ab00734e2c6e8e3, // switcher
+        0x857578b6e350f303, // switcher
         0x2408bfddb0031e83, // welcome
         0xea36deb588723e15, // quit
         0xf7d02feda2f8909b, // project_menu

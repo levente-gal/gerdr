@@ -430,18 +430,21 @@ impl Chrome {
                 }),
         );
 
-        // The switcher at the top of the app area.
+        // The switcher at the top of the app area, its agents' dots
+        // blinking in front of it.
+        let mut switcher_dots = None;
         let switcher = view.switcher.map(|switcher| {
-            let panel = switcher_geometry(&switcher, area).panel;
-            let (loc, size) = shadowed(panel);
-            ((switcher, panel.size.w, theme, scale), loc, size)
+            let geometry = switcher_geometry(&switcher, area);
+            let (loc, size) = shadowed(geometry.panel);
+            switcher_dots = Some((loc, switcher_blinkers(&switcher, &geometry)));
+            ((switcher, geometry.panel.size.w, theme, scale), loc, size)
         });
-        parts.extend(
-            self.switcher
-                .part(switcher, now, true, |(switcher, w, ..)| {
-                    painter.switcher(switcher, *w, scale, theme.palette())
-                }),
-        );
+        let part = self
+            .switcher
+            .part(switcher, now, true, |(switcher, w, ..)| {
+                painter.switcher(switcher, *w, scale, theme.palette())
+            });
+        push_popup(&mut parts, part, dot, switcher_dots, blink);
 
         // The help panel, centred at the bottom of the app area.
         let pinned = view.help_pinned;
@@ -643,6 +646,30 @@ fn push_dots<'a>(
             parts.push((dot, rect.loc, rect.size, alpha));
         }
     }
+}
+
+/// A popup's `part`, if it shows, with the blinking `dot` in front of it
+/// at each of `dots`: the rects laid out for the popup placed at a point,
+/// moved with it as it slides and faded with it. A popup fading out has
+/// none.
+fn push_popup<'a>(
+    parts: &mut Vec<Part<'a>>,
+    part: Option<Part<'a>>,
+    dot: &'a MemoryRenderBuffer,
+    dots: Option<(Point<i32, Logical>, Vec<Rect>)>,
+    blink: f32,
+) {
+    let Some(part) = part else {
+        return;
+    };
+    if let Some((at, dots)) = dots {
+        let by = part.1 - at;
+        let moved = dots
+            .into_iter()
+            .map(|dot| Rectangle::new(dot.loc + by, dot.size));
+        push_dots(parts, dot, moved, part.3 * blink);
+    }
+    parts.push(part);
 }
 
 /// A drawn buffer, where it goes on the output, the logical size it covers
