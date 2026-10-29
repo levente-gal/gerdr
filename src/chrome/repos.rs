@@ -27,7 +27,6 @@ use std::ops::Range;
 
 use crate::diff::LineKind;
 use crate::text_field::Line;
-use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -258,6 +257,12 @@ pub struct BranchMenuView {
     /// to 1; with some, the lines have one more under the list, shown in
     /// part.
     pub part: f64,
+    /// How far the lines are moved down (up when negative), logical
+    /// pixels, while the menu is pulled past an end.
+    pub over: f64,
+    /// The longest of all its branches, in view or not: the menu is wide
+    /// enough for them.
+    pub widest: Vec<String>,
 }
 
 /// The branch menu's row creating the branch typed in its search.
@@ -1207,6 +1212,108 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
     }
 }
 
+/// A line of the branch menu's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuItem {
+    /// By index into `BranchMenuView::headings`.
+    Heading(usize),
+    /// By index into `BranchMenuView::rows`.
+    Row(usize),
+}
+
+/// The first `laid` lines of `menu`'s list, top down: each group's
+/// heading over its rows.
+fn menu_items(menu: &BranchMenuView, laid: usize) -> Vec<MenuItem> {
+    let (mut headings, mut rows) = (0, 0);
+    let mut items = Vec::with_capacity(laid);
+    for _ in 0..laid {
+        if menu
+            .headings
+            .get(headings)
+            .is_some_and(|&(at, _)| at == rows)
+        {
+            items.push(MenuItem::Heading(headings));
+            headings += 1;
+        } else if rows < menu.rows.len() {
+            items.push(MenuItem::Row(rows));
+            rows += 1;
+        }
+    }
+    items
+}
+
+/// A line of the branch menu as drawn: what its pixels come from, but
+/// its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MenuLook {
+    Heading(String),
+    Branch {
+        label: String,
+        /// Enter picks it.
+        picked: bool,
+        /// They are all on it.
+        current: bool,
+        /// It has a local branch to delete.
+        deletable: bool,
+        /// What the pointer is over on it, as on the first row.
+        hover: Option<ReposHit>,
+    },
+}
+
+/// Line `item` of `view`'s branch menu `menu`, as drawn.
+fn menu_look(view: &ReposView, menu: &BranchMenuView, item: MenuItem) -> MenuLook {
+    match item {
+        MenuItem::Heading(i) => MenuLook::Heading(
+            menu.headings
+                .get(i)
+                .map_or(String::new(), |(_, l)| l.clone()),
+        ),
+        MenuItem::Row(i) => MenuLook::Branch {
+            label: menu.rows[i].clone(),
+            picked: menu.picked == Some(i),
+            current: menu.current == Some(i),
+            deletable: menu.deletable.get(i) == Some(&true),
+            hover: match view.hover {
+                Some(ReposHit::BranchRow(j)) if j == i => Some(ReposHit::BranchRow(0)),
+                Some(ReposHit::BranchDelete(j)) if j == i => Some(ReposHit::BranchDelete(0)),
+                _ => None,
+            },
+        },
+    }
+}
+
+/// The lines of `menu` as `layout` has them, top down, each with its
+/// rect; `rows` the rows'.
+fn menu_rects(menu: &BranchMenuView, layout: &ReposLayout, rows: &[Rect]) -> Vec<(MenuItem, Rect)> {
+    let laid = layout.branch_headings.len() + rows.len();
+    menu_items(menu, laid)
+        .into_iter()
+        .filter_map(|item| {
+            let rect = match item {
+                MenuItem::Heading(i) => layout.branch_headings.iter().find(|(j, _)| *j == i)?.1,
+                MenuItem::Row(i) => *rows.get(i)?,
+            };
+            Some((item, rect))
+        })
+        .collect()
+}
+
+/// What of the branch menu `menu` its card is drawn from: all but its
+/// lines and where they stand. `empty` is what it says, empty while it
+/// has rows.
+fn menu_card_view(menu: &BranchMenuView) -> BranchMenuView {
+    BranchMenuView {
+        empty: match menu.rows.is_empty() {
+            true => menu.empty.clone(),
+            false => String::new(),
+        },
+        query: menu.query.clone(),
+        placeholder: menu.placeholder.clone(),
+        create: menu.create.clone(),
+        ..BranchMenuView::default()
+    }
+}
+
 /// A tree line as drawn: what its pixels come from, but its place.
 #[derive(Clone, Debug, PartialEq)]
 struct TreeRow {
@@ -1538,6 +1645,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         let widest = menu
             .rows
             .iter()
+            .chain(&menu.widest)
             .chain([&menu.empty, &menu.placeholder, &menu.query.text])
             .chain(create)
             .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
@@ -1571,30 +1679,24 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (mx + BRANCH_MENU_PAD, rows_y).into(),
             (inner, shown as i32 * row_h).into(),
         ));
-        let shift = wheel::shift(menu.part, row_h);
+        // Scrolled part of a line, the lines start up by as much; pulled
+        // past an end, they move with the pull.
+        let shift = scrolled_by(menu.part, menu.over, row_h);
         let card = Rectangle::new((mx, my).into(), (mw, mh).into());
         branch_search = Some(Rectangle::new(
             (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
             (inner, row_h).into(),
         ));
         let line = |j: usize| {
-            Rectangle::new(
-                (mx + BRANCH_MENU_PAD, rows_y + j as i32 * row_h - shift).into(),
-                (inner, row_h).into(),
-            )
+            let y = (rows_y as f64 + (j as i32 * row_h) as f64 - shift).round() as i32;
+            Rectangle::new((mx + BRANCH_MENU_PAD, y).into(), (inner, row_h).into())
         };
         let mut rows: Vec<Rect> = Vec::new();
         let laid = if shown == lines { shown + under } else { shown };
-        for j in 0..laid {
-            let next = branch_headings.len();
-            if menu
-                .headings
-                .get(next)
-                .is_some_and(|&(at, _)| at == rows.len())
-            {
-                branch_headings.push((next, line(j)));
-            } else if rows.len() < menu.rows.len() {
-                rows.push(line(j));
+        for (j, item) in menu_items(menu, laid).into_iter().enumerate() {
+            match item {
+                MenuItem::Heading(i) => branch_headings.push((i, line(j))),
+                MenuItem::Row(_) => rows.push(line(j)),
             }
         }
         (card, rows)
@@ -2250,7 +2352,9 @@ impl Painter {
     }
 
     /// The branch menu of `view`, while open, as `layout` has it, moved by
-    /// `by` onto the buffer.
+    /// `by` onto the buffer: its card, then its lines cut to where they
+    /// show.
+    #[cfg(test)]
     fn repos_menu(
         &self,
         c: &mut Canvas,
@@ -2260,28 +2364,47 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        let (Some(menu), Some((card, rows)), Some(search)) =
+        let (Some(menu), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) else {
+            return;
+        };
+        self.repos_menu_card(c, view, layout, by, scale, p);
+        if menu.rows.is_empty() {
+            return;
+        }
+        let list = moved(layout.branch_list.unwrap_or(*card), by);
+        let (lx, ly, lw, lh) = rect_px(list, scale);
+        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
+            for (item, rect) in menu_rects(menu, layout, rows) {
+                let look = menu_look(view, menu, item);
+                self.branch_line(c, &look, moved(rect, by), scale, p);
+            }
+        });
+    }
+
+    /// The branch menu's card of `view`, while open, as `layout` has it,
+    /// moved by `by` onto the buffer.
+    fn repos_menu_card(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        layout: &ReposLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(menu), Some((card, _)), Some(search)) =
             (&view.branch.menu, &layout.branch_menu, layout.branch_search)
         else {
             return;
         };
-        let shift = |r: Rect| moved(r, by);
-        let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
-        let create = layout.branch_create.map(shift);
-        let headings: Vec<(usize, Rect)> = layout
-            .branch_headings
-            .iter()
-            .map(|&(i, r)| (i, shift(r)))
-            .collect();
-        let list = layout.branch_list.map_or(shift(*card), shift);
-        let parts = (
-            shift(*card),
-            shift(search),
-            create,
-            (list, &rows[..]),
-            &headings[..],
+        let at = (
+            moved(*card, by),
+            moved(search, by),
+            layout.branch_create.map(|r| moved(r, by)),
         );
-        self.branch_menu(c, view, menu, parts, scale, p);
+        let card_view = menu_card_view(menu);
+        let hover = view.hover.filter(|h| *h == ReposHit::BranchCreate);
+        self.branch_menu_card(c, &card_view, hover, at, view.density, scale, p);
     }
 
     /// A tree line `size` big in a buffer of its own.
@@ -3497,24 +3620,18 @@ impl Painter {
         );
     }
 
-    /// The branch menu, a card in `card` with its search in `search`, the
-    /// row creating the branch typed in `create`, then a row per branch in
-    /// `rows`: the one Enter picks lit, the one they are all on checked;
-    /// the groups' headings in `headings`, muted. Rows and headings are cut
-    /// to `list`, where they show.
-    #[allow(clippy::type_complexity)]
-    fn branch_menu(
+    /// The branch menu's card in `card` with its search in `search` and
+    /// the row creating the branch typed in `create`, or what it says
+    /// without rows; not its lines (see `menu_card_view`). `hover` is what
+    /// the pointer is over.
+    #[allow(clippy::too_many_arguments)]
+    fn branch_menu_card(
         &self,
         c: &mut Canvas,
-        view: &ReposView,
         menu: &BranchMenuView,
-        (card, search, create, (list, rows), headings): (
-            Rect,
-            Rect,
-            Option<Rect>,
-            (Rect, &[Rect]),
-            &[(usize, Rect)],
-        ),
+        hover: Option<ReposHit>,
+        (card, search, create): (Rect, Rect, Option<Rect>),
+        density: Density,
         scale: f64,
         p: &Palette,
     ) {
@@ -3540,7 +3657,7 @@ impl Painter {
             let r = (MENU_RADIUS - 2.0) * s;
             if row.picked {
                 c.rounded(x, y, w, h, r, p.selected);
-            } else if view.hover == Some(ReposHit::BranchCreate) {
+            } else if hover == Some(ReposHit::BranchCreate) {
                 c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
             }
             let color = if row.problem.is_some() {
@@ -3574,7 +3691,7 @@ impl Painter {
                 return;
             }
         }
-        if menu.rows.is_empty() {
+        if menu.rows.is_empty() && !menu.empty.is_empty() {
             let row = Rectangle::new(
                 (
                     card.loc.x + BRANCH_MENU_PAD,
@@ -3583,7 +3700,7 @@ impl Painter {
                     .into(),
                 (
                     (card.size.w - 2 * BRANCH_MENU_PAD).max(0),
-                    repos_row(view.density),
+                    repos_row(density),
                 )
                     .into(),
             );
@@ -3600,17 +3717,19 @@ impl Painter {
                 scale,
                 p.placeholder,
             );
-            return;
         }
-        let (lx, ly, lw, lh) = rect_px(list, scale);
-        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
-            for &(i, rect) in headings {
-                let Some((_, label)) = menu.headings.get(i) else {
-                    continue;
-                };
+    }
+
+    /// A line of the branch menu in `rect`: a group's heading, muted; or a
+    /// branch, lit when Enter picks it, checked when they are all on it.
+    fn branch_line(&self, c: &mut Canvas, look: &MenuLook, rect: Rect, scale: f64, p: &Palette) {
+        let s = scale as f32;
+        let pad = BRANCH_ROW_PAD as f32 * s;
+        let row_band = band(rect, scale);
+        let (label, picked, current, deletable, hover) = match look {
+            MenuLook::Heading(label) => {
                 let (x, end) = phys(rect, scale);
-                let pad = BRANCH_ROW_PAD as f32 * s;
-                let row_band = band(rect, scale);
+                let color = p.placeholder;
                 self.text(
                     c,
                     label,
@@ -3619,38 +3738,53 @@ impl Painter {
                     end - pad,
                     row_band,
                     scale,
-                    p.placeholder,
+                    color,
                 );
+                return;
             }
-            for (i, (rect, label)) in rows.iter().zip(&menu.rows).enumerate() {
-                let (x, y, w, h) = rect_px(*rect, scale);
-                let r = (MENU_RADIUS - 2.0) * s;
-                let on_delete = view.hover == Some(ReposHit::BranchDelete(i));
-                let hovered = on_delete || view.hover == Some(ReposHit::BranchRow(i));
-                if menu.picked == Some(i) {
-                    c.rounded(x, y, w, h, r, p.selected);
-                } else if hovered {
-                    c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
-                }
-                let mark = branch_check(*rect);
-                if menu.current == Some(i) {
-                    icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
-                }
-                // The delete button shows on the row pointed at or picked.
-                let delete = branch_delete(*rect);
-                let deletable = menu.deletable.get(i) == Some(&true);
-                if deletable && (hovered || menu.picked == Some(i)) {
-                    let color = if on_delete { p.error } else { p.placeholder };
-                    icon_sdf(c, delete, scale, color, |x, y| trash(x, y, s));
-                }
-                let pad = BRANCH_ROW_PAD as f32 * s;
-                let end = (delete.loc.x as f64 * scale) as f32;
-                let row_band = band(*rect, scale);
-                self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
-            }
-        });
+            MenuLook::Branch {
+                label,
+                picked,
+                current,
+                deletable,
+                hover,
+            } => (label, *picked, *current, *deletable, *hover),
+        };
+        let (x, y, w, h) = rect_px(rect, scale);
+        let r = (MENU_RADIUS - 2.0) * s;
+        let on_delete = hover == Some(ReposHit::BranchDelete(0));
+        let hovered = hover.is_some();
+        if picked {
+            c.rounded(x, y, w, h, r, p.selected);
+        } else if hovered {
+            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
+        }
+        let mark = branch_check(rect);
+        if current {
+            icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
+        }
+        // The delete button shows on the row pointed at or picked.
+        let delete = branch_delete(rect);
+        if deletable && (hovered || picked) {
+            let color = if on_delete { p.error } else { p.placeholder };
+            icon_sdf(c, delete, scale, color, |x, y| trash(x, y, s));
+        }
+        let end = (delete.loc.x as f64 * scale) as f32;
+        self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
     }
 
+    /// A line of the branch menu `size` big, in a buffer of its own.
+    fn branch_line_buffer(
+        &self,
+        look: &MenuLook,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        self.branch_line(&mut c, look, Rectangle::from_size(size), scale, p);
+        c.into_buffer(false)
+    }
     /// The sheet over the panel, which is dimmed under it: its title, a
     /// line per repository and its buttons, the default one in the accent.
     #[allow(clippy::too_many_arguments)]
@@ -3822,8 +3956,9 @@ type DetailKey = (DetailLook, Size<i32, Logical>, super::Theme, f64);
 /// A scrollbar thumb's, and the pinned header's shadow's: its size, the
 /// theme and the scale.
 type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
-/// The branch menu's: the menu, what the pointer is over, its card, the
-/// density, the theme and the scale.
+/// The branch menu's card's: the menu as `menu_card_view` has it, what
+/// the pointer is over on it, the card, the density, the theme and the
+/// scale.
 type MenuKey = (
     BranchMenuView,
     Option<ReposHit>,
@@ -3832,6 +3967,9 @@ type MenuKey = (
     super::Theme,
     f64,
 );
+/// A branch menu line's: the line as drawn, its size, the theme and the
+/// scale.
+type MenuLineKey = (MenuLook, Size<i32, Logical>, super::Theme, f64);
 /// The sheet's: the sheet, what the pointer is over, its card, the
 /// output's size, the theme and the scale.
 type SheetKey = (
@@ -3847,7 +3985,8 @@ type SheetKey = (
 /// `Overlay`): its frame; over it each of the tree's lines and of the
 /// detail's rows in a buffer of its own, the detail's pinned header with
 /// its shadow and the thumbs of their scrollbars, so that scrolling them
-/// only moves those; then the branch menu and the sheet over all.
+/// only moves those; then the branch menu's card and over it its lines,
+/// each its own buffer too; the sheet over all.
 #[derive(Default)]
 pub(super) struct ReposLayers {
     overlay: super::Overlay<FrameKey>,
@@ -3857,10 +3996,14 @@ pub(super) struct ReposLayers {
     detail_thumb: super::Cached<ThumbKey>,
     pin_shadow: super::Cached<ThumbKey>,
     menu: super::Cached<MenuKey>,
+    menu_lines: super::RowCache<MenuLineKey>,
     sheet: super::Cached<SheetKey>,
-    /// How many times the frame was drawn, for tests.
+    /// How many times the frame and the branch menu's card were drawn,
+    /// for tests.
     #[cfg(test)]
     frames: usize,
+    #[cfg(test)]
+    cards: usize,
 }
 
 impl ReposLayers {
@@ -3886,9 +4029,12 @@ impl ReposLayers {
             detail_thumb,
             pin_shadow,
             menu,
+            menu_lines,
             sheet,
             #[cfg(test)]
             frames,
+            #[cfg(test)]
+            cards,
         } = self;
         let p = theme.palette();
         let draw = |(view, output, ..): &FrameKey| {
@@ -3919,13 +4065,31 @@ impl ReposLayers {
                 });
                 over.push(super::Part::new(buffer, loc, size, 1.0));
             }
-            if let (Some(m), Some((card, _))) = (&view.branch.menu, &layout.branch_menu) {
+            if let (Some(m), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) {
+                let list = layout.branch_list.unwrap_or(*card);
+                let row_h = repos_row(view.density);
+                let shift = scrolled_by(m.part, m.over, row_h);
+                for (j, (item, rect)) in menu_rects(m, layout, rows).into_iter().enumerate() {
+                    let key = (menu_look(view, m, item), rect.size, theme, scale);
+                    let buffer = menu_lines.get(key, rect.size, scale, |(look, size, ..)| {
+                        painter.branch_line_buffer(look, *size, scale, p)
+                    });
+                    let y = (list.loc.y + j as i32 * row_h) as f64 - shift;
+                    let at = Point::from((rect.loc.x as f64, y));
+                    let part = super::Part::new(&buffer, rect.loc, rect.size, 1.0).at(at);
+                    over.push(part.clipped(list));
+                }
                 let (loc, size) = super::shadowed(*card);
-                let key = (m.clone(), view.hover, *card, view.density, theme, scale);
+                let hover = view.hover.filter(|h| *h == ReposHit::BranchCreate);
+                let key = (menu_card_view(m), hover, *card, view.density, theme, scale);
                 let buffer = menu.get(key, |_| {
+                    #[cfg(test)]
+                    {
+                        *cards += 1;
+                    }
                     let mut c = Canvas::new(physical(size, scale));
                     let by = Point::from((SHADOW - card.loc.x, SHADOW - card.loc.y));
-                    painter.repos_menu(&mut c, view, layout, by, scale, p);
+                    painter.repos_menu_card(&mut c, view, layout, by, scale, p);
                     c.into_buffer(false)
                 });
                 over.push(super::Part::new(buffer, loc, size, 1.0));
@@ -3963,9 +4127,11 @@ impl ReposLayers {
         let parts = overlay.parts(placed, now, true, draw, over);
         tree.sweep();
         detail.sweep();
+        menu_lines.sweep();
         if !overlay.lingers() {
             tree.clear();
             detail.clear();
+            menu_lines.clear();
         }
         parts
     }
@@ -4319,6 +4485,8 @@ mod tests {
                     create: None,
                     headings: vec![(0, "Local".into()), (3, "Remote".into())],
                     part: 0.0,
+                    over: 0.0,
+                    widest: vec!["main / master".into(), "production".into()],
                 }),
                 ..full().branch
             },
@@ -5111,6 +5279,65 @@ mod tests {
             for (k, y) in ys_b[shadow + 1..].iter().enumerate() {
                 assert!((ys_a[2 + k] - y - by).abs() < 1e-9, "{k}: {y}");
                 assert_eq!(layout.detail_rows[k + 1].loc.y, y.round() as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_the_branch_menu_by_part_of_a_line_draws_nothing_again() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let row_h = repos_row(DENSITY) as f64;
+        let opened = std::time::Instant::now();
+        let now = opened + std::time::Duration::from_secs(1);
+        // Scrolled part of a line, one more shown in part under the list.
+        let mut view = ReposView {
+            hover: None,
+            ..with_menu()
+        };
+        if let Some(menu) = &mut view.branch.menu {
+            menu.part = 0.2;
+            menu.rows.push("release/2.2".into());
+            menu.deletable.push(false);
+        }
+        let mut layers = ReposLayers::default();
+        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
+        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        let drawn = (layers.frames, layers.cards, layers.menu_lines.drawn());
+        assert_eq!(drawn, (1, 1, 7));
+        let list = repos_layout(&view, size).branch_list.unwrap();
+        let in_list = |parts: &[crate::chrome::Part]| -> Vec<f64> {
+            let ys = parts.iter().filter(|p| p.clip == Some(list));
+            ys.map(|p| p.loc.y).collect()
+        };
+        let ys_a = in_list(&a);
+        assert_eq!(ys_a.len(), 7);
+        // Further by part of a line; pulled down past the start, the line
+        // under the list gone.
+        for (part, over) in [(0.7, 0.0), (0.0, 6.5)] {
+            let mut moved = view.clone();
+            if let Some(menu) = &mut moved.branch.menu {
+                (menu.part, menu.over) = (part, over);
+                if part == 0.0 {
+                    menu.rows.pop();
+                    menu.deletable.pop();
+                }
+            }
+            let layout = repos_layout(&moved, size);
+            assert_eq!(layout.branch_list, Some(list));
+            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            let again = (layers.frames, layers.cards, layers.menu_lines.drawn());
+            assert_eq!(again, drawn);
+            let ys_b = in_list(&b);
+            let by = (part - 0.2) * row_h - over;
+            for (y_a, y_b) in ys_a.iter().zip(&ys_b) {
+                assert!((y_a - y_b - by).abs() < 1e-9, "{y_a} {y_b}");
+            }
+            // Hit where they are drawn, to the logical pixel.
+            let (_, rows) = layout.branch_menu.clone().unwrap();
+            let lines = menu_rects(moved.branch.menu.as_ref().unwrap(), &layout, &rows);
+            for ((_, rect), y) in lines.iter().zip(&ys_b) {
+                assert_eq!(rect.loc.y, y.round() as i32);
             }
         }
     }

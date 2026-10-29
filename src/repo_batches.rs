@@ -1071,7 +1071,6 @@ impl Gerdr {
     /// branch menu's, the detail's, else the tree's. What is under the
     /// pointer is left as it was while it moves.
     pub fn repos_scroll(&mut self, motion: crate::scroll::Motion) {
-        let rows = crate::scroll::Scroll::legacy_rows(motion, 40.0);
         let now = std::time::Instant::now();
         let Some(view) = self.repos_view() else {
             return;
@@ -1110,7 +1109,7 @@ impl Gerdr {
             return;
         };
         if over_menu {
-            panel.scroll_branches(rows, &ctx);
+            panel.scroll_branches(motion, now, &ctx);
         } else {
             panel.scroll(motion, now, over_detail, &ctx);
         }

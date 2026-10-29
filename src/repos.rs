@@ -75,11 +75,13 @@ use crate::{
     review::{self, Comment, Quoted, Review},
     scroll::{Bounds, Motion, Scroll},
     text_field::{self, Edit, TextField},
-    wheel::Wheel,
 };
 
 /// A repository changing this many files or more starts folded.
 pub const FOLD_FILES: usize = 200;
+
+/// How many of the branch menu's longest branches it is measured by.
+const WIDEST: usize = 3;
 
 /// The panel, while open, and the batch running or last run.
 #[derive(Default)]
@@ -298,12 +300,13 @@ enum RowKey {
     At(usize),
 }
 
-/// The branch picker's menu: the first branch in view, and the one Enter
+/// The branch picker's menu: where its lines stand, and the branch Enter
 /// picks, by index into `Panel::shown_branches`; what is typed to find
 /// one, which has the keyboard.
 #[derive(Clone, Debug, Default)]
 pub struct BranchMenu {
-    pub first: usize,
+    /// In lines (headings and branches).
+    pub scroll: Scroll,
     pub picked: usize,
     pub query: TextField,
     pub action: MenuAction,
@@ -312,8 +315,6 @@ pub struct BranchMenu {
     pub create_first: bool,
     /// Enter creates the branch typed rather than picking `picked`.
     pub on_create: bool,
-    /// The wheel's turn not yet a whole line.
-    pub wheel: Wheel,
 }
 
 /// Where a repository has the branch about to be created.
@@ -372,23 +373,17 @@ fn menu_lines(branches: &[Branch]) -> Vec<MenuLine> {
     lines
 }
 
-/// The menu's top line `first`, moved the least to show branch `k` of
-/// `lines` in a page of `page`, with its group's heading when it is the
-/// group's first branch.
-fn scroll_to(lines: &[MenuLine], k: usize, first: usize, page: usize) -> usize {
+/// Where the menu standing at `pos` (in lines) stands moved the least to
+/// show branch `k` of `lines` whole in a page of `page`, with its group's
+/// heading when it is the group's first branch.
+fn scroll_to(lines: &[MenuLine], k: usize, pos: f64, page: usize) -> f64 {
     let at = lines
         .iter()
         .position(|l| *l == MenuLine::Branch(k))
         .unwrap_or(0);
     let headed = at > 0 && matches!(lines[at - 1], MenuLine::Heading { .. });
     let top = if headed && page > 1 { at - 1 } else { at };
-    if top < first {
-        top
-    } else if at >= first + page {
-        at + 1 - page
-    } else {
-        first
-    }
+    showing(pos, (top, at), page)
 }
 
 /// Where a list of `len` rows with `page` of them in view stands by
@@ -1733,8 +1728,15 @@ impl Panel {
             let shown: Vec<&Branch> = in_window.iter().map(|&k| &branches[k]).collect();
             let current = self.current_branch(ctx);
             let in_view = |k: usize| in_window.iter().position(|&w| w == k);
+            // The longest of them all, which the menu is as wide as, so
+            // that it keeps its width as they scroll by.
+            let mut widest: Vec<&Branch> = branches.iter().collect();
+            widest.sort_by_key(|b| Reverse(b.label.chars().count()));
+            widest.truncate(WIDEST);
             BranchMenuView {
                 part,
+                over: menu.scroll.overscroll(),
+                widest: widest.into_iter().map(|b| b.label.clone()).collect(),
                 headings,
                 rows: shown.iter().map(|b| b.label.clone()).collect(),
                 deletable: shown
@@ -1821,19 +1823,18 @@ impl Panel {
                 let picked = current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
                     .unwrap_or(0);
-                (scroll_to(&menu_lines(&branches), picked, 0, page), picked)
+                (scroll_to(&menu_lines(&branches), picked, 0.0, page), picked)
             }
-            MenuAction::Integrate(_) => (0, 0),
+            MenuAction::Integrate(_) => (0.0, 0),
         };
         self.error = None;
         self.branch_menu = Some(BranchMenu {
-            first,
+            scroll: Scroll::at(first),
             picked,
             query: TextField::default(),
             action,
             create_first: false,
             on_create: false,
-            wheel: Wheel::default(),
         });
     }
 
@@ -1872,14 +1873,12 @@ impl Panel {
     /// and that part.
     fn menu_window(&self, branches: &[Branch], page: usize) -> (Vec<MenuLine>, f64) {
         let lines = menu_lines(branches);
-        let first = self.branch_menu.as_ref().map_or(0, |m| m.first);
-        let first = first.min(lines.len().saturating_sub(page));
-        let end = (first + page).min(lines.len());
-        let part = match &self.branch_menu {
-            Some(menu) if end < lines.len() => menu.wheel.part(first),
-            _ => 0.0,
+        let (first, part) = match &self.branch_menu {
+            Some(menu) => standing(&menu.scroll, lines.len(), page),
+            None => (0, 0.0),
         };
-        (lines[first..end + usize::from(part > 0.0)].to_vec(), part)
+        let end = (first + page + usize::from(part > 0.0)).min(lines.len());
+        (lines[first..end].to_vec(), part)
     }
 
     /// A key while the branch menu is open, which takes them all:
@@ -1929,7 +1928,8 @@ impl Panel {
             // Down from the row creating the branch: the first branch.
             Keysym::Down | Keysym::KP_Down if menu.on_create => {
                 menu.on_create = len == 0;
-                (menu.first, menu.picked) = (0, 0);
+                menu.scroll.jump(0.0);
+                menu.picked = 0;
                 return None;
             }
             Keysym::Up | Keysym::KP_Up if create && at == 0 => {
@@ -1955,9 +1955,9 @@ impl Panel {
             }
             _ => {
                 if menu.query.key(mods, sym, typed).changed() {
-                    (menu.first, menu.picked) = (0, 0);
-                    // Other branches: none of a line is scrolled past.
-                    menu.wheel = Wheel::default();
+                    // Other branches, from the top.
+                    menu.scroll.jump(0.0);
+                    menu.picked = 0;
                     let create_first = menu.create_first;
                     let found = !self.shown_branches(ctx).is_empty();
                     let create = self.create_row(ctx).is_some();
@@ -1971,8 +1971,9 @@ impl Panel {
         let to = to.clamp(0, len.saturating_sub(1) as isize) as usize;
         menu.on_create = false;
         menu.picked = to;
-        let first = menu.first.min(lines.len().saturating_sub(page));
-        menu.first = scroll_to(&lines, to, first, page);
+        let last = lines.len().saturating_sub(page) as f64;
+        let pos = scroll_to(&lines, to, menu.scroll.pos().min(last), page);
+        move_to(&mut menu.scroll, pos);
         None
     }
 
@@ -2126,19 +2127,19 @@ impl Panel {
         None
     }
 
-    /// The wheel turned `rows` rows (down positive) over the branch menu.
-    pub fn scroll_branches(&mut self, rows: f64, ctx: &Ctx) {
+    /// The branch menu moved by `motion` at `now`.
+    pub fn scroll_branches(&mut self, motion: Motion, now: Instant, ctx: &Ctx) {
+        let b = self.menu_bounds(ctx);
+        if let Some(menu) = self.branch_menu.as_mut() {
+            menu.scroll.apply(motion, now, b);
+        }
+    }
+
+    /// The branch menu's lines as a list scrolled.
+    fn menu_bounds(&self, ctx: &Ctx) -> Bounds {
         let len = menu_lines(&self.shown_branches(ctx)).len();
-        let page = self.menu_page(ctx);
-        let Some(menu) = self.branch_menu.as_mut() else {
-            return;
-        };
-        let last = len.saturating_sub(page);
-        let first = menu.first.min(last);
-        let whole = menu.wheel.turn(rows, first);
-        let wanted = first as i64 + whole;
-        menu.first = wanted.clamp(0, last as i64) as usize;
-        menu.wheel.settle(wanted, menu.first, last);
+        let row = crate::chrome::repos_row(ctx.density);
+        bounds(len, self.menu_page(ctx), row)
     }
 
     /// The list changed (a Git status read): drop what is gone (checked
@@ -3059,12 +3060,27 @@ impl Panel {
             let b = self.scroll_bounds(true, ctx);
             moving |= self.detail_scroll.tick(now, b);
         }
+        if self
+            .branch_menu
+            .as_ref()
+            .is_some_and(|m| m.scroll.moving(now))
+        {
+            let b = self.menu_bounds(ctx);
+            if let Some(menu) = self.branch_menu.as_mut() {
+                moving |= menu.scroll.tick(now, b);
+            }
+        }
         moving
     }
 
     /// Whether a list moves on its own or under the fingers at `now`.
     pub fn scrolling(&self, now: Instant) -> bool {
-        self.tree_scroll.moving(now) || self.detail_scroll.moving(now)
+        self.tree_scroll.moving(now)
+            || self.detail_scroll.moving(now)
+            || self
+                .branch_menu
+                .as_ref()
+                .is_some_and(|m| m.scroll.moving(now))
     }
 
     /// The detail's rows, or else the tree's lines, as a list scrolled.
@@ -5377,6 +5393,15 @@ mod tests {
         let now = Instant::now();
         panel.scroll(Motion::Finger { px, time: 0 }, now, over_detail, ctx);
         panel.scroll(Motion::Lift { time: 1000 }, now, over_detail, ctx);
+        panel.scroll_tick(later(now), ctx);
+    }
+
+    /// `swipe_tree` over the branch menu, by its lines.
+    fn swipe_menu(panel: &mut Panel, rows: f64, ctx: &Ctx) {
+        let px = rows * crate::chrome::repos_row(ctx.density) as f64;
+        let now = Instant::now();
+        panel.scroll_branches(Motion::Finger { px, time: 0 }, now, ctx);
+        panel.scroll_branches(Motion::Lift { time: 1000 }, now, ctx);
         panel.scroll_tick(later(now), ctx);
     }
 
@@ -7708,7 +7733,7 @@ mod tests {
         );
         press(&mut panel, ctrl(), Keysym::s, &ctx);
         press(&mut panel, ctrl(), Keysym::End, &ctx);
-        panel.scroll_branches(-100.0, &ctx);
+        swipe_menu(&mut panel, -100.0, &ctx);
         assert_eq!(menu_rows(&panel, &ctx)[0], "main");
     }
 
@@ -7724,7 +7749,7 @@ mod tests {
         let mut panel = Panel::new(&items);
         press(&mut panel, ctrl(), Keysym::s, &ctx);
         // Part of the heading scrolled past, one more row under the list.
-        panel.scroll_branches(0.5, &ctx);
+        swipe_menu(&mut panel, 0.5, &ctx);
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
         assert_eq!(menu.part, 0.5);
         assert_eq!(menu.headings, [(0, "Local".to_owned())]);
@@ -7738,14 +7763,14 @@ mod tests {
             }) if names == ["b03"]
         ));
         press(&mut panel, ctrl(), Keysym::s, &ctx);
-        panel.scroll_branches(1.25, &ctx);
+        swipe_menu(&mut panel, 1.25, &ctx);
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
         assert_eq!((menu.part, menu.rows.len()), (0.25, 6));
         // The end holds the menu whole, and typing drops the part.
-        panel.scroll_branches(100.5, &ctx);
+        swipe_menu(&mut panel, 100.5, &ctx);
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
         assert_eq!((menu.part, menu.rows.len() + menu.headings.len()), (0.0, 5));
-        panel.scroll_branches(-1.5, &ctx);
+        swipe_menu(&mut panel, -1.5, &ctx);
         assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().part, 0.5);
         press(&mut panel, none(), Keysym::b, &ctx);
         assert_eq!(panel.view("p", &ctx).branch.menu.unwrap().part, 0.0);
