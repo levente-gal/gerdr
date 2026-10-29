@@ -12,7 +12,7 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Rectangle, Size};
 
 /// The dot's diameter, logical pixels.
-pub const DOT: i32 = 6;
+pub const DOT: i32 = 5;
 /// How far round the dot the icon is cut away, logical pixels.
 const DOT_RING: f32 = 1.5;
 /// How far the dot sticks out past the icon's corner, logical pixels.
@@ -144,11 +144,7 @@ pub(super) fn agent_badge(
     let s = scale as f32;
     let icon = icon_box(rect, size);
     match (badge.icon, badge.icon.picture()) {
-        (_, Some(picture)) => {
-            for layer in [&picture.mono, &picture.color].into_iter().flatten() {
-                c.picture_sized(layer, icon, scale, tint, size);
-            }
-        }
+        (_, Some(picture)) => c.picture_sized(picture, icon, scale, tint, size),
         (AgentIcon::Test, None) => {
             let k = size as f32 / 14.0 * s;
             icon_sdf(c, icon, scale, tint, |x, y| flask(x, y, k));
@@ -220,7 +216,7 @@ mod tests {
         let rect = Rectangle::new((10, 20).into(), (16, 24).into());
         let dot = dot_rect(rect, 16);
         // The icon spans 10..26 across and 24..40 down.
-        assert_eq!(dot.loc, (21, 35).into());
+        assert_eq!(dot.loc, (22, 36).into());
         assert_eq!(dot.size, (DOT, DOT).into());
     }
 

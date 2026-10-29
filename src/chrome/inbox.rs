@@ -733,7 +733,7 @@ fn tone_color(tone: InboxTone, p: &Palette) -> Rgb {
 }
 
 /// How big an agent's logo is on an item's mark grown by `grow`.
-const BADGE_LOGO: f32 = 18.0;
+const BADGE_LOGO: f32 = 12.0;
 /// How much bigger the detail's mark is than a row's.
 const DETAIL_GROW: f32 = DETAIL_BADGE as f32 / BADGE as f32;
 

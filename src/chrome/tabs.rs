@@ -701,7 +701,7 @@ impl Painter {
                 } else {
                     p.tab_bar
                 };
-                let tint = if is_active { p.text } else { p.muted };
+                let tint = if is_active { p.muted } else { p.placeholder };
                 let icon = tab_icon_rect(*rect, size.h);
                 agent_badge(&mut c, icon, TAB_ICON, badge, tint, ground, scale, p);
                 text_x += ((TAB_ICON + STATUS_GAP) as f32 * s).round();
@@ -915,7 +915,7 @@ impl Painter {
 /// Where the strip's tabs are hit, for the `hover` of a `TabStripView`:
 /// `pos` in strip coordinates.
 /// How big an agent's badge is on its tab.
-const TAB_ICON: i32 = 14;
+const TAB_ICON: i32 = GITHUB_ICON_SIZE;
 
 /// The status a tab's mark shows: one that says something.
 fn tab_status(tab: &TabView) -> Option<AgentStatus> {
