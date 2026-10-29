@@ -22,7 +22,8 @@ use crate::menu::{MenuAction, MenuItem, MenuSpec};
 use crate::{
     Drag, Gerdr,
     chrome::{
-        self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, Tone, TreeLine, TreeTool,
+        self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, SearchPart, Tone,
+        TreeLine, TreeTool,
     },
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
@@ -1032,6 +1033,17 @@ impl Gerdr {
                     TreeTool::Collapse => ("Fold every repository and folder", "Alt+Left"),
                     TreeTool::List => ("List the changed files flat, by path", "Alt+F"),
                     TreeTool::Folders => ("List the changed files by folder", "Alt+F"),
+                };
+                Some(Tooltip::new(text, *rect).key(key))
+            }
+            ReposHit::Search(part) => {
+                let (_, rect) = layout.detail_search.iter().find(|(p, _)| *p == part)?;
+                let (text, key) = match part {
+                    SearchPart::Open => ("Find in the diff", "/"),
+                    SearchPart::Prev => ("The place found before", "Shift+Enter"),
+                    SearchPart::Next => ("The next place found", "Enter"),
+                    SearchPart::Close => ("Close the search", "Esc"),
+                    SearchPart::Field => return None,
                 };
                 Some(Tooltip::new(text, *rect).key(key))
             }
