@@ -20,12 +20,13 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
-    chevron_down, coverage, field_text, git_branch, icon_sdf, measure, measure_mono, mix, phys,
-    physical, plus, rect_px, rounded_rect, trash,
+    chevron_down, coverage, field_text, folder, git_branch, icon_sdf, measure, measure_mono, mix,
+    phys, physical, plus, rect_px, rounded_rect, segment, trash,
 };
 use std::ops::Range;
 
 use crate::diff::LineKind;
+use crate::repos::Grouping;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -63,6 +64,10 @@ pub fn repos_row(density: Density) -> i32 {
 }
 const REPOS_LINE_INSET: i32 = 4;
 const REPOS_INDENT: i32 = 24;
+/// How much further a line is indented per folder it is in, and the room
+/// of a folder's icon.
+const REPOS_LEVEL: i32 = 20;
+const REPOS_FOLDER: i32 = 20;
 /// The scrollbar at the right of the tree and of the detail: its width,
 /// and the shortest its thumb gets.
 const SCROLLBAR: i32 = 6;
@@ -217,6 +222,8 @@ pub struct ReposView {
     pub density: Density,
     /// The tree's share of the panel's width.
     pub tree_share: f64,
+    /// How the tree lists the files: the toolbar over it says.
+    pub grouping: Grouping,
 }
 
 /// The header's branch picker: the branch the repositories acted on are
@@ -280,6 +287,7 @@ pub struct BranchCreate {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TreeLine {
     Repo(RepoLine),
+    Dir(DirLine),
     File(FileLine),
 }
 
@@ -306,15 +314,32 @@ pub struct RepoLine {
     pub state: LineState,
 }
 
+/// A folder's line, with changed files under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirLine {
+    /// On when all its files are checked, partly when some are.
+    pub check: Check,
+    /// Its files show.
+    pub open: bool,
+    /// Its path from its folder's line, `src/chrome` for one holding only
+    /// a folder.
+    pub name: String,
+    /// How many folders it is in.
+    pub depth: usize,
+}
+
 /// A changed file's line, under its repository.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileLine {
     pub check: Check,
     /// `git::Change::code`.
     pub code: char,
-    /// From the repository's top folder; a rename as `old → new`.
+    /// From the repository's top folder, or its name under its folder's
+    /// line; a rename as `old → new`.
     pub path: String,
     pub conflicted: bool,
+    /// How many folders' lines it is under.
+    pub depth: usize,
 }
 
 /// A checkbox: a repository's is `Partial` when only some of its files are
@@ -639,7 +664,7 @@ pub enum ReposHit {
     Line(usize),
     /// Its checkbox.
     Check(usize),
-    /// A repository line's expander.
+    /// A repository's or a folder's line's expander.
     Expander(usize),
     /// A repository line's chip: it says what it means.
     Chip(usize),
@@ -671,6 +696,8 @@ pub enum ReposHit {
     More,
     /// The line between the tree and the detail, to drag.
     Splitter,
+    /// A button of the tree's toolbar: list the files this way.
+    Grouping(Grouping),
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -821,6 +848,8 @@ pub struct ReposLayout {
     pub header: Rect,
     /// The tree's area.
     pub tree: Rect,
+    /// The buttons of the tree's toolbar, over its lines.
+    pub tree_tools: Vec<(Grouping, Rect)>,
     /// Per tree line: its rect, its checkbox's, and a repository line's
     /// expander's. A scrolled tree's first and last lines reach out of
     /// `tree_list`.
@@ -1053,7 +1082,7 @@ pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) 
     let panel = panel_rect(size);
     let bottom = REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS);
     let middle = panel.size.h - REPOS_HEADER - bottom;
-    let tree = (middle - 2 * REPOS_PAD) / repos_row(density);
+    let tree = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_row(density);
     let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
     (tree.max(1) as usize, detail.max(1) as usize)
 }
@@ -1081,20 +1110,44 @@ fn scrolled_by(part: f64, over: f64, height: i32) -> f64 {
 /// expander's.
 fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
     let (x, y, h) = (rect.loc.x, rect.loc.y, rect.size.h);
+    let level = |depth: usize| REPOS_INDENT + depth as i32 * REPOS_LEVEL;
     let indent = match line {
         TreeLine::Repo(_) => 0,
-        TreeLine::File(_) => REPOS_INDENT,
+        TreeLine::Dir(dir) => level(dir.depth),
+        TreeLine::File(file) => level(file.depth),
     };
     let check_x = x + REPOS_LINE_INSET + indent;
     let check = Rectangle::new((check_x, y).into(), (REPOS_CHECK, h).into());
-    let expander = match line {
-        TreeLine::Repo(repo) if repo.expanded.is_some() => Some(Rectangle::new(
+    let expands = match line {
+        TreeLine::Repo(repo) => repo.expanded.is_some(),
+        TreeLine::Dir(_) => true,
+        TreeLine::File(_) => false,
+    };
+    let expander = expands.then(|| {
+        Rectangle::new(
             (check_x + REPOS_CHECK, y).into(),
             (REPOS_EXPANDER, h).into(),
-        )),
-        _ => None,
-    };
+        )
+    });
     (rect, check, expander)
+}
+
+/// The tree's toolbar over its lines, in `tree`: its buttons at its
+/// right, one per way of listing the files.
+fn tree_tools(tree: Rect) -> Vec<(Grouping, Rect)> {
+    let y = tree.loc.y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
+    let right = tree.loc.x + tree.size.w - HELP_PADDING;
+    [Grouping::List, Grouping::Folders]
+        .into_iter()
+        .rev()
+        .enumerate()
+        .map(|(k, grouping)| {
+            let x = right - (k as i32 + 1) * ROW_BUTTON - k as i32 * REPOS_TAB_GAP;
+            let rect = Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into());
+            (grouping, rect)
+        })
+        .rev()
+        .collect()
 }
 
 /// Where a buffer holding the panel `panel` and its shadow has its top
@@ -1115,10 +1168,14 @@ fn tree_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
     let track = Rectangle::new(
         (
             tree.loc.x + tree.size.w - REPOS_PAD - SCROLLBAR,
-            tree.loc.y + REPOS_PAD,
+            tree.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
         )
             .into(),
-        (SCROLLBAR, (tree.size.h - 2 * REPOS_PAD).max(0)).into(),
+        (
+            SCROLLBAR,
+            (tree.size.h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
+        )
+            .into(),
     );
     let whole = view
         .lines
@@ -1424,7 +1481,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let tree = Rectangle::new((x, middle_y).into(), (tree_w, middle_h).into());
     let (line_x, line_w) = (x + REPOS_PAD, (tree_w - 2 * REPOS_PAD - SCROLLBAR).max(0));
     let tree_end = middle_y + middle_h - REPOS_PAD;
-    let lines_y = middle_y + REPOS_PAD;
+    let lines_y = middle_y + REPOS_DETAIL_TITLE + REPOS_PAD;
     // Scrolled part of the first line, the lines start up by as much and
     // the last is shown in part, cut at where the others end; pulled past
     // an end, they move with the pull.
@@ -1756,6 +1813,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             panel,
             header,
             tree,
+            tree_tools: tree_tools(tree),
             lines,
             tree_list,
             marks,
@@ -1893,6 +1951,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if layout.branch_menu.is_some() {
         return Some(ReposHit::Panel);
     }
+    if let Some(&(grouping, _)) = layout.tree_tools.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::Grouping(grouping));
+    }
     // A scrolled tree's lines count only where they show.
     let lines = if at(&layout.tree_list) {
         &layout.lines[..]
@@ -1980,6 +2041,19 @@ pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> Fi
         text: field_text(area, scale),
         line: line.clone(),
     }
+}
+
+/// Signed distance to a list centred on the origin: three rows, each a
+/// dot and a line.
+fn list_mark(x: f32, y: f32, s: f32) -> f32 {
+    [-4.5, 0.0, 4.5]
+        .into_iter()
+        .map(|row: f32| {
+            let dot = (x + 5.5 * s).hypot(y - row * s) - 1.1 * s;
+            let line = segment(x, y, -2.5 * s, row * s, 6.5 * s, row * s) - 0.8 * s;
+            dot.min(line)
+        })
+        .fold(f32::MAX, f32::min)
 }
 
 /// Signed distance to a small chevron centred on the origin pointing right
@@ -2287,11 +2361,17 @@ impl Painter {
 
         // The tree, then the line between it and the detail pane.
         let tree = shift(layout.tree);
+        let tools: Vec<_> = layout
+            .tree_tools
+            .iter()
+            .map(|&(g, r)| (g, shift(r)))
+            .collect();
+        self.tree_title(&mut c, view, tree, &tools, scale, p);
         if view.lines.is_empty() && !view.empty.is_empty() {
             let first = Rectangle::new(
                 (
                     tree.loc.x + REPOS_PAD + REPOS_LINE_INSET,
-                    tree.loc.y + REPOS_PAD,
+                    tree.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
                 )
                     .into(),
                 (
@@ -2477,7 +2557,7 @@ impl Painter {
         let hovered = row.hover.is_some();
         let state = match line {
             TreeLine::Repo(repo) => Some(&repo.state),
-            TreeLine::File(_) => None,
+            TreeLine::Dir(_) | TreeLine::File(_) => None,
         };
         if row.selected {
             let fill = if row.dim {
@@ -2523,6 +2603,35 @@ impl Painter {
                 let on_chip = row.hover == Some(ReposHit::Chip(0));
                 let at = (label_x, right);
                 self.repo_line(c, repo, at, line_band, gap, (mark, on_chip), scale, p);
+            }
+            TreeLine::Dir(dir) => {
+                self.checkbox(c, box_rect, dir.check, check_hovered, scale, p);
+                if let Some(rect) = expander {
+                    let color = if row.hover == Some(ReposHit::Expander(0)) {
+                        p.text
+                    } else {
+                        p.muted
+                    };
+                    icon_sdf(c, rect, scale, color, |x, y| {
+                        expander_mark(dir.open, x, y, s)
+                    });
+                }
+                let icon_x = check.loc.x + REPOS_CHECK + REPOS_EXPANDER;
+                let icon = Rectangle::new(
+                    (icon_x, check.loc.y).into(),
+                    (REPOS_FOLDER, check.size.h).into(),
+                );
+                icon_sdf(c, icon, scale, p.muted, |x, y| folder(x, y, 0.75 * s));
+                self.mixed_text(
+                    c,
+                    &dir.name,
+                    SMALL_FONT_SIZE,
+                    px(icon_x + REPOS_FOLDER) as f32 + gap / 2.0,
+                    right,
+                    line_band,
+                    scale,
+                    p.text,
+                );
             }
             TreeLine::File(file) => {
                 self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
@@ -3383,6 +3492,78 @@ impl Painter {
 
     /// The detail pane's `tab` segment in `rect`: an outlined pill, filled
     /// when it is the tab shown, lighter under the pointer.
+    fn tree_title(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        tree: Rect,
+        tools: &[(Grouping, Rect)],
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let title = Rectangle::new(tree.loc, (tree.size.w, REPOS_DETAIL_TITLE).into());
+        let (x, mut right) = phys(title, scale);
+        if let Some((_, first)) = tools.first() {
+            right = px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round();
+        }
+        let x = x + px(HELP_PADDING) as f32;
+        self.mixed_text(
+            c,
+            "Changes",
+            FONT_SIZE,
+            x,
+            right,
+            band(title, scale),
+            scale,
+            p.text,
+        );
+        for &(grouping, rect) in tools {
+            self.grouping_button(c, view, grouping, rect, scale, p);
+        }
+        let border = px(1).max(1);
+        c.fill(
+            px(tree.loc.x) + border,
+            px(tree.loc.y + REPOS_DETAIL_TITLE) - border,
+            px(tree.loc.x + tree.size.w) - px(tree.loc.x) - border,
+            border,
+            p.border_variant,
+        );
+    }
+
+    /// A button of the tree's toolbar in `rect`: lit while the files are
+    /// listed its way.
+    fn grouping_button(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        grouping: Grouping,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let b = ((scale.round() as i32).max(1)) as f32;
+        let r = BUTTON_RADIUS * s;
+        let on = view.grouping == grouping;
+        let fill = if on {
+            p.selected
+        } else if view.hover == Some(ReposHit::Grouping(grouping)) {
+            mix(p.element, p.selected, 0.5)
+        } else {
+            p.element
+        };
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+        let color = if on { p.text } else { p.muted };
+        match grouping {
+            Grouping::List => icon_sdf(c, rect, scale, color, |x, y| list_mark(x, y, s)),
+            Grouping::Folders => icon_sdf(c, rect, scale, color, |x, y| folder(x, y, 0.8 * s)),
+        }
+    }
+
     fn tab_segment(
         &self,
         c: &mut Canvas,
@@ -3972,6 +4153,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         },
         density: view.density,
         tree_share: view.tree_share,
+        grouping: view.grouping,
     }
 }
 
@@ -4257,6 +4439,7 @@ mod tests {
             code,
             path: path.into(),
             conflicted: code == 'U',
+            depth: 0,
         })
     }
 
@@ -4347,6 +4530,7 @@ mod tests {
         ];
         let total = lines.len() + 12;
         ReposView {
+            grouping: Grouping::List,
             title: "gerdr".into(),
             summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
             lines,
@@ -4618,6 +4802,42 @@ mod tests {
     }
 
     /// The views the layout is checked with: bare, full, and with a sheet.
+    /// `full` with the files listed by folder.
+    fn by_folder() -> ReposView {
+        let dir = |name: &str, depth: usize, open: bool, check: Check| {
+            TreeLine::Dir(DirLine {
+                check,
+                open,
+                name: name.into(),
+                depth,
+            })
+        };
+        let at = |depth: usize, line: TreeLine| match line {
+            TreeLine::File(f) => TreeLine::File(FileLine { depth, ..f }),
+            line => line,
+        };
+        let mut view = full();
+        let repo = view.lines[0].clone();
+        let rest = view.lines[3..].to_vec();
+        view.lines = [
+            repo,
+            dir("src", 0, true, Check::Partial),
+            dir("chrome", 1, true, Check::On),
+            at(2, file('M', "repos.rs", Check::On)),
+            at(2, file('A', "mod.rs", Check::On)),
+            at(1, file('M', "git.rs", Check::Off)),
+            dir("docs/deep", 0, false, Check::Off),
+            file('?', "notes.md", Check::Off),
+        ]
+        .into_iter()
+        .chain(rest)
+        .collect();
+        view.grouping = Grouping::Folders;
+        view.selected = Some(2);
+        view.hover = Some(ReposHit::Grouping(Grouping::List));
+        view
+    }
+
     fn views() -> Vec<ReposView> {
         let bare = ReposView {
             error: None,
@@ -4628,6 +4848,7 @@ mod tests {
             empty(),
             bare,
             full(),
+            by_folder(),
             with_sheet(),
             with_menu(),
             with_empty_menu(),
@@ -4642,6 +4863,40 @@ mod tests {
             r.loc.y as f64 + r.size.h as f64 / 2.0,
         )
             .into()
+    }
+
+    #[test]
+    fn the_trees_toolbar_is_over_its_lines_and_its_buttons_hit() {
+        for (w, h) in SIZES {
+            let size: Size<i32, Logical> = (w, h).into();
+            let mut view = full();
+            view.lines.insert(
+                1,
+                TreeLine::Dir(DirLine {
+                    check: Check::Partial,
+                    open: true,
+                    name: "src/chrome".into(),
+                    depth: 1,
+                }),
+            );
+            let l = repos_layout(&view, size);
+            let groupings: Vec<_> = l.tree_tools.iter().map(|(g, _)| *g).collect();
+            assert_eq!(groupings, [Grouping::List, Grouping::Folders]);
+            let (list, folders) = (l.tree_tools[0].1, l.tree_tools[1].1);
+            assert!(list.loc.x + list.size.w <= folders.loc.x);
+            for (grouping, rect) in &l.tree_tools {
+                assert!(inside(l.tree, *rect), "{size:?}");
+                assert!(rect.loc.y + rect.size.h <= l.tree_list.loc.y);
+                let at = rect.loc.to_f64() + Point::from((4.0, 4.0));
+                assert_eq!(repos_hit(&l, at), Some(ReposHit::Grouping(*grouping)));
+            }
+            // A folder's line is indented by its depth, with an expander.
+            let (_, check, expander) = l.lines[1];
+            let (_, repo_check, _) = l.lines[0];
+            let indent = REPOS_INDENT + REPOS_LEVEL;
+            assert_eq!(check.loc.x - repo_check.loc.x, indent);
+            assert!(expander.is_some());
+        }
     }
 
     #[test]
@@ -5396,6 +5651,7 @@ mod tests {
         let views = [
             empty(),
             full(),
+            by_folder(),
             with_sheet(),
             disabled_hover,
             compact,
@@ -5433,6 +5689,7 @@ mod tests {
         };
         let cases = [
             ("full", full()),
+            ("folders", by_folder()),
             ("sheet", with_sheet()),
             ("empty", empty()),
             ("hover", disabled_hover),

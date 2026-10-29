@@ -25,8 +25,8 @@ use crate::{
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
-        Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
-        RunState,
+        Batch, BatchKind, Ctx, Found, Grouping, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun,
+        Repos, RunState,
     },
     review,
     toast::Level,
@@ -522,6 +522,9 @@ impl Gerdr {
             }
         };
         self.repos.panel = Some(panel);
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.grouping = self.projects.repo_grouping;
+        }
         self.repos_refresh();
         self.repos_fetch();
         self.refresh_git();
@@ -872,13 +875,9 @@ impl Gerdr {
             || chrome::Rect::new((pos.x as i32, pos.y as i32).into(), (1, 1).into()),
             |(rect, ..)| *rect,
         );
-        let path = view.selected.and_then(|i| match view.lines.get(i)? {
-            TreeLine::File(file) => {
-                let root = self.repos.panel.as_ref()?.selected_root()?;
-                Some(root.join(file.path.split(" → ").last().unwrap_or(&file.path)))
-            }
-            TreeLine::Repo(_) => self.repos.panel.as_ref()?.selected_root(),
-        });
+        let path = view
+            .selected
+            .and_then(|_| self.repos.panel.as_ref()?.selected_path());
         let hints: Vec<&Hint> = view.hints.iter().collect();
         let spec = repos_menu_spec(&hints, path, anchor);
         self.open_menu(spec);
@@ -1011,11 +1010,24 @@ impl Gerdr {
             }
             ReposHit::Expander(i) => {
                 let rect = layout.lines.get(i)?.2?;
-                let text = match repo(i)?.expanded? {
+                let open = match view.lines.get(i)? {
+                    TreeLine::Repo(repo) => repo.expanded?,
+                    TreeLine::Dir(dir) => dir.open,
+                    TreeLine::File(_) => return None,
+                };
+                let text = match open {
                     true => "Hide its changed files",
                     false => "Show its changed files",
                 };
                 Some(Tooltip::new(text, rect))
+            }
+            ReposHit::Grouping(grouping) => {
+                let (_, rect) = layout.tree_tools.iter().find(|(g, _)| *g == grouping)?;
+                let text = match grouping {
+                    Grouping::List => "List the changed files flat, by path",
+                    Grouping::Folders => "List the changed files by folder",
+                };
+                Some(Tooltip::new(text, *rect).key("Alt+F"))
             }
             ReposHit::Chip(i) => {
                 let (_, rect) = layout.chips.iter().find(|(j, _)| *j == i)?;
@@ -1216,6 +1228,10 @@ impl Gerdr {
     pub fn apply_repos(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Close => self.close_repos(),
+            Outcome::Grouping(grouping) => {
+                self.projects.repo_grouping = grouping;
+                self.projects.save();
+            }
             Outcome::Batch { .. }
             | Outcome::Confirmed { .. }
             | Outcome::CreateBranch { .. }

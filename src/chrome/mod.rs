@@ -863,6 +863,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         }
         rects.extend(layout.buttons.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.detail_tabs.into_iter().map(|(_, rect)| rect));
+        rects.extend(layout.tree_tools.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.chips.into_iter().map(|(_, rect)| rect));
         rects.extend(layout.more);
         rects.push(layout.splitter);

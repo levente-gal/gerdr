@@ -4,7 +4,8 @@
 //! folders by itself; what ran in the panes, the venvs and the apps gerdr
 //! launched outside herdr are remembered here, a file per project in
 //! `~/.local/share/gerdr/projects/<id>.json`; the rest (the project shown
-//! last, the quit choice, which of Cursor's idle chats stay shown) in
+//! last, the quit choice, which of Cursor's idle chats stay shown, how the
+//! repositories panel lists files) in
 //! `~/.local/share/gerdr/state.json`.
 
 use std::{
@@ -17,7 +18,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{cursor_agents::History, desktop::shell_quote, herdr, home_dir, layout::SavedNode};
+use crate::{
+    cursor_agents::History, desktop::shell_quote, herdr, home_dir, layout::SavedNode,
+    repos::Grouping,
+};
 
 /// The store's format.
 const VERSION: u32 = 1;
@@ -47,6 +51,9 @@ pub struct Store {
     /// The pull requests whose CI is watched, by repository.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ci_watched: crate::ci::Watched,
+    /// How the repositories panel lists changed files, as last picked.
+    #[serde(default, skip_serializing_if = "Grouping::is_list")]
+    pub repo_grouping: Grouping,
     #[serde(skip)]
     books: Books,
 }
@@ -63,6 +70,8 @@ struct State {
     cursor_history: History,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ci_watched: crate::ci::Watched,
+    #[serde(default, skip_serializing_if = "Grouping::is_list")]
+    repo_grouping: Grouping,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -358,6 +367,7 @@ impl Store {
         self.quit_choice = state.quit_choice;
         self.cursor_history = state.cursor_history;
         self.ci_watched = state.ci_watched;
+        self.repo_grouping = state.repo_grouping;
     }
 
     fn state(&self) -> State {
@@ -367,6 +377,7 @@ impl Store {
             quit_choice: self.quit_choice,
             cursor_history: self.cursor_history.clone(),
             ci_watched: self.ci_watched.clone(),
+            repo_grouping: self.repo_grouping,
         }
     }
 
@@ -1453,6 +1464,7 @@ mod tests {
             quit_choice: Some(QuitChoice::Keep),
             cursor_history: History::default(),
             ci_watched: Default::default(),
+            repo_grouping: Grouping::Folders,
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),
