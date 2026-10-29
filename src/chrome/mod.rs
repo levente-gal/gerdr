@@ -896,7 +896,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     rects.push(shift(layout.toggle));
     for bar in view.pane_bars.iter().filter(|bar| bar.visible) {
         rects.push(bar.rect);
-        rects.extend(pane_bar_buttons(bar.rect).map(|(_, rect)| rect));
+        rects.extend(
+            pane_bar_buttons(bar.rect, bar.buttons)
+                .into_iter()
+                .map(|(_, rect)| rect),
+        );
     }
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);

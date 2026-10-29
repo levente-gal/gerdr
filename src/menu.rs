@@ -63,6 +63,11 @@ pub enum MenuAction {
     PaneToTab(u32, Option<usize>),
     RestartPane(u32),
     StopPane(u32),
+    /// Take the web page in pane `id` of the active tab back, forward, or
+    /// load it again.
+    WebStep(u32, crate::web_control::WebStep),
+    /// Copy the address of the web page in pane `id` of the active tab.
+    CopyPaneUrl(u32),
     /// Show the agent.
     FocusAgent(crate::agents::AgentKey),
     /// Delete idle or done Cursor chat (by id) from gerdr.
@@ -332,6 +337,10 @@ impl Gerdr {
                 self.focus_pane(|_| Some(id));
                 self.stop_focused_pane();
             }
+            MenuAction::WebStep(id, step) => {
+                self.web_pane_step(id, step);
+            }
+            MenuAction::CopyPaneUrl(id) => self.copy_pane_url(id),
             MenuAction::FocusAgent(key) => self.focus_agent(&key),
             MenuAction::DeleteCursorChat(id) => self.delete_cursor_chat(&id),
             MenuAction::DismissTest(id) => self.dismiss_test(&id),
