@@ -20,8 +20,8 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
-    chevron_down, coverage, field_text, folder, git_branch, icon_sdf, measure, measure_mono, mix,
-    phys, physical, plus, rect_px, rounded_rect, segment, trash,
+    chevron_down, coverage, cross, field_text, folder, git_branch, icon_sdf, magnifier, measure,
+    measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, segment, trash,
 };
 use std::ops::Range;
 
@@ -120,6 +120,15 @@ const DIFF_WORD_TINT: f32 = 0.28;
 /// The Diff and Log tabs: each this wide, this far apart.
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
+/// The diff's search: room for how many it found, and between its
+/// buttons.
+const SEARCH_COUNT: i32 = 84;
+const SEARCH_GAP: i32 = 2;
+/// How much of the search's colour tints a place found, and the one gone
+/// to; how high a tick on the scrollbar is.
+const FOUND_TINT: f32 = 0.35;
+const FOUND_CURRENT_TINT: f32 = 0.75;
+const SEARCH_TICK: i32 = 2;
 /// The field's row, and the field in it.
 const REPOS_FIELD_ROW: i32 = 44;
 const REPOS_FIELD: i32 = 32;
@@ -450,6 +459,42 @@ pub struct DetailView {
     pub total: usize,
     /// The detail has the keyboard.
     pub focused: bool,
+    /// The diff's search, in the title row in place of the title while
+    /// open.
+    pub search: Option<SearchBar>,
+    /// Per row of `rows`, the places the search found on it, by char
+    /// index into what it shows, each with whether it is the one gone to.
+    /// Empty for none.
+    pub found: Vec<Vec<(Range<usize>, bool)>>,
+    /// Where the places found are on the scrollbar: shares of all the
+    /// rows from the top, each with whether it is the one gone to.
+    pub ticks: Vec<(f64, bool)>,
+}
+
+/// The diff's search: what is typed, what it says while empty, and how
+/// many places it found (`3 of 17`, `No matches`; empty with nothing
+/// typed).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchBar {
+    pub query: Line,
+    pub placeholder: String,
+    pub count: String,
+    /// It found some.
+    pub found: bool,
+    /// It has the keyboard.
+    pub focused: bool,
+}
+
+/// A part of the diff's search: the button opening it (while closed), its
+/// field, and its buttons going to the place before or the next, and
+/// closing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchPart {
+    Open,
+    Field,
+    Prev,
+    Next,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -712,6 +757,8 @@ pub enum ReposHit {
     Splitter,
     /// A button of the tree's toolbar.
     Tool(TreeTool),
+    /// A part of the diff's search.
+    Search(SearchPart),
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -892,6 +939,10 @@ pub struct ReposLayout {
     /// into `detail_rows`.
     pub detail_title_buttons: Vec<(ReposButton, Rect)>,
     pub detail_row_buttons: Vec<(usize, ReposButton, Rect)>,
+    /// The diff's search in the title row: the button opening it, or its
+    /// field and buttons; and where it says how many it found.
+    pub detail_search: Vec<(SearchPart, Rect)>,
+    pub detail_search_count: Option<Rect>,
     pub field: Rect,
     pub result: Option<Rect>,
     /// The result bar's buttons, the footer's, and the sheet's.
@@ -1287,6 +1338,8 @@ struct DetailLook {
     hover: Option<ReposHit>,
     /// The detail has the keyboard.
     focused: bool,
+    /// The places the search found on it (`DetailView::found`).
+    found: Vec<(Range<usize>, bool)>,
 }
 
 /// Row `i` of `view`'s detail, as drawn.
@@ -1312,6 +1365,7 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
         buttons,
         hover,
         focused: view.detail.focused,
+        found: view.detail.found.get(i).cloned().unwrap_or_default(),
     }
 }
 
@@ -1638,6 +1692,43 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         right -= REPOS_BUTTON_GAP;
     }
     detail_title_buttons.reverse();
+    // The diff's search left of them: its button while closed; open, its
+    // field across the rest of the row, then how many it found and its
+    // buttons.
+    let (mut detail_search, mut detail_search_count) = (Vec::new(), None);
+    let mut right = detail_title_buttons
+        .first()
+        .map_or(tabs_x - REPOS_TAB_GAP * 2, |(_, r)| {
+            r.loc.x - REPOS_BUTTON_GAP
+        });
+    let square = |x: i32| Rectangle::new((x, tab_y).into(), (ROW_BUTTON, ROW_BUTTON).into());
+    let left = detail.loc.x + HELP_PADDING;
+    if view.detail.tab == DetailTab::Diff {
+        match &view.detail.search {
+            None if right - ROW_BUTTON >= detail.loc.x + detail.size.w / 3 => {
+                detail_search.push((SearchPart::Open, square(right - ROW_BUTTON)));
+            }
+            None => {}
+            Some(_) => {
+                for part in [SearchPart::Close, SearchPart::Next, SearchPart::Prev] {
+                    right -= ROW_BUTTON;
+                    detail_search.push((part, square(right)));
+                    right -= SEARCH_GAP;
+                }
+                right -= SEARCH_COUNT - SEARCH_GAP;
+                let count =
+                    Rectangle::new((right, tab_y).into(), (SEARCH_COUNT, ROW_BUTTON).into());
+                right -= FIELD_GAP;
+                let field_w = (right - left).max(0);
+                detail_search.push((
+                    SearchPart::Field,
+                    Rectangle::new((left, tab_y).into(), (field_w, ROW_BUTTON).into()),
+                ));
+                detail_search_count = Some(count);
+                detail_search.reverse();
+            }
+        }
+    }
     let mut detail_row_buttons = Vec::new();
     for (i, row) in detail_rows.iter().enumerate() {
         let hints: Vec<&Hint> = view
@@ -1845,6 +1936,8 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             detail_checks,
             detail_folds,
             detail_title_buttons,
+            detail_search,
+            detail_search_count,
             detail_row_buttons,
             field,
             result,
@@ -2006,6 +2099,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if let Some((button, _)) = layout.detail_title_buttons.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::Button(*button));
     }
+    if let Some((part, _)) = layout.detail_search.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::Search(*part));
+    }
     // A scrolled pane's rows count only where they show; the header
     // pinned at the top, the first, over those under it.
     let list = layout.detail_list;
@@ -2049,10 +2145,18 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
 /// The panel's field, for the caret and selection, on an output of `size`.
 pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
     let layout = repos_layout(view, size);
-    // The open branch menu's search has the keyboard.
+    // The open branch menu's search has the keyboard, else the diff's
+    // while it has.
+    let diff_search = layout
+        .detail_search
+        .iter()
+        .find(|(part, _)| *part == SearchPart::Field);
     let (area, line) = match (&view.branch.menu, layout.branch_search) {
         (Some(menu), Some(search)) => (search, &menu.query),
-        _ => (layout.field, &view.field),
+        _ => match (&view.detail.search, diff_search) {
+            (Some(bar), Some(&(_, field))) if bar.focused => (field, &bar.query),
+            _ => (layout.field, &view.field),
+        },
     };
     FieldSpot {
         size: FONT_SIZE,
@@ -2126,6 +2230,28 @@ pub(super) fn scrollbar(
         w / 2.0,
         mix(p.elevated, p.muted, 0.45),
     );
+}
+
+/// `range` (char indices) in parts one after another, each with whether
+/// it is in one of the places `found`.
+fn found_split(range: Range<usize>, found: &[(Range<usize>, bool)]) -> Vec<(Range<usize>, bool)> {
+    let mut parts = Vec::new();
+    let mut at = range.start;
+    for (f, _) in found {
+        let (start, end) = (f.start.max(at), f.end.min(range.end));
+        if start >= end {
+            continue;
+        }
+        if at < start {
+            parts.push((at..start, false));
+        }
+        parts.push((start..end, true));
+        at = end;
+    }
+    if at < range.end {
+        parts.push((at..range.end, false));
+    }
+    parts
 }
 
 /// The colour of a change's status letter (`git::Change::code`) in `p`.
@@ -2441,7 +2567,15 @@ impl Painter {
             .iter()
             .map(|&(b, r)| (b, shift(r)))
             .collect();
-        self.detail_title(&mut c, view, detail, &tabs, &title_buttons, scale, p);
+        let search: Vec<_> = layout
+            .detail_search
+            .iter()
+            .map(|&(part, r)| (part, shift(r)))
+            .collect();
+        let buttons = (&title_buttons[..], &search[..]);
+        self.detail_title(&mut c, view, detail, &tabs, buttons, scale, p);
+        let count = layout.detail_search_count.map(shift);
+        self.detail_search(&mut c, view, &search, count, scale, p);
 
         // The field, what went wrong, the result bar and the footer.
         let field = shift(layout.field);
@@ -2856,16 +2990,141 @@ impl Painter {
         }
     }
 
-    /// The detail pane's title row in `rect`, the pane's: its title, its
-    /// buttons in `title_buttons` and its tabs in `tabs`, a line under it.
+    /// The diff's search in the title row: its button while closed; open,
+    /// its field, how many it found and its buttons.
     #[allow(clippy::too_many_arguments)]
+    fn detail_search(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        parts: &[(SearchPart, Rect)],
+        count: Option<Rect>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let bar = view.detail.search.as_ref();
+        for &(part, rect) in parts {
+            let hovered = view.hover == Some(ReposHit::Search(part));
+            if part == SearchPart::Field {
+                let Some(bar) = bar else { continue };
+                let (x, y, w, h) = rect_px(rect, scale);
+                let (b, r) = (px(1).max(1) as f32, BUTTON_RADIUS * s);
+                let (edge, fill) = if bar.focused {
+                    (p.accent, p.element)
+                } else if hovered {
+                    (p.border, mix(p.element, p.selected, 0.4))
+                } else {
+                    (p.border, mix(p.elevated, p.element, 0.6))
+                };
+                c.rounded(x, y, w, h, r, edge);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                self.edit_line(
+                    c,
+                    &bar.query,
+                    &bar.placeholder,
+                    field_text(rect, scale),
+                    band(rect, scale),
+                    bar.focused,
+                    FONT_SIZE,
+                    scale,
+                    p,
+                );
+                continue;
+            }
+            // Going on or back needs places found.
+            let enabled = match part {
+                SearchPart::Prev | SearchPart::Next => bar.is_some_and(|b| b.found),
+                _ => true,
+            };
+            let (x, y, w, h) = rect_px(rect, scale);
+            let b = ((scale.round() as i32).max(1)) as f32;
+            let r = BUTTON_RADIUS * s;
+            let fill = if hovered && enabled {
+                mix(p.element, p.selected, 0.5)
+            } else {
+                p.element
+            };
+            c.rounded(x, y, w, h, r, p.border);
+            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+            let color = match enabled {
+                true if hovered => p.text,
+                true => p.muted,
+                false => p.placeholder,
+            };
+            icon_sdf(c, rect, scale, color, |x, y| match part {
+                SearchPart::Open => magnifier(x, y, 0.9 * s),
+                SearchPart::Prev => chevron_down(x, -y, 1.2 * s),
+                SearchPart::Next => chevron_down(x, y, 1.2 * s),
+                _ => cross(x, y, 0.8 * s),
+            });
+        }
+        if let (Some(bar), Some(rect)) = (bar, count) {
+            let color = if bar.found { p.muted } else { p.error };
+            self.centered(c, &bar.count, SMALL_FONT_SIZE, rect, scale, color);
+        }
+    }
+
+    /// The places the search found, as ticks across the diff's scrollbar
+    /// `track` (in buffer coordinates): the one gone to taller, in the
+    /// accent.
+    fn search_ticks(
+        &self,
+        c: &mut Canvas,
+        ticks: &[(f64, bool)],
+        track: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (x, y, w, h) = rect_px(track, scale);
+        let th = (SEARCH_TICK as f64 * scale).round().max(1.0) as f32;
+        let found = mix(p.elevated, p.warning, FOUND_CURRENT_TINT);
+        let mut current = None;
+        let mut last = None;
+        for &(at, on) in ticks {
+            let ty = (y + (h - th) * at as f32).round();
+            if on {
+                current = Some(ty);
+            }
+            // Ticks on one pixel row are one.
+            if last != Some(ty) {
+                c.rounded(x, ty, w, th, 0.0, found);
+                last = Some(ty);
+            }
+        }
+        if let Some(ty) = current {
+            let ty = (ty - th / 2.0).clamp(y, y + h - 2.0 * th);
+            c.rounded(x, ty, w, 2.0 * th, th / 2.0, p.accent);
+        }
+    }
+
+    /// The ticks of `search_ticks` in a buffer of their own, the track's
+    /// size: over the scrollbar's thumb, they show on it too.
+    fn search_ticks_buffer(
+        &self,
+        ticks: &[(f64, bool)],
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let track = Rectangle::new((0, 0).into(), size);
+        self.search_ticks(&mut c, ticks, track, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// The detail pane's title row in `rect`, the pane's: its title, its
+    /// buttons in `title_buttons` and the search's in `search`, and its
+    /// tabs in `tabs`, a line under it.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn detail_title(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         rect: Rect,
         tabs: &[(DetailTab, Rect)],
-        title_buttons: &[(ReposButton, Rect)],
+        (title_buttons, search): (&[(ReposButton, Rect)], &[(SearchPart, Rect)]),
         scale: f64,
         p: &Palette,
     ) {
@@ -2881,9 +3140,17 @@ impl Painter {
         if let Some(first) = first {
             right = px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round();
         }
+        // The search open in its place, or its button left of the others.
+        if let Some((_, first)) = search.first() {
+            right = right.min(px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round());
+        }
+        let title_text = match search.iter().any(|(part, _)| *part == SearchPart::Field) {
+            true => "",
+            false => &view.detail.title,
+        };
         self.mixed_text(
             c,
-            &view.detail.title,
+            title_text,
             FONT_SIZE,
             x,
             right,
@@ -2956,6 +3223,7 @@ impl Painter {
         let (track, shown) = detail_bar(view, layout);
         let at = (view.detail.first, shown, view.detail.total);
         scrollbar(c, moved(track, by), at, scale, p);
+        self.search_ticks(c, &view.detail.ticks, moved(track, by), scale, p);
     }
 
     /// The detail's row `look` in `rect`, its tint across the pane from
@@ -3019,11 +3287,67 @@ impl Painter {
         c.into_buffer(false)
     }
 
+    /// Tint the places the search `found` in `text` (by char index), its
+    /// first character at `x` and each measured by `width` of the text
+    /// before it, cut at `end`: the one gone to more.
+    #[allow(clippy::too_many_arguments)]
+    fn found_tints(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        found: &[(Range<usize>, bool)],
+        (x, end): (f32, f32),
+        (y, h): (i32, i32),
+        width: impl Fn(&str) -> f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let border = ((scale.round() as i32).max(1)) as f32;
+        let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+        for (range, current) in found {
+            let x0 = x + width(&text[..byte(range.start)]);
+            if x0 >= end {
+                break;
+            }
+            let x1 = (x + width(&text[..byte(range.end)])).min(end);
+            let tint = if *current {
+                FOUND_CURRENT_TINT
+            } else {
+                FOUND_TINT
+            };
+            let (ty, th) = (y as f32 + border, h as f32 - 2.0 * border);
+            let color = mix(p.elevated, p.warning, tint);
+            c.rounded(x0, ty, x1 - x0, th, 2.0 * scale as f32, color);
+        }
+    }
+
+    /// Where `path` starts as `path_text` draws it from `x`, cut at
+    /// `max_x`: the byte its shown part starts at, and where that is (after
+    /// an ellipsis when cut); none when not even its name fits.
+    fn path_start(
+        &self,
+        path: &str,
+        size: f32,
+        x: f32,
+        max_x: f32,
+        scale: f64,
+    ) -> Option<(usize, f32)> {
+        let width = |text: &str| self.mixed_width(text, size, scale);
+        if x + width(path) <= max_x {
+            return Some((0, x));
+        }
+        let ellipsis = self.text_width("…", size, scale);
+        path.char_indices()
+            .map(|(i, _)| i)
+            .find(|&i| x + ellipsis + width(&path[i..]) <= max_x)
+            .map(|from| (from, x + ellipsis))
+    }
+
     /// A row of the detail in `rect`; its tint across the pane from
     /// `tint.0` to `tint.1` (physical pixels). A repository's header and a
     /// file's are banded, a hunk is a rule with what it is in, an added or
     /// removed line is tinted with a bar at its left and its changed words
-    /// tinted more.
+    /// tinted more; the places the search found tinted too.
     fn detail_row(
         &self,
         c: &mut Canvas,
@@ -3203,6 +3527,20 @@ impl Painter {
                     );
                     pen += (gap / 2.0).round();
                 }
+                if let Some((from, at)) = self.path_start(&file.path, FONT_SIZE, pen, right, scale)
+                {
+                    // By char index into the part shown.
+                    let skip = file.path[..from].chars().count();
+                    let found: Vec<_> = look
+                        .found
+                        .iter()
+                        .filter(|(r, _)| r.start >= skip)
+                        .map(|(r, on)| (r.start - skip..r.end - skip, *on))
+                        .collect();
+                    let width = |t: &str| self.mixed_width(t, FONT_SIZE, scale);
+                    let shown = &file.path[from..];
+                    self.found_tints(c, shown, &found, (at, right), row_band, width, scale, p);
+                }
                 self.path_text(
                     c,
                     &file.path,
@@ -3225,16 +3563,27 @@ impl Painter {
                     context.clone()
                 };
                 let tx = bx + lead as f32 + (gap / 2.0).round();
-                let end = self.mono_text(
+                let width = |t: &str| self.mono_width(t, SMALL_FONT_SIZE, scale);
+                self.found_tints(
                     c,
                     &label,
-                    SMALL_FONT_SIZE,
-                    tx,
-                    bend,
+                    &look.found,
+                    (tx, bend),
                     row_band,
+                    width,
                     scale,
-                    p.muted,
+                    p,
                 );
+                // What the search found in it in the text's own colour.
+                let mut end = tx;
+                let chars = label.chars().count();
+                let byte = |n: usize| label.char_indices().nth(n).map_or(label.len(), |(b, _)| b);
+                for (part, found) in found_split(0..chars, &look.found) {
+                    let text = &label[byte(part.start)..byte(part.end)];
+                    let color = if found { p.text } else { p.muted };
+                    end =
+                        self.mono_text(c, text, SMALL_FONT_SIZE, end, bend, row_band, scale, color);
+                }
                 let from = (end + (gap / 2.0).round()) as i32;
                 if (from as f32) < bend {
                     c.fill(from, mid, bend as i32 - from, border, p.border_variant);
@@ -3275,6 +3624,9 @@ impl Painter {
                     }
                     c.fill(tint_x, y, px(DIFF_BAR), h, tone);
                 }
+                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let text = &line.text;
+                self.found_tints(c, text, &look.found, (tx, bend), row_band, width, scale, p);
                 // A dot in the gutter: a comment is on it.
                 if mark.noted {
                     let d = (4.0 * s).round();
@@ -3300,6 +3652,14 @@ impl Painter {
                     if x < bend {
                         let text = &line.text[from..to];
                         self.mono_text(c, text, REPOS_MONO_SIZE, x, bend, row_band, scale, color);
+                    }
+                };
+                // In the places the search found, in the text's own colour
+                // to read on their tint.
+                let ends = bytes.len() - 1;
+                let mut run = |from: usize, to: usize, color: Rgb| {
+                    for (part, found) in found_split(from..to.min(ends), &look.found) {
+                        run(part.start, part.end, if found { p.text } else { color });
                     }
                 };
                 let mut at = 0;
@@ -4179,6 +4539,7 @@ fn frame_view(view: &ReposView) -> ReposView {
             title: detail.title.clone(),
             title_buttons: detail.title_buttons.clone(),
             focused: detail.focused,
+            search: detail.search.clone(),
             ..DetailView::default()
         },
         sheet: None,
@@ -4208,6 +4569,9 @@ type DetailKey = (DetailLook, Size<i32, Logical>, super::Theme, f64);
 /// A scrollbar thumb's, and the pinned header's shadow's: its size, the
 /// theme and the scale.
 type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
+/// The search's ticks on the detail's scrollbar: the ticks, the track's
+/// size, the theme and the scale.
+type TicksKey = (Vec<(f64, bool)>, Size<i32, Logical>, super::Theme, f64);
 /// The branch menu's card's: the menu as `menu_card_view` has it, what
 /// the pointer is over on it, the card, the density, the theme and the
 /// scale.
@@ -4246,6 +4610,7 @@ pub(super) struct ReposLayers {
     tree_thumb: super::Cached<ThumbKey>,
     detail: super::RowCache<DetailKey>,
     detail_thumb: super::Cached<ThumbKey>,
+    detail_ticks: super::Cached<TicksKey>,
     pin_shadow: super::Cached<ThumbKey>,
     menu: super::Cached<MenuKey>,
     menu_lines: super::RowCache<MenuLineKey>,
@@ -4279,6 +4644,7 @@ impl ReposLayers {
             tree_thumb,
             detail,
             detail_thumb,
+            detail_ticks,
             pin_shadow,
             menu,
             menu_lines,
@@ -4349,7 +4715,7 @@ impl ReposLayers {
             over.extend(detail_parts(
                 view,
                 layout,
-                (detail, detail_thumb, pin_shadow),
+                (detail, detail_thumb, detail_ticks, pin_shadow),
                 (theme, scale),
                 painter,
             ));
@@ -4389,16 +4755,17 @@ impl ReposLayers {
     }
 }
 
-/// The detail's parts over the frame, front to back: its scrollbar's
-/// thumb, the pinned header's shadow and the header, and its rows, each
-/// of its own buffer from `caches` (the rows', the thumb's and the
-/// shadow's).
+/// The detail's parts over the frame, front to back: the search's ticks
+/// on its scrollbar, its thumb, the pinned header's shadow and the
+/// header, and its rows, each of its own buffer from `caches` (the
+/// rows', the thumb's, the ticks' and the shadow's).
 fn detail_parts(
     view: &ReposView,
     layout: &ReposLayout,
-    (rows, thumb, shadow): (
+    (rows, thumb, ticks, shadow): (
         &mut super::RowCache<DetailKey>,
         &mut super::Cached<ThumbKey>,
+        &mut super::Cached<TicksKey>,
         &mut super::Cached<ThumbKey>,
     ),
     (theme, scale): (super::Theme, f64),
@@ -4409,6 +4776,13 @@ fn detail_parts(
     let mut parts = Vec::new();
     let detail = &view.detail;
     let (track, shown) = detail_bar(view, layout);
+    if detail.tab == DetailTab::Diff && !detail.ticks.is_empty() {
+        let key = (detail.ticks.clone(), track.size, theme, scale);
+        let buffer = ticks.get(key, |(t, size, ..)| {
+            painter.search_ticks_buffer(t, *size, scale, p)
+        });
+        parts.push(Part::new(buffer, track.loc, track.size, 1.0));
+    }
     let pos = detail.first as f64 + detail.part;
     if let Some((top, h)) = thumb_place(track, pos, shown, detail.total) {
         let size = Size::from((SCROLLBAR, h));
@@ -4709,6 +5083,7 @@ mod tests {
                 first: 3,
                 total: 40,
                 focused: true,
+                ..DetailView::default()
             },
             sheet: None,
             empty: "No repositories in this project".into(),
@@ -4879,6 +5254,33 @@ mod tests {
         view
     }
 
+    /// `full()` with the diff's search open on "git", which has the keys:
+    /// found in the pinned header's path, and in two lines, the second
+    /// gone to; and in what the hunk is in.
+    fn with_search() -> ReposView {
+        let mut view = full();
+        view.field_focused = false;
+        view.detail.search = Some(SearchBar {
+            query: Line {
+                text: "git".into(),
+                caret: 3,
+                anchor: 3,
+            },
+            placeholder: "Find in the diff".into(),
+            count: "2 of 3".into(),
+            found: true,
+            focused: true,
+        });
+        let mut found = vec![Vec::new(); view.detail.rows.len()];
+        found[0] = vec![(4..7, false)];
+        found[1] = vec![(7..13, false)];
+        found[3] = vec![(14..17, true)];
+        found[4] = vec![(14..17, false), (60..90, false)];
+        view.detail.found = found;
+        view.detail.ticks = vec![(0.1, false), (0.12, true), (0.8, false)];
+        view
+    }
+
     fn views() -> Vec<ReposView> {
         let bare = ReposView {
             error: None,
@@ -4895,6 +5297,7 @@ mod tests {
             with_empty_menu(),
             with_create_menu(),
             with_bad_name_menu(),
+            with_search(),
         ]
     }
 
@@ -5137,6 +5540,9 @@ mod tests {
                 }
                 for (t, r) in &l.detail_tabs {
                     assert_eq!(hit(*r), Some(ReposHit::DetailTab(*t)));
+                }
+                for &(part, r) in &l.detail_search {
+                    assert_eq!(hit(r), Some(ReposHit::Search(part)));
                 }
                 assert_eq!(hit(l.field), Some(ReposHit::Field));
                 // The pinned header is over the row it covers.
@@ -5484,6 +5890,77 @@ mod tests {
     }
 
     #[test]
+    fn text_splits_at_the_places_found() {
+        let found = [(2..4, false), (6..9, true)];
+        let parts = found_split(0..10, &found);
+        let want = [
+            (0..2, false),
+            (2..4, true),
+            (4..6, false),
+            (6..9, true),
+            (9..10, false),
+        ];
+        assert_eq!(parts, want);
+        // A run inside a place, and one reaching into it.
+        assert_eq!(found_split(7..8, &found), [(7..8, true)]);
+        assert_eq!(found_split(3..5, &found), [(3..4, true), (4..5, false)]);
+        assert_eq!(found_split(0..3, &[]), [(0..3, false)]);
+    }
+
+    #[test]
+    fn the_search_sits_in_the_title_row_and_takes_the_field_spot() {
+        for (w, h) in SIZES {
+            let size: Size<i32, Logical> = (w, h).into();
+            // Closed, its button is left of the title's, over the diff
+            // only.
+            let closed = repos_layout(&full(), size);
+            let parts: Vec<SearchPart> = closed.detail_search.iter().map(|p| p.0).collect();
+            assert_eq!(parts, [SearchPart::Open]);
+            let (_, open) = closed.detail_search[0];
+            for (_, b) in &closed.detail_title_buttons {
+                assert!(open.loc.x + open.size.w <= b.loc.x);
+            }
+            let log = ReposView {
+                detail: DetailView {
+                    tab: DetailTab::Log,
+                    ..full().detail
+                },
+                ..full()
+            };
+            assert!(repos_layout(&log, size).detail_search.is_empty());
+            // Open: the field, then the count and the buttons, in a row
+            // left of the title's buttons and the tabs.
+            let view = with_search();
+            let l = repos_layout(&view, size);
+            let parts: Vec<SearchPart> = l.detail_search.iter().map(|p| p.0).collect();
+            let order = [
+                SearchPart::Field,
+                SearchPart::Prev,
+                SearchPart::Next,
+                SearchPart::Close,
+            ];
+            assert_eq!(parts, order);
+            let count = l.detail_search_count.expect("a count");
+            let field = l.detail_search[0].1;
+            assert!(field.size.w > 0 && field.loc.x + field.size.w <= count.loc.x);
+            for pair in l.detail_search.windows(2) {
+                assert!(pair[0].1.loc.x + pair[0].1.size.w <= pair[1].1.loc.x);
+            }
+            let tabs = l.detail_tabs[0].1;
+            let (_, close) = l.detail_search[3];
+            assert!(close.loc.x + close.size.w <= tabs.loc.x);
+            assert!(within(l.detail, field));
+            let spot = repos_field(&view, size, 1.0);
+            assert_eq!(spot.area, field);
+            assert_eq!(spot.line.text, "git");
+            // Without the keys, the commit field has the spot.
+            let mut away = with_search();
+            away.detail.search.as_mut().unwrap().focused = false;
+            assert_eq!(repos_field(&away, size, 1.0).area, l.field);
+        }
+    }
+
+    #[test]
     fn what_the_ui_font_lacks_is_drawn_in_the_monospace_one() {
         let painter = Painter::new();
         if painter.font.is_none() || painter.has_glyph('→') {
@@ -5709,6 +6186,11 @@ mod tests {
             with_empty_menu(),
             with_create_menu(),
             with_bad_name_menu(),
+            with_search(),
+            ReposView {
+                hover: Some(ReposHit::Search(SearchPart::Next)),
+                ..with_search()
+            },
         ];
         for view in views {
             for (w, h) in SIZES {
@@ -5746,6 +6228,7 @@ mod tests {
             ("menu_empty", with_empty_menu()),
             ("menu_create", with_create_menu()),
             ("menu_bad_name", with_bad_name_menu()),
+            ("search", with_search()),
             (
                 "menu_delete",
                 ReposView {

@@ -21,7 +21,8 @@
 //! a line marked. Selecting a line in the tree scrolls it there; the
 //! header of the file in view stays pinned at its top. Review comments
 //! written on its lines show under them, to copy all at once as Markdown
-//! for an AI agent (see `review`); kept with the project.
+//! for an AI agent (see `review`); kept with the project. `/` in the diff
+//! (Ctrl+Shift+F anywhere) searches it, folded files too (see `search`).
 //!
 //! The tree lists a repository's files flat, by their whole paths, or
 //! under their folders (a folder holding only a folder one line with it),
@@ -85,6 +86,10 @@ use crate::{
     text_field::{self, Edit, TextField},
 };
 
+mod search;
+
+use search::DiffSearch;
+
 /// A repository changing this many files or more starts folded.
 pub const FOLD_FILES: usize = 200;
 
@@ -139,6 +144,9 @@ impl Repos {
     /// The field, while the panel is open.
     pub fn field_mut(&mut self) -> Option<&mut TextField> {
         let panel = self.panel.as_mut()?;
+        if panel.search_has_keys() && panel.branch_menu.is_none() {
+            return panel.search_field_mut();
+        }
         Some(match &mut panel.branch_menu {
             Some(menu) => &mut menu.query,
             None => &mut panel.field,
@@ -306,6 +314,8 @@ pub struct Panel {
     /// indices.
     outdated: HashSet<usize>,
     noted: HashSet<(usize, usize, usize, usize)>,
+    /// The diff's search, while open.
+    search: Option<DiffSearch>,
 }
 
 /// The diff's line cursor: the row it is on, and the row its range reaches
@@ -1202,7 +1212,7 @@ fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
         Keysym::c | Keysym::C if shift => B::CopyReview,
         Keysym::p | Keysym::P if shift => B::ForcePush,
         Keysym::p | Keysym::P => B::Push,
-        Keysym::f | Keysym::F => B::Fetch,
+        Keysym::f | Keysym::F if !shift => B::Fetch,
         Keysym::l | Keysym::L => B::Pull,
         Keysym::m | Keysym::M if shift => B::Rebase,
         Keysym::m | Keysym::M => B::Merge,
@@ -1358,6 +1368,15 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Alt+F", "list the files by folder, or flat"),
     ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
     ("Ctrl+D / Ctrl+T", "the diff, the log"),
+    (
+        "/ / Ctrl+Shift+F",
+        "find in the diff: its lines, paths, hunks",
+    ),
+    (
+        "Enter / Shift+Enter",
+        "in the search, the next place, the one before",
+    ),
+    ("F3 / Shift+F3", "the next place found, the one before"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -3104,6 +3123,19 @@ impl Panel {
         if self.branch_menu.is_some() {
             return self.branch_menu_key(mods, sym, typed, ctx);
         }
+        // The search takes the keys while it has them; Ctrl+Shift+F opens
+        // it from anywhere.
+        if self.search_has_keys() {
+            return self.search_key(mods, sym, typed, ctx);
+        }
+        if mods.ctrl
+            && mods.shift
+            && !(mods.alt || mods.logo)
+            && matches!(sym, Keysym::f | Keysym::F)
+        {
+            self.open_search(ctx);
+            return None;
+        }
         // The comment being written takes the keys while the diff has them.
         if self.editing.is_some() && self.focus == Focus::Detail && self.tab() == DetailTab::Diff {
             return self.editor_key(mods, sym, typed, ctx);
@@ -3127,6 +3159,9 @@ impl Panel {
         }
         if only_alt && matches!(sym, Keysym::Right | Keysym::KP_Right) {
             self.fold_all(true, ctx);
+            return None;
+        }
+        if self.search_open_key(mods, sym, ctx) {
             return None;
         }
         let plain = !(mods.ctrl || mods.alt || mods.logo);
@@ -3173,6 +3208,10 @@ impl Panel {
                 Focus::Detail => Focus::Field,
                 Focus::Field => Focus::Tree,
             };
+            return None;
+        }
+        if in_diff && plain && typed == Keysym::slash {
+            self.open_search(ctx);
             return None;
         }
         if self.focus == Focus::Detail
@@ -3315,6 +3354,15 @@ impl Panel {
             };
         }
         self.rewrap(ctx);
+        // The search's parts act on it; a click elsewhere gives the
+        // keyboard back from it.
+        if let ReposHit::Search(part) = hit {
+            self.search_click(part, ctx);
+            return None;
+        }
+        if let Some(search) = &mut self.search {
+            search.focused = false;
+        }
         // A click elsewhere than on the comment being written saves it;
         // the diff row clicked found again among the rows without it.
         let diff_row = match hit {
@@ -3414,6 +3462,7 @@ impl Panel {
             ReposHit::Detail
             | ReposHit::Panel
             | ReposHit::More
+            | ReposHit::Search(_)
             | ReposHit::Splitter
             | ReposHit::BranchRow(_)
             | ReposHit::BranchDelete(_)
@@ -3953,6 +4002,7 @@ impl Panel {
             rows.extend(range.clone().map(|r| self.diff_row_view(r, false, ctx)));
             let shown: Vec<usize> = sticky.into_iter().chain(range.clone()).collect();
             let mut marks: Vec<RowMark> = shown.iter().map(|&r| self.row_mark(r)).collect();
+            let mut found: Vec<_> = shown.iter().map(|&r| self.found_on(r)).collect();
             let mut row_buttons = self.row_buttons(&shown);
             let line_h = crate::chrome::repos_detail_line(ctx.density);
             let pin = |h| self.diff_pin(h, page, line_h);
@@ -3961,11 +4011,15 @@ impl Panel {
                 let text = "No changes in any repository";
                 rows = vec![DetailRow::Text(detail_line(text, DiffTone::Plain))];
                 marks.clear();
+                found.clear();
                 row_buttons.clear();
             }
             return DetailView {
                 tab,
                 title: self.diff_title(ctx),
+                search: self.search_bar(),
+                found,
+                ticks: self.search_ticks(),
                 rows,
                 sticky: sticky.is_some(),
                 marks,
@@ -4011,6 +4065,7 @@ impl Panel {
             first,
             total,
             focused,
+            ..DetailView::default()
         }
     }
 
@@ -4151,6 +4206,7 @@ impl Panel {
         self.noted = noted;
         self.diff_rows = rows;
         self.diff_roots = items.iter().map(|i| i.root.clone()).collect();
+        self.find_hits(false);
         if let Some(anchor) = anchor.filter(|_| self.tab() == DetailTab::Diff) {
             self.scroll_to(&anchor);
         }
@@ -4856,10 +4912,7 @@ impl Panel {
                 let key = (item.root.clone(), file.path.clone());
                 DetailRow::File(DiffFile {
                     repo: pinned.then(|| item.label.clone()),
-                    path: match &file.orig {
-                        Some(orig) => format!("{orig} → {}", file.path),
-                        None => file.path.clone(),
-                    },
+                    path: search::shown_path(file),
                     code: file.code,
                     check,
                     folded: self.diff_folded.contains(&key),
@@ -8872,5 +8925,171 @@ mod tests {
         assert_eq!(texts(&panel.view("p", &ctx)), ["app", "lib"]);
         press(&mut panel, alt(), Keysym::Right, &ctx);
         assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
+    }
+
+    /// The diff row the cursor is on.
+    fn cursor_row(panel: &Panel) -> Option<usize> {
+        panel.cursor.as_ref().map(|c| c.row)
+    }
+
+    /// What the search says it found.
+    fn search_count(panel: &Panel, ctx: &Ctx) -> String {
+        panel.view("p", ctx).detail.search.expect("open").count
+    }
+
+    #[test]
+    fn slash_searches_the_diff_and_enter_goes_round_what_it_found() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        // Typed in the tree, a slash goes to the field.
+        panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
+        assert!(panel.search.is_none());
+        assert_eq!(panel.field.line().text, "/");
+        panel.focus = Focus::Detail;
+        panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
+        let bar = panel.view("p", &ctx).detail.search.expect("open");
+        assert!(bar.focused && bar.count.is_empty());
+        // "n": notes.md's path (row 5), its line (6), new.rs's path (9).
+        type_text(&mut panel, "n", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 3");
+        assert_eq!(cursor_row(&panel), Some(5));
+        let notes = Selected::File(root("gerdr"), "notes.md".into());
+        assert_eq!(panel.selected, Some(notes));
+        assert_eq!(panel.found_on(5), vec![(0..1, true)]);
+        assert_eq!(panel.found_on(6), vec![(0..1, false)]);
+        assert_eq!(panel.found_on(9), vec![(9..10, false)]);
+        assert!(panel.found_on(2).is_empty());
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(cursor_row(&panel), Some(6));
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(search_count(&panel, &ctx), "3 of 3");
+        assert_eq!(cursor_row(&panel), Some(9));
+        // Round past the end, and back.
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(cursor_row(&panel), Some(5));
+        press(&mut panel, mods(false, true, false), Keysym::Return, &ctx);
+        assert_eq!(cursor_row(&panel), Some(9));
+        // The ticks: a share of the ten rows each, the one gone to marked.
+        let ticks = panel.view("p", &ctx).detail.ticks;
+        assert_eq!(ticks, vec![(0.5, false), (0.6, false), (0.9, true)]);
+        // A capital finds only its case.
+        type_text(&mut panel, "N", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "No matches");
+        assert!(panel.view("p", &ctx).detail.ticks.is_empty());
+        press(&mut panel, none(), Keysym::BackSpace, &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 3");
+        // Down gives the diff the keys back, the places still found; F3
+        // goes on from there.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert!(!panel.search_has_keys());
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(cursor_row(&panel), Some(6));
+        press(&mut panel, none(), Keysym::F3, &ctx);
+        assert_eq!(cursor_row(&panel), Some(6));
+        assert_eq!(search_count(&panel, &ctx), "2 of 3");
+        // Esc closes the search first, then the panel.
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert!(panel.search.is_none());
+        assert!(panel.view("p", &ctx).detail.found.iter().all(Vec::is_empty));
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Escape, &ctx),
+            Some(Outcome::Close)
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_f_searches_and_ctrl_f_still_fetches() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        panel.tab = Some(DetailTab::Log);
+        assert_eq!(press(&mut panel, ctrl_shift(), Keysym::F, &ctx), None);
+        assert_eq!(panel.tab(), DetailTab::Diff);
+        assert_eq!(panel.focus, Focus::Detail);
+        assert!(panel.search_has_keys());
+        // Its own keys type; Esc closes it, the panel open.
+        type_text(&mut panel, "git", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 1");
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert!(panel.search.is_none());
+        let fetch = press(&mut panel, ctrl(), Keysym::f, &ctx);
+        assert!(matches!(
+            fetch,
+            Some(Outcome::Batch {
+                kind: BatchKind::Fetch,
+                ..
+            })
+        ));
+        assert!(panel.search.is_none());
+    }
+
+    #[test]
+    fn a_place_in_a_folded_file_unfolds_it_but_its_path() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        let key = (root("gerdr"), "notes.md".to_string());
+        panel.diff_folded.insert(key.clone());
+        panel.build_rows(&items, None);
+        // Folded: gerdr, src/git.rs, a, b, c, notes.md, a gap, zed, new.rs.
+        press(&mut panel, ctrl_shift(), Keysym::F, &ctx);
+        type_text(&mut panel, "n", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 3");
+        // Its path shows on its header: it stays folded.
+        assert_eq!(cursor_row(&panel), Some(5));
+        assert!(panel.diff_folded.contains(&key));
+        // Its line's tick is on its header.
+        let ticks: Vec<f64> = panel.search_ticks().iter().map(|t| t.0).collect();
+        assert_eq!(ticks, vec![5.0 / 9.0, 8.0 / 9.0]);
+        assert_eq!(panel.found_on(5), vec![(0..1, true)]);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert!(!panel.diff_folded.contains(&key));
+        assert_eq!(cursor_row(&panel), Some(6));
+        assert_eq!(search_count(&panel, &ctx), "2 of 3");
+        assert_eq!(panel.found_on(6), vec![(0..1, true)]);
+    }
+
+    #[test]
+    fn the_search_finds_what_hunks_are_in_and_keeps_its_place_on_a_read() {
+        use crate::chrome::SearchPart;
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let text = "diff --git a/f b/f\n\
+            @@ -1,2 +1,2 @@ fn alpha()\n x\n-y\n+z\n\
+            @@ -9,1 +9,1 @@ fn beta()\n-alpha\n+gamma\n";
+        let mut file = crate::diff::parse(text).pop().unwrap();
+        file.path = "src/git.rs".into();
+        file.code = 'M';
+        let g = panel.diff_gen;
+        panel.set_diffs(root("gerdr"), g, vec![file.clone()], &ctx);
+        // gerdr, src/git.rs, fn alpha(), x, y, z, fn beta(), alpha, gamma.
+        press(&mut panel, ctrl_shift(), Keysym::F, &ctx);
+        type_text(&mut panel, "alpha", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 2");
+        assert_eq!(cursor_row(&panel), Some(2));
+        assert_eq!(panel.found_on(2), vec![(3..8, true)]);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(cursor_row(&panel), Some(7));
+        // Read again, it stays on the same place.
+        panel.set_diffs(root("gerdr"), g, vec![file], &ctx);
+        assert_eq!(search_count(&panel, &ctx), "2 of 2");
+        assert_eq!(panel.found_on(7), vec![(0..5, true)]);
+        // The buttons go back and on; a click on the diff takes the keys
+        // from the search, its own field gives them back.
+        panel.click(ReposHit::Search(SearchPart::Prev), &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 2");
+        panel.click(ReposHit::DiffRow(0), &ctx);
+        assert!(!panel.search_has_keys() && panel.search.is_some());
+        panel.click(ReposHit::Search(SearchPart::Field), &ctx);
+        assert!(panel.search_has_keys());
+        panel.click(ReposHit::Search(SearchPart::Close), &ctx);
+        assert!(panel.search.is_none());
+        panel.click(ReposHit::Search(SearchPart::Open), &ctx);
+        assert!(panel.search_has_keys());
     }
 }

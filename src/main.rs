@@ -21,6 +21,7 @@ mod cursor_agents;
 mod desktop;
 mod diff;
 mod frecency;
+mod find;
 mod fuzzy;
 mod git;
 mod git_ops;
