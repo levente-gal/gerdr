@@ -26,7 +26,9 @@
 //! The tree lists a repository's files flat, by their whole paths, or
 //! under their folders (a folder holding only a folder one line with it),
 //! as the buttons over it or Alt+F pick, for every repository; the diff
-//! goes in the same order. A folder checks and folds as a whole.
+//! goes in the same order. Two more buttons there (Alt+Left / Alt+Right)
+//! fold every repository and folder, or unfold them all. A folder checks
+//! and folds as a whole.
 //!
 //! Keys: Tab moves from the tree to the detail to the field. In the tree
 //! Up/Down select, Space checks, Left/Right fold, Enter opens a file in
@@ -73,7 +75,7 @@ use crate::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, Density,
         DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone, DirLine,
         FileLine, Hint, LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar,
-        RowMark, SheetView, Tone, TreeLine,
+        RowMark, SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
     git::{Change, GitStatus, InProgress},
@@ -1354,6 +1356,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ),
     ("Enter", "open the file in Zed; fold a repository or folder"),
     ("Alt+F", "list the files by folder, or flat"),
+    ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
     ("Ctrl+D / Ctrl+T", "the diff, the log"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
@@ -1832,14 +1835,48 @@ impl Panel {
         }
         self.order_diffs(items);
         self.build_rows(items, self.diff_anchor());
-        let page = ctx.page.0.max(1);
+        self.relist(ctx);
+        Some(Outcome::Grouping(grouping))
+    }
+
+    /// Unfold every repository and folder, or fold them all (the folders
+    /// while listed by folder): the selection, hidden, on its
+    /// repository's line.
+    fn fold_all(&mut self, open: bool, ctx: &Ctx) {
+        let items = ctx.items;
+        for item in items {
+            self.set_open(item, open);
+        }
+        if open {
+            self.folded_dirs.clear();
+        } else {
+            if self.grouping == Grouping::Folders {
+                for (k, item) in items.iter().enumerate() {
+                    for row in file_rows(k, &item.status.changes, self.grouping) {
+                        if let Some(path) = Panel::dir_path(row, items) {
+                            self.folded_dirs
+                                .insert((item.root.clone(), path.to_owned()));
+                        }
+                    }
+                }
+            }
+            if let Some(Selected::Dir(root, _) | Selected::File(root, _)) = &self.selected {
+                self.selected = Some(Selected::Repo(root.clone()));
+            }
+        }
+        self.relist(ctx);
+    }
+
+    /// The tree's lines changed as a whole: the selection kept, and in
+    /// view.
+    fn relist(&mut self, ctx: &Ctx) {
+        let (items, page) = (ctx.items, ctx.page.0.max(1));
         self.settle(items, page);
         let rows = self.rows(items);
         if let Some(k) = self.selected_row(&rows, items) {
             let to = showing(self.tree_scroll.pos(), (k, k), page);
             move_to(&mut self.tree_scroll, to);
         }
-        Some(Outcome::Grouping(grouping))
     }
 
     /// The diffs read put in the tree's order.
@@ -3084,6 +3121,14 @@ impl Panel {
         if only_alt && matches!(sym, Keysym::f | Keysym::F) {
             return self.set_grouping(self.grouping.other(), ctx);
         }
+        if only_alt && matches!(sym, Keysym::Left | Keysym::KP_Left) {
+            self.fold_all(false, ctx);
+            return None;
+        }
+        if only_alt && matches!(sym, Keysym::Right | Keysym::KP_Right) {
+            self.fold_all(true, ctx);
+            return None;
+        }
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         if sym == Keysym::Escape && plain {
             return Some(Outcome::Close);
@@ -3334,7 +3379,12 @@ impl Panel {
                     return self.fold_line(rows[k], ctx);
                 }
             }
-            ReposHit::Grouping(grouping) => return self.set_grouping(grouping, ctx),
+            ReposHit::Tool(tool) => match tool {
+                TreeTool::Expand => self.fold_all(true, ctx),
+                TreeTool::Collapse => self.fold_all(false, ctx),
+                TreeTool::List => return self.set_grouping(Grouping::List, ctx),
+                TreeTool::Folders => return self.set_grouping(Grouping::Folders, ctx),
+            },
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
@@ -8692,10 +8742,10 @@ mod tests {
         // A folder's line is gone from the list: its repository's is
         // selected.
         panel.selected = Some(Selected::Dir(root("app"), "src".into()));
-        let outcome = panel.click(ReposHit::Grouping(Grouping::List), &ctx);
+        let outcome = panel.click(ReposHit::Tool(TreeTool::List), &ctx);
         assert_eq!(outcome, Some(Outcome::Grouping(Grouping::List)));
         assert_eq!(panel.selected, Some(Selected::Repo(root("app"))));
-        assert_eq!(panel.click(ReposHit::Grouping(Grouping::List), &ctx), None);
+        assert_eq!(panel.click(ReposHit::Tool(TreeTool::List), &ctx), None);
     }
 
     #[test]
@@ -8789,5 +8839,38 @@ mod tests {
         assert_eq!(file_name_text(&change("src/a/b.rs", 'M')), "b.rs");
         assert_eq!(file_name_text(&rename("src/old.rs")), "old.rs → new.rs");
         assert_eq!(file_name_text(&rename("lib/old.rs")), "lib/old.rs → new.rs");
+    }
+
+    #[test]
+    fn everything_folds_and_unfolds_at_once() {
+        let items = foldered();
+        let ctx = ctx(&items, None);
+        let mut panel = by_folder(&items);
+        panel.selected = Some(Selected::File(root("app"), "src/main.rs".into()));
+        press(&mut panel, alt(), Keysym::Left, &ctx);
+        assert_eq!(texts(&panel.view("p", &ctx)), ["app", "lib"]);
+        // The file hidden, its repository's line is selected.
+        assert_eq!(panel.selected, Some(Selected::Repo(root("app"))));
+        // Its repository unfolded, its folders are folded too.
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        let view = panel.view("p", &ctx);
+        assert_eq!(
+            texts(&view),
+            [
+                "app",
+                "assets/",
+                "docs/deep/only/",
+                "src/",
+                "Cargo.toml",
+                "README.md",
+                "lib"
+            ]
+        );
+        panel.click(ReposHit::Tool(TreeTool::Expand), &ctx);
+        assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
+        panel.click(ReposHit::Tool(TreeTool::Collapse), &ctx);
+        assert_eq!(texts(&panel.view("p", &ctx)), ["app", "lib"]);
+        press(&mut panel, alt(), Keysym::Right, &ctx);
+        assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
     }
 }
