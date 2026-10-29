@@ -24,6 +24,7 @@
 //! view. `inbox_panel` wires it into gerdr; `chrome::inbox` draws it.
 
 use std::{
+    cell::Cell,
     cmp::Reverse,
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
@@ -43,8 +44,8 @@ use crate::{
     herdr::AgentStatus,
     inbox_store::{InboxFile, TodoId, Triage},
     issues::{IssueSource, IssuesRead, IssuesState, TicketRepo},
+    scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
-    wheel::Wheel,
 };
 
 /// What colour an item is: the chrome's own, as it has nothing to
@@ -723,10 +724,12 @@ pub struct Panel {
     /// Where the selected item was in the list: what is selected once it
     /// is gone.
     selected_at: usize,
-    /// The first row in view, by index into the list's rows.
-    first: usize,
-    /// The wheel's turn not yet a whole row.
-    wheel: Wheel,
+    /// Where the list is scrolled to, in rows: the first in view, by
+    /// index into the list's rows, and the part of it scrolled past.
+    scroll: Scroll,
+    /// The list as last seen, which a scroll moving on its own goes by
+    /// between views.
+    bounds: Cell<Bounds>,
     /// Every workspace's items, not just the active one's.
     all: bool,
     /// Only the hidden items are listed (Ctrl+H).
@@ -742,8 +745,13 @@ impl Default for Panel {
             focus: None,
             selected: None,
             selected_at: 0,
-            first: 0,
-            wheel: Wheel::default(),
+            scroll: Scroll::default(),
+            bounds: Cell::new(Bounds {
+                max: 0.0,
+                notch: 1.0,
+                unit: chrome::INBOX_ROW as f64,
+                view: 0.0,
+            }),
             all: true,
             show_hidden: false,
         }
@@ -782,6 +790,13 @@ impl Listed {
     fn row(&self, k: usize) -> Option<usize> {
         self.rows.iter().position(|e| *e == Entry::Item(k))
     }
+}
+
+/// How many rows from its first a view of `page` rows takes: enough to
+/// fill the list, its first row scrolled all but past, were they all
+/// labels (lower than items).
+fn reach(page: usize) -> usize {
+    ((page.max(1) + 2) * chrome::INBOX_ROW as usize).div_ceil(chrome::INBOX_LABEL as usize)
 }
 
 /// The workspace after `at` (`back`: before) among `n`, then none, round.
@@ -919,7 +934,10 @@ impl Panel {
     /// first) when `follow`.
     fn first_row(&self, listed: &Listed, k: Option<usize>, page: usize, follow: bool) -> usize {
         let page = page.max(1);
-        let mut first = self.first.min(listed.rows.len().saturating_sub(page));
+        let mut first = self
+            .scroll
+            .first()
+            .min(listed.rows.len().saturating_sub(page));
         if let Some(r) = k.and_then(|k| listed.row(k)).filter(|_| follow) {
             let top = match r.checked_sub(1).map(|r| listed.rows[r]) {
                 Some(Entry::Label(..)) => r - 1,
@@ -933,29 +951,62 @@ impl Panel {
         first
     }
 
-    /// Select item `k` of `listed`, scrolling it into a view of `page` rows.
-    fn select(&mut self, listed: &Listed, k: usize, page: usize) {
+    /// Where a view of `page` rows of `listed` stands, moved to show item
+    /// `k` when `follow`: its first row, the part of it scrolled past, and
+    /// how far its rows are moved down past an end (logical pixels, see
+    /// `Scroll::overscroll`). Moved other than scrolled, it shows whole
+    /// rows.
+    fn at(
+        &self,
+        listed: &Listed,
+        k: Option<usize>,
+        page: usize,
+        follow: bool,
+    ) -> (usize, f64, f64) {
+        let first = self.first_row(listed, k, page, follow);
+        if first == self.scroll.first() {
+            (first, self.scroll.part(), self.scroll.overscroll())
+        } else {
+            (first, 0.0, 0.0)
+        }
+    }
+
+    /// The list `listed` as a view of `page` rows scrolls it: by rows, a
+    /// notch one, the first in view as high as it is.
+    fn list_bounds(&self, listed: &Listed, page: usize) -> Bounds {
+        let page = page.max(1);
+        let unit = match listed.rows.get(self.scroll.first()) {
+            Some(Entry::Label(..)) => chrome::INBOX_LABEL,
+            _ => chrome::INBOX_ROW,
+        };
+        Bounds {
+            max: listed.rows.len().saturating_sub(page) as f64,
+            notch: 1.0,
+            unit: unit as f64,
+            // A page of items is about as high as the list.
+            view: (page as i32 * chrome::INBOX_ROW) as f64,
+        }
+    }
+
+    /// Select item `k` of `listed`, scrolling it into a view of `page`
+    /// rows: at once, or gliding there from `glide`.
+    fn select(&mut self, listed: &Listed, k: usize, page: usize, glide: Option<Instant>) {
         let Some(item) = listed.items.get(k) else {
             return;
         };
         self.selected = Some(item.id.clone());
         self.selected_at = k;
-        let before = self.first_row(listed, None, page, false);
-        self.first = self.first_row(listed, Some(k), page, true);
+        let first = self.first_row(listed, Some(k), page, true);
         // Scrolled to it, or selected at the top where it is cut, the list
         // shows whole rows.
-        if self.first != before || listed.row(k) == Some(self.first) {
-            self.wheel = Wheel::default();
-        }
-    }
-
-    /// The part of row `first` scrolled past in a view of `page` rows of
-    /// `listed`: none where the list shows its end.
-    fn part(&self, listed: &Listed, first: usize, page: usize) -> f64 {
-        if first + page.max(1) < listed.rows.len() {
-            self.wheel.part(first)
-        } else {
-            0.0
+        if first != self.scroll.first() || listed.row(k) == Some(first) {
+            match glide {
+                Some(now) => {
+                    let bounds = self.list_bounds(listed, page);
+                    self.scroll.glide_to(first as f64, now, bounds);
+                }
+                None => self.scroll.jump(first as f64),
+            }
         }
     }
 
@@ -965,7 +1016,7 @@ impl Panel {
         if !self.pinned(&listed.items)
             && let Some(k) = self.current(&listed.items)
         {
-            self.select(listed, k, page);
+            self.select(listed, k, page, None);
         }
     }
 
@@ -974,15 +1025,14 @@ impl Panel {
     /// still listed, else the first.
     fn refilter(&mut self, list: &Listing) {
         let listed = self.listed(list);
-        self.first = 0;
-        self.wheel = Wheel::default();
+        self.scroll.jump(0.0);
         let kept = listed
             .items
             .iter()
             .position(|i| Some(&i.id) == self.selected.as_ref())
             .filter(|_| self.query.is_empty());
         if let Some(k) = kept.or((!listed.items.is_empty()).then_some(0)) {
-            self.select(&listed, k, list.page);
+            self.select(&listed, k, list.page, None);
         }
     }
 
@@ -1180,7 +1230,7 @@ impl Panel {
             _ => None,
         };
         if let Some(to) = to {
-            self.select(&listed, to, page);
+            self.select(&listed, to, page, None);
             return None;
         }
         let action = match sym {
@@ -1219,13 +1269,14 @@ impl Panel {
         let listed = self.listed(list);
         self.settle(&listed, page);
         let selected = self.current(&listed.items);
-        let first = self.first_row(&listed, selected, page, false);
-        // Scrolled part of a row, the row under the page shows too.
-        let shown = page.max(1) + usize::from(self.part(&listed, first, page) > 0.0);
+        let (first, ..) = self.at(&listed, selected, page, false);
+        let shown = reach(page);
         let at = |i: usize| match listed.rows.get(first + i) {
             Some(Entry::Item(k)) if i < shown => Some(*k),
             _ => None,
         };
+        // A row cut by the list's edge glides into view.
+        let now = Some(Instant::now());
         let (item, action) = match hit {
             InboxHit::Scope(all) => {
                 if list.active.is_some() && self.all != all {
@@ -1238,14 +1289,14 @@ impl Panel {
             InboxHit::Row(i) => {
                 let k = at(i)?;
                 if selected != Some(k) {
-                    self.select(&listed, k, page);
+                    self.select(&listed, k, page, now);
                     return None;
                 }
                 (k, ItemAction::GoTo)
             }
             InboxHit::Button(i, b) => {
                 let k = at(i)?;
-                self.select(&listed, k, page);
+                self.select(&listed, k, page, now);
                 let actions = actions(&listed.items[k], self.show_hidden);
                 (k, *row_actions(&actions).get(b)?)
             }
@@ -1258,21 +1309,40 @@ impl Panel {
         self.act(&item, action, list)
     }
 
-    /// What the pointer is over now.
-    pub fn hover(&mut self, hit: Option<InboxHit>) {
+    /// The pointer is over `hit` at `now`; what of it is kept: not a row
+    /// while the list moves.
+    pub fn hover(&mut self, hit: Option<InboxHit>, now: Instant) -> Option<InboxHit> {
         self.hover = hit;
+        self.unhover(now);
+        self.hover
     }
 
-    /// The wheel turned `rows` rows (down positive) over the list: whole
-    /// rows scroll it, the part of a row left shows it moved by as much.
-    pub fn scroll(&mut self, rows: f64, list: &Listing) {
+    /// Let go of a row under the pointer while the list moves at `now`:
+    /// rows passing under a still pointer are not lit by it.
+    fn unhover(&mut self, now: Instant) {
+        let on_row = matches!(self.hover, Some(InboxHit::Row(_) | InboxHit::Button(..)));
+        if on_row && self.scroll.moving(now) {
+            self.hover = None;
+        }
+    }
+
+    /// The wheel or the touchpad moved the list at `now` (see
+    /// `Scroll::apply`).
+    pub fn scroll(&mut self, motion: Motion, now: Instant, list: &Listing) {
         let listed = self.listed(list);
         self.settle(&listed, list.page);
-        let last = listed.rows.len().saturating_sub(list.page.max(1));
-        let first = self.first_row(&listed, None, list.page, false);
-        let wanted = first as i64 + self.wheel.turn(rows, first);
-        self.first = wanted.clamp(0, last as i64) as usize;
-        self.wheel.settle(wanted, self.first, last);
+        let bounds = self.list_bounds(&listed, list.page);
+        self.bounds.set(bounds);
+        self.scroll.apply(motion, now, bounds);
+        self.unhover(now);
+    }
+
+    /// Move the list on to `now` if it moves on its own; whether it still
+    /// moves (see `Scroll::moving`).
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let moving = self.scroll.tick(now, self.bounds.get());
+        self.unhover(now);
+        moving
     }
 
     /// The footer's hints, for what is selected (`actions`) over `list`.
@@ -1346,10 +1416,9 @@ impl Panel {
         let page = list.page.max(1);
         let selected = self.current(&listed.items);
         let follow = !self.pinned(&listed.items);
-        let first = self.first_row(&listed, selected, page, follow);
-        // Scrolled part of a row, the list shows one more under it.
-        let part = self.part(&listed, first, page);
-        let end = (first + page + usize::from(part > 0.0)).min(listed.rows.len());
+        let (first, part, over) = self.at(&listed, selected, page, follow);
+        let end = (first + reach(page)).min(listed.rows.len());
+        self.bounds.set(self.list_bounds(&listed, page));
         let hovered = match self.hover {
             Some(InboxHit::Row(i) | InboxHit::Button(i, _)) => Some(first + i),
             _ => None,
@@ -1442,6 +1511,7 @@ impl Panel {
             empty: empty.into(),
             show_hidden: self.show_hidden,
             part,
+            over,
         }
     }
 }
@@ -2068,12 +2138,33 @@ mod tests {
             }));
     }
 
-    #[test]
-    fn paging_keeps_the_selection_in_view() {
-        let items: Vec<_> = (0..12)
+    /// Twelve repos, then three todos, five rows a page.
+    fn long_list() -> Vec<InboxItem> {
+        (0..12)
             .map(|n| item(&format!("g{n}"), Section::Repos, None))
             .chain((0..3).map(|n| todo(n, None)))
-            .collect();
+            .collect()
+    }
+
+    /// Whatever moves the list, run out.
+    fn rest(panel: &mut Panel) {
+        assert!(!panel.tick(Instant::now() + Duration::from_secs(5)));
+    }
+
+    /// The wheel turned by `notches` over the list, and its glide run out.
+    fn wheel(panel: &mut Panel, notches: f64, list: &Listing) {
+        panel.scroll(Motion::Notches(notches), Instant::now(), list);
+        rest(panel);
+    }
+
+    /// The fingers moved the list by `px` at event time `time`.
+    fn finger(panel: &mut Panel, px: f64, time: u32, list: &Listing) {
+        panel.scroll(Motion::Finger { px, time }, Instant::now(), list);
+    }
+
+    #[test]
+    fn paging_keeps_the_selection_in_view() {
+        let items = long_list();
         let triage = BTreeMap::new();
         let names = names();
         let list = Listing {
@@ -2083,9 +2174,9 @@ mod tests {
         let mut panel = Panel::new(None);
         let in_view = |panel: &Panel| {
             let view = panel.view(&list);
-            assert!(view.rows.len() <= 5);
             assert_eq!(view.total, 17);
             let id = selected_id(&view).expect("the selection in view");
+            assert!(view.selected.is_some_and(|r| r < 5), "{view:?}");
             // Just opened, nothing is selected for good yet.
             if let Some(selected) = panel.selected() {
                 assert_eq!(selected, &ItemId(id));
@@ -2112,15 +2203,15 @@ mod tests {
         press(&mut panel, Keysym::Home, &list);
         assert_eq!(in_view(&panel).first, 0);
         // The wheel scrolls, within the list.
-        panel.scroll(3.0, &list);
+        wheel(&mut panel, 3.0, &list);
         assert_eq!(panel.view(&list).first, 3);
-        panel.scroll(100.0, &list);
+        wheel(&mut panel, 100.0, &list);
         assert_eq!(panel.view(&list).first, 12);
         // Half a row up shows the row above in part.
-        panel.scroll(-0.5, &list);
+        wheel(&mut panel, -0.5, &list);
         assert_eq!(panel.view(&list).first, 11);
         assert_eq!(panel.view(&list).part, 0.5);
-        panel.scroll(-0.5, &list);
+        wheel(&mut panel, -0.5, &list);
         assert_eq!(panel.view(&list).first, 11);
         assert_eq!(panel.view(&list).part, 0.0);
         // Clicks go by the rows in view.
@@ -2137,10 +2228,7 @@ mod tests {
 
     #[test]
     fn a_touchpad_scrolls_by_parts_of_a_row() {
-        let items: Vec<_> = (0..12)
-            .map(|n| item(&format!("g{n}"), Section::Repos, None))
-            .chain((0..3).map(|n| todo(n, None)))
-            .collect();
+        let items = long_list();
         let triage = BTreeMap::new();
         let names = names();
         let list = Listing {
@@ -2152,38 +2240,100 @@ mod tests {
             InboxRow::Item(line) => line.id.clone(),
             row => panic!("{row:?}"),
         };
-        panel.scroll(1.5, &list);
+        // One to one by the rows' own heights: the label, then half an
+        // item.
+        finger(&mut panel, chrome::INBOX_LABEL as f64, 0, &list);
+        assert_eq!(panel.view(&list).first, 1);
+        finger(&mut panel, chrome::INBOX_ROW as f64 / 2.0, 8, &list);
+        panel.scroll(Motion::Lift { time: 300 }, Instant::now(), &list);
+        rest(&mut panel);
         let view = panel.view(&list);
         assert_eq!((view.first, view.part), (1, 0.5));
-        // The row shown in part under the page too, and clicked.
-        assert_eq!(view.rows.len(), 6);
+        // The rows past the page too, as many as may show, and clicked.
+        assert_eq!(view.rows.len(), reach(5));
         assert_eq!(id(&view, 5), "g5");
         panel.click(InboxHit::Row(5), &list);
         assert_eq!(panel.selected(), Some(&ItemId("g5".into())));
-        // Selecting it scrolled the list to show it whole.
+        // Selecting it glided the list to show it whole.
+        rest(&mut panel);
         let view = panel.view(&list);
-        assert_eq!((view.first, view.part, view.rows.len()), (2, 0.0, 5));
-        // Up past the top, and down past the end, hold the list whole.
-        panel.scroll(-3.25, &list);
-        let view = panel.view(&list);
-        assert_eq!((view.first, view.part, view.rows.len()), (0, 0.0, 5));
-        panel.scroll(100.5, &list);
+        assert_eq!((view.first, view.part), (2, 0.0));
+        // Down past the end the wheel holds the list whole.
+        wheel(&mut panel, 100.5, &list);
         let view = panel.view(&list);
         assert_eq!((view.first, view.part, view.rows.len()), (12, 0.0, 5));
         // A key moving the list drops the part.
         press(&mut panel, Keysym::Home, &list);
-        panel.scroll(0.5, &list);
+        wheel(&mut panel, 0.5, &list);
         assert_eq!(panel.view(&list).part, 0.5);
         press(&mut panel, Keysym::End, &list);
         assert_eq!(panel.view(&list).part, 0.0);
         // So does selecting the row cut at the top, shown whole then.
         press(&mut panel, Keysym::Home, &list);
-        panel.scroll(2.5, &list);
+        wheel(&mut panel, 2.5, &list);
         assert_eq!(id(&panel.view(&list), 0), "g1");
         press(&mut panel, Keysym::Down, &list);
         let view = panel.view(&list);
         assert_eq!(panel.selected(), Some(&ItemId("g1".into())));
         assert_eq!((view.first, view.part, view.selected), (2, 0.0, Some(0)));
+    }
+
+    #[test]
+    fn fingers_pulling_past_the_top_stretch_the_list_and_it_springs_back() {
+        let items = long_list();
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = Listing {
+            page: 5,
+            ..listing(&items, &triage, &names)
+        };
+        let mut panel = Panel::new(None);
+        finger(&mut panel, -200.0, 0, &list);
+        let view = panel.view(&list);
+        assert_eq!((view.first, view.part), (0, 0.0));
+        assert!(view.over > 0.0 && view.over < 200.0, "{}", view.over);
+        panel.scroll(Motion::Lift { time: 8 }, Instant::now(), &list);
+        assert!(panel.tick(Instant::now()));
+        rest(&mut panel);
+        assert_eq!(panel.view(&list).over, 0.0);
+    }
+
+    #[test]
+    fn a_moving_list_lights_no_row_under_the_pointer() {
+        let items = long_list();
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = Listing {
+            page: 5,
+            ..listing(&items, &triage, &names)
+        };
+        let mut panel = Panel::new(None);
+        let t = Instant::now();
+        assert_eq!(
+            panel.hover(Some(InboxHit::Row(2)), t),
+            Some(InboxHit::Row(2))
+        );
+        panel.scroll(Motion::Notches(3.0), t, &list);
+        assert_eq!(panel.view(&list).hover, None);
+        // Moved on a frame later, part of the way.
+        let frame = t + Duration::from_millis(16);
+        assert!(panel.tick(frame));
+        let view = panel.view(&list);
+        assert!(view.first < 3 && view.part > 0.0, "{view:?}");
+        assert_eq!(panel.hover(Some(InboxHit::Row(2)), frame), None);
+        // What is not a row still is.
+        assert_eq!(
+            panel.hover(Some(InboxHit::DetailButton(0)), frame),
+            Some(InboxHit::DetailButton(0))
+        );
+        // Stopped, the rows are lit again.
+        let later = t + Duration::from_secs(1);
+        assert!(!panel.tick(later));
+        assert_eq!(panel.view(&list).first, 3);
+        assert_eq!(
+            panel.hover(Some(InboxHit::Row(2)), later),
+            Some(InboxHit::Row(2))
+        );
     }
 
     #[test]
