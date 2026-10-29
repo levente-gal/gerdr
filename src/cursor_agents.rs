@@ -979,6 +979,15 @@ pub fn run_hook() {
     let Some(event) = HookEvent::from_payload(&payload, now_ms()) else {
         return;
     };
+    // Cursor's agent CLI runs the same hooks, but herdr shows it already,
+    // as the agent of its pane.
+    let under_cli = crate::launch::lineage(std::process::id())
+        .into_iter()
+        .filter_map(|pid| std::fs::read(format!("/proc/{pid}/cmdline")).ok())
+        .any(|cmdline| is_cli_agent(&crate::launch::cmdline_args(&cmdline)));
+    if under_cli {
+        return;
+    }
     let display = std::env::var_os("WAYLAND_DISPLAY");
     let (Ok(message), Some(path)) = (
         serde_json::to_vec(&event),
@@ -991,6 +1000,16 @@ pub fn run_hook() {
     };
     let _ = socket.set_nonblocking(true);
     let _ = socket.send_to(&message, path);
+}
+
+/// Whether a process running `args` is Cursor's agent CLI started in a
+/// terminal: its script runs node on the `index.js` of a version of it.
+/// Not one of the workers Cursor runs its own chats in, by the same CLI.
+fn is_cli_agent(args: &[String]) -> bool {
+    let cli = args
+        .iter()
+        .any(|arg| arg.contains("/cursor-agent/versions/") && arg.ends_with("/index.js"));
+    cli && !args.iter().any(|arg| arg == "worker")
 }
 
 /// `existing`, the text of a hooks.json, with `command` run for each of
@@ -1034,9 +1053,15 @@ fn is_gerdr_hook(command: &str) -> bool {
         return false;
     };
     let program = program.trim().trim_matches(|c| c == '\'' || c == '"');
-    Path::new(program)
+    Path::new(live_path(program))
         .file_name()
         .is_some_and(|name| name == "gerdr")
+}
+
+/// `path` as /proc names a program run from it: without the " (deleted)"
+/// it gets once the file is built again under the running program.
+fn live_path(path: &str) -> &str {
+    path.strip_suffix(" (deleted)").unwrap_or(path)
 }
 
 /// Add this gerdr to Cursor's hooks, in `~/.cursor/hooks.json`, unless it
@@ -1045,7 +1070,7 @@ pub fn install_hooks(home: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
     let command = format!(
         "{} {HOOK_COMMAND}",
-        crate::desktop::shell_quote(&exe.to_string_lossy())
+        crate::desktop::shell_quote(live_path(&exe.to_string_lossy()))
     );
     let path = home.join(".cursor/hooks.json");
     let existing = match std::fs::read_to_string(&path) {
@@ -1746,7 +1771,8 @@ mod tests {
         assert_eq!(fresh["version"], 1);
         assert_eq!(fresh["hooks"]["stop"][0]["command"], command);
         let theirs = r#"{"version":1,"hooks":{"stop":[{"command":"notify-send done"},
-            {"command":"'/old/gerdr' cursor-hook"}],"afterFileEdit":[{"command":"fmt"}]},"x":2}"#;
+            {"command":"'/old/gerdr' cursor-hook"},{"command":"'/new/gerdr (deleted)' cursor-hook"}],
+            "afterFileEdit":[{"command":"fmt"}]},"x":2}"#;
         let merged = merge_hooks(Some(theirs), command).unwrap();
         let value: Value = serde_json::from_str(&merged).unwrap();
         let stop = value["hooks"]["stop"].as_array().unwrap();
@@ -1771,6 +1797,28 @@ mod tests {
             assert_eq!(name("gerdr-0").as_deref(), Some("gerdr-0.cursor"));
             assert_eq!(name("wayland-3").as_deref(), Some("gerdr-wayland-3.cursor"));
         }
+    }
+
+    #[test]
+    fn only_the_cli_in_a_terminal_is_told_from_cursors_chats() {
+        let args = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let versions = "/home/u/.local/share/cursor-agent/versions/2026.10.14-941492e";
+        let cli = args(&format!(
+            "/home/u/.local/bin/cursor-agent --use-system-ca {versions}/index.js"
+        ));
+        assert!(is_cli_agent(&cli));
+        let alias = args(&format!("agent {versions}/index.js --model sonnet"));
+        assert!(is_cli_agent(&alias));
+        let worker = args(&format!(
+            "/home/u/p/agent-cli/.local/bin/cursor-agent --use-system-ca \
+             /home/u/p/agent-cli/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/index.js \
+             --endpoint https://api2.cursor.sh worker start --worker-dir /home/u/w"
+        ));
+        assert!(!is_cli_agent(&worker));
+        assert!(!is_cli_agent(&args(
+            "/usr/share/cursor/cursor --type=utility"
+        )));
+        assert!(!is_cli_agent(&args("sh -c gerdr cursor-hook")));
     }
 
     #[test]

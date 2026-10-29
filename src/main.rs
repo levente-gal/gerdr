@@ -959,6 +959,8 @@ pub struct PendingEnter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     NewTab,
+    /// Cursor's agent CLI in a new tab of the active workspace.
+    NewCursorAgent,
     CloseTab,
     NextTab,
     PrevTab,
@@ -3722,6 +3724,7 @@ impl Gerdr {
         }
         match action {
             Action::NewTab => self.new_tab(),
+            Action::NewCursorAgent => self.new_cursor_agent(self.active_workspace),
             Action::CloseTab => self.close_tab(tab),
             Action::NextTab if tabs > 0 => self.switch_tab((tab + 1) % tabs),
             Action::PrevTab if tabs > 0 => self.switch_tab((tab + tabs - 1) % tabs),

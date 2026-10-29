@@ -9,7 +9,7 @@ use super::{
     AgentLine, AgentView, BarButton, BarButtons, BarStatus, FormField, FormView, Help, HelpHit,
     HelpPress, InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView,
     ItemIcon, MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
-    PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState,
+    PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, RowState, SidebarState,
     SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView,
     TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
@@ -727,7 +727,7 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0xd6388dc5ece9a7b0, // sidebar
+        0xe8b1959bc938f770, // sidebar
         0x6f51308dd7cdce6c, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
@@ -741,7 +741,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Dark at 2
     [
-        0x159db3d6c5543d17, // sidebar
+        0x38c5ddcf14f79f97, // sidebar
         0x16e4f5440b99562b, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
@@ -755,7 +755,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 1
     [
-        0x92c047769de561a1, // sidebar
+        0x15840963c4e44961, // sidebar
         0x4a807baae40c759e, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
@@ -769,7 +769,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 2
     [
-        0x26db32d5380e25b0, // sidebar
+        0x2a0eceb7e43deab0, // sidebar
         0x8ef3bfabf0e0d845, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
@@ -1001,6 +1001,33 @@ fn dump_overlays() {
                     project: Some("aft".into()),
                     header_lit: false,
                     state: SidebarState::default(),
+                },
+                (260, 520).into(),
+                scale,
+                p,
+            ),
+            px(260),
+        );
+        // A header under the pointer, on its agent button.
+        let hovered = RowState {
+            hover: 16,
+            agent: true,
+            ..RowState::default()
+        };
+        dump(
+            &dir,
+            &format!("sidebar_hover_{tag}"),
+            painter.sidebar_view(
+                &SidebarView {
+                    workspaces: workspaces(),
+                    agents: many_agents(),
+                    active: Some(0),
+                    project: Some("aft".into()),
+                    header_lit: false,
+                    state: SidebarState {
+                        rows: vec![hovered],
+                        ..SidebarState::default()
+                    },
                 },
                 (260, 520).into(),
                 scale,
