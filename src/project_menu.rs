@@ -764,6 +764,17 @@ impl ProjectMenu {
         }
     }
 
+    /// Stand the list `px` pixels down, as its scrollbar's thumb held
+    /// there puts it, the selection dragged along.
+    fn stand_at(&mut self, px: f64) {
+        if self.form.is_some() || self.settings.is_some() {
+            return;
+        }
+        let max = self.bounds().max.max(0.0);
+        self.scroll.jump(self.places.pos(px).clamp(0.0, max));
+        self.drag();
+    }
+
     /// Move the list on to `now`; whether it still moves.
     fn tick(&mut self, now: Instant) -> bool {
         let moving = self.scroll.tick(now, self.bounds());
@@ -1013,6 +1024,7 @@ impl ProjectMenu {
                 ]),
                 hover_alpha,
                 part: 0.0,
+                bar: None,
             };
         }
         if let Some(settings) = &self.settings {
@@ -1026,6 +1038,7 @@ impl ProjectMenu {
                 hints: hints(&[("Tab", "next"), ("Enter", "save"), ("Esc", "back")]),
                 hover_alpha,
                 part: 0.0,
+                bar: None,
             };
         }
         let first = self.scroll.first().min(self.items.len());
@@ -1106,6 +1119,10 @@ impl ProjectMenu {
             hints,
             hover_alpha,
             part,
+            bar: (self.places.end() > self.list_height()).then(|| chrome::ListBar {
+                down: self.places.px(self.scroll.pos()),
+                total: self.places.end(),
+            }),
         }
     }
 }
@@ -1461,6 +1478,16 @@ impl Gerdr {
         if let Some(menu) = self.project_menu.as_mut() {
             menu.set_room(room);
             menu.scroll(motion, Instant::now());
+        }
+    }
+
+    /// Stand the project menu's list `px` pixels down, as its scrollbar's
+    /// thumb held there puts it.
+    pub fn project_menu_scroll_to(&mut self, px: f64) {
+        let room = self.project_menu_room();
+        if let Some(menu) = self.project_menu.as_mut() {
+            menu.set_room(room);
+            menu.stand_at(px);
         }
     }
 

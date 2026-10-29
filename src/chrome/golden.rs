@@ -345,6 +345,7 @@ fn switcher() -> SwitcherView {
         ],
         selected: Some(0),
         hover: Some(3),
+        bar: None,
     }
 }
 
@@ -429,6 +430,7 @@ fn project_menu() -> ProjectMenuView {
         ],
         hover_alpha: 16,
         part: 0.0,
+        bar: None,
     }
 }
 
@@ -451,6 +453,7 @@ fn form() -> ProjectMenuView {
         hints: vec![("Esc".into(), "back".into())],
         hover_alpha: 16,
         part: 0.0,
+        bar: None,
     }
 }
 
