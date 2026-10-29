@@ -6,8 +6,9 @@
 use super::{
     Badge, Canvas, Density, Dot, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING,
     Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
-    Theme, ThemeMode, agent_badge, cross, dot_rect, eye, field_text, icon_sdf, mix, moon, new_tab,
-    no_restart, physical, rounded_rect, segment, status_label, sun, tab_strip_height, tray,
+    Theme, ThemeMode, agent_icon, cross, dot_slot, eye, field_text, icon_sdf, mix, moon, new_tab,
+    no_restart, physical, rounded_rect, row_dot, segment, status_dot, status_label, sun,
+    tab_strip_height, tray,
 };
 use crate::agent_icons::AgentIcon;
 use crate::app_icons::github_icon;
@@ -672,8 +673,15 @@ impl Painter {
             } else {
                 px(rect.loc.x + rect.size.w - GAP) as f32 - pad
             };
+            // Its agent's dot, before the "×" (where it goes, shown or not).
+            let badge = tab_badge(tab);
+            if let Some(badge) = badge {
+                let dot = tab_dot(*rect, close, size.h);
+                status_dot(&mut c, dot, badge.dot, scale, p);
+                right = right.min(px(dot_slot(tab_dot_line(*rect, close, size.h)).loc.x) as f32);
+            }
             // What runs in the tab won't run again after a restart: say so
-            // before the "×".
+            // before the "×" and the dot.
             if tab.restart == Some(false) {
                 let mark_w = px(STATUS_WIDTH) as f32;
                 let mark = Rectangle::new(
@@ -685,7 +693,7 @@ impl Painter {
                 });
                 right = px(mark.loc.x) as f32 - px(STATUS_GAP) as f32;
             }
-            // Before the number, a mark: its agent's badge when its status
+            // Before the number, a mark: its agent's icon when its status
             // says something, else GitHub's when the tab shows a GitHub page.
             let mut text_x = x as f32 + pad;
             let mark = Rectangle::new(
@@ -693,17 +701,10 @@ impl Painter {
                 (STATUS_WIDTH, size.h).into(),
             );
             let github = tab.github.then(github_icon).flatten();
-            if let Some(badge) = tab_badge(tab) {
-                let ground = if is_active {
-                    p.tab_active
-                } else if hovered {
-                    mix(p.tab_bar, p.element, alpha)
-                } else {
-                    p.tab_bar
-                };
+            if let Some(badge) = badge {
                 let tint = if is_active { p.muted } else { p.placeholder };
                 let icon = tab_icon_rect(*rect, size.h);
-                agent_badge(&mut c, icon, TAB_ICON, badge, tint, ground, scale, p);
+                agent_icon(&mut c, icon, TAB_ICON, badge.icon, tint, scale);
                 text_x += ((TAB_ICON + STATUS_GAP) as f32 * s).round();
             } else if let Some(icon) = &github {
                 let tint = if is_active { p.muted } else { p.placeholder };
@@ -944,6 +945,25 @@ fn tab_icon_rect(rect: Rect, h: i32) -> Rect {
     )
 }
 
+/// The line a tab at `rect` with its "×" at `close` (none when too
+/// narrow) puts its dot at the end of: up to the "×".
+fn tab_dot_line(rect: Rect, close: Rect, h: i32) -> Rect {
+    let end = if close.size.w > 0 {
+        close.loc.x - PLUS_GAP
+    } else {
+        rect.loc.x + rect.size.w - GAP - PADDING as i32
+    };
+    Rectangle::new(
+        (rect.loc.x, 0).into(),
+        ((end - rect.loc.x).max(0), h).into(),
+    )
+}
+
+/// Where the dot of a tab at `rect` with its "×" at `close` goes.
+fn tab_dot(rect: Rect, close: Rect, h: i32) -> Rect {
+    row_dot(tab_dot_line(rect, close, h))
+}
+
 /// Where the blinking dots of `view`'s tabs go on its strip, `size` big
 /// (strip coordinates): one per tab at work, but the one being renamed.
 pub fn tab_blinkers(view: &TabStripView, size: Size<i32, Logical>) -> Vec<Rect> {
@@ -959,14 +979,15 @@ pub fn tab_blinkers(view: &TabStripView, size: Size<i32, Logical>) -> Vec<Rect> 
     layout
         .tabs
         .iter()
+        .zip(&layout.closes)
         .zip(&view.tabs)
         .enumerate()
-        .filter(|(i, (rect, tab))| {
+        .filter(|(i, ((rect, _), tab))| {
             Some(*i) != renaming
                 && rect.size.w > TAB_ICON
                 && tab_badge(tab).is_some_and(|b| b.dot.blinks())
         })
-        .map(|(_, (rect, _))| dot_rect(tab_icon_rect(*rect, size.h), TAB_ICON))
+        .map(|(_, ((rect, close), _))| tab_dot(*rect, *close, size.h))
         .collect()
 }
 
@@ -1512,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn a_working_tab_blinks_its_badges_dot_but_not_while_renamed() {
+    fn a_working_tab_blinks_its_dot_but_not_while_renamed() {
         let size = (900, tab_strip_height(Density::Comfortable)).into();
         let working = TabView {
             title: "gerdr".into(),
@@ -1534,6 +1555,9 @@ mod tests {
         let l = tab_layout(3, size, false, false, false, false);
         assert_eq!(dots.len(), 2);
         assert!(inside(l.tabs[1], dots[0]) && inside(l.tabs[2], dots[1]));
+        // At the tab's right end, before its "×".
+        assert!(dots[0].loc.x > l.tabs[1].loc.x + l.tabs[1].size.w / 2);
+        assert!(dots[0].loc.x + dots[0].size.w <= l.closes[1].loc.x);
         view.renaming = Some((1, Line::default()));
         assert_eq!(tab_blinkers(&view, size).len(), 1);
     }
