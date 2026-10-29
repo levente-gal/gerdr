@@ -591,8 +591,9 @@ impl Chrome {
             (view.tab_strip, theme, strip_size.w, scale),
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
-        parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
         // Every row is as wide as the next, so one band buffer fits all.
+        // Parts go front to back: the bands before the opaque sidebar, or
+        // they would be under it.
         if let Some(size) = bands.first().map(|band| band.size) {
             let buffer = self.pulse.get((size, theme, scale), |(size, ..)| {
                 painter.pulse_band(*size, scale, theme.palette())
@@ -601,6 +602,7 @@ impl Chrome {
                 parts.push((buffer, band.loc, size, pulse_alpha));
             }
         }
+        parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size, 1.0));
         render_parts(renderer, parts, scale)
     }
