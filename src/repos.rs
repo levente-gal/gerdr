@@ -419,6 +419,8 @@ fn bounds(len: usize, page: usize, unit: i32) -> Bounds {
         max: len.saturating_sub(page) as f64,
         notch: 1.0,
         unit: unit as f64,
+        next: unit as f64,
+        prev: unit as f64,
         view: (page as i32 * unit) as f64,
     }
 }

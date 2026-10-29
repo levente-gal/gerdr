@@ -152,6 +152,8 @@ impl Gerdr {
             max: layout.max_scroll(height) as f64,
             notch: SIDEBAR_NOTCH,
             unit: 1.0,
+            next: 1.0,
+            prev: 1.0,
             view: (height - BAR_HEIGHT).max(0) as f64,
         }
     }

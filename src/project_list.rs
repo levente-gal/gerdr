@@ -114,10 +114,16 @@ impl RowTops {
     /// What moves a list `view` high standing as `scroll`: a notch moves
     /// it a row, and it goes down until its end shows at the bottom.
     pub fn bounds(&self, scroll: &Scroll, view: f64) -> Bounds {
+        let first = scroll.first();
+        let unit = self.height(first);
         Bounds {
             max: self.pos(self.end() - view),
             notch: 1.0,
-            unit: self.height(scroll.first()),
+            unit,
+            next: Some(first + 1)
+                .filter(|&i| i < self.len())
+                .map_or(unit, |i| self.height(i)),
+            prev: first.checked_sub(1).map_or(unit, |i| self.height(i)),
             view,
         }
     }

@@ -433,10 +433,14 @@ impl Popup {
     /// `items`: in worktrees, a notch one, as high as from its first to
     /// the next.
     fn bounds(&self, items: &[Item], page: usize) -> Bounds {
+        let first = self.first_shown(items, page);
+        let unit = step(items, first) as f64;
         Bounds {
             max: last_first(items, page) as f64,
             notch: 1.0,
-            unit: step(items, self.first_shown(items, page)) as f64,
+            unit,
+            next: step(items, first + 1) as f64,
+            prev: first.checked_sub(1).map_or(unit, |i| step(items, i) as f64),
             view: list_height(items, page) as f64,
         }
     }
