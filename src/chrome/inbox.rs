@@ -396,6 +396,24 @@ fn thumb_place(
     ))
 }
 
+/// The list's scrollbar in `layout` for `view` on an `output`, where the
+/// list does not all show.
+pub fn inbox_thumb(
+    view: &InboxView,
+    layout: &InboxLayout,
+    output: Size<i32, Logical>,
+) -> Option<super::Thumb> {
+    let track = scroll_track(layout.list);
+    let page = inbox_page(output);
+    let (loc, size) = thumb_place(view, track, page)?;
+    Some(super::Thumb {
+        track,
+        top: loc.y,
+        h: size.h as f64,
+        last: (view.total - page) as f64,
+    })
+}
+
 /// The list's scrollbar track, at the right of `list`.
 fn scroll_track(list: Rect) -> Rect {
     Rectangle::new(

@@ -133,6 +133,14 @@ impl Gerdr {
         self.sidebar_scroll.apply(motion, Instant::now(), bounds);
     }
 
+    /// Stand the sidebar's rows `pos` pixels down, as a scrollbar's thumb
+    /// held there puts them.
+    pub(crate) fn sidebar_scroll_to(&mut self, pos: f64) {
+        let bounds = self.sidebar_bounds(&self.sidebar_layout());
+        self.sidebar_scroll
+            .jump(pos.clamp(0.0, bounds.max.max(0.0)));
+    }
+
     /// Move the sidebar's rows on to `now` if they move on their own;
     /// whether they still move (see `Scroll::moving`).
     pub fn sidebar_scroll_tick(&mut self, now: Instant) -> bool {
@@ -171,6 +179,10 @@ impl Gerdr {
     /// What is under the pointer in the sidebar, if it is free and there.
     fn sidebar_hit(&self, layout: &SidebarLayout, pos: Point<f64, Logical>) -> Option<SidebarHit> {
         if self.sidebar_covered() || pos.x >= self.sidebar_width as f64 {
+            return None;
+        }
+        // Nothing lights up while a scrollbar's thumb is held.
+        if self.thumb_drag.is_some() {
             return None;
         }
         // Rows passing under a still pointer don't light up.

@@ -1118,6 +1118,37 @@ impl Gerdr {
         }
     }
 
+    /// Stand the detail, or else the tree, at line `pos`, as its
+    /// scrollbar's thumb held there puts it.
+    pub fn repos_scroll_to(&mut self, pos: f64, detail: bool) {
+        let page = self.repos_page();
+        let (density, tree_share, cols) = self.repos_env();
+        let Repos {
+            panel,
+            batch,
+            items,
+            same_branches,
+            top_branches,
+            fetches,
+            ..
+        } = &mut self.repos;
+        let ctx = Ctx {
+            items,
+            batch: batch.as_ref(),
+            page,
+            now: SystemTime::now(),
+            fetching: *fetches > 0,
+            same: same_branches,
+            top: top_branches,
+            density,
+            tree_share,
+            cols,
+        };
+        if let Some(panel) = panel.as_mut() {
+            panel.stand_at(pos, detail, &ctx);
+        }
+    }
+
     /// Move the repositories panel's lists on to `now` if they move on
     /// their own; whether one still moves (see `Scroll::moving`).
     pub fn repos_scroll_tick(&mut self, now: std::time::Instant) -> bool {

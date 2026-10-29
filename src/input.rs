@@ -393,6 +393,9 @@ impl Gerdr {
                 if state == ButtonState::Released {
                     self.field_drag = false;
                     self.repos_rows_drag = false;
+                    if self.thumb_drag.take().is_some() {
+                        return;
+                    }
                 }
                 if state == ButtonState::Released && self.drag.take().is_some() {
                     // The final size, without Resizing, so every client applies it.
@@ -438,6 +441,19 @@ impl Gerdr {
                         );
                         pointer.frame(self);
                         self.refresh_pointer_focus();
+                    }
+                    return;
+                }
+                // A left press on a scrollbar holds its thumb, flung or not.
+                if state == ButtonState::Pressed
+                    && !pointer.is_grabbed()
+                    && event.button_code() == BTN_LEFT
+                    && self.press_thumb(location)
+                {
+                    self.tooltip.hide();
+                    self.chrome.drop_tooltip();
+                    if self.rename.is_some() {
+                        self.commit_rename();
                     }
                     return;
                 }
@@ -923,6 +939,9 @@ impl Gerdr {
         }
         if self.repos_rows_drag {
             self.repos_drag_rows(pos);
+        }
+        if self.thumb_drag.is_some() {
+            self.drag_thumb(pos);
         }
         // An overlay takes the hover from everything under it.
         let overlay = self.quit.is_some()

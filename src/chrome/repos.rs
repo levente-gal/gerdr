@@ -1145,6 +1145,33 @@ fn thumb_place(track: Rect, pos: f64, shown: usize, total: usize) -> Option<(f64
     Some((top, thumb as i32))
 }
 
+/// The scrollbars of the tree and of the detail in `layout`, each where
+/// its list does not all show.
+pub fn repos_thumbs(view: &ReposView, layout: &ReposLayout) -> [Option<super::Thumb>; 2] {
+    let thumb = |(track, shown): (Rect, usize), pos: f64, total: usize| {
+        let (top, h) = thumb_place(track, pos, shown, total)?;
+        Some(super::Thumb {
+            track,
+            top,
+            h: h as f64,
+            last: (total - shown) as f64,
+        })
+    };
+    let detail = &view.detail;
+    [
+        thumb(
+            tree_bar(view, layout),
+            view.first as f64 + view.part,
+            view.total,
+        ),
+        thumb(
+            detail_bar(view, layout),
+            detail.first as f64 + detail.part,
+            detail.total,
+        ),
+    ]
+}
+
 /// How wide the detail's rows are in a pane `w` wide: short of its
 /// padding and its scrollbar.
 fn body_width(w: i32) -> i32 {

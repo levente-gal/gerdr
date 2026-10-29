@@ -57,6 +57,7 @@ mod repos;
 mod restart;
 mod review;
 mod scroll;
+mod scrollbars;
 mod scrolling;
 mod sidebar;
 mod switcher;
@@ -1289,6 +1290,8 @@ pub struct Gerdr {
     /// The left button went down on the repositories panel's diff and is
     /// held: moving drags the diff cursor's range on.
     pub repos_rows_drag: bool,
+    /// A scrollbar's thumb held with the left button: moving drags it.
+    pub thumb_drag: Option<scrollbars::ThumbDrag>,
     /// The projects whose sessions are being stopped, by id: not shown
     /// until they have.
     pub stopping: HashSet<String>,
@@ -1438,7 +1441,7 @@ impl Gerdr {
                 && self.context_menu.is_none();
             return on.then_some(Drag::ReposSplit);
         }
-        if (pos.x - self.sidebar_width as f64).abs() <= GRAB {
+        if (pos.x - self.sidebar_width as f64).abs() <= GRAB && !self.on_sidebar_bar(pos) {
             return Some(Drag::Sidebar);
         }
         let layout = self.tab()?.layout.as_ref()?;
@@ -5898,6 +5901,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         field_clicks: None,
         field_drag: false,
         repos_rows_drag: false,
+        thumb_drag: None,
         stopping: HashSet::new(),
         project_menu: None,
         header_hover: false,

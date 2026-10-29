@@ -360,6 +360,18 @@ impl Gerdr {
         }
     }
 
+    /// Stand the panel's list at row `pos`, as its scrollbar's thumb held
+    /// there puts it.
+    pub fn inbox_scroll_to(&mut self, pos: f64) {
+        if self.inbox.panel.is_none() {
+            return;
+        }
+        let parts = self.inbox_parts();
+        if let Some(panel) = self.inbox.panel.as_mut() {
+            panel.scroll_to(pos, &parts.listing());
+        }
+    }
+
     /// Move the inbox panel's list on to `now` if it moves on its own;
     /// whether it still moves (see `Scroll::moving`).
     pub fn inbox_scroll_tick(&mut self, now: Instant) -> bool {

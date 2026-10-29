@@ -3056,6 +3056,19 @@ impl Panel {
         Some(Outcome::Batch { kind, jobs })
     }
 
+    /// Stand the detail pane, or else the tree, at line `pos`, to the
+    /// fraction, as its scrollbar's thumb held there puts it.
+    pub fn stand_at(&mut self, pos: f64, detail: bool, ctx: &Ctx) {
+        let b = self.scroll_bounds(detail, ctx);
+        let pos = pos.clamp(0.0, b.max.max(0.0));
+        if detail {
+            self.detail_scroll.jump(pos);
+            self.take_slack(ctx.page.1);
+        } else {
+            self.tree_scroll.jump(pos);
+        }
+    }
+
     /// The detail pane, or else the tree, moved by `motion` at `now`.
     pub fn scroll(&mut self, motion: Motion, now: Instant, over_detail: bool, ctx: &Ctx) {
         let b = self.scroll_bounds(over_detail, ctx);

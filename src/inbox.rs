@@ -1355,6 +1355,16 @@ impl Panel {
         self.unhover(now);
     }
 
+    /// Stand the list at row `pos`, to the fraction, as a scrollbar's
+    /// thumb held there puts it.
+    pub fn scroll_to(&mut self, pos: f64, list: &Listing) {
+        let listed = self.listed(list);
+        self.settle(&listed, list.page);
+        let bounds = self.list_bounds(&listed, list.page);
+        self.bounds.set(bounds);
+        self.scroll.jump(pos.clamp(0.0, bounds.max.max(0.0)));
+    }
+
     /// Move the list on to `now` if it moves on its own; whether it still
     /// moves (see `Scroll::moving`).
     pub fn tick(&mut self, now: Instant) -> bool {

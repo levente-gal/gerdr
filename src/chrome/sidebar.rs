@@ -2752,6 +2752,36 @@ fn scroll_track(size: Size<i32, Logical>) -> Rect {
     )
 }
 
+/// The sidebar's scrollbar, `width` wide on an `output`, with its rows
+/// laid out as `layout` scrolled `scroll` pixels down; none while they
+/// all show.
+pub fn sidebar_thumb(
+    layout: &SidebarLayout,
+    width: i32,
+    output: Size<i32, Logical>,
+    scroll: f64,
+) -> Option<super::Thumb> {
+    let max = layout.max_scroll(output.h);
+    let shown = output.h - BAR_HEIGHT;
+    let track = scroll_track((width, output.h).into());
+    let room = track.size.h as f64;
+    if max <= 0 || shown <= 0 || room <= 0.0 {
+        return None;
+    }
+    let total = (shown + max) as f64;
+    let h = (room * shown as f64 / total)
+        .max((THUMB_MIN as f64).min(room))
+        .min(room)
+        .round();
+    let top = track.loc.y as f64 + (room - h) * scroll.clamp(0.0, max as f64) / max as f64;
+    Some(super::Thumb {
+        track,
+        top,
+        h,
+        last: max as f64,
+    })
+}
+
 /// The line closing the sidebar at its right edge, down all of `c`.
 fn sidebar_edge(c: &mut Canvas, scale: f64, p: &Palette) {
     let w = ((GAP as f64 * scale).round() as i32).max(1);
@@ -2956,21 +2986,13 @@ impl SidebarLayers {
         }
 
         // Where the rows are scrolled to, when they do not all fit.
-        let shown = output.h - BAR_HEIGHT;
-        let track = scroll_track(size);
-        let room = track.size.h as f64;
-        if max > 0 && shown > 0 && room > 0.0 {
-            let total = (shown + max) as f64;
-            let h = (room * shown as f64 / total)
-                .max((THUMB_MIN as f64).min(room))
-                .min(room)
-                .round() as i32;
-            let y = track.loc.y as f64 + (room - h as f64) * scroll / max as f64;
-            let thumb = (SCROLLBAR_WIDTH, h).into();
+        if let Some(bar) = sidebar_thumb(&layout, width, output, scroll) {
+            let thumb = (SCROLLBAR_WIDTH, bar.h as i32).into();
             let buffer = self.thumb.get((thumb, theme, scale), |(size, ..)| {
                 painter.scroll_thumb(*size, scale, theme.palette())
             });
-            parts.push(Part::new(buffer, track.loc, thumb, 1.0).at((track.loc.x as f64, y).into()));
+            let at = (bar.track.loc.x as f64, bar.top).into();
+            parts.push(Part::new(buffer, bar.track.loc, thumb, 1.0).at(at));
         }
 
         // The blocked agents' pulse: one band per row, composed over the
