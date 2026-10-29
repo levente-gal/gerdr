@@ -602,6 +602,11 @@ impl Chrome {
             (view.sidebar, theme, sidebar_size, scale),
             |(sidebar, ..)| painter.sidebar_view(sidebar, sidebar_size, scale, theme.palette()),
         );
+        // The tab strip's blinking dots, moved onto the output.
+        let strip_dots: Vec<Rect> = tab_blinkers(&view.tab_strip, strip_size)
+            .into_iter()
+            .map(|dot| Rectangle::new(dot.loc + Point::from((sidebar_w, 0)), dot.size))
+            .collect();
         let strip = self.tabs.get(
             (view.tab_strip, theme, strip_size.w, scale),
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
@@ -619,6 +624,7 @@ impl Chrome {
             }
         }
         parts.push((sidebar, Point::from((0, 0)), sidebar_size, 1.0));
+        push_dots(&mut parts, dot, strip_dots, blink);
         parts.push((strip, Point::from((sidebar_w, 0)), strip_size, 1.0));
         render_parts(renderer, parts, scale)
     }

@@ -154,6 +154,7 @@ fn tabs() -> Vec<TabView> {
             activity: "claude working · cargo build".into(),
             restart: Some(true),
             github: false,
+            agent: Some(crate::agent_icons::AgentIcon::Claude),
         },
         TabView {
             title: "zsh".into(),
@@ -707,7 +708,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0x4087d4468d21db1c, // sidebar
-        0x35a1890943b945e0, // tab_strip
+        0x0769bf25f49d539d, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
@@ -721,7 +722,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 2
     [
         0x4c191a7f2df1eb9b, // sidebar
-        0x057804639bd5f3d2, // tab_strip
+        0xd0dce344d6d0b1d1, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
@@ -735,7 +736,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Light at 1
     [
         0x047108c61ea45cc0, // sidebar
-        0x76286b9148f6cf2c, // tab_strip
+        0x2e31bd93352f7a4f, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
@@ -749,7 +750,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     // Light at 2
     [
         0x36e0ac8566eb4f8d, // sidebar
-        0xb977630fd30a1f46, // tab_strip
+        0xb38843d4ac4bbe22, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
@@ -986,6 +987,18 @@ fn dump_overlays() {
                 p,
             ),
             px(260),
+        );
+        let strip_h = super::tab_strip_height(super::Density::Comfortable);
+        dump(
+            &dir,
+            &format!("tab_strip_{tag}"),
+            painter.tab_strip_view(
+                &TabStripView::plain(tabs(), 1, true, ThemeMode::System),
+                theme,
+                (900, strip_h).into(),
+                scale,
+            ),
+            px(900),
         );
         dump(
             &dir,

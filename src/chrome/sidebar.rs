@@ -2655,6 +2655,7 @@ mod tests {
             activity: activity.into(),
             restart: None,
             github: false,
+            agent: None,
         };
         let tabs = [
             tab(
