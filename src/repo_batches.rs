@@ -981,6 +981,13 @@ impl Gerdr {
     /// The pointer moved while the panel is open.
     pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.repos_view()?;
+        // Nothing while a list moves under the pointer: it is found again
+        // once they stop.
+        let panel = self.repos.panel.as_mut()?;
+        if panel.scrolling(std::time::Instant::now()) {
+            panel.hover = None;
+            return None;
+        }
         let layout = chrome::repos_layout(&view, self.output_size());
         let hit = chrome::repos_hit(&layout, pos);
         if let Some(panel) = self.repos.panel.as_mut() {
@@ -1060,10 +1067,11 @@ impl Gerdr {
         }
     }
 
-    /// The wheel turned `rows` rows (down positive) over the panel: the
-    /// detail under the pointer scrolls, else the tree.
+    /// The wheel or the touchpad moved the list under the pointer: the
+    /// branch menu's, the detail's, else the tree's. What is under the
+    /// pointer is left as it was while it moves.
     pub fn repos_scroll(&mut self, motion: crate::scroll::Motion) {
-        let rows = crate::scroll::Scroll::legacy_rows(motion, 40.0);
+        let now = std::time::Instant::now();
         let Some(view) = self.repos_view() else {
             return;
         };
@@ -1097,17 +1105,56 @@ impl Gerdr {
             tree_share,
             cols,
         };
-        match panel.as_mut() {
-            Some(panel) if over_menu => panel.scroll_branches(rows, &ctx),
-            Some(panel) => panel.scroll(rows, over_detail, &ctx),
-            None => {}
+        let Some(panel) = panel.as_mut() else {
+            return;
+        };
+        if over_menu {
+            panel.scroll_branches(motion, now, &ctx);
+        } else {
+            panel.scroll(motion, now, over_detail, &ctx);
+        }
+        if panel.scrolling(now) {
+            panel.hover = None;
         }
     }
 
-    /// Move the repositories panel's list on to `now` if it moves on its own; whether it
-    /// still moves (see `Scroll::moving`).
-    pub fn repos_scroll_tick(&mut self, _now: std::time::Instant) -> bool {
-        false
+    /// Move the repositories panel's lists on to `now` if they move on
+    /// their own; whether one still moves (see `Scroll::moving`).
+    pub fn repos_scroll_tick(&mut self, now: std::time::Instant) -> bool {
+        if !self.repos.panel.as_ref().is_some_and(|p| p.scrolling(now)) {
+            return false;
+        }
+        let page = self.repos_page();
+        let (density, tree_share, cols) = self.repos_env();
+        let Repos {
+            panel,
+            batch,
+            items,
+            same_branches,
+            top_branches,
+            fetches,
+            ..
+        } = &mut self.repos;
+        let ctx = Ctx {
+            items,
+            batch: batch.as_ref(),
+            page,
+            now: SystemTime::now(),
+            fetching: *fetches > 0,
+            same: same_branches,
+            top: top_branches,
+            density,
+            tree_share,
+            cols,
+        };
+        let Some(panel) = panel.as_mut() else {
+            return false;
+        };
+        let moving = panel.scroll_tick(now, &ctx);
+        if moving {
+            panel.hover = None;
+        }
+        moving
     }
 
     /// What the panel shows, while it is open.

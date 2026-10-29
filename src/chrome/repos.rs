@@ -21,13 +21,12 @@ use super::{
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
     chevron_down, coverage, field_text, git_branch, icon_sdf, measure, measure_mono, mix, phys,
-    plus, rect_px, rounded_rect, trash,
+    physical, plus, rect_px, rounded_rect, trash,
 };
 use std::ops::Range;
 
 use crate::diff::LineKind;
 use crate::text_field::Line;
-use crate::wheel;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -99,6 +98,8 @@ const DIFF_INSET: i32 = 8;
 const DIFF_BAR: i32 = 3;
 /// A review comment's text, in from its card's edge.
 const COMMENT_INDENT: i32 = 12;
+/// How far the line and shadow under the pinned header reach down.
+const PIN_SHADOW: i32 = 5;
 /// A button on a diff row: its padding, the gap before its key, the gap
 /// between two, and how far in from the row's ends and edges it sits.
 const ROW_CHIP_PAD: i32 = 8;
@@ -182,6 +183,9 @@ pub struct ReposView {
     /// The part of the first line scrolled past, 0 to 1; with some,
     /// `lines` has one more under the tree, shown in part.
     pub part: f64,
+    /// How far the lines are moved down (up when negative), logical
+    /// pixels, while the tree is pulled past an end.
+    pub over: f64,
     /// Where `lines` start among all the tree's lines, and how many there
     /// are: where the tree's scrollbar stands.
     pub first: usize,
@@ -253,6 +257,12 @@ pub struct BranchMenuView {
     /// to 1; with some, the lines have one more under the list, shown in
     /// part.
     pub part: f64,
+    /// How far the lines are moved down (up when negative), logical
+    /// pixels, while the menu is pulled past an end.
+    pub over: f64,
+    /// The longest of all its branches, in view or not: the menu is wide
+    /// enough for them.
+    pub widest: Vec<String>,
 }
 
 /// The branch menu's row creating the branch typed in its search.
@@ -370,9 +380,16 @@ pub struct DetailView {
     /// repository's name.
     pub title: String,
     /// The rows in view, scrolled; with `sticky`, the first is the header
-    /// of the file the rest start in, pinned at the top.
+    /// of the file the rest start in, pinned at the top over them.
     pub rows: Vec<DetailRow>,
     pub sticky: bool,
+    /// Where the pinned header is, logical pixels down from the top of the
+    /// rows: 0 pinned there, less while the next file's header pushes it
+    /// up, more while the rows are pulled down past the start.
+    pub pin: f64,
+    /// The pinned header is scrolled past its own place: it casts a
+    /// shadow on the rows under it.
+    pub stuck: bool,
     /// How each of `rows` is marked: the diff's cursor, the range it
     /// reaches back to, a comment on it. Empty for none.
     pub marks: Vec<RowMark>,
@@ -385,6 +402,9 @@ pub struct DetailView {
     /// any) past, 0 to 1; with some, `rows` has one more under the pane,
     /// shown in part.
     pub part: f64,
+    /// How far the rows are moved down (up when negative), logical
+    /// pixels, while the pane is pulled past an end.
+    pub over: f64,
     /// Where the rows start among them all, and how many there are: where
     /// the scrollbar stands.
     pub first: usize,
@@ -862,8 +882,6 @@ struct Parts {
     layout: ReposLayout,
     /// The line under the field saying what went wrong.
     error: Option<Rect>,
-    /// Where the detail pane's lines go, under its title row.
-    body: Rect,
     /// The result bar's buttons, by index into `ResultBar::buttons`.
     result_buttons: Vec<(usize, Rect)>,
     /// The footer's buttons, by index into `ReposView::hints`.
@@ -910,9 +928,6 @@ fn hint_width(hint: &Hint) -> i32 {
         + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
-/// The detail's title row buttons and its rows', as laid out.
-type DetailButtons<'a> = (&'a [(ReposButton, Rect)], &'a [(usize, ReposButton, Rect)]);
-
 /// How wide a button on a diff row is: its label, then its key muted.
 fn row_chip_width(hint: &Hint) -> i32 {
     let key = match hint.key.is_empty() {
@@ -920,6 +935,26 @@ fn row_chip_width(hint: &Hint) -> i32 {
         false => ROW_CHIP_KEY_GAP + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR),
     };
     2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR) + key
+}
+
+/// Where the buttons `widths` wide go on a diff row in `row`: in order,
+/// right-aligned on it.
+fn chip_rects(row: Rect, widths: impl DoubleEndedIterator<Item = i32>) -> Vec<Rect> {
+    let mut end = row.loc.x + row.size.w - ROW_CHIP_INSET;
+    let mut rects: Vec<Rect> = widths
+        .rev()
+        .map(|w| {
+            end -= w;
+            let rect = Rectangle::new(
+                (end, row.loc.y + ROW_CHIP_INSET).into(),
+                (w, (row.size.h - 2 * ROW_CHIP_INSET).max(1)).into(),
+            );
+            end -= ROW_CHIP_GAP;
+            rect
+        })
+        .collect();
+    rects.reverse();
+    rects
 }
 
 /// What the footer's "more" button says with `n` actions behind it.
@@ -1035,6 +1070,281 @@ pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
     ((text.max(0) as f32 / advance).floor() as usize).max(16)
 }
 
+/// How far up a scrolled list's rows `height` high are moved, logical
+/// pixels: by the `part` of its first row scrolled past, less how far it
+/// is pulled down past an end (`over`).
+fn scrolled_by(part: f64, over: f64, height: i32) -> f64 {
+    part * height as f64 - over
+}
+
+/// A tree line in `rect`, its checkbox's rect and a repository line's
+/// expander's.
+fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
+    let (x, y, h) = (rect.loc.x, rect.loc.y, rect.size.h);
+    let indent = match line {
+        TreeLine::Repo(_) => 0,
+        TreeLine::File(_) => REPOS_INDENT,
+    };
+    let check_x = x + REPOS_LINE_INSET + indent;
+    let check = Rectangle::new((check_x, y).into(), (REPOS_CHECK, h).into());
+    let expander = match line {
+        TreeLine::Repo(repo) if repo.expanded.is_some() => Some(Rectangle::new(
+            (check_x + REPOS_CHECK, y).into(),
+            (REPOS_EXPANDER, h).into(),
+        )),
+        _ => None,
+    };
+    (rect, check, expander)
+}
+
+/// Where a buffer holding the panel `panel` and its shadow has its top
+/// left, in output coordinates negated: what moves a rect onto it.
+fn buffer_origin(panel: Rect) -> Point<i32, Logical> {
+    Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y))
+}
+
+/// `rect` moved by `by`.
+fn moved(rect: Rect, by: Point<i32, Logical>) -> Rect {
+    Rectangle::new(rect.loc + by, rect.size)
+}
+
+/// The tree's scrollbar in `layout`, and how many of `view`'s lines it
+/// shows whole.
+fn tree_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
+    let tree = layout.tree;
+    let track = Rectangle::new(
+        (
+            tree.loc.x + tree.size.w - REPOS_PAD - SCROLLBAR,
+            tree.loc.y + REPOS_PAD,
+        )
+            .into(),
+        (SCROLLBAR, (tree.size.h - 2 * REPOS_PAD).max(0)).into(),
+    );
+    let whole = view
+        .lines
+        .len()
+        .saturating_sub(usize::from(view.part > 0.0));
+    (track, layout.lines.len().min(whole))
+}
+
+/// Where the thumb of a scrollbar in `track` goes for a list of `total`
+/// rows showing `shown` of them from row `pos` (to the fraction): its top,
+/// in logical pixels to the fraction, and its height. None when they all
+/// fit.
+fn thumb_place(track: Rect, pos: f64, shown: usize, total: usize) -> Option<(f64, i32)> {
+    if total <= shown || shown == 0 {
+        return None;
+    }
+    let h = track.size.h as f64;
+    let thumb = (h * shown as f64 / total as f64)
+        .max((SCROLLBAR_MIN as f64).min(h))
+        .min(h)
+        .round();
+    let pos = pos.clamp(0.0, (total - shown) as f64);
+    let top = track.loc.y as f64 + (h - thumb) * pos / (total - shown) as f64;
+    Some((top, thumb as i32))
+}
+
+/// How wide the detail's rows are in a pane `w` wide: short of its
+/// padding and its scrollbar.
+fn body_width(w: i32) -> i32 {
+    (w - 2 * HELP_PADDING - SCROLLBAR).max(0)
+}
+
+/// The detail's scrollbar in `layout`, and how many of `view`'s rows it
+/// shows: a page.
+fn detail_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
+    let pane = layout.detail;
+    let line_h = repos_detail_line(view.density);
+    let track = Rectangle::new(
+        (
+            pane.loc.x + pane.size.w - HELP_PADDING / 2 - SCROLLBAR,
+            pane.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
+        )
+            .into(),
+        (
+            SCROLLBAR,
+            (pane.size.h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
+        )
+            .into(),
+    );
+    let shown = layout.detail_list.size.h / line_h.max(1);
+    (track, shown.max(1) as usize)
+}
+
+/// A row of the detail as drawn: what its pixels come from, but its
+/// place.
+#[derive(Clone, Debug, PartialEq)]
+struct DetailLook {
+    row: DetailRow,
+    mark: RowMark,
+    /// Its buttons, in order.
+    buttons: Vec<Hint>,
+    /// What the pointer is over on it, as on the first row.
+    hover: Option<ReposHit>,
+    /// The detail has the keyboard.
+    focused: bool,
+}
+
+/// Row `i` of `view`'s detail, as drawn.
+fn detail_look(view: &ReposView, i: usize) -> DetailLook {
+    use ReposHit::*;
+    let buttons: Vec<Hint> = view
+        .detail
+        .row_buttons
+        .iter()
+        .filter(|(j, _)| *j == i)
+        .map(|(_, hint)| hint.clone())
+        .collect();
+    let hover = match view.hover {
+        Some(DiffRow(j)) if j == i => Some(DiffRow(0)),
+        Some(DiffCheck(j)) if j == i => Some(DiffCheck(0)),
+        Some(DiffFold(j)) if j == i => Some(DiffFold(0)),
+        Some(Button(b)) if buttons.iter().any(|h| h.button == b) => Some(Button(b)),
+        _ => None,
+    };
+    DetailLook {
+        row: view.detail.rows[i].clone(),
+        mark: view.detail.marks.get(i).copied().unwrap_or_default(),
+        buttons,
+        hover,
+        focused: view.detail.focused,
+    }
+}
+
+/// A line of the branch menu's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuItem {
+    /// By index into `BranchMenuView::headings`.
+    Heading(usize),
+    /// By index into `BranchMenuView::rows`.
+    Row(usize),
+}
+
+/// The first `laid` lines of `menu`'s list, top down: each group's
+/// heading over its rows.
+fn menu_items(menu: &BranchMenuView, laid: usize) -> Vec<MenuItem> {
+    let (mut headings, mut rows) = (0, 0);
+    let mut items = Vec::with_capacity(laid);
+    for _ in 0..laid {
+        if menu
+            .headings
+            .get(headings)
+            .is_some_and(|&(at, _)| at == rows)
+        {
+            items.push(MenuItem::Heading(headings));
+            headings += 1;
+        } else if rows < menu.rows.len() {
+            items.push(MenuItem::Row(rows));
+            rows += 1;
+        }
+    }
+    items
+}
+
+/// A line of the branch menu as drawn: what its pixels come from, but
+/// its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MenuLook {
+    Heading(String),
+    Branch {
+        label: String,
+        /// Enter picks it.
+        picked: bool,
+        /// They are all on it.
+        current: bool,
+        /// It has a local branch to delete.
+        deletable: bool,
+        /// What the pointer is over on it, as on the first row.
+        hover: Option<ReposHit>,
+    },
+}
+
+/// Line `item` of `view`'s branch menu `menu`, as drawn.
+fn menu_look(view: &ReposView, menu: &BranchMenuView, item: MenuItem) -> MenuLook {
+    match item {
+        MenuItem::Heading(i) => MenuLook::Heading(
+            menu.headings
+                .get(i)
+                .map_or(String::new(), |(_, l)| l.clone()),
+        ),
+        MenuItem::Row(i) => MenuLook::Branch {
+            label: menu.rows[i].clone(),
+            picked: menu.picked == Some(i),
+            current: menu.current == Some(i),
+            deletable: menu.deletable.get(i) == Some(&true),
+            hover: match view.hover {
+                Some(ReposHit::BranchRow(j)) if j == i => Some(ReposHit::BranchRow(0)),
+                Some(ReposHit::BranchDelete(j)) if j == i => Some(ReposHit::BranchDelete(0)),
+                _ => None,
+            },
+        },
+    }
+}
+
+/// The lines of `menu` as `layout` has them, top down, each with its
+/// rect; `rows` the rows'.
+fn menu_rects(menu: &BranchMenuView, layout: &ReposLayout, rows: &[Rect]) -> Vec<(MenuItem, Rect)> {
+    let laid = layout.branch_headings.len() + rows.len();
+    menu_items(menu, laid)
+        .into_iter()
+        .filter_map(|item| {
+            let rect = match item {
+                MenuItem::Heading(i) => layout.branch_headings.iter().find(|(j, _)| *j == i)?.1,
+                MenuItem::Row(i) => *rows.get(i)?,
+            };
+            Some((item, rect))
+        })
+        .collect()
+}
+
+/// What of the branch menu `menu` its card is drawn from: all but its
+/// lines and where they stand. `empty` is what it says, empty while it
+/// has rows.
+fn menu_card_view(menu: &BranchMenuView) -> BranchMenuView {
+    BranchMenuView {
+        empty: match menu.rows.is_empty() {
+            true => menu.empty.clone(),
+            false => String::new(),
+        },
+        query: menu.query.clone(),
+        placeholder: menu.placeholder.clone(),
+        create: menu.create.clone(),
+        ..BranchMenuView::default()
+    }
+}
+
+/// A tree line as drawn: what its pixels come from, but its place.
+#[derive(Clone, Debug, PartialEq)]
+struct TreeRow {
+    line: TreeLine,
+    selected: bool,
+    /// Selected while the field has the keyboard: lit less.
+    dim: bool,
+    /// What the pointer is over on it, as on the first line.
+    hover: Option<ReposHit>,
+}
+
+/// Tree line `i` of `view`, as drawn.
+fn tree_row(view: &ReposView, i: usize) -> TreeRow {
+    use ReposHit::*;
+    let hover = match view.hover {
+        Some(Line(j)) if j == i => Some(Line(0)),
+        Some(Check(j)) if j == i => Some(Check(0)),
+        Some(Expander(j)) if j == i => Some(Expander(0)),
+        Some(Chip(j)) if j == i => Some(Chip(0)),
+        Some(Mark(j, mark)) if j == i => Some(Mark(0, mark)),
+        _ => None,
+    };
+    let selected = view.selected == Some(i);
+    TreeRow {
+        line: view.lines[i].clone(),
+        selected,
+        dim: selected && view.field_focused,
+        hover,
+    }
+}
+
 /// Where the parts of the panel showing `view` go on an output of `size`.
 pub fn repos_layout(view: &ReposView, size: Size<i32, Logical>) -> ReposLayout {
     parts(view, size).layout
@@ -1089,8 +1399,9 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let tree_end = middle_y + middle_h - REPOS_PAD;
     let lines_y = middle_y + REPOS_PAD;
     // Scrolled part of the first line, the lines start up by as much and
-    // the last is shown in part, cut at where the others end.
-    let tree_shift = wheel::shift(view.part, row_h);
+    // the last is shown in part, cut at where the others end; pulled past
+    // an end, they move with the pull.
+    let tree_shift = scrolled_by(view.part, view.over, row_h);
     let whole_lines = view
         .lines
         .len()
@@ -1103,25 +1414,13 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             break;
         }
         tree_shown += usize::from(i < whole_lines);
-        let ly = at - tree_shift;
+        let ly = (at as f64 - tree_shift).round() as i32;
         let rect = Rectangle::new((line_x, ly).into(), (line_w, row_h).into());
-        let indent = match line {
-            TreeLine::Repo(_) => 0,
-            TreeLine::File(_) => REPOS_INDENT,
-        };
-        let check_x = line_x + REPOS_LINE_INSET + indent;
-        let check = Rectangle::new((check_x, ly).into(), (REPOS_CHECK, row_h).into());
-        let expander = match line {
-            TreeLine::Repo(repo) if repo.expanded.is_some() => Some(Rectangle::new(
-                (check_x + REPOS_CHECK, ly).into(),
-                (REPOS_EXPANDER, row_h).into(),
-            )),
-            _ => None,
-        };
+        let (_, check, expander) = line_rects(line, rect);
         if let TreeLine::Repo(repo) = line {
             // Measured as the painter measures, at one pixel a pixel.
             let width = |text: &str, size: f32| measure(text, size).unwrap_or(0.0);
-            let x = (check_x + REPOS_CHECK + REPOS_EXPANDER) as f32;
+            let x = (check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
             let right = (line_x + line_w) as f32 - PADDING;
             let spans = line_spans(repo, (x, right), FIELD_GAP as f32, 1.0, &width);
             for m in spans.marks {
@@ -1166,7 +1465,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (tab, Rectangle::new((tx, tab_y).into(), size.into()))
         })
         .collect();
-    let body = Rectangle::new(
+    let body: Rect = Rectangle::new(
         (
             detail.loc.x + HELP_PADDING,
             middle_y + REPOS_DETAIL_TITLE + REPOS_PAD,
@@ -1182,21 +1481,27 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     // The detail's rows; a file header's chevron, then its checkbox.
     let (mut detail_rows, mut detail_checks, mut detail_folds) =
         (Vec::new(), Vec::new(), Vec::new());
-    // Scrolled part of the first row under the pinned header, the rows
-    // start up by as much (under the header) and the last is shown in
-    // part, cut at where the others end.
+    // Scrolled part of the first row, the rows start up by as much and the
+    // last is shown in part, cut at where the others end; pulled past an
+    // end, they move with the pull. The header pinned at the top goes over
+    // them, where its pin has it.
     let pinned = usize::from(view.detail.sticky);
-    let detail_shift = wheel::shift(view.detail.part, line_h);
+    let detail_shift = scrolled_by(view.detail.part, view.detail.over, line_h);
     let under = usize::from(view.detail.part > 0.0);
-    let whole_rows = view.detail.rows.len().saturating_sub(under);
+    let whole_rows = view.detail.rows.len().saturating_sub(pinned + under);
     let mut detail_shown = 0;
     for (i, row) in view.detail.rows.iter().enumerate() {
-        let at = body.loc.y + i as i32 * line_h;
-        if i < whole_rows && at + line_h > body.loc.y + body.size.h {
-            break;
-        }
-        detail_shown += usize::from(i < whole_rows);
-        let ry = if i < pinned { at } else { at - detail_shift };
+        let ry = match i.checked_sub(pinned) {
+            None => (body.loc.y as f64 + view.detail.pin).round() as i32,
+            Some(j) => {
+                let at = body.loc.y + j as i32 * line_h;
+                if j < whole_rows && at + line_h > body.loc.y + body.size.h {
+                    break;
+                }
+                detail_shown += usize::from(j < whole_rows);
+                (at as f64 - detail_shift).round() as i32
+            }
+        };
         if let DetailRow::File(_) = row {
             let fold = Rectangle::new((body.loc.x, ry).into(), (DIFF_FOLD, line_h).into());
             let check = Rectangle::new(
@@ -1211,14 +1516,10 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (body.size.w, line_h).into(),
         ));
     }
-    let detail_list = {
-        let top = body.loc.y + pinned.min(detail_shown) as i32 * line_h;
-        let bottom = body.loc.y + detail_shown as i32 * line_h;
-        Rectangle::new(
-            (detail.loc.x, top).into(),
-            (detail.size.w, bottom - top).into(),
-        )
-    };
+    let detail_list = Rectangle::new(
+        (detail.loc.x, body.loc.y).into(),
+        (detail.size.w, detail_shown as i32 * line_h).into(),
+    );
     // The title row's buttons left of the tabs, the rows' at their right,
     // each right-aligned in order; none on a title too narrow for them.
     let mut detail_title_buttons = Vec::new();
@@ -1235,28 +1536,19 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     }
     detail_title_buttons.reverse();
     let mut detail_row_buttons = Vec::new();
-    let mut ends: Vec<(usize, i32)> = Vec::new();
-    for (i, hint) in view.detail.row_buttons.iter().rev() {
-        let Some(row) = detail_rows.get(*i) else {
-            continue;
-        };
-        let end = match ends.iter_mut().find(|(j, _)| j == i) {
-            Some((_, end)) => end,
-            None => {
-                ends.push((*i, row.loc.x + row.size.w - ROW_CHIP_INSET));
-                &mut ends.last_mut().expect("just pushed").1
-            }
-        };
-        let bw = row_chip_width(hint);
-        *end -= bw;
-        let rect = Rectangle::new(
-            (*end, row.loc.y + ROW_CHIP_INSET).into(),
-            (bw, (row.size.h - 2 * ROW_CHIP_INSET).max(1)).into(),
-        );
-        detail_row_buttons.push((*i, hint.button, rect));
-        *end -= ROW_CHIP_GAP;
+    for (i, row) in detail_rows.iter().enumerate() {
+        let hints: Vec<&Hint> = view
+            .detail
+            .row_buttons
+            .iter()
+            .filter(|(j, _)| *j == i)
+            .map(|(_, hint)| hint)
+            .collect();
+        let rects = chip_rects(*row, hints.iter().map(|h| row_chip_width(h)));
+        for (hint, rect) in hints.iter().zip(rects) {
+            detail_row_buttons.push((i, hint.button, rect));
+        }
     }
-    detail_row_buttons.reverse();
 
     // The result bar's buttons, right-aligned.
     let mut result_buttons = Vec::new();
@@ -1353,6 +1645,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         let widest = menu
             .rows
             .iter()
+            .chain(&menu.widest)
             .chain([&menu.empty, &menu.placeholder, &menu.query.text])
             .chain(create)
             .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
@@ -1386,30 +1679,24 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (mx + BRANCH_MENU_PAD, rows_y).into(),
             (inner, shown as i32 * row_h).into(),
         ));
-        let shift = wheel::shift(menu.part, row_h);
+        // Scrolled part of a line, the lines start up by as much; pulled
+        // past an end, they move with the pull.
+        let shift = scrolled_by(menu.part, menu.over, row_h);
         let card = Rectangle::new((mx, my).into(), (mw, mh).into());
         branch_search = Some(Rectangle::new(
             (mx + BRANCH_MENU_PAD, my + BRANCH_MENU_PAD).into(),
             (inner, row_h).into(),
         ));
         let line = |j: usize| {
-            Rectangle::new(
-                (mx + BRANCH_MENU_PAD, rows_y + j as i32 * row_h - shift).into(),
-                (inner, row_h).into(),
-            )
+            let y = (rows_y as f64 + (j as i32 * row_h) as f64 - shift).round() as i32;
+            Rectangle::new((mx + BRANCH_MENU_PAD, y).into(), (inner, row_h).into())
         };
         let mut rows: Vec<Rect> = Vec::new();
         let laid = if shown == lines { shown + under } else { shown };
-        for j in 0..laid {
-            let next = branch_headings.len();
-            if menu
-                .headings
-                .get(next)
-                .is_some_and(|&(at, _)| at == rows.len())
-            {
-                branch_headings.push((next, line(j)));
-            } else if rows.len() < menu.rows.len() {
-                rows.push(line(j));
+        for (j, item) in menu_items(menu, laid).into_iter().enumerate() {
+            match item {
+                MenuItem::Heading(i) => branch_headings.push((i, line(j))),
+                MenuItem::Row(_) => rows.push(line(j)),
             }
         }
         (card, rows)
@@ -1471,7 +1758,6 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             branch_list,
         },
         error,
-        body,
         result_buttons,
         hints,
         sheet_title,
@@ -1613,16 +1899,10 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if let Some((button, _)) = layout.detail_title_buttons.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::Button(*button));
     }
-    // A scrolled pane's rows count only where they show, but for the
-    // header pinned above them.
+    // A scrolled pane's rows count only where they show; the header
+    // pinned at the top, the first, over those under it.
     let list = layout.detail_list;
-    let shown = |i: usize| {
-        at(&list)
-            || layout
-                .detail_rows
-                .get(i)
-                .is_some_and(|r| r.loc.y + r.size.h <= list.loc.y)
-    };
+    let shown = |_: usize| at(&list);
     let row_button = layout
         .detail_row_buttons
         .iter()
@@ -1881,7 +2161,10 @@ impl Painter {
     }
 
     /// The repositories panel for an output of `size`, inside a margin of
-    /// `SHADOW` holding its drop shadow.
+    /// `SHADOW` holding its drop shadow, in one buffer: its frame with the
+    /// lists over it as they show at rest, then the branch menu and the
+    /// sheet over all.
+    #[cfg(test)]
     pub(super) fn repos(
         &self,
         view: &ReposView,
@@ -1891,13 +2174,42 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let parts = parts(view, size);
         let layout = &parts.layout;
+        let mut c = self.repos_frame(view, &parts, scale, p);
+        let by = buffer_origin(layout.panel);
+        let shift = |r: Rect| moved(r, by);
+        // The lines, cut to where they show (a scrolled tree's first and
+        // last in part).
+        let (lx, ly, lw, lh) = rect_px(shift(layout.tree_list), scale);
+        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
+            for (i, (rect, ..)) in layout.lines.iter().enumerate() {
+                let row = tree_row(view, i);
+                let rects = line_rects(&row.line, shift(*rect));
+                self.tree_line(c, &row, rects, scale, p);
+            }
+        });
+        let (track, shown) = tree_bar(view, layout);
+        let at = (view.first, shown, view.total);
+        scrollbar(&mut c, shift(track), at, scale, p);
+        self.detail_rows(&mut c, view, layout, by, scale, p);
+        self.repos_menu(&mut c, view, layout, by, scale, p);
+        if let Some(sheet) = &view.sheet {
+            self.sheet(&mut c, view, sheet, &parts, shift, scale, p);
+        }
+        c.into_buffer(false)
+    }
+
+    /// The panel's frame laid out as `parts`, inside a margin of `SHADOW`
+    /// holding its drop shadow: all of it but the tree's lines and its
+    /// scrollbar, the branch menu and the sheet.
+    fn repos_frame(&self, view: &ReposView, parts: &Parts, scale: f64, p: &Palette) -> Canvas {
+        let layout = &parts.layout;
         let panel = layout.panel;
         let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
-        let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
-        let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
+        let by = buffer_origin(panel);
+        let shift = |r: Rect| moved(r, by);
         let across = |c: &mut Canvas, y: i32| {
             c.fill(
                 px(SHADOW) + border,
@@ -1946,7 +2258,7 @@ impl Painter {
 
         // The tree, then the line between it and the detail pane.
         let tree = shift(layout.tree);
-        if view.lines.is_empty() {
+        if view.lines.is_empty() && !view.empty.is_empty() {
             let first = Rectangle::new(
                 (
                     tree.loc.x + REPOS_PAD + REPOS_LINE_INSET,
@@ -1971,37 +2283,6 @@ impl Painter {
                 p.placeholder,
             );
         }
-        // The lines, cut to where they show (a scrolled tree's first and
-        // last in part).
-        let (lx, ly, lw, lh) = rect_px(shift(layout.tree_list), scale);
-        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
-            for (i, ((rect, check, expander), line)) in
-                layout.lines.iter().zip(&view.lines).enumerate()
-            {
-                let rects = (shift(*rect), shift(*check), expander.map(shift));
-                self.tree_line(c, view, i, line, rects, scale, p);
-            }
-        });
-        let tree_track = Rectangle::new(
-            (
-                tree.loc.x + tree.size.w - REPOS_PAD - SCROLLBAR,
-                tree.loc.y + REPOS_PAD,
-            )
-                .into(),
-            (SCROLLBAR, (tree.size.h - 2 * REPOS_PAD).max(0)).into(),
-        );
-        let whole = view
-            .lines
-            .len()
-            .saturating_sub(usize::from(view.part > 0.0));
-        let shown = layout.lines.len().min(whole);
-        scrollbar(
-            &mut c,
-            tree_track,
-            (view.first, shown, view.total),
-            scale,
-            p,
-        );
         let detail = shift(layout.detail);
         c.fill(
             px(detail.loc.x),
@@ -2015,20 +2296,12 @@ impl Painter {
             .iter()
             .map(|(t, r)| (*t, shift(*r)))
             .collect();
-        let rows: Vec<Rect> = layout.detail_rows.iter().map(|r| shift(*r)).collect();
-        let body = (shift(parts.body), shift(layout.detail_list), &rows[..]);
         let title_buttons: Vec<_> = layout
             .detail_title_buttons
             .iter()
             .map(|&(b, r)| (b, shift(r)))
             .collect();
-        let row_buttons: Vec<_> = layout
-            .detail_row_buttons
-            .iter()
-            .map(|&(i, b, r)| (i, b, shift(r)))
-            .collect();
-        let buttons = (&title_buttons[..], &row_buttons[..]);
-        self.detail_pane(&mut c, view, detail, body, &tabs, buttons, scale, p);
+        self.detail_title(&mut c, view, detail, &tabs, &title_buttons, scale, p);
 
         // The field, what went wrong, the result bar and the footer.
         let field = shift(layout.field);
@@ -2075,42 +2348,92 @@ impl Painter {
             };
             self.hint_button(&mut c, view, &more, ReposHit::More, shift(rect), scale, p);
         }
-
-        if let (Some(menu), Some((card, rows)), Some(search)) =
-            (&view.branch.menu, &layout.branch_menu, layout.branch_search)
-        {
-            let rows: Vec<Rect> = rows.iter().map(|r| shift(*r)).collect();
-            let create = layout.branch_create.map(shift);
-            let headings: Vec<(usize, Rect)> = layout
-                .branch_headings
-                .iter()
-                .map(|&(i, r)| (i, shift(r)))
-                .collect();
-            let list = layout.branch_list.map_or(shift(*card), shift);
-            let parts = (
-                shift(*card),
-                shift(search),
-                create,
-                (list, &rows[..]),
-                &headings[..],
-            );
-            self.branch_menu(&mut c, view, menu, parts, scale, p);
-        }
-        if let Some(sheet) = &view.sheet {
-            self.sheet(&mut c, view, sheet, &parts, shift, scale, p);
-        }
-        c.into_buffer(false)
+        c
     }
 
-    /// Tree line `i` in its `(rect, checkbox, expander)` (buffer
-    /// coordinates): its highlight, then a repository's or a file's line.
-    #[allow(clippy::too_many_arguments)]
-    fn tree_line(
+    /// The branch menu of `view`, while open, as `layout` has it, moved by
+    /// `by` onto the buffer: its card, then its lines cut to where they
+    /// show.
+    #[cfg(test)]
+    fn repos_menu(
         &self,
         c: &mut Canvas,
         view: &ReposView,
-        i: usize,
-        line: &TreeLine,
+        layout: &ReposLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(menu), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) else {
+            return;
+        };
+        self.repos_menu_card(c, view, layout, by, scale, p);
+        if menu.rows.is_empty() {
+            return;
+        }
+        let list = moved(layout.branch_list.unwrap_or(*card), by);
+        let (lx, ly, lw, lh) = rect_px(list, scale);
+        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
+            for (item, rect) in menu_rects(menu, layout, rows) {
+                let look = menu_look(view, menu, item);
+                self.branch_line(c, &look, moved(rect, by), scale, p);
+            }
+        });
+    }
+
+    /// The branch menu's card of `view`, while open, as `layout` has it,
+    /// moved by `by` onto the buffer.
+    fn repos_menu_card(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        layout: &ReposLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(menu), Some((card, _)), Some(search)) =
+            (&view.branch.menu, &layout.branch_menu, layout.branch_search)
+        else {
+            return;
+        };
+        let at = (
+            moved(*card, by),
+            moved(search, by),
+            layout.branch_create.map(|r| moved(r, by)),
+        );
+        let card_view = menu_card_view(menu);
+        let hover = view.hover.filter(|h| *h == ReposHit::BranchCreate);
+        self.branch_menu_card(c, &card_view, hover, at, view.density, scale, p);
+    }
+
+    /// A tree line `size` big in a buffer of its own.
+    fn tree_row(
+        &self,
+        row: &TreeRow,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let rects = line_rects(&row.line, Rectangle::from_size(size));
+        self.tree_line(&mut c, row, rects, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// A scrollbar's thumb `size` big in a buffer of its own.
+    fn thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let (w, h) = (c.w as f32, c.h as f32);
+        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        c.into_buffer(false)
+    }
+    /// A tree line in its `(rect, checkbox, expander)` (buffer
+    /// coordinates): its highlight, then a repository's or a file's line.
+    fn tree_line(
+        &self,
+        c: &mut Canvas,
+        row: &TreeRow,
         (rect, check, expander): (Rect, Rect, Option<Rect>),
         scale: f64,
         p: &Palette,
@@ -2121,22 +2444,14 @@ impl Painter {
         // The highlight stops short of the lines above and below.
         let (hy, hh) = (y + px(1) as f32, h - 2.0 * px(1) as f32);
         let r = (MENU_RADIUS - 2.0) * s;
-        let hovered = matches!(
-            view.hover,
-            Some(
-                ReposHit::Line(j)
-                    | ReposHit::Check(j)
-                    | ReposHit::Expander(j)
-                    | ReposHit::Chip(j)
-                    | ReposHit::Mark(j, _)
-            ) if j == i
-        );
+        let line = &row.line;
+        let hovered = row.hover.is_some();
         let state = match line {
             TreeLine::Repo(repo) => Some(&repo.state),
             TreeLine::File(_) => None,
         };
-        if view.selected == Some(i) {
-            let fill = if view.field_focused {
+        if row.selected {
+            let fill = if row.dim {
                 mix(p.elevated, p.selected, 0.6)
             } else {
                 p.selected
@@ -2150,7 +2465,7 @@ impl Painter {
             c.rounded(x, hy + 4.0 * s, 2.0 * s, hh - 8.0 * s, s, p.warning);
         }
 
-        let check_hovered = view.hover == Some(ReposHit::Check(i));
+        let check_hovered = row.hover == Some(ReposHit::Check(0));
         let side = CHECKBOX_SIZE;
         let box_rect = Rectangle::new(
             (check.loc.x + (check.size.w - side) / 2, check.loc.y).into(),
@@ -2164,7 +2479,7 @@ impl Painter {
                 let check_state = repo.check;
                 self.checkbox(c, box_rect, check_state, check_hovered, scale, p);
                 if let (Some(open), Some(rect)) = (repo.expanded, expander) {
-                    let color = if view.hover == Some(ReposHit::Expander(i)) {
+                    let color = if row.hover == Some(ReposHit::Expander(0)) {
                         p.text
                     } else {
                         p.muted
@@ -2172,11 +2487,11 @@ impl Painter {
                     icon_sdf(c, rect, scale, color, |x, y| expander_mark(open, x, y, s));
                 }
                 let label_x = px(check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
-                let mark = match view.hover {
-                    Some(ReposHit::Mark(j, mark)) if j == i => Some(mark),
+                let mark = match row.hover {
+                    Some(ReposHit::Mark(_, mark)) => Some(mark),
                     _ => None,
                 };
-                let on_chip = view.hover == Some(ReposHit::Chip(i));
+                let on_chip = row.hover == Some(ReposHit::Chip(0));
                 let at = (label_x, right);
                 self.repo_line(c, repo, at, line_band, gap, (mark, on_chip), scale, p);
             }
@@ -2372,19 +2687,16 @@ impl Painter {
         }
     }
 
-    /// The detail pane in `rect`: its title, its buttons and tabs, then
-    /// its lines in `body` in the monospace font, added and removed ones
-    /// on a tint: each in its rect of `rows`, the scrolled ones cut to
-    /// `list`, with their buttons.
+    /// The detail pane's title row in `rect`, the pane's: its title, its
+    /// buttons in `title_buttons` and its tabs in `tabs`, a line under it.
     #[allow(clippy::too_many_arguments)]
-    fn detail_pane(
+    fn detail_title(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         rect: Rect,
-        (body, list, rows): (Rect, Rect, &[Rect]),
         tabs: &[(DetailTab, Rect)],
-        (title_buttons, row_buttons): DetailButtons,
+        title_buttons: &[(ReposButton, Rect)],
         scale: f64,
         p: &Palette,
     ) {
@@ -2432,70 +2744,121 @@ impl Painter {
             border,
             p.border_variant,
         );
-
-        let line_h = repos_detail_line(view.density);
-        // Tints reach across the pane, short of its edges.
-        let tint = (
-            px(rect.loc.x) + border,
-            px(rect.loc.x + rect.size.w) - border,
-        );
-        // The rows scrolled, cut to where they show; then the header
-        // pinned at the top, over them.
-        let pinned = usize::from(view.detail.sticky);
-        let shown = rows.iter().zip(&view.detail.rows).enumerate();
-        let (lx, ly, lw, lh) = rect_px(list, scale);
-        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
-            for (i, (at, row)) in shown.clone().skip(pinned) {
-                self.detail_row(c, view, i, row, *at, tint, scale, p);
-                self.row_chips(c, view, i, row_buttons, scale, p);
-            }
-        });
-        for (i, (at, row)) in shown.take(pinned) {
-            self.detail_row(c, view, i, row, *at, tint, scale, p);
-            self.row_chips(c, view, i, row_buttons, scale, p);
-        }
-        // The header pinned at the top casts a shadow on what scrolls under.
-        if view.detail.sticky && !rows.is_empty() {
-            let (y, h) = band(
-                Rectangle::new(body.loc, (body.size.w, line_h).into()),
-                scale,
-            );
-            c.fill(tint.0, y + h - border, tint.1 - tint.0, border, p.border);
-            let depth = px(4).max(1);
-            for dy in 0..depth {
-                let fade = 1.0 - dy as f32 / depth as f32;
-                for x in tint.0..tint.1 {
-                    c.blend(x, y + h + dy, [0, 0, 0], p.shadow * 0.35 * fade * fade);
-                }
-            }
-        }
-        let track = Rectangle::new(
-            (
-                rect.loc.x + rect.size.w - HELP_PADDING / 2 - SCROLLBAR,
-                body.loc.y,
-            )
-                .into(),
-            (SCROLLBAR, body.size.h).into(),
-        );
-        let (first, total) = (view.detail.first, view.detail.total);
-        let under = usize::from(view.detail.part > 0.0);
-        let whole = view.detail.rows.len().saturating_sub(under);
-        let shown = rows.len().min(whole).saturating_sub(pinned);
-        scrollbar(c, track, (first, shown.max(1), total), scale, p);
     }
 
-    /// Row `i` of the detail in `rect`; its tint across the pane from
+    /// The detail's rows of `view` as `layout` has them, moved by `by`
+    /// onto the buffer: those scrolled cut to where they show, the header
+    /// pinned at the top over them with its shadow, then the scrollbar.
+    #[cfg(test)]
+    fn detail_rows(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        layout: &ReposLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let pane = moved(layout.detail, by);
+        let border = px(1).max(1);
+        // Tints reach across the pane, short of its edges.
+        let tint = (
+            px(pane.loc.x) + border,
+            px(pane.loc.x + pane.size.w) - border,
+        );
+        let pinned = usize::from(view.detail.sticky);
+        let rows: Vec<(usize, Rect)> = layout
+            .detail_rows
+            .iter()
+            .map(|r| moved(*r, by))
+            .enumerate()
+            .collect();
+        let (lx, ly, lw, lh) = rect_px(moved(layout.detail_list, by), scale);
+        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
+            for &(i, rect) in rows[pinned.min(rows.len())..].iter().chain(&rows[..pinned]) {
+                self.detail_line(c, &detail_look(view, i), rect, tint, scale, p);
+            }
+            if let (true, Some(&(_, head))) = (view.detail.stuck, rows.first()) {
+                let (y, h) = band(head, scale);
+                self.pin_shadow(c, tint, y + h - border, scale, p);
+            }
+        });
+        let (track, shown) = detail_bar(view, layout);
+        let at = (view.detail.first, shown, view.detail.total);
+        scrollbar(c, moved(track, by), at, scale, p);
+    }
+
+    /// The detail's row `look` in `rect`, its tint across the pane from
+    /// `tint.0` to `tint.1` (physical pixels), with its buttons.
+    fn detail_line(
+        &self,
+        c: &mut Canvas,
+        look: &DetailLook,
+        rect: Rect,
+        tint: (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        self.detail_row(c, look, rect, tint, scale, p);
+        let rects = chip_rects(rect, look.buttons.iter().map(row_chip_width));
+        self.row_chips(c, look, &rects, scale, p);
+    }
+
+    /// A detail row across a pane `size` big, in a buffer of its own.
+    fn detail_row_buffer(
+        &self,
+        look: &DetailLook,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        let border = ((scale.round() as i32).max(1)).min(c.w);
+        let rect = Rectangle::new(
+            (HELP_PADDING, 0).into(),
+            (body_width(size.w), size.h).into(),
+        );
+        let tint = (border, c.w - border);
+        self.detail_line(&mut c, look, rect, tint, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// Under the header pinned at the top of the diff, from `x.0` to `x.1`
+    /// and from `y` down (physical pixels): a line, then the shadow it
+    /// casts on what scrolls under it.
+    fn pin_shadow(&self, c: &mut Canvas, (x0, x1): (i32, i32), y: i32, scale: f64, p: &Palette) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let border = px(1).max(1);
+        c.fill(x0, y, x1 - x0, border, p.border);
+        let depth = px(PIN_SHADOW - 1).max(1);
+        for dy in 0..depth {
+            let fade = 1.0 - dy as f32 / depth as f32;
+            for x in x0..x1 {
+                c.blend(x, y + border + dy, [0, 0, 0], p.shadow * 0.35 * fade * fade);
+            }
+        }
+    }
+
+    /// The pinned header's line and shadow across a pane `w` wide, in a
+    /// buffer of its own.
+    fn pin_shadow_buffer(&self, w: i32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical((w, PIN_SHADOW).into(), scale));
+        let border = ((scale.round() as i32).max(1)).min(c.w);
+        let x1 = c.w - border;
+        self.pin_shadow(&mut c, (border, x1), 0, scale, p);
+        c.into_buffer(false)
+    }
+
+    /// A row of the detail in `rect`; its tint across the pane from
     /// `tint.0` to `tint.1` (physical pixels). A repository's header and a
     /// file's are banded, a hunk is a rule with what it is in, an added or
     /// removed line is tinted with a bar at its left and its changed words
     /// tinted more.
-    #[allow(clippy::too_many_arguments)]
     fn detail_row(
         &self,
         c: &mut Canvas,
-        view: &ReposView,
-        i: usize,
-        row: &DetailRow,
+        look: &DetailLook,
         rect: Rect,
         (tint_x, tint_end): (i32, i32),
         scale: f64,
@@ -2512,7 +2875,7 @@ impl Painter {
         let across = |c: &mut Canvas, color: Rgb| c.fill(tint_x, y, tint_end - tint_x, h, color);
         // The cursor's row and the range it reaches back to, lit as one;
         // not a file's header, pinned or not, which shows its own.
-        let mark = view.detail.marks.get(i).copied().unwrap_or_default();
+        let (row, mark) = (&look.row, look.mark);
         let picked = mark.selected && !matches!(row, DetailRow::File(_));
         let lit = picked.then_some(0.5);
         if let Some(amount) = lit
@@ -2591,10 +2954,7 @@ impl Painter {
                 }
             }
             DetailRow::File(file) => {
-                let hovered = matches!(
-                    view.hover,
-                    Some(ReposHit::DiffRow(j) | ReposHit::DiffCheck(j) | ReposHit::DiffFold(j)) if j == i
-                );
+                let hovered = look.hover.is_some();
                 let fill = if file.selected {
                     mix(p.elevated, p.selected, 0.75)
                 } else if hovered {
@@ -2604,11 +2964,11 @@ impl Painter {
                 };
                 across(c, fill);
                 c.fill(tint_x, y, tint_end - tint_x, border, p.border_variant);
-                if file.selected && view.detail.focused {
+                if file.selected && look.focused {
                     c.fill(tint_x, y, px(2), h, p.accent);
                 }
                 let fold = Rectangle::new(rect.loc, (DIFF_FOLD, rect.size.h).into());
-                let color = if view.hover == Some(ReposHit::DiffFold(i)) {
+                let color = if look.hover == Some(ReposHit::DiffFold(0)) {
                     p.text
                 } else {
                     p.muted
@@ -2621,7 +2981,7 @@ impl Painter {
                     (rect.loc.x + DIFF_FOLD + (DIFF_CHECK - side) / 2, rect.loc.y).into(),
                     (side, rect.size.h).into(),
                 );
-                let check_hovered = view.hover == Some(ReposHit::DiffCheck(i));
+                let check_hovered = look.hover == Some(ReposHit::DiffCheck(0));
                 self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
                 // The status letter on a pill of its colour.
                 let tone = code_color(file.code, p);
@@ -2841,7 +3201,7 @@ impl Painter {
                     c.fill(sx as i32, iy, (ex - sx).max(1.0) as i32, ih, p.selected);
                 }
                 self.mono_text(c, text, REPOS_MONO_SIZE, tx, x1, row_band, scale, p.text);
-                if let Some(caret) = caret.filter(|_| view.detail.focused) {
+                if let Some(caret) = caret.filter(|_| look.focused) {
                     let cx = at(caret).min(x1 - b) as i32;
                     let pad = px(3);
                     c.fill(cx, y + pad, px(1).max(1), h - 2 * pad, p.accent);
@@ -2850,11 +3210,7 @@ impl Painter {
         }
         // The rows picked outlined as one, a bar down their left.
         if picked {
-            let color = if view.detail.focused {
-                p.accent
-            } else {
-                p.muted
-            };
+            let color = if look.focused { p.accent } else { p.muted };
             let w = tint_end - tint_x;
             c.fill(tint_x, y, px(DIFF_BAR), h, color);
             c.fill(tint_end - border, y, border, h, color);
@@ -2867,32 +3223,24 @@ impl Painter {
         }
     }
 
-    /// The buttons on row `i` of the detail, of those in `buttons`: the
-    /// first of them (keeping the comment written, writing one) in the
-    /// accent, the others plain; lighter under the pointer, with their
-    /// key muted after their label.
+    /// The buttons of the detail's row `look`, each in its rect of
+    /// `rects`: the first of them (keeping the comment written, writing
+    /// one) in the accent, the others plain; lighter under the pointer,
+    /// with their key muted after their label.
     fn row_chips(
         &self,
         c: &mut Canvas,
-        view: &ReposView,
-        i: usize,
-        buttons: &[(usize, ReposButton, Rect)],
+        look: &DetailLook,
+        rects: &[Rect],
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
-        let hints = view.detail.row_buttons.iter().filter(|(j, _)| *j == i);
-        for (k, (_, hint)) in hints.enumerate() {
-            let Some(&(.., rect)) = buttons
-                .iter()
-                .find(|&&(j, b, _)| j == i && b == hint.button)
-            else {
-                continue;
-            };
+        for (k, (hint, &rect)) in look.buttons.iter().zip(rects).enumerate() {
             let (x, y, w, h) = rect_px(rect, scale);
             let r = (h / 2.0).min(BUTTON_RADIUS * s);
             let b = s.round().max(1.0);
-            let hovered = view.hover == Some(ReposHit::Button(hint.button));
+            let hovered = look.hover == Some(ReposHit::Button(hint.button));
             let (fill, label, key) = if k == 0 {
                 let fill = if hovered {
                     mix(p.accent, p.on_accent, 0.15)
@@ -3272,24 +3620,18 @@ impl Painter {
         );
     }
 
-    /// The branch menu, a card in `card` with its search in `search`, the
-    /// row creating the branch typed in `create`, then a row per branch in
-    /// `rows`: the one Enter picks lit, the one they are all on checked;
-    /// the groups' headings in `headings`, muted. Rows and headings are cut
-    /// to `list`, where they show.
-    #[allow(clippy::type_complexity)]
-    fn branch_menu(
+    /// The branch menu's card in `card` with its search in `search` and
+    /// the row creating the branch typed in `create`, or what it says
+    /// without rows; not its lines (see `menu_card_view`). `hover` is what
+    /// the pointer is over.
+    #[allow(clippy::too_many_arguments)]
+    fn branch_menu_card(
         &self,
         c: &mut Canvas,
-        view: &ReposView,
         menu: &BranchMenuView,
-        (card, search, create, (list, rows), headings): (
-            Rect,
-            Rect,
-            Option<Rect>,
-            (Rect, &[Rect]),
-            &[(usize, Rect)],
-        ),
+        hover: Option<ReposHit>,
+        (card, search, create): (Rect, Rect, Option<Rect>),
+        density: Density,
         scale: f64,
         p: &Palette,
     ) {
@@ -3315,7 +3657,7 @@ impl Painter {
             let r = (MENU_RADIUS - 2.0) * s;
             if row.picked {
                 c.rounded(x, y, w, h, r, p.selected);
-            } else if view.hover == Some(ReposHit::BranchCreate) {
+            } else if hover == Some(ReposHit::BranchCreate) {
                 c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
             }
             let color = if row.problem.is_some() {
@@ -3349,7 +3691,7 @@ impl Painter {
                 return;
             }
         }
-        if menu.rows.is_empty() {
+        if menu.rows.is_empty() && !menu.empty.is_empty() {
             let row = Rectangle::new(
                 (
                     card.loc.x + BRANCH_MENU_PAD,
@@ -3358,7 +3700,7 @@ impl Painter {
                     .into(),
                 (
                     (card.size.w - 2 * BRANCH_MENU_PAD).max(0),
-                    repos_row(view.density),
+                    repos_row(density),
                 )
                     .into(),
             );
@@ -3375,17 +3717,19 @@ impl Painter {
                 scale,
                 p.placeholder,
             );
-            return;
         }
-        let (lx, ly, lw, lh) = rect_px(list, scale);
-        c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
-            for &(i, rect) in headings {
-                let Some((_, label)) = menu.headings.get(i) else {
-                    continue;
-                };
+    }
+
+    /// A line of the branch menu in `rect`: a group's heading, muted; or a
+    /// branch, lit when Enter picks it, checked when they are all on it.
+    fn branch_line(&self, c: &mut Canvas, look: &MenuLook, rect: Rect, scale: f64, p: &Palette) {
+        let s = scale as f32;
+        let pad = BRANCH_ROW_PAD as f32 * s;
+        let row_band = band(rect, scale);
+        let (label, picked, current, deletable, hover) = match look {
+            MenuLook::Heading(label) => {
                 let (x, end) = phys(rect, scale);
-                let pad = BRANCH_ROW_PAD as f32 * s;
-                let row_band = band(rect, scale);
+                let color = p.placeholder;
                 self.text(
                     c,
                     label,
@@ -3394,38 +3738,53 @@ impl Painter {
                     end - pad,
                     row_band,
                     scale,
-                    p.placeholder,
+                    color,
                 );
+                return;
             }
-            for (i, (rect, label)) in rows.iter().zip(&menu.rows).enumerate() {
-                let (x, y, w, h) = rect_px(*rect, scale);
-                let r = (MENU_RADIUS - 2.0) * s;
-                let on_delete = view.hover == Some(ReposHit::BranchDelete(i));
-                let hovered = on_delete || view.hover == Some(ReposHit::BranchRow(i));
-                if menu.picked == Some(i) {
-                    c.rounded(x, y, w, h, r, p.selected);
-                } else if hovered {
-                    c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
-                }
-                let mark = branch_check(*rect);
-                if menu.current == Some(i) {
-                    icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
-                }
-                // The delete button shows on the row pointed at or picked.
-                let delete = branch_delete(*rect);
-                let deletable = menu.deletable.get(i) == Some(&true);
-                if deletable && (hovered || menu.picked == Some(i)) {
-                    let color = if on_delete { p.error } else { p.placeholder };
-                    icon_sdf(c, delete, scale, color, |x, y| trash(x, y, s));
-                }
-                let pad = BRANCH_ROW_PAD as f32 * s;
-                let end = (delete.loc.x as f64 * scale) as f32;
-                let row_band = band(*rect, scale);
-                self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
-            }
-        });
+            MenuLook::Branch {
+                label,
+                picked,
+                current,
+                deletable,
+                hover,
+            } => (label, *picked, *current, *deletable, *hover),
+        };
+        let (x, y, w, h) = rect_px(rect, scale);
+        let r = (MENU_RADIUS - 2.0) * s;
+        let on_delete = hover == Some(ReposHit::BranchDelete(0));
+        let hovered = hover.is_some();
+        if picked {
+            c.rounded(x, y, w, h, r, p.selected);
+        } else if hovered {
+            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, 0.5));
+        }
+        let mark = branch_check(rect);
+        if current {
+            icon_sdf(c, mark, scale, p.accent, |x, y| check(x, y, s));
+        }
+        // The delete button shows on the row pointed at or picked.
+        let delete = branch_delete(rect);
+        if deletable && (hovered || picked) {
+            let color = if on_delete { p.error } else { p.placeholder };
+            icon_sdf(c, delete, scale, color, |x, y| trash(x, y, s));
+        }
+        let end = (delete.loc.x as f64 * scale) as f32;
+        self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
     }
 
+    /// A line of the branch menu `size` big, in a buffer of its own.
+    fn branch_line_buffer(
+        &self,
+        look: &MenuLook,
+        size: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(size, scale));
+        self.branch_line(&mut c, look, Rectangle::from_size(size), scale, p);
+        c.into_buffer(false)
+    }
     /// The sheet over the panel, which is dimmed under it: its title, a
     /// line per repository and its buttons, the default one in the accent.
     #[allow(clippy::too_many_arguments)]
@@ -3521,11 +3880,130 @@ impl Painter {
     }
 }
 
-/// The repositories panel as the chrome shows it: its buffer, fading in and out (see
-/// `Overlay`).
+/// What of `view` the panel's frame is drawn from: all but the tree's
+/// lines and the detail's rows and where they stand, the branch menu (but
+/// that it is open), the sheet, and the pointer on what those show.
+/// `empty` is what the tree says, empty while it has lines.
+fn frame_view(view: &ReposView) -> ReposView {
+    use ReposHit::*;
+    let on_row = |b: ReposButton| view.detail.row_buttons.iter().any(|(_, h)| h.button == b);
+    let hover = view.hover.filter(|hit| match *hit {
+        Button(b) => !on_row(b),
+        hit => !matches!(
+            hit,
+            Line(_)
+                | Check(_)
+                | Expander(_)
+                | Chip(_)
+                | Mark(..)
+                | DiffRow(_)
+                | DiffCheck(_)
+                | DiffFold(_)
+                | BranchRow(_)
+                | BranchDelete(_)
+                | BranchCreate
+                | BranchMenu
+        ),
+    });
+    let detail = &view.detail;
+    let menu = view.branch.menu.as_ref().map(|_| BranchMenuView::default());
+    ReposView {
+        title: view.title.clone(),
+        summary: view.summary.clone(),
+        lines: Vec::new(),
+        part: 0.0,
+        over: 0.0,
+        first: 0,
+        total: 0,
+        selected: None,
+        hover,
+        field: view.field.clone(),
+        field_focused: view.field_focused,
+        placeholder: view.placeholder.clone(),
+        error: view.error.clone(),
+        result: view.result.clone(),
+        hints: view.hints.clone(),
+        detail: DetailView {
+            tab: detail.tab,
+            title: detail.title.clone(),
+            title_buttons: detail.title_buttons.clone(),
+            focused: detail.focused,
+            ..DetailView::default()
+        },
+        sheet: None,
+        empty: match view.lines.is_empty() {
+            true => view.empty.clone(),
+            false => String::new(),
+        },
+        branch: BranchPicker {
+            label: view.branch.label.clone(),
+            mixed: view.branch.mixed,
+            enabled: view.branch.enabled,
+            menu,
+        },
+        density: view.density,
+        tree_share: view.tree_share,
+    }
+}
+
+/// The frame's inputs: the view as `frame_view` has it, the output's
+/// size, the theme and the scale.
+type FrameKey = (ReposView, Size<i32, Logical>, super::Theme, f64);
+/// A tree line's: the line as drawn, its size, the theme and the scale.
+type TreeKey = (TreeRow, Size<i32, Logical>, super::Theme, f64);
+/// A detail row's: the row as drawn, its size, the theme and the scale.
+type DetailKey = (DetailLook, Size<i32, Logical>, super::Theme, f64);
+/// A scrollbar thumb's, and the pinned header's shadow's: its size, the
+/// theme and the scale.
+type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
+/// The branch menu's card's: the menu as `menu_card_view` has it, what
+/// the pointer is over on it, the card, the density, the theme and the
+/// scale.
+type MenuKey = (
+    BranchMenuView,
+    Option<ReposHit>,
+    Rect,
+    Density,
+    super::Theme,
+    f64,
+);
+/// A branch menu line's: the line as drawn, its size, the theme and the
+/// scale.
+type MenuLineKey = (MenuLook, Size<i32, Logical>, super::Theme, f64);
+/// The sheet's: the sheet, what the pointer is over, its card, the
+/// output's size, the theme and the scale.
+type SheetKey = (
+    SheetView,
+    Option<ReposHit>,
+    Option<Rect>,
+    Size<i32, Logical>,
+    super::Theme,
+    f64,
+);
+
+/// The repositories panel as the chrome shows it, fading in and out (see
+/// `Overlay`): its frame; over it each of the tree's lines and of the
+/// detail's rows in a buffer of its own, the detail's pinned header with
+/// its shadow and the thumbs of their scrollbars, so that scrolling them
+/// only moves those; then the branch menu's card and over it its lines,
+/// each its own buffer too; the sheet over all.
 #[derive(Default)]
 pub(super) struct ReposLayers {
-    overlay: super::Overlay<(ReposView, Size<i32, Logical>, super::Theme, f64)>,
+    overlay: super::Overlay<FrameKey>,
+    tree: super::RowCache<TreeKey>,
+    tree_thumb: super::Cached<ThumbKey>,
+    detail: super::RowCache<DetailKey>,
+    detail_thumb: super::Cached<ThumbKey>,
+    pin_shadow: super::Cached<ThumbKey>,
+    menu: super::Cached<MenuKey>,
+    menu_lines: super::RowCache<MenuLineKey>,
+    sheet: super::Cached<SheetKey>,
+    /// How many times the frame and the branch menu's card were drawn,
+    /// for tests.
+    #[cfg(test)]
+    frames: usize,
+    #[cfg(test)]
+    cards: usize,
 }
 
 impl ReposLayers {
@@ -3538,18 +4016,186 @@ impl ReposLayers {
         scale: f64,
         now: std::time::Instant,
         painter: &Painter,
-    ) -> Vec<super::layers::Part> {
-        let placed = view.map(|view| {
-            let (loc, size) = super::shadowed(repos_layout(&view, output).panel);
-            ((view, output, theme, scale), loc, size)
+    ) -> Vec<super::Part> {
+        let placed = view.as_ref().map(|view| {
+            let (loc, size) = super::shadowed(panel_rect(output));
+            ((frame_view(view), output, theme, scale), loc, size)
         });
-        self.overlay
-            .part(placed, now, true, |(view, output, ..)| {
-                painter.repos(view, *output, scale, theme.palette())
-            })
-            .into_iter()
-            .collect()
+        let Self {
+            overlay,
+            tree,
+            tree_thumb,
+            detail,
+            detail_thumb,
+            pin_shadow,
+            menu,
+            menu_lines,
+            sheet,
+            #[cfg(test)]
+            frames,
+            #[cfg(test)]
+            cards,
+        } = self;
+        let p = theme.palette();
+        let draw = |(view, output, ..): &FrameKey| {
+            #[cfg(test)]
+            {
+                *frames += 1;
+            }
+            let laid = parts(view, *output);
+            painter
+                .repos_frame(view, &laid, scale, p)
+                .into_buffer(false)
+        };
+        let over = |_: &FrameKey| {
+            let Some(view) = &view else {
+                return Vec::new();
+            };
+            let laid = parts(view, output);
+            let layout = &laid.layout;
+            let mut over = Vec::new();
+            if let Some(s) = &view.sheet {
+                let (loc, size) = super::shadowed(layout.panel);
+                let key = (s.clone(), view.hover, layout.sheet, output, theme, scale);
+                let buffer = sheet.get(key, |_| {
+                    let mut c = Canvas::new(physical(size, scale));
+                    let by = buffer_origin(layout.panel);
+                    painter.sheet(&mut c, view, s, &laid, |r| moved(r, by), scale, p);
+                    c.into_buffer(false)
+                });
+                over.push(super::Part::new(buffer, loc, size, 1.0));
+            }
+            if let (Some(m), Some((card, rows))) = (&view.branch.menu, &layout.branch_menu) {
+                let list = layout.branch_list.unwrap_or(*card);
+                let row_h = repos_row(view.density);
+                let shift = scrolled_by(m.part, m.over, row_h);
+                for (j, (item, rect)) in menu_rects(m, layout, rows).into_iter().enumerate() {
+                    let key = (menu_look(view, m, item), rect.size, theme, scale);
+                    let buffer = menu_lines.get(key, rect.size, scale, |(look, size, ..)| {
+                        painter.branch_line_buffer(look, *size, scale, p)
+                    });
+                    let y = (list.loc.y + j as i32 * row_h) as f64 - shift;
+                    let at = Point::from((rect.loc.x as f64, y));
+                    let part = super::Part::new(&buffer, rect.loc, rect.size, 1.0).at(at);
+                    over.push(part.clipped(list));
+                }
+                let (loc, size) = super::shadowed(*card);
+                let hover = view.hover.filter(|h| *h == ReposHit::BranchCreate);
+                let key = (menu_card_view(m), hover, *card, view.density, theme, scale);
+                let buffer = menu.get(key, |_| {
+                    #[cfg(test)]
+                    {
+                        *cards += 1;
+                    }
+                    let mut c = Canvas::new(physical(size, scale));
+                    let by = Point::from((SHADOW - card.loc.x, SHADOW - card.loc.y));
+                    painter.repos_menu_card(&mut c, view, layout, by, scale, p);
+                    c.into_buffer(false)
+                });
+                over.push(super::Part::new(buffer, loc, size, 1.0));
+            }
+            over.extend(detail_parts(
+                view,
+                layout,
+                (detail, detail_thumb, pin_shadow),
+                (theme, scale),
+                painter,
+            ));
+            let (track, shown) = tree_bar(view, layout);
+            let pos = view.first as f64 + view.part;
+            if let Some((top, h)) = thumb_place(track, pos, shown, view.total) {
+                let size = Size::from((SCROLLBAR, h));
+                let buffer =
+                    tree_thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
+                let at = Point::from((track.loc.x as f64, top));
+                over.push(super::Part::new(buffer, track.loc, size, 1.0).at(at));
+            }
+            let row_h = repos_row(view.density);
+            let shift = scrolled_by(view.part, view.over, row_h);
+            for (i, (rect, ..)) in layout.lines.iter().enumerate() {
+                let key = (tree_row(view, i), rect.size, theme, scale);
+                let buffer = tree.get(key, rect.size, scale, |(row, size, ..)| {
+                    painter.tree_row(row, *size, scale, p)
+                });
+                let y = (layout.tree_list.loc.y + i as i32 * row_h) as f64 - shift;
+                let at = Point::from((rect.loc.x as f64, y));
+                let part = super::Part::new(&buffer, rect.loc, rect.size, 1.0).at(at);
+                over.push(part.clipped(layout.tree_list));
+            }
+            over
+        };
+        let parts = overlay.parts(placed, now, true, draw, over);
+        tree.sweep();
+        detail.sweep();
+        menu_lines.sweep();
+        if !overlay.lingers() {
+            tree.clear();
+            detail.clear();
+            menu_lines.clear();
+        }
+        parts
     }
+}
+
+/// The detail's parts over the frame, front to back: its scrollbar's
+/// thumb, the pinned header's shadow and the header, and its rows, each
+/// of its own buffer from `caches` (the rows', the thumb's and the
+/// shadow's).
+fn detail_parts(
+    view: &ReposView,
+    layout: &ReposLayout,
+    (rows, thumb, shadow): (
+        &mut super::RowCache<DetailKey>,
+        &mut super::Cached<ThumbKey>,
+        &mut super::Cached<ThumbKey>,
+    ),
+    (theme, scale): (super::Theme, f64),
+    painter: &Painter,
+) -> Vec<super::Part> {
+    use super::Part;
+    let p = theme.palette();
+    let mut parts = Vec::new();
+    let detail = &view.detail;
+    let (track, shown) = detail_bar(view, layout);
+    let pos = detail.first as f64 + detail.part;
+    if let Some((top, h)) = thumb_place(track, pos, shown, detail.total) {
+        let size = Size::from((SCROLLBAR, h));
+        let buffer = thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
+        let at = Point::from((track.loc.x as f64, top));
+        parts.push(Part::new(buffer, track.loc, size, 1.0).at(at));
+    }
+    let list = layout.detail_list;
+    let line_h = repos_detail_line(view.density);
+    let size = Size::from((layout.detail.size.w, line_h));
+    let x = layout.detail.loc.x;
+    let pinned = usize::from(detail.sticky);
+    let mut row = |i: usize, y: f64| {
+        let key = (detail_look(view, i), size, theme, scale);
+        let buffer = rows.get(key, size, scale, |(look, size, ..)| {
+            painter.detail_row_buffer(look, *size, scale, p)
+        });
+        let at = Point::from((x as f64, y));
+        Part::new(&buffer, list.loc, size, 1.0).at(at).clipped(list)
+    };
+    if pinned == 1 && !layout.detail_rows.is_empty() {
+        let y = list.loc.y as f64 + detail.pin;
+        if detail.stuck {
+            let shadow_size = Size::from((size.w, PIN_SHADOW));
+            let buffer = shadow.get((shadow_size, theme, scale), |_| {
+                painter.pin_shadow_buffer(size.w, scale, p)
+            });
+            let at = Point::from((x as f64, y + (line_h - 1) as f64));
+            let part = Part::new(buffer, list.loc, shadow_size, 1.0).at(at);
+            parts.push(part.clipped(list));
+        }
+        parts.push(row(0, y));
+    }
+    let shift = scrolled_by(detail.part, detail.over, line_h);
+    for i in pinned..layout.detail_rows.len() {
+        let y = (list.loc.y + (i - pinned) as i32 * line_h) as f64 - shift;
+        parts.push(row(i, y));
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -3676,6 +4322,7 @@ mod tests {
             summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
             lines,
             part: 0.0,
+            over: 0.0,
             first: 0,
             total,
             selected: Some(1),
@@ -3802,6 +4449,9 @@ mod tests {
                     (9, hint(DeleteComment, "", None)),
                 ],
                 part: 0.0,
+                over: 0.0,
+                pin: 0.0,
+                stuck: true,
                 first: 3,
                 total: 40,
                 focused: true,
@@ -3835,6 +4485,8 @@ mod tests {
                     create: None,
                     headings: vec![(0, "Local".into()), (3, "Remote".into())],
                     part: 0.0,
+                    over: 0.0,
+                    widest: vec!["main / master".into(), "production".into()],
                 }),
                 ..full().branch
             },
@@ -4154,7 +4806,14 @@ mod tests {
                     assert_eq!(hit(*r), Some(ReposHit::DetailTab(*t)));
                 }
                 assert_eq!(hit(l.field), Some(ReposHit::Field));
+                // The pinned header is over the row it covers.
+                let pinned = view.detail.sticky as usize;
+                let covered = |i: usize| i >= pinned && l.detail_rows[i].overlaps(l.detail_rows[0]);
                 for (i, r) in l.detail_rows.iter().enumerate() {
+                    if pinned == 1 && covered(i) {
+                        assert_eq!(hit(*r), Some(ReposHit::DiffRow(0)));
+                        continue;
+                    }
                     // Past a file header's chevron and checkbox.
                     let end = Rectangle::new(
                         (r.loc.x + r.size.w - 4, r.loc.y).into(),
@@ -4327,25 +4986,34 @@ mod tests {
         assert_eq!(hit((x, bottom(b.tree_list) - 2)), Some(ReposHit::Line(n)));
         assert_ne!(hit((x, bottom(b.tree_list) + 2)), Some(ReposHit::Line(n)));
 
-        // The detail: its pinned header stays, the rows under it move up
-        // half the first, under the header; the last is shown in part.
+        // The detail: its pinned header stays at the top, the rows under
+        // it move up half the first; the last is shown in part.
         assert!(scrolled.detail.sticky);
         assert_eq!(a.detail_list, b.detail_list);
         assert_eq!(a.detail_rows[0], b.detail_rows[0]);
-        assert_eq!(b.detail_list.loc.y, bottom(b.detail_rows[0]));
+        assert_eq!(b.detail_list.loc.y, b.detail_rows[0].loc.y);
         assert_eq!(b.detail_rows[1].loc.y, b.detail_list.loc.y - line_h / 2);
         let last = *b.detail_rows.last().unwrap();
         assert!(last.loc.y < bottom(b.detail_list) && bottom(last) > bottom(b.detail_list));
-        // Over the pinned header, the row under it is not hit.
+        // On the pinned header, the row under it is not hit.
         let x = b.detail_list.loc.x + b.detail_list.size.w / 2;
-        assert_eq!(
+        let under = bottom(b.detail_rows[0]);
+        assert_eq!(hit((x, under - 2)), Some(ReposHit::DiffRow(0)));
+        assert_eq!(hit((x, under + 2)), Some(ReposHit::DiffRow(2)));
+        assert_ne!(
             hit((x, b.detail_list.loc.y - 2)),
             Some(ReposHit::DiffRow(0))
         );
-        assert_eq!(
-            hit((x, b.detail_list.loc.y + 2)),
-            Some(ReposHit::DiffRow(1))
-        );
+        // Pushed up by the next file's header, only what shows of it is.
+        let mut pushed = scrolled.clone();
+        pushed.detail.pin = -(line_h / 4) as f64;
+        let c = repos_layout(&pushed, size);
+        let top = c.detail_list.loc.y;
+        assert_eq!(c.detail_rows[0].loc.y, top - line_h / 4);
+        assert_eq!(c.detail_rows[1], b.detail_rows[1]);
+        let hit_c = |p: (i32, i32)| repos_hit(&c, (p.0 as f64, p.1 as f64).into());
+        assert_ne!(hit_c((x, top - 2)), Some(ReposHit::DiffRow(0)));
+        assert_eq!(hit_c((x, top + 2)), Some(ReposHit::DiffRow(0)));
         let n = b.detail_rows.len() - 1;
         assert_eq!(
             hit((x, bottom(b.detail_list) - 2)),
@@ -4465,7 +5133,8 @@ mod tests {
                 let parts = parts(&view, size);
                 if h >= 600 {
                     assert_eq!(parts.layout.lines.len(), tree_rows, "{size:?}");
-                    assert!(parts.body.size.h >= detail_rows as i32 * repos_detail_line(DENSITY));
+                    let (track, _) = detail_bar(&view, &parts.layout);
+                    assert!(track.size.h >= detail_rows as i32 * repos_detail_line(DENSITY));
                 }
             }
         }
@@ -4490,6 +5159,187 @@ mod tests {
         let runs = painter.runs("a.rs → b.rs");
         assert_eq!(runs, vec![("a.rs ", false), ("→", true), (" b.rs", false)]);
         assert_eq!(painter.runs("plain"), vec![("plain", false)]);
+    }
+
+    /// The tree's lines among `parts`: those cut to its list.
+    fn tree_parts(parts: &[crate::chrome::Part], layout: &ReposLayout) -> Vec<f64> {
+        parts
+            .iter()
+            .filter(|p| p.clip == Some(layout.tree_list))
+            .map(|p| p.loc.y)
+            .collect()
+    }
+
+    #[test]
+    fn scrolling_the_tree_by_part_of_a_line_draws_nothing_again() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let row_h = repos_row(DENSITY) as f64;
+        // Shown a second after it opened: risen and faded in.
+        let opened = std::time::Instant::now();
+        let now = opened + std::time::Duration::from_secs(1);
+        // More lines than fit, scrolled part of a line: one more shown in
+        // part under those that fit.
+        let mut view = ReposView {
+            hover: None,
+            part: 0.2,
+            ..full()
+        };
+        view.lines = view.lines.iter().cycle().take(60).cloned().collect();
+        let fits = repos_page(size, DENSITY).0;
+        view.lines.truncate(fits + 1);
+        let mut layers = ReposLayers::default();
+        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
+        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        let (frames, rows) = (layers.frames, layers.tree.drawn());
+        // Alike lines share a buffer.
+        assert_eq!(frames, 1);
+        assert!(rows > 1 && rows <= fits + 1);
+        // Further by part of a line, and pulled past the start: the same
+        // buffers, moved.
+        for (part, over) in [(0.7, 0.0), (0.0, 12.5)] {
+            let moved = ReposView {
+                part,
+                over,
+                ..view.clone()
+            };
+            let layout = repos_layout(&moved, size);
+            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            assert_eq!((layers.frames, layers.tree.drawn()), (frames, rows));
+            let (ys_a, ys_b) = (tree_parts(&a, &layout), tree_parts(&b, &layout));
+            assert!(ys_b.len() >= fits);
+            for (y_a, y_b) in ys_a.iter().zip(&ys_b) {
+                let by = (part - 0.2) * row_h - over;
+                assert!((y_a - y_b - by).abs() < 1e-9, "{y_a} {y_b}");
+            }
+            // Hit where they are drawn, to the logical pixel.
+            for ((rect, ..), y) in layout.lines.iter().zip(&ys_b) {
+                assert_eq!(rect.loc.y, y.round() as i32);
+            }
+        }
+        // The lines come with the frame, front to back.
+        assert!(a.len() > fits + 1);
+        assert_eq!(a.last().map(|p| p.clip), Some(None));
+    }
+
+    #[test]
+    fn scrolling_the_diff_by_part_of_a_row_draws_nothing_again() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let line_h = repos_detail_line(DENSITY) as f64;
+        let opened = std::time::Instant::now();
+        let now = opened + std::time::Duration::from_secs(1);
+        // More rows than fit under the pinned header, scrolled part of a
+        // row: one more shown in part under those that fit.
+        let mut view = ReposView {
+            hover: None,
+            ..full()
+        };
+        let fits = repos_page(size, DENSITY).1;
+        let detail = &mut view.detail;
+        detail.rows = detail.rows.iter().cycle().take(60).cloned().collect();
+        detail.rows.truncate(1 + fits + 1);
+        detail.part = 0.2;
+        let mut layers = ReposLayers::default();
+        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
+        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        let (frames, rows) = (layers.frames, layers.detail.drawn());
+        assert_eq!(frames, 1);
+        assert!(rows > 1);
+        let list = repos_layout(&view, size).detail_list;
+        let in_list = |parts: &[crate::chrome::Part]| -> Vec<f64> {
+            let ys = parts.iter().filter(|p| p.clip == Some(list));
+            ys.map(|p| p.loc.y).collect()
+        };
+        // The shadow under the pinned header, the header, the rows.
+        let ys_a = in_list(&a);
+        assert_eq!(ys_a.len(), 2 + fits + 1);
+        // Further by part of a row; the header pushed up by the next;
+        // pulled down past the start with the header in its place.
+        let cases = [
+            (0.7, 0.0, 0.0, true),
+            (0.7, 0.0, -7.5, true),
+            (0.0, 9.0, 9.0, false),
+        ];
+        for (part, over, pin, stuck) in cases {
+            let mut moved = view.clone();
+            moved.detail.part = part;
+            moved.detail.over = over;
+            moved.detail.pin = pin;
+            moved.detail.stuck = stuck;
+            let layout = repos_layout(&moved, size);
+            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            assert_eq!((layers.frames, layers.detail.drawn()), (frames, rows));
+            let ys_b = in_list(&b);
+            let shadow = usize::from(stuck);
+            let header = ys_b[shadow];
+            assert_eq!(header, list.loc.y as f64 + pin);
+            assert_eq!(layout.detail_rows[0].loc.y, header.round() as i32);
+            let by = (part - 0.2) * line_h - over;
+            for (k, y) in ys_b[shadow + 1..].iter().enumerate() {
+                assert!((ys_a[2 + k] - y - by).abs() < 1e-9, "{k}: {y}");
+                assert_eq!(layout.detail_rows[k + 1].loc.y, y.round() as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_the_branch_menu_by_part_of_a_line_draws_nothing_again() {
+        let painter = Painter::new();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let row_h = repos_row(DENSITY) as f64;
+        let opened = std::time::Instant::now();
+        let now = opened + std::time::Duration::from_secs(1);
+        // Scrolled part of a line, one more shown in part under the list.
+        let mut view = ReposView {
+            hover: None,
+            ..with_menu()
+        };
+        if let Some(menu) = &mut view.branch.menu {
+            menu.part = 0.2;
+            menu.rows.push("release/2.2".into());
+            menu.deletable.push(false);
+        }
+        let mut layers = ReposLayers::default();
+        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
+        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        let drawn = (layers.frames, layers.cards, layers.menu_lines.drawn());
+        assert_eq!(drawn, (1, 1, 7));
+        let list = repos_layout(&view, size).branch_list.unwrap();
+        let in_list = |parts: &[crate::chrome::Part]| -> Vec<f64> {
+            let ys = parts.iter().filter(|p| p.clip == Some(list));
+            ys.map(|p| p.loc.y).collect()
+        };
+        let ys_a = in_list(&a);
+        assert_eq!(ys_a.len(), 7);
+        // Further by part of a line; pulled down past the start, the line
+        // under the list gone.
+        for (part, over) in [(0.7, 0.0), (0.0, 6.5)] {
+            let mut moved = view.clone();
+            if let Some(menu) = &mut moved.branch.menu {
+                (menu.part, menu.over) = (part, over);
+                if part == 0.0 {
+                    menu.rows.pop();
+                    menu.deletable.pop();
+                }
+            }
+            let layout = repos_layout(&moved, size);
+            assert_eq!(layout.branch_list, Some(list));
+            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            let again = (layers.frames, layers.cards, layers.menu_lines.drawn());
+            assert_eq!(again, drawn);
+            let ys_b = in_list(&b);
+            let by = (part - 0.2) * row_h - over;
+            for (y_a, y_b) in ys_a.iter().zip(&ys_b) {
+                assert!((y_a - y_b - by).abs() < 1e-9, "{y_a} {y_b}");
+            }
+            // Hit where they are drawn, to the logical pixel.
+            let (_, rows) = layout.branch_menu.clone().unwrap();
+            let lines = menu_rects(moved.branch.menu.as_ref().unwrap(), &layout, &rows);
+            for ((_, rect), y) in lines.iter().zip(&ys_b) {
+                assert_eq!(rect.loc.y, y.round() as i32);
+            }
+        }
     }
 
     #[test]
