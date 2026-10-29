@@ -11,7 +11,7 @@ use smithay::{
 
 use crate::{
     Gerdr,
-    chrome::{self, Rect, ScrollbackHit, ScrollbackRow, ScrollbackView},
+    chrome::{self, Rect, ScrollbackHit, ScrollbackRow, ScrollbackView, SearchPart},
     input::{MULTI_CLICK, MULTI_CLICK_SLOP, Overlay},
     scroll::Motion,
     scrollback::{Fit, Outcome, Scrollback},
@@ -26,17 +26,36 @@ const MIN_HEIGHT: i32 = 240;
 /// How far the viewer stands in from its pane's edges, so its own show.
 const INSET: i32 = 4;
 
-/// The viewer's key hints, each a key it takes and what it does.
-fn hints() -> Vec<(String, String)> {
-    [
-        ("Ctrl+C", "copy"),
-        ("Enter", "copy and close"),
-        ("Ctrl+A", "select all"),
-        ("Esc", "close"),
-    ]
-    .into_iter()
-    .map(|(key, what)| (key.to_owned(), what.to_owned()))
-    .collect()
+/// The viewer's key hints, each a key it takes and what it does: the
+/// search's while it is open, and while its field has the keyboard only
+/// those.
+fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
+    let hints: &[(&str, &str)] = match viewer.find_bar() {
+        Some(bar) if bar.focused => &[
+            ("Enter", "next"),
+            ("Shift+Enter", "previous"),
+            ("Tab", "to the text"),
+            ("Esc", "close search"),
+        ],
+        Some(_) => &[
+            ("n", "next"),
+            ("Shift+N", "previous"),
+            ("Ctrl+C", "copy"),
+            ("/", "find"),
+            ("Esc", "close search"),
+        ],
+        None => &[
+            ("Ctrl+C", "copy"),
+            ("Enter", "copy and close"),
+            ("Ctrl+A", "select all"),
+            ("/", "find"),
+            ("Esc", "close"),
+        ],
+    };
+    hints
+        .iter()
+        .map(|(key, what)| ((*key).to_owned(), (*what).to_owned()))
+        .collect()
 }
 
 /// `rect` less `by` on every side.
@@ -146,6 +165,7 @@ impl Gerdr {
             .map(|i| ScrollbackRow {
                 text: viewer.row_text(i).to_owned(),
                 selected: viewer.row_selection(i),
+                found: viewer.row_found(i),
             })
             .collect();
         let note = match viewer.selected_lines() {
@@ -163,17 +183,25 @@ impl Gerdr {
             part: viewer.part(),
             overscroll: viewer.overscroll(),
             total: viewer.row_count(),
-            hints: hints(),
+            hints: hints(viewer),
             hover: viewer.hover,
+            search: viewer.find_bar(),
+            ticks: viewer.find_ticks(),
         })
     }
 
-    /// A key while the viewer is open.
-    pub fn scrollback_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+    /// A key while the viewer is open, `typed` with Shift and the layout
+    /// applied.
+    pub fn scrollback_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Outcome> {
         let (_, fit) = self.scrollback_place()?;
         self.scrollback
             .as_mut()?
-            .key(mods, sym, Instant::now(), fit)
+            .key(mods, sym, typed, Instant::now(), fit)
     }
 
     /// Do what the viewer asked for.
@@ -196,14 +224,29 @@ impl Gerdr {
 
     /// A left press while the viewer is open: on the text it starts a
     /// selection (a word on a double click, the line on a triple one, and
-    /// with Shift the selection reaches there); outside the viewer it
-    /// closes it, but on a toast presses that.
+    /// with Shift the selection reaches there), the keyboard going to the
+    /// text from the search; on the search, what its part does; outside
+    /// the viewer it closes it, but on a toast presses that.
     pub fn scrollback_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.scrollback_view() else {
             return;
         };
         let layout = chrome::scrollback_layout(view.panel, &view.hints);
-        match chrome::scrollback_hit(&view, &layout, pos) {
+        let hit = chrome::scrollback_hit(&view, &layout, pos);
+        if !matches!(hit, Some(ScrollbackHit::Search(_)))
+            && let Some(viewer) = self.scrollback.as_mut()
+        {
+            viewer.blur_find();
+        }
+        match hit {
+            Some(ScrollbackHit::Search(part)) => {
+                let Some((_, fit)) = self.scrollback_place() else {
+                    return;
+                };
+                if let Some(viewer) = self.scrollback.as_mut() {
+                    viewer.find_click(part, fit);
+                }
+            }
             Some(ScrollbackHit::Text) => {
                 let (row, col) = chrome::scrollback_point(&view, &layout, pos);
                 let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
@@ -267,16 +310,27 @@ impl Gerdr {
         }
     }
 
-    /// The pointer moved while the viewer is open: its key hints light up.
+    /// The pointer moved while the viewer is open: its key hints and the
+    /// search's buttons light up, the buttons with a tooltip.
     pub fn scrollback_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.scrollback_view()?;
         let layout = chrome::scrollback_layout(view.panel, &view.hints);
         let hit = chrome::scrollback_hit(&view, &layout, pos);
-        self.scrollback.as_mut()?.hover = match hit {
-            Some(ScrollbackHit::Hint(i)) => Some(i),
-            _ => None,
+        self.scrollback.as_mut()?.hover =
+            hit.filter(|hit| matches!(hit, ScrollbackHit::Hint(_) | ScrollbackHit::Search(_)));
+        let Some(ScrollbackHit::Search(part)) = hit else {
+            return None;
         };
-        None
+        let (parts, _) = chrome::scrollback_search(&view, &layout);
+        let (_, rect) = parts.iter().find(|(p, _)| *p == part)?;
+        let (text, key) = match part {
+            SearchPart::Open => ("Find in the scrollback", "/"),
+            SearchPart::Prev => ("The place found before", "Shift+Enter"),
+            SearchPart::Next => ("The next place found", "Enter"),
+            SearchPart::Close => ("Close the search", "Esc"),
+            SearchPart::Field => return None,
+        };
+        Some(Tooltip::new(text, *rect).key(key))
     }
 
     /// Whether `pos` is on the viewer's text, where the pointer is a text
