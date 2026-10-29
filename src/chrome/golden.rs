@@ -6,9 +6,9 @@
 use std::time::Instant;
 
 use super::{
-    AgentLine, AgentView, BarButton, BarStatus, FormField, FormView, Help, HelpHit, HelpPress,
-    InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView, ItemIcon,
-    MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
+    AgentLine, AgentView, BarButton, BarButtons, BarStatus, FormField, FormView, Help, HelpHit,
+    HelpPress, InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView,
+    ItemIcon, MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
     PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, SidebarState,
     SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView,
     TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
@@ -91,9 +91,57 @@ fn agents() -> Vec<Vec<AgentView>> {
             subagents: Vec::new(),
             inbox: false,
             test: None,
+            icon: crate::agent_icons::AgentIcon::Claude,
         }],
         vec![],
     ]
+}
+
+/// An agent of each kind and state, to look at their badges.
+fn many_agents() -> Vec<Vec<AgentView>> {
+    use crate::agent_icons::AgentIcon::*;
+    use crate::ci::CiState;
+    let base = agents().remove(0).remove(0);
+    let card = |icon, kind: &str, status, test| AgentView {
+        key: crate::agents::AgentKey::Herdr(kind.into()),
+        kind: kind.into(),
+        name: None,
+        status,
+        test,
+        icon,
+        ..base.clone()
+    };
+    let rows = [
+        (Claude, "claude", AgentStatus::Working, None),
+        (Codex, "codex", AgentStatus::Done, None),
+        (Gemini, "gemini", AgentStatus::Idle, None),
+        (Cursor, "cursor", AgentStatus::Working, None),
+        (OpenCode, "opencode", AgentStatus::Blocked, None),
+        (Copilot, "copilot", AgentStatus::Idle, None),
+        (Amp, "amp", AgentStatus::Done, None),
+        (Qwen, "qwen", AgentStatus::Idle, None),
+        (Kimi, "kimi", AgentStatus::Idle, None),
+        (Grok, "grok", AgentStatus::Idle, None),
+        (Kiro, "kiro", AgentStatus::Idle, None),
+        (Cline, "cline", AgentStatus::Idle, None),
+        (Devin, "devin", AgentStatus::Idle, None),
+        (Antigravity, "agy", AgentStatus::Idle, None),
+        (Mastra, "mastracode", AgentStatus::Idle, None),
+        (Generic, "droid", AgentStatus::Unknown, None),
+        (
+            Test,
+            "cargo test",
+            AgentStatus::Working,
+            Some(CiState::Running),
+        ),
+        (Test, "npm test", AgentStatus::Done, Some(CiState::Passed)),
+        (Test, "pytest", AgentStatus::Done, Some(CiState::Failed)),
+    ];
+    let cards = rows
+        .into_iter()
+        .map(|(icon, kind, status, test)| card(icon, kind, status, test))
+        .collect();
+    vec![cards, vec![]]
 }
 
 fn tabs() -> Vec<TabView> {
@@ -106,6 +154,7 @@ fn tabs() -> Vec<TabView> {
             activity: "claude working · cargo build".into(),
             restart: Some(true),
             github: false,
+            agent: Some(crate::agent_icons::AgentIcon::Claude),
         },
         TabView {
             title: "zsh".into(),
@@ -126,7 +175,9 @@ fn pane_bar() -> PaneBarView {
         status: BarStatus::Exited,
         can_restart: true,
         can_stop: false,
-        buttons: true,
+        can_back: false,
+        can_forward: false,
+        buttons: BarButtons::Terminal,
         focused: true,
         lit: true,
         hover: Some(BarButton::Restart),
@@ -262,7 +313,13 @@ fn switcher() -> SwitcherView {
             ),
             row(ItemIcon::Tab, "2 zsh", "gerdr", "tab", Some("Tabs"), &[]),
             row(
-                ItemIcon::Agent(AgentStatus::Working),
+                ItemIcon::Agent(
+                    super::Badge {
+                        icon: crate::agent_icons::AgentIcon::Claude,
+                        dot: super::Dot::Working,
+                    },
+                    AgentStatus::Working,
+                ),
                 "claude",
                 "gerdr",
                 "agent",
@@ -443,24 +500,33 @@ fn inbox() -> InboxView {
         label: label.into(),
         key: key.into(),
     };
+    use crate::agent_icons::AgentIcon;
     use InboxIcon as I;
     use InboxTone as T;
+    let badge = |icon, dot| I::Badge(super::Badge { icon, dot });
     let mut rows = vec![
         label(I::Agent, "Agents", 3, 0),
         inbox_item(
             "a1",
             "claude",
             "gerdr · blocked · Allow edit?",
-            I::Blocked,
+            badge(AgentIcon::Claude, super::Dot::Blocked),
             T::Blocked,
             "2m",
         ),
-        inbox_item("a2", "codex", "gerdr-inbox · done", I::Done, T::Done, "14m"),
+        inbox_item(
+            "a2",
+            "codex",
+            "gerdr-inbox · done",
+            badge(AgentIcon::Codex, super::Dot::Done),
+            T::Done,
+            "14m",
+        ),
         inbox_item(
             "a3",
             "claude",
             "aft · working",
-            I::Working,
+            badge(AgentIcon::Claude, super::Dot::Working),
             T::Working,
             "1h",
         ),
@@ -545,7 +611,10 @@ fn inbox() -> InboxView {
         detail: Some(InboxDetailView {
             title: "claude".into(),
             subtitle: "gerdr · blocked · Allow edit?".into(),
-            icon: InboxIcon::Blocked,
+            icon: InboxIcon::Badge(super::Badge {
+                icon: crate::agent_icons::AgentIcon::Claude,
+                dot: super::Dot::Blocked,
+            }),
             tone: InboxTone::Blocked,
             fields: vec![
                 ("Status".into(), "blocked".into()),
@@ -618,7 +687,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 /// The surfaces the motion work added, apart so the table above keeps
 /// its shape: a menu with hints, a pinned help panel, a toast with a
 /// button, a tooltip, the placeholder waiting and timed out, the spinner.
-const OVERLAYS: [&str; 7] = [
+const OVERLAYS: [&str; 8] = [
     "full_menu",
     "help_pinned",
     "toast_action",
@@ -626,6 +695,7 @@ const OVERLAYS: [&str; 7] = [
     "placeholder",
     "placeholder_timed_out",
     "spinner",
+    "blink_dot",
 ];
 
 fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -642,6 +712,7 @@ fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.placeholder(&placeholder(false), None, scale, p)),
         hash(painter.placeholder(&placeholder(true), Some(PlaceholderButton::Retry), scale, p)),
         hash(painter.spinner(5, scale, p)),
+        hash(super::blink_dot(super::Dot::Working, scale, p)),
     ]
 }
 
@@ -656,12 +727,12 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0x623a12c2c297347a, // sidebar
-        0x35a1890943b945e0, // tab_strip
+        0x3a0e8e76981cdccb, // sidebar
+        0x283e951e74957ffb, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
         0xeac2e664137d8223, // menu
-        0x9ff4f582252e5a7d, // switcher
+        0x867e5f067c607162, // switcher
         0xe4d55e0a322e116f, // welcome
         0x59378f4fb455dd74, // quit
         0xd5fbf9747a465bfc, // project_menu
@@ -670,12 +741,12 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Dark at 2
     [
-        0x93671f60c56b48f4, // sidebar
-        0x057804639bd5f3d2, // tab_strip
+        0x1b5ff35150d95126, // sidebar
+        0x4487bd887929c378, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
         0x1483bdc67e595289, // menu
-        0x5f7bff6c609f26be, // switcher
+        0xee89131097a31758, // switcher
         0xc6a2b9324f6b7b75, // welcome
         0xca6aac6e936af23a, // quit
         0xde799af24ea3160e, // project_menu
@@ -684,12 +755,12 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 1
     [
-        0x6b3f22ad5188a42a, // sidebar
-        0x76286b9148f6cf2c, // tab_strip
+        0x6ca4ddfd0e0ebd91, // sidebar
+        0xc0ed9820fb214e40, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
         0x3276e8655270d746, // menu
-        0x38ffd61880514d09, // switcher
+        0x251f8e753d714359, // switcher
         0x0bf38b649779155b, // welcome
         0x9141f1eb6dfa4384, // quit
         0xa0b64fb50d67fbc2, // project_menu
@@ -698,12 +769,12 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 2
     [
-        0x51b26a60939585ce, // sidebar
-        0xb977630fd30a1f46, // tab_strip
+        0x63c6a914aef398a8, // sidebar
+        0x6157a465bf37a565, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
         0x129626ffb502a663, // menu
-        0x7ab00734e2c6e8e3, // switcher
+        0x0838ec8eb0866208, // switcher
         0x2408bfddb0031e83, // welcome
         0xea36deb588723e15, // quit
         0xf7d02feda2f8909b, // project_menu
@@ -713,7 +784,7 @@ const GOLDEN: [[u64; 11]; 4] = [
 ];
 
 /// The recorded hashes of `OVERLAYS`, per case in `CASES`.
-const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
+const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0xa2b92bfd04e8baf2, // full_menu
@@ -723,6 +794,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0xd5b2438c44e2d360, // placeholder
         0x3f94e9f481ad4ddb, // placeholder_timed_out
         0x7a426c6be23d66a6, // spinner
+        0xa690059b318b2273, // blink_dot
     ],
     // Dark at 2
     [
@@ -733,6 +805,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x94bf628b2c8d8e61, // placeholder
         0x914e6acce8dc1bda, // placeholder_timed_out
         0x2f28c94a7002e520, // spinner
+        0xa3a8c9c97be4e475, // blink_dot
     ],
     // Light at 1
     [
@@ -743,6 +816,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x848913a059883552, // placeholder
         0x8bb8ef097eeae24a, // placeholder_timed_out
         0x4345ed79149d747b, // spinner
+        0xe9f5673284f20252, // blink_dot
     ],
     // Light at 2
     [
@@ -753,6 +827,7 @@ const GOLDEN_OVERLAYS: [[u64; 7]; 4] = [
         0x9bc50d6953da1fd5, // placeholder
         0xb6a46ef59a601576, // placeholder_timed_out
         0x883035c0209e314f, // spinner
+        0xf86dcbb81955c375, // blink_dot
     ],
 ];
 
@@ -914,6 +989,36 @@ fn dump_overlays() {
             &format!("inbox_{tag}"),
             painter.inbox(&inbox(), inbox_size, scale, p),
             px(inbox_panel.size.w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("sidebar_agents_{tag}"),
+            painter.sidebar_view(
+                &SidebarView {
+                    workspaces: workspaces(),
+                    agents: many_agents(),
+                    active: Some(0),
+                    project: Some("aft".into()),
+                    header_lit: false,
+                    state: SidebarState::default(),
+                },
+                (260, 520).into(),
+                scale,
+                p,
+            ),
+            px(260),
+        );
+        let strip_h = super::tab_strip_height(super::Density::Comfortable);
+        dump(
+            &dir,
+            &format!("tab_strip_{tag}"),
+            painter.tab_strip_view(
+                &TabStripView::plain(tabs(), 1, true, ThemeMode::System),
+                theme,
+                (900, strip_h).into(),
+                scale,
+            ),
+            px(900),
         );
         dump(
             &dir,

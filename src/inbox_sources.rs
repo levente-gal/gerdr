@@ -221,6 +221,8 @@ pub fn agent_items(src: &Sources) -> Vec<InboxItem> {
                 actions: TRIAGE.to_vec(),
                 detail: Detail::Agent {
                     status: view.status,
+                    icon: view.icon,
+                    test: view.test,
                     model: view.model.clone(),
                     workspace: workspace.clone(),
                     pane,
@@ -727,6 +729,7 @@ mod tests {
             subagents: Vec::new(),
             inbox: false,
             test: None,
+            icon: crate::agent_icons::AgentIcon::Claude,
         }
     }
 

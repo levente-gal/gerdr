@@ -8,15 +8,14 @@
 //! its items into an `InboxView`.
 
 use super::{
-    BUTTON_RADIUS, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FOOTER_ROW, FieldSpot,
-    HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE, MENU_MARK_GAP,
-    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
+    BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, Dot, FIELD_GAP, FONT_SIZE, FOOTER_ROW,
+    FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE,
+    MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
     PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, STROKE, band, check, cross, folder, footer_height, footer_hint_spots,
-    git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil, phys, plus,
-    project_menu::menu_query_text, rect_px, rounded_rect, segment, status_mark, tray,
+    SMALL_FONT_SIZE, STROKE, agent_badge, band, cross, dot_rect, folder, footer_height,
+    footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil,
+    phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, segment, tray,
 };
-use crate::herdr::AgentStatus;
 use crate::text_field::Line;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -187,12 +186,8 @@ pub struct InboxLine {
 pub enum InboxIcon {
     /// An agent, as the Agents section's label shows it.
     Agent,
-    /// An agent waiting for input: an exclamation mark.
-    Blocked,
-    /// An agent done with unseen work: a check mark.
-    Done,
-    /// An agent at work: the spinner's ring.
-    Working,
+    /// An agent or test run: its badge (see `badge`) on the tinted square.
+    Badge(Badge),
     /// A repository needing a look: a branch.
     Repo,
     /// A worktree needing a look: a folder.
@@ -774,6 +769,68 @@ fn tone_color(tone: InboxTone, p: &Palette) -> Rgb {
     }
 }
 
+/// How big an agent's logo is on an item's mark grown by `grow`.
+const BADGE_LOGO: f32 = 12.0;
+/// How much bigger the detail's mark is than a row's.
+const DETAIL_GROW: f32 = DETAIL_BADGE as f32 / BADGE as f32;
+
+fn logo_size(grow: f32) -> i32 {
+    (BADGE_LOGO * grow).round() as i32
+}
+
+/// Where the mark of the item row at `rect` goes: at its left, centred.
+fn row_badge(rect: Rect) -> Rect {
+    Rectangle::new(
+        (
+            rect.loc.x + BADGE_INSET,
+            rect.loc.y + (rect.size.h - BADGE) / 2,
+        )
+            .into(),
+        (BADGE, BADGE).into(),
+    )
+}
+
+/// Where the detail's mark goes, in the detail at `rect` whose title is
+/// at `title`: at its left, centred on the title.
+fn detail_badge(rect: Rect, title: Rect) -> Rect {
+    Rectangle::new(
+        (
+            rect.loc.x + HELP_PADDING,
+            title.loc.y + (title.size.h - DETAIL_BADGE) / 2,
+        )
+            .into(),
+        (DETAIL_BADGE, DETAIL_BADGE).into(),
+    )
+}
+
+/// Where the blinking dots of the inbox `view` go, laid out as `layout`
+/// (output coordinates): one per row of an agent at work, not hidden,
+/// where the list shows it, and one on the detail's mark.
+pub fn inbox_blinkers(view: &InboxView, layout: &InboxLayout) -> Vec<Rect> {
+    let blinks = |icon: InboxIcon| matches!(icon, InboxIcon::Badge(b) if b.dot.blinks());
+    // A row the list cuts shows the part of its dot it shows of it.
+    let window = layout.window;
+    let shows = |r: &Rect| r.overlaps(window);
+    let mut dots: Vec<Rect> = layout
+        .rows
+        .iter()
+        .zip(&view.rows)
+        .filter_map(|((rect, _), row)| match row {
+            InboxRow::Item(line) if !line.hidden && blinks(line.icon) && rect.size.h > 0 => {
+                Some(dot_rect(row_badge(*rect), logo_size(1.0)))
+            }
+            _ => None,
+        })
+        .filter(shows)
+        .collect();
+    if let Some(detail) = view.detail.as_ref().filter(|d| blinks(d.icon)) {
+        let title = detail_parts(detail, layout.detail).title;
+        let badge = detail_badge(layout.detail, title);
+        dots.push(dot_rect(badge, logo_size(DETAIL_GROW)));
+    }
+    dots
+}
+
 /// Signed distance to `icon`'s shape centred on the origin, about 12
 /// logical pixels across.
 fn icon_shape(icon: InboxIcon, x: f32, y: f32, s: f32) -> f32 {
@@ -784,19 +841,8 @@ fn icon_shape(icon: InboxIcon, x: f32, y: f32, s: f32) -> f32 {
     };
     match icon {
         // A head with two eyes and an antenna.
-        InboxIcon::Agent => {
-            let head = rounded_rect(x, y, -5.5 * s, -3.0 * s, 11.0 * s, 8.5 * s, 2.5 * s).abs()
-                - STROKE * s;
-            let eyes = (x.abs() - 2.3 * s).hypot(y - 1.2 * s) - 1.1 * s;
-            let antenna = line(0.0, -3.0, 0.0, -5.0).min(x.hypot(y + 5.6 * s) - 1.1 * s);
-            head.min(eyes).min(antenna)
-        }
-        InboxIcon::Blocked => {
-            let bar = segment(x, y, 0.0, -4.6 * s, 0.0, 0.8 * s) - 1.1 * s;
-            bar.min(x.hypot(y - 4.0 * s) - 1.25 * s)
-        }
-        InboxIcon::Done => check(x, y, 1.25 * s),
-        InboxIcon::Working => status_mark(AgentStatus::Working, x, y, 1.3 * s),
+        // Drawn by `agent_badge` instead; a robot if it ever got here.
+        InboxIcon::Agent | InboxIcon::Badge(_) => robot(x, y, s),
         InboxIcon::Repo => git_branch(x, y, s),
         InboxIcon::Worktree => folder(x, y, 0.72 * s) - 0.25 * s,
         InboxIcon::Failed => cross(x, y, 1.05 * s) - 0.2 * s,
@@ -1018,7 +1064,7 @@ impl Painter {
 
     /// An item's mark in `rect` (logical, buffer coordinates): `icon` in
     /// `color` on a rounded square of `ground` tinted with it, the icon
-    /// grown by `grow`.
+    /// grown by `grow`. An agent's badge is `BADGE_LOGO` big, grown.
     #[allow(clippy::too_many_arguments)]
     fn inbox_badge(
         &self,
@@ -1029,10 +1075,16 @@ impl Painter {
         ground: Rgb,
         grow: f32,
         scale: f64,
+        p: &Palette,
     ) {
         let (x, y, w, h) = rect_px(rect, scale);
         let r = BADGE_RADIUS * grow * scale as f32;
-        c.rounded(x, y, w, h, r, mix(ground, color, BADGE_TINT));
+        let fill = mix(ground, color, BADGE_TINT);
+        c.rounded(x, y, w, h, r, fill);
+        if let InboxIcon::Badge(badge) = icon {
+            agent_badge(c, rect, logo_size(grow), badge, color, fill, scale, p);
+            return;
+        }
         let s = grow * scale as f32;
         icon_sdf(c, rect, scale, color, |x, y| icon_shape(icon, x, y, s));
     }
@@ -1358,15 +1410,16 @@ impl Painter {
         } else {
             tone
         };
-        let badge = Rectangle::new(
-            (
-                rect.loc.x + BADGE_INSET,
-                rect.loc.y + (rect.size.h - BADGE) / 2,
-            )
-                .into(),
-            (BADGE, BADGE).into(),
-        );
-        self.inbox_badge(c, badge, line.icon, mark_color, ground, 1.0, scale);
+        // A hidden line's dot doesn't blink: nothing is composed over it.
+        let icon = match line.icon {
+            InboxIcon::Badge(badge) if line.hidden => InboxIcon::Badge(Badge {
+                dot: Dot::Idle,
+                ..badge
+            }),
+            icon => icon,
+        };
+        let badge = row_badge(rect);
+        self.inbox_badge(c, badge, icon, mark_color, ground, 1.0, scale, p);
 
         for (k, &button) in buttons.iter().enumerate() {
             let label = line.buttons.get(k).map_or("", |b| b.label.as_str());
@@ -1451,17 +1504,10 @@ impl Painter {
 
         let title = parts.title;
         let (tx, tright) = phys(title, scale);
-        let badge = Rectangle::new(
-            (
-                rect.loc.x + HELP_PADDING,
-                title.loc.y + (title.size.h - DETAIL_BADGE) / 2,
-            )
-                .into(),
-            (DETAIL_BADGE, DETAIL_BADGE).into(),
-        );
-        let grow = DETAIL_BADGE as f32 / BADGE as f32;
+        let badge = detail_badge(rect, title);
         let color = tone_color(detail.tone, p);
-        self.inbox_badge(c, badge, detail.icon, color, p.elevated, grow, scale);
+        let grow = DETAIL_GROW;
+        self.inbox_badge(c, badge, detail.icon, color, p.elevated, grow, scale, p);
         let text_x = tx + px(HELP_PADDING + DETAIL_BADGE) as f32 + gap * 1.5;
         let text_end = tright - px(HELP_PADDING) as f32;
         // The title over the subtitle, the two centred on the mark.
@@ -1745,6 +1791,7 @@ pub(super) struct InboxLayers {
 
 impl InboxLayers {
     /// The parts showing the inbox panel at `now`, front to back.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn parts(
         &mut self,
         view: Option<InboxView>,
@@ -1753,8 +1800,9 @@ impl InboxLayers {
         scale: f64,
         now: std::time::Instant,
         painter: &Painter,
+        blink: super::layers::Blink,
     ) -> Vec<super::layers::Part> {
-        use super::layers::Part;
+        use super::layers::{Part, dot_parts};
         let placed = view.as_ref().map(|view| {
             let (loc, size) = super::shadowed(inbox_layout(view, output).panel);
             ((frame_view(view), output, theme, scale), loc, size)
@@ -1766,7 +1814,13 @@ impl InboxLayers {
                 return Vec::new();
             };
             let layout = inbox_layout(view, output);
-            let mut parts = Vec::new();
+            // The dots of the agents at work, in front of their rows.
+            let at: Vec<_> = (layout.rows.iter())
+                .zip(row_tops(view, layout.window))
+                .map(|((rect, _), top)| (*rect, Point::from((rect.loc.x as f64, top))))
+                .collect();
+            let dots = inbox_blinkers(view, &layout);
+            let mut parts = dot_parts(blink, dots, &at, layout.window);
             let track = scroll_track(layout.list);
             if let Some((loc, size)) = thumb_place(view, track, inbox_page(output)) {
                 let buffer = thumb.get((size, theme, scale), |(size, ..)| {
@@ -2053,6 +2107,47 @@ mod tests {
         .into_iter()
         .map(|(k, a)| (k.into(), a.into()))
         .collect()
+    }
+
+    #[test]
+    fn agents_at_work_blink_but_not_hidden_ones() {
+        use crate::agent_icons::AgentIcon;
+        let working = InboxIcon::Badge(Badge {
+            icon: AgentIcon::Claude,
+            dot: Dot::Working,
+        });
+        let at_work = |hidden: bool| {
+            InboxRow::Item(InboxLine {
+                icon: working,
+                hidden,
+                ..match item("agent:p1", "claude", "w · working", InboxTone::Working, "") {
+                    InboxRow::Item(line) => line,
+                    _ => unreachable!(),
+                }
+            })
+        };
+        let mut v = view();
+        v.rows = vec![label("Agents", 2, 0), at_work(false), at_work(true)];
+        v.total = v.rows.len();
+        v.selected = Some(1);
+        v.detail = None;
+        let output = (1400, 900).into();
+        let layout = inbox_layout(&v, output);
+        let dots = inbox_blinkers(&v, &layout);
+        assert_eq!(
+            dots,
+            vec![dot_rect(row_badge(layout.rows[1].0), logo_size(1.0))]
+        );
+        assert!(inside(row_badge(layout.rows[1].0), dots[0]));
+        // The detail of one at work blinks on its mark too.
+        v.detail = Some(InboxDetailView {
+            icon: working,
+            ..agent_detail()
+        });
+        let layout = inbox_layout(&v, output);
+        let dots = inbox_blinkers(&v, &layout);
+        assert_eq!(dots.len(), 2);
+        assert!(inside(layout.detail, dots[1]));
     }
 
     fn view() -> InboxView {
@@ -2482,9 +2577,17 @@ mod tests {
         let t = std::time::Instant::now();
         // Opened, then faded in.
         let mut was = at(2, 0.25);
-        layers.parts(Some(was.clone()), size, Theme::Dark, 1.0, t, &painter);
+        layers.parts(Some(was.clone()), size, Theme::Dark, 1.0, t, &painter, None);
         let later = t + std::time::Duration::from_secs(1);
-        let parts = layers.parts(Some(was.clone()), size, Theme::Dark, 1.0, later, &painter);
+        let parts = layers.parts(
+            Some(was.clone()),
+            size,
+            Theme::Dark,
+            1.0,
+            later,
+            &painter,
+            None,
+        );
         let frame = layers.overlay.cached.key.clone();
         let mut drawn = layers.rows.drawn();
         assert_eq!(drawn, shown(&was).len());
@@ -2494,7 +2597,15 @@ mod tests {
         // rows coming into view are drawn, and the frame not again.
         for (first, part) in [(2, 0.6), (3, 0.1), (3, 0.1)] {
             let v = at(first, part);
-            let parts = layers.parts(Some(v.clone()), size, Theme::Dark, 1.0, later, &painter);
+            let parts = layers.parts(
+                Some(v.clone()),
+                size,
+                Theme::Dark,
+                1.0,
+                later,
+                &painter,
+                None,
+            );
             let before = shown(&was);
             let new = shown(&v).iter().filter(|r| !before.contains(r)).count();
             assert_eq!(layers.rows.drawn(), drawn + new, "at {first} {part}");
@@ -2508,11 +2619,11 @@ mod tests {
             was = v;
         }
         // Closed and faded out, its rows are let go of.
-        layers.parts(None, size, Theme::Dark, 1.0, later, &painter);
+        layers.parts(None, size, Theme::Dark, 1.0, later, &painter, None);
         let gone = later + std::time::Duration::from_secs(1);
         assert!(
             layers
-                .parts(None, size, Theme::Dark, 1.0, gone, &painter)
+                .parts(None, size, Theme::Dark, 1.0, gone, &painter, None)
                 .is_empty()
         );
     }

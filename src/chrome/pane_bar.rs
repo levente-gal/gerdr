@@ -1,11 +1,11 @@
-//! The bar over each terminal pane: what it shows, its buttons, how it
-//! hides and shows, and how it is drawn; and the strip marking the focused
-//! pane, whatever it shows.
+//! The bar over each pane: what it shows, its buttons, how it hides and
+//! shows, and how it is drawn; and the strip marking the focused pane,
+//! whatever it shows.
 
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
-    PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, icon_sdf, mix, physical,
-    rect_px, restart_arrow, status_mark, stop,
+    PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, centred_dot, chevron_side,
+    copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -78,34 +78,72 @@ pub fn focus_strip(size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryR
     c.into_buffer(false)
 }
 
-/// Where the restart and stop buttons sit in a pane's bar, left to right.
-pub fn pane_bar_buttons(bar: Rect) -> [(BarButton, Rect); 2] {
+/// Where the buttons of a bar with `kind`'s sit, left to right, at its
+/// right end.
+pub fn pane_bar_buttons(bar: Rect, kind: BarButtons) -> Vec<(BarButton, Rect)> {
     let right = bar.loc.x + bar.size.w - BAR_INSET;
+    let buttons = kind.buttons();
+    let n = buttons.len() as i32;
     let at = |i: i32| {
         Rectangle::new(
             (right - (i + 1) * BAR_BUTTON - i * BAR_BUTTON_GAP, bar.loc.y).into(),
             (BAR_BUTTON, bar.size.h).into(),
         )
     };
-    [(BarButton::Restart, at(1)), (BarButton::Stop, at(0))]
+    (0..n)
+        .zip(buttons)
+        .map(|(i, &button)| (button, at(n - 1 - i)))
+        .collect()
 }
 
-/// What of a pane's bar is at `pos`, if the bar is.
-pub fn pane_bar_hit(bar: Rect, pos: Point<f64, Logical>) -> Option<BarHit> {
+/// What of a pane's bar, with `kind`'s buttons, is at `pos`, if the bar is.
+pub fn pane_bar_hit(bar: Rect, kind: BarButtons, pos: Point<f64, Logical>) -> Option<BarHit> {
     if !bar.to_f64().contains(pos) {
         return None;
     }
-    let button = pane_bar_buttons(bar)
+    let button = pane_bar_buttons(bar, kind)
         .into_iter()
         .find(|(_, rect)| rect.to_f64().contains(pos));
     Some(button.map_or(BarHit::Label, |(button, _)| BarHit::Button(button)))
 }
 
-/// A button in a terminal pane's bar.
+/// A button in a pane's bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarButton {
     Restart,
     Stop,
+    Back,
+    Forward,
+    Reload,
+    CopyUrl,
+}
+
+/// Which buttons a pane's bar has, by what the pane shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BarButtons {
+    /// An app's window: none.
+    #[default]
+    None,
+    /// A terminal: restart and stop what runs in it.
+    Terminal,
+    /// A web page: back, forward, reload, and copy its address.
+    Web,
+}
+
+impl BarButtons {
+    /// The buttons, left to right.
+    pub fn buttons(self) -> &'static [BarButton] {
+        match self {
+            Self::None => &[],
+            Self::Terminal => &[BarButton::Restart, BarButton::Stop],
+            Self::Web => &[
+                BarButton::Back,
+                BarButton::Forward,
+                BarButton::Reload,
+                BarButton::CopyUrl,
+            ],
+        }
+    }
 }
 
 /// What a click on a pane's bar lands on.
@@ -127,8 +165,8 @@ pub enum BarStatus {
     Working,
 }
 
-/// The bar over a terminal pane: what runs in it, its buttons, and where
-/// it stands between hidden and shown.
+/// The bar over a pane: what runs in it or what it shows, its buttons, and
+/// where it stands between hidden and shown.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneBarView {
     /// Where the bar goes on the output when shown in full; no height while
@@ -140,8 +178,11 @@ pub struct PaneBarView {
     pub status: BarStatus,
     pub can_restart: bool,
     pub can_stop: bool,
-    /// It has the restart and stop buttons: a terminal's bar.
-    pub buttons: bool,
+    /// A web page's history goes back, or forward, from where it is.
+    pub can_back: bool,
+    pub can_forward: bool,
+    /// Which buttons it has, by what the pane shows.
+    pub buttons: BarButtons,
     /// The pane has keyboard focus.
     pub focused: bool,
     /// The pointer is over the bar: its buttons show.
@@ -167,6 +208,27 @@ impl PaneBarView {
         (self.rect.loc, (self.rect.size.w, h).into(), self.alpha)
     }
 
+    /// Where its mark goes on the output: at its start, `slide` up with
+    /// the rest of it.
+    fn mark(&self) -> Rect {
+        Rectangle::new(
+            (
+                self.rect.loc.x + PADDING as i32,
+                self.rect.loc.y - self.slide,
+            )
+                .into(),
+            (STATUS_WIDTH, self.rect.size.h).into(),
+        )
+    }
+
+    /// Where its blinking dot goes on the output, while its command runs
+    /// and the dot is not slid under its pane's top edge.
+    pub fn blinker(&self) -> Option<Rect> {
+        let dot = centred_dot(self.mark());
+        (self.status == BarStatus::Running && self.rect.size.h > 0 && dot.loc.y >= self.rect.loc.y)
+            .then_some(dot)
+    }
+
     /// The same bar at full opacity: what its buffer looks like, for a
     /// cache key (the alpha is applied when it is composed).
     pub fn still(&self) -> Self {
@@ -178,9 +240,9 @@ impl PaneBarView {
 }
 
 impl Painter {
-    /// A terminal pane's bar: a mark saying how its command is, the command
-    /// and a note after it, then, with the pointer over it, the restart and
-    /// stop buttons. Drawn `view.slide` pixels up, cut off at the top.
+    /// A pane's bar: a mark saying how its command is, the command (or the
+    /// page's title) and a note after it, then, with the pointer over it,
+    /// its buttons. Drawn `view.slide` pixels up, cut off at the top.
     pub(super) fn pane_bar(
         &self,
         view: &PaneBarView,
@@ -204,15 +266,13 @@ impl Painter {
         // Everything is laid out in the full bar, then moved up by the slide.
         let up = -view.slide;
         let bar = Rectangle::new((0, up).into(), full);
-        let buttons = pane_bar_buttons(bar);
+        let buttons = pane_bar_buttons(bar, view.buttons);
         let mark = Rectangle::new((PADDING as i32, up).into(), (STATUS_WIDTH, full.h).into());
-        // The marks the sidebar's agent chips use: a dot for alive, a ring
-        // for waiting, an open ring for busy.
+        // The marks the sidebar's agent chips use: a ring for waiting, an
+        // open ring for busy. A running command's is a blinking dot,
+        // composed over the bar (see `blinker`).
         match view.status {
-            BarStatus::Idle => {}
-            BarStatus::Running => icon_sdf(&mut c, mark, scale, p.success, |x, y| {
-                status_mark(AgentStatus::Done, x, y, s)
-            }),
+            BarStatus::Idle | BarStatus::Running => {}
             BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
                 status_mark(AgentStatus::Idle, x, y, s)
             }),
@@ -225,10 +285,9 @@ impl Painter {
         // the buttons hidden, both reach the bar's end.
         let band = (px(up), px(up + full.h));
         let x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
-        let end_x = if view.lit && view.buttons {
-            buttons[0].1.loc.x
-        } else {
-            full.w - BAR_INSET
+        let end_x = match buttons.first() {
+            Some((_, first)) if view.lit => first.loc.x,
+            _ => full.w - BAR_INSET,
         };
         let right = px(end_x - BAR_NOTE_GAP) as f32;
         let note_w = view.note.map_or(0.0, |note| {
@@ -264,13 +323,16 @@ impl Painter {
             );
         }
 
-        if !view.lit || !view.buttons {
+        if !view.lit {
             return c.into_buffer(true);
         }
         for (button, rect) in buttons {
             let enabled = match button {
                 BarButton::Restart => view.can_restart,
                 BarButton::Stop => view.can_stop,
+                BarButton::Back => view.can_back,
+                BarButton::Forward => view.can_forward,
+                BarButton::Reload | BarButton::CopyUrl => true,
             };
             let hovered = enabled && view.hover == Some(button);
             if hovered {
@@ -289,10 +351,17 @@ impl Painter {
                 p.muted
             };
             match button {
-                BarButton::Restart => {
+                BarButton::Restart | BarButton::Reload => {
                     icon_sdf(&mut c, rect, scale, color, |x, y| restart_arrow(x, y, s))
                 }
                 BarButton::Stop => icon_sdf(&mut c, rect, scale, color, |x, y| stop(x, y, s)),
+                BarButton::Back | BarButton::Forward => {
+                    let left = button == BarButton::Back;
+                    icon_sdf(&mut c, rect, scale, color, |x, y| {
+                        chevron_side(left, x, y, s)
+                    })
+                }
+                BarButton::CopyUrl => icon_sdf(&mut c, rect, scale, color, |x, y| copy(x, y, s)),
             }
         }
         c.into_buffer(true)
@@ -302,9 +371,9 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        BAR_REVEAL, BarButton, BarHit, BarStatus, FOCUS_STRIP, PaneBarView, focus_strip,
-        focus_strip_rect, pane_bar_buttons, pane_bar_hit, pane_bar_rects, pane_bar_rects_shown,
-        pointer_reveals,
+        BAR_REVEAL, BarButton, BarButtons, BarHit, BarStatus, FOCUS_STRIP, PaneBarView,
+        focus_strip, focus_strip_rect, pane_bar_buttons, pane_bar_hit, pane_bar_rects,
+        pane_bar_rects_shown, pointer_reveals,
     };
     use crate::chrome::{BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
 
@@ -316,7 +385,9 @@ mod tests {
             status: BarStatus::Running,
             can_restart: true,
             can_stop: true,
-            buttons: true,
+            can_back: true,
+            can_forward: false,
+            buttons: BarButtons::Terminal,
             focused: true,
             lit: true,
             hover: None,
@@ -411,26 +482,51 @@ mod tests {
     #[test]
     fn pane_bar_buttons_sit_right_and_do_not_overlap() {
         let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
-        let [(first, restart), (second, stop)] = pane_bar_buttons(bar);
-        assert_eq!((first, second), (BarButton::Restart, BarButton::Stop));
-        assert_eq!(stop.loc.x + stop.size.w, 200 + 600 - BAR_INSET);
-        assert!(restart.loc.x + restart.size.w <= stop.loc.x);
-        assert!(restart.loc.y == 50 && stop.size.h == PANE_BAR_HEIGHT);
+        for kind in [BarButtons::Terminal, BarButtons::Web] {
+            let buttons = pane_bar_buttons(bar, kind);
+            let order: Vec<_> = buttons.iter().map(|(b, _)| *b).collect();
+            assert_eq!(order, kind.buttons());
+            let (_, last) = buttons.last().unwrap();
+            assert_eq!(last.loc.x + last.size.w, 200 + 600 - BAR_INSET);
+            for pair in buttons.windows(2) {
+                assert!(pair[0].1.loc.x + pair[0].1.size.w <= pair[1].1.loc.x);
+            }
+            assert!(
+                buttons
+                    .iter()
+                    .all(|(_, r)| r.loc.y == 50 && r.size.h == PANE_BAR_HEIGHT)
+            );
+        }
+        assert!(pane_bar_buttons(bar, BarButtons::None).is_empty());
     }
 
     #[test]
     fn pane_bar_hit_agrees_with_the_buttons() {
         let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
-        for (button, rect) in pane_bar_buttons(bar) {
-            let centre = rect.to_f64().loc + rect.to_f64().size.downscale(2.0).to_point();
-            assert_eq!(pane_bar_hit(bar, centre), Some(BarHit::Button(button)));
+        for kind in [BarButtons::Terminal, BarButtons::Web] {
+            for (button, rect) in pane_bar_buttons(bar, kind) {
+                let centre = rect.to_f64().loc + rect.to_f64().size.downscale(2.0).to_point();
+                assert_eq!(
+                    pane_bar_hit(bar, kind, centre),
+                    Some(BarHit::Button(button))
+                );
+                // A bar without buttons has only its label there.
+                assert_eq!(
+                    pane_bar_hit(bar, BarButtons::None, centre),
+                    Some(BarHit::Label)
+                );
+            }
         }
-        assert_eq!(pane_bar_hit(bar, (210.0, 60.0).into()), Some(BarHit::Label));
-        assert_eq!(pane_bar_hit(bar, (210.0, 80.0).into()), None);
-        assert_eq!(pane_bar_hit(bar, (100.0, 60.0).into()), None);
+        let kind = BarButtons::Terminal;
+        assert_eq!(
+            pane_bar_hit(bar, kind, (210.0, 60.0).into()),
+            Some(BarHit::Label)
+        );
+        assert_eq!(pane_bar_hit(bar, kind, (210.0, 80.0).into()), None);
+        assert_eq!(pane_bar_hit(bar, kind, (100.0, 60.0).into()), None);
         // A hidden bar has nothing to hit.
         let hidden = Rect::new((200, 50).into(), (600, 0).into());
-        assert_eq!(pane_bar_hit(hidden, (210.0, 50.0).into()), None);
+        assert_eq!(pane_bar_hit(hidden, kind, (210.0, 50.0).into()), None);
     }
 
     #[test]
@@ -447,6 +543,26 @@ mod tests {
         // The cache key forgets the alpha, not the slide.
         let still = v.still();
         assert_eq!((still.alpha, still.slide), (1.0, PANE_BAR_HEIGHT + 5));
+    }
+
+    #[test]
+    fn a_running_bar_blinks_its_dot_where_its_mark_is() {
+        let mut v = view(600);
+        v.rect.loc = (200, 50).into();
+        v.status = BarStatus::Running;
+        let dot = v.blinker().expect("a running bar blinks");
+        assert_eq!(dot.size, (crate::chrome::DOT, crate::chrome::DOT).into());
+        assert!(dot.loc.x > 200 && dot.loc.x < 200 + super::PADDING as i32 + super::STATUS_WIDTH);
+        let mid = dot.loc.y + dot.size.h / 2;
+        assert!((mid - (50 + PANE_BAR_HEIGHT / 2)).abs() <= 1);
+        // Slid up with the bar, while it stays past the edge.
+        v.slide = 2;
+        assert_eq!(v.blinker().map(|d| d.loc.y), Some(dot.loc.y - 2));
+        v.slide = PANE_BAR_HEIGHT / 2;
+        assert_eq!(v.blinker(), None);
+        v.slide = 0;
+        v.status = BarStatus::Exited;
+        assert_eq!(v.blinker(), None);
     }
 
     #[test]
@@ -468,7 +584,13 @@ mod tests {
                             can_restart: i < 2,
                             can_stop: i % 2 == 1,
                             focused: i == 0,
-                            buttons: i != 2,
+                            buttons: [
+                                BarButtons::Terminal,
+                                BarButtons::Web,
+                                BarButtons::None,
+                                BarButtons::Web,
+                            ][i],
+                            can_back: i < 2,
                             lit: i != 3,
                             hover: Some(BarButton::Restart),
                             slide: [0, 7, PANE_BAR_HEIGHT - 1, PANE_BAR_HEIGHT][i],

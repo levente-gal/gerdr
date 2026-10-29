@@ -894,7 +894,7 @@ impl Gerdr {
         }
         // An agent's mark says how it is doing.
         let i = hover?;
-        let ItemIcon::Agent(status) = view.rows.get(i)?.icon else {
+        let ItemIcon::Agent(_, status) = view.rows.get(i)?.icon else {
             return None;
         };
         let icon = chrome::switcher_icon(layout.rows[i]);
@@ -1179,7 +1179,7 @@ impl Gerdr {
                 let mut detail = vec![status_label(card.status), self.workspaces[w].name.as_str()];
                 detail.extend(card.title().map(str::trim).filter(|t| !t.is_empty()));
                 items.push(Item::new(
-                    ItemIcon::Agent(card.status),
+                    ItemIcon::Agent(card.badge(), card.status),
                     card.label(),
                     detail.join(" · "),
                     Target::Agent(card.key.clone()),

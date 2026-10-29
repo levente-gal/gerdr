@@ -64,8 +64,16 @@ const HOST_RETRY: Duration = Duration::from_secs(1);
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum FromBrowser {
-    /// The pane's tab shows `url` now.
-    Page { pane: String, url: String },
+    /// The pane's tab shows `url` now, and can go `back` and `forward` if
+    /// it says so (nothing said where the page can't be asked).
+    Page {
+        pane: String,
+        url: String,
+        #[serde(default)]
+        back: Option<bool>,
+        #[serde(default)]
+        forward: Option<bool>,
+    },
     /// The pane's tab closed.
     Closed { pane: String },
 }
@@ -75,6 +83,25 @@ enum FromBrowser {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ToBrowser<'a> {
     Navigate { pane: String, url: &'a str },
+    Back { pane: String },
+    Forward { pane: String },
+    Reload { pane: String },
+}
+
+/// A step a web pane's tab takes through its history, or again where it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebStep {
+    Back,
+    Forward,
+    Reload,
+}
+
+/// Whether a web pane's tab can go back and forward, as its page last said:
+/// `None` for one that wasn't asked or couldn't say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebHistory {
+    pub back: Option<bool>,
+    pub forward: Option<bool>,
 }
 
 /// What happens on a connection to gerdr's socket, by the connection.
@@ -93,12 +120,19 @@ pub struct WebControl {
     connections: HashMap<u64, UnixStream>,
     /// The connection of each pane whose tab the extension took, by pane.
     panes: HashMap<u32, u64>,
+    /// Where each of those panes' tabs can go, by pane.
+    history: HashMap<u32, WebHistory>,
 }
 
 impl WebControl {
     /// Whether the extension follows `pane`'s tab.
     pub fn follows(&self, pane: u32) -> bool {
         self.panes.contains_key(&pane)
+    }
+
+    /// Where `pane`'s tab can go, as the extension last said.
+    pub fn history(&self, pane: u32) -> WebHistory {
+        self.history.get(&pane).copied().unwrap_or_default()
     }
 
     /// gerdr's socket, once it listens on it.
@@ -350,17 +384,29 @@ impl Gerdr {
             Event::Gone(id) => {
                 control.connections.remove(&id);
                 control.panes.retain(|_, connection| *connection != id);
+                let panes = &control.panes;
+                control.history.retain(|pane, _| panes.contains_key(pane));
             }
             Event::Message(_, FromBrowser::Closed { pane }) => {
                 if let Some(pane) = token_pane(&pane) {
                     control.panes.remove(&pane);
+                    control.history.remove(&pane);
                 }
             }
-            Event::Message(id, FromBrowser::Page { pane, url }) => {
+            Event::Message(
+                id,
+                FromBrowser::Page {
+                    pane,
+                    url,
+                    back,
+                    forward,
+                },
+            ) => {
                 let Some(pane) = token_pane(&pane) else {
                     return;
                 };
                 control.panes.insert(pane, id);
+                control.history.insert(pane, WebHistory { back, forward });
                 if crate::is_web_link(&url) {
                     self.set_web_page(pane, url);
                 }
@@ -397,25 +443,42 @@ impl Gerdr {
     /// Send `pane`'s tab to `url`, if the extension follows it; whether it
     /// was asked to.
     pub fn navigate_web_pane(&mut self, pane: u32, url: &str) -> bool {
-        let control = &mut self.web_control;
-        let Some(id) = control.panes.get(&pane).copied() else {
-            return false;
-        };
         let message = ToBrowser::Navigate {
             pane: pane_token(pane),
             url,
         };
-        let Ok(message) = serde_json::to_vec(&message) else {
-            return false;
-        };
-        let sent = control
-            .connections
-            .get_mut(&id)
-            .is_some_and(|stream| stream.write_all(&framed(&message)).is_ok());
+        let sent = self.send_to_browser(pane, &message);
         if sent {
             self.set_web_page(pane, url.to_owned());
         }
         sent
+    }
+
+    /// Take `pane`'s tab a `step`, if the extension follows it; whether it
+    /// was asked to. Where it lands comes back as any other page does.
+    pub fn web_pane_step(&mut self, pane: u32, step: WebStep) -> bool {
+        let pane_id = pane_token(pane);
+        let message = match step {
+            WebStep::Back => ToBrowser::Back { pane: pane_id },
+            WebStep::Forward => ToBrowser::Forward { pane: pane_id },
+            WebStep::Reload => ToBrowser::Reload { pane: pane_id },
+        };
+        self.send_to_browser(pane, &message)
+    }
+
+    /// Send `message` to the browser holding `pane`'s tab; whether it went.
+    fn send_to_browser(&mut self, pane: u32, message: &ToBrowser) -> bool {
+        let control = &mut self.web_control;
+        let Some(id) = control.panes.get(&pane).copied() else {
+            return false;
+        };
+        let Ok(message) = serde_json::to_vec(message) else {
+            return false;
+        };
+        control
+            .connections
+            .get_mut(&id)
+            .is_some_and(|stream| stream.write_all(&framed(&message)).is_ok())
     }
 }
 
@@ -473,6 +536,21 @@ mod tests {
             FromBrowser::Page {
                 pane: "1.2".into(),
                 url: "https://a.b".into(),
+                back: None,
+                forward: None,
+            }
+        );
+        let page: FromBrowser = serde_json::from_str(
+            r#"{"type":"page","pane":"1.2","url":"https://a.b","back":true,"forward":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            page,
+            FromBrowser::Page {
+                pane: "1.2".into(),
+                url: "https://a.b".into(),
+                back: Some(true),
+                forward: None,
             }
         );
         let message = serde_json::to_string(&ToBrowser::Navigate {
@@ -483,6 +561,20 @@ mod tests {
         assert_eq!(
             message,
             r#"{"type":"navigate","pane":"1.2","url":"https://c.d"}"#
+        );
+        let steps = [
+            ToBrowser::Back { pane: "1.2".into() },
+            ToBrowser::Forward { pane: "1.2".into() },
+            ToBrowser::Reload { pane: "1.2".into() },
+        ]
+        .map(|message| serde_json::to_string(&message).unwrap());
+        assert_eq!(
+            steps,
+            [
+                r#"{"type":"back","pane":"1.2"}"#,
+                r#"{"type":"forward","pane":"1.2"}"#,
+                r#"{"type":"reload","pane":"1.2"}"#,
+            ]
         );
     }
 

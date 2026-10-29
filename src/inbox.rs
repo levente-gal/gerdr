@@ -37,6 +37,7 @@ use smithay::{
 };
 
 use crate::{
+    agent_icons::AgentIcon,
     agents::AgentKey,
     chrome::{self, InboxCompose, InboxDetailView, InboxHit, InboxLine, InboxRow, InboxView},
     ci::CiState,
@@ -126,12 +127,15 @@ impl InboxItem {
     pub fn icon(&self) -> chrome::InboxIcon {
         use chrome::InboxIcon as I;
         match &self.detail {
-            Detail::Agent { status, .. } => match status {
-                AgentStatus::Blocked => I::Blocked,
-                AgentStatus::Done => I::Done,
-                AgentStatus::Working => I::Working,
-                _ => I::Agent,
-            },
+            Detail::Agent {
+                status, icon, test, ..
+            } => I::Badge(chrome::Badge {
+                icon: *icon,
+                dot: match test {
+                    Some(test) => chrome::Dot::of_ci(*test),
+                    None => chrome::Dot::of_status(*status),
+                },
+            }),
             Detail::Git { .. } if self.id.0.starts_with("worktree:") => I::Worktree,
             Detail::Git { .. } => I::Repo,
             Detail::Ci { .. } if self.section == Section::PullRequests => I::PullRequest,
@@ -230,6 +234,9 @@ impl ItemAction {
 pub enum Detail {
     Agent {
         status: AgentStatus,
+        /// What its badge shows it is, and for a test run how it went.
+        icon: AgentIcon,
+        test: Option<CiState>,
         model: Option<String>,
         /// Its workspace's name.
         workspace: String,
@@ -502,6 +509,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             model,
             workspace,
             pane,
+            ..
         } => {
             field("Status", chrome::status_meaning(*status).to_owned());
             if let Some(age) = item.age {
@@ -1526,6 +1534,8 @@ mod tests {
         let detail = match section {
             Section::Agents => Detail::Agent {
                 status: AgentStatus::Working,
+                icon: AgentIcon::Claude,
+                test: None,
                 model: None,
                 workspace: "w".into(),
                 pane: None,

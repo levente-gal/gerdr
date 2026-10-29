@@ -112,6 +112,39 @@ pub(super) fn render_parts(
         .collect()
 }
 
+/// The blinking dot and how opaque it is now, for the parts showing what
+/// runs (see `badge`).
+pub(super) type Blink<'a> = Option<(&'a MemoryRenderBuffer, f32)>;
+
+/// The blinking dot of `blink` over each of `dots`, laid out on rows at
+/// whole logical pixels, front to back. A dot on one of `rows` (each the
+/// rect laid out for a row, and where its part goes) moves with that row,
+/// to the fraction of a pixel, and shows only within `clip`; any other
+/// stays where it was laid out.
+pub(super) fn dot_parts(
+    blink: Blink,
+    dots: Vec<Rect>,
+    rows: &[(Rect, Point<f64, Logical>)],
+    clip: Rect,
+) -> Vec<Part> {
+    let Some((dot, alpha)) = blink.filter(|(_, alpha)| *alpha > 0.0) else {
+        return Vec::new();
+    };
+    dots.into_iter()
+        .filter(|rect| rect.size.w > 0 && rect.size.h > 0)
+        .map(|rect| {
+            let part = Part::new(dot, rect.loc, rect.size, alpha);
+            match rows.iter().find(|(row, _)| row.contains_rect(rect)) {
+                Some((row, at)) => {
+                    let by = *at - row.loc.to_f64();
+                    part.at(rect.loc.to_f64() + by).clipped(clip)
+                }
+                None => part,
+            }
+        })
+        .collect()
+}
+
 /// Bytes of row buffers a cache keeps beyond those shown.
 const ROW_CACHE_BYTES: usize = 48 << 20;
 
@@ -206,6 +239,25 @@ impl<K: PartialEq> RowCache<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dot_moves_with_its_row_and_shows_only_in_the_list() {
+        let dot = MemoryRenderBuffer::default();
+        let list = Rect::new((0, 100).into(), (200, 300).into());
+        // The row laid out at 140 is drawn at 139.6.
+        let rows = [(
+            Rect::new((0, 140).into(), (200, 40).into()),
+            (0.0, 139.6).into(),
+        )];
+        let on_row = Rect::new((10, 150).into(), (8, 8).into());
+        let elsewhere = Rect::new((300, 20).into(), (8, 8).into());
+        let parts = dot_parts(Some((&dot, 0.5)), vec![on_row, elsewhere], &rows, list);
+        assert_eq!(parts[0].loc, (10.0, 149.6).into());
+        assert_eq!((parts[0].clip, parts[0].alpha), (Some(list), 0.5));
+        assert_eq!((parts[1].loc, parts[1].clip), ((300.0, 20.0).into(), None));
+        // Unlit, there are none.
+        assert!(dot_parts(Some((&dot, 0.0)), vec![on_row], &rows, list).is_empty());
+    }
 
     #[test]
     fn a_row_kept_is_not_drawn_again() {

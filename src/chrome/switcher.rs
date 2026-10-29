@@ -10,12 +10,12 @@
 use super::Rgb;
 use super::layers::{Part, RowCache};
 use super::{
-    BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
-    HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette, ROW_ICON_GAP,
-    ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS,
-    SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, app, folder, folder_plus,
-    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, prompt, rect_px,
-    status_mark, tab, terminal,
+    AGENT_ICON, BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN,
+    HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
+    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
+    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_badge,
+    app, dot_rect, folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs,
+    icon_sdf, mix, pencil, prompt, rect_px, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -52,7 +52,8 @@ const CHIPS_ROW: i32 = CHIP_HEIGHT + SWITCHER_PADDING;
 pub enum ItemIcon {
     Workspace(WorkspaceKind),
     Tab,
-    Agent(AgentStatus),
+    /// An agent: its badge, and its status for the tooltip.
+    Agent(Badge, AgentStatus),
     /// A folder to open.
     Folder,
     /// An app or command to launch.
@@ -129,6 +130,21 @@ pub struct SwitcherLayout {
     pub footer: Rect,
     /// The footer's key hints, by index into `SwitcherView::hints`.
     pub hints: Vec<(usize, Rect)>,
+}
+
+/// Where the blinking dots of `view`'s agents at work go, laid out as
+/// `layout`: one per such row, where the list shows it.
+pub fn switcher_blinkers(view: &SwitcherView, layout: &SwitcherLayout) -> Vec<Rect> {
+    // A row the list cuts shows the part of its dot it shows of it.
+    let list = layout.list;
+    let shows = |r: &Rect| r.overlaps(list);
+    view.rows
+        .iter()
+        .zip(&layout.rows)
+        .filter(|(row, _)| matches!(row.icon, ItemIcon::Agent(badge, _) if badge.dot.blinks()))
+        .map(|(_, slot)| dot_rect(switcher_icon(*slot), AGENT_ICON))
+        .filter(shows)
+        .collect()
 }
 
 /// Where the icon of the switcher row in `row` goes.
@@ -594,9 +610,10 @@ impl Painter {
                 icon_sdf(c, icon, scale, p.placeholder, |x, y| app(x, y, small))
             }
             ItemIcon::Tab => icon_sdf(c, icon, scale, p.placeholder, |x, y| tab(x, y, small)),
-            &ItemIcon::Agent(status) => icon_sdf(c, icon, scale, p.status(status), |x, y| {
-                status_mark(status, x, y, s)
-            }),
+            &ItemIcon::Agent(badge, _) => {
+                let ground = fill.unwrap_or(p.elevated);
+                agent_badge(c, icon, AGENT_ICON, badge, p.placeholder, ground, scale, p);
+            }
             ItemIcon::Folder => icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                 folder_plus(x, y, small)
             }),
@@ -735,6 +752,7 @@ pub(super) struct SwitcherLayers {
 impl SwitcherLayers {
     /// The parts showing the switcher at the top of the app `area` at
     /// `now`, front to back.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn parts(
         &mut self,
         view: Option<SwitcherView>,
@@ -743,6 +761,7 @@ impl SwitcherLayers {
         scale: f64,
         now: std::time::Instant,
         painter: &Painter,
+        blink: super::layers::Blink,
     ) -> Vec<Part> {
         let shown = view.map(|view| {
             let layout = switcher_geometry(&view, area);
@@ -817,6 +836,13 @@ impl SwitcherLayers {
                 for &kept in &placed.headings {
                     heading(&mut parts, kept);
                 }
+                // The dots of the agents at work, in front of their rows.
+                let at: Vec<_> = (layout.rows.iter())
+                    .zip(&placed.rows)
+                    .map(|(slot, &dy)| (*slot, Point::from((x as f64, top + dy))))
+                    .collect();
+                let dots = switcher_blinkers(view, layout);
+                parts.extend(super::layers::dot_parts(blink, dots, &at, layout.list));
                 for (i, (row, &dy)) in view.rows.iter().zip(&placed.rows).enumerate() {
                     if out(dy, ROW_HEIGHT) {
                         continue;
@@ -1041,7 +1067,7 @@ mod tests {
         let draw = |layers: &mut SwitcherLayers, part: f64, ms: u64| {
             let at = start + Duration::from_millis(ms);
             let view = Some(scrolled(&sections, part));
-            layers.parts(view, area, Theme::Dark, 1.25, at, &painter)
+            layers.parts(view, area, Theme::Dark, 1.25, at, &painter, None)
         };
         // Faded in first.
         draw(&mut layers, 0.0, 0);
@@ -1085,5 +1111,49 @@ mod tests {
         assert!(room(600) < room(800));
         assert_eq!(room(100), SECTION_HEIGHT + ROW_HEIGHT);
         assert_eq!(room(2000), 12 * ROW_HEIGHT + 2 * SECTION_HEIGHT);
+    }
+
+    #[test]
+    fn agents_at_work_blink_while_their_row_shows_whole() {
+        use crate::agent_icons::AgentIcon;
+        use crate::chrome::{Badge, Dot, inside};
+        use crate::herdr::AgentStatus;
+        let area = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let agent = |dot| SwitcherRow {
+            icon: ItemIcon::Agent(
+                Badge {
+                    icon: AgentIcon::Gemini,
+                    dot,
+                },
+                AgentStatus::Working,
+            ),
+            ..row(None)
+        };
+        let mut view = SwitcherView {
+            query: "".into(),
+            hint: "",
+            categories: Vec::new(),
+            category: 0,
+            category_hover: None,
+            rows: vec![agent(Dot::Working), row(None), agent(Dot::Done)],
+            selected: Some(0),
+            hover: None,
+            hints: Vec::new(),
+            hint_hover: None,
+            part: 0.0,
+        };
+        let layout = switcher_geometry(&view, area);
+        let dots = super::switcher_blinkers(&view, &layout);
+        assert_eq!(dots.len(), 1);
+        let icon = super::switcher_icon(layout.rows[0]);
+        assert_eq!(dots[0], crate::chrome::dot_rect(icon, super::AGENT_ICON));
+        assert!(inside(layout.rows[0], dots[0]));
+        // Scrolled: a dot shows only where the list does.
+        view.rows.extend((0..20).map(|_| agent(Dot::Working)));
+        view.part = 0.5;
+        let layout = switcher_geometry(&view, area);
+        let dots = super::switcher_blinkers(&view, &layout);
+        assert!(!dots.is_empty() && dots.len() < view.rows.len() - 1);
+        assert!(dots.iter().all(|dot| inside(layout.list, *dot)));
     }
 }

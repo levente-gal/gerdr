@@ -121,6 +121,36 @@ pub(super) fn status_mark(status: AgentStatus, x: f32, y: f32, s: f32) -> f32 {
     }
 }
 
+/// Signed distance to a robot's head centred on the origin, about 12
+/// logical pixels across: a rounded head with two eyes and an antenna. An
+/// agent without a logo of its own.
+pub(super) fn robot(x: f32, y: f32, s: f32) -> f32 {
+    let head =
+        rounded_rect(x, y, -5.5 * s, -3.0 * s, 11.0 * s, 8.5 * s, 2.5 * s).abs() - STROKE * s;
+    let eyes = (x.abs() - 2.3 * s).hypot(y - 1.2 * s) - 1.1 * s;
+    let antenna = (segment(x, y, 0.0, -3.0 * s, 0.0, -5.0 * s) - STROKE * s)
+        .min(x.hypot(y + 5.6 * s) - 1.1 * s);
+    head.min(eyes).min(antenna)
+}
+
+/// Signed distance to a flask centred on the origin, about 12 logical
+/// pixels across: a neck under a rim, widening to a flat bottom, filled
+/// with liquid up to its shoulders. A test run.
+pub(super) fn flask(x: f32, y: f32, s: f32) -> f32 {
+    let line = |ax: f32, ay: f32, bx: f32, by: f32| segment(x, y, ax * s, ay * s, bx * s, by * s);
+    let outline = line(-3.2, -6.0, 3.2, -6.0)
+        .min(line(-2.0, -6.0, -2.0, -1.5))
+        .min(line(2.0, -6.0, 2.0, -1.5))
+        .min(line(-2.0, -1.5, -5.6, 5.0))
+        .min(line(2.0, -1.5, 5.6, 5.0))
+        .min(line(-5.6, 5.0, 5.6, 5.0))
+        - STROKE * s;
+    // The body's sides, as far from the middle as y is down the slope.
+    let side = |y: f32| (2.0 + (y / s + 1.5) * 3.6 / 6.5) * s;
+    let liquid = (x.abs() - side(y)).max(1.5 * s - y).max(y - 5.0 * s);
+    outline.min(liquid)
+}
+
 /// Signed distance to a Git branch icon centred on the origin: a trunk
 /// between two rings, and a ring at the top right forking off it.
 pub(super) fn git_branch(x: f32, y: f32, s: f32) -> f32 {
@@ -170,6 +200,25 @@ pub(super) fn chevron_down(x: f32, y: f32, s: f32) -> f32 {
     let left = segment(x, y, -3.0 * s, -1.5 * s, 0.0, 1.5 * s);
     let right = segment(x, y, 0.0, 1.5 * s, 3.0 * s, -1.5 * s);
     left.min(right) - 0.75 * s
+}
+
+/// Signed distance to a chevron centred on the origin, pointing left for
+/// back, else right for forward.
+pub(super) fn chevron_side(left: bool, x: f32, y: f32, s: f32) -> f32 {
+    let x = if left { x } else { -x };
+    let top = segment(x, y, 1.8 * s, -3.8 * s, -1.8 * s, 0.0);
+    let bottom = segment(x, y, -1.8 * s, 0.0, 1.8 * s, 3.8 * s);
+    top.min(bottom) - STROKE * s
+}
+
+/// Signed distance to two pages, one over the other's top left, centred
+/// on the origin: copy.
+pub(super) fn copy(x: f32, y: f32, s: f32) -> f32 {
+    let front = rounded_rect(x, y, -1.6 * s, -1.6 * s, 6.0 * s, 6.0 * s, 1.2 * s);
+    let back = rounded_rect(x, y, -4.4 * s, -4.4 * s, 6.0 * s, 6.0 * s, 1.2 * s);
+    // The back page shows only where the front one doesn't cover it.
+    let back = (back.abs() - STROKE * s).max(-(front - STROKE * s));
+    (front.abs() - STROKE * s).min(back)
 }
 
 /// Signed distance to a magnifying glass centred on the origin: a ring and

@@ -1,0 +1,7 @@
+Coding agents' logos, drawn on their cards (see src/agent_icons.rs).
+
+From @lobehub/icons-static-svg 1.101.0:
+https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.101.0/icons/<name>.svg
+
+Changed only so that they read on their own: the 1em width and height set
+to 24, the style attribute and the title dropped.

@@ -10,6 +10,10 @@ pub const FAST: Duration = Duration::from_millis(120);
 pub const SLOW: Duration = Duration::from_millis(150);
 /// How long a blocked agent's pulse takes to go up and back down.
 pub const PULSE: Duration = Duration::from_millis(1500);
+/// How long a running dot's blink takes, dim to bright and back.
+pub const BLINK: Duration = Duration::from_millis(1200);
+/// How dim a blinking dot gets: never gone.
+const BLINK_LOW: f32 = 0.35;
 
 /// How many steps a fade's value is quantized to.
 const STEPS: f32 = 16.0;
@@ -130,6 +134,13 @@ pub fn phase(start: Instant, period: Duration, now: Instant) -> f32 {
     t - t.floor()
 }
 
+/// How opaque a blinking dot is at `now`, counted from `epoch`: bright at
+/// the start of every `BLINK`, `BLINK_LOW` half-way, easing in between.
+pub fn blink(epoch: Instant, now: Instant) -> f32 {
+    let wave = 0.5 + 0.5 * (std::f32::consts::TAU * phase(epoch, BLINK, now)).cos();
+    BLINK_LOW + (1.0 - BLINK_LOW) * wave
+}
+
 /// Where a blocked agent's pulse stands at `now`: from 0 up to 1 and back
 /// down every `PULSE`, counted from `epoch`.
 pub fn pulse(epoch: Instant, now: Instant) -> f32 {
@@ -138,7 +149,7 @@ pub fn pulse(epoch: Instant, now: Instant) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAST, Fade, Hover, PULSE, phase, pulse, quantize};
+    use super::{BLINK, BLINK_LOW, FAST, Fade, Hover, PULSE, blink, phase, pulse, quantize};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -202,6 +213,18 @@ mod tests {
         hover.track(Some(0), half);
         assert!((hover.alpha(0, half) - v).abs() < 0.01);
         assert_eq!(hover.alpha(0, half + FAST), 1.0);
+    }
+
+    #[test]
+    fn a_blink_dims_and_comes_back_but_never_goes() {
+        let epoch = Instant::now();
+        assert!((blink(epoch, epoch) - 1.0).abs() < 1e-4);
+        assert!((blink(epoch, epoch + BLINK / 2) - BLINK_LOW).abs() < 1e-3);
+        assert!((blink(epoch, epoch + BLINK * 7) - 1.0).abs() < 1e-3);
+        for ms in (0..2400).step_by(37) {
+            let a = blink(epoch, epoch + Duration::from_millis(ms));
+            assert!((BLINK_LOW - 1e-4..=1.0 + 1e-4).contains(&a));
+        }
     }
 
     #[test]

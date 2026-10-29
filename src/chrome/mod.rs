@@ -15,6 +15,7 @@
 //!
 //! The look follows Zed's default themes, One Dark and One Light.
 
+mod badge;
 mod canvas;
 mod consts;
 mod drop;
@@ -53,6 +54,7 @@ use crate::anim::{FAST, Fade, SLOW, phase};
 
 // One surface per module; the rest of gerdr reaches all of it as
 // `chrome::X`. The canvas and the shapes stay inside.
+pub use badge::*;
 use canvas::*;
 pub use consts::*;
 pub use drop::*;
@@ -172,6 +174,9 @@ pub struct Chrome {
     /// One per placeholder, and the spinner they share.
     placeholders: Vec<Cached<PlaceholderKey>>,
     spinner: Cached<(u32, Theme, f64)>,
+    /// The blinking dot of what runs, composed over every surface showing
+    /// one (see `badge`).
+    blink_dot: Cached<(Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
     /// The strip along the focused pane's top edge.
@@ -216,6 +221,7 @@ impl Chrome {
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
+            blink_dot: Cached::default(),
             pane_bars: Vec::new(),
             focus_strip: Cached::default(),
             pane_drop: Cached::default(),
@@ -283,6 +289,10 @@ impl Chrome {
         let pointer = view.pointer;
         let painter = &self.painter;
         let spinner_step = self.spinner_step(now);
+        let blink = crate::anim::blink(self.epoch, now);
+        let dot = self.blink_dot.get((theme, scale), |_| {
+            blink_dot(Dot::Working, scale, theme.palette())
+        });
         // Overlays that faded out for good are let go of.
         self.toasts.retain(|(_, toast)| toast.lingers());
 
@@ -372,10 +382,15 @@ impl Chrome {
         );
 
         // The inbox panel, as high.
-        parts.extend(
-            self.inbox
-                .parts(view.inbox, output, theme, scale, now, painter),
-        );
+        parts.extend(self.inbox.parts(
+            view.inbox,
+            output,
+            theme,
+            scale,
+            now,
+            painter,
+            Some((dot, blink)),
+        ));
 
         // The project menu reaches over the sidebar and the apps.
         parts.extend(self.project_menu.parts(
@@ -388,10 +403,15 @@ impl Chrome {
         ));
 
         // The switcher at the top of the app area.
-        parts.extend(
-            self.switcher
-                .parts(view.switcher, area, theme, scale, now, painter),
-        );
+        parts.extend(self.switcher.parts(
+            view.switcher,
+            area,
+            theme,
+            scale,
+            now,
+            painter,
+            Some((dot, blink)),
+        ));
 
         // The help panel, centred at the bottom of the app area.
         let pinned = view.help_pinned;
@@ -490,6 +510,7 @@ impl Chrome {
             if size.w <= 0 || size.h <= 0 {
                 continue;
             }
+            push_dots(&mut parts, dot, bar.blinker(), alpha * blink);
             let buffer = cached.get((bar.still(), theme, scale), |(bar, ..)| {
                 painter.pane_bar(bar, scale, theme.palette())
             });
@@ -505,6 +526,11 @@ impl Chrome {
         }
 
         // The sidebar and the tab strip.
+        // The tab strip's blinking dots, moved onto the output.
+        let strip_dots: Vec<Rect> = tab_blinkers(&view.tab_strip, strip_size)
+            .into_iter()
+            .map(|dot| Rectangle::new(dot.loc + Point::from((sidebar_w, 0)), dot.size))
+            .collect();
         let strip = self.tabs.get(
             (view.tab_strip, theme, strip_size.w, scale),
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
@@ -518,7 +544,9 @@ impl Chrome {
             theme,
             scale,
             painter,
+            Some((dot, blink)),
         ));
+        push_dots(&mut parts, dot, strip_dots, blink);
         parts.push(Part::new(
             strip,
             Point::from((sidebar_w, 0)),
@@ -536,6 +564,21 @@ fn shadowed(panel: Rect) -> (Point<i32, Logical>, Size<i32, Logical>) {
         panel.loc - Point::from((SHADOW, SHADOW)),
         Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW)),
     )
+}
+
+/// The blinking `dot` at each of `rects` (output coordinates), `alpha`
+/// opaque: in front of the surface they are on, so pushed before it.
+fn push_dots(
+    parts: &mut Vec<Part>,
+    dot: &MemoryRenderBuffer,
+    rects: impl IntoIterator<Item = Rect>,
+    alpha: f32,
+) {
+    for rect in rects {
+        if rect.size.w > 0 && rect.size.h > 0 {
+            parts.push(Part::new(dot, rect.loc, rect.size, alpha));
+        }
+    }
 }
 
 /// A buffer plus the inputs it was drawn from.
@@ -770,7 +813,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     rects.push(shift(layout.toggle));
     for bar in view.pane_bars.iter().filter(|bar| bar.visible) {
         rects.push(bar.rect);
-        rects.extend(pane_bar_buttons(bar.rect).map(|(_, rect)| rect));
+        rects.extend(
+            pane_bar_buttons(bar.rect, bar.buttons)
+                .into_iter()
+                .map(|(_, rect)| rect),
+        );
     }
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);
