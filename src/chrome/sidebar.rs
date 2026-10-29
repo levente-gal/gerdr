@@ -25,15 +25,16 @@
 
 use super::repos::scrollbar;
 use super::{
-    BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, CARD_LINE, CHEVRON_WIDTH, Canvas,
-    DETAIL_FONT_SIZE, Density, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN,
-    HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
-    ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb, SMALL_FONT_SIZE,
-    STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, app, band, chevron_down, ci_mark,
-    cross, distinct, folder, git_branch, icon_sdf, measure, mix, new_tab, physical, rect_px,
-    restart_arrow, status_mark, terminal,
+    AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
+    Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
+    HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING, Painter,
+    Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb,
+    SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE, TINY_FONT_SIZE, TabView, agent_badge, app,
+    band, chevron_down, ci_mark, cross, distinct, folder, git_branch, icon_sdf, measure, mix,
+    new_tab, physical, rect_px, restart_arrow, status_mark, terminal,
 };
 use crate::WorkspaceKind;
+use crate::agent_icons::AgentIcon;
 use crate::agents::AgentKey;
 use crate::app_icons::{AppIcon, github_icon};
 use crate::ci::{CiState, Group};
@@ -76,8 +77,11 @@ const NAME_X: i32 = ICON_X + ROW_ICON_WIDTH + 7;
 /// sits under the header's name; and where the row starts.
 const CHILD_PAD: i32 = 6;
 const CHILD_X: i32 = NAME_X - CHILD_PAD;
-/// Where a row's text starts under a header: after its status mark.
-const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
+/// Where an agent row's badge starts on its row: a little left of the
+/// status marks of the other rows, as it is wider.
+const AGENT_ICON_X: i32 = CHILD_PAD - 3;
+/// Where a row's text starts under a header: after an agent's badge.
+const CHILD_TEXT_X: i32 = NAME_X - 3 + AGENT_ICON + STATUS_GAP;
 /// The "×" at the right end of a header, and of a deletable agent row.
 const CLOSE_SLOT: i32 = 22;
 /// The restart button left of a header's "×".
@@ -180,6 +184,16 @@ pub fn blocked_band(row: Rect, density: Density) -> Rect {
     )
 }
 
+/// Where the badge of the agent row at `row` goes: at its start, on its
+/// first line, `AGENT_ICON` wide.
+pub fn agent_icon_rect(row: Rect, density: Density) -> Rect {
+    let first = blocked_band(row, density);
+    Rectangle::new(
+        (row.loc.x + AGENT_ICON_X, row.loc.y).into(),
+        (AGENT_ICON, first.size.h).into(),
+    )
+}
+
 /// How opaque the pulse band over a blocked agent's row is drawn when the
 /// pulse stands at `pulse` (0 to 1).
 pub fn pulse_alpha(pulse: f32) -> f32 {
@@ -221,6 +235,8 @@ pub struct AgentView {
     /// For a test run (see `test_runs`), how it went: its mark shows that
     /// instead of the status.
     pub test: Option<CiState>,
+    /// What its badge shows it is.
+    pub icon: AgentIcon,
 }
 
 /// A subagent on its parent's row: what it is on, and the agent a click
@@ -298,6 +314,7 @@ impl AgentView {
             subagents: Vec::new(),
             inbox: false,
             test: None,
+            icon: AgentIcon::from_info(info),
         }
     }
 
@@ -357,6 +374,20 @@ impl AgentView {
             subagents,
             inbox: false,
             test: None,
+            icon: AgentIcon::Cursor,
+        }
+    }
+
+    /// Its badge: its icon, and a dot for how its test run went or else
+    /// for its status.
+    pub fn badge(&self) -> Badge {
+        let dot = match self.test {
+            Some(test) => Dot::of_ci(test),
+            None => Dot::of_status(self.status),
+        };
+        Badge {
+            icon: self.icon,
+            dot,
         }
     }
 
@@ -2163,7 +2194,6 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let r = ROW_RADIUS * s;
-        let status = p.status(card.status);
         let blocked = card.status == AgentStatus::Blocked;
         let hover = alpha(state.hover);
         let fill = if state.open {
@@ -2209,19 +2239,20 @@ impl Painter {
         }
 
         let line_band = band(first, scale);
-        let mark = Rectangle::new(
-            (rect.loc.x + CHILD_PAD, rect.loc.y).into(),
-            (STATUS_WIDTH, first.size.h).into(),
+        let tint = match card.status {
+            AgentStatus::Idle | AgentStatus::Unknown => p.muted,
+            _ => p.text,
+        };
+        agent_badge(
+            c,
+            agent_icon_rect(rect, density),
+            AGENT_ICON,
+            card.badge(),
+            tint,
+            surface,
+            scale,
+            p,
         );
-        match card.test {
-            // A test run's mark says how it went, as a CI chip's does.
-            Some(test) => icon_sdf(c, mark, scale, ci_color(test, p), |x, y| {
-                ci_mark(test, x, y, s)
-            }),
-            None => icon_sdf(c, mark, scale, status, |x, y| {
-                status_mark(card.status, x, y, s)
-            }),
-        }
         let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
         let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
         let end = if card.deletable && hover > 0.0 {
@@ -2585,6 +2616,7 @@ mod tests {
             subagents: Vec::new(),
             inbox: false,
             test: None,
+            icon: crate::agent_icons::AgentIcon::Claude,
         }
     }
 

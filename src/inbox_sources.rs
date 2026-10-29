@@ -727,6 +727,7 @@ mod tests {
             subagents: Vec::new(),
             inbox: false,
             test: None,
+            icon: crate::agent_icons::AgentIcon::Claude,
         }
     }
 

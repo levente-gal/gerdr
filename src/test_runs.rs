@@ -318,6 +318,7 @@ impl TestRun {
             subagents: Vec::new(),
             inbox: false,
             test: Some(self.outcome.as_ref().map_or(CiState::Running, |o| o.state)),
+            icon: crate::agent_icons::AgentIcon::Test,
         }
     }
 }

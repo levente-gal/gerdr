@@ -91,9 +91,57 @@ fn agents() -> Vec<Vec<AgentView>> {
             subagents: Vec::new(),
             inbox: false,
             test: None,
+            icon: crate::agent_icons::AgentIcon::Claude,
         }],
         vec![],
     ]
+}
+
+/// An agent of each kind and state, to look at their badges.
+fn many_agents() -> Vec<Vec<AgentView>> {
+    use crate::agent_icons::AgentIcon::*;
+    use crate::ci::CiState;
+    let base = agents().remove(0).remove(0);
+    let card = |icon, kind: &str, status, test| AgentView {
+        key: crate::agents::AgentKey::Herdr(kind.into()),
+        kind: kind.into(),
+        name: None,
+        status,
+        test,
+        icon,
+        ..base.clone()
+    };
+    let rows = [
+        (Claude, "claude", AgentStatus::Working, None),
+        (Codex, "codex", AgentStatus::Done, None),
+        (Gemini, "gemini", AgentStatus::Idle, None),
+        (Cursor, "cursor", AgentStatus::Working, None),
+        (OpenCode, "opencode", AgentStatus::Blocked, None),
+        (Copilot, "copilot", AgentStatus::Idle, None),
+        (Amp, "amp", AgentStatus::Done, None),
+        (Qwen, "qwen", AgentStatus::Idle, None),
+        (Kimi, "kimi", AgentStatus::Idle, None),
+        (Grok, "grok", AgentStatus::Idle, None),
+        (Kiro, "kiro", AgentStatus::Idle, None),
+        (Cline, "cline", AgentStatus::Idle, None),
+        (Devin, "devin", AgentStatus::Idle, None),
+        (Antigravity, "agy", AgentStatus::Idle, None),
+        (Mastra, "mastracode", AgentStatus::Idle, None),
+        (Generic, "droid", AgentStatus::Unknown, None),
+        (
+            Test,
+            "cargo test",
+            AgentStatus::Working,
+            Some(CiState::Running),
+        ),
+        (Test, "npm test", AgentStatus::Done, Some(CiState::Passed)),
+        (Test, "pytest", AgentStatus::Done, Some(CiState::Failed)),
+    ];
+    let cards = rows
+        .into_iter()
+        .map(|(icon, kind, status, test)| card(icon, kind, status, test))
+        .collect();
+    vec![cards, vec![]]
 }
 
 fn tabs() -> Vec<TabView> {
@@ -656,7 +704,7 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0x623a12c2c297347a, // sidebar
+        0x4087d4468d21db1c, // sidebar
         0x35a1890943b945e0, // tab_strip
         0x3439cb7d3306236f, // pane_bar
         0x866d59a70ebe252d, // help
@@ -670,7 +718,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Dark at 2
     [
-        0x93671f60c56b48f4, // sidebar
+        0x4c191a7f2df1eb9b, // sidebar
         0x057804639bd5f3d2, // tab_strip
         0xfc4e33dc6b28947e, // pane_bar
         0x56045b72862ed173, // help
@@ -684,7 +732,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 1
     [
-        0x6b3f22ad5188a42a, // sidebar
+        0x047108c61ea45cc0, // sidebar
         0x76286b9148f6cf2c, // tab_strip
         0xa03863dc2beb5821, // pane_bar
         0x8c0302567b35f0c3, // help
@@ -698,7 +746,7 @@ const GOLDEN: [[u64; 11]; 4] = [
     ],
     // Light at 2
     [
-        0x51b26a60939585ce, // sidebar
+        0x36e0ac8566eb4f8d, // sidebar
         0xb977630fd30a1f46, // tab_strip
         0xa042d2689e70b1ce, // pane_bar
         0x22f444d49649f855, // help
@@ -914,6 +962,24 @@ fn dump_overlays() {
             &format!("inbox_{tag}"),
             painter.inbox(&inbox(), inbox_size, scale, p),
             px(inbox_panel.size.w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("sidebar_agents_{tag}"),
+            painter.sidebar_view(
+                &SidebarView {
+                    workspaces: workspaces(),
+                    agents: many_agents(),
+                    active: Some(0),
+                    project: Some("aft".into()),
+                    header_lit: false,
+                    state: SidebarState::default(),
+                },
+                (260, 520).into(),
+                scale,
+                p,
+            ),
+            px(260),
         );
         dump(
             &dir,
