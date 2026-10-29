@@ -18,7 +18,10 @@ use std::{
 /// What moved a list.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Motion {
-    /// The wheel turned by notches, down positive.
+    /// The mouse wheel turned by notches, down positive: each goes
+    /// `NOTCH_PX` at least, and further turned fast (see `BURST`).
+    Wheel(f64),
+    /// The list scrolled by as many of its notches (`Bounds::notch`).
     Notches(f64),
     /// A touchpad's fingers moved the list by logical pixels (down
     /// positive) at `time`, the event's clock in milliseconds.
@@ -42,6 +45,13 @@ pub struct Bounds {
     pub view: f64,
 }
 
+/// How far a notch of the wheel scrolls, logical pixels, at least.
+const NOTCH_PX: f64 = 100.0;
+/// Notches turned within this long of the last go further each time, up
+/// to `BURST_MAX` times as far: a wheel spun fast covers more ground.
+const BURST: Duration = Duration::from_millis(120);
+const BURST_STEP: f64 = 1.3;
+const BURST_MAX: f64 = 3.0;
 /// A glide's time constant: a notch's way is 95% gone after three.
 const GLIDE: f64 = 0.045;
 /// A fling's time constant: its speed falls to a third in as long.
@@ -80,6 +90,9 @@ pub struct Scroll {
     samples: VecDeque<(u32, f64)>,
     /// When the fingers last moved, while they are on the touchpad.
     touched: Option<Instant>,
+    /// When the wheel last turned, and how many times further than a
+    /// notch's way its notches go now (see `BURST`).
+    turned: Option<(Instant, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,16 +172,27 @@ impl Scroll {
     pub fn apply(&mut self, motion: Motion, now: Instant, b: Bounds) {
         self.advance(now, b);
         match motion {
-            Motion::Notches(n) => {
-                self.unpull();
-                let from = match self.moving {
-                    Some(Moving::Glide { target, .. }) => target,
-                    _ => self.pos,
+            Motion::Wheel(n) => {
+                let burst = match self.turned {
+                    Some((at, burst)) if now.saturating_duration_since(at) < BURST => {
+                        (burst * BURST_STEP).min(BURST_MAX)
+                    }
+                    _ => 1.0,
                 };
-                let target = (from + n * b.notch).clamp(0.0, b.max.max(0.0));
-                self.moving = (target != self.pos).then_some(Moving::Glide { target, at: now });
+                self.turned = Some((now, burst));
+                let step = b.notch.max(NOTCH_PX / b.unit.max(1.0)) * burst;
+                self.glide_by(n * step, now, b);
             }
+            Motion::Notches(n) => self.glide_by(n * b.notch, now, b),
             Motion::Finger { px, time } => {
+                // Pixels while the wheel's notches glide are the wheel's
+                // own, turned part of a notch (a fine-grained wheel's, which
+                // come as pixels): they go with the glide.
+                if let Some(Moving::Glide { target, at }) = self.moving {
+                    let target = (target + px / b.unit.max(1.0)).clamp(0.0, b.max.max(0.0));
+                    self.moving = Some(Moving::Glide { target, at });
+                    return;
+                }
                 // The fingers catch the list, also back from past an end.
                 if let Some(Moving::Spring { .. }) = self.moving {
                     self.pull = unband(self.over, b.view);
@@ -185,6 +209,8 @@ impl Scroll {
                 }
                 self.pull_by(px, b);
             }
+            // Only fingers that moved the list let go of it.
+            Motion::Lift { .. } if self.touched.is_none() => {}
             Motion::Lift { time } => {
                 let vel = self.speed(time);
                 self.samples.clear();
@@ -192,6 +218,18 @@ impl Scroll {
                 self.let_go(vel, now, b);
             }
         }
+    }
+
+    /// Glide `by` units on from where the list stands, or where it glides
+    /// to.
+    fn glide_by(&mut self, by: f64, now: Instant, b: Bounds) {
+        self.unpull();
+        let from = match self.moving {
+            Some(Moving::Glide { target, .. }) => target,
+            _ => self.pos,
+        };
+        let target = (from + by).clamp(0.0, b.max.max(0.0));
+        self.moving = (target != self.pos).then_some(Moving::Glide { target, at: now });
     }
 
     /// Move on to `now`; whether the list still moves then (see `moving`).
@@ -385,37 +423,69 @@ mod tests {
     }
 
     #[test]
-    fn a_notch_glides_a_row_and_settles_on_it() {
+    fn a_notch_glides_a_hundred_pixels_and_settles_there() {
         let (mut s, t) = (Scroll::default(), Instant::now());
-        s.apply(Motion::Notches(1.0), t, rows(10.0));
+        s.apply(Motion::Wheel(1.0), t, rows(10.0));
         s.tick(t + Duration::from_millis(16), rows(10.0));
-        assert!(s.pos() > 0.2 && s.pos() < 1.0, "{}", s.pos());
+        assert!(s.pos() > 0.5 && s.pos() < 2.5, "{}", s.pos());
         assert!(s.moving(t + Duration::from_millis(16)));
         let end = run(&mut s, t, 300, rows(10.0));
-        assert_eq!(s.pos(), 1.0);
+        // Rows 40 high: two and a half of them.
+        assert_eq!(s.pos(), 2.5);
         assert!(!s.moving(end));
+        // A list scrolled by more a notch goes as far as it says.
+        let mut s = Scroll::default();
+        let b = Bounds {
+            notch: 4.0,
+            ..rows(10.0)
+        };
+        s.apply(Motion::Wheel(1.0), t, b);
+        run(&mut s, t, 400, b);
+        assert_eq!(s.pos(), 4.0);
     }
 
     #[test]
-    fn notches_turned_while_gliding_add_up() {
+    fn notches_turned_fast_add_up_and_go_further() {
         let (mut s, t) = (Scroll::default(), Instant::now());
-        s.apply(Motion::Notches(1.0), t, rows(10.0));
-        s.apply(
-            Motion::Notches(1.0),
-            t + Duration::from_millis(20),
-            rows(10.0),
+        let b = rows(100.0);
+        let ms = |n| t + Duration::from_millis(n);
+        s.apply(Motion::Wheel(1.0), t, b);
+        s.apply(Motion::Wheel(1.0), ms(60), b);
+        s.apply(Motion::Wheel(1.0), ms(120), b);
+        run(&mut s, ms(120), 400, b);
+        // 2.5 rows a notch, then 1.3 and 1.69 times as far.
+        assert!(
+            (s.pos() - 2.5 * (1.0 + 1.3 + 1.69)).abs() < 1e-9,
+            "{}",
+            s.pos()
         );
-        s.apply(
-            Motion::Notches(1.0),
-            t + Duration::from_millis(40),
-            rows(10.0),
-        );
-        run(&mut s, t + Duration::from_millis(40), 400, rows(10.0));
-        assert_eq!(s.pos(), 3.0);
+        // Turned slowly, each goes a notch's way.
+        let mut s = Scroll::default();
+        s.apply(Motion::Wheel(1.0), t, b);
+        s.apply(Motion::Wheel(1.0), ms(300), b);
+        run(&mut s, ms(300), 400, b);
+        assert_eq!(s.pos(), 5.0);
         // Not past the end, nor before the start.
-        s.apply(Motion::Notches(20.0), t, rows(10.0));
-        run(&mut s, t, 400, rows(10.0));
+        s.apply(Motion::Wheel(20.0), ms(1000), rows(10.0));
+        run(&mut s, ms(1000), 400, rows(10.0));
         assert_eq!(s.pos(), 10.0);
+        s.apply(Motion::Wheel(-20.0), ms(2000), rows(10.0));
+        run(&mut s, ms(2000), 400, rows(10.0));
+        assert_eq!(s.pos(), 0.0);
+    }
+
+    #[test]
+    fn pixels_while_a_notch_glides_go_with_the_glide() {
+        let (mut s, t) = (Scroll::default(), Instant::now());
+        let b = rows(100.0);
+        s.apply(Motion::Wheel(1.0), t, b);
+        // A fine-grained wheel's part of a notch, and an event with
+        // no move that is no lift.
+        s.apply(Motion::Finger { px: 20.0, time: 8 }, t, b);
+        s.apply(Motion::Lift { time: 16 }, t, b);
+        assert!(s.moving(t));
+        run(&mut s, t, 400, b);
+        assert_eq!(s.pos(), 3.0);
     }
 
     #[test]

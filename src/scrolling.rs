@@ -8,17 +8,21 @@ use smithay::backend::input::{Axis, Event, InputBackend, PointerAxisEvent};
 
 use crate::{Gerdr, scroll::Motion};
 
+/// How many logical pixels a list moves for each a touchpad's fingers move.
+const FINGER_SPEED: f64 = 1.5;
+
 impl Gerdr {
     /// What a wheel or touchpad event does to a list. The wheel turns
     /// whole notches; a touchpad (winit says only "pixels") moves by its
-    /// pixels, physical ones made logical, and an event moving neither way
-    /// is its fingers lifting. Sideways alone moves nothing.
+    /// pixels, physical ones made logical and sped up by `FINGER_SPEED`,
+    /// and an event moving neither way is its fingers lifting. Sideways
+    /// alone moves nothing.
     pub(crate) fn scroll_motion<I: InputBackend>(
         &self,
         event: &I::PointerAxisEvent,
     ) -> Option<Motion> {
         if let Some(v120) = event.amount_v120(Axis::Vertical) {
-            return (v120 != 0.0).then_some(Motion::Notches(v120 / 120.0));
+            return (v120 != 0.0).then_some(Motion::Wheel(v120 / 120.0));
         }
         let time = event.time_msec();
         let dy = event.amount(Axis::Vertical)?;
@@ -27,7 +31,7 @@ impl Gerdr {
             return Some(Motion::Lift { time });
         }
         (dy != 0.0).then(|| Motion::Finger {
-            px: dy / self.scale(),
+            px: dy / self.scale() * FINGER_SPEED,
             time,
         })
     }
