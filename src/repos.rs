@@ -73,10 +73,10 @@ use smithay::{
 
 use crate::{
     chrome::{
-        BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, Density,
-        DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone, DirLine,
-        FileLine, Hint, LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar,
-        RowMark, SheetView, Tone, TreeLine, TreeTool,
+        BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, CleanLine,
+        Density, DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone,
+        DirLine, FileLine, Hint, LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView,
+        ResultBar, RowMark, SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
     git::{Change, GitStatus, InProgress},
@@ -239,6 +239,8 @@ pub enum Selected {
     Dir(PathBuf, String),
     /// A file, by its repository's root and its path.
     File(PathBuf, String),
+    /// The heading over the repositories with nothing to do.
+    Clean,
 }
 
 /// The panel's state, kept by who things are as the list changes under it
@@ -260,6 +262,13 @@ pub struct Panel {
     pub(crate) grouping: Grouping,
     /// Folders folded, by (root, path).
     pub(crate) folded_dirs: HashSet<(PathBuf, String)>,
+    /// The repositories that had something to do since the panel opened:
+    /// they stay with the others, under no `Clean` heading, so that a
+    /// line doesn't jump there as a batch commits and pushes it.
+    pub(crate) stirred: HashSet<PathBuf>,
+    /// The repositories with nothing to do are hidden under their
+    /// heading.
+    pub(crate) clean_folded: bool,
     /// Where the tree stands, in lines.
     pub(crate) tree_scroll: Scroll,
     /// Where the detail stands, in rows.
@@ -959,20 +968,23 @@ enum Row {
     },
     /// Change `c` of repository `k`, `depth` folders in.
     File(usize, usize, usize),
+    /// The heading over the repositories with nothing to do.
+    Clean,
 }
 
 impl Row {
-    /// The repository it is, or is under.
-    fn item(self) -> usize {
+    /// The repository it is, or is under; none for the heading.
+    fn item(self) -> Option<usize> {
         match self {
-            Row::Repo(k) | Row::Dir { k, .. } | Row::File(k, ..) => k,
+            Row::Repo(k) | Row::Dir { k, .. } | Row::File(k, ..) => Some(k),
+            Row::Clean => None,
         }
     }
 
     /// How many folders in it is; a repository is none.
     fn depth(self) -> usize {
         match self {
-            Row::Repo(_) => 0,
+            Row::Repo(_) | Row::Clean => 0,
             Row::Dir { depth, .. } | Row::File(.., depth) => depth,
         }
     }
@@ -1537,10 +1549,10 @@ impl Panel {
     /// A panel over `items`, nothing checked: repositories with changes
     /// unfolded unless they have `FOLD_FILES` or more, the first selected.
     pub fn new(items: &[RepoItem]) -> Panel {
-        let mut panel = Panel {
-            selected: items.first().map(|i| Selected::Repo(i.root.clone())),
-            ..Panel::default()
-        };
+        let mut panel = Panel::default();
+        panel.stir(items);
+        let first = panel.rows(items).first().and_then(|r| r.item());
+        panel.selected = first.map(|k| Selected::Repo(items[k].root.clone()));
         panel.build_rows(items, None);
         panel
     }
@@ -1570,11 +1582,21 @@ impl Panel {
 
     /// The tree's lines, in `items`' order: each repository, then its
     /// files when unfolded, as `file_rows` has them, but those in folded
-    /// folders. Never sorted by state, so that lines don't jump as a batch
-    /// goes.
+    /// folders; the repositories with nothing to do last. Never sorted by
+    /// state otherwise, so that lines don't jump as a batch goes.
     fn rows(&self, items: &[RepoItem]) -> Vec<Row> {
         let mut rows = Vec::new();
-        for (k, item) in items.iter().enumerate() {
+        // Those with nothing to do go last, under a heading, when there
+        // are others to go after.
+        let (clean, busy): (Vec<usize>, Vec<usize>) =
+            (0..items.len()).partition(|&k| self.is_clean(&items[k]));
+        let grouped = !clean.is_empty() && !busy.is_empty();
+        let order = match grouped {
+            true => busy,
+            false => (0..items.len()).collect(),
+        };
+        for k in order {
+            let item = &items[k];
             rows.push(Row::Repo(k));
             if !self.open(item) {
                 continue;
@@ -1592,7 +1614,36 @@ impl Panel {
                 rows.push(row);
             }
         }
+        if grouped {
+            rows.push(Row::Clean);
+            if !self.clean_folded {
+                rows.extend(clean.into_iter().map(Row::Repo));
+            }
+        }
         rows
+    }
+
+    /// Whether `item` has nothing to do: no changes, nothing to push or
+    /// pull, no merge or rebase stopped, on a branch.
+    fn quiet(item: &RepoItem) -> bool {
+        let status = &item.status;
+        status.changes.is_empty()
+            && status.ahead == 0
+            && status.behind == 0
+            && status.op.is_none()
+            && status.branch.is_some()
+    }
+
+    /// Whether `item` goes under the `Clean` heading: it has had nothing
+    /// to do since the panel opened.
+    fn is_clean(&self, item: &RepoItem) -> bool {
+        Panel::quiet(item) && !self.stirred.contains(&item.root)
+    }
+
+    /// Remember the repositories of `items` with something to do.
+    fn stir(&mut self, items: &[RepoItem]) {
+        let busy = items.iter().filter(|i| !Panel::quiet(i));
+        self.stirred.extend(busy.map(|i| i.root.clone()));
     }
 
     /// The path of folder line `row`.
@@ -1608,21 +1659,21 @@ impl Panel {
         if self.folded_dirs.is_empty() {
             return true;
         }
-        match Panel::dir_path(row, items) {
-            Some(path) => {
-                let key = (items[row.item()].root.clone(), path.to_owned());
+        match (Panel::dir_path(row, items), row.item()) {
+            (Some(path), Some(k)) => {
+                let key = (items[k].root.clone(), path.to_owned());
                 !self.folded_dirs.contains(&key)
             }
-            None => true,
+            _ => true,
         }
     }
 
     /// Show or hide the files of folder line `row`.
     fn set_dir_open(&mut self, row: Row, items: &[RepoItem], open: bool) {
-        let Some(path) = Panel::dir_path(row, items) else {
+        let (Some(path), Some(k)) = (Panel::dir_path(row, items), row.item()) else {
             return;
         };
-        let key = (items[row.item()].root.clone(), path.to_owned());
+        let key = (items[k].root.clone(), path.to_owned());
         if open {
             self.folded_dirs.remove(&key);
         } else {
@@ -1642,7 +1693,7 @@ impl Panel {
     fn parent(rows: &[Row], at: usize) -> Option<usize> {
         let depth = rows[at].depth();
         rows[..at].iter().rposition(|r| match r {
-            Row::Repo(_) => true,
+            Row::Repo(_) | Row::Clean => true,
             Row::Dir { depth: d, .. } => *d < depth,
             Row::File(..) => false,
         })
@@ -1658,6 +1709,7 @@ impl Panel {
             (Some(Selected::File(root, path)), Row::File(k, c, _)) => {
                 items[k].root == *root && items[k].status.changes[c].path == *path
             }
+            (Some(Selected::Clean), Row::Clean) => true,
             _ => false,
         }
     }
@@ -1673,6 +1725,7 @@ impl Panel {
         let (root, path) = match self.selected.as_ref()? {
             Selected::Repo(root) | Selected::Dir(root, _) => (root, None),
             Selected::File(root, path) => (root, Some(path)),
+            Selected::Clean => return None,
         };
         let k = items.iter().position(|i| i.root == *root)?;
         match path {
@@ -1696,20 +1749,22 @@ impl Panel {
         match self.selected.as_ref()? {
             Selected::Repo(root) => Some(root.clone()),
             Selected::Dir(root, path) | Selected::File(root, path) => Some(root.join(path)),
+            Selected::Clean => None,
         }
     }
 
     /// Select line `k` of `rows`, scrolling it into a view of `page`.
     fn select(&mut self, rows: &[Row], k: usize, items: &[RepoItem], page: usize) {
         let Some(&row) = rows.get(k) else { return };
-        let root = items[row.item()].root.clone();
+        let root = || items[row.item().unwrap_or_default()].root.clone();
         let id = match row {
-            Row::Repo(_) => Selected::Repo(root),
+            Row::Repo(_) => Selected::Repo(root()),
             Row::Dir { .. } => {
                 let path = Panel::dir_path(row, items).unwrap_or_default();
-                Selected::Dir(root, path.to_owned())
+                Selected::Dir(root(), path.to_owned())
             }
-            Row::File(k, c, _) => Selected::File(root, items[k].status.changes[c].path.clone()),
+            Row::File(k, c, _) => Selected::File(root(), items[k].status.changes[c].path.clone()),
+            Row::Clean => Selected::Clean,
         };
         let moved = self.selected.as_ref() != Some(&id);
         self.selected = Some(id);
@@ -1730,7 +1785,15 @@ impl Panel {
         match self.selected_row(&rows, items) {
             Some(k) => self.selected_at = k,
             None if !rows.is_empty() => {
-                let k = self.selected_at.min(rows.len() - 1);
+                let mut k = self.selected_at.min(rows.len() - 1);
+                // A line, rather than the heading, takes its place.
+                if rows[k] == Row::Clean {
+                    k = if k + 1 < rows.len() {
+                        k + 1
+                    } else {
+                        k.saturating_sub(1)
+                    };
+                }
                 self.select(&rows, k, items, page);
             }
             None => self.selected = None,
@@ -1805,8 +1868,10 @@ impl Panel {
     /// Check line `row`, or uncheck it: a repository or folder partly
     /// checked is unchecked.
     fn toggle(&mut self, row: Row, items: &[RepoItem]) {
-        let item = &items[row.item()];
+        let Some(k) = row.item() else { return };
+        let item = &items[k];
         match row {
+            Row::Clean => return,
             Row::Repo(_) => {
                 let on = self.check(item) == Check::Off;
                 self.set_checked(item, on);
@@ -1866,6 +1931,7 @@ impl Panel {
         for item in items {
             self.set_open(item, open);
         }
+        self.clean_folded = !open;
         if open {
             self.folded_dirs.clear();
         } else {
@@ -2572,6 +2638,7 @@ impl Panel {
         self.checked_repos.retain(|r| roots.contains(r.as_path()));
         self.unfolded.retain(|r| roots.contains(r.as_path()));
         self.folded.retain(|r| roots.contains(r.as_path()));
+        self.stir(items);
         self.checked_files.retain(|(root, path)| {
             items
                 .iter()
@@ -3283,6 +3350,7 @@ impl Panel {
             Keysym::Right | Keysym::KP_Right if plain => match row {
                 Some(Row::Repo(k)) => self.set_open(&items[k], true),
                 Some(row @ Row::Dir { .. }) => self.set_dir_open(row, items, true),
+                Some(Row::Clean) => self.clean_folded = false,
                 _ => {}
             },
             // A line folds, else the one over it is selected.
@@ -3293,6 +3361,10 @@ impl Panel {
                 }
                 (Some(row @ Row::Dir { .. }), _) if self.dir_open(row, items) => {
                     self.set_dir_open(row, items, false);
+                    self.settle(items, page);
+                }
+                (Some(Row::Clean), _) => {
+                    self.clean_folded = true;
                     self.settle(items, page);
                 }
                 (Some(_), Some(at)) => {
@@ -3413,7 +3485,7 @@ impl Panel {
                 let k = at(i)?;
                 self.select(&rows, k, items, page);
                 self.focus = Focus::Tree;
-                return self.mark_press(mark, rows[k].item(), ctx);
+                return self.mark_press(mark, rows[k].item()?, ctx);
             }
             ReposHit::Check(i) => {
                 let k = at(i)?;
@@ -3486,6 +3558,7 @@ impl Panel {
                 self.set_dir_open(row, items, open);
             }
             Row::File(..) => return self.act(ReposButton::OpenInZed, ctx),
+            Row::Clean => self.clean_folded = !self.clean_folded,
         }
         self.settle(items, page);
         None
@@ -3750,8 +3823,16 @@ impl Panel {
 
     /// Line `row` of the tree.
     fn tree_line(&self, row: Row, ctx: &Ctx) -> TreeLine {
-        let item = &ctx.items[row.item()];
+        let Some(k) = row.item() else {
+            return TreeLine::Clean(CleanLine {
+                open: !self.clean_folded,
+                count: ctx.items.iter().filter(|i| self.is_clean(i)).count(),
+            });
+        };
+        let item = &ctx.items[k];
         let status = &item.status;
+        let files = self.diffs.get(&item.root).map(|(_, f)| f.as_slice());
+        let files = files.unwrap_or_default();
         if let Row::Dir {
             from, to, depth, ..
         } = row
@@ -3788,11 +3869,15 @@ impl Panel {
                 behind: status.behind,
                 no_upstream: status.branch.is_some() && status.upstream.is_none(),
                 stashes: status.stashes,
+                files: status.changes.len(),
+                added: files.iter().map(|f| f.added).sum(),
+                removed: files.iter().map(|f| f.removed).sum(),
                 chip,
                 state,
             });
         };
         let change = &status.changes[c];
+        let diff = files.iter().find(|f| f.path == change.path);
         TreeLine::File(FileLine {
             check: if self.file_checked(item, change) {
                 Check::On
@@ -3806,6 +3891,8 @@ impl Panel {
             },
             conflicted: change.conflicted(),
             depth,
+            added: diff.map_or(0, |f| f.added),
+            removed: diff.map_or(0, |f| f.removed),
         })
     }
 
@@ -3924,6 +4011,7 @@ impl Panel {
     fn detail_key(&self) -> Option<DetailKey> {
         let root = match self.selected.as_ref()? {
             Selected::Repo(root) | Selected::Dir(root, _) | Selected::File(root, _) => root,
+            Selected::Clean => return None,
         };
         let tab = self.tab();
         (tab != DetailTab::Diff).then(|| DetailKey {
@@ -4742,7 +4830,7 @@ impl Panel {
                     _ => false,
                 })
                 .or_else(|| self.header_row(root, None)),
-            None => None,
+            Some(Selected::Clean) | None => None,
         };
         if let Some(head) = head {
             self.detail_scroll.jump(head as f64);
@@ -5923,7 +6011,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 TreeLine::Repo(r) => Some(r),
-                TreeLine::Dir(_) | TreeLine::File(_) => None,
+                TreeLine::Dir(_) | TreeLine::File(_) | TreeLine::Clean(_) => None,
             })
             .collect()
     }
@@ -5942,6 +6030,7 @@ mod tests {
                 TreeLine::Repo(r) => r.label.clone(),
                 TreeLine::Dir(d) => format!("{}{}/", "  ".repeat(d.depth), d.name),
                 TreeLine::File(f) => format!("{}{}", "  ".repeat(f.depth), f.path),
+                TreeLine::Clean(c) => format!("Clean · {}", c.count),
             })
             .collect()
     }
@@ -6300,7 +6389,9 @@ mod tests {
         }
         let view = panel.view("p", &ctx);
         let lines = repo_lines(&view);
-        assert_eq!(lines[1].state, LineState::Busy("fetching…".into()));
+        // herdr, with nothing to do, is under the heading, last.
+        assert_eq!(lines[2].label, "herdr");
+        assert_eq!(lines[2].state, LineState::Busy("fetching…".into()));
         assert_eq!(lines[0].chip.as_ref().map(|c| c.tone), Some(Tone::Success));
         let result = view.result.unwrap();
         assert_eq!(result.text, "Fetch: 1 done · 1 of 2 running");
@@ -6708,6 +6799,63 @@ mod tests {
     }
 
     #[test]
+    fn repositories_with_nothing_to_do_go_last_under_a_heading() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let tree = |panel: &Panel, ctx: &Ctx| texts(&panel.view("p", ctx));
+        assert_eq!(
+            tree(&panel, &ctx),
+            [
+                "gerdr",
+                "src/git.rs",
+                "notes.md",
+                "zed",
+                "old.rs → new.rs",
+                "Clean · 1",
+                "herdr"
+            ]
+        );
+        // The heading folds and unfolds like a folder.
+        panel.selected = Some(Selected::Clean);
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(tree(&panel, &ctx).last().unwrap(), "Clean · 1");
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(tree(&panel, &ctx).last().unwrap(), "herdr");
+        // Committed and pushed, zed stays where it was.
+        let mut done = items.clone();
+        done[2].status.changes.clear();
+        let ctx = super::Ctx {
+            items: &done,
+            ..ctx
+        };
+        panel.refresh(&ctx);
+        assert_eq!(
+            tree(&panel, &ctx),
+            [
+                "gerdr",
+                "src/git.rs",
+                "notes.md",
+                "zed",
+                "Clean · 1",
+                "herdr"
+            ]
+        );
+        // With nothing to do anywhere, there is no heading.
+        let clean: Vec<RepoItem> = (items.iter().cloned())
+            .map(|mut i| {
+                i.status.changes.clear();
+                i
+            })
+            .collect();
+        let ctx = super::Ctx {
+            items: &clean,
+            ..ctx
+        };
+        assert_eq!(tree(&Panel::new(&clean), &ctx), ["gerdr", "herdr", "zed"]);
+    }
+
+    #[test]
     fn big_change_lists_start_folded() {
         let many = |n: usize| (0..n).map(|i| change(&format!("f{i}"), 'M')).collect();
         let items = vec![
@@ -6732,7 +6880,7 @@ mod tests {
         press(&mut panel, none(), Keysym::Down, &ctx);
         press(&mut panel, none(), Keysym::Return, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!(texts(&view), ["big", "small", "clean"]);
+        assert_eq!(texts(&view), ["big", "small", "Clean · 1", "clean"]);
         assert_eq!(repo_lines(&view)[2].expanded, None);
         // Left on a file selects its repository.
         press(&mut panel, none(), Keysym::Return, &ctx);
@@ -6950,17 +7098,19 @@ mod tests {
                 chip("MERGING · 2", Tone::Error),
                 None,
                 chip("REBASING 2/5", Tone::Error),
+                // Not on a branch, it has something to do; the rest
+                // haven't, and go last.
+                chip("detached", Tone::Warning),
                 chip("login needed", Tone::Error),
                 chip("nothing checked", Tone::Muted),
                 chip("done", Tone::Success),
                 chip("conflict", Tone::Error),
-                chip("detached", Tone::Warning),
             ]
         );
         let lines = repo_lines(&view);
         assert_eq!(lines[1].state, LineState::Attention);
-        assert_eq!(lines[6].state, LineState::Settled);
-        assert_eq!(lines[8].branch, None);
+        assert_eq!(lines[7].state, LineState::Settled);
+        assert_eq!(lines[4].branch, None);
         // Login needed: run it in a terminal.
         select(&mut panel, "auth");
         let hints = panel.view("p", &ctx).hints;
@@ -6983,20 +7133,20 @@ mod tests {
             press(&mut panel, none(), Keysym::Down, &ctx);
         }
         let view = panel.view("p", &ctx);
-        assert_eq!(texts(&view), ["notes.md", "herdr", "zed"]);
+        assert_eq!(texts(&view), ["notes.md", "zed", "old.rs → new.rs"]);
         assert_eq!(view.selected, Some(2));
         press(&mut panel, none(), Keysym::End, &ctx);
         assert_eq!(panel.view("p", &ctx).selected, Some(2));
-        assert_eq!(panel.tree_scroll.pos(), 3.0);
+        assert_eq!(panel.tree_scroll.pos(), 4.0);
         press(&mut panel, none(), Keysym::Page_Up, &ctx);
-        assert_eq!(panel.selected_at, 2);
+        assert_eq!(panel.selected_at, 3);
         press(&mut panel, none(), Keysym::Home, &ctx);
         assert_eq!((panel.selected_at, panel.tree_scroll.pos()), (0, 0.0));
         // A notch of the wheel glides a line, as far as there are lines.
         wheel_tree(&mut panel, 1.0, &ctx);
         assert_eq!(panel.tree_scroll.pos(), 1.0);
         wheel_tree(&mut panel, 10.0, &ctx);
-        assert_eq!(panel.tree_scroll.pos(), 3.0);
+        assert_eq!(panel.tree_scroll.pos(), 4.0);
         wheel_tree(&mut panel, -10.0, &ctx);
         assert_eq!(panel.tree_scroll.pos(), 0.0);
         // Out of view, the selection isn't shown.
@@ -7032,11 +7182,11 @@ mod tests {
         // The ends hold the tree whole once let go.
         swipe_tree(&mut panel, 10.5, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.first, view.part, view.lines.len()), (3, 0.0, 3));
+        assert_eq!((view.first, view.part, view.lines.len()), (4, 0.0, 3));
         assert_eq!(view.over, 0.0);
         swipe_tree(&mut panel, -0.25, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.first, view.part), (2, 0.75));
+        assert_eq!((view.first, view.part), (3, 0.75));
         swipe_tree(&mut panel, -10.0, &ctx);
         let view = panel.view("p", &ctx);
         assert_eq!((view.first, view.part), (0, 0.0));
@@ -7081,7 +7231,7 @@ mod tests {
         assert!(panel.tree_scroll.pos() > before);
         let end = run_out(&mut panel, lift, &ctx);
         assert!(!panel.scrolling(end));
-        assert_eq!(panel.tree_scroll.pos(), 3.0);
+        assert_eq!(panel.tree_scroll.pos(), 4.0);
     }
 
     #[test]
@@ -7090,7 +7240,7 @@ mod tests {
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
         panel.focus = Focus::Field;
-        assert_eq!(panel.click(ReposHit::Line(3), &ctx), None);
+        assert_eq!(panel.click(ReposHit::Line(6), &ctx), None);
         assert_eq!(panel.selected, Some(Selected::Repo(root("herdr"))));
         assert_eq!(panel.focus, Focus::Tree);
         panel.click(ReposHit::Check(1), &ctx);
@@ -7098,7 +7248,7 @@ mod tests {
         panel.click(ReposHit::Expander(0), &ctx);
         assert_eq!(
             texts(&panel.view("p", &ctx)),
-            ["gerdr", "herdr", "zed", "old.rs → new.rs"]
+            ["gerdr", "zed", "old.rs → new.rs", "Clean · 1", "herdr"]
         );
         panel.click(ReposHit::Field, &ctx);
         assert_eq!(panel.focus, Focus::Field);
@@ -7125,7 +7275,7 @@ mod tests {
             ..ctx
         };
         select(&mut panel, "zed");
-        let chip = repo_lines(&panel.view("p", &ctx))[2].chip.clone();
+        let chip = repo_lines(&panel.view("p", &ctx))[1].chip.clone();
         assert_eq!(chip.unwrap().text, "checked out elsewhere");
         assert_eq!(
             panel.click(ReposHit::Button(ReposButton::OpenWorkspace), &ctx),
@@ -7141,7 +7291,7 @@ mod tests {
         // gerdr is checked, but the arrows act on their own line alone.
         panel.click(ReposHit::Check(0), &ctx);
         assert_eq!(
-            panel.click(ReposHit::Mark(3, RepoMark::Ahead), &ctx),
+            panel.click(ReposHit::Mark(6, RepoMark::Ahead), &ctx),
             Some(Outcome::Batch {
                 kind: BatchKind::Push { force: false },
                 jobs: jobs(&["herdr"])
@@ -7149,15 +7299,15 @@ mod tests {
         );
         assert_eq!(panel.selected, Some(Selected::Repo(root("herdr"))));
         assert_eq!(
-            panel.click(ReposHit::Mark(4, RepoMark::Behind), &ctx),
+            panel.click(ReposHit::Mark(3, RepoMark::Behind), &ctx),
             Some(Outcome::Batch {
                 kind: BatchKind::Pull(Pull::FastForward),
                 jobs: jobs(&["zed"])
             })
         );
-        assert_eq!(panel.click(ReposHit::Mark(4, RepoMark::Dirty), &ctx), None);
+        assert_eq!(panel.click(ReposHit::Mark(3, RepoMark::Dirty), &ctx), None);
         assert_eq!(
-            panel.click(ReposHit::Mark(3, RepoMark::Stashes), &ctx),
+            panel.click(ReposHit::Mark(6, RepoMark::Stashes), &ctx),
             None
         );
         assert_eq!(panel.tab, Some(DetailTab::Stashes));
@@ -7182,7 +7332,7 @@ mod tests {
             batch: Some(&b),
             ..ctx
         };
-        assert_eq!(panel.click(ReposHit::Mark(3, RepoMark::Ahead), &ctx), None);
+        assert_eq!(panel.click(ReposHit::Mark(6, RepoMark::Ahead), &ctx), None);
         assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
     }
 
@@ -8675,7 +8825,7 @@ mod tests {
     }
 
     /// The tree of `foldered()` by folder.
-    const FOLDERS: [&str; 14] = [
+    const FOLDERS: [&str; 15] = [
         "app",
         "assets/",
         "  icon.svg",
@@ -8689,6 +8839,7 @@ mod tests {
         "  main.rs",
         "Cargo.toml",
         "README.md",
+        "Clean · 1",
         "lib",
     ];
 
@@ -8901,7 +9052,7 @@ mod tests {
         let mut panel = by_folder(&items);
         panel.selected = Some(Selected::File(root("app"), "src/main.rs".into()));
         press(&mut panel, alt(), Keysym::Left, &ctx);
-        assert_eq!(texts(&panel.view("p", &ctx)), ["app", "lib"]);
+        assert_eq!(texts(&panel.view("p", &ctx)), ["app", "Clean · 1"]);
         // The file hidden, its repository's line is selected.
         assert_eq!(panel.selected, Some(Selected::Repo(root("app"))));
         // Its repository unfolded, its folders are folded too.
@@ -8916,13 +9067,13 @@ mod tests {
                 "src/",
                 "Cargo.toml",
                 "README.md",
-                "lib"
+                "Clean · 1"
             ]
         );
         panel.click(ReposHit::Tool(TreeTool::Expand), &ctx);
         assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
         panel.click(ReposHit::Tool(TreeTool::Collapse), &ctx);
-        assert_eq!(texts(&panel.view("p", &ctx)), ["app", "lib"]);
+        assert_eq!(texts(&panel.view("p", &ctx)), ["app", "Clean · 1"]);
         press(&mut panel, alt(), Keysym::Right, &ctx);
         assert_eq!(texts(&panel.view("p", &ctx)), FOLDERS);
     }
@@ -8959,7 +9110,8 @@ mod tests {
         assert_eq!(panel.selected, Some(notes));
         assert_eq!(panel.found_on(5), vec![(0..1, true)]);
         assert_eq!(panel.found_on(6), vec![(0..1, false)]);
-        assert_eq!(panel.found_on(9), vec![(9..10, false)]);
+        // On new.rs's header, its name first.
+        assert_eq!(panel.found_on(9), vec![(0..1, false)]);
         assert!(panel.found_on(2).is_empty());
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert_eq!(cursor_row(&panel), Some(6));

@@ -21,7 +21,7 @@ use super::{
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, arrow, band, check,
     chevron_down, coverage, cross, field_text, folder, git_branch, icon_sdf, magnifier, measure,
-    measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, segment, trash,
+    measure_bold, measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, segment, trash,
 };
 use std::ops::Range;
 
@@ -68,6 +68,8 @@ const REPOS_INDENT: i32 = 24;
 /// of a folder's icon.
 const REPOS_LEVEL: i32 = 20;
 const REPOS_FOLDER: i32 = 20;
+/// The branch icon on a repository's header, in the tree and the diff.
+const BRANCH_ICON: i32 = 14;
 /// The room between the tree's toolbar's groups of buttons.
 const REPOS_TOOL_GAP: i32 = 12;
 /// The scrollbar at the right of the tree and of the detail: its width,
@@ -116,6 +118,9 @@ const ROW_CHIP_INSET: i32 = 2;
 /// How strongly an added or removed line is tinted, and its changed
 /// words.
 const DIFF_TINT: f32 = 0.10;
+/// How strongly a repository's header is tinted, in the tree and the
+/// diff: it heads what is under it.
+const HEADER_TINT: f32 = 0.07;
 const DIFF_WORD_TINT: f32 = 0.28;
 /// The Diff and Log tabs: each this wide, this far apart.
 const REPOS_TAB_WIDTH: i32 = 64;
@@ -312,6 +317,17 @@ pub enum TreeLine {
     Repo(RepoLine),
     Dir(DirLine),
     File(FileLine),
+    /// The heading over the repositories with nothing to do, after the
+    /// others.
+    Clean(CleanLine),
+}
+
+/// The heading over the repositories with nothing to do: `Clean · 3`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CleanLine {
+    /// Its repositories show.
+    pub open: bool,
+    pub count: usize,
 }
 
 /// A repository's line.
@@ -330,6 +346,11 @@ pub struct RepoLine {
     /// Its branch has no upstream yet.
     pub no_upstream: bool,
     pub stashes: u32,
+    /// How many files it has changed, and the lines added and removed in
+    /// them as its diff has it (none while it is read).
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
     /// What it is in the middle of, or what went wrong: `MERGING · 2`,
     /// `REBASING 2/5`, `login needed`, `detached`.
     pub chip: Option<Chip>,
@@ -363,6 +384,10 @@ pub struct FileLine {
     pub conflicted: bool,
     /// How many folders' lines it is under.
     pub depth: usize,
+    /// The lines added and removed in it, as its diff has it (none while
+    /// it is read).
+    pub added: usize,
+    pub removed: usize,
 }
 
 /// A checkbox: a repository's is `Partial` when only some of its files are
@@ -796,6 +821,8 @@ impl RepoMark {
 /// pixels a logical pixel, its text measured by `width(text, size)`:
 /// the painter and the hit test work it out alike.
 struct LineSpans {
+    /// Where its counts start, at the right.
+    counts: Option<f32>,
     /// The chip's left edge and width.
     chip: Option<(f32, f32)>,
     /// Where the label, branch and marks end at the latest.
@@ -823,26 +850,78 @@ struct MarkSpan {
     end: f32,
 }
 
+/// What a diff's counts say, in their tones: `lead` (`3 files`), the
+/// lines added and those removed, each left out when there is none.
+fn count_parts(lead: Option<String>, (added, removed): (usize, usize)) -> Vec<(String, Tone)> {
+    let mut parts = Vec::new();
+    parts.extend(lead.map(|lead| (lead, Tone::Muted)));
+    if added > 0 {
+        parts.push((format!("+{added}"), Tone::Success));
+    }
+    if removed > 0 {
+        parts.push((format!("−{removed}"), Tone::Error));
+    }
+    parts
+}
+
+/// The gap between two of a diff's counts, physical pixels.
+fn count_gap(s: f32) -> f32 {
+    (6.0 * s).round()
+}
+
+/// A repository line's counts: its files while folded (they show else),
+/// and its lines added and removed.
+fn repo_counts(repo: &RepoLine) -> Vec<(String, Tone)> {
+    let files = (repo.expanded == Some(false)).then(|| files_text(repo.files));
+    count_parts(files, (repo.added, repo.removed))
+}
+
+/// `1 file`, `3 files`.
+fn files_text(n: usize) -> String {
+    match n {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
+    }
+}
+
+/// How wide a text is at a size, physical pixels: in the UI font, or the
+/// bold one.
+type Width<'a> = &'a dyn Fn(&str, f32) -> f32;
+
+/// The room of the branch icon before a repository's branch, with the gap
+/// after it, physical pixels.
+fn branch_icon(gap: f32, s: f32) -> f32 {
+    (BRANCH_ICON as f32 * s).round() + (gap / 2.0).round()
+}
+
 fn line_spans(
     repo: &RepoLine,
     (x, right): (f32, f32),
     gap: f32,
     s: f32,
-    width: &dyn Fn(&str, f32) -> f32,
+    (width, bold): (Width, Width),
 ) -> LineSpans {
     let mut end = right;
+    let parts = repo_counts(repo);
+    let counts = (!parts.is_empty()).then(|| {
+        let w: f32 = parts.iter().map(|(t, _)| width(t, SMALL_FONT_SIZE)).sum();
+        let w = w + count_gap(s) * (parts.len() - 1) as f32;
+        let cx = (right - w).floor().max(x);
+        end = cx - gap;
+        cx
+    });
     let chip = repo.chip.as_ref().map(|chip| {
         let pad = (CHIP_PAD as f32 * s).round();
         let cw = (width(&chip.text, DETAIL_FONT_SIZE) + 2.0 * pad).round();
-        let cx = (right - cw).max(x);
+        let cx = (end - cw).max(x);
         end = cx - gap;
         (cx, cw)
     });
-    let mut pen = (x + width(&repo.label, FONT_SIZE)).min(end).max(x);
-    let branch = (pen + gap < end).then(|| {
+    let mut pen = (x + bold(&repo.label, FONT_SIZE)).min(end).max(x);
+    let branch = (pen + gap + branch_icon(gap, s) < end).then(|| {
         let bx = pen + gap;
         let text = repo.branch.as_deref().unwrap_or("detached");
-        pen = (bx + width(text, SMALL_FONT_SIZE)).min(end);
+        pen = (bx + branch_icon(gap, s) + width(text, SMALL_FONT_SIZE)).min(end);
         bx
     });
     let (w, mark_gap) = (
@@ -893,6 +972,7 @@ fn line_spans(
         pen = note_end;
     }
     LineSpans {
+        counts,
         chip,
         end,
         branch,
@@ -1177,15 +1257,20 @@ fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
     let (x, y, h) = (rect.loc.x, rect.loc.y, rect.size.h);
     let level = |depth: usize| REPOS_INDENT + depth as i32 * REPOS_LEVEL;
     let indent = match line {
-        TreeLine::Repo(_) => 0,
+        TreeLine::Repo(_) | TreeLine::Clean(_) => 0,
         TreeLine::Dir(dir) => level(dir.depth),
         TreeLine::File(file) => level(file.depth),
     };
     let check_x = x + REPOS_LINE_INSET + indent;
-    let check = Rectangle::new((check_x, y).into(), (REPOS_CHECK, h).into());
+    // The heading has no checkbox: its chevron is where a repository's is.
+    let check_w = match line {
+        TreeLine::Clean(_) => 0,
+        _ => REPOS_CHECK,
+    };
+    let check = Rectangle::new((check_x, y).into(), (check_w, h).into());
     let expands = match line {
         TreeLine::Repo(repo) => repo.expanded.is_some(),
-        TreeLine::Dir(_) => true,
+        TreeLine::Dir(_) | TreeLine::Clean(_) => true,
         TreeLine::File(_) => false,
     };
     let expander = expands.then(|| {
@@ -1475,6 +1560,8 @@ fn menu_card_view(menu: &BranchMenuView) -> BranchMenuView {
 #[derive(Clone, Debug, PartialEq)]
 struct TreeRow {
     line: TreeLine,
+    /// It is the tree's first line: a repository's has no rule over it.
+    top: bool,
     selected: bool,
     /// Selected while the field has the keyboard: lit less.
     dim: bool,
@@ -1496,6 +1583,7 @@ fn tree_row(view: &ReposView, i: usize) -> TreeRow {
     let selected = view.selected == Some(i);
     TreeRow {
         line: view.lines[i].clone(),
+        top: view.first + i == 0,
         selected,
         dim: selected && view.field_focused,
         hover,
@@ -1577,9 +1665,11 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         if let TreeLine::Repo(repo) = line {
             // Measured as the painter measures, at one pixel a pixel.
             let width = |text: &str, size: f32| measure(text, size).unwrap_or(0.0);
+            let bold = |text: &str, size: f32| measure_bold(text, size).unwrap_or(0.0);
             let x = (check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
             let right = (line_x + line_w) as f32 - PADDING;
-            let spans = line_spans(repo, (x, right), FIELD_GAP as f32, 1.0, &width);
+            let widths: (Width, Width) = (&width, &bold);
+            let spans = line_spans(repo, (x, right), FIELD_GAP as f32, 1.0, widths);
             for m in spans.marks {
                 let mx = m.x.floor() as i32;
                 let mw = (m.end.ceil() as i32 - mx).max(1);
@@ -2232,6 +2322,16 @@ pub(super) fn scrollbar(
     );
 }
 
+/// Those of the places `found` inside `range` (char indices), from its
+/// start.
+fn found_within(found: &[(Range<usize>, bool)], range: Range<usize>) -> Vec<(Range<usize>, bool)> {
+    found
+        .iter()
+        .filter(|(r, _)| r.start >= range.start && r.end <= range.end)
+        .map(|(r, on)| (r.start - range.start..r.end - range.start, *on))
+        .collect()
+}
+
 /// `range` (char indices) in parts one after another, each with whether
 /// it is in one of the places `found`.
 fn found_split(range: Range<usize>, found: &[(Range<usize>, bool)]) -> Vec<(Range<usize>, bool)> {
@@ -2263,6 +2363,27 @@ fn code_color(code: char, p: &Palette) -> Rgb {
         '?' => p.muted,
         _ => p.warning,
     }
+}
+
+/// A file's path as shown name first: its name, then its folder and,
+/// renamed, where it was (`src/chrome  ← src/old.rs`). A rename comes as
+/// `old → new`.
+pub fn name_first(path: &str) -> (&str, String) {
+    let (from, to) = match path.split_once(" → ") {
+        Some((from, to)) => (Some(from), to),
+        None => (None, path),
+    };
+    // A folder git lists whole keeps its `/`.
+    let cut = to.trim_end_matches('/').rfind('/').map_or(0, |i| i + 1);
+    let mut rest = to[..cut].trim_end_matches('/').to_owned();
+    if let Some(from) = from {
+        if !rest.is_empty() {
+            rest.push_str("  ");
+        }
+        rest.push_str("← ");
+        rest.push_str(from);
+    }
+    (&to[cut..], rest)
 }
 
 /// The colour of `tone` in `p`.
@@ -2363,61 +2484,28 @@ impl Painter {
         pen
     }
 
-    /// A file's `path` from `x`, its folders in the first of `colors` and
-    /// its name in the second; cut off at the start with "…" when it
-    /// doesn't fit before `max_x`, so that the name shows.
+    /// A file's `path` name first between `x` and `max_x`: its name in
+    /// the first of `colors`, then its folder (and where it was renamed
+    /// from) in the second, cut off at the end when it doesn't fit.
+    /// Returns where it ends.
     #[allow(clippy::too_many_arguments)]
-    fn path_text(
+    fn name_first(
         &self,
         c: &mut Canvas,
         path: &str,
         size: f32,
-        x: f32,
-        max_x: f32,
+        (x, max_x): (f32, f32),
         band: (i32, i32),
         scale: f64,
-        (folders, name): (Rgb, Rgb),
-    ) {
-        let split = path.trim_end_matches('/').rfind('/').map_or(0, |i| i + 1);
-        let width = |text: &str| self.mixed_width(text, size, scale);
-        let mut pen = x;
-        let mut start = 0;
-        if x + width(path) > max_x {
-            let ellipsis = self.text_width("…", size, scale);
-            let Some(from) = path
-                .char_indices()
-                .map(|(i, _)| i)
-                .find(|&i| x + ellipsis + width(&path[i..]) <= max_x)
-            else {
-                // Not even the end of the name fits: as much of it as does.
-                self.mixed_text(c, &path[split..], size, x, max_x, band, scale, name);
-                return;
-            };
-            pen = self.text(c, "…", size, pen, f32::MAX, band, scale, folders);
-            start = from;
+        (name_color, rest_color): (Rgb, Rgb),
+    ) -> f32 {
+        let (name, rest) = name_first(path);
+        let pen = self.mixed_text(c, name, size, x, max_x, band, scale, name_color);
+        let gap = (FIELD_GAP as f32 * scale as f32).round();
+        if rest.is_empty() || pen + gap >= max_x {
+            return pen;
         }
-        if start < split {
-            pen = self.mixed_text(
-                c,
-                &path[start..split],
-                size,
-                pen,
-                f32::MAX,
-                band,
-                scale,
-                folders,
-            );
-        }
-        self.mixed_text(
-            c,
-            &path[start.max(split)..],
-            size,
-            pen,
-            f32::MAX,
-            band,
-            scale,
-            name,
-        );
+        self.mixed_text(c, &rest, size, pen + gap, max_x, band, scale, rest_color)
     }
 
     /// The repositories panel for an output of `size`, inside a margin of
@@ -2722,8 +2810,24 @@ impl Painter {
         let hovered = row.hover.is_some();
         let state = match line {
             TreeLine::Repo(repo) => Some(&repo.state),
-            TreeLine::Dir(_) | TreeLine::File(_) => None,
+            TreeLine::Dir(_) | TreeLine::File(_) | TreeLine::Clean(_) => None,
         };
+        let border = px(1).max(1);
+        if let TreeLine::Repo(_) | TreeLine::Clean(_) = line {
+            // It heads the lines under it: a band across, a rule over it
+            // but on the first line.
+            let (bx, by) = (x as i32, y as i32);
+            c.fill(
+                bx,
+                by,
+                w as i32,
+                h as i32,
+                mix(p.elevated, p.text, HEADER_TINT),
+            );
+            if !row.top {
+                c.fill(bx, by, w as i32, border, p.border_variant);
+            }
+        }
         if row.selected {
             let fill = if row.dim {
                 mix(p.elevated, p.selected, 0.6)
@@ -2738,6 +2842,21 @@ impl Painter {
             // A bar at the left edge: it needs a look.
             c.rounded(x, hy + 4.0 * s, 2.0 * s, hh - 8.0 * s, s, p.warning);
         }
+        // A rule down from each line it is under, through its checkbox's
+        // middle: its repository's, then its folders'.
+        let depth = match line {
+            TreeLine::Dir(dir) => Some(dir.depth),
+            TreeLine::File(file) => Some(file.depth),
+            TreeLine::Repo(_) | TreeLine::Clean(_) => None,
+        };
+        for level in 0..depth.map_or(0, |d| d + 1) {
+            let indent = match level {
+                0 => 0,
+                n => REPOS_INDENT + (n as i32 - 1) * REPOS_LEVEL,
+            };
+            let gx = px(rect.loc.x + REPOS_LINE_INSET + indent + REPOS_CHECK / 2);
+            c.fill(gx, y as i32, border, h as i32, p.border);
+        }
 
         let check_hovered = row.hover == Some(ReposHit::Check(0));
         let side = CHECKBOX_SIZE;
@@ -2748,17 +2867,19 @@ impl Painter {
         let line_band = band(rect, scale);
         let right = x + w - PADDING * s;
         let gap = (FIELD_GAP as f32 * s).round();
+        let expander_color = if row.hover == Some(ReposHit::Expander(0)) {
+            p.text
+        } else {
+            p.muted
+        };
         match line {
             TreeLine::Repo(repo) => {
                 let check_state = repo.check;
                 self.checkbox(c, box_rect, check_state, check_hovered, scale, p);
                 if let (Some(open), Some(rect)) = (repo.expanded, expander) {
-                    let color = if row.hover == Some(ReposHit::Expander(0)) {
-                        p.text
-                    } else {
-                        p.muted
-                    };
-                    icon_sdf(c, rect, scale, color, |x, y| expander_mark(open, x, y, s));
+                    icon_sdf(c, rect, scale, expander_color, |x, y| {
+                        expander_mark(open, x, y, s)
+                    });
                 }
                 let label_x = px(check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
                 let mark = match row.hover {
@@ -2769,15 +2890,29 @@ impl Painter {
                 let at = (label_x, right);
                 self.repo_line(c, repo, at, line_band, gap, (mark, on_chip), scale, p);
             }
+            TreeLine::Clean(clean) => {
+                if let Some(rect) = expander {
+                    icon_sdf(c, rect, scale, expander_color, |x, y| {
+                        expander_mark(clean.open, x, y, s)
+                    });
+                }
+                let label_x = px(check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
+                let label = format!("Clean · {}", clean.count);
+                self.mixed_text(
+                    c,
+                    &label,
+                    SMALL_FONT_SIZE,
+                    label_x,
+                    right,
+                    line_band,
+                    scale,
+                    p.muted,
+                );
+            }
             TreeLine::Dir(dir) => {
                 self.checkbox(c, box_rect, dir.check, check_hovered, scale, p);
                 if let Some(rect) = expander {
-                    let color = if row.hover == Some(ReposHit::Expander(0)) {
-                        p.text
-                    } else {
-                        p.muted
-                    };
-                    icon_sdf(c, rect, scale, color, |x, y| {
+                    icon_sdf(c, rect, scale, expander_color, |x, y| {
                         expander_mark(dir.open, x, y, s)
                     });
                 }
@@ -2800,14 +2935,13 @@ impl Painter {
             }
             TreeLine::File(file) => {
                 self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
-                let code_x = px(check.loc.x + check.size.w + REPOS_CODE_GAP) as f32;
+                // At the right its status letter, its counts before it.
                 let code_w = px(REPOS_CODE) as f32;
+                let code_x = right - code_w;
                 let letter = file.code.to_string();
-                let color = match file.code {
-                    'U' => p.error,
-                    '?' => p.placeholder,
-                    _ if file.conflicted => p.error,
-                    _ => p.text,
+                let tone = match file.conflicted {
+                    true => p.error,
+                    false => code_color(file.code, p),
                 };
                 let lw = self.mono_width(&letter, REPOS_MONO_SIZE, scale);
                 self.mono_text(
@@ -2818,18 +2952,25 @@ impl Painter {
                     f32::MAX,
                     line_band,
                     scale,
-                    color,
+                    tone,
                 );
-                let name = if file.conflicted { p.error } else { p.text };
-                self.path_text(
+                let counts = (file.added, file.removed);
+                let end =
+                    self.diff_counts(c, None, counts, code_x - gap / 2.0, line_band, scale, p);
+                let name = match file.code {
+                    _ if file.conflicted => p.error,
+                    'D' => p.muted,
+                    _ => p.text,
+                };
+                let x = px(check.loc.x + check.size.w + REPOS_CODE_GAP) as f32;
+                self.name_first(
                     c,
                     &file.path,
                     SMALL_FONT_SIZE,
-                    code_x + code_w + gap / 2.0,
-                    right,
+                    (x, end - gap),
                     line_band,
                     scale,
-                    (p.muted, name),
+                    (name, p.muted),
                 );
             }
         }
@@ -2851,8 +2992,26 @@ impl Painter {
     ) {
         let s = scale as f32;
         let width = |text: &str, size: f32| self.mixed_width(text, size, scale);
-        let spans = line_spans(repo, (x, right), gap, s, &width);
+        let bold = |text: &str, size: f32| self.bold_width(text, size, scale);
+        let spans = line_spans(repo, (x, right), gap, s, (&width, &bold));
         let end = spans.end;
+        if let Some(cx) = spans.counts {
+            let mut pen = cx;
+            for (text, tone) in repo_counts(repo) {
+                let color = tone_color(tone, p);
+                pen = self.mixed_text(
+                    c,
+                    &text,
+                    SMALL_FONT_SIZE,
+                    pen,
+                    f32::MAX,
+                    line_band,
+                    scale,
+                    color,
+                );
+                pen += count_gap(s);
+            }
+        }
         if let (Some(chip), Some((cx, cw))) = (&repo.chip, spans.chip) {
             let color = tone_color(chip.tone, p);
             let (top, height) = line_band;
@@ -2882,7 +3041,7 @@ impl Painter {
             LineState::Busy(_) => p.muted,
             _ => p.text,
         };
-        self.mixed_text(
+        self.bold_text(
             c,
             &repo.label,
             FONT_SIZE,
@@ -2897,11 +3056,24 @@ impl Painter {
             None => ("detached", p.placeholder),
         };
         if let Some(bx) = spans.branch {
+            let (top, height) = line_band;
+            let icon_w = (BRANCH_ICON as f32 * s).round();
+            c.paint_in(
+                bx as i32,
+                top,
+                icon_w as i32 + 1,
+                height,
+                branch_color,
+                |px, py| {
+                    let (cx, cy) = (bx + icon_w / 2.0, top as f32 + height as f32 / 2.0);
+                    coverage(git_branch(px - cx, py - cy, s))
+                },
+            );
             self.mixed_text(
                 c,
                 branch,
                 SMALL_FONT_SIZE,
-                bx,
+                bx + branch_icon(gap, s),
                 end,
                 line_band,
                 scale,
@@ -3321,26 +3493,32 @@ impl Painter {
         }
     }
 
-    /// Where `path` starts as `path_text` draws it from `x`, cut at
-    /// `max_x`: the byte its shown part starts at, and where that is (after
-    /// an ellipsis when cut); none when not even its name fits.
-    fn path_start(
+    /// `text` from `x`, cut at `max_x`, in `color` but for the places
+    /// the search `found` in it (by char index): tinted, in the text's own
+    /// colour. Returns where it ends.
+    #[allow(clippy::too_many_arguments)]
+    fn found_text(
         &self,
-        path: &str,
+        c: &mut Canvas,
+        text: &str,
+        found: &[(Range<usize>, bool)],
         size: f32,
-        x: f32,
-        max_x: f32,
+        (x, max_x): (f32, f32),
+        band: (i32, i32),
         scale: f64,
-    ) -> Option<(usize, f32)> {
-        let width = |text: &str| self.mixed_width(text, size, scale);
-        if x + width(path) <= max_x {
-            return Some((0, x));
+        color: Rgb,
+        p: &Palette,
+    ) -> f32 {
+        let width = |t: &str| self.mixed_width(t, size, scale);
+        self.found_tints(c, text, found, (x, max_x), band, width, scale, p);
+        let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+        let mut pen = x;
+        for (part, on) in found_split(0..text.chars().count(), found) {
+            let piece = &text[byte(part.start)..byte(part.end)];
+            let color = if on { p.text } else { color };
+            pen = self.mixed_text(c, piece, size, pen, max_x, band, scale, color);
         }
-        let ellipsis = self.text_width("…", size, scale);
-        path.char_indices()
-            .map(|(i, _)| i)
-            .find(|&i| x + ellipsis + width(&path[i..]) <= max_x)
-            .map(|from| (from, x + ellipsis))
+        pen
     }
 
     /// A row of the detail in `rect`; its tint across the pane from
@@ -3398,12 +3576,10 @@ impl Painter {
                 );
             }
             DetailRow::Repo(repo) => {
-                across(c, mix(p.elevated, p.text, 0.07));
+                across(c, mix(p.elevated, p.text, HEADER_TINT));
+                c.fill(tint_x, y, tint_end - tint_x, border, p.border_variant);
                 c.fill(tint_x, y + h - border, tint_end - tint_x, border, p.border);
-                let files = match repo.files {
-                    1 => "1 file".to_string(),
-                    n => format!("{n} files"),
-                };
+                let files = files_text(repo.files);
                 let counts = self.diff_counts(
                     c,
                     Some(&files),
@@ -3414,7 +3590,7 @@ impl Painter {
                     p,
                 );
                 let right = counts - gap;
-                let mut pen = self.mixed_text(
+                let mut pen = self.bold_text(
                     c,
                     &repo.label,
                     FONT_SIZE,
@@ -3428,11 +3604,11 @@ impl Painter {
                     pen += gap;
                     let icon = Rectangle::new(
                         ((pen / s).round() as i32, rect.loc.y).into(),
-                        (14, rect.size.h).into(),
+                        (BRANCH_ICON, rect.size.h).into(),
                     );
-                    if pen + px(14) as f32 + gap < right {
+                    if pen + branch_icon(gap, s) < right {
                         icon_sdf(c, icon, scale, p.muted, |x, y| git_branch(x, y, s));
-                        pen += px(14) as f32 + (gap / 2.0).round();
+                        pen += branch_icon(gap, s);
                         self.mixed_text(
                             c,
                             branch,
@@ -3514,10 +3690,19 @@ impl Painter {
                 let right = counts - gap;
                 let mut pen = badge_x + bw + gap;
                 if let Some(repo) = &file.repo {
-                    let label = format!("{repo} ›");
+                    pen = self.bold_text(
+                        c,
+                        repo,
+                        SMALL_FONT_SIZE,
+                        pen,
+                        right,
+                        row_band,
+                        scale,
+                        p.text,
+                    );
                     pen = self.mixed_text(
                         c,
-                        &label,
+                        " ›",
                         SMALL_FONT_SIZE,
                         pen,
                         right,
@@ -3527,30 +3712,36 @@ impl Painter {
                     );
                     pen += (gap / 2.0).round();
                 }
-                if let Some((from, at)) = self.path_start(&file.path, FONT_SIZE, pen, right, scale)
-                {
-                    // By char index into the part shown.
-                    let skip = file.path[..from].chars().count();
-                    let found: Vec<_> = look
-                        .found
-                        .iter()
-                        .filter(|(r, _)| r.start >= skip)
-                        .map(|(r, on)| (r.start - skip..r.end - skip, *on))
-                        .collect();
-                    let width = |t: &str| self.mixed_width(t, FONT_SIZE, scale);
-                    let shown = &file.path[from..];
-                    self.found_tints(c, shown, &found, (at, right), row_band, width, scale, p);
-                }
-                self.path_text(
+                // Name first, then its folder; what the search found in
+                // either tinted (`search::path_text` joins them so).
+                let (name, rest) = name_first(&file.path);
+                let n = name.chars().count();
+                let in_name = found_within(&look.found, 0..n);
+                let pen = self.found_text(
                     c,
-                    &file.path,
+                    name,
+                    &in_name,
                     FONT_SIZE,
-                    pen,
-                    right,
+                    (pen, right),
                     row_band,
                     scale,
-                    (p.muted, p.text),
+                    p.text,
+                    p,
                 );
+                if !rest.is_empty() && pen + gap < right {
+                    let in_rest = found_within(&look.found, n + 1..usize::MAX);
+                    self.found_text(
+                        c,
+                        &rest,
+                        &in_rest,
+                        FONT_SIZE,
+                        (pen + gap, right),
+                        row_band,
+                        scale,
+                        p.muted,
+                        p,
+                    );
+                }
             }
             DetailRow::Hunk { context, number } => {
                 // A short rule, what the hunk is in, then a rule on.
@@ -3856,17 +4047,8 @@ impl Painter {
         p: &Palette,
     ) -> f32 {
         let size = SMALL_FONT_SIZE;
-        let gap = (6.0 * scale as f32).round();
-        let mut parts: Vec<(String, Rgb)> = Vec::new();
-        if let Some(lead) = lead {
-            parts.push((lead.to_string(), p.muted));
-        }
-        if added > 0 {
-            parts.push((format!("+{added}"), p.success));
-        }
-        if removed > 0 {
-            parts.push((format!("−{removed}"), p.error));
-        }
+        let gap = count_gap(scale as f32);
+        let parts = count_parts(lead.map(str::to_owned), (added, removed));
         let widths: Vec<f32> = parts
             .iter()
             .map(|(t, _)| self.mixed_width(t, size, scale))
@@ -3874,8 +4056,9 @@ impl Painter {
         let total = widths.iter().sum::<f32>() + gap * parts.len().saturating_sub(1) as f32;
         let left = (right - total).round();
         let mut x = left;
-        for ((text, color), w) in parts.iter().zip(widths) {
-            self.mixed_text(c, text, size, x, f32::MAX, band, scale, *color);
+        for ((text, tone), w) in parts.iter().zip(widths) {
+            let color = tone_color(*tone, p);
+            self.mixed_text(c, text, size, x, f32::MAX, band, scale, color);
             x += w + gap;
         }
         left
@@ -4843,6 +5026,9 @@ mod tests {
             behind: 0,
             no_upstream: false,
             stashes: 0,
+            files: 0,
+            added: 0,
+            removed: 0,
             chip: None,
             state: LineState::Settled,
         }
@@ -4855,7 +5041,21 @@ mod tests {
             path: path.into(),
             conflicted: code == 'U',
             depth: 0,
+            added: 0,
+            removed: 0,
         })
+    }
+
+    /// File line `line` with `(added, removed)` lines.
+    fn counted(line: TreeLine, (added, removed): (usize, usize)) -> TreeLine {
+        match line {
+            TreeLine::File(f) => TreeLine::File(FileLine {
+                added,
+                removed,
+                ..f
+            }),
+            line => line,
+        }
     }
 
     fn hint(button: ReposButton, key: &str, disabled: Option<&str>) -> Hint {
@@ -4897,10 +5097,13 @@ mod tests {
                 expanded: Some(true),
                 dirty: true,
                 ahead: 2,
+                files: 3,
+                added: 15,
+                removed: 1,
                 ..repo("gerdr", Some("feat/x"))
             }),
-            file('M', "src/git.rs", Check::On),
-            file('?', "notes.md", Check::Off),
+            counted(file('M', "src/git.rs", Check::On), (2, 1)),
+            counted(file('?', "notes.md", Check::Off), (13, 0)),
             file(
                 'R',
                 "src/old/name.rs → src/chrome/a/rather/long/path/to/the/new_name.rs",
@@ -4921,6 +5124,9 @@ mod tests {
                 check: Check::On,
                 expanded: Some(false),
                 behind: 1,
+                files: 4,
+                added: 20,
+                removed: 7,
                 ..repo("zed-ext", Some("main"))
             }),
             TreeLine::Repo(RepoLine {
@@ -4942,6 +5148,11 @@ mod tests {
                 behind: 3,
                 ..repo("infra", Some("feat/x"))
             }),
+            TreeLine::Clean(CleanLine {
+                open: true,
+                count: 1,
+            }),
+            TreeLine::Repo(repo("docs", Some("main"))),
         ];
         let total = lines.len() + 12;
         ReposView {
@@ -5272,7 +5483,8 @@ mod tests {
             focused: true,
         });
         let mut found = vec![Vec::new(); view.detail.rows.len()];
-        found[0] = vec![(4..7, false)];
+        // "git.rs", then "src".
+        found[0] = vec![(0..3, false)];
         found[1] = vec![(7..13, false)];
         found[3] = vec![(14..17, true)];
         found[4] = vec![(14..17, false), (60..90, false)];
@@ -5517,7 +5729,10 @@ mod tests {
                 let hit = |r: Rect| repos_hit(&l, centre(r));
                 assert_eq!(hit(l.branch), Some(ReposHit::BranchButton));
                 for (i, (line, check, expander)) in l.lines.iter().enumerate() {
-                    assert_eq!(hit(*check), Some(ReposHit::Check(i)));
+                    // The heading has no checkbox.
+                    if check.size.w > 0 {
+                        assert_eq!(hit(*check), Some(ReposHit::Check(i)));
+                    }
                     if let Some(e) = expander {
                         assert_eq!(hit(*e), Some(ReposHit::Expander(i)));
                     }
@@ -5612,7 +5827,7 @@ mod tests {
         assert!(marks.contains(&(stashed, RepoMark::Stashes)), "{marks:?}");
         let note = |repo: &RepoLine| {
             let width = |text: &str, _: f32| text.chars().count() as f32 * 6.0;
-            let spans = line_spans(repo, (0.0, 1000.0), 8.0, 1.0, &width);
+            let spans = line_spans(repo, (0.0, 1000.0), 8.0, 1.0, (&width, &width));
             let mark = spans.marks.iter().find(|m| m.mark == RepoMark::Stashes);
             (spans.no_upstream, mark.map(|m| (m.x, m.end)))
         };

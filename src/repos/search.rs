@@ -12,7 +12,7 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use super::{Ctx, DiffRow, Focus, Outcome, Panel, action_key, move_to};
 use crate::{
-    chrome::{DetailTab, ReposButton, SearchBar, SearchPart},
+    chrome::{self, DetailTab, ReposButton, SearchBar, SearchPart},
     find,
     text_field::{Edit, TextField},
 };
@@ -51,7 +51,7 @@ struct Hit {
 /// What a place is found in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Within {
-    /// The file's path, as its header shows it.
+    /// The file's path, as its header shows it (`path_text`).
     Path,
     /// What hunk `h` is in, on the line over it.
     Context(usize),
@@ -59,12 +59,21 @@ enum Within {
     Line(usize, usize),
 }
 
-/// A file header's text: its path, after what a rename was called.
+/// A file header's path: after what a rename was called.
 pub(super) fn shown_path(file: &crate::diff::FileDiff) -> String {
     match &file.orig {
         Some(orig) => format!("{orig} → {}", file.path),
         None => file.path.clone(),
     }
+}
+
+/// What the search looks in on a file's header, as it shows it: its
+/// name, then on a line of its own (which nothing typed matches across)
+/// its folder and where it was renamed from.
+fn path_text(file: &crate::diff::FileDiff) -> String {
+    let shown = shown_path(file);
+    let (name, rest) = chrome::name_first(&shown);
+    format!("{name}\n{rest}")
 }
 
 impl Hit {
@@ -317,7 +326,7 @@ impl Panel {
                         tick: row.unwrap_or(head),
                     }));
                 };
-                add(Within::Path, &shown_path(file));
+                add(Within::Path, &path_text(file));
                 for (h, hunk) in file.hunks.iter().enumerate() {
                     if !hunk.context.is_empty() {
                         add(Within::Context(h), &hunk.context);
