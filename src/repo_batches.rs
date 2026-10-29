@@ -765,12 +765,15 @@ impl Gerdr {
             tree_share,
             cols,
         };
+        let mut drags = false;
         let outcome = panel.as_mut().and_then(|p| {
             if let (ReposHit::DiffRow(i), true, false) = (hit, shift, double) {
                 p.extend_detail_row(i, &ctx);
+                drags = p.drags_rows();
                 return None;
             }
             let outcome = p.click(hit, &ctx);
+            drags = matches!(hit, ReposHit::DiffRow(_)) && !double && p.drags_rows();
             match hit {
                 ReposHit::Line(i) if double && p.is_file_line(i, &ctx) => {
                     p.press(ReposButton::OpenInZed, &ctx)
@@ -779,6 +782,8 @@ impl Gerdr {
                 _ => outcome,
             }
         });
+        // Held, the press drags the cursor's range on.
+        self.repos_rows_drag = drags;
         self.repos_detail();
         self.repos_save_review();
         if let Some(outcome) = outcome {
@@ -870,6 +875,61 @@ impl Gerdr {
     pub fn repos_drag_to(&mut self, pos: Point<f64, Logical>) {
         let share = chrome::repos_share_at(pos.x, self.output_size());
         self.repos.tree_share = Some(share);
+    }
+
+    /// The pointer dragged to `pos` from a press on the diff: the
+    /// cursor's range reaches the row under it, the diff scrolling a row
+    /// on when it is above or below the rows.
+    pub fn repos_drag_rows(&mut self, pos: Point<f64, Logical>) {
+        let Some(view) = self.repos_view() else {
+            self.repos_rows_drag = false;
+            return;
+        };
+        let layout = chrome::repos_layout(&view, self.output_size());
+        let list = layout.detail_list;
+        let by = if pos.y < list.loc.y as f64 {
+            -1
+        } else if pos.y >= (list.loc.y + list.size.h) as f64 {
+            1
+        } else {
+            0
+        };
+        let row = layout
+            .detail_rows
+            .iter()
+            .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y));
+        let page = self.repos_page();
+        let (density, tree_share, cols) = self.repos_env();
+        let Repos {
+            panel,
+            batch,
+            items,
+            same_branches,
+            top_branches,
+            fetches,
+            ..
+        } = &mut self.repos;
+        let ctx = Ctx {
+            items,
+            batch: batch.as_ref(),
+            page,
+            now: SystemTime::now(),
+            fetching: *fetches > 0,
+            same: same_branches,
+            top: top_branches,
+            density,
+            tree_share,
+            cols,
+        };
+        let Some(p) = panel.as_mut() else {
+            return;
+        };
+        match (by, row) {
+            (0, Some(i)) => p.extend_detail_row(i, &ctx),
+            (0, None) => {}
+            (by, _) => p.drag_past_rows(by, &ctx),
+        }
+        self.repos_detail();
     }
 
     /// The pointer moved while the panel is open.

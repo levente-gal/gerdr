@@ -99,6 +99,12 @@ const DIFF_INSET: i32 = 8;
 const DIFF_BAR: i32 = 3;
 /// A review comment's text, in from its card's edge.
 const COMMENT_INDENT: i32 = 12;
+/// A button on a diff row: its padding, the gap before its key, the gap
+/// between two, and how far in from the row's ends and edges it sits.
+const ROW_CHIP_PAD: i32 = 8;
+const ROW_CHIP_KEY_GAP: i32 = 6;
+const ROW_CHIP_GAP: i32 = 4;
+const ROW_CHIP_INSET: i32 = 2;
 /// How strongly an added or removed line is tinted, and its changed
 /// words.
 const DIFF_TINT: f32 = 0.10;
@@ -370,6 +376,11 @@ pub struct DetailView {
     /// How each of `rows` is marked: the diff's cursor, the range it
     /// reaches back to, a comment on it. Empty for none.
     pub marks: Vec<RowMark>,
+    /// Actions at the right of the title row (copying the review), and
+    /// on rows of `rows` by index (commenting on the lines picked, the
+    /// comment being written kept or dropped), right-aligned on them.
+    pub title_buttons: Vec<Hint>,
+    pub row_buttons: Vec<(usize, Hint)>,
     /// The part of the first row scrolled (under the pinned header, if
     /// any) past, 0 to 1; with some, `rows` has one more under the pane,
     /// shown in part.
@@ -394,10 +405,12 @@ pub enum DetailTab {
 /// How a row of the diff is marked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowMark {
-    /// The cursor is on it.
-    pub cursor: bool,
-    /// Between the cursor and where its range reaches back to.
-    pub range: bool,
+    /// The cursor is on it, or it is between the cursor and where its
+    /// range reaches back to: the rows lit and outlined as one.
+    pub selected: bool,
+    /// The first of those rows and the last: the outline closes there.
+    pub top: bool,
+    pub bottom: bool,
     /// A comment is on it.
     pub noted: bool,
 }
@@ -544,6 +557,12 @@ pub enum ReposButton {
     /// (asked first, on a sheet).
     CopyReview,
     ClearReview,
+    /// A comment on the diff lines picked; the comment being written
+    /// kept, dropped, or (one written before) deleted.
+    Comment,
+    SaveComment,
+    DiscardComment,
+    DeleteComment,
 }
 
 impl ReposButton {
@@ -585,6 +604,10 @@ impl ReposButton {
             ReposButton::EditName => "Edit name",
             ReposButton::CopyReview => "Copy review",
             ReposButton::ClearReview => "Clear review",
+            ReposButton::Comment => "Comment",
+            ReposButton::SaveComment => "Save",
+            ReposButton::DiscardComment => "Discard",
+            ReposButton::DeleteComment => "Delete",
         }
     }
 }
@@ -802,6 +825,10 @@ pub struct ReposLayout {
     pub detail_list: Rect,
     pub detail_checks: Vec<(usize, Rect)>,
     pub detail_folds: Vec<(usize, Rect)>,
+    /// The buttons of the detail's title row, and of its rows by index
+    /// into `detail_rows`.
+    pub detail_title_buttons: Vec<(ReposButton, Rect)>,
+    pub detail_row_buttons: Vec<(usize, ReposButton, Rect)>,
     pub field: Rect,
     pub result: Option<Rect>,
     /// The result bar's buttons, the footer's, and the sheet's.
@@ -881,6 +908,21 @@ fn hint_width(hint: &Hint) -> i32 {
         + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR)
         + HINT_KEY_GAP
         + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
+}
+
+/// The detail's title row buttons and its rows', as laid out.
+type DetailButtons<'a> = (
+    &'a [(ReposButton, Rect)],
+    &'a [(usize, ReposButton, Rect)],
+);
+
+/// How wide a button on a diff row is: its label, then its key muted.
+fn row_chip_width(hint: &Hint) -> i32 {
+    let key = match hint.key.is_empty() {
+        true => 0,
+        false => ROW_CHIP_KEY_GAP + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR),
+    };
+    2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR) + key
 }
 
 /// What the footer's "more" button says with `n` actions behind it.
@@ -1180,6 +1222,44 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             (detail.size.w, bottom - top).into(),
         )
     };
+    // The title row's buttons left of the tabs, the rows' at their right,
+    // each right-aligned in order; none on a title too narrow for them.
+    let mut detail_title_buttons = Vec::new();
+    let mut right = tabs_x - REPOS_TAB_GAP * 2;
+    for hint in view.detail.title_buttons.iter().rev() {
+        let bw = hint_width(hint);
+        right -= bw;
+        if right < detail.loc.x + detail.size.w / 3 {
+            break;
+        }
+        let rect = Rectangle::new((right, tab_y).into(), (bw, ROW_BUTTON).into());
+        detail_title_buttons.push((hint.button, rect));
+        right -= REPOS_BUTTON_GAP;
+    }
+    detail_title_buttons.reverse();
+    let mut detail_row_buttons = Vec::new();
+    let mut ends: Vec<(usize, i32)> = Vec::new();
+    for (i, hint) in view.detail.row_buttons.iter().rev() {
+        let Some(row) = detail_rows.get(*i) else {
+            continue;
+        };
+        let end = match ends.iter_mut().find(|(j, _)| j == i) {
+            Some((_, end)) => end,
+            None => {
+                ends.push((*i, row.loc.x + row.size.w - ROW_CHIP_INSET));
+                &mut ends.last_mut().expect("just pushed").1
+            }
+        };
+        let bw = row_chip_width(hint);
+        *end -= bw;
+        let rect = Rectangle::new(
+            (*end, row.loc.y + ROW_CHIP_INSET).into(),
+            (bw, (row.size.h - 2 * ROW_CHIP_INSET).max(1)).into(),
+        );
+        detail_row_buttons.push((*i, hint.button, rect));
+        *end -= ROW_CHIP_GAP;
+    }
+    detail_row_buttons.reverse();
 
     // The result bar's buttons, right-aligned.
     let mut result_buttons = Vec::new();
@@ -1376,6 +1456,8 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             detail_list,
             detail_checks,
             detail_folds,
+            detail_title_buttons,
+            detail_row_buttons,
             field,
             result,
             buttons,
@@ -1531,6 +1613,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     if let Some((tab, _)) = layout.detail_tabs.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::DetailTab(*tab));
     }
+    if let Some((button, _)) = layout.detail_title_buttons.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::Button(*button));
+    }
     // A scrolled pane's rows count only where they show, but for the
     // header pinned above them.
     let list = layout.detail_list;
@@ -1541,6 +1626,13 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
                 .get(i)
                 .is_some_and(|r| r.loc.y + r.size.h <= list.loc.y)
     };
+    let row_button = layout
+        .detail_row_buttons
+        .iter()
+        .find(|(i, _, r)| at(r) && shown(*i));
+    if let Some((_, button, _)) = row_button {
+        return Some(ReposHit::Button(*button));
+    }
     if let Some((i, _)) = layout.detail_folds.iter().find(|(i, r)| at(r) && shown(*i)) {
         return Some(ReposHit::DiffFold(*i));
     }
@@ -1928,7 +2020,18 @@ impl Painter {
             .collect();
         let rows: Vec<Rect> = layout.detail_rows.iter().map(|r| shift(*r)).collect();
         let body = (shift(parts.body), shift(layout.detail_list), &rows[..]);
-        self.detail_pane(&mut c, view, detail, body, &tabs, scale, p);
+        let title_buttons: Vec<_> = layout
+            .detail_title_buttons
+            .iter()
+            .map(|&(b, r)| (b, shift(r)))
+            .collect();
+        let row_buttons: Vec<_> = layout
+            .detail_row_buttons
+            .iter()
+            .map(|&(i, b, r)| (i, b, shift(r)))
+            .collect();
+        let buttons = (&title_buttons[..], &row_buttons[..]);
+        self.detail_pane(&mut c, view, detail, body, &tabs, buttons, scale, p);
 
         // The field, what went wrong, the result bar and the footer.
         let field = shift(layout.field);
@@ -2272,9 +2375,10 @@ impl Painter {
         }
     }
 
-    /// The detail pane in `rect`: its title and tabs, then its lines in
-    /// `body` in the monospace font, added and removed ones on a tint:
-    /// each in its rect of `rows`, the scrolled ones cut to `list`.
+    /// The detail pane in `rect`: its title, its buttons and tabs, then
+    /// its lines in `body` in the monospace font, added and removed ones
+    /// on a tint: each in its rect of `rows`, the scrolled ones cut to
+    /// `list`, with their buttons.
     #[allow(clippy::too_many_arguments)]
     fn detail_pane(
         &self,
@@ -2283,6 +2387,7 @@ impl Painter {
         rect: Rect,
         (body, list, rows): (Rect, Rect, &[Rect]),
         tabs: &[(DetailTab, Rect)],
+        (title_buttons, row_buttons): DetailButtons,
         scale: f64,
         p: &Palette,
     ) {
@@ -2291,7 +2396,8 @@ impl Painter {
         let title = Rectangle::new(rect.loc, (rect.size.w, REPOS_DETAIL_TITLE).into());
         let (x, mut right) = phys(title, scale);
         let x = x + px(HELP_PADDING) as f32;
-        if let Some((_, first)) = tabs.first() {
+        let first = title_buttons.first().map(|(_, r)| r).or(tabs.first().map(|(_, r)| r));
+        if let Some(first) = first {
             right = px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round();
         }
         self.mixed_text(
@@ -2306,6 +2412,12 @@ impl Painter {
         );
         for &(tab, rect) in tabs {
             self.tab_segment(c, view, tab, rect, scale, p);
+        }
+        for &(button, rect) in title_buttons {
+            if let Some(hint) = view.detail.title_buttons.iter().find(|h| h.button == button) {
+                let hit = ReposHit::Button(button);
+                self.hint_button(c, view, hint, hit, rect, scale, p);
+            }
         }
         let border = px(1).max(1);
         c.fill(
@@ -2330,10 +2442,12 @@ impl Painter {
         c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
             for (i, (at, row)) in shown.clone().skip(pinned) {
                 self.detail_row(c, view, i, row, *at, tint, scale, p);
+                self.row_chips(c, view, i, row_buttons, scale, p);
             }
         });
         for (i, (at, row)) in shown.take(pinned) {
             self.detail_row(c, view, i, row, *at, tint, scale, p);
+            self.row_chips(c, view, i, row_buttons, scale, p);
         }
         // The header pinned at the top casts a shadow on what scrolls under.
         if view.detail.sticky && !rows.is_empty() {
@@ -2391,9 +2505,11 @@ impl Painter {
         let gap = (FIELD_GAP as f32 * s).round();
         let inset = px(DIFF_INSET) as f32;
         let across = |c: &mut Canvas, color: Rgb| c.fill(tint_x, y, tint_end - tint_x, h, color);
-        // The cursor's row and the range it reaches back to, lit.
+        // The cursor's row and the range it reaches back to, lit as one;
+        // not a file's header, pinned or not, which shows its own.
         let mark = view.detail.marks.get(i).copied().unwrap_or_default();
-        let lit = (mark.cursor || mark.range).then_some(if mark.cursor { 0.55 } else { 0.45 });
+        let picked = mark.selected && !matches!(row, DetailRow::File(_));
+        let lit = picked.then_some(0.5);
         if let Some(amount) = lit
             && matches!(
                 row,
@@ -2727,15 +2843,80 @@ impl Painter {
                 }
             }
         }
-        // The cursor's row outlined, a bar at its left.
-        if mark.cursor && !matches!(row, DetailRow::File(_)) {
+        // The rows picked outlined as one, a bar down their left.
+        if picked {
             let color = if view.detail.focused {
                 p.accent
             } else {
                 p.muted
             };
-            c.outline(tint_x, y, tint_end - tint_x, h, border, color);
+            let w = tint_end - tint_x;
             c.fill(tint_x, y, px(DIFF_BAR), h, color);
+            c.fill(tint_end - border, y, border, h, color);
+            if mark.top {
+                c.fill(tint_x, y, w, border, color);
+            }
+            if mark.bottom {
+                c.fill(tint_x, y + h - border, w, border, color);
+            }
+        }
+    }
+
+    /// The buttons on row `i` of the detail, of those in `buttons`: the
+    /// first of them (keeping the comment written, writing one) in the
+    /// accent, the others plain; lighter under the pointer, with their
+    /// key muted after their label.
+    fn row_chips(
+        &self,
+        c: &mut Canvas,
+        view: &ReposView,
+        i: usize,
+        buttons: &[(usize, ReposButton, Rect)],
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let hints = view.detail.row_buttons.iter().filter(|(j, _)| *j == i);
+        for (k, (_, hint)) in hints.enumerate() {
+            let Some(&(.., rect)) = buttons
+                .iter()
+                .find(|&&(j, b, _)| j == i && b == hint.button)
+            else {
+                continue;
+            };
+            let (x, y, w, h) = rect_px(rect, scale);
+            let r = (h / 2.0).min(BUTTON_RADIUS * s);
+            let b = s.round().max(1.0);
+            let hovered = view.hover == Some(ReposHit::Button(hint.button));
+            let (fill, label, key) = if k == 0 {
+                let fill = if hovered { mix(p.accent, p.on_accent, 0.15) } else { p.accent };
+                (fill, p.on_accent, mix(p.accent, p.on_accent, 0.7))
+            } else {
+                let fill = if hovered { p.selected } else { p.element };
+                c.rounded(x, y, w, h, r, p.border);
+                (fill, p.text, p.muted)
+            };
+            if k == 0 {
+                c.rounded(x, y, w, h, r, fill);
+            } else {
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+            }
+            let chip_band = band(rect, scale);
+            let tx = x + (ROW_CHIP_PAD as f32 * s).round();
+            let end = self.mixed_text(
+                c,
+                &hint.label,
+                SMALL_FONT_SIZE,
+                tx,
+                x + w,
+                chip_band,
+                scale,
+                label,
+            );
+            if !hint.key.is_empty() {
+                let kx = end + (ROW_CHIP_KEY_GAP as f32 * s).round();
+                self.mixed_text(c, &hint.key, KEY_FONT_SIZE, kx, x + w, chip_band, scale, key);
+            }
         }
     }
 
@@ -3528,6 +3709,7 @@ mod tests {
                         first: true,
                         last: true,
                     },
+                    DetailRow::Note("Shift+Enter breaks the line".into()),
                     DetailRow::Note("Binary file".into()),
                     DetailRow::Text(detail_line("", DiffTone::Plain)),
                     DetailRow::Repo(DiffRepo {
@@ -3557,11 +3739,19 @@ mod tests {
                 sticky: true,
                 marks: (0..16)
                     .map(|i| RowMark {
-                        cursor: i == 4,
-                        range: i == 3,
+                        selected: (2..=4).contains(&i),
+                        top: i == 2,
+                        bottom: i == 4,
                         noted: i == 4,
                     })
                     .collect(),
+                title_buttons: vec![hint(CopyReview, "", None)],
+                row_buttons: vec![
+                    (4, hint(Comment, "C", None)),
+                    (9, hint(SaveComment, "Enter", None)),
+                    (9, hint(DiscardComment, "Esc", None)),
+                    (9, hint(DeleteComment, "", None)),
+                ],
                 part: 0.0,
                 first: 3,
                 total: 40,

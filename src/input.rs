@@ -399,6 +399,7 @@ impl Gerdr {
 
                 if state == ButtonState::Released {
                     self.field_drag = false;
+                    self.repos_rows_drag = false;
                 }
                 if state == ButtonState::Released && self.drag.take().is_some() {
                     // The final size, without Resizing, so every client applies it.
@@ -932,6 +933,9 @@ impl Gerdr {
         }
         if self.field_drag {
             self.drag_field(pos);
+        }
+        if self.repos_rows_drag {
+            self.repos_drag_rows(pos);
         }
         // An overlay takes the hover from everything under it.
         let overlay = self.quit.is_some()
