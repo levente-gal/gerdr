@@ -258,6 +258,11 @@ pub struct Switcher {
 }
 
 impl Switcher {
+    /// Stop the list flung; whether it was.
+    pub fn stop_fling(&mut self) -> bool {
+        self.scroll.stop_fling()
+    }
+
     fn new(items: Vec<Item>, run: bool, place: Place) -> Self {
         static OPENED: AtomicU64 = AtomicU64::new(0);
         let mut switcher = Self {

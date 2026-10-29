@@ -157,6 +157,15 @@ impl Scroll {
         }
     }
 
+    /// Stop a fling where the list stands; whether one was going.
+    pub fn stop_fling(&mut self) -> bool {
+        let flung = matches!(self.moving, Some(Moving::Fling { .. }));
+        if flung {
+            self.moving = None;
+        }
+        flung
+    }
+
     /// Glide to `pos` from `now`, as a notch would: the list was asked to
     /// show something (the active workspace, say) without a jump.
     pub fn glide_to(&mut self, pos: f64, now: Instant, b: Bounds) {
@@ -611,6 +620,25 @@ mod tests {
         assert!(s.moving(t));
         run(&mut s, t, 400, rows(10.0));
         assert_eq!(s.pos(), 4.0);
+    }
+
+    #[test]
+    fn a_fling_stops_where_the_list_stands() {
+        let (mut s, t) = (Scroll::default(), Instant::now());
+        let b = rows(100.0);
+        let now = swipe(&mut s, t, 0, 16.0, 10, b);
+        s.apply(Motion::Lift { time: 80 }, now, b);
+        let at = run(&mut s, now, 100, b);
+        let pos = s.pos();
+        assert!(s.stop_fling());
+        assert!(!s.moving(at));
+        run(&mut s, at, 500, b);
+        assert_eq!(s.pos(), pos);
+        // Nothing flung, nothing stopped: a glide goes on.
+        assert!(!s.stop_fling());
+        s.apply(Motion::Notches(1.0), at, b);
+        assert!(!s.stop_fling());
+        assert!(s.moving(at));
     }
 
     #[test]

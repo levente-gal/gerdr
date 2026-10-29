@@ -820,6 +820,11 @@ fn cycle(at: Option<usize>, n: usize, back: bool) -> Option<usize> {
 }
 
 impl Panel {
+    /// Stop the list flung; whether it was.
+    pub fn stop_fling(&mut self) -> bool {
+        self.scroll.stop_fling()
+    }
+
     /// A panel opening on `focus`'s first item, else the first.
     pub fn new(focus: Option<Section>) -> Self {
         Panel {

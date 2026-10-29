@@ -441,6 +441,11 @@ impl Gerdr {
                     }
                     return;
                 }
+                // A press while a list is flung stops it where it is, and
+                // does nothing else: what is under the pointer was moving.
+                if state == ButtonState::Pressed && !pointer.is_grabbed() && self.stop_flings() {
+                    return;
+                }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
                     let button = event.button_code();
                     let taken = self.press(location, button);
