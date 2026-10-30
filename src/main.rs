@@ -4480,21 +4480,31 @@ impl Gerdr {
     }
 
     /// Show `window`, not one gerdr started, in the shown project: split
-    /// the focused pane of the current tab along its longer side. It may be
-    /// another window of an app kept running (see `Pane::window_of`).
+    /// the focused pane of the current tab along its longer side. Another
+    /// window of an app kept running (see `Pane::window_of`) goes where the
+    /// app is instead (see `kept_window_place`).
     fn place_stray(&mut self, window: Window, stray: bool, window_of: Option<String>) {
-        if self.workspaces.is_empty() {
-            let ws = self.new_workspace(home_dir().unwrap_or_default(), WorkspaceKind::Project);
-            self.workspaces.push(ws);
-            self.active_workspace = 0;
-        }
-        let w = self.active_workspace;
-        let ws = &mut self.workspaces[w];
-        if ws.tabs.is_empty() {
-            ws.tabs.push(Tab::default());
-            ws.active_tab = 0;
-        }
-        let t = ws.active_tab;
+        let kept = window_of
+            .as_deref()
+            .and_then(|command| self.kept_window_place(command));
+        let (w, t) = match kept {
+            Some(place) => place,
+            None => {
+                if self.workspaces.is_empty() {
+                    let ws =
+                        self.new_workspace(home_dir().unwrap_or_default(), WorkspaceKind::Project);
+                    self.workspaces.push(ws);
+                    self.active_workspace = 0;
+                }
+                let w = self.active_workspace;
+                let ws = &mut self.workspaces[w];
+                if ws.tabs.is_empty() {
+                    ws.tabs.push(Tab::default());
+                    ws.active_tab = 0;
+                }
+                (w, ws.active_tab)
+            }
+        };
         let id = self.new_split(w, t);
         let pane = Pane {
             id,

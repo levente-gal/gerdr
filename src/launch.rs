@@ -221,26 +221,31 @@ impl Gerdr {
     /// (see `vs_code_of`), or waits for its window: its workspace, tab and
     /// leaf. A second one would only open an editor window of the same copy
     /// (for Cursor, not its Agents window), so a project keeps one. Another
-    /// window of a kept one counts once shown (see `Pane::window_of`).
+    /// window of a kept one counts once shown (see `Pane::window_of`), after
+    /// its own window.
     fn running_vs_code(&self, command: &str) -> Option<(usize, usize, u32)> {
         let key = vs_code_of(command)?;
         let same = |c: Option<&str>| c.and_then(vs_code_of).as_ref() == Some(&key);
-        self.workspaces.iter().enumerate().find_map(|(w, ws)| {
-            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
-                let shown = tab
-                    .panes
+        let find = |leaf: &dyn Fn(&Tab) -> Option<u32>| {
+            self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+                ws.tabs
                     .iter()
-                    .find(|p| same(p.app_command.as_deref().or(p.window_of.as_deref())))
-                    .map(|p| p.id);
-                let waiting = || {
-                    tab.expected
-                        .iter()
-                        .find(|e| same(e.app_command.as_deref()))
-                        .map(|e| e.pane)
-                };
-                Some((w, t, shown.or_else(waiting)?))
+                    .enumerate()
+                    .find_map(|(t, tab)| Some((w, t, leaf(tab)?)))
+            })
+        };
+        let pane = |tab: &Tab, of: &dyn Fn(&crate::Pane) -> Option<&str>| {
+            tab.panes.iter().find(|p| same(of(p))).map(|p| p.id)
+        };
+        find(&|tab| {
+            pane(tab, &|p| p.app_command.as_deref()).or_else(|| {
+                tab.expected
+                    .iter()
+                    .find(|e| same(e.app_command.as_deref()))
+                    .map(|e| e.pane)
             })
         })
+        .or_else(|| find(&|tab| pane(tab, &|p| p.window_of.as_deref())))
     }
 
     /// Show the shown project's Cursor, else start `command` (the installed
@@ -255,24 +260,7 @@ impl Gerdr {
         if let Some((w, t, leaf)) = self.running_vs_code(&command) {
             return self.show_leaf(w, t, leaf);
         }
-        let existing = self
-            .workspaces
-            .iter()
-            .position(|ws| ws.kind == WorkspaceKind::Cursor);
-        let w = existing.unwrap_or_else(|| {
-            let dir = self
-                .project
-                .as_deref()
-                .and_then(|id| self.projects.project(id))
-                .map(hooks::project_dir)
-                .or_else(home_dir)
-                .unwrap_or_default();
-            let mut ws = Workspace::new(dir, WorkspaceKind::Cursor);
-            ws.name = CURSOR_WORKSPACE.to_owned();
-            ws.record = self.remember_workspace(&ws.name, ws.kind, &ws.dir, None);
-            self.workspaces.push(ws);
-            self.workspaces.len() - 1
-        });
+        let (w, existing) = self.cursor_workspace();
         let record = self.workspaces[w].record.clone();
         let ws = &mut self.workspaces[w];
         ws.tabs.push(Tab::default());
@@ -280,12 +268,71 @@ impl Gerdr {
         self.active_workspace = w;
         let t = ws.active_tab;
         if self.launch_into(w, t, None, &command).is_none()
-            && existing.is_none()
+            && !existing
             && self.workspaces.iter().all(|ws| ws.record != record)
         {
             self.forget_workspace(&record);
         }
         self.show_active();
+    }
+
+    /// The project's Cursor workspace, made in the project's folder if it
+    /// has none, and whether it was there already.
+    fn cursor_workspace(&mut self) -> (usize, bool) {
+        if let Some(w) = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.kind == WorkspaceKind::Cursor)
+        {
+            return (w, true);
+        }
+        let dir = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id))
+            .map(hooks::project_dir)
+            .or_else(home_dir)
+            .unwrap_or_default();
+        let mut ws = Workspace::new(dir, WorkspaceKind::Cursor);
+        ws.name = CURSOR_WORKSPACE.to_owned();
+        ws.record = self.remember_workspace(&ws.name, ws.kind, &ws.dir, None);
+        self.workspaces.push(ws);
+        (self.workspaces.len() - 1, false)
+    }
+
+    /// The workspace and tab for another window of the kept app `command`
+    /// that no leaf waits for (see `Pane::window_of`), such as the Agents
+    /// window a chat link opens: beside a window of the app shown, else,
+    /// for Cursor, a new tab of its workspace (see `open_cursor`). `None`
+    /// for the shown tab.
+    pub(crate) fn kept_window_place(&mut self, command: &str) -> Option<(usize, usize)> {
+        let program = program_name(command)?;
+        let of_app = |c: Option<&str>| c.and_then(program_name).as_ref() == Some(&program);
+        let own = |p: &crate::Pane| of_app(p.app_command.as_deref());
+        let other = |p: &crate::Pane| of_app(p.window_of.as_deref());
+        let find = |pred: &dyn Fn(&crate::Pane) -> bool, cursor: bool| {
+            self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+                if cursor && ws.kind != WorkspaceKind::Cursor {
+                    return None;
+                }
+                let t = ws.tabs.iter().position(|tab| tab.panes.iter().any(pred))?;
+                Some((w, t))
+            })
+        };
+        if let Some(place) = find(&own, false) {
+            return Some(place);
+        }
+        if program != CURSOR {
+            return find(&other, false);
+        }
+        if let Some(place) = find(&other, true) {
+            return Some(place);
+        }
+        let (w, _) = self.cursor_workspace();
+        let ws = &mut self.workspaces[w];
+        ws.tabs.push(Tab::default());
+        ws.active_tab = ws.tabs.len() - 1;
+        Some((w, ws.active_tab))
     }
 
     /// Start an agent CLI by `command` in a new tab of workspace `w`, in
