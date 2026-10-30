@@ -8,7 +8,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use std::time::Instant;
 
 use crate::{
-    Gerdr, Reorderable,
+    Gerdr, Reorderable, Tab,
     chrome::{self, TabHit, TabLayout, TabStripView, TabView, ThemeMode},
     input::{BTN_LEFT, BTN_MIDDLE},
     layout::Dir,
@@ -81,17 +81,30 @@ pub struct KeyHints {
     pub split_right: Option<String>,
     pub split_down: Option<String>,
     pub run_tab: Option<String>,
+    pub zoom_pane: Option<String>,
 }
 
 /// The menu of tab `t` in workspace `w`. Splitting works on the tab
 /// shown, where `pane` is its focused pane; other tabs show the entries
-/// disabled.
-pub fn tab_menu_items(w: usize, t: usize, pane: Option<u32>, hints: &KeyHints) -> Vec<MenuItem> {
+/// disabled. A tab whose pane `zoomed` fills it can be unzoomed.
+pub fn tab_menu_items(
+    w: usize,
+    t: usize,
+    pane: Option<u32>,
+    zoomed: Option<u32>,
+    hints: &KeyHints,
+) -> Vec<MenuItem> {
     let hinted = |item: MenuItem, hint: &Option<String>| match hint {
         Some(hint) => item.hint(hint),
         None => item,
     };
-    vec![
+    let unzoom = zoomed.map(|id| {
+        hinted(
+            MenuItem::new("Unzoom pane", MenuAction::ZoomPane(id)),
+            &hints.zoom_pane,
+        )
+    });
+    let mut items = vec![
         hinted(
             MenuItem::new("New tab", MenuAction::NewTab(w)),
             &hints.new_tab,
@@ -113,11 +126,13 @@ pub fn tab_menu_items(w: usize, t: usize, pane: Option<u32>, hints: &KeyHints) -
             .enabled(pane.is_some()),
             &hints.split_down,
         ),
-        hinted(
-            MenuItem::new("Close tab", MenuAction::CloseTab(w, t)),
-            &hints.close_tab,
-        ),
-    ]
+    ];
+    items.extend(unzoom);
+    items.push(hinted(
+        MenuItem::new("Close tab", MenuAction::CloseTab(w, t)),
+        &hints.close_tab,
+    ));
+    items
 }
 
 /// The menu under the "+" of workspace `w`: a new terminal tab, the run
@@ -278,6 +293,7 @@ impl Gerdr {
             split_right: key("split pane right / down", 0).or_else(|| key("split pane right", 0)),
             split_down: key("split pane right / down", 1).or_else(|| key("split pane down", 0)),
             run_tab: key("run an app in a new tab", 0),
+            zoom_pane: key("zoom pane to fill the tab, or unzoom", 0),
         }
     }
 
@@ -302,7 +318,8 @@ impl Gerdr {
     /// end cycles the theme mode.
     pub(crate) fn tab_strip_press(&mut self, x: i32, y: i32, button: u32) {
         let view = self.tab_strip_view();
-        let hit = self.tab_strip_layout(&view).hit(x, y);
+        let size = self.tab_strip_rect().size;
+        let hit = chrome::tab_strip_hit(&view, size, (x, y).into());
         match (button, hit) {
             (BTN_LEFT, Some(TabHit::Toggle)) => self.set_theme_mode(next_mode(self.theme_mode)),
             (BTN_LEFT, Some(TabHit::Overflow)) => {
@@ -311,8 +328,14 @@ impl Gerdr {
                 }
             }
             (BTN_LEFT, Some(TabHit::Close(idx)))
-            | (BTN_MIDDLE, Some(TabHit::Tab(idx)))
+            | (BTN_MIDDLE, Some(TabHit::Tab(idx) | TabHit::Unzoom(idx)))
             | (BTN_MIDDLE, Some(TabHit::Close(idx))) => self.close_tab(idx),
+            (BTN_LEFT, Some(TabHit::Unzoom(idx))) => {
+                self.switch_tab(idx);
+                if let Some(id) = self.tab().and_then(Tab::zoomed) {
+                    self.zoom_pane(id);
+                }
+            }
             (BTN_LEFT, Some(TabHit::Tab(idx))) => {
                 self.switch_tab(idx);
                 self.hold(Reorderable::Tab);
@@ -350,6 +373,13 @@ impl Gerdr {
             TabHit::Close(i) => keyed(
                 Tooltip::new("Close tab", anchor(layout.closes[i])),
                 &hints.close_tab,
+            ),
+            TabHit::Unzoom(i) => keyed(
+                Tooltip::new(
+                    "Unzoom pane",
+                    anchor(chrome::tab_zoom_rect(view, &layout, i, strip.size.h)?),
+                ),
+                &hints.zoom_pane,
             ),
             TabHit::Plus => keyed(
                 Tooltip::new("New tab · right click to run an app", anchor(layout.plus)),
@@ -403,13 +433,14 @@ impl Gerdr {
         let hints = self.tab_key_hints();
         let w = self.active_workspace;
         match hit {
-            TabHit::Tab(t) | TabHit::Close(t) => {
+            TabHit::Tab(t) | TabHit::Close(t) | TabHit::Unzoom(t) => {
                 let pane = (t == view.active)
                     .then(|| self.tab()?.focused_id())
                     .flatten();
+                let zoomed = self.workspace()?.tabs.get(t).and_then(Tab::zoomed);
                 Some(MenuSpec {
                     anchor: anchor(layout.tabs[t]),
-                    items: tab_menu_items(w, t, pane, &hints),
+                    items: tab_menu_items(w, t, pane, zoomed, &hints),
                 })
             }
             TabHit::Plus => Some(MenuSpec {
@@ -463,8 +494,9 @@ mod tests {
             split_right: Some("Ctrl+B v".into()),
             split_down: Some("Ctrl+B -".into()),
             run_tab: Some("Ctrl+B Shift+R".into()),
+            zoom_pane: Some("Ctrl+B z".into()),
         };
-        let items = tab_menu_items(1, 2, Some(7), &hints);
+        let items = tab_menu_items(1, 2, Some(7), None, &hints);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -485,9 +517,15 @@ mod tests {
         assert_eq!(items[4].action, MenuAction::CloseTab(1, 2));
         assert!(items.iter().all(|i| i.enabled));
         // A tab not shown can't be split from here.
-        let other = tab_menu_items(1, 0, None, &KeyHints::default());
+        let other = tab_menu_items(1, 0, None, None, &KeyHints::default());
         assert!(!other[2].enabled && !other[3].enabled);
         assert!(other[0].hint.is_none());
+        // A tab with a zoomed pane can be unzoomed, before it is closed.
+        let zoomed = tab_menu_items(1, 2, Some(7), Some(5), &hints);
+        assert_eq!(zoomed[4].label, "Unzoom pane");
+        assert_eq!(zoomed[4].action, MenuAction::ZoomPane(5));
+        assert_eq!(zoomed[4].hint.as_deref(), Some("Ctrl+B z"));
+        assert_eq!(zoomed[5].action, MenuAction::CloseTab(1, 2));
     }
 
     #[test]

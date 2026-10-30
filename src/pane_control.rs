@@ -288,6 +288,8 @@ pub struct BarContent {
     pub other_tabs: Vec<(usize, String)>,
     /// How many panes share the pane's tab. Only the menu fills it in.
     pub pane_count: usize,
+    /// The pane fills its tab, zoomed. Only the menu fills it in.
+    pub zoomed: bool,
 }
 
 /// The process leading what runs in a pane, if not its shell.
@@ -336,6 +338,7 @@ pub fn bar_content(
             buttons: BarButtons::Terminal,
             other_tabs: Vec::new(),
             pane_count: 0,
+            zoomed: false,
         };
     }
     if let Some(leader) = process.and_then(running_leader) {
@@ -352,6 +355,7 @@ pub fn bar_content(
             buttons: BarButtons::Terminal,
             other_tabs: Vec::new(),
             pane_count: 0,
+            zoomed: false,
         };
     }
     if let Some(remembered) = remembered {
@@ -367,6 +371,7 @@ pub fn bar_content(
             buttons: BarButtons::Terminal,
             other_tabs: Vec::new(),
             pane_count: 0,
+            zoomed: false,
         };
     }
     let shell = process
@@ -383,6 +388,7 @@ pub fn bar_content(
         buttons: BarButtons::Terminal,
         other_tabs: Vec::new(),
         pane_count: 0,
+        zoomed: false,
     }
 }
 
@@ -403,6 +409,7 @@ fn app_bar_content(pane: &Pane) -> BarContent {
         buttons: BarButtons::None,
         other_tabs: Vec::new(),
         pane_count: 0,
+        zoomed: false,
     }
 }
 
@@ -604,6 +611,11 @@ const SCROLLBACK_HELP: (&str, &str, usize) = (
 const FLIP_HELP: (&str, &str, usize) = ("flip the pane's split", "flip the pane's split", 0);
 const PANE_TO_NEW_TAB_HELP: (&str, &str, usize) =
     ("move pane to a new tab", "move pane to a new tab", 0);
+const ZOOM_HELP: (&str, &str, usize) = (
+    "zoom pane to fill the tab, or unzoom",
+    "zoom pane to fill the tab, or unzoom",
+    0,
+);
 
 /// The key for `what` (one of the `_HELP` triples), if `help` lists one.
 /// The key for one of the bar's actions, as the help lists it: on its own
@@ -623,6 +635,8 @@ pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
         // The restart key loads a web page again.
         BarButton::Reload => ("Reload", Some(RESTART_HELP)),
         BarButton::CopyUrl => ("Copy URL", None),
+        BarButton::Zoom => ("Zoom pane", Some(ZOOM_HELP)),
+        BarButton::Unzoom => ("Unzoom pane", Some(ZOOM_HELP)),
     };
     let tip = Tooltip::new(text, rect);
     match what.and_then(|what| hint_for(help, what)) {
@@ -659,6 +673,16 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             "Flip split",
             MenuAction::FlipPane(id),
             FLIP_HELP,
+            content.pane_count > 1,
+        ),
+        item(
+            if content.zoomed {
+                "Unzoom pane"
+            } else {
+                "Zoom pane"
+            },
+            MenuAction::ZoomPane(id),
+            ZOOM_HELP,
             content.pane_count > 1,
         ),
         item(
@@ -941,6 +965,7 @@ impl Gerdr {
                     can_back: content.can_back,
                     can_forward: content.can_forward,
                     buttons: content.buttons,
+                    zoom: tab.bar_zoom(id),
                     focused: is_focused,
                     lit: look.visible && full.to_f64().contains(pointer),
                     hover: self
@@ -968,7 +993,8 @@ impl Gerdr {
             .filter(|(id, _)| self.pane_bar_drawn(tab, *id))
             .find_map(|(id, rect)| {
                 let kind = tab.panes.iter().find(|p| p.id == id).map(bar_buttons)?;
-                let hit = chrome::pane_bar_hit(chrome::pane_bar_rects(rect).0, kind, pos)?;
+                let bar = chrome::pane_bar_rects(rect).0;
+                let hit = chrome::pane_bar_hit(bar, kind, tab.bar_zoom(id), pos)?;
                 Some((id, hit))
             })
     }
@@ -986,7 +1012,7 @@ impl Gerdr {
             .into_iter()
             .find(|(pane, _)| *pane == id)?;
         let bar = chrome::pane_bar_rects(rect).0;
-        let (_, rect) = chrome::pane_bar_buttons(bar, kind)
+        let (_, rect) = chrome::pane_bar_buttons(bar, kind, tab.bar_zoom(id))
             .into_iter()
             .find(|(b, _)| *b == button)?;
         Some(button_tooltip(button, rect, &self.keymap.help()))
@@ -1009,6 +1035,7 @@ impl Gerdr {
             .map(|(t, view)| (t, view.title))
             .collect();
         content.pane_count = tab.layout.as_ref().map_or(0, |l| l.leaves().len());
+        content.zoomed = tab.zoomed() == Some(id);
         Some(bar_menu(pos, id, &content, &self.keymap.help()))
     }
 
@@ -1035,6 +1062,7 @@ impl Gerdr {
             BarButton::Reload => WebStep::Reload,
             BarButton::CopyUrl => return self.copy_pane_url(id),
             BarButton::Scrollback => return self.open_scrollback(id),
+            BarButton::Zoom | BarButton::Unzoom => return self.zoom_pane(id),
             BarButton::Restart | BarButton::Stop => {
                 let Some(pane_id) = self.tab().and_then(|tab| tab.herdr_pane(id)) else {
                     return;
@@ -1896,6 +1924,7 @@ mod tests {
                 "Split right",
                 "Split down",
                 "Flip split",
+                "Zoom pane",
                 "Move to new tab",
                 "Move to tab: zsh",
                 "Move to tab: vim notes",
@@ -1912,6 +1941,7 @@ mod tests {
                 &MenuAction::SplitPane(7, Dir::Right),
                 &MenuAction::SplitPane(7, Dir::Down),
                 &MenuAction::FlipPane(7),
+                &MenuAction::ZoomPane(7),
                 &MenuAction::PaneToTab(7, None),
                 &MenuAction::PaneToTab(7, Some(0)),
                 &MenuAction::PaneToTab(7, Some(2)),
@@ -1924,19 +1954,33 @@ mod tests {
         let enabled: Vec<bool> = menu.items.iter().map(|i| i.enabled).collect();
         assert_eq!(
             enabled,
-            [true, true, true, true, true, true, true, false, false, true]
+            [
+                true, true, true, true, true, true, true, true, false, false, true
+            ]
         );
         let hints: Vec<Option<&str>> = menu.items.iter().map(|i| i.hint.as_deref()).collect();
-        assert_eq!(hints[2..4], [Some("Ctrl+B Space"), Some("Ctrl+B !")]);
-        assert_eq!(hints[4..6], [None, None]);
-        assert_eq!(hints[6..8], [Some("Ctrl+B ["), Some("Ctrl+B A")]);
+        assert_eq!(
+            hints[2..5],
+            [Some("Ctrl+B Space"), Some("Ctrl+B Z"), Some("Ctrl+B !")]
+        );
+        assert_eq!(hints[5..7], [None, None]);
+        assert_eq!(hints[7..9], [Some("Ctrl+B ["), Some("Ctrl+B A")]);
         // With a command running: stop; with one exited: restart. A pane
-        // alone in its tab has no split to flip, and no other tab to go to.
+        // alone in its tab has no split to flip, nothing to zoom over, and
+        // no other tab to go to.
         let running = bar_content(Some(&running(9, "npm run dev")), None, None);
         let menu = bar_menu((0.0, 0.0).into(), 1, &running, &help);
-        assert!(!menu.items[2].enabled);
-        assert_eq!(menu.items[5].label, "Restart");
-        assert!(!menu.items[5].enabled && menu.items[6].enabled);
+        assert!(!menu.items[2].enabled && !menu.items[3].enabled);
+        assert_eq!(menu.items[6].label, "Restart");
+        assert!(!menu.items[6].enabled && menu.items[7].enabled);
+        // A zoomed pane's menu unzooms it.
+        let zoomed = BarContent {
+            zoomed: true,
+            ..content
+        };
+        let menu = bar_menu((0.0, 0.0).into(), 7, &zoomed, &help);
+        assert_eq!(menu.items[3].label, "Unzoom pane");
+        assert_eq!(menu.items[3].action, MenuAction::ZoomPane(7));
     }
 
     #[test]
@@ -1950,7 +1994,7 @@ mod tests {
             ..bar_content(None, None, None)
         };
         let menu = bar_menu((0.0, 0.0).into(), 3, &content, &help);
-        let tail: Vec<(&str, &MenuAction, bool)> = menu.items[4..]
+        let tail: Vec<(&str, &MenuAction, bool)> = menu.items[5..]
             .iter()
             .map(|i| (i.label.as_str(), &i.action, i.enabled))
             .collect();
@@ -1965,6 +2009,6 @@ mod tests {
             ]
         );
         // Reload is what the restart key does on a web page.
-        assert_eq!(menu.items[6].hint.as_deref(), Some("Ctrl+B A"));
+        assert_eq!(menu.items[7].hint.as_deref(), Some("Ctrl+B A"));
     }
 }

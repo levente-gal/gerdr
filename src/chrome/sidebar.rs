@@ -3168,6 +3168,7 @@ mod tests {
             restart: None,
             github: false,
             agent: None,
+            zoomed: false,
         };
         let tabs = [
             tab(

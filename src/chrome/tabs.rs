@@ -8,7 +8,7 @@ use super::{
     Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
     Theme, ThemeMode, agent_icon, cross, dot_slot, eye, field_text, icon_sdf, mix, moon, new_tab,
     no_restart, physical, rounded_rect, row_dot, segment, status_dot, status_label, sun,
-    tab_strip_height, tray,
+    tab_strip_height, tray, zoom_corners,
 };
 use crate::agent_icons::AgentIcon;
 use crate::app_icons::github_icon;
@@ -42,6 +42,9 @@ pub struct TabView {
     /// The icon of the agent its status is of: the one in its focused
     /// pane, else the first standing as the tab does.
     pub agent: Option<AgentIcon>,
+    /// One of its panes is zoomed to fill it: it carries a mark that
+    /// unzooms it.
+    pub zoomed: bool,
 }
 
 impl TabView {
@@ -143,6 +146,7 @@ impl TabView {
             restart: None,
             github: false,
             agent,
+            zoomed: false,
         }
     }
 
@@ -309,6 +313,8 @@ pub enum TabHit {
     Tab(usize),
     /// The "×" of tab `i`.
     Close(usize),
+    /// The zoom mark of tab `i`, whose pane fills it.
+    Unzoom(usize),
     /// The "+" button.
     Plus,
     /// The chip saying other workspaces need attention.
@@ -648,7 +654,7 @@ impl Painter {
                 px(rect.loc.x + rect.size.w) - px(rect.loc.x),
             );
             let is_active = i == view.active;
-            let hovered = lit(TabHit::Tab(i)) || lit(TabHit::Close(i));
+            let hovered = lit(TabHit::Tab(i)) || lit(TabHit::Close(i)) || lit(TabHit::Unzoom(i));
             // Like Zed: the active tab opens into the editor below it; a
             // tab under the pointer lifts a little.
             if is_active {
@@ -679,6 +685,22 @@ impl Painter {
                 let dot = tab_dot(*rect, close, size.h);
                 status_dot(&mut c, dot, badge.dot, scale, p);
                 right = right.min(px(dot_slot(tab_dot_line(*rect, close, size.h)).loc.x) as f32);
+            }
+            // A pane fills the tab: its mark, before the dot, unzooms it.
+            if let Some(mark) = tab_zoom_mark(tab, *rect, close, size.h) {
+                if lit(TabHit::Unzoom(i)) {
+                    let behind = if is_active { p.tab_active } else { p.element };
+                    self.pill(&mut c, mark, 4.0, mix(behind, p.selected, alpha), scale);
+                }
+                let color = if lit(TabHit::Unzoom(i)) {
+                    p.text
+                } else {
+                    p.muted
+                };
+                icon_sdf(&mut c, mark, scale, color, |x, y| {
+                    zoom_corners(true, x, y, s)
+                });
+                right = right.min(px(mark.loc.x) as f32);
             }
             // What runs in the tab won't run again after a restart: say so
             // before the "×" and the dot.
@@ -964,6 +986,20 @@ fn tab_dot(rect: Rect, close: Rect, h: i32) -> Rect {
     row_dot(tab_dot_line(rect, close, h))
 }
 
+/// Where the zoom mark of `tab`, at `rect` with its "×" at `close`, goes:
+/// before its dot's place, shown or not, so it stays put. None while no
+/// pane of it is zoomed, or on a tab too narrow for a "×".
+fn tab_zoom_mark(tab: &TabView, rect: Rect, close: Rect, h: i32) -> Option<Rect> {
+    if !tab.zoomed || close.size.w == 0 {
+        return None;
+    }
+    let slot = dot_slot(tab_dot_line(rect, close, h));
+    Some(Rectangle::new(
+        (slot.loc.x - CLOSE, (h - CLOSE) / 2).into(),
+        (CLOSE, CLOSE).into(),
+    ))
+}
+
 /// Where the blinking dots of `view`'s tabs go on its strip, `size` big
 /// (strip coordinates): one per tab at work, but the one being renamed.
 pub fn tab_blinkers(view: &TabStripView, size: Size<i32, Logical>) -> Vec<Rect> {
@@ -991,27 +1027,48 @@ pub fn tab_blinkers(view: &TabStripView, size: Size<i32, Logical>) -> Vec<Rect> 
         .collect()
 }
 
+/// What `pos` (strip coordinates) is over in the strip drawn from `view`,
+/// `size` big: a tab's zoom mark too.
 pub fn tab_strip_hit(
     view: &TabStripView,
     size: Size<i32, Logical>,
     pos: Point<i32, Logical>,
 ) -> Option<TabHit> {
-    tab_layout(
+    let layout = tab_layout(
         view.tabs.len(),
         size,
         view.prefix,
         view.overflow(),
         view.watch.is_some(),
         view.inbox.is_some(),
+    );
+    let hit = layout.hit(pos.x, pos.y)?;
+    if let TabHit::Tab(i) = hit
+        && let Some(mark) = tab_zoom_rect(view, &layout, i, size.h)
+        && mark.contains(pos)
+    {
+        return Some(TabHit::Unzoom(i));
+    }
+    Some(hit)
+}
+
+/// Where the zoom mark of tab `i` of `view`, laid out as `layout` on a
+/// strip `h` high, goes, if it has one.
+pub fn tab_zoom_rect(view: &TabStripView, layout: &TabLayout, i: usize, h: i32) -> Option<Rect> {
+    tab_zoom_mark(
+        view.tabs.get(i)?,
+        *layout.tabs.get(i)?,
+        *layout.closes.get(i)?,
+        h,
     )
-    .hit(pos.x, pos.y)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CHIP_GAP, CLOSE, EDGE, PILL, PLUS_GAP, TAB_MAX_WIDTH, TabHit, TabStripView, TabView,
-        WATCH_WIDTH, tab_blinkers, tab_layout, tab_rename_field, tab_slot,
+        WATCH_WIDTH, tab_blinkers, tab_layout, tab_rename_field, tab_slot, tab_strip_hit,
+        tab_zoom_rect,
     };
     use crate::agent_icons::AgentIcon;
     use crate::chrome::{
@@ -1022,6 +1079,7 @@ mod tests {
     };
     use crate::text_field::Line;
     use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+    use smithay::utils::{Logical, Point};
     use std::path::PathBuf;
 
     fn pane(cwd: Option<&str>, focused: bool) -> PaneState {
@@ -1232,6 +1290,55 @@ mod tests {
                 let (cx, cy) = (close.loc.x + 1, close.loc.y + 1);
                 assert!(matches!(l.hit(cx, cy), Some(TabHit::Close(_))));
             }
+        }
+    }
+
+    #[test]
+    fn a_zoomed_tab_has_a_mark_that_unzooms_it() {
+        let size = strip(Density::Comfortable);
+        let zoomed = TabView {
+            title: "zsh".into(),
+            zoomed: true,
+            ..Default::default()
+        };
+        let view = TabStripView::plain(
+            vec![TabView::default(), zoomed],
+            1,
+            false,
+            ThemeMode::System,
+        );
+        let l = tab_layout(2, size, false, false, false, false);
+        assert_eq!(tab_zoom_rect(&view, &l, 0, size.h), None);
+        let mark = tab_zoom_rect(&view, &l, 1, size.h).unwrap();
+        // Inside its tab, before the "×" and clear of it.
+        assert!(inside(l.tabs[1], mark));
+        assert!(mark.loc.x + mark.size.w <= l.closes[1].loc.x);
+        let mid = |r: Rect| -> Point<i32, Logical> {
+            (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2).into()
+        };
+        assert_eq!(
+            tab_strip_hit(&view, size, mid(mark)),
+            Some(TabHit::Unzoom(1))
+        );
+        assert_eq!(
+            tab_strip_hit(&view, size, mid(l.closes[1])),
+            Some(TabHit::Close(1))
+        );
+        // The same place on a tab not zoomed is the tab.
+        let shifted = mid(mark) - Point::from((l.tabs[1].loc.x - l.tabs[0].loc.x, 0));
+        assert_eq!(tab_strip_hit(&view, size, shifted), Some(TabHit::Tab(0)));
+        // A tab too narrow for a "×" has no mark either.
+        let narrow = tab_layout(20, (400, 36).into(), false, false, false, false);
+        let many = TabStripView::plain(vec![view.tabs[1].clone(); 20], 0, false, ThemeMode::System);
+        assert_eq!(tab_zoom_rect(&many, &narrow, 3, 36), None);
+        let painter = Painter::new();
+        for hover in [None, Some(TabHit::Unzoom(1))] {
+            let view = TabStripView {
+                hover,
+                hover_alpha: 16,
+                ..view.clone()
+            };
+            painter.tab_strip_view(&view, Theme::Dark, size, 1.5);
         }
     }
 

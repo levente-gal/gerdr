@@ -91,7 +91,9 @@ impl Gerdr {
         if pos.y < self.tab_strip_height() as f64 {
             let view = self.tab_strip_view();
             return match self.tab_strip_hit_at(&view, pos)? {
-                TabHit::Tab(t) | TabHit::Close(t) => (t != view.active).then_some(PaneDrop::Tab(t)),
+                TabHit::Tab(t) | TabHit::Close(t) | TabHit::Unzoom(t) => {
+                    (t != view.active).then_some(PaneDrop::Tab(t))
+                }
                 TabHit::Plus => Some(PaneDrop::NewTab),
                 _ => None,
             };

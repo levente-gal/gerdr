@@ -298,6 +298,21 @@ pub(super) fn file(x: f32, y: f32, s: f32) -> f32 {
         - STROKE * s
 }
 
+/// Signed distance to four corner brackets centred on the origin: at the
+/// corners of a square pointing out for zoom, or near its middle pointing
+/// in for unzoom.
+pub(super) fn zoom_corners(unzoom: bool, x: f32, y: f32, s: f32) -> f32 {
+    let (corner, arm) = if unzoom { (2.2, 2.4) } else { (4.4, -2.8) };
+    let mut d = f32::MAX;
+    for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let (cx, cy) = (sx * corner * s, sy * corner * s);
+        let across = segment(x, y, cx, cy, cx + sx * arm * s, cy);
+        let down = segment(x, y, cx, cy, cx, cy + sy * arm * s);
+        d = d.min(across).min(down);
+    }
+    d - STROKE * s
+}
+
 /// Signed distance to a filled square centred on the origin: stop.
 pub(super) fn stop(x: f32, y: f32, s: f32) -> f32 {
     rounded_rect(x, y, -3.8 * s, -3.8 * s, 7.6 * s, 7.6 * s, 1.2 * s)

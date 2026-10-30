@@ -742,6 +742,10 @@ impl Gerdr {
         }
         if let Some((id, hit)) = self.pane_bar_at(location) {
             match button {
+                // A second click on its label zooms the pane, or unzooms it.
+                BTN_LEFT if hit == BarHit::Label && self.is_double(location) => {
+                    self.zoom_pane(id);
+                }
                 BTN_LEFT => {
                     self.pane_bar_click(id, hit);
                     // Held by its label, the pane can be dragged elsewhere

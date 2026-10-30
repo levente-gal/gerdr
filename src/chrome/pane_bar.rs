@@ -6,6 +6,7 @@ use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
     PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, centred_dot, chevron_side,
     copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop, text_lines,
+    zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -79,10 +80,15 @@ pub fn focus_strip(size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryR
 }
 
 /// Where the buttons of a bar with `kind`'s sit, left to right, at its
-/// right end.
-pub fn pane_bar_buttons(bar: Rect, kind: BarButtons) -> Vec<(BarButton, Rect)> {
+/// right end; last the zoom button, if `zoom` (see `zoom_button`).
+pub fn pane_bar_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<(BarButton, Rect)> {
     let right = bar.loc.x + bar.size.w - BAR_INSET;
-    let buttons = kind.buttons();
+    let buttons: Vec<_> = kind
+        .buttons()
+        .iter()
+        .copied()
+        .chain(zoom_button(zoom))
+        .collect();
     let n = buttons.len() as i32;
     let at = |i: i32| {
         Rectangle::new(
@@ -92,16 +98,34 @@ pub fn pane_bar_buttons(bar: Rect, kind: BarButtons) -> Vec<(BarButton, Rect)> {
     };
     (0..n)
         .zip(buttons)
-        .map(|(i, &button)| (button, at(n - 1 - i)))
+        .map(|(i, button)| (button, at(n - 1 - i)))
         .collect()
 }
 
-/// What of a pane's bar, with `kind`'s buttons, is at `pos`, if the bar is.
-pub fn pane_bar_hit(bar: Rect, kind: BarButtons, pos: Point<f64, Logical>) -> Option<BarHit> {
+/// The zoom button of a bar whose pane is zoomed (`Some(true)`) or can be
+/// (`Some(false)`); none for a pane alone in its tab (`None`).
+fn zoom_button(zoom: Option<bool>) -> Option<BarButton> {
+    zoom.map(|zoomed| {
+        if zoomed {
+            BarButton::Unzoom
+        } else {
+            BarButton::Zoom
+        }
+    })
+}
+
+/// What of a pane's bar, with `kind`'s buttons and the zoom button if
+/// `zoom`, is at `pos`, if the bar is.
+pub fn pane_bar_hit(
+    bar: Rect,
+    kind: BarButtons,
+    zoom: Option<bool>,
+    pos: Point<f64, Logical>,
+) -> Option<BarHit> {
     if !bar.to_f64().contains(pos) {
         return None;
     }
-    let button = pane_bar_buttons(bar, kind)
+    let button = pane_bar_buttons(bar, kind, zoom)
         .into_iter()
         .find(|(_, rect)| rect.to_f64().contains(pos));
     Some(button.map_or(BarHit::Label, |(button, _)| BarHit::Button(button)))
@@ -117,6 +141,10 @@ pub enum BarButton {
     Forward,
     Reload,
     CopyUrl,
+    /// Zoom the pane to fill its tab.
+    Zoom,
+    /// Give the tab's other panes their places back.
+    Unzoom,
 }
 
 /// Which buttons a pane's bar has, by what the pane shows.
@@ -184,6 +212,8 @@ pub struct PaneBarView {
     pub can_forward: bool,
     /// Which buttons it has, by what the pane shows.
     pub buttons: BarButtons,
+    /// Its pane is zoomed (`Some(true)`) or can be: the zoom button.
+    pub zoom: Option<bool>,
     /// The pane has keyboard focus.
     pub focused: bool,
     /// The pointer is over the bar: its buttons show.
@@ -267,7 +297,7 @@ impl Painter {
         // Everything is laid out in the full bar, then moved up by the slide.
         let up = -view.slide;
         let bar = Rectangle::new((0, up).into(), full);
-        let buttons = pane_bar_buttons(bar, view.buttons);
+        let buttons = pane_bar_buttons(bar, view.buttons, view.zoom);
         let mark = Rectangle::new((PADDING as i32, up).into(), (STATUS_WIDTH, full.h).into());
         // The marks the sidebar's agent chips use: a ring for waiting, an
         // open ring for busy. A running command's is a blinking dot,
@@ -333,7 +363,11 @@ impl Painter {
                 BarButton::Stop => view.can_stop,
                 BarButton::Back => view.can_back,
                 BarButton::Forward => view.can_forward,
-                BarButton::Scrollback | BarButton::Reload | BarButton::CopyUrl => true,
+                BarButton::Scrollback
+                | BarButton::Reload
+                | BarButton::CopyUrl
+                | BarButton::Zoom
+                | BarButton::Unzoom => true,
             };
             let hovered = enabled && view.hover == Some(button);
             if hovered {
@@ -366,6 +400,12 @@ impl Painter {
                 BarButton::Scrollback => {
                     icon_sdf(&mut c, rect, scale, color, |x, y| text_lines(x, y, s))
                 }
+                BarButton::Zoom | BarButton::Unzoom => {
+                    let unzoom = button == BarButton::Unzoom;
+                    icon_sdf(&mut c, rect, scale, color, |x, y| {
+                        zoom_corners(unzoom, x, y, s)
+                    })
+                }
             }
         }
         c.into_buffer(true)
@@ -392,6 +432,7 @@ mod tests {
             can_back: true,
             can_forward: false,
             buttons: BarButtons::Terminal,
+            zoom: None,
             focused: true,
             lit: true,
             hover: None,
@@ -486,10 +527,20 @@ mod tests {
     #[test]
     fn pane_bar_buttons_sit_right_and_do_not_overlap() {
         let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
-        for kind in [BarButtons::Terminal, BarButtons::Web] {
-            let buttons = pane_bar_buttons(bar, kind);
+        let kinds = [BarButtons::Terminal, BarButtons::Web, BarButtons::None];
+        for (kind, zoom) in kinds
+            .into_iter()
+            .flat_map(|k| [(k, Some(false)), (k, Some(true))])
+        {
+            let buttons = pane_bar_buttons(bar, kind, zoom);
             let order: Vec<_> = buttons.iter().map(|(b, _)| *b).collect();
-            assert_eq!(order, kind.buttons());
+            // The zoom button comes last, at the bar's end.
+            let zoom_button = if zoom == Some(true) {
+                BarButton::Unzoom
+            } else {
+                BarButton::Zoom
+            };
+            assert_eq!(order, [kind.buttons(), &[zoom_button]].concat());
             let (_, last) = buttons.last().unwrap();
             assert_eq!(last.loc.x + last.size.w, 200 + 600 - BAR_INSET);
             for pair in buttons.windows(2) {
@@ -501,36 +552,43 @@ mod tests {
                     .all(|(_, r)| r.loc.y == 50 && r.size.h == PANE_BAR_HEIGHT)
             );
         }
-        assert!(pane_bar_buttons(bar, BarButtons::None).is_empty());
+        assert!(pane_bar_buttons(bar, BarButtons::None, None).is_empty());
+        let order: Vec<_> = pane_bar_buttons(bar, BarButtons::Terminal, None)
+            .into_iter()
+            .map(|(b, _)| b)
+            .collect();
+        assert_eq!(order, BarButtons::Terminal.buttons());
     }
 
     #[test]
     fn pane_bar_hit_agrees_with_the_buttons() {
         let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
         for kind in [BarButtons::Terminal, BarButtons::Web] {
-            for (button, rect) in pane_bar_buttons(bar, kind) {
-                let centre = rect.to_f64().loc + rect.to_f64().size.downscale(2.0).to_point();
-                assert_eq!(
-                    pane_bar_hit(bar, kind, centre),
-                    Some(BarHit::Button(button))
-                );
-                // A bar without buttons has only its label there.
-                assert_eq!(
-                    pane_bar_hit(bar, BarButtons::None, centre),
-                    Some(BarHit::Label)
-                );
+            for zoom in [None, Some(false), Some(true)] {
+                for (button, rect) in pane_bar_buttons(bar, kind, zoom) {
+                    let centre = rect.to_f64().loc + rect.to_f64().size.downscale(2.0).to_point();
+                    assert_eq!(
+                        pane_bar_hit(bar, kind, zoom, centre),
+                        Some(BarHit::Button(button))
+                    );
+                    // A bar without buttons has only its label there.
+                    assert_eq!(
+                        pane_bar_hit(bar, BarButtons::None, None, centre),
+                        Some(BarHit::Label)
+                    );
+                }
             }
         }
         let kind = BarButtons::Terminal;
         assert_eq!(
-            pane_bar_hit(bar, kind, (210.0, 60.0).into()),
+            pane_bar_hit(bar, kind, None, (210.0, 60.0).into()),
             Some(BarHit::Label)
         );
-        assert_eq!(pane_bar_hit(bar, kind, (210.0, 80.0).into()), None);
-        assert_eq!(pane_bar_hit(bar, kind, (100.0, 60.0).into()), None);
+        assert_eq!(pane_bar_hit(bar, kind, None, (210.0, 80.0).into()), None);
+        assert_eq!(pane_bar_hit(bar, kind, None, (100.0, 60.0).into()), None);
         // A hidden bar has nothing to hit.
         let hidden = Rect::new((200, 50).into(), (600, 0).into());
-        assert_eq!(pane_bar_hit(hidden, kind, (210.0, 50.0).into()), None);
+        assert_eq!(pane_bar_hit(hidden, kind, None, (210.0, 50.0).into()), None);
     }
 
     #[test]
@@ -594,6 +652,7 @@ mod tests {
                                 BarButtons::None,
                                 BarButtons::Web,
                             ][i],
+                            zoom: [None, Some(false), Some(true), Some(false)][i],
                             can_back: i < 2,
                             lit: i != 3,
                             hover: Some(BarButton::Restart),

@@ -343,6 +343,15 @@ pub struct Tab {
     /// The name it was given, shown ahead of the title derived from what
     /// runs in it.
     pub label: Option<String>,
+    /// The pane filling the whole tab, if any (see `Tab::zoomed`).
+    pub zoom: Option<Zoom>,
+}
+
+/// A pane zoomed to fill its tab, with the layout it was zoomed in: any
+/// change to the layout (a split, a close, a move) ends the zoom.
+pub struct Zoom {
+    pane: u32,
+    layout: Node,
 }
 
 impl Tab {
@@ -462,12 +471,69 @@ impl Tab {
             .collect()
     }
 
+    /// The pane filling the whole tab: the zoomed one, while the layout is
+    /// still the one it was zoomed in.
+    fn zoomed(&self) -> Option<u32> {
+        let zoom = self.zoom.as_ref()?;
+        (self.layout.as_ref() == Some(&zoom.layout)).then_some(zoom.pane)
+    }
+
+    /// Zoom pane `id` to fill the tab, or end the zoom if it is zoomed. A
+    /// tab of one pane has nothing to zoom over.
+    fn toggle_zoom(&mut self, id: u32) {
+        if self.zoomed() == Some(id) {
+            self.zoom = None;
+            return;
+        }
+        self.zoom = self
+            .layout
+            .clone()
+            .filter(|l| l.leaves().len() > 1 && l.leaves().contains(&id))
+            .map(|layout| Zoom { pane: id, layout });
+    }
+
+    /// What the zoom button on pane `id`'s bar does: unzoom (`Some(true)`)
+    /// or zoom (`Some(false)`); none for a pane alone in its tab.
+    fn bar_zoom(&self, id: u32) -> Option<bool> {
+        let many = self.layout.as_ref().is_some_and(|l| l.leaves().len() > 1);
+        many.then(|| self.zoomed() == Some(id))
+    }
+
+    /// Where the panes go in `area`: the zoomed one over all of it, else
+    /// each to its place in the layout.
+    fn rects(&self, area: Rectangle<i32, Logical>) -> Vec<(u32, Rectangle<i32, Logical>)> {
+        match self.zoomed() {
+            Some(id) => vec![(id, area)],
+            None => self.layout_rects(area),
+        }
+    }
+
+    /// Where the panes go in `area` by the layout, zoomed or not.
+    fn layout_rects(&self, area: Rectangle<i32, Logical>) -> Vec<(u32, Rectangle<i32, Logical>)> {
+        self.layout
+            .as_ref()
+            .map_or(Vec::new(), |l| l.rects(area, DIVIDER))
+    }
+
     /// Where the panes that have a window go in `area`.
     fn shown_rects(&self, area: Rectangle<i32, Logical>) -> Vec<(u32, Rectangle<i32, Logical>)> {
-        let rects = self
-            .layout
-            .as_ref()
-            .map_or(Vec::new(), |l| l.rects(area, DIVIDER));
+        self.with_window(self.rects(area))
+    }
+
+    /// Where the panes that have a window go in `area` by the layout, as
+    /// if not zoomed.
+    fn shown_layout_rects(
+        &self,
+        area: Rectangle<i32, Logical>,
+    ) -> Vec<(u32, Rectangle<i32, Logical>)> {
+        self.with_window(self.layout_rects(area))
+    }
+
+    /// The places in `rects` of panes that have a window.
+    fn with_window(
+        &self,
+        rects: Vec<(u32, Rectangle<i32, Logical>)>,
+    ) -> Vec<(u32, Rectangle<i32, Logical>)> {
         rects
             .into_iter()
             .filter(|(id, _)| self.window(*id).is_some())
@@ -480,11 +546,7 @@ impl Tab {
         &self,
         area: Rectangle<i32, Logical>,
     ) -> Vec<(&Expected, Rectangle<i32, Logical>)> {
-        let rects = self
-            .layout
-            .as_ref()
-            .map_or(Vec::new(), |l| l.rects(area, DIVIDER));
-        rects
+        self.rects(area)
             .into_iter()
             .filter(|(id, _)| self.window(*id).is_none())
             .filter_map(|(id, rect)| {
@@ -1020,6 +1082,8 @@ pub enum Action {
     FlipPane,
     /// Move the focused pane to a new tab of the workspace.
     PaneToNewTab,
+    /// Zoom the focused pane to fill its tab, or unzoom it.
+    ZoomPane,
     /// Open the worktrees popup, to review, check out, merge and delete the
     /// repositories' worktrees.
     Worktrees,
@@ -1455,8 +1519,11 @@ impl Gerdr {
         if (pos.x - self.sidebar_width as f64).abs() <= GRAB && !self.on_sidebar_bar(pos) {
             return Some(Drag::Sidebar);
         }
-        let layout = self.tab()?.layout.as_ref()?;
-        let divider = layout
+        // A zoomed pane covers the dividers.
+        let tab = self.tab().filter(|t| t.zoomed().is_none())?;
+        let divider = tab
+            .layout
+            .as_ref()?
             .dividers(self.content_rect(), DIVIDER)
             .into_iter()
             .find(|d| d.near(pos, GRAB))?;
@@ -3748,7 +3815,8 @@ impl Gerdr {
             Action::FocusSide(side) => {
                 let area = self.content_rect();
                 self.focus_pane(|tab| {
-                    layout::neighbor(&tab.shown_rects(area), tab.focused_id()?, side)
+                    // By the layout under a zoom: moving on ends it.
+                    layout::neighbor(&tab.shown_layout_rects(area), tab.focused_id()?, side)
                 });
             }
             Action::ToggleTheme => self.toggle_theme(),
@@ -3783,6 +3851,11 @@ impl Gerdr {
             Action::FlipPane => {
                 if let Some(id) = self.tab().and_then(Tab::focused_id) {
                     self.flip_pane(id);
+                }
+            }
+            Action::ZoomPane => {
+                if let Some(id) = self.tab().and_then(Tab::focused_id) {
+                    self.zoom_pane(id);
                 }
             }
             Action::PaneToNewTab => {
@@ -4503,19 +4576,47 @@ impl Gerdr {
                 self.space.map_element(window, rect.loc, false);
             }
         }
+        // The panes under a zoomed one stay off screen until it unzooms.
+        let mut hidden = Vec::new();
+        for tab in self.workspaces.iter().flat_map(|ws| &ws.tabs) {
+            if let Some(zoomed) = tab.zoomed() {
+                hidden.extend(
+                    tab.panes
+                        .iter()
+                        .filter(|p| p.id != zoomed)
+                        .map(|p| p.window.clone()),
+                );
+            }
+        }
+        for window in hidden {
+            self.pending_place
+                .remove(&window.toplevel().unwrap().wl_surface().id());
+            self.space.unmap_elem(&window);
+        }
     }
 
+    /// Give `window` the keyboard. Focusing a pane under a zoomed one ends
+    /// the zoom.
     pub fn focus(&mut self, window: Option<Window>) {
+        let mut unzoomed = false;
         for tab in self.workspaces.iter_mut().flat_map(|ws| ws.tabs.iter_mut()) {
+            let zoomed = tab.zoomed();
             for pane in &tab.panes {
                 let active = Some(&pane.window) == window.as_ref();
                 if active {
                     tab.focused = Some(pane.window.clone());
+                    if zoomed.is_some_and(|z| z != pane.id) {
+                        tab.zoom = None;
+                        unzoomed = true;
+                    }
                 }
                 if pane.window.set_activated(active) {
                     pane.window.toplevel().unwrap().send_pending_configure();
                 }
             }
+        }
+        if unzoomed {
+            self.arrange();
         }
         let surface = window.map(|w| w.toplevel().unwrap().wl_surface().clone());
         let keyboard = self.seat.get_keyboard().unwrap();
@@ -4671,6 +4772,7 @@ impl Gerdr {
                     .and_then(|id| tab.panes.iter().find(|p| p.id == id))
                     .and_then(|p| p.app_command.as_deref())
                     .is_some_and(ci::is_github_page);
+                view.zoomed = tab.zoomed().is_some();
                 view
             })
             .collect()
@@ -6134,6 +6236,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab laid out 1 | (2 over 3), with no windows.
+    fn three_panes() -> Tab {
+        let mut layout = Node::Leaf(1);
+        assert!(layout.split(1, 2, Dir::Right, 0.5));
+        assert!(layout.split(2, 3, Dir::Down, 0.5));
+        Tab {
+            layout: Some(layout),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_zoomed_pane_fills_its_tab_until_it_unzooms() {
+        let area = Rectangle::new((10, 20).into(), (800, 600).into());
+        let mut tab = three_panes();
+        let laid_out = tab.rects(area);
+        assert_eq!(tab.bar_zoom(2), Some(false));
+        tab.toggle_zoom(2);
+        assert_eq!(tab.zoomed(), Some(2));
+        assert_eq!(tab.rects(area), [(2, area)]);
+        // Under the zoom, the layout stays as it was.
+        assert_eq!(tab.layout_rects(area), laid_out);
+        assert_eq!(
+            (tab.bar_zoom(2), tab.bar_zoom(1)),
+            (Some(true), Some(false))
+        );
+        // Zooming another pane moves the zoom; zooming it again ends it.
+        tab.toggle_zoom(3);
+        assert_eq!(tab.zoomed(), Some(3));
+        tab.toggle_zoom(3);
+        assert_eq!(tab.zoomed(), None);
+        assert_eq!(tab.rects(area), laid_out);
+        // No such pane: nothing to zoom.
+        tab.toggle_zoom(9);
+        assert_eq!(tab.zoomed(), None);
+    }
+
+    #[test]
+    fn a_change_to_the_layout_ends_the_zoom() {
+        let changes: [fn(&mut Option<Node>); 4] = [
+            |l| assert!(l.as_mut().unwrap().split(1, 4, Dir::Down, 0.5)),
+            |l| assert!(l.as_mut().unwrap().swap(1, 3)),
+            |l| assert!(l.as_mut().unwrap().flip(2)),
+            |l| {
+                layout::remove(l, 3);
+            },
+        ];
+        for change in changes {
+            let mut tab = three_panes();
+            tab.toggle_zoom(1);
+            change(&mut tab.layout);
+            assert_eq!(tab.zoomed(), None);
+        }
+    }
+
+    #[test]
+    fn a_pane_alone_has_nothing_to_zoom_over() {
+        let mut tab = Tab {
+            layout: Some(Node::Leaf(1)),
+            ..Default::default()
+        };
+        assert_eq!(tab.bar_zoom(1), None);
+        tab.toggle_zoom(1);
+        assert_eq!(tab.zoomed(), None);
+    }
 
     fn herdr_leaf(id: &str) -> SavedNode {
         SavedNode::Leaf(SavedLeaf::Herdr { pane_id: id.into() })
