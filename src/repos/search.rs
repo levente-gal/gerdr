@@ -4,7 +4,8 @@
 //! too. Every place found is tinted, the one gone to more; Enter goes to
 //! the next (Shift+Enter, the one before), round past the ends, the
 //! cursor on its row and a folded file unfolded for it. Ticks on the
-//! diff's scrollbar say where they all are. Esc closes it.
+//! diff's scrollbar say where they all are. Esc closes it. `*` (`#` back)
+//! searches for the word under the pointer as a whole word, as vim's do.
 
 use std::{collections::HashMap, ops::Range, path::PathBuf};
 
@@ -23,6 +24,9 @@ pub(super) struct DiffSearch {
     field: TextField,
     /// It has the keyboard (else the diff has, the places still tinted).
     pub(super) focused: bool,
+    /// It finds what is typed only as a whole word (`*`), until it is
+    /// typed into.
+    whole: bool,
     /// Every place found, in the diff's order.
     hits: Vec<Hit>,
     /// The place gone to, by index into `hits`.
@@ -114,6 +118,53 @@ impl Panel {
         search.field.select_all();
     }
 
+    /// Search the diff for the word at char `col` of diff row `row` (or
+    /// the next after it on its line), a changed or unchanged line, as a
+    /// whole word, as vim's `*` does: to the next place after it, or with
+    /// `back` the one before (`#`), round past the ends. The diff keeps
+    /// the keyboard, for F3. Whether there was a word to search for.
+    pub(super) fn star_search(&mut self, row: usize, col: usize, back: bool, ctx: &Ctx) -> bool {
+        let Some(DiffRow::Line(k, f, h, l)) = self.diff_rows.get(row).copied() else {
+            return false;
+        };
+        let text = self
+            .diff_roots
+            .get(k)
+            .and_then(|root| self.diffs.get(root))
+            .and_then(|(_, files)| files.get(f)?.hunks.get(h)?.lines.get(l))
+            .map(|line| line.text.clone());
+        let Some(text) = text else {
+            return false;
+        };
+        let Some(word) = find::word_at(&text, col) else {
+            return false;
+        };
+        let query: String = text.chars().skip(word.start).take(word.len()).collect();
+        self.set_tab(DetailTab::Diff);
+        self.focus = Focus::Detail;
+        let search = self.search.get_or_insert_with(DiffSearch::default);
+        search.field.set(&query);
+        search.focused = false;
+        search.whole = true;
+        search.from = row;
+        self.find_hits(true);
+        let Some(search) = &mut self.search else {
+            return true;
+        };
+        let n = search.hits.len() as i64;
+        let here = search
+            .hits
+            .iter()
+            .position(|h| h.row == Some(row) && h.chars.start == word.start);
+        search.current = match here {
+            _ if n == 0 => None,
+            Some(i) => Some((i as i64 + if back { -1 } else { 1 }).rem_euclid(n) as usize),
+            None => Some(search.hits.iter().position(|h| h.tick >= row).unwrap_or(0)),
+        };
+        self.show_hit(ctx);
+        true
+    }
+
     /// Close the search: nothing is tinted any more.
     pub(super) fn close_search(&mut self) {
         self.search = None;
@@ -152,6 +203,7 @@ impl Panel {
             _ => {
                 let search = self.search.as_mut()?;
                 if search.field.key(mods, sym, typed) == Edit::Changed {
+                    search.whole = false;
                     self.find_hits(true);
                     self.search_from_start(ctx);
                 }
@@ -286,7 +338,7 @@ impl Panel {
         let Some(search) = &self.search else {
             return;
         };
-        let query = search.field.line().text;
+        let (query, whole) = (search.field.line().text, search.whole);
         let was = search.current.and_then(|i| search.hits.get(i)).cloned();
         // The rows each place could show on, by who it is.
         let mut rows: HashMap<(usize, usize, Within), usize> = HashMap::new();
@@ -317,14 +369,18 @@ impl Panel {
                 };
                 let mut add = |within: Within, text: &str| {
                     let row = rows.get(&(k, f, within)).copied();
-                    hits.extend(find::find_all(text, &query).into_iter().map(|chars| Hit {
-                        root: root.clone(),
-                        path: file.path.clone(),
-                        within,
-                        chars,
-                        row,
-                        tick: row.unwrap_or(head),
-                    }));
+                    hits.extend(
+                        find::find(text, &query, whole)
+                            .into_iter()
+                            .map(|chars| Hit {
+                                root: root.clone(),
+                                path: file.path.clone(),
+                                within,
+                                chars,
+                                row,
+                                tick: row.unwrap_or(head),
+                            }),
+                    );
                 };
                 add(Within::Path, &path_text(file));
                 for (h, hunk) in file.hunks.iter().enumerate() {
@@ -381,6 +437,7 @@ impl Panel {
             count,
             found: n > 0,
             focused: self.search_has_keys(),
+            whole: search.whole,
         })
     }
 

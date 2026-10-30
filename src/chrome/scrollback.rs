@@ -736,6 +736,7 @@ mod tests {
             count: "2 of 9".into(),
             found: true,
             focused: true,
+            whole: true,
         });
         v.ticks = vec![(0.1, false), (0.32, true), (0.33, false), (0.8, false)];
         for (theme, scale) in [

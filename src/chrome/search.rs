@@ -33,6 +33,8 @@ pub struct SearchBar {
     pub found: bool,
     /// It has the keyboard.
     pub focused: bool,
+    /// It finds what is typed only as a whole word (vim's `*`).
+    pub whole: bool,
 }
 
 /// A part of the search: the button opening it (while closed), its
@@ -46,6 +48,10 @@ pub enum SearchPart {
     Next,
     Close,
 }
+
+/// What the field says at its right end while the search finds whole
+/// words.
+const WHOLE_TAG: &str = "Whole word";
 
 /// What the search's count says: nothing with nothing `typed`, else
 /// which of the `n` places found it is at (by index), or how many.
@@ -154,11 +160,35 @@ impl Painter {
                 };
                 c.rounded(x, y, w, h, r, edge);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                let (text_x, mut text_end) = field_text(rect, scale);
+                // A whole word: a tag at the right end says so.
+                if bar.whole {
+                    let tw = self.text_width(WHOLE_TAG, SMALL_FONT_SIZE, scale);
+                    let pad = (6.0 * s).round();
+                    let (tx, tend) = (text_end - tw - pad, text_end + pad / 2.0);
+                    if tx - pad > text_x {
+                        let (ty, th) = (y + 4.0 * b, h - 8.0 * b);
+                        let tag = mix(fill, p.accent, 0.25);
+                        c.rounded(tx - pad / 2.0, ty, tend - tx, th, r - b, tag);
+                        let band = band(rect, scale);
+                        self.text(
+                            c,
+                            WHOLE_TAG,
+                            SMALL_FONT_SIZE,
+                            tx,
+                            tend,
+                            band,
+                            scale,
+                            p.muted,
+                        );
+                        text_end = tx - pad;
+                    }
+                }
                 self.edit_line(
                     c,
                     &bar.query,
                     &bar.placeholder,
-                    field_text(rect, scale),
+                    (text_x, text_end),
                     band(rect, scale),
                     bar.focused,
                     FONT_SIZE,
