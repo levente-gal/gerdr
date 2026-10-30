@@ -8,7 +8,8 @@
 //! the diff is read again. `y` yanks as `d` deletes (`yy`, `yw`, `Y`, a
 //! selection) and copies it too; `p` puts what was yanked or deleted
 //! last after the caret (whole lines under its line), `P` before. `u`
-//! undoes the last cut or paste, `U` does it again.
+//! undoes the last cut, paste or restore (see `restore`), `U` does it
+//! again.
 
 use std::{
     ops::Range,
@@ -174,6 +175,7 @@ impl DiffView {
             Keysym::x => self.cut_along(|col, _| col..col + count),
             Keysym::X => self.cut_along(|col, _| col.saturating_sub(count)..col),
             Keysym::D => self.cut_along(|col, len| col..len),
+            Keysym::R => self.restore_here(),
             Keysym::u => Some(Outcome::UndoCut),
             Keysym::U => Some(Outcome::RedoCut),
             // A count before a motion: the motion as many times.
@@ -588,8 +590,8 @@ impl DiffView {
     /// What the title says while a command is typed or visual mode is on.
     pub(crate) fn mode_title(&self) -> Option<String> {
         let mode = match self.visual {
-            Some(Visual::Chars { .. }) => "-- VISUAL -- d delete · y yank · Esc stop",
-            Some(Visual::Lines) => "-- VISUAL LINE -- d delete · y yank · Esc stop",
+            Some(Visual::Chars { .. }) => "-- VISUAL -- d delete · y yank · R restore · Esc stop",
+            Some(Visual::Lines) => "-- VISUAL LINE -- d delete · y yank · R restore · Esc stop",
             None => "",
         };
         let Pending { count, op, go } = self.pending;

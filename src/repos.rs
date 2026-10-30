@@ -1268,6 +1268,7 @@ fn key_name(button: ReposButton) -> &'static str {
         B::Help => "F1",
         B::CopyReview => "Ctrl+Shift+C",
         B::Comment => "C",
+        B::Restore => "R",
         B::SaveComment => "Enter",
         B::DiscardComment => "Esc",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
@@ -1434,7 +1435,14 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "yy yw y$ Y, p / P",
         "in the diff, yank (and copy); paste after, before",
     ),
-    ("u / U", "undo the last delete or paste, do it again"),
+    (
+        "R",
+        "in the diff, restore the change at the caret or the lines selected",
+    ),
+    (
+        "u / U",
+        "undo the last delete, paste or restore, do it again",
+    ),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -2935,7 +2943,7 @@ impl Panel {
             }
             B::ClearReview if self.diff.review.is_empty() => Err(Why::other(NO_REVIEW)),
             B::ClearReview => Err(Why::other("Asked on a sheet")),
-            B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment => {
+            B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment | B::Restore => {
                 Err(Why::other("Done on the diff"))
             }
             B::All
@@ -3592,7 +3600,10 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
-            ReposHit::DiffRow(_) | ReposHit::DiffCheck(_) | ReposHit::DiffFold(_) => {}
+            ReposHit::DiffRow(_)
+            | ReposHit::DiffCheck(_)
+            | ReposHit::DiffFold(_)
+            | ReposHit::DiffRestore(_) => {}
             ReposHit::BranchButton => self.open_branch_menu(MenuAction::Switch, ctx),
             ReposHit::Detail
             | ReposHit::Panel
@@ -5554,11 +5565,11 @@ mod tests {
                 at: None,
             })
         );
-        // The diff, ten rows, two in view: Shift+Down scrolls it.
+        // The diff, twelve rows, two in view: Shift+Down scrolls it.
         read_diffs(&mut panel, &ctx);
         panel.diff.scroll.jump(0.0);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.first, view.detail.total), (0, 10));
+        assert_eq!((view.detail.first, view.detail.total), (0, 12));
         assert_eq!(
             press(&mut panel, mods(false, true, false), Keysym::Down, &ctx),
             None
@@ -5580,7 +5591,7 @@ mod tests {
         assert_eq!(panel.view("p", &ctx).detail.first, 2);
         // As far as the last row, at the bottom.
         swipe_detail(&mut panel, 100.0, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 8.0);
+        assert_eq!(panel.diff.scroll.pos(), 10.0);
         let view = panel.view("p", &ctx);
         assert_eq!(detail_rows(&view), ["# zed", "= old.rs → new.rs"]);
         assert!(!view.detail.sticky);
@@ -6342,10 +6353,12 @@ mod tests {
             [
                 "# gerdr",
                 "= src/git.rs",
+                "@ ",
                 "+a",
                 "+b",
                 "+c",
                 "= notes.md",
+                "@ ",
                 "+n",
                 "",
                 "# zed",
@@ -6358,21 +6371,21 @@ mod tests {
             page: (20, 4),
             ..ctx
         };
-        panel.diff.scroll.jump(3.0);
+        panel.diff.scroll.jump(4.0);
         let view = panel.view("p", &paged);
         assert!(view.detail.sticky && view.detail.stuck);
         assert_eq!(
             detail_rows(&view),
-            ["= src/git.rs", "+b", "+c", "= notes.md", "+n"]
+            ["= src/git.rs", "+b", "+c", "= notes.md", "@ "]
         );
         // The next file's header pushes it up as it comes.
         let line = crate::chrome::repos_detail_line(paged.density) as f64;
         assert_eq!(view.detail.pin, 0.0);
-        panel.diff.scroll.jump(4.25);
+        panel.diff.scroll.jump(5.25);
         let view = panel.view("p", &paged);
         assert_eq!(view.detail.pin, -0.25 * line);
         assert_eq!(detail_rows(&view)[..2], ["= src/git.rs", "+c"]);
-        panel.diff.scroll.jump(3.0);
+        panel.diff.scroll.jump(4.0);
         let DetailRow::File(file) = &view.detail.rows[0] else {
             panic!("{:?}", view.detail.rows[0]);
         };
@@ -6382,14 +6395,14 @@ mod tests {
         // where they were.
         panel.refresh(&ctx);
         assert_eq!(panel.diffs_wanted(&ctx).len(), 2);
-        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        assert_eq!(panel.view("p", &ctx).detail.total, 12);
         panel.set_diffs(
             root("gerdr"),
             1,
             vec![added("src/git.rs", 'M', &["a", "c"])],
             &ctx,
         );
-        assert_eq!(panel.diff.scroll.pos(), 3.0);
+        assert_eq!(panel.diff.scroll.pos(), 4.0);
         assert_eq!(detail_rows(&panel.view("p", &paged))[1], "+c");
         // A read for an earlier status read, coming late, is dropped.
         panel.set_diffs(root("gerdr"), 0, vec![], &ctx);
@@ -6401,10 +6414,10 @@ mod tests {
         press(&mut panel, none(), Keysym::Down, &ctx);
         assert_eq!(panel.diff.scroll.pos(), 1.0);
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 5.0);
+        assert_eq!(panel.diff.scroll.pos(), 6.0);
         let view = panel.view("p", &ctx);
-        let DetailRow::File(file) = &view.detail.rows[5] else {
-            panic!("{:?}", view.detail.rows[5]);
+        let DetailRow::File(file) = &view.detail.rows[6] else {
+            panic!("{:?}", view.detail.rows[6]);
         };
         assert!(file.selected);
         // The repository's log, with what the batch ran there.
@@ -6465,7 +6478,7 @@ mod tests {
         assert_eq!((view.detail.first, view.detail.part), (0, 0.5));
         assert_eq!(
             detail_rows(&view),
-            ["# gerdr", "= src/git.rs", "+a", "+b", "+c"]
+            ["# gerdr", "= src/git.rs", "@ ", "+a", "+b"]
         );
         // A file's header scrolled past its place stays at the top, pinned
         // over itself and the rows moving under it.
@@ -6476,14 +6489,7 @@ mod tests {
         assert_eq!(view.detail.pin, 0.0);
         assert_eq!(
             detail_rows(&view),
-            [
-                "= src/git.rs",
-                "= src/git.rs",
-                "+a",
-                "+b",
-                "+c",
-                "= notes.md"
-            ]
+            ["= src/git.rs", "= src/git.rs", "@ ", "+a", "+b", "+c"]
         );
         // Under the pinned header, the rows move by the part.
         swipe_detail(&mut panel, 0.75, &ctx);
@@ -6492,16 +6498,16 @@ mod tests {
         assert_eq!((view.detail.first, view.detail.part), (2, 0.25));
         assert_eq!(
             detail_rows(&view),
-            ["= src/git.rs", "+a", "+b", "+c", "= notes.md", "+n"]
+            ["= src/git.rs", "@ ", "+a", "+b", "+c", "= notes.md"]
         );
         // A click on the row shown in part under the pane selects it.
-        panel.click(ReposHit::DiffRow(4), &ctx);
+        panel.click(ReposHit::DiffRow(5), &ctx);
         let notes = Selected::File(root("gerdr"), "notes.md".into());
         assert_eq!(panel.selected, Some(notes));
         // The end holds the diff whole, its last row at the bottom.
         swipe_detail(&mut panel, 10.5, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.first, view.detail.part), (6, 0.0));
+        assert_eq!((view.detail.first, view.detail.part), (8, 0.0));
         assert_eq!(
             detail_rows(&view),
             ["= notes.md", "+n", "", "# zed", "= old.rs → new.rs"]
@@ -6565,7 +6571,7 @@ mod tests {
         panel.scroll(Motion::Lift { time: 1000 }, now, true, &ctx);
         run_out(&mut panel, now, &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.first, view.detail.over), (6, 0.0));
+        assert_eq!((view.detail.first, view.detail.over), (8, 0.0));
     }
 
     /// The cursor's row, and where its range reaches back to.
@@ -6585,24 +6591,30 @@ mod tests {
         press(&mut panel, none(), Keysym::c, &ctx);
         assert!(panel.diff.editing.is_none() && panel.error.is_some());
         // On a and b, Shift+Down reaching the range.
-        for _ in 0..3 {
+        for _ in 0..4 {
             press(&mut panel, none(), Keysym::Down, &ctx);
         }
         press(&mut panel, mods(false, true, false), Keysym::Down, &ctx);
-        assert_eq!(cursor(&panel), Some((3, 2)));
+        assert_eq!(cursor(&panel), Some((4, 3)));
         // Shift+Down in the diff doesn't scroll it.
         assert_eq!(panel.diff.scroll.pos(), 0.0);
         let marks = panel.view("p", &ctx).detail.marks;
-        assert!(marks[2].selected && marks[2].top && !marks[2].bottom);
-        assert!(marks[3].selected && marks[3].bottom && !marks[4].selected);
-        // The button writing a comment on them, at the cursor.
+        assert!(marks[3].selected && marks[3].top && !marks[3].bottom);
+        assert!(marks[4].selected && marks[4].bottom && !marks[5].selected);
+        // The buttons writing a comment on them and putting them back, at
+        // the cursor; each hunk's header puts it back.
         let buttons = panel.view("p", &ctx).detail.row_buttons;
         assert_eq!(
             buttons
                 .iter()
                 .map(|(i, h)| (*i, h.button))
                 .collect::<Vec<_>>(),
-            [(3, ReposButton::Comment)]
+            [
+                (2, ReposButton::Restore),
+                (7, ReposButton::Restore),
+                (4, ReposButton::Comment),
+                (4, ReposButton::Restore)
+            ]
         );
         press(&mut panel, none(), Keysym::c, &ctx);
         type_text(&mut panel, "why", &ctx);
@@ -6610,7 +6622,7 @@ mod tests {
         type_text(&mut panel, "and b", &ctx);
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(
-            rows[4..8],
+            rows[5..9],
             ["| why", "| and b", "~ Shift+Enter breaks the line", "+c"]
         );
         // The editor has the keys: Tab and Up don't leave it.
@@ -6630,11 +6642,11 @@ mod tests {
         );
         let view = panel.view("p", &ctx);
         assert_eq!(
-            detail_rows(&view)[2..7],
+            detail_rows(&view)[3..8],
             ["+a", "+b", "> why", "> and b", "+c"]
         );
-        assert!(view.detail.marks[2].noted && view.detail.marks[3].noted);
-        assert!(!view.detail.marks[6].noted);
+        assert!(view.detail.marks[3].noted && view.detail.marks[4].noted);
+        assert!(!view.detail.marks[7].noted);
         // Copied for an agent, with Ctrl+Shift+C.
         let Some(Outcome::Copy { text, count }) = press(&mut panel, ctrl_shift(), Keysym::C, &ctx)
         else {
@@ -6656,10 +6668,10 @@ mod tests {
         let moved = vec![added("src/git.rs", 'M', &["x", "a", "b", "c"])];
         panel.set_diffs(root("gerdr"), g, moved, &ctx);
         let rows = detail_rows(&panel.view("p", &ctx));
-        assert_eq!(rows[2..8], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
+        assert_eq!(rows[3..9], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
 
         // C on it edits it; Esc drops the edit, not the panel.
-        panel.diff.set_cursor(5, None);
+        panel.diff.set_cursor(6, None);
         press(&mut panel, none(), Keysym::c, &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
@@ -6718,18 +6730,22 @@ mod tests {
                 .collect()
         };
         // A press on a and a drag to b pick them.
-        panel.click(ReposHit::DiffRow(2), &ctx);
+        panel.click(ReposHit::DiffRow(3), &ctx);
         assert!(panel.drags_rows(&ctx));
-        panel.extend_detail_row(3, &ctx);
-        assert_eq!(cursor(&panel), Some((3, 2)));
-        assert_eq!(buttons(&panel), [(3, B::Comment)]);
+        panel.extend_detail_row(4, &ctx);
+        assert_eq!(cursor(&panel), Some((4, 3)));
+        let hunks = [(2, B::Restore), (7, B::Restore)];
+        assert_eq!(
+            buttons(&panel),
+            [hunks[0], hunks[1], (4, B::Comment), (4, B::Restore)]
+        );
         assert!(panel.view("p", &ctx).detail.title_buttons.is_empty());
         // Its button writes on them; Discard drops it, Save keeps it.
         assert_eq!(panel.click(ReposHit::Button(B::Comment), &ctx), None);
         assert!(panel.diff.editing.is_some() && !panel.drags_rows(&ctx));
         assert_eq!(
             buttons(&panel),
-            [(5, B::SaveComment), (5, B::DiscardComment)]
+            [(6, B::SaveComment), (6, B::DiscardComment)]
         );
         type_text(&mut panel, "why", &ctx);
         panel.click(ReposHit::Button(B::DiscardComment), &ctx);
@@ -6757,16 +6773,16 @@ mod tests {
         panel.click(ReposHit::Button(B::Cancel), &ctx);
         assert!(panel.sheet.is_none() && !panel.diff.review.is_empty());
         // Edited, it can be deleted.
-        panel.click(ReposHit::DiffRow(4), &ctx);
+        panel.click(ReposHit::DiffRow(5), &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
-        assert!(buttons(&panel).contains(&(5, B::DeleteComment)));
+        assert!(buttons(&panel).contains(&(6, B::DeleteComment)));
         panel.click(ReposHit::Button(B::DeleteComment), &ctx);
         assert!(panel.diff.editing.is_none() && panel.diff.review.is_empty());
         // Dragged below the rows, the range goes on down.
-        panel.click(ReposHit::DiffRow(2), &ctx);
+        panel.click(ReposHit::DiffRow(3), &ctx);
         panel.drag_past_rows(1, &ctx);
         panel.drag_past_rows(1, &ctx);
-        assert_eq!(cursor(&panel), Some((4, 2)));
+        assert_eq!(cursor(&panel), Some((5, 3)));
     }
 
     #[test]
@@ -6778,12 +6794,12 @@ mod tests {
         let mut panel = Panel::new(&items);
         read_diffs(&mut panel, &ctx);
         panel.focus = Focus::Detail;
-        panel.diff.set_cursor(2, None);
+        panel.diff.set_cursor(3, None);
         press(&mut panel, none(), Keysym::c, &ctx);
         type_text(&mut panel, "one two three", &ctx);
         let rows = detail_rows(&panel.view("p", &ctx));
-        assert_eq!(rows[3..5], ["| one two ", "| three"]);
-        let DetailRow::Editor { caret, .. } = &panel.view("p", &ctx).detail.rows[4] else {
+        assert_eq!(rows[4..6], ["| one two ", "| three"]);
+        let DetailRow::Editor { caret, .. } = &panel.view("p", &ctx).detail.rows[5] else {
             panic!();
         };
         assert_eq!(*caret, Some(5));
@@ -6791,9 +6807,9 @@ mod tests {
         // Wider, it is worked out again.
         ctx.cols = 40;
         press(&mut panel, none(), Keysym::Up, &ctx);
-        assert_eq!(detail_rows(&panel.view("p", &ctx))[3], "> one two three");
+        assert_eq!(detail_rows(&panel.view("p", &ctx))[4], "> one two three");
         // A click on it edits it.
-        panel.click(ReposHit::DiffRow(3), &ctx);
+        panel.click(ReposHit::DiffRow(4), &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
         // A click elsewhere keeps the edit.
         type_text(&mut panel, "!", &ctx);
@@ -6817,39 +6833,40 @@ mod tests {
         read_diffs(&mut panel, &ctx);
         // Under src/git.rs pinned, notes.md folds and unfolds in place,
         // also scrolled part of a row.
-        for pos in [3.0, 3.5] {
+        for pos in [4.0, 4.5] {
             panel.diff.scroll.jump(pos);
             panel.click(ReposHit::DiffFold(3), &ctx);
             let view = panel.view("p", &ctx);
             assert_eq!(panel.diff.scroll.pos(), pos);
-            assert_eq!(view.detail.total, 9);
+            assert_eq!(view.detail.total, 10);
             let rows = detail_rows(&view);
             assert_eq!(rows[..4], ["= src/git.rs", "+b", "+c", "= notes.md"]);
             panel.click(ReposHit::DiffFold(3), &ctx);
             let rows = detail_rows(&panel.view("p", &ctx));
-            assert_eq!(rows[3..5], ["= notes.md", "+n"]);
+            assert_eq!(rows[3..5], ["= notes.md", "@ "]);
         }
         // At the end, the diff goes past it rather than pull the rows
         // above down under the pointer.
         swipe_detail(&mut panel, 10.0, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 4.0);
-        panel.click(ReposHit::DiffFold(2), &ctx);
+
+        assert_eq!(panel.diff.scroll.pos(), 6.0);
+        panel.click(ReposHit::DiffFold(1), &ctx);
         let view = panel.view("p", &ctx);
-        assert_eq!((view.detail.total, view.detail.first), (9, 4));
-        assert_eq!(detail_rows(&view)[2], "= notes.md");
+        assert_eq!((view.detail.total, view.detail.first), (10, 6));
+        assert_eq!(detail_rows(&view)[1], "= notes.md");
         // Not even a glide past the end pulls it back.
         let now = Instant::now();
         panel.scroll(Motion::Notches(1.0), now, true, &ctx);
         run_out(&mut panel, now, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 4.0);
-        panel.click(ReposHit::DiffFold(2), &ctx);
+        assert_eq!(panel.diff.scroll.pos(), 6.0);
+        panel.click(ReposHit::DiffFold(1), &ctx);
         let rows = detail_rows(&panel.view("p", &ctx));
-        assert_eq!(rows[2..4], ["= notes.md", "+n"]);
+        assert_eq!(rows[1..3], ["= notes.md", "@ "]);
         // Scrolled back, the rows past the end are gone.
-        panel.click(ReposHit::DiffFold(2), &ctx);
-        swipe_detail(&mut panel, -1.0, &ctx);
+        panel.click(ReposHit::DiffFold(1), &ctx);
+        swipe_detail(&mut panel, -2.0, &ctx);
         swipe_detail(&mut panel, 1.0, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 3.0);
+        assert_eq!(panel.diff.scroll.pos(), 4.0);
     }
 
     #[test]
@@ -6881,11 +6898,11 @@ mod tests {
         assert!(marks[4].selected && marks[4].top && marks[4].bottom && !marks[3].selected);
         // Alt+Down goes to the next file, and Alt+Up back.
         press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 5.0);
+        assert_eq!(panel.diff.scroll.pos(), 6.0);
         let notes = Selected::File(root("gerdr"), "notes.md".into());
         assert_eq!(panel.selected, Some(notes));
         press(&mut panel, mods(false, false, true), Keysym::Down, &ctx);
-        assert_eq!(panel.diff.scroll.pos(), 6.0);
+        assert_eq!(panel.diff.scroll.pos(), 8.0);
         press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
         press(&mut panel, mods(false, false, true), Keysym::Up, &ctx);
         assert_eq!(panel.diff.scroll.pos(), 1.0);
@@ -6910,14 +6927,14 @@ mod tests {
                 root: root("gerdr"),
                 paths: vec!["src/git.rs".into()],
                 at: Some(diff_view::Position {
-                    line: 2,
+                    line: 1,
                     col: Some(0),
                 }),
             })
         );
         // On a line, Left moves the caret, folding nothing.
         press(&mut panel, none(), Keysym::Left, &ctx);
-        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        assert_eq!(panel.view("p", &ctx).detail.total, 12);
         assert_eq!(panel.diff.cursor.as_ref().map(|c| c.row), Some(3));
         // On its header, Left folds it, its header at the top; Right
         // unfolds it.
@@ -6925,9 +6942,9 @@ mod tests {
         press(&mut panel, none(), Keysym::Up, &ctx);
         press(&mut panel, none(), Keysym::Left, &ctx);
         assert_eq!(panel.diff.scroll.pos(), 1.0);
-        assert_eq!(panel.view("p", &ctx).detail.total, 7);
+        assert_eq!(panel.view("p", &ctx).detail.total, 8);
         press(&mut panel, none(), Keysym::Right, &ctx);
-        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        assert_eq!(panel.view("p", &ctx).detail.total, 12);
         // Typing doesn't act on the tree.
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Field);
@@ -6939,11 +6956,11 @@ mod tests {
         panel.click(ReposHit::DiffCheck(1), &ctx);
         assert!(!panel.checked_files.contains(&key));
         panel.click(ReposHit::DiffFold(1), &ctx);
-        assert_eq!(panel.view("p", &ctx).detail.total, 7);
+        assert_eq!(panel.view("p", &ctx).detail.total, 8);
         // Folded, its header stayed where it was.
         assert_eq!(panel.diff.scroll.pos(), 0.0);
         panel.click(ReposHit::DiffFold(1), &ctx);
-        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        assert_eq!(panel.view("p", &ctx).detail.total, 12);
         panel.diff.scroll.jump(0.0);
         panel.click(ReposHit::DiffRow(3), &ctx);
         assert_eq!(panel.focus, Focus::Detail);
@@ -6956,7 +6973,7 @@ mod tests {
                 root: root("gerdr"),
                 paths: vec!["src/git.rs".into()],
                 at: Some(diff_view::Position {
-                    line: 2,
+                    line: 1,
                     col: Some(0),
                 }),
             })
@@ -8199,6 +8216,85 @@ mod tests {
     }
 
     #[test]
+    fn r_and_the_restore_buttons_put_changes_back() {
+        use crate::diff_edit::Cut;
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let text = "diff --git a/f b/f\n@@ -1,4 +1,7 @@ fn main() {\n f();\n+if x == nil {\n+\treturn\n+}\n g();\n-\told\n+new\n h();\n";
+        let mut file = crate::diff::parse(text).pop().unwrap();
+        file.path = "src/a.rs".into();
+        file.code = 'M';
+        let g = panel.diff.reads;
+        panel.set_diffs(root("gerdr"), g, vec![file], &ctx);
+        let at = |panel: &Panel, n: usize| {
+            let on = |r: &DiffRow| matches!(r, DiffRow::Line(_, _, _, l) if *l == n);
+            panel.diff.rows.iter().position(on).unwrap()
+        };
+        panel.focus = Focus::Detail;
+        let restore = |o: Option<Outcome>| match o {
+            Some(Outcome::Cut(edit)) => match edit.cut {
+                Cut::Restore { drop, put } => (drop, put),
+                other => panic!("not a restore: {other:?}"),
+            },
+            other => panic!("not a cut: {other:?}"),
+        };
+        let put = |n: usize, l: &str| vec![(n, vec![l.to_owned()])];
+        let keys = |panel: &mut Panel, keys: &str| {
+            let mut last = None;
+            for c in keys.chars() {
+                let sym = Keysym::from_char(c);
+                let shift = mods(false, c.is_uppercase(), false);
+                last = panel.key(&shift, Keysym::from_char(c.to_ascii_lowercase()), sym, &ctx);
+            }
+            last
+        };
+        // The change at the caret: the added check, whole.
+        panel.caret_to(at(&panel, 2), 0, &ctx);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![2, 3, 4], vec![]));
+        // A changed line: the removed one back, tab and all.
+        panel.caret_to(at(&panel, 6), 0, &ctx);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![6], put(6, "\told")));
+        // Not on a change.
+        panel.caret_to(at(&panel, 4), 0, &ctx);
+        assert_eq!(
+            keys(&mut panel, "R"),
+            Some(Outcome::Notice("No change there"))
+        );
+        // The lines selected only: `}` and the removed line.
+        panel.caret_to(at(&panel, 3), 0, &ctx);
+        assert_eq!(keys(&mut panel, "Vjj"), None);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![4], put(6, "\told")));
+        // The hunk's header has a button putting the whole hunk back; the
+        // cursor's changed line one for its change.
+        panel.caret_to(at(&panel, 6), 0, &ctx);
+        let view = panel.view("p", &ctx);
+        let hunk = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Hunk { .. }));
+        let hunk = hunk.unwrap();
+        let on = |i: usize| {
+            view.detail
+                .row_buttons
+                .iter()
+                .any(|(j, h)| *j == i && h.button == ReposButton::Restore)
+        };
+        assert!(on(hunk));
+        let line = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Line(l) if l.text == "new"));
+        assert!(on(line.unwrap()));
+        assert_eq!(
+            restore(panel.click(ReposHit::DiffRestore(hunk), &ctx)),
+            (vec![2, 3, 4, 6], put(6, "\told"))
+        );
+    }
+
+    #[test]
     fn vims_deletes_cut_the_file_at_the_caret() {
         use crate::diff_edit::{Cut, Spot};
         let items = items();
@@ -8309,7 +8405,7 @@ mod tests {
         assert_eq!(keys(&mut panel, "Vjj"), None);
         assert_eq!(
             panel.diff.mode_title().as_deref(),
-            Some("-- VISUAL LINE -- d delete · y yank · Esc stop")
+            Some("-- VISUAL LINE -- d delete · y yank · R restore · Esc stop")
         );
         assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
         assert!(panel.diff.visual.is_none());
@@ -8420,30 +8516,39 @@ mod tests {
         panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
         let bar = panel.view("p", &ctx).detail.search.expect("open");
         assert!(bar.focused && bar.count.is_empty());
-        // "n": notes.md's path (row 5), its line (6), new.rs's path (9).
+        // "n": notes.md's path (row 6), its line (8), new.rs's path (11).
         type_text(&mut panel, "n", &ctx);
         assert_eq!(search_count(&panel, &ctx), "1 of 3");
-        assert_eq!(cursor_row(&panel), Some(5));
+        assert_eq!(cursor_row(&panel), Some(6));
         let notes = Selected::File(root("gerdr"), "notes.md".into());
         assert_eq!(panel.selected, Some(notes));
-        assert_eq!(panel.diff.found_on(5), vec![(0..1, true)]);
-        assert_eq!(panel.diff.found_on(6), vec![(0..1, false)]);
+        assert_eq!(panel.diff.found_on(6), vec![(0..1, true)]);
+        assert_eq!(panel.diff.found_on(8), vec![(0..1, false)]);
         // On new.rs's header, its name first.
-        assert_eq!(panel.diff.found_on(9), vec![(0..1, false)]);
-        assert!(panel.diff.found_on(2).is_empty());
+        assert_eq!(panel.diff.found_on(11), vec![(0..1, false)]);
+        assert!(panel.diff.found_on(3).is_empty());
         press(&mut panel, none(), Keysym::Return, &ctx);
-        assert_eq!(cursor_row(&panel), Some(6));
+        assert_eq!(cursor_row(&panel), Some(8));
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert_eq!(search_count(&panel, &ctx), "3 of 3");
-        assert_eq!(cursor_row(&panel), Some(9));
+        assert_eq!(cursor_row(&panel), Some(11));
         // Round past the end, and back.
         press(&mut panel, none(), Keysym::Return, &ctx);
-        assert_eq!(cursor_row(&panel), Some(5));
+        assert_eq!(cursor_row(&panel), Some(6));
         press(&mut panel, mods(false, true, false), Keysym::Return, &ctx);
-        assert_eq!(cursor_row(&panel), Some(9));
-        // The ticks: a share of the ten rows each, the one gone to marked.
+        assert_eq!(cursor_row(&panel), Some(11));
+        // The ticks: a share of the twelve rows each, the one gone to
+        // marked.
         let ticks = panel.view("p", &ctx).detail.ticks;
-        assert_eq!(ticks, vec![(0.5, false), (0.6, false), (0.9, true)]);
+        let share = |r: f64| r / 12.0;
+        assert_eq!(
+            ticks,
+            vec![
+                (share(6.0), false),
+                (share(8.0), false),
+                (share(11.0), true)
+            ]
+        );
         // A capital finds only its case.
         type_text(&mut panel, "N", &ctx);
         assert_eq!(search_count(&panel, &ctx), "No matches");
@@ -8455,9 +8560,9 @@ mod tests {
         press(&mut panel, none(), Keysym::Down, &ctx);
         assert!(!panel.search_has_keys());
         press(&mut panel, none(), Keysym::Down, &ctx);
-        assert_eq!(cursor_row(&panel), Some(6));
+        assert_eq!(cursor_row(&panel), Some(7));
         press(&mut panel, none(), Keysym::F3, &ctx);
-        assert_eq!(cursor_row(&panel), Some(6));
+        assert_eq!(cursor_row(&panel), Some(8));
         assert_eq!(search_count(&panel, &ctx), "2 of 3");
         // Esc closes the search first, then the panel.
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
@@ -8505,22 +8610,23 @@ mod tests {
         let key = (root("gerdr"), "notes.md".to_string());
         panel.diff.folded.insert(key.clone());
         panel.build_rows(&items);
-        // Folded: gerdr, src/git.rs, a, b, c, notes.md, a gap, zed, new.rs.
+        // Folded: gerdr, src/git.rs, its hunk, a, b, c, notes.md, a gap,
+        // zed, new.rs.
         press(&mut panel, ctrl_shift(), Keysym::F, &ctx);
         type_text(&mut panel, "n", &ctx);
         assert_eq!(search_count(&panel, &ctx), "1 of 3");
         // Its path shows on its header: it stays folded.
-        assert_eq!(cursor_row(&panel), Some(5));
+        assert_eq!(cursor_row(&panel), Some(6));
         assert!(panel.diff.folded.contains(&key));
         // Its line's tick is on its header.
         let ticks: Vec<f64> = panel.diff.search_ticks().iter().map(|t| t.0).collect();
-        assert_eq!(ticks, vec![5.0 / 9.0, 8.0 / 9.0]);
-        assert_eq!(panel.diff.found_on(5), vec![(0..1, true)]);
+        assert_eq!(ticks, vec![6.0 / 10.0, 9.0 / 10.0]);
+        assert_eq!(panel.diff.found_on(6), vec![(0..1, true)]);
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert!(!panel.diff.folded.contains(&key));
-        assert_eq!(cursor_row(&panel), Some(6));
+        assert_eq!(cursor_row(&panel), Some(8));
         assert_eq!(search_count(&panel, &ctx), "2 of 3");
-        assert_eq!(panel.diff.found_on(6), vec![(0..1, true)]);
+        assert_eq!(panel.diff.found_on(8), vec![(0..1, true)]);
     }
 
     #[test]

@@ -53,6 +53,8 @@ pub struct Line {
     pub kind: LineKind,
     /// Without its `+`, `-` or space, tabs as four spaces.
     pub text: String,
+    /// As git wrote it, when that isn't `text`: with its tabs.
+    pub raw: Option<String>,
     /// Where it is in the file as it is now; a removed line, where it was.
     pub number: usize,
     /// The words changed from the line it pairs with, by char index
@@ -61,6 +63,13 @@ pub struct Line {
     /// Its code's colours, by char index into `text`; empty when the
     /// file's language isn't known.
     pub syntax: Spans,
+}
+
+impl Line {
+    /// The line as it is in the file, tabs and all.
+    pub fn raw(&self) -> &str {
+        self.raw.as_deref().unwrap_or(&self.text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -174,6 +183,7 @@ impl Section {
             hunk.lines.push(Line {
                 kind,
                 text: expand(text),
+                raw: text.contains('\t').then(|| text.to_owned()),
                 number,
                 words: Vec::new(),
                 syntax: Vec::new(),
@@ -618,6 +628,7 @@ mod tests {
         .map(|(kind, text)| Line {
             kind,
             text: text.into(),
+            raw: None,
             number: 1,
             words: Vec::new(),
             syntax: Vec::new(),

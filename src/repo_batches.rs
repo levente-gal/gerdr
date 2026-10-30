@@ -1409,14 +1409,20 @@ impl Gerdr {
     }
 
     /// Cut `edit` out of its file, kept to paste, the caret to go where
-    /// the cut was once the diff is read again.
+    /// the cut was once the diff is read again. A restore isn't kept to
+    /// paste: it says what it put back instead.
     fn repos_cut(&mut self, edit: FileEdit) {
-        match diff_edit::apply(&edit) {
-            Ok((done, taken)) => {
+        match (diff_edit::apply(&edit), edit.cut.restored()) {
+            (Ok((done, _)), Some(n)) => {
+                self.repos_edited(done);
+                let lines = if n == 1 { "line" } else { "lines" };
+                self.show_notice(format!("Restored {n} {lines} · u to undo"));
+            }
+            (Ok((done, taken)), None) => {
                 self.repos.register = taken;
                 self.repos_edited(done);
             }
-            Err(why) => self.show_notice(why),
+            (Err(why), _) => self.show_notice(why),
         }
     }
 

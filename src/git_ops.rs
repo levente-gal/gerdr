@@ -2548,6 +2548,43 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_puts_a_file_back_as_git_had_it() {
+        let fx = Fx::local();
+        let dir = &fx.repo;
+        let cases = [
+            (
+                "tabs.go",
+                "func f() {\n\tg()\n\th()\n}\n",
+                "func f() {\n\tif x == nil {\n\t\treturn\n\t}\n\tg()\n\tk()\n}\n",
+            ),
+            ("crlf.txt", "a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\nd\r\n"),
+            ("open.txt", "a\nb", "z\na\nb\nc"),
+        ];
+        for (path, before, after) in cases {
+            write(dir, path, before);
+            git(dir, &["add", "--", path]);
+            git(dir, &["commit", "-q", "-m", path]);
+            write(dir, path, after);
+            let change = Change {
+                path: path.into(),
+                orig: None,
+                code: 'M',
+            };
+            let file = repo_diff(dir, &[change]).pop().unwrap();
+            let (cut, _) = crate::diff_edit::restore_cut(&file, |_, _| true).unwrap();
+            let edit = crate::diff_edit::FileEdit {
+                root: dir.clone(),
+                path: path.into(),
+                cut,
+                shown: crate::diff_edit::shown(&file),
+                caret: Default::default(),
+            };
+            crate::diff_edit::apply(&edit).unwrap();
+            assert_eq!(read(dir, path), before, "{path}");
+        }
+    }
+
+    #[test]
     fn a_worktree_changed_since_it_forked() {
         let fx = Fx::local();
         let main = &fx.repo;
