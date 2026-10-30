@@ -39,6 +39,27 @@ pub struct FileEdit {
     pub caret: Spot,
 }
 
+/// What was yanked or deleted last, to paste: whole lines, each with its
+/// break, or chars.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Register {
+    pub text: String,
+    pub lines: bool,
+}
+
+/// A paste into file `path` of the repository at `root`, at `at` (the
+/// caret), `count` times; before it, or after. `shown` as
+/// `FileEdit::shown`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Put {
+    pub root: PathBuf,
+    pub path: String,
+    pub shown: Vec<(usize, String)>,
+    pub at: Spot,
+    pub before: bool,
+    pub count: usize,
+}
+
 /// A cut made: the file's text before it and after, and where the caret
 /// was and went, to undo and do it again.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,15 +172,7 @@ pub fn cut(text: &str, cut: &Cut) -> Result<(String, Spot), &'static str> {
             } else {
                 (to, from)
             };
-            let ok = |n: usize| n >= 1 && n <= all.len();
-            if !(ok(from.line) && ok(to.line)) {
-                return Err("Those lines aren't in the file");
-            }
-            let start = line_start(&all, from.line) + byte_at(body(all[from.line - 1]), from.col);
-            let end = line_start(&all, to.line) + end_at(body(all[to.line - 1]), to.col);
-            if start >= end {
-                return Err("Nothing to delete there");
-            }
+            let (start, end) = char_span(&all, from, to)?;
             let after = [&text[..start], &text[end..]].concat();
             let line = lines(&after)
                 .get(from.line - 1)
@@ -178,24 +191,160 @@ pub fn cut(text: &str, cut: &Cut) -> Result<(String, Spot), &'static str> {
     }
 }
 
-/// Cut `edit` out of its file, unless it no longer holds what the diff
-/// showed of it.
-pub fn apply(edit: &FileEdit) -> Result<Done, String> {
-    let full = edit.root.join(&edit.path);
-    let before = read(&full)?;
-    if !holds(&before, &edit.shown) {
-        return Err(format!("{} changed since the diff was read", edit.path));
+/// Where the chars from `from` up to `to` (in order) are in the text of
+/// lines `all`, by byte.
+fn char_span(all: &[&str], from: &Spot, to: &Spot) -> Result<(usize, usize), &'static str> {
+    let ok = |n: usize| n >= 1 && n <= all.len();
+    if !(ok(from.line) && ok(to.line)) {
+        return Err("Those lines aren't in the file");
     }
+    let start = line_start(all, from.line) + byte_at(body(all[from.line - 1]), from.col);
+    let end = line_start(all, to.line) + end_at(body(all[to.line - 1]), to.col);
+    if start >= end {
+        return Err("Nothing there");
+    }
+    Ok((start, end))
+}
+
+/// What `cut` takes of `text`: whole lines each with its break, or the
+/// chars.
+pub fn taken(text: &str, cut: &Cut) -> Result<Register, &'static str> {
+    let all = lines(text);
+    match cut {
+        Cut::Lines(numbers) => {
+            let mut taken: String = (1..=all.len())
+                .filter(|n| numbers.contains(n))
+                .map(|n| all[n - 1])
+                .collect();
+            if taken.is_empty() {
+                return Err("Those lines aren't in the file");
+            }
+            if !taken.ends_with('\n') {
+                taken.push('\n');
+            }
+            Ok(Register {
+                text: taken,
+                lines: true,
+            })
+        }
+        Cut::Chars(from, to) => {
+            let (from, to) = if (from.line, from.col) <= (to.line, to.col) {
+                (from, to)
+            } else {
+                (to, from)
+            };
+            let (start, end) = char_span(&all, from, to)?;
+            Ok(Register {
+                text: text[start..end].to_owned(),
+                lines: false,
+            })
+        }
+    }
+}
+
+/// `text` with `register` put in at `put.at`, `put.count` times: whole
+/// lines under its line (over it, `before`), else chars after its char
+/// (before it); and where the caret goes, on the first line put or the
+/// last char.
+pub fn put_in(text: &str, put: &Put, register: &Register) -> Result<(String, Spot), &'static str> {
+    let all = lines(text);
+    let n = put.at.line;
+    if register.text.is_empty() {
+        return Err("Nothing yanked or deleted yet");
+    }
+    if n < 1 || n > all.len().max(1) {
+        return Err("That line isn't in the file");
+    }
+    let more = register.text.repeat(put.count.max(1));
+    if register.lines {
+        let at = if put.before { n - 1 } else { n.min(all.len()) };
+        let byte = line_start(&all, at + 1);
+        // After a last line without a break: the break goes first.
+        let (gap, more) = match at == all.len() && !text.is_empty() && !text.ends_with('\n') {
+            true => ("\n", more.strip_suffix('\n').unwrap_or(&more)),
+            false => ("", more.as_str()),
+        };
+        let after = [&text[..byte], gap, more, &text[byte..]].concat();
+        let first = lines(more)
+            .first()
+            .map_or(0, |l| find::first_char(&diff::expand(body(l))));
+        return Ok((
+            after,
+            Spot {
+                line: at + 1,
+                col: first,
+            },
+        ));
+    }
+    let line = all.get(n - 1).map_or("", |l| body(l));
+    let b = match put.before {
+        true => byte_at(line, put.at.col),
+        false => end_at(line, put.at.col + 1),
+    };
+    let byte = all
+        .get(..n - 1)
+        .map_or(0, |a| a.iter().map(|l| l.len()).sum())
+        + b;
+    let after = [&text[..byte], &more, &text[byte..]].concat();
+    let shown = |t: &str| diff::expand(t).chars().count();
+    let col = match more.contains('\n') {
+        true => shown(&line[..b]),
+        false => (shown(&line[..b]) + shown(&more)).saturating_sub(1),
+    };
+    Ok((after, Spot { line: n, col }))
+}
+
+/// Cut `edit` out of its file, unless it no longer holds what the diff
+/// showed of it; and what it took.
+pub fn apply(edit: &FileEdit) -> Result<(Done, Register), String> {
+    let full = edit.root.join(&edit.path);
+    let before = read_shown(&full, &edit.path, &edit.shown)?;
+    let register = taken(&before, &edit.cut).map_err(String::from)?;
     let (after, then) = cut(&before, &edit.cut).map_err(String::from)?;
     std::fs::write(&full, &after).map_err(|e| format!("{}: {e}", edit.path))?;
-    Ok(Done {
+    let done = Done {
         root: edit.root.clone(),
         path: edit.path.clone(),
         before,
         after,
         caret: edit.caret,
         then,
+    };
+    Ok((done, register))
+}
+
+/// What `edit` would cut out of its file, unless it no longer holds what
+/// the diff showed of it.
+pub fn yank(edit: &FileEdit) -> Result<Register, String> {
+    let text = read_shown(&edit.root.join(&edit.path), &edit.path, &edit.shown)?;
+    taken(&text, &edit.cut).map_err(String::from)
+}
+
+/// Put `register` in the file `put` is in, unless it no longer holds what
+/// the diff showed of it.
+pub fn paste(put: &Put, register: &Register) -> Result<Done, String> {
+    let full = put.root.join(&put.path);
+    let before = read_shown(&full, &put.path, &put.shown)?;
+    let (after, then) = put_in(&before, put, register).map_err(String::from)?;
+    std::fs::write(&full, &after).map_err(|e| format!("{}: {e}", put.path))?;
+    Ok(Done {
+        root: put.root.clone(),
+        path: put.path.clone(),
+        before,
+        after,
+        caret: put.at,
+        then,
     })
+}
+
+/// The text of the file at `full` (`path` in its repository), if it still
+/// holds the lines `shown`.
+fn read_shown(full: &Path, path: &str, shown: &[(usize, String)]) -> Result<String, String> {
+    let text = read(full)?;
+    if !holds(&text, shown) {
+        return Err(format!("{path} changed since the diff was read"));
+    }
+    Ok(text)
 }
 
 /// Put `done`'s file back as it was before it (`back`), or cut it again,
@@ -293,7 +442,8 @@ mod tests {
             caret: spot(2, 4),
         };
         assert!(apply(&edit(shown(2, "b"))).is_err());
-        let done = apply(&edit(shown(2, "    b"))).unwrap();
+        let (done, taken) = apply(&edit(shown(2, "    b"))).unwrap();
+        assert_eq!(taken.text, "\tb\n");
         assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "a\nc\n");
         assert_eq!(redo(&done, true), Ok(spot(2, 4)));
         assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), text);
@@ -304,5 +454,70 @@ mod tests {
         assert!(redo(&done, true).is_err());
         assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "other\n");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_a_cut_takes_is_kept_to_paste() {
+        let text = "a\n\tb c\nd";
+        let lines = |t: &str| Register {
+            text: t.into(),
+            lines: true,
+        };
+        let chars = |t: &str| Register {
+            text: t.into(),
+            lines: false,
+        };
+        assert_eq!(taken(text, &Cut::Lines(vec![2])), Ok(lines("\tb c\n")));
+        assert_eq!(taken(text, &Cut::Lines(vec![3, 1])), Ok(lines("a\nd\n")));
+        assert_eq!(
+            taken(text, &Cut::Chars(spot(2, 4), spot(2, 5))),
+            Ok(chars("b"))
+        );
+        assert_eq!(
+            taken(text, &Cut::Chars(spot(2, 6), spot(3, 1))),
+            Ok(chars("c\nd"))
+        );
+    }
+
+    #[test]
+    fn a_paste_goes_under_or_over_the_line_or_by_the_char() {
+        let text = "one\n  two\nend";
+        let put = |line, col, before, count| Put {
+            root: PathBuf::new(),
+            path: String::new(),
+            shown: Vec::new(),
+            at: spot(line, col),
+            before,
+            count,
+        };
+        let lines = Register {
+            text: "  x\n".into(),
+            lines: true,
+        };
+        let (after, at) = put_in(text, &put(1, 0, false, 1), &lines).unwrap();
+        assert_eq!((after.as_str(), at), ("one\n  x\n  two\nend", spot(2, 2)));
+        let (after, at) = put_in(text, &put(1, 2, true, 2), &lines).unwrap();
+        assert_eq!(
+            (after.as_str(), at),
+            ("  x\n  x\none\n  two\nend", spot(1, 2))
+        );
+        // Under a last line without a break, and still without one.
+        let (after, at) = put_in(text, &put(3, 0, false, 1), &lines).unwrap();
+        assert_eq!((after.as_str(), at), ("one\n  two\nend\n  x", spot(4, 2)));
+        let chars = Register {
+            text: "ab".into(),
+            lines: false,
+        };
+        let (after, at) = put_in(text, &put(1, 1, false, 1), &chars).unwrap();
+        assert_eq!((after.as_str(), at), ("onabe\n  two\nend", spot(1, 3)));
+        let (after, at) = put_in(text, &put(1, 1, true, 2), &chars).unwrap();
+        assert_eq!((after.as_str(), at), ("oababne\n  two\nend", spot(1, 4)));
+        // On an empty file and an empty line.
+        assert_eq!(put_in("", &put(1, 0, false, 1), &chars).unwrap().0, "ab");
+        assert_eq!(
+            put_in("\n", &put(1, 0, false, 1), &chars).unwrap().0,
+            "ab\n"
+        );
+        assert!(put_in(text, &put(1, 0, false, 1), &Register::default()).is_err());
     }
 }

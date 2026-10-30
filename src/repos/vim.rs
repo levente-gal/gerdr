@@ -5,7 +5,10 @@
 //! goes, as Shift with the arrows does; `d` or `x` deletes what is
 //! selected. Each cuts the file in the working tree, if it still holds
 //! what the diff showed of it, and the caret stays where the cut was as
-//! the diff is read again. `u` undoes the last cut, `U` does it again.
+//! the diff is read again. `y` yanks as `d` deletes (`yy`, `yw`, `Y`, a
+//! selection) and copies it too; `p` puts what was yanked or deleted
+//! last after the caret (whole lines under its line), `P` before. `u`
+//! undoes the last cut or paste, `U` does it again.
 
 use std::{
     ops::Range,
@@ -18,7 +21,7 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use super::{Ctx, DiffRow, Outcome, Panel, RowKey};
 use crate::{
     diff::LineKind,
-    diff_edit::{self, Cut, FileEdit, Spot},
+    diff_edit::{self, Cut, FileEdit, Put, Spot},
 };
 
 /// The most a count goes to.
@@ -36,11 +39,36 @@ pub(super) enum Visual {
     Lines,
 }
 
-/// What is typed of a command so far: a count, and `d`.
+/// What is typed of a command so far: a count, and `d` or `y`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Pending {
     count: usize,
-    delete: bool,
+    op: Option<Op>,
+}
+
+/// What a motion after it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Op {
+    Delete,
+    Yank,
+}
+
+impl Op {
+    /// Its key, typed twice for whole lines.
+    fn key(self) -> Keysym {
+        match self {
+            Op::Delete => Keysym::d,
+            Op::Yank => Keysym::y,
+        }
+    }
+
+    /// `outcome` (a cut) as this does it.
+    fn of(self, outcome: Option<Outcome>) -> Option<Outcome> {
+        match (self, outcome) {
+            (Op::Yank, Some(Outcome::Cut(edit))) => Some(Outcome::Yank(edit)),
+            (_, outcome) => outcome,
+        }
+    }
 }
 
 /// Where the caret goes once a file is read again after a cut: its line
@@ -91,8 +119,8 @@ impl Panel {
             return Some(None);
         }
         let count = pending.count.max(1);
-        if pending.delete {
-            return Some(self.delete_motion(sym, typed, count));
+        if let Some(op) = pending.op {
+            return Some(op.of(self.delete_motion(op.key(), sym, typed, count)));
         }
         let selecting =
             self.visual.is_some() || self.cursor.as_ref().is_some_and(|c| c.from != c.row);
@@ -106,12 +134,23 @@ impl Panel {
                 None
             }
             Keysym::d | Keysym::x | Keysym::X | Keysym::D if selecting => self.delete_selection(),
-            Keysym::d => {
+            Keysym::y | Keysym::Y if selecting => Op::Yank.of(self.delete_selection()),
+            Keysym::d | Keysym::y => {
+                let op = if typed == Keysym::d {
+                    Op::Delete
+                } else {
+                    Op::Yank
+                };
                 self.pending = Pending {
-                    delete: true,
+                    op: Some(op),
                     ..pending
                 };
                 None
+            }
+            Keysym::Y => Op::Yank.of(self.delete_motion(Keysym::y, Keysym::y, Keysym::y, count)),
+            Keysym::p | Keysym::P => {
+                self.leave_visual();
+                self.paste(typed == Keysym::P, count)
             }
             Keysym::x => self.cut_along(|col, _| col..col + count),
             Keysym::X => self.cut_along(|col, _| col.saturating_sub(count)..col),
@@ -217,9 +256,9 @@ impl Panel {
     /// a cut there is in, unless the line isn't in the file as it is now.
     fn line_of(&self, r: usize) -> Result<LineOf, &'static str> {
         let Some(&DiffRow::Line(k, f, h, l)) = self.diff_rows.get(r) else {
-            return Err("No line there to delete");
+            return Err("No line there");
         };
-        let (root, file) = self.diff_file(k, f).ok_or("No line there to delete")?;
+        let (root, file) = self.diff_file(k, f).ok_or("No line there")?;
         let line = &file.hunks[h].lines[l];
         if line.kind == LineKind::Removed {
             return Err("A removed line isn't in the file");
@@ -248,6 +287,24 @@ impl Panel {
         }))
     }
 
+    /// Put what was yanked or deleted last in at the caret, `count`
+    /// times: after it, or `before`.
+    fn paste(&self, before: bool, count: usize) -> Option<Outcome> {
+        let (row, col) = self.caret()?;
+        let (root, path, line, shown) = match self.line_of(row) {
+            Ok(it) => it,
+            Err(why) => return Some(Outcome::Notice(why)),
+        };
+        Some(Outcome::Paste(Put {
+            root,
+            path,
+            shown,
+            at: Spot { line, col },
+            before,
+            count,
+        }))
+    }
+
     /// Cut the chars `range` (of the caret's char, and the line's length)
     /// gives of the caret's line.
     fn cut_along(&self, range: impl FnOnce(usize, usize) -> Range<usize>) -> Option<Outcome> {
@@ -255,7 +312,7 @@ impl Panel {
         let len = self.line_text(row)?.chars().count();
         let cols = range(col, len);
         if cols.start >= cols.end.min(len) {
-            return Some(Outcome::Notice("Nothing to delete there"));
+            return Some(Outcome::Notice("Nothing there"));
         }
         self.cut_here(|at| {
             let spot = |col| Spot { col, ..at };
@@ -265,7 +322,13 @@ impl Panel {
 
     /// `d` and then `sym` (`typed`), `count` times: lines, or chars along
     /// the caret's line, never past it.
-    fn delete_motion(&mut self, sym: Keysym, typed: Keysym, count: usize) -> Option<Outcome> {
+    fn delete_motion(
+        &mut self,
+        twice: Keysym,
+        sym: Keysym,
+        typed: Keysym,
+        count: usize,
+    ) -> Option<Outcome> {
         let lines = |from: i64, to: i64| {
             move |at: Spot| {
                 let n = at.line as i64;
@@ -274,7 +337,7 @@ impl Panel {
         };
         let count = count as i64;
         match sym {
-            Keysym::d => return self.cut_here(lines(0, count - 1)),
+            _ if sym == twice => return self.cut_here(lines(0, count - 1)),
             Keysym::j | Keysym::Down | Keysym::KP_Down => return self.cut_here(lines(0, count)),
             Keysym::k | Keysym::Up | Keysym::KP_Up => return self.cut_here(lines(-count, 0)),
             _ => {}
@@ -375,13 +438,13 @@ impl Panel {
     fn cut_lines(&self, rows: std::ops::RangeInclusive<usize>) -> Option<Outcome> {
         let mut file = None;
         let mut numbers = Vec::new();
-        let mut why = "No lines there to delete";
+        let mut why = "No lines there";
         for r in rows {
             let Some(&DiffRow::Line(k, f, ..)) = self.diff_rows.get(r) else {
                 continue;
             };
             if file.get_or_insert((k, f)) != &(k, f) {
-                return Some(Outcome::Notice("Select lines of one file to delete them"));
+                return Some(Outcome::Notice("Select lines of one file"));
             }
             match self.line_of(r) {
                 Ok(line) => numbers.push(line),
@@ -506,16 +569,22 @@ impl Panel {
     /// What the title says while a command is typed or visual mode is on.
     pub(super) fn mode_title(&self) -> Option<String> {
         let mode = match self.visual {
-            Some(Visual::Chars { .. }) => "-- VISUAL -- d delete · Esc stop",
-            Some(Visual::Lines) => "-- VISUAL LINE -- d delete · Esc stop",
+            Some(Visual::Chars { .. }) => "-- VISUAL -- d delete · y yank · Esc stop",
+            Some(Visual::Lines) => "-- VISUAL LINE -- d delete · y yank · Esc stop",
             None => "",
         };
-        let Pending { count, delete } = self.pending;
-        let typed = match (count, delete) {
-            (0, false) => String::new(),
-            (0, true) => "d".into(),
-            (n, d) => format!("{n}{}", if d { "d" } else { "" }),
+        let Pending { count, op } = self.pending;
+        let count = if count > 0 {
+            count.to_string()
+        } else {
+            String::new()
         };
+        let op = match op {
+            Some(Op::Delete) => "d",
+            Some(Op::Yank) => "y",
+            None => "",
+        };
+        let typed = format!("{count}{op}");
         match (typed.is_empty(), mode.is_empty()) {
             (true, true) => None,
             (true, false) => Some(mode.into()),

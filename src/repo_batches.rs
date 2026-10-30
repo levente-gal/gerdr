@@ -25,7 +25,7 @@ use crate::{
         self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, SearchPart, Tone,
         TreeLine, TreeTool,
     },
-    diff_edit::{self, FileEdit},
+    diff_edit::{self, Done, FileEdit, Put},
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
@@ -1274,6 +1274,8 @@ impl Gerdr {
             }
             Outcome::Notice(text) => self.show_notice(text.into()),
             Outcome::Cut(edit) => self.repos_cut(edit),
+            Outcome::Yank(edit) => self.repos_yank(edit),
+            Outcome::Paste(put) => self.repos_paste(put),
             Outcome::UndoCut => self.repos_undo_cut(false),
             Outcome::RedoCut => self.repos_undo_cut(true),
             Outcome::Batch { .. }
@@ -1365,23 +1367,56 @@ impl Gerdr {
         }
     }
 
-    /// Cut `edit` out of its file, the caret to go where the cut was once
-    /// the diff is read again.
+    /// Cut `edit` out of its file, kept to paste, the caret to go where
+    /// the cut was once the diff is read again.
     fn repos_cut(&mut self, edit: FileEdit) {
         match diff_edit::apply(&edit) {
-            Ok(done) => {
-                if let Some(panel) = &mut self.repos.panel {
-                    panel.place_caret(done.root.clone(), done.path.clone(), done.then);
-                }
-                self.repos.undone.clear();
-                self.repos.cuts.push(done);
-                if self.repos.cuts.len() > CUTS {
-                    self.repos.cuts.remove(0);
-                }
-                self.refresh_git();
+            Ok((done, taken)) => {
+                self.repos.register = taken;
+                self.repos_edited(done);
             }
             Err(why) => self.show_notice(why),
         }
+    }
+
+    /// Keep what `edit` would cut, to paste, and put it on the clipboard.
+    fn repos_yank(&mut self, edit: FileEdit) {
+        match diff_edit::yank(&edit) {
+            Ok(taken) => {
+                let n = taken.text.lines().count();
+                let what = match (taken.lines, n) {
+                    (true, 1) => "Yanked 1 line".to_owned(),
+                    (true, n) => format!("Yanked {n} lines"),
+                    (false, _) => format!("Yanked {} chars", taken.text.chars().count()),
+                };
+                self.copy_text(taken.text.clone());
+                self.repos.register = taken;
+                self.show_notice(what);
+            }
+            Err(why) => self.show_notice(why),
+        }
+    }
+
+    /// Put what was yanked or deleted last in as `put` says.
+    fn repos_paste(&mut self, put: Put) {
+        match diff_edit::paste(&put, &self.repos.register) {
+            Ok(done) => self.repos_edited(done),
+            Err(why) => self.show_notice(why),
+        }
+    }
+
+    /// A file was edited from the diff: undone with `u`, the caret to go
+    /// where the edit left it once the diff is read again.
+    fn repos_edited(&mut self, done: Done) {
+        if let Some(panel) = &mut self.repos.panel {
+            panel.place_caret(done.root.clone(), done.path.clone(), done.then);
+        }
+        self.repos.undone.clear();
+        self.repos.cuts.push(done);
+        if self.repos.cuts.len() > CUTS {
+            self.repos.cuts.remove(0);
+        }
+        self.refresh_git();
     }
 
     /// Undo the last cut, or (`again`) do the last undone again, unless

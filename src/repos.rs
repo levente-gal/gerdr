@@ -79,7 +79,7 @@ use crate::{
         ResultBar, RowMark, SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
-    diff_edit::FileEdit,
+    diff_edit::{FileEdit, Put},
     find,
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
@@ -135,6 +135,8 @@ pub struct Repos {
     /// undone, to do again.
     pub(crate) cuts: Vec<crate::diff_edit::Done>,
     pub(crate) undone: Vec<crate::diff_edit::Done>,
+    /// What was yanked or deleted from the diff last, to paste.
+    pub(crate) register: crate::diff_edit::Register,
 }
 
 impl Repos {
@@ -972,6 +974,10 @@ pub enum Outcome {
     Notice(&'static str),
     /// Cut this out of a file, as a delete in the diff asks.
     Cut(FileEdit),
+    /// Keep what this would cut, to paste, and copy it.
+    Yank(FileEdit),
+    /// Put what was yanked or deleted last in a file.
+    Paste(Put),
     /// Undo the last cut; do the last undone again.
     UndoCut,
     RedoCut,
@@ -1432,7 +1438,11 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "v / V, then d",
         "select by chars, by lines; delete it from the file",
     ),
-    ("u / U", "undo the last delete, do it again"),
+    (
+        "yy yw y$ Y, p / P",
+        "in the diff, yank (and copy); paste after, before",
+    ),
+    ("u / U", "undo the last delete or paste, do it again"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -9547,7 +9557,7 @@ mod tests {
         assert_eq!(keys(&mut panel, "Vjj"), None);
         assert_eq!(
             panel.mode_title().as_deref(),
-            Some("-- VISUAL LINE -- d delete · Esc stop")
+            Some("-- VISUAL LINE -- d delete · y yank · Esc stop")
         );
         assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
         assert!(panel.visual.is_none());
@@ -9564,6 +9574,41 @@ mod tests {
             Cut::Chars(spot(2, 4), spot(3, 5))
         );
         assert!(panel.chosen(&shown).is_empty());
+        // `y` yanks as `d` deletes; `p` and `P` paste at the caret.
+        let yank = |o: Option<Outcome>| match o {
+            Some(Outcome::Yank(edit)) => edit.cut,
+            other => panic!("not a yank: {other:?}"),
+        };
+        panel.caret_to(id, 4, &ctx);
+        assert_eq!(yank(keys(&mut panel, "yy")), Cut::Lines(vec![2]));
+        assert_eq!(yank(keys(&mut panel, "2Y")), Cut::Lines(vec![2, 3]));
+        assert_eq!(
+            yank(keys(&mut panel, "yw")),
+            Cut::Chars(spot(2, 4), spot(2, 7))
+        );
+        assert_eq!(panel.mode_title(), None);
+        keys(&mut panel, "3y");
+        assert_eq!(panel.mode_title().as_deref(), Some("3y"));
+        assert_eq!(yank(keys(&mut panel, "j")), Cut::Lines(vec![2, 3, 4, 5]));
+        keys(&mut panel, "vl");
+        assert_eq!(
+            yank(keys(&mut panel, "y")),
+            Cut::Chars(spot(2, 4), spot(2, 6))
+        );
+        assert!(panel.visual.is_none());
+        match keys(&mut panel, "2P") {
+            Some(Outcome::Paste(put)) => {
+                assert_eq!((put.at, put.before, put.count), (spot(2, 5), true, 2));
+                assert_eq!(put.path, "src/a.rs");
+            }
+            other => panic!("not a paste: {other:?}"),
+        }
+        assert!(matches!(keys(&mut panel, "p"), Some(Outcome::Paste(put)) if !put.before));
+        panel.caret_to(old, 0, &ctx);
+        assert_eq!(
+            keys(&mut panel, "p"),
+            Some(Outcome::Notice("A removed line isn't in the file"))
+        );
         // `u` and `U` undo and do again.
         assert_eq!(keys(&mut panel, "u"), Some(Outcome::UndoCut));
         assert_eq!(keys(&mut panel, "U"), Some(Outcome::RedoCut));
