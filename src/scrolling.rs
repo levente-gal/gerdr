@@ -44,7 +44,7 @@ impl Gerdr {
             (self.project_menu.as_mut()).is_some_and(|menu| menu.stop_fling()),
             (self.switcher.as_mut()).is_some_and(|switcher| switcher.stop_fling()),
             self.worktrees.stop_fling(),
-            (self.repos.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
+            self.repos.stop_fling(),
             (self.inbox.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
             (self.scrollback.as_mut()).is_some_and(|viewer| viewer.stop_fling()),
         ]

@@ -232,6 +232,9 @@ pub struct ReposView {
     pub tree_share: f64,
     /// How the tree lists the files: the toolbar over it says.
     pub grouping: Grouping,
+    /// The diff alone across the panel, `title` its heading: no tree,
+    /// branch picker, tabs, field or footer (a worktree's diff).
+    pub diff_only: bool,
 }
 
 /// The header's branch picker: the branch the repositories acted on are
@@ -1210,7 +1213,26 @@ pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) 
 /// the diff holds, on an output of `size` with the tree's share `share`.
 pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
     let w = panel_rect(size).size.w;
-    let detail = (w - tree_width(w, share)).max(0);
+    detail_cols((w - tree_width(w, share)).max(0))
+}
+
+/// How many diff rows the panel shows at once with the diff alone across
+/// it (`ReposView::diff_only`), on an output of `size`.
+pub fn diff_only_page(size: Size<i32, Logical>, density: Density) -> usize {
+    let middle = panel_rect(size).size.h - REPOS_HEADER;
+    let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
+    detail.max(1) as usize
+}
+
+/// How many characters a review comment's row holds with the diff alone
+/// across the panel, on an output of `size`.
+pub fn diff_only_cols(size: Size<i32, Logical>) -> usize {
+    detail_cols(panel_rect(size).size.w)
+}
+
+/// How many characters a review comment's row holds in a detail pane
+/// `detail` wide.
+fn detail_cols(detail: i32) -> usize {
     let text = detail - 2 * HELP_PADDING - SCROLLBAR - 2 * DIFF_INSET - COMMENT_INDENT;
     let advance = measure_mono("0", REPOS_MONO_SIZE)
         .filter(|a| *a > 0.0)
@@ -1594,19 +1616,24 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let inner_x = x + HELP_PADDING;
     let inner_w = (w - 2 * HELP_PADDING).max(0);
     let header = Rectangle::new((x, top).into(), (w, REPOS_HEADER).into());
+    // The diff alone: none of the rest, all of the panel under the header.
+    let only = view.diff_only;
     // The branch picker at the header's left, no more than a third of it.
     let pw = picker_width(&view.branch.label).min(inner_w / 3).max(1);
     let branch = Rectangle::new(
         (inner_x, top + (REPOS_HEADER - ROW_BUTTON) / 2).into(),
-        (pw, ROW_BUTTON).into(),
+        (if only { 0 } else { pw }, ROW_BUTTON).into(),
     );
 
     let row_h = repos_row(view.density);
     let line_h = repos_detail_line(view.density);
 
     // From the bottom up: the footer, the result bar, the error, the field.
-    let (rows, overflow) = hint_rows(&view.hints, inner_w);
-    let footer_height = footer_h(rows.len());
+    let (rows, overflow) = match only {
+        true => (Vec::new(), Vec::new()),
+        false => hint_rows(&view.hints, inner_w),
+    };
+    let footer_height = if only { 0 } else { footer_h(rows.len()) };
     let footer_y = bottom_edge - footer_height;
     let footer = Rectangle::new((x, footer_y).into(), (w, footer_height).into());
     let mut y = footer_y;
@@ -1618,16 +1645,21 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
         y -= ERROR_HEIGHT;
         Rectangle::new((inner_x, y).into(), (inner_w, ERROR_HEIGHT).into())
     });
-    y -= REPOS_FIELD_ROW;
+    let field_row = if only { 0 } else { REPOS_FIELD_ROW };
+    y -= field_row;
     let field = Rectangle::new(
-        (inner_x, y + (REPOS_FIELD_ROW - REPOS_FIELD) / 2).into(),
-        (inner_w, REPOS_FIELD).into(),
+        (inner_x, y + (field_row - REPOS_FIELD).max(0) / 2).into(),
+        (inner_w, if only { 0 } else { REPOS_FIELD }).into(),
     );
     let middle_y = top + REPOS_HEADER;
     let middle_h = (y - middle_y).max(0);
 
     // The tree and its lines, short of its scrollbar.
-    let tree_w = tree_width(w, view.tree_share);
+    let tree_w = if only {
+        0
+    } else {
+        tree_width(w, view.tree_share)
+    };
     let tree = Rectangle::new((x, middle_y).into(), (tree_w, middle_h).into());
     let (line_x, line_w) = (x + REPOS_PAD, (tree_w - 2 * REPOS_PAD - SCROLLBAR).max(0));
     let tree_end = middle_y + middle_h - REPOS_PAD;
@@ -1686,14 +1718,18 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     );
     let splitter = Rectangle::new(
         (x + tree_w - SPLITTER_GRAB, middle_y).into(),
-        (2 * SPLITTER_GRAB, middle_h).into(),
+        (if only { 0 } else { 2 * SPLITTER_GRAB }, middle_h).into(),
     );
     let tab_y = middle_y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
-    let tabs = [DetailTab::Diff, DetailTab::Log, DetailTab::Stashes];
-    let tabs_w = tabs.len() as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP) - REPOS_TAB_GAP;
+    let tabs: &[DetailTab] = match only {
+        true => &[],
+        false => &[DetailTab::Diff, DetailTab::Log, DetailTab::Stashes],
+    };
+    let tabs_w = (tabs.len() as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP) - REPOS_TAB_GAP).max(0);
     let tabs_x = detail.loc.x + detail.size.w - HELP_PADDING - tabs_w;
     let detail_tabs = tabs
-        .into_iter()
+        .iter()
+        .copied()
         .enumerate()
         .map(|(k, tab)| {
             let tx = tabs_x + k as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP);
@@ -1991,7 +2027,7 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
             panel,
             header,
             tree,
-            tree_tools: tree_tools(tree),
+            tree_tools: if only { Vec::new() } else { tree_tools(tree) },
             lines,
             tree_list,
             marks,
@@ -2538,9 +2574,15 @@ impl Painter {
         let header = shift(layout.header);
         let picker = shift(layout.branch);
         let (_, hend) = phys(header, scale);
-        let hx = px(picker.loc.x + picker.size.w + HEADER_GAP) as f32;
+        let only = view.diff_only;
+        let hx = match only {
+            true => px(header.loc.x + HELP_PADDING) as f32,
+            false => px(picker.loc.x + picker.size.w + HEADER_GAP) as f32,
+        };
         let hend = hend - px(HELP_PADDING) as f32;
-        let heading = if view.title.is_empty() {
+        let heading = if only {
+            view.title.clone()
+        } else if view.title.is_empty() {
             "Repositories".to_owned()
         } else {
             format!("Repositories · {}", view.title)
@@ -2566,7 +2608,9 @@ impl Painter {
             scale,
             p.muted,
         );
-        self.branch_button(&mut c, view, picker, scale, p);
+        if !only {
+            self.branch_button(&mut c, view, picker, scale, p);
+        }
         across(&mut c, px(header.loc.y + header.size.h) - border);
 
         // The tree, then the line between it and the detail pane.
@@ -2576,8 +2620,10 @@ impl Painter {
             .iter()
             .map(|&(g, r)| (g, shift(r)))
             .collect();
-        self.tree_title(&mut c, view, tree, &tools, scale, p);
-        if view.lines.is_empty() && !view.empty.is_empty() {
+        if !only {
+            self.tree_title(&mut c, view, tree, &tools, scale, p);
+        }
+        if !only && view.lines.is_empty() && !view.empty.is_empty() {
             let first = Rectangle::new(
                 (
                     tree.loc.x + REPOS_PAD + REPOS_LINE_INSET,
@@ -2603,13 +2649,15 @@ impl Painter {
             );
         }
         let detail = shift(layout.detail);
-        c.fill(
-            px(detail.loc.x),
-            px(detail.loc.y),
-            border,
-            px(detail.loc.y + detail.size.h) - px(detail.loc.y),
-            p.border_variant,
-        );
+        if !only {
+            c.fill(
+                px(detail.loc.x),
+                px(detail.loc.y),
+                border,
+                px(detail.loc.y + detail.size.h) - px(detail.loc.y),
+                p.border_variant,
+            );
+        }
         let tabs: Vec<_> = layout
             .detail_tabs
             .iter()
@@ -2636,6 +2684,9 @@ impl Painter {
         self.search_bar(&mut c, bar, &search, count, hover, scale, p);
 
         // The field, what went wrong, the result bar and the footer.
+        if only {
+            return c;
+        }
         let field = shift(layout.field);
         across(
             &mut c,
@@ -4594,6 +4645,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         density: view.density,
         tree_share: view.tree_share,
         grouping: view.grouping,
+        diff_only: view.diff_only,
     }
 }
 
@@ -5161,6 +5213,7 @@ mod tests {
             },
             density: DENSITY,
             tree_share: REPOS_TREE_SHARE,
+            diff_only: false,
         }
     }
 
@@ -5573,6 +5626,68 @@ mod tests {
         let l = repos_layout(&wide, size);
         assert!(l.tree.size.w > repos_layout(&full(), size).tree.size.w);
         assert_eq!(repos_hit(&l, centre(l.splitter)), Some(ReposHit::Splitter));
+    }
+
+    /// `full`'s diff alone across the panel, as a worktree's, its files
+    /// with no checkbox.
+    fn diff_only() -> ReposView {
+        let mut view = full();
+        for row in &mut view.detail.rows {
+            if let DetailRow::File(file) = row {
+                file.check = None;
+            }
+        }
+        ReposView {
+            title: "Worktree · feat/x".into(),
+            summary: "2 commits on main".into(),
+            lines: Vec::new(),
+            hints: Vec::new(),
+            result: None,
+            error: None,
+            diff_only: true,
+            ..view
+        }
+    }
+
+    #[test]
+    fn the_diff_alone_takes_the_whole_panel() {
+        for (w, h) in SIZES {
+            let size: Size<i32, Logical> = (w, h).into();
+            let view = diff_only();
+            let l = repos_layout(&view, size);
+            let hit = |r: Rect| repos_hit(&l, centre(r));
+            // No tree, picker, tabs, field or footer: the diff across it.
+            assert_eq!(l.detail.loc.x, l.panel.loc.x);
+            assert_eq!(l.detail.size.w, l.panel.size.w);
+            assert_eq!(
+                l.detail.loc.y + l.detail.size.h,
+                l.panel.loc.y + l.panel.size.h
+            );
+            assert!(l.tree_tools.is_empty() && l.detail_tabs.is_empty());
+            assert!(l.buttons.is_empty() && l.more.is_none());
+            for r in [l.branch, l.field, l.splitter, l.tree] {
+                assert!(r.size.w == 0 || r.size.h == 0, "{r:?}");
+            }
+            assert!(l.detail_checks.is_empty());
+            assert!(!l.detail_folds.is_empty());
+            for &(i, r) in &l.detail_folds {
+                assert_eq!(hit(r), Some(ReposHit::DiffFold(i)));
+            }
+            for &(part, r) in &l.detail_search {
+                assert_eq!(hit(r), Some(ReposHit::Search(part)));
+            }
+            for (b, r) in &l.detail_title_buttons {
+                assert_eq!(hit(*r), Some(ReposHit::Button(*b)));
+            }
+            // As many rows as fit, which the page says.
+            let page = diff_only_page(size, view.density);
+            let line_h = repos_detail_line(view.density);
+            assert_eq!(
+                l.detail_list.size.h / line_h,
+                page.min(view.detail.rows.len() - 1) as i32
+            );
+            assert!(diff_only_cols(size) > repos_detail_cols(size, REPOS_TREE_SHARE));
+        }
     }
 
     #[test]
@@ -6276,6 +6391,7 @@ mod tests {
                 hover: Some(ReposHit::Search(SearchPart::Next)),
                 ..with_search()
             },
+            diff_only(),
         ];
         for view in views {
             for (w, h) in SIZES {
@@ -6314,6 +6430,7 @@ mod tests {
             ("menu_create", with_create_menu()),
             ("menu_bad_name", with_bad_name_menu()),
             ("search", with_search()),
+            ("diff_only", diff_only()),
             (
                 "menu_delete",
                 ReposView {

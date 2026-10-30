@@ -4,9 +4,11 @@
 //! squash into the main worktree and delete, as agents leave them behind.
 //!
 //! Typing filters them by name, path and repository. Up/Down select, Enter
-//! (or Ctrl+D) opens the diff against the main worktree's branch in a new
-//! tab, Ctrl+K checks its branch out in the main worktree, Ctrl+M squashes
-//! it in there (in a tab, for the commit message and any conflicts), Delete
+//! (or Ctrl+D) shows its diff against the main worktree's branch in place
+//! of the popup, in the repositories panel's diff view (see
+//! `worktree_diff`); Esc there comes back. Ctrl+K checks its branch out
+//! in the main worktree, Ctrl+M squashes it in there (in a tab, for the
+//! commit message and any conflicts), Delete
 //! deletes it (twice when that loses changes or commits), Shift+Delete
 //! deletes the repository's merged ones, Ctrl+O opens a tab in it (Zed
 //! over a terminal), Ctrl+C copies its path, Esc clears the filter, then
@@ -53,6 +55,9 @@ pub struct Worktrees {
     merging: HashSet<PathBuf>,
     /// Hands the deletes' and checkouts' results to the event loop.
     done: Option<channel::Sender<Done>>,
+    /// The popup as it was when a worktree's diff took its place, to go
+    /// back to.
+    parked: Option<Popup>,
 }
 
 impl Worktrees {
@@ -67,6 +72,21 @@ impl Worktrees {
 
     pub fn close(&mut self) {
         self.popup = None;
+        self.parked = None;
+    }
+
+    /// Put the popup aside while a worktree's diff takes its place.
+    pub fn park(&mut self) {
+        if let Some(popup) = self.popup.take() {
+            self.parked = Some(popup);
+        }
+    }
+
+    /// The popup back as it was put aside, if it was.
+    pub fn unpark(&mut self) {
+        if let Some(popup) = self.parked.take() {
+            self.popup = Some(popup);
+        }
     }
 
     /// The filter field, while the popup is open.
@@ -385,21 +405,6 @@ fn filter(
 /// `text` quoted for a POSIX shell.
 fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
-}
-
-/// The diff of worktree `item` against what its branch merges into, in a
-/// pager: its commits, its changed and new files, and everything changed
-/// since it forked, committed or not.
-fn diff_command(item: &Item) -> String {
-    let pager = "if command -v delta >/dev/null; then delta --paging=always; else less -R; fi";
-    if item.wt.main {
-        return format!("{{ git status --short; git diff HEAD; }} | {pager}; exit");
-    }
-    let target = quote(&item.target);
-    format!(
-        "{{ git log --oneline {target}..HEAD; git status --short; \
-         git diff $(git merge-base {target} HEAD); }} | {pager}; exit"
-    )
 }
 
 impl Popup {
@@ -1065,9 +1070,11 @@ impl Gerdr {
             Outcome::Close => self.close_worktrees(),
             Outcome::Diff(path) => {
                 let Some(item) = find(&path) else { return };
-                self.close_worktrees();
                 let w = self.worktree_workspace(&item);
-                self.new_tab_running(w, &item.wt.path, diff_command(&item));
+                let (names, _) = self.popup_items();
+                let label = names.get(item.repo).cloned().unwrap_or_default();
+                let target = (!item.wt.main).then(|| item.target.clone());
+                self.open_worktree_diff(item.wt.path, label, item.wt.branch, target, w);
             }
             Outcome::Checkout(path) => {
                 let Some(item) = find(&path) else { return };
@@ -1784,17 +1791,5 @@ mod tests {
             popup.selected.as_deref(),
             Some(Path::new("/src/s/.wt/feature"))
         );
-    }
-
-    #[test]
-    fn the_diff_runs_against_the_fork_point() {
-        let mut wip = item(0, "wip", false, false, true);
-        wip.target = "it's".into();
-        let command = diff_command(&wip);
-        assert!(
-            command.contains(r"git merge-base 'it'\''s' HEAD"),
-            "{command}"
-        );
-        assert!(command.ends_with("; exit"));
     }
 }

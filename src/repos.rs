@@ -85,8 +85,10 @@ use crate::{
     },
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
+    review::Review,
     scroll::{Bounds, Motion, Scroll},
     text_field::{self, Edit, TextField},
+    worktree_diff::WorktreeDiff,
 };
 
 /// A repository changing this many files or more starts folded.
@@ -133,21 +135,58 @@ pub struct Repos {
     pub(crate) undone: Vec<crate::diff_edit::Done>,
     /// What was yanked or deleted from the diff last, to paste.
     pub(crate) register: crate::diff_edit::Register,
+    /// A worktree's diff, shown in the panel in its place, while open.
+    pub(crate) worktree: Option<WorktreeDiff>,
+    /// The review comments written on worktrees' diffs, by worktree, as
+    /// they were closed.
+    pub(crate) worktree_reviews: HashMap<PathBuf, Review>,
 }
 
 impl Repos {
+    /// The panel, or a worktree's diff in its place, is open.
     pub fn is_open(&self) -> bool {
-        self.panel.is_some()
+        self.panel.is_some() || self.worktree.is_some()
     }
 
     /// Close it for good, as when leaving the project.
     pub fn close(&mut self) {
         self.panel = None;
         self.kept = None;
+        self.close_worktree();
     }
 
-    /// The field, while the panel is open.
+    /// Close the worktree's diff, its review kept for when it is shown
+    /// again.
+    pub fn close_worktree(&mut self) {
+        if let Some(wd) = self.worktree.take() {
+            let review = wd.diff.review;
+            if !review.is_empty() || self.worktree_reviews.contains_key(&wd.root) {
+                self.worktree_reviews.insert(wd.root, review);
+            }
+        }
+    }
+
+    /// The diff shown: the worktree's, else the panel's.
+    pub fn diff_mut(&mut self) -> Option<&mut DiffView> {
+        match (&mut self.worktree, &mut self.panel) {
+            (Some(wd), _) => Some(&mut wd.diff),
+            (None, Some(panel)) => Some(&mut panel.diff),
+            (None, None) => None,
+        }
+    }
+
+    /// Stop a list flung; whether one was.
+    pub fn stop_fling(&mut self) -> bool {
+        let panel = (self.panel.as_mut()).is_some_and(|panel| panel.stop_fling());
+        let worktree = (self.worktree.as_mut()).is_some_and(|wd| wd.diff.scroll.stop_fling());
+        panel || worktree
+    }
+
+    /// The field, while the panel is open: a worktree diff's, its search's.
     pub fn field_mut(&mut self) -> Option<&mut TextField> {
+        if let Some(wd) = self.worktree.as_mut() {
+            return wd.diff.search_field_mut();
+        }
         let panel = self.panel.as_mut()?;
         if panel.search_has_keys() && panel.branch_menu.is_none() {
             return panel.diff.search_field_mut();
@@ -809,6 +848,12 @@ pub enum RepoEvent {
         generation: u64,
         files: Vec<FileDiff>,
     },
+    /// A worktree's changes since it forked, and their diff, read for its
+    /// diff (`WorktreeDiff`); or why they couldn't be.
+    WorktreeDiff {
+        root: PathBuf,
+        read: Result<(crate::git_ops::Since, Vec<FileDiff>), String>,
+    },
 }
 
 /// What the panel asked for.
@@ -1087,7 +1132,7 @@ fn selected_file(selected: &Option<Selected>) -> Option<(&Path, &str)> {
 
 /// What the diff asked for, as the panel asks it; a file's check is the
 /// panel's own (`Panel::from_diff`).
-fn from_diff(outcome: diff_view::Outcome) -> Outcome {
+pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
     use diff_view::Outcome as D;
     match outcome {
         D::Copy { text, count } => Outcome::Copy { text, count },
@@ -1276,8 +1321,6 @@ fn missing(jobs: &[Job], have: &[(PathBuf, Found)]) -> Vec<Job> {
         .cloned()
         .collect()
 }
-
-/// Why the review can't be copied or cleared.
 
 /// The panel's keys, as the help sheet lists them: the key, what it does.
 const HELP_KEYS: &[(&str, &str)] = &[
@@ -1473,6 +1516,7 @@ impl Panel {
         [
             self.tree_scroll.stop_fling(),
             self.detail_scroll.stop_fling(),
+            self.diff.scroll.stop_fling(),
             menu,
         ]
         .contains(&true)
@@ -4421,6 +4465,7 @@ impl Panel {
             density: ctx.density,
             tree_share: ctx.tree_share,
             grouping: self.grouping,
+            diff_only: false,
         }
     }
 

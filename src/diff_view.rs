@@ -66,6 +66,9 @@ pub enum Keys {
     Field,
 }
 
+/// The checkbox of the file at `path` of the checkout at `root`.
+pub type CheckOf<'a> = &'a dyn Fn(&Path, &str) -> Check;
+
 /// What the diff's keys, clicks and views need from its host.
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
@@ -83,8 +86,8 @@ pub struct Ctx<'a> {
     pub empty: &'a str,
     /// The title counts the checkouts with changes too.
     pub count_sections: bool,
-    /// Each file's checkbox on its header (`root`, `path`): none without.
-    pub check: Option<&'a dyn Fn(&Path, &str) -> Check>,
+    /// Each file's checkbox on its header: none without.
+    pub check: Option<CheckOf<'a>>,
     /// The file the host has selected, its header marked.
     pub selected: Option<(&'a Path, &'a str)>,
 }
@@ -1789,11 +1792,6 @@ impl DiffView {
         std::mem::take(&mut self.signals)
     }
 
-    /// Whether a checkout's diff is read and shown.
-    pub fn has_rows(&self) -> bool {
-        !self.rows.is_empty()
-    }
-
     /// The diff, scrolled: of a long diff only the page is copied.
     pub fn view(&self, ctx: &Ctx) -> DetailView {
         let page = ctx.page.max(1);
@@ -1917,26 +1915,6 @@ impl DiffView {
             return self.detail_press(mods, sym, typed, ctx);
         }
         None
-    }
-
-    /// Whether `hit` is on the diff: its rows, a file header's checkbox
-    /// or chevron, its search, or a button of its own.
-    pub fn is_hit(hit: ReposHit) -> bool {
-        use ReposButton as B;
-        matches!(
-            hit,
-            ReposHit::DiffRow(_)
-                | ReposHit::DiffCheck(_)
-                | ReposHit::DiffFold(_)
-                | ReposHit::Search(_)
-                | ReposHit::Button(
-                    B::Comment
-                        | B::SaveComment
-                        | B::DiscardComment
-                        | B::DeleteComment
-                        | B::CopyReview
-                )
-        )
     }
 
     /// A click somewhere in the host: on the diff's search, rows or
@@ -2066,10 +2044,5 @@ impl DiffView {
         let b = self.scroll_bounds(ctx);
         self.scroll.jump(pos.clamp(0.0, b.max.max(0.0)));
         self.take_slack(ctx.page);
-    }
-
-    /// The comment being written, while one is.
-    pub fn is_editing(&self) -> bool {
-        self.editing.is_some()
     }
 }

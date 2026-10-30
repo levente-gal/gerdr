@@ -76,6 +76,7 @@ mod tooltip;
 mod web_control;
 mod web_pages;
 mod welcome;
+mod worktree_diff;
 mod worktrees;
 
 use std::{

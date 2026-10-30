@@ -1207,11 +1207,19 @@ fn cap(text: String, lines: usize) -> String {
 /// `git diff`, an untracked file as all added, an untracked folder as
 /// its files.
 pub fn repo_diff(dir: &Path, changes: &[Change]) -> Vec<FileDiff> {
+    repo_diff_from(dir, changes, None)
+}
+
+/// `repo_diff` against commit `from` (HEAD for none).
+pub fn repo_diff_from(dir: &Path, changes: &[Change], from: Option<&str>) -> Vec<FileDiff> {
     let top = top(dir);
     let mut tracked = Vec::new();
     let mut failed = None;
     if changes.iter().any(|c| c.code != '?') {
-        let from = head_oid(&top).unwrap_or_else(|| empty_tree(&top));
+        let from = match from {
+            Some(from) => from.to_owned(),
+            None => head_oid(&top).unwrap_or_else(|| empty_tree(&top)),
+        };
         let args = [
             "-c",
             "core.quotePath=false",
@@ -1246,6 +1254,104 @@ pub fn repo_diff(dir: &Path, changes: &[Change]) -> Vec<FileDiff> {
             file
         })
         .collect()
+}
+
+/// What a worktree changed since it forked from `target` (since HEAD for
+/// none, or before its first commit): the commit it forked at, how many
+/// commits it made since, and every file changed since, committed or not,
+/// then the untracked ones (a folder untracked whole as one, ending in
+/// `/`); else why they can't be read.
+pub fn changes_since(dir: &Path, target: Option<&str>) -> Result<Since, String> {
+    let top = top(dir);
+    let head = head_oid(&top);
+    let base = match (target, &head) {
+        (Some(target), Some(_)) => query(&top, &["merge-base", target, "HEAD"])
+            .map(|b| b.trim().to_owned())
+            .ok_or_else(|| format!("It has no commit in common with {target}"))?,
+        (None, Some(head)) => head.clone(),
+        (_, None) => empty_tree(&top),
+    };
+    let args = [
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--name-status",
+        "-z",
+        "-M",
+        "--no-ext-diff",
+        &base,
+    ];
+    let out = exec(&top, &args, Reach::Read);
+    if out.code != Some(0) {
+        return Err(why(&out.stderr, &out.stdout));
+    }
+    let mut changes = parse_name_status(&out.stdout);
+    let args = [
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-standard",
+        "--directory",
+        "--no-empty-directory",
+    ];
+    let out = exec(&top, &args, Reach::Read);
+    if out.code != Some(0) {
+        return Err(why(&out.stderr, &out.stdout));
+    }
+    changes.extend(
+        out.stdout
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|path| Change {
+                path: path.to_owned(),
+                orig: None,
+                code: '?',
+            }),
+    );
+    let commits = match &head {
+        Some(_) => query(&top, &["rev-list", "--count", &format!("{base}..HEAD")])
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(0),
+        None => 0,
+    };
+    Ok(Since {
+        base,
+        commits,
+        changes,
+    })
+}
+
+/// What a worktree changed since it forked (`changes_since`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Since {
+    /// The commit it forked at, which its diff is against.
+    pub base: String,
+    /// Its commits since.
+    pub commits: usize,
+    pub changes: Vec<Change>,
+}
+
+/// The files `git diff --name-status -z` lists: what happened to each, by
+/// its letter, a rename or copy with where it was.
+fn parse_name_status(out: &str) -> Vec<Change> {
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut changes = Vec::new();
+    while let Some(status) = fields.next() {
+        let code = status.chars().next().unwrap_or('M');
+        let (orig, path) = match code {
+            'R' | 'C' => (fields.next().map(str::to_owned), fields.next()),
+            _ => (None, fields.next()),
+        };
+        let Some(path) = path else {
+            break;
+        };
+        changes.push(Change {
+            path: path.to_owned(),
+            orig,
+            code,
+        });
+    }
+    changes
 }
 
 /// An untracked file as a diff adding all of it, an untracked folder as
@@ -2439,6 +2545,56 @@ mod tests {
         git(&unborn, &["add", "x"]);
         let d = repo_diff(&unborn, &[change("x", None, 'A')]);
         assert_eq!(lines(&d[0]), ["+x"]);
+    }
+
+    #[test]
+    fn a_worktree_changed_since_it_forked() {
+        let fx = Fx::local();
+        let main = &fx.repo;
+        let wt = fx.root.join("wt");
+        let wt_path = wt.to_str().unwrap();
+        git(main, &["worktree", "add", "-q", "-b", "feat", wt_path]);
+        // Main moves on: none of it is the worktree's.
+        commit(main, "main-only", "on main\n");
+        commit(&wt, "a", "changed\n");
+        commit(&wt, "old", "moved\n");
+        git(&wt, &["mv", "old", "moved"]);
+        git(&wt, &["commit", "-q", "-m", "move"]);
+        write(&wt, "b", "not committed\n");
+        git(&wt, &["add", "b"]);
+        write(&wt, "new", "untracked\n");
+        write(&wt, "dir/x", "x\n");
+        let since = changes_since(&wt, Some("main")).unwrap();
+        assert_eq!(since.base, rev(main, "main~1"));
+        assert_eq!(since.commits, 3);
+        let changes: Vec<(&str, Option<&str>, char)> = since
+            .changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.orig.as_deref(), c.code))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                ("a", None, 'M'),
+                ("b", None, 'A'),
+                ("moved", None, 'A'),
+                ("dir/", None, '?'),
+                ("new", None, '?'),
+            ]
+        );
+        // Its diff is against where it forked, committed or not.
+        let d = repo_diff_from(&wt, &since.changes, Some(&since.base));
+        let paths: Vec<&str> = d.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a", "b", "moved", "dir/", "new"]);
+        assert_eq!((d[0].added, d[0].removed), (1, 1));
+        assert_eq!(d[3].notes, ["dir/x"]);
+        // A main worktree's: what isn't committed.
+        write(main, "a", "dirty\n");
+        let since = changes_since(main, None).unwrap();
+        assert_eq!((since.base, since.commits), (rev(main, "HEAD"), 0));
+        assert_eq!(since.changes.len(), 1);
+        // Nothing in common, it says so.
+        assert!(changes_since(&wt, Some("no-such-branch")).is_err());
     }
 
     #[test]

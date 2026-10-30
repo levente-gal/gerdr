@@ -511,6 +511,7 @@ impl Gerdr {
         self.switcher = None;
         self.project_menu = None;
         self.worktrees.close();
+        self.repos.close_worktree();
         self.inbox.close();
         self.scrollback = None;
         self.stop_key_repeat();
@@ -556,6 +557,9 @@ impl Gerdr {
 
     /// Close the panel, kept as it is for opening again.
     fn close_repos(&mut self) {
+        if self.repos.worktree.is_some() {
+            return self.close_worktree_diff();
+        }
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
@@ -602,7 +606,7 @@ impl Gerdr {
     }
 
     /// Where the threads send what they came to; set up the first time.
-    fn repos_sender(&mut self) -> Option<channel::Sender<RepoEvent>> {
+    pub(crate) fn repos_sender(&mut self) -> Option<channel::Sender<RepoEvent>> {
         if self.repos.done.is_none() {
             let (tx, rx) = channel::channel::<RepoEvent>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
@@ -669,6 +673,7 @@ impl Gerdr {
 
     /// A Git status read came in.
     pub fn repos_read(&mut self) {
+        self.worktree_diff_read();
         if self.repos.panel.is_none() && self.repos.batch.is_none() {
             return;
         }
@@ -742,6 +747,9 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Outcome> {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_key(mods, sym, typed);
+        }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
         let Repos {
@@ -805,6 +813,9 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.diff.pointer_char = at;
         }
+        if let Some(wd) = self.repos.worktree.as_mut() {
+            wd.diff.pointer_char = at;
+        }
         let double = self.is_double(pos);
         self.repos_hit(hit, double);
     }
@@ -817,6 +828,9 @@ impl Gerdr {
             .seat
             .get_keyboard()
             .is_some_and(|k| k.modifier_state().shift);
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_hit(hit, double, shift);
+        }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
         let Repos {
@@ -870,6 +884,9 @@ impl Gerdr {
     /// and a menu of the actions opens; elsewhere in the panel, the menu
     /// alone.
     pub fn repos_right_click(&mut self, pos: Point<f64, Logical>) {
+        if self.repos.worktree.is_some() {
+            return;
+        }
         let Some(view) = self.repos_view() else {
             return;
         };
@@ -969,6 +986,9 @@ impl Gerdr {
             .detail_rows
             .iter()
             .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y));
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_drag(by, row);
+        }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
         let Repos {
@@ -1006,6 +1026,20 @@ impl Gerdr {
     /// The pointer moved while the panel is open.
     pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.repos_view()?;
+        let size = self.output_size();
+        if let Some(wd) = self.repos.worktree.as_mut() {
+            if wd.scrolling(std::time::Instant::now()) {
+                wd.hover = None;
+                return None;
+            }
+            let layout = chrome::repos_layout(&view, size);
+            let hit = chrome::repos_hit(&layout, pos);
+            wd.hover = hit;
+            return match hit? {
+                ReposHit::Search(part) => search_tip(&layout, part),
+                _ => None,
+            };
+        }
         // Nothing while a list moves under the pointer: it is found again
         // once they stop.
         let panel = self.repos.panel.as_mut()?;
@@ -1058,17 +1092,7 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(text, *rect).key(key))
             }
-            ReposHit::Search(part) => {
-                let (_, rect) = layout.detail_search.iter().find(|(p, _)| *p == part)?;
-                let (text, key) = match part {
-                    SearchPart::Open => ("Find in the diff", "/"),
-                    SearchPart::Prev => ("The place found before", "Shift+Enter"),
-                    SearchPart::Next => ("The next place found", "Enter"),
-                    SearchPart::Close => ("Close the search", "Esc"),
-                    SearchPart::Field => return None,
-                };
-                Some(Tooltip::new(text, *rect).key(key))
-            }
+            ReposHit::Search(part) => search_tip(&layout, part),
             ReposHit::Chip(i) => {
                 let (_, rect) = layout.chips.iter().find(|(j, _)| *j == i)?;
                 let chip = repo(i)?.chip.as_ref()?;
@@ -1123,6 +1147,9 @@ impl Gerdr {
     /// branch menu's, the detail's, else the tree's. What is under the
     /// pointer is left as it was while it moves.
     pub fn repos_scroll(&mut self, motion: crate::scroll::Motion) {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_scroll(motion);
+        }
         let now = std::time::Instant::now();
         let Some(view) = self.repos_view() else {
             return;
@@ -1173,6 +1200,9 @@ impl Gerdr {
     /// Stand the detail, or else the tree, at line `pos`, as its
     /// scrollbar's thumb held there puts it.
     pub fn repos_scroll_to(&mut self, pos: f64, detail: bool) {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_scroll_to(pos);
+        }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
         let Repos {
@@ -1204,6 +1234,9 @@ impl Gerdr {
     /// Move the repositories panel's lists on to `now` if they move on
     /// their own; whether one still moves (see `Scroll::moving`).
     pub fn repos_scroll_tick(&mut self, now: std::time::Instant) -> bool {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_tick(now);
+        }
         if !self.repos.panel.as_ref().is_some_and(|p| p.scrolling(now)) {
             return false;
         }
@@ -1242,6 +1275,9 @@ impl Gerdr {
 
     /// What the panel shows, while it is open.
     pub fn repos_view(&self) -> Option<ReposView> {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_view();
+        }
         let panel = self.repos.panel.as_ref()?;
         let (density, tree_share, cols) = self.repos_env();
         let ctx = Ctx {
@@ -1408,10 +1444,8 @@ impl Gerdr {
     /// A file was edited from the diff: undone with `u`, the caret to go
     /// where the edit left it once the diff is read again.
     fn repos_edited(&mut self, done: Done) {
-        if let Some(panel) = &mut self.repos.panel {
-            panel
-                .diff
-                .place_caret(done.root.clone(), done.path.clone(), done.then);
+        if let Some(diff) = self.repos.diff_mut() {
+            diff.place_caret(done.root.clone(), done.path.clone(), done.then);
         }
         self.repos.undone.clear();
         self.repos.cuts.push(done);
@@ -1438,10 +1472,8 @@ impl Gerdr {
         };
         match diff_edit::redo(&done, !again) {
             Ok(spot) => {
-                if let Some(panel) = &mut self.repos.panel {
-                    panel
-                        .diff
-                        .place_caret(done.root.clone(), done.path.clone(), spot);
+                if let Some(diff) = self.repos.diff_mut() {
+                    diff.place_caret(done.root.clone(), done.path.clone(), spot);
                 }
                 match again {
                     true => self.repos.cuts.push(done),
@@ -1859,6 +1891,7 @@ impl Gerdr {
                 self.repos.fetches = self.repos.fetches.saturating_sub(1);
                 self.refresh_git();
             }
+            RepoEvent::WorktreeDiff { root, read } => self.worktree_diff_event(root, read),
         }
     }
 
@@ -1906,12 +1939,14 @@ impl Gerdr {
     /// Open `paths` of the repository at `root` in its workspace's Zed; in
     /// a terminal tab showing `git status` when the workspace has no Zed.
     fn repos_open_in_zed(&mut self, root: &Path, paths: &[String]) {
-        let Some(w) = self
-            .repos
-            .items
-            .iter()
-            .find(|i| i.root == root)
-            .map(|i| i.workspace)
+        let worktree = (self.repos.worktree.as_ref())
+            .filter(|wd| wd.is(root))
+            .map(|wd| wd.workspace);
+        let Some(w) = worktree
+            .or_else(|| {
+                let item = self.repos.items.iter().find(|i| i.root == root);
+                item.map(|i| i.workspace)
+            })
             .filter(|&w| w < self.workspaces.len())
         else {
             return;
@@ -1948,6 +1983,19 @@ impl Gerdr {
             self.toast("Zed didn't open the files".into(), Level::Error);
         }
     }
+}
+
+/// The tip of part `part` of the diff's search, as `layout` has it.
+pub(crate) fn search_tip(layout: &chrome::ReposLayout, part: SearchPart) -> Option<Tooltip> {
+    let (_, rect) = layout.detail_search.iter().find(|(p, _)| *p == part)?;
+    let (text, key) = match part {
+        SearchPart::Open => ("Find in the diff", "/"),
+        SearchPart::Prev => ("The place found before", "Shift+Enter"),
+        SearchPart::Next => ("The next place found", "Enter"),
+        SearchPart::Close => ("Close the search", "Esc"),
+        SearchPart::Field => return None,
+    };
+    Some(Tooltip::new(text, *rect).key(key))
 }
 
 /// A menu of `hints`, each with its key and dimmed when it can't be done
