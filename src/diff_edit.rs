@@ -2,6 +2,7 @@
 //! them: whole lines, or chars on to a place maybe lines on, out of a
 //! file of the working tree. A file isn't cut once it no longer holds
 //! the lines its diff showed; what it held before is kept, to put back.
+//! A restore puts changed lines back as the diff's base had them.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,25 @@ pub enum Cut {
     /// From one place up to the other, without it: the lines between go,
     /// and those two are joined. Never a line's break at its end.
     Chars(Spot, Spot),
+    /// Changes put back as they were: the added lines `drop` go, by
+    /// number, and each run of removed lines in `put` comes back over
+    /// the line its number is (past the last, at the end).
+    Restore {
+        drop: Vec<usize>,
+        put: Vec<(usize, Vec<String>)>,
+    },
+}
+
+impl Cut {
+    /// How many lines a restore puts back or takes away.
+    pub fn restored(&self) -> Option<usize> {
+        match self {
+            Cut::Restore { drop, put } => {
+                Some(drop.len() + put.iter().map(|(_, l)| l.len()).sum::<usize>())
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A cut out of file `path` of the repository at `root`, made as its
@@ -80,6 +100,38 @@ pub fn shown(file: &FileDiff) -> Vec<(usize, String)> {
         .filter(|l| l.kind != LineKind::Removed)
         .map(|l| (l.number, l.text.clone()))
         .collect()
+}
+
+/// The restore putting back the changed lines of `file` that `picked`
+/// takes (by hunk and line): its added lines go, its removed lines come
+/// back where they were; and the first line it changes. `None` when it
+/// takes no changed line.
+pub fn restore_cut(file: &FileDiff, picked: impl Fn(usize, usize) -> bool) -> Option<(Cut, usize)> {
+    let mut drop = Vec::new();
+    let mut put: Vec<(usize, Vec<String>)> = Vec::new();
+    for (h, hunk) in file.hunks.iter().enumerate() {
+        for (l, line) in hunk.lines.iter().enumerate() {
+            if line.kind == LineKind::Context || !picked(h, l) {
+                continue;
+            }
+            if line.kind == LineKind::Added {
+                drop.push(line.number);
+                continue;
+            }
+            // A removed line's number is the line now after it.
+            match put.last_mut() {
+                Some((n, lines)) if *n == line.number => lines.push(line.raw().to_owned()),
+                _ => put.push((line.number, vec![line.raw().to_owned()])),
+            }
+        }
+    }
+    let first = drop
+        .first()
+        .copied()
+        .into_iter()
+        .chain(put.first().map(|p| p.0))
+        .min()?;
+    Some((Cut::Restore { drop, put }, first))
 }
 
 /// `text`'s lines, each with its break.
@@ -194,7 +246,59 @@ pub fn cut(text: &str, cut: &Cut) -> Result<(String, Spot), &'static str> {
                 },
             ))
         }
+        Cut::Restore { drop, put } => restore(text, &all, drop, put),
     }
+}
+
+/// `text` (its lines `all`) with the lines `drop` gone and those `put`
+/// back, as `Cut::Restore`; and where the caret goes, on the first line
+/// put back or after those gone. Lines put back end as the file's do.
+fn restore(
+    text: &str,
+    all: &[&str],
+    drop: &[usize],
+    put: &[(usize, Vec<String>)],
+) -> Result<(String, Spot), &'static str> {
+    let fits = drop.iter().all(|&n| n >= 1 && n <= all.len())
+        && put.iter().all(|&(n, _)| n >= 1 && n <= all.len() + 1);
+    if !fits || (drop.is_empty() && put.iter().all(|(_, l)| l.is_empty())) {
+        return Err("Those lines aren't in the file");
+    }
+    let brk = match all.first().is_some_and(|l| l.ends_with("\r\n")) {
+        true => "\r\n",
+        false => "\n",
+    };
+    let mut kept: Vec<String> = Vec::new();
+    let mut first = None;
+    for n in 1..=all.len() + 1 {
+        for (_, lines) in put.iter().filter(|(at, _)| *at == n) {
+            first.get_or_insert(kept.len() + 1);
+            kept.extend(lines.iter().map(|l| format!("{l}{brk}")));
+        }
+        let Some(line) = all.get(n - 1) else {
+            break;
+        };
+        if drop.contains(&n) {
+            first.get_or_insert(kept.len() + 1);
+            continue;
+        }
+        match line.ends_with('\n') {
+            true => kept.push(line.to_string()),
+            false => kept.push(format!("{line}{brk}")),
+        }
+    }
+    let mut after = kept.concat();
+    // The file ended without a break: so it still does.
+    if !text.is_empty() && !text.ends_with('\n') {
+        let end = after.strip_suffix('\n').unwrap_or(&after);
+        let end = end.strip_suffix('\r').unwrap_or(end).len();
+        after.truncate(end);
+    }
+    let line = first.unwrap_or(1).min(kept.len().max(1));
+    let col = kept
+        .get(line - 1)
+        .map_or(0, |l| find::first_char(&diff::expand(body(l))));
+    Ok((after, Spot { line, col }))
 }
 
 /// Where the chars from `from` up to `to` (in order) are in the text of
@@ -245,6 +349,8 @@ pub fn taken(text: &str, cut: &Cut) -> Result<Register, &'static str> {
                 lines: false,
             })
         }
+        // Nothing to paste: what was there is the diff's base.
+        Cut::Restore { .. } => Ok(Register::default()),
     }
 }
 
@@ -409,6 +515,48 @@ mod tests {
         assert_eq!(after, "a");
         let (after, _) = cut("a\nb\n", &Cut::Lines(vec![1, 2])).unwrap();
         assert_eq!(after, "");
+    }
+
+    #[test]
+    fn a_restore_puts_changes_back_as_they_were() {
+        let restore = |drop: Vec<usize>, put: Vec<(usize, Vec<&str>)>| Cut::Restore {
+            drop,
+            put: put
+                .into_iter()
+                .map(|(n, l)| (n, l.into_iter().map(String::from).collect()))
+                .collect(),
+        };
+        // `-a` `+b`: b goes, a comes back over where it was.
+        let text = "x\nb\ny\n";
+        let (after, at) = cut(text, &restore(vec![2], vec![(2, vec!["a"])])).unwrap();
+        assert_eq!(after, "x\na\ny\n");
+        assert_eq!(at, spot(2, 0));
+        // An added null check goes.
+        let text = "f()\nif x == nil {\n  return\n}\ng()\n";
+        let (after, at) = cut(text, &restore(vec![2, 3, 4], vec![])).unwrap();
+        assert_eq!(after, "f()\ng()\n");
+        assert_eq!(at, spot(2, 0));
+        // Removed lines come back, at the end too; tabs as they were.
+        let (after, _) = cut("a\nc\n", &restore(vec![], vec![(2, vec!["\tb"])])).unwrap();
+        assert_eq!(after, "a\n\tb\nc\n");
+        let (after, _) = cut("a\n", &restore(vec![], vec![(2, vec!["z"])])).unwrap();
+        assert_eq!(after, "a\nz\n");
+        // Part of a change: one added line of two.
+        let (after, _) = cut("a\nb\nc\n", &restore(vec![3], vec![])).unwrap();
+        assert_eq!(after, "a\nb\n");
+        // Breaks as the file's, and none at its end when it had none.
+        let (after, _) = cut("a\r\nb\r\n", &restore(vec![2], vec![(2, vec!["c"])])).unwrap();
+        assert_eq!(after, "a\r\nc\r\n");
+        let (after, _) = cut("a\nb", &restore(vec![], vec![(3, vec!["c"])])).unwrap();
+        assert_eq!(after, "a\nb\nc");
+        let (after, _) = cut("a\n\nb", &restore(vec![3], vec![])).unwrap();
+        assert_eq!(after, "a\n");
+        assert!(cut("a\n", &restore(vec![5], vec![])).is_err());
+        assert!(cut("a\n", &restore(vec![], vec![(3, vec!["z"])])).is_err());
+        assert_eq!(
+            taken("a\n", &restore(vec![1], vec![])),
+            Ok(Register::default())
+        );
     }
 
     #[test]

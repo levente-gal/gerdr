@@ -669,6 +669,8 @@ pub enum ReposButton {
     SaveComment,
     DiscardComment,
     DeleteComment,
+    /// The change at the diff's cursor, or a hunk, put back as it was.
+    Restore,
 }
 
 impl ReposButton {
@@ -714,6 +716,7 @@ impl ReposButton {
             ReposButton::SaveComment => "Save",
             ReposButton::DiscardComment => "Discard",
             ReposButton::DeleteComment => "Delete",
+            ReposButton::Restore => "Restore",
         }
     }
 }
@@ -740,6 +743,8 @@ pub enum ReposHit {
     /// A file header's checkbox, and its fold chevron.
     DiffCheck(usize),
     DiffFold(usize),
+    /// A row's Restore button: at the cursor, or on a hunk's header.
+    DiffRestore(usize),
     /// The branch picker's button.
     BranchButton,
     /// A row of the branch menu, by index into `BranchMenuView::rows`.
@@ -1443,6 +1448,7 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
         Some(DiffRow(j)) if j == i => Some(DiffRow(0)),
         Some(DiffCheck(j)) if j == i => Some(DiffCheck(0)),
         Some(DiffFold(j)) if j == i => Some(DiffFold(0)),
+        Some(DiffRestore(j)) if j == i => Some(Button(ReposButton::Restore)),
         Some(Button(b)) if buttons.iter().any(|h| h.button == b) => Some(Button(b)),
         _ => None,
     };
@@ -2214,8 +2220,10 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
         .detail_row_buttons
         .iter()
         .find(|(i, _, r)| at(r) && shown(*i));
-    if let Some((_, button, _)) = row_button {
-        return Some(ReposHit::Button(*button));
+    match row_button {
+        Some((i, ReposButton::Restore, _)) => return Some(ReposHit::DiffRestore(*i)),
+        Some((_, button, _)) => return Some(ReposHit::Button(*button)),
+        None => {}
     }
     if let Some((i, _)) = layout.detail_folds.iter().find(|(i, r)| at(r) && shown(*i)) {
         return Some(ReposHit::DiffFold(*i));
@@ -4599,6 +4607,7 @@ fn frame_view(view: &ReposView) -> ReposView {
                 | DiffRow(_)
                 | DiffCheck(_)
                 | DiffFold(_)
+                | DiffRestore(_)
                 | BranchRow(_)
                 | BranchDelete(_)
                 | BranchCreate
@@ -4980,6 +4989,7 @@ mod tests {
         DetailRow::Line(crate::diff::Line {
             kind,
             text: text.into(),
+            raw: None,
             number: 1,
             words: words.to_vec(),
             syntax: crate::syntax::lang("x.rs")
@@ -6402,6 +6412,20 @@ mod tests {
         }
     }
 
+    /// The full panel with Restore buttons on the hunk's header and at the
+    /// cursor, the pointer on the header's.
+    fn with_restore() -> ReposView {
+        use ReposButton::*;
+        let mut view = full();
+        view.detail.row_buttons = vec![
+            (2, hint(Restore, "", None)),
+            (4, hint(Comment, "C", None)),
+            (4, hint(Restore, "R", None)),
+        ];
+        view.hover = Some(ReposHit::DiffRestore(2));
+        view
+    }
+
     /// With `GERDR_DUMP_DIR` set, write the panel there as images to look
     /// at (both themes, scale 1 and 2, with and without a sheet).
     #[test]
@@ -6468,6 +6492,7 @@ mod tests {
                     ..full()
                 },
             ),
+            ("restore", with_restore()),
             (
                 "confirm",
                 ReposView {

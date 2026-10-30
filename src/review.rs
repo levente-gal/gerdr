@@ -374,6 +374,7 @@ mod tests {
         Line {
             kind,
             text: text.into(),
+            raw: None,
             number,
             words: Vec::new(),
             syntax: Vec::new(),

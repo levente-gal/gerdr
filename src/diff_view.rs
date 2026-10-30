@@ -35,6 +35,7 @@ use crate::{
     text_field::{Edit, TextField},
 };
 
+mod restore;
 mod search;
 mod vim;
 
@@ -401,6 +402,7 @@ fn key_name(button: ReposButton) -> &'static str {
     match button {
         B::CopyReview => "Ctrl+Shift+C",
         B::Comment => "C",
+        B::Restore => "R",
         B::SaveComment => "Enter",
         B::DiscardComment => "Esc",
         _ => "",
@@ -1516,16 +1518,36 @@ impl DiffView {
             }
             return buttons;
         }
+        // Every hunk's header in view puts the hunk back.
+        let mut buttons: Vec<(usize, Hint)> = shown
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(self.rows.get(**r), Some(DiffRow::Hunk(..))))
+            .map(|(i, _)| (i, hint(B::Restore)))
+            .collect();
         let Some(cursor) = &self.cursor else {
-            return Vec::new();
+            return buttons;
         };
         let lines = self.cursor_lines().is_some_and(|(_, _, l)| !l.is_empty());
-        match at(cursor.row) {
-            Some(i) if lines && self.comment_at(cursor.row).is_none() => {
-                vec![(i, hint(B::Comment))]
+        if let Some(i) = at(cursor.row)
+            && lines
+            && self.comment_at(cursor.row).is_none()
+        {
+            buttons.push((i, hint(B::Comment)));
+            if self.changed_row(cursor.row) {
+                buttons.push((i, hint(B::Restore)));
             }
-            _ => Vec::new(),
         }
+        buttons
+    }
+
+    /// Whether diff row `r` is an added or removed line.
+    fn changed_row(&self, r: usize) -> bool {
+        let Some(&DiffRow::Line(k, f, h, l)) = self.rows.get(r) else {
+            return false;
+        };
+        self.diff_file(k, f)
+            .is_some_and(|(_, file)| file.hunks[h].lines[l].kind != LineKind::Context)
     }
 
     /// The title row's button copying the review, while there is one.
@@ -2033,6 +2055,15 @@ impl DiffView {
         }
         if hit == ReposHit::Button(ReposButton::ClearReview) {
             return Some(Some(Outcome::Clear));
+        }
+        // A hunk's header puts the hunk back; the cursor's row, the change
+        // there or the lines selected.
+        if let ReposHit::DiffRestore(i) = hit {
+            let r = self.detail_row_at(i, ctx);
+            return Some(match r.map(|r| self.rows[r]) {
+                Some(DiffRow::Hunk(..)) => r.and_then(|r| self.restore_hunk(r)),
+                _ => self.restore_here(),
+            });
         }
         // A click elsewhere than on the comment being written saves it;
         // the diff row clicked found again among the rows without it.

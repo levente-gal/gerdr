@@ -1268,6 +1268,7 @@ fn key_name(button: ReposButton) -> &'static str {
         B::Help => "F1",
         B::CopyReview => "Ctrl+Shift+C",
         B::Comment => "C",
+        B::Restore => "R",
         B::SaveComment => "Enter",
         B::DiscardComment => "Esc",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
@@ -1434,7 +1435,14 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "yy yw y$ Y, p / P",
         "in the diff, yank (and copy); paste after, before",
     ),
-    ("u / U", "undo the last delete or paste, do it again"),
+    (
+        "R",
+        "in the diff, restore the change at the caret or the lines selected",
+    ),
+    (
+        "u / U",
+        "undo the last delete, paste or restore, do it again",
+    ),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -2935,7 +2943,7 @@ impl Panel {
             }
             B::ClearReview if self.diff.review.is_empty() => Err(Why::other(NO_REVIEW)),
             B::ClearReview => Err(Why::other("Asked on a sheet")),
-            B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment => {
+            B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment | B::Restore => {
                 Err(Why::other("Done on the diff"))
             }
             B::All
@@ -3592,7 +3600,10 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
-            ReposHit::DiffRow(_) | ReposHit::DiffCheck(_) | ReposHit::DiffFold(_) => {}
+            ReposHit::DiffRow(_)
+            | ReposHit::DiffCheck(_)
+            | ReposHit::DiffFold(_)
+            | ReposHit::DiffRestore(_) => {}
             ReposHit::BranchButton => self.open_branch_menu(MenuAction::Switch, ctx),
             ReposHit::Detail
             | ReposHit::Panel
@@ -6595,14 +6606,15 @@ mod tests {
         let marks = panel.view("p", &ctx).detail.marks;
         assert!(marks[2].selected && marks[2].top && !marks[2].bottom);
         assert!(marks[3].selected && marks[3].bottom && !marks[4].selected);
-        // The button writing a comment on them, at the cursor.
+        // The buttons writing a comment on them and putting them back, at
+        // the cursor.
         let buttons = panel.view("p", &ctx).detail.row_buttons;
         assert_eq!(
             buttons
                 .iter()
                 .map(|(i, h)| (*i, h.button))
                 .collect::<Vec<_>>(),
-            [(3, ReposButton::Comment)]
+            [(3, ReposButton::Comment), (3, ReposButton::Restore)]
         );
         press(&mut panel, none(), Keysym::c, &ctx);
         type_text(&mut panel, "why", &ctx);
@@ -6722,7 +6734,7 @@ mod tests {
         assert!(panel.drags_rows(&ctx));
         panel.extend_detail_row(3, &ctx);
         assert_eq!(cursor(&panel), Some((3, 2)));
-        assert_eq!(buttons(&panel), [(3, B::Comment)]);
+        assert_eq!(buttons(&panel), [(3, B::Comment), (3, B::Restore)]);
         assert!(panel.view("p", &ctx).detail.title_buttons.is_empty());
         // Its button writes on them; Discard drops it, Save keeps it.
         assert_eq!(panel.click(ReposHit::Button(B::Comment), &ctx), None);
@@ -8199,6 +8211,85 @@ mod tests {
     }
 
     #[test]
+    fn r_and_the_restore_buttons_put_changes_back() {
+        use crate::diff_edit::Cut;
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let text = "diff --git a/f b/f\n@@ -1,4 +1,7 @@ fn main() {\n f();\n+if x == nil {\n+\treturn\n+}\n g();\n-\told\n+new\n h();\n";
+        let mut file = crate::diff::parse(text).pop().unwrap();
+        file.path = "src/a.rs".into();
+        file.code = 'M';
+        let g = panel.diff.reads;
+        panel.set_diffs(root("gerdr"), g, vec![file], &ctx);
+        let at = |panel: &Panel, n: usize| {
+            let on = |r: &DiffRow| matches!(r, DiffRow::Line(_, _, _, l) if *l == n);
+            panel.diff.rows.iter().position(on).unwrap()
+        };
+        panel.focus = Focus::Detail;
+        let restore = |o: Option<Outcome>| match o {
+            Some(Outcome::Cut(edit)) => match edit.cut {
+                Cut::Restore { drop, put } => (drop, put),
+                other => panic!("not a restore: {other:?}"),
+            },
+            other => panic!("not a cut: {other:?}"),
+        };
+        let put = |n: usize, l: &str| vec![(n, vec![l.to_owned()])];
+        let keys = |panel: &mut Panel, keys: &str| {
+            let mut last = None;
+            for c in keys.chars() {
+                let sym = Keysym::from_char(c);
+                let shift = mods(false, c.is_uppercase(), false);
+                last = panel.key(&shift, Keysym::from_char(c.to_ascii_lowercase()), sym, &ctx);
+            }
+            last
+        };
+        // The change at the caret: the added check, whole.
+        panel.caret_to(at(&panel, 2), 0, &ctx);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![2, 3, 4], vec![]));
+        // A changed line: the removed one back, tab and all.
+        panel.caret_to(at(&panel, 6), 0, &ctx);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![6], put(6, "\told")));
+        // Not on a change.
+        panel.caret_to(at(&panel, 4), 0, &ctx);
+        assert_eq!(
+            keys(&mut panel, "R"),
+            Some(Outcome::Notice("No change there"))
+        );
+        // The lines selected only: `}` and the removed line.
+        panel.caret_to(at(&panel, 3), 0, &ctx);
+        assert_eq!(keys(&mut panel, "Vjj"), None);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![4], put(6, "\told")));
+        // The hunk's header has a button putting the whole hunk back; the
+        // cursor's changed line one for its change.
+        panel.caret_to(at(&panel, 6), 0, &ctx);
+        let view = panel.view("p", &ctx);
+        let hunk = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Hunk { .. }));
+        let hunk = hunk.unwrap();
+        let on = |i: usize| {
+            view.detail
+                .row_buttons
+                .iter()
+                .any(|(j, h)| *j == i && h.button == ReposButton::Restore)
+        };
+        assert!(on(hunk));
+        let line = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Line(l) if l.text == "new"));
+        assert!(on(line.unwrap()));
+        assert_eq!(
+            restore(panel.click(ReposHit::DiffRestore(hunk), &ctx)),
+            (vec![2, 3, 4, 6], put(6, "\told"))
+        );
+    }
+
+    #[test]
     fn vims_deletes_cut_the_file_at_the_caret() {
         use crate::diff_edit::{Cut, Spot};
         let items = items();
@@ -8309,7 +8400,7 @@ mod tests {
         assert_eq!(keys(&mut panel, "Vjj"), None);
         assert_eq!(
             panel.diff.mode_title().as_deref(),
-            Some("-- VISUAL LINE -- d delete · y yank · Esc stop")
+            Some("-- VISUAL LINE -- d delete · y yank · R restore · Esc stop")
         );
         assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
         assert!(panel.diff.visual.is_none());
