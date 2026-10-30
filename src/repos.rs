@@ -37,10 +37,10 @@
 //! Up/Down or the pages scrolls the detail. In the diff the arrows and the
 //! pages move a cursor over its rows (with Shift, reaching a range back),
 //! Alt+Up/Down go to the file before or after, and for the cursor's file
-//! Space checks it, Left/Right fold it and Enter opens it in Zed at the
-//! cursor's line. C writes a comment on the range's lines (or edits the
-//! one the cursor is on): Shift+Enter breaks its line, Enter keeps it, Esc
-//! drops it; Delete deletes it, Ctrl+Shift+C copies the review, and
+//! Space checks it, Left/Right fold it (on a line, move the caret) and
+//! Enter opens it in Zed at the cursor's line. C writes a comment on the
+//! range's lines (or edits the one the cursor is on): Shift+Enter breaks
+//! its line, Enter keeps it, Esc drops it; Delete deletes it, Ctrl+Shift+C copies the review, and
 //! "Clear review" deletes it all, asked first. Ctrl+N opens the branch
 //! picker to create a branch (in it, Ctrl+Enter creates the one typed),
 //! Ctrl+Enter
@@ -1407,7 +1407,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Ctrl+A", "check everything, or nothing"),
     (
         "Left / Right",
-        "fold a repository or folder, or the diff's file",
+        "fold a repository, a folder or a diff file header; move the caret",
     ),
     ("Enter", "open the file in Zed; fold a repository or folder"),
     ("Alt+F", "list the files by folder, or flat"),
@@ -4538,12 +4538,18 @@ impl Panel {
     /// A key that moves the caret along its line, as vim's do: `h` and
     /// `l` by a char, `w`, `b` and `e` by words (on to the lines after or
     /// before), `0`, `^` and `$` to the line's start, first char and end.
-    /// The first puts the cursor on the first row in view. Whether `sym`
-    /// was one.
+    /// The first puts the cursor on the first row in view. Left and Right
+    /// go as `h` and `l` while the cursor is on a line, else they fold.
+    /// Whether `sym` was one.
     fn caret_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, ctx: &Ctx) -> bool {
         if mods.ctrl || mods.alt || mods.logo {
             return false;
         }
+        let sym = match sym {
+            Keysym::Left | Keysym::KP_Left if !mods.shift && self.caret().is_some() => Keysym::h,
+            Keysym::Right | Keysym::KP_Right if !mods.shift && self.caret().is_some() => Keysym::l,
+            sym => sym,
+        };
         let letter = !mods.shift
             && matches!(
                 sym,
@@ -5529,7 +5535,8 @@ impl Panel {
     /// the diff they move its cursor (with Shift reaching its range
     /// further), Alt+Up/Down go to the file before or after, and for the
     /// cursor's file (else the one at the top) Space checks it, Left and
-    /// Right fold and unfold it, and Enter opens it in Zed at the cursor's
+    /// Right fold and unfold it (off a line, where they move the caret),
+    /// and Enter opens it in Zed at the cursor's
     /// line (else the first in view). C comments on the cursor's lines, or
     /// edits the comment it is on; Delete deletes that. `j` and `k` move
     /// the cursor as Down and Up do, and some letters its caret
@@ -8192,7 +8199,14 @@ mod tests {
                 paths: vec!["src/git.rs:2".into()],
             })
         );
-        // Left folds it, its header at the top; Right unfolds it.
+        // On a line, Left moves the caret, folding nothing.
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(panel.view("p", &ctx).detail.total, 10);
+        assert_eq!(panel.cursor.as_ref().map(|c| c.row), Some(3));
+        // On its header, Left folds it, its header at the top; Right
+        // unfolds it.
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        press(&mut panel, none(), Keysym::Up, &ctx);
         press(&mut panel, none(), Keysym::Left, &ctx);
         assert_eq!(panel.detail_scroll.pos(), 1.0);
         assert_eq!(panel.view("p", &ctx).detail.total, 7);
@@ -9432,6 +9446,13 @@ mod tests {
         press(&mut panel, none(), Keysym::h, &ctx);
         press(&mut panel, none(), Keysym::h, &ctx);
         assert_eq!(panel.caret(), Some((r0, 0)));
+        // Right and Left go as l and h.
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 2)));
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 1)));
+        press(&mut panel, none(), Keysym::Left, &ctx);
         // Up and down keep how far in it stands, on the line's last char
         // for a shorter one.
         let shift = mods(false, true, false);
