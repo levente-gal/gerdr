@@ -16,10 +16,11 @@ use std::{
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use crate::{
-    chrome::{Density, DetailView, ReposHit},
+    chrome::{Density, DetailView, ReposButton, ReposHit, SheetView},
     diff::FileDiff,
     diff_view::{self, DiffView, Keys, Section},
     git_ops::Since,
+    repos::sheet_step,
     review::Review,
     scroll::Motion,
 };
@@ -49,7 +50,13 @@ pub struct WorktreeDiff {
     pub reading: bool,
     pub diff: DiffView,
     pub hover: Option<ReposHit>,
+    /// The sheet asking whether to delete the review, while open: the
+    /// button Enter presses, by index into `CLEAR_BUTTONS`.
+    pub clearing: Option<usize>,
 }
+
+/// The buttons of the sheet asking whether to delete the review.
+const CLEAR_BUTTONS: [ReposButton; 2] = [ReposButton::ClearReview, ReposButton::Cancel];
 
 /// What the diff's views and keys need of the chrome.
 #[derive(Clone, Copy, Debug)]
@@ -115,6 +122,16 @@ impl WorktreeDiff {
         f(diff, &ctx(&sections, env, &lead, empty))
     }
 
+    /// The diff's one section: the worktree.
+    fn sections(&self) -> [Section<'_>; 1] {
+        [Section {
+            root: &self.root,
+            label: &self.label,
+            branch: self.branch.as_deref(),
+            changes: &self.since.changes,
+        }]
+    }
+
     /// Over the diff, before its counts: what it is against.
     fn lead(&self) -> String {
         match &self.target {
@@ -161,12 +178,7 @@ impl WorktreeDiff {
 
     /// The diff, as the panel's detail shows it.
     pub fn view(&self, env: Env) -> DetailView {
-        let sections = [Section {
-            root: &self.root,
-            label: &self.label,
-            branch: self.branch.as_deref(),
-            changes: &self.since.changes,
-        }];
+        let sections = self.sections();
         let lead = self.lead();
         self.diff.view(&ctx(&sections, env, &lead, self.empty()))
     }
@@ -193,7 +205,8 @@ impl WorktreeDiff {
         });
     }
 
-    /// A key; `None` for none of the diff's, Esc closing it.
+    /// A key; `None` for none of the diff's, Esc closing it. The sheet
+    /// asking whether to delete the review takes them all while open.
     pub fn key(
         &mut self,
         mods: &ModifiersState,
@@ -201,20 +214,72 @@ impl WorktreeDiff {
         typed: Keysym,
         env: Env,
     ) -> Option<Done> {
+        if let Some(choice) = self.clearing.as_mut() {
+            let button = sheet_step(choice, &CLEAR_BUTTONS, mods, sym)?;
+            self.sheet_press(button, env);
+            return None;
+        }
         let outcome = self.with_diff(env, |diff, ctx| diff.key(mods, sym, typed, ctx));
-        match outcome {
+        let done = match outcome {
             Some(outcome) => outcome.map(Done::Diff),
             None => {
                 let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
                 (sym == Keysym::Escape && plain).then_some(Done::Close)
             }
+        };
+        self.asked(done)
+    }
+
+    /// A click on `hit`, in the panel; the sheet takes them while open.
+    pub fn click(&mut self, hit: ReposHit, env: Env) -> Option<Done> {
+        if self.clearing.is_some() {
+            if let ReposHit::Button(button) = hit {
+                self.sheet_press(button, env);
+            }
+            return None;
+        }
+        let outcome = self.with_diff(env, |diff, ctx| diff.click(hit, ctx));
+        self.asked(outcome.flatten().map(Done::Diff))
+    }
+
+    /// Answer the sheet asking whether to delete the review: it closes,
+    /// the review deleted when `button` says so.
+    fn sheet_press(&mut self, button: ReposButton, env: Env) {
+        if !CLEAR_BUTTONS.contains(&button) {
+            return;
+        }
+        self.clearing = None;
+        if button == ReposButton::ClearReview {
+            self.with_diff(env, |diff, ctx| diff.clear_review(ctx.sections));
         }
     }
 
-    /// A click on `hit`, in the panel.
-    pub fn click(&mut self, hit: ReposHit, env: Env) -> Option<Done> {
-        let outcome = self.with_diff(env, |diff, ctx| diff.click(hit, ctx));
-        outcome.flatten().map(Done::Diff)
+    /// What a key or click on the diff asked for: deleting the review is
+    /// asked about first, on a sheet.
+    fn asked(&mut self, done: Option<Done>) -> Option<Done> {
+        match done {
+            Some(Done::Diff(diff_view::Outcome::Clear)) => {
+                self.clearing = Some(0);
+                None
+            }
+            done => done,
+        }
+    }
+
+    /// The sheet asking whether to delete the review, while open.
+    pub fn sheet(&self, env: Env) -> Option<SheetView> {
+        let choice = self.clearing?;
+        let sections = self.sections();
+        let lead = self.lead();
+        let (title, lines) = self
+            .diff
+            .clear_sheet(&ctx(&sections, env, &lead, self.empty()));
+        Some(SheetView {
+            title,
+            lines,
+            buttons: CLEAR_BUTTONS.to_vec(),
+            default: choice.min(CLEAR_BUTTONS.len() - 1),
+        })
     }
 
     /// Shift+click on row `i` of the diff, or the pointer dragged on it.
@@ -475,7 +540,7 @@ impl crate::Gerdr {
             result: None,
             hints: Vec::new(),
             detail: wd.view(env),
-            sheet: None,
+            sheet: wd.sheet(env),
             empty: String::new(),
             branch: Default::default(),
             density: self.density,
@@ -835,5 +900,43 @@ mod tests {
         // A file header's chevron folds it.
         wd.click(ReposHit::DiffFold(1), ENV);
         assert_eq!(texts(&wd)[1..3], ["file a.rs None", "file new.rs None"]);
+    }
+
+    #[test]
+    fn clearing_its_review_asks_first() {
+        let mut wd = read();
+        let mut key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        for sym in [
+            Keysym::Down,
+            Keysym::Down,
+            Keysym::Down,
+            Keysym::c,
+            Keysym::o,
+        ] {
+            key(&mut wd, sym);
+        }
+        key(&mut wd, Keysym::Return);
+        let buttons: Vec<ReposButton> = wd
+            .view(ENV)
+            .title_buttons
+            .iter()
+            .map(|h| h.button)
+            .collect();
+        assert_eq!(buttons, [ReposButton::CopyReview, ReposButton::ClearReview]);
+        // Asked on a sheet, which takes the keys: Esc keeps it.
+        let clear = ReposHit::Button(ReposButton::ClearReview);
+        assert_eq!(wd.click(clear, ENV), None);
+        let sheet = wd.sheet(ENV).unwrap();
+        assert_eq!(sheet.title, "Delete the review's 1 comment for good?");
+        assert_eq!(sheet.lines[0].1, "a.rs: 1 comment");
+        assert_eq!(key(&mut wd, Keysym::Escape), None);
+        assert!(wd.sheet(ENV).is_none() && wd.diff.review.comments.len() == 1);
+        // Enter deletes it, to be saved.
+        wd.click(clear, ENV);
+        wd.diff.review_dirty = false;
+        assert_eq!(key(&mut wd, Keysym::Return), None);
+        assert!(wd.sheet(ENV).is_none() && wd.diff.review.is_empty());
+        assert!(wd.diff.review_dirty);
+        assert!(wd.view(ENV).title_buttons.is_empty());
     }
 }

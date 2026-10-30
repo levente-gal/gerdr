@@ -6432,6 +6432,22 @@ mod tests {
             ("search", with_search()),
             ("diff_only", diff_only()),
             (
+                "diff_only_sheet",
+                ReposView {
+                    sheet: Some(SheetView {
+                        title: "Delete the review's 2 comments for good?".into(),
+                        lines: vec![(
+                            "gerdr".into(),
+                            "src/git.rs: 2 comments".into(),
+                            Tone::Warning,
+                        )],
+                        buttons: vec![ReposButton::ClearReview, ReposButton::Cancel],
+                        default: 0,
+                    }),
+                    ..diff_only()
+                },
+            ),
+            (
                 "menu_delete",
                 ReposView {
                     hover: Some(ReposHit::BranchDelete(1)),

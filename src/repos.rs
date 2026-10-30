@@ -1172,7 +1172,7 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
         D::Paste(put) => Outcome::Paste(put),
         D::UndoCut => Outcome::UndoCut,
         D::RedoCut => Outcome::RedoCut,
-        D::Toggle { .. } => Outcome::Notice("Checked in the panel"),
+        D::Toggle { .. } | D::Clear => Outcome::Notice("Done in the panel"),
     }
 }
 
@@ -1341,6 +1341,30 @@ fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
             buttons
         }
     }
+}
+
+/// A key on a sheet with `buttons`, `choice` the one Enter presses: the
+/// arrows and Tab move it, Enter presses it, Esc presses Cancel. The
+/// button pressed, if any.
+pub fn sheet_step(
+    choice: &mut usize,
+    buttons: &[ReposButton],
+    mods: &ModifiersState,
+    sym: Keysym,
+) -> Option<ReposButton> {
+    let n = buttons.len();
+    if n == 0 {
+        return None;
+    }
+    match sym {
+        Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => *choice = (*choice + n - 1) % n,
+        Keysym::Tab if mods.shift => *choice = (*choice + n - 1) % n,
+        Keysym::Right | Keysym::KP_Right | Keysym::Tab => *choice = (*choice + 1) % n,
+        Keysym::Return | Keysym::KP_Enter => return Some(buttons[(*choice).min(n - 1)]),
+        Keysym::Escape => return Some(ReposButton::Cancel),
+        _ => {}
+    }
+    None
 }
 
 /// Those of `jobs` without the branch `have` lists.
@@ -3174,21 +3198,8 @@ impl Panel {
         | Sheet::Help { choice, .. }
         | Sheet::ClearReview { choice, .. }
         | Sheet::Exists { choice, .. }) = sheet;
-        let n = buttons.len();
-        match sym {
-            Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => {
-                *choice = (*choice + n - 1) % n
-            }
-            Keysym::Tab if mods.shift => *choice = (*choice + n - 1) % n,
-            Keysym::Right | Keysym::KP_Right | Keysym::Tab => *choice = (*choice + 1) % n,
-            Keysym::Return | Keysym::KP_Enter => {
-                let button = buttons[(*choice).min(n - 1)];
-                return self.sheet_press(button, ctx);
-            }
-            Keysym::Escape => return self.sheet_press(ReposButton::Cancel, ctx),
-            _ => {}
-        }
-        None
+        let button = sheet_step(choice, &buttons, mods, sym)?;
+        self.sheet_press(button, ctx)
     }
 
     /// Show the detail's `tab`; the diff where the selection is.
@@ -3256,6 +3267,7 @@ impl Panel {
                 self.toggle(Row::File(k, c, 0), items);
                 None
             }
+            diff_view::Outcome::Clear => self.act(ReposButton::ClearReview, ctx),
             outcome => Some(from_diff(outcome)),
         }
     }
@@ -4429,22 +4441,8 @@ impl Panel {
                 (title, lines, *choice)
             }
             Sheet::ClearReview { choice } => {
-                let mut files: BTreeMap<(String, &str), usize> = BTreeMap::new();
-                for c in &self.diff.review.comments {
-                    *files.entry((label(&c.root), c.path.as_str())).or_default() += 1;
-                }
-                let lines = files
-                    .into_iter()
-                    .map(|((repo, path), n)| {
-                        (
-                            repo,
-                            format!("{path}: {}", count(n, "comment")),
-                            Tone::Warning,
-                        )
-                    })
-                    .collect();
-                let n = self.diff.review.comments.len();
-                let title = format!("Delete the review's {} for good?", count(n, "comment"));
+                diff_ctx!(self, ctx, dctx);
+                let (title, lines) = self.diff.clear_sheet(&dctx);
                 (title, lines, *choice)
             }
             Sheet::Help { choice } => {
@@ -6741,15 +6739,23 @@ mod tests {
         panel.click(ReposHit::Button(B::SaveComment), &ctx);
         assert!(panel.diff.editing.is_none());
         assert_eq!(panel.diff.review.comments[0].text, "why");
-        // The title row copies it.
+        // The title row copies it, or clears it after asking.
         let title = panel.view("p", &ctx).detail.title_buttons;
-        assert_eq!(title.len(), 1);
+        let title: Vec<(B, &str)> = title.iter().map(|h| (h.button, h.label.as_str())).collect();
         assert_eq!(
-            (title[0].button, title[0].label.as_str()),
-            (B::CopyReview, "Copy 1 comment")
+            title,
+            [
+                (B::CopyReview, "Copy 1 comment"),
+                (B::ClearReview, "Clear review")
+            ]
         );
         let copied = panel.click(ReposHit::Button(B::CopyReview), &ctx);
         assert!(matches!(copied, Some(Outcome::Copy { count: 1, .. })));
+        assert_eq!(panel.click(ReposHit::Button(B::ClearReview), &ctx), None);
+        let sheet = panel.view("p", &ctx).sheet.unwrap();
+        assert_eq!(sheet.title, "Delete the review's 1 comment for good?");
+        panel.click(ReposHit::Button(B::Cancel), &ctx);
+        assert!(panel.sheet.is_none() && !panel.diff.review.is_empty());
         // Edited, it can be deleted.
         panel.click(ReposHit::DiffRow(4), &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));

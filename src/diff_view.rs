@@ -24,7 +24,7 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use crate::{
     chrome::{
         Check, Density, DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone,
-        Hint, ReposButton, ReposHit, RowMark,
+        Hint, ReposButton, ReposHit, RowMark, Tone,
     },
     diff::{FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
@@ -133,6 +133,9 @@ pub enum Outcome {
     /// Undo the last cut; do the last undone again.
     UndoCut,
     RedoCut,
+    /// Ask whether to delete every review comment (`clear_sheet`), then
+    /// `clear_review`.
+    Clear,
 }
 
 /// Where in a file Zed opens it: a line (from 1) and, on one in the file
@@ -331,6 +334,14 @@ pub(crate) struct Anchor {
 /// is on: where a row ends and the next starts, the next.
 fn caret_row(wrap: &[Range<usize>], caret: usize) -> usize {
     wrap.iter().rposition(|r| r.start <= caret).unwrap_or(0)
+}
+
+/// `n` comments, in words.
+fn comments(n: usize) -> String {
+    match n {
+        1 => "1 comment".into(),
+        n => format!("{n} comments"),
+    }
 }
 
 /// `n` checkouts, in words.
@@ -1524,12 +1535,37 @@ impl DiffView {
             1 => "Copy 1 comment".to_owned(),
             n => format!("Copy {n} comments"),
         };
-        vec![Hint {
-            button: ReposButton::CopyReview,
+        let hint = |button: ReposButton, label: String| Hint {
+            button,
             label,
             key: String::new(),
             disabled: None,
-        }]
+        };
+        vec![
+            hint(ReposButton::CopyReview, label),
+            hint(
+                ReposButton::ClearReview,
+                ReposButton::ClearReview.label().into(),
+            ),
+        ]
+    }
+
+    /// What the sheet asking whether to delete the review says: its title,
+    /// and a line per file with comments.
+    pub fn clear_sheet(&self, ctx: &Ctx) -> (String, Vec<(String, String, Tone)>) {
+        let mut files: BTreeMap<(String, &str), usize> = BTreeMap::new();
+        for c in &self.review.comments {
+            *files
+                .entry((label_of(&c.root, ctx), c.path.as_str()))
+                .or_default() += 1;
+        }
+        let lines = files
+            .into_iter()
+            .map(|((repo, path), n)| (repo, format!("{path}: {}", comments(n)), Tone::Warning))
+            .collect();
+        let n = self.review.comments.len();
+        let title = format!("Delete the review's {} for good?", comments(n));
+        (title, lines)
     }
 
     /// The diff row shown as row `i` of the detail pane.
@@ -1994,6 +2030,9 @@ impl DiffView {
         }
         if hit == ReposHit::Button(ReposButton::CopyReview) {
             return Some(self.copy(ctx));
+        }
+        if hit == ReposHit::Button(ReposButton::ClearReview) {
+            return Some(Some(Outcome::Clear));
         }
         // A click elsewhere than on the comment being written saves it;
         // the diff row clicked found again among the rows without it.
