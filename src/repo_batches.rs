@@ -725,18 +725,6 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Outcome> {
-        // `*` searches for the word under the pointer.
-        if matches!(
-            typed,
-            Keysym::asterisk | Keysym::KP_Multiply | Keysym::numbersign
-        ) {
-            let at = self
-                .repos_view()
-                .and_then(|view| chrome::repos_diff_char(&view, self.output_size(), self.pointer));
-            if let Some(panel) = self.repos.panel.as_mut() {
-                panel.pointer_char = at;
-            }
-        }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
         let Repos {
@@ -794,6 +782,11 @@ impl Gerdr {
                 return;
             }
             _ => {}
+        }
+        // A press on a line puts the caret on the char there.
+        let at = chrome::repos_diff_char(&view, self.output_size(), pos);
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.pointer_char = at;
         }
         let double = self.is_double(pos);
         self.repos_hit(hit, double);
@@ -1001,16 +994,12 @@ impl Gerdr {
         let panel = self.repos.panel.as_mut()?;
         if panel.scrolling(std::time::Instant::now()) {
             panel.hover = None;
-            panel.pointer_char = None;
             return None;
         }
         let layout = chrome::repos_layout(&view, self.output_size());
         let hit = chrome::repos_hit(&layout, pos);
-        // The word under it is underlined: what `*` searches for.
-        let at = chrome::repos_diff_char(&view, self.output_size(), pos);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.hover = hit;
-            panel.pointer_char = at;
         }
         // Icons say what they are; not over a question or an open menu.
         if view.sheet.is_some() {

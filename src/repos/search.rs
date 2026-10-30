@@ -125,16 +125,7 @@ impl Panel {
     /// the keyboard, for `n` and `N`. Whether there was a word to search
     /// for.
     pub(super) fn star_search(&mut self, row: usize, col: usize, back: bool, ctx: &Ctx) -> bool {
-        let Some(DiffRow::Line(k, f, h, l)) = self.diff_rows.get(row).copied() else {
-            return false;
-        };
-        let text = self
-            .diff_roots
-            .get(k)
-            .and_then(|root| self.diffs.get(root))
-            .and_then(|(_, files)| files.get(f)?.hunks.get(h)?.lines.get(l))
-            .map(|line| line.text.clone());
-        let Some(text) = text else {
+        let Some(text) = self.line_text(row).map(str::to_owned) else {
             return false;
         };
         let Some(word) = find::word_at(&text, col) else {
@@ -323,6 +314,9 @@ impl Panel {
             return;
         };
         self.set_cursor(row, None);
+        if let Some(cursor) = &mut self.cursor {
+            cursor.col = hit.chars.start;
+        }
         let page = ctx.page.1.max(1);
         // Out of view or near an edge (under the pinned header), it goes
         // a third down the page.

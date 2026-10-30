@@ -71,9 +71,11 @@ pub struct ScrollbackRow {
     /// The places the search found on it, by character of it, each with
     /// whether it is the one gone to.
     pub found: Vec<(Range<usize>, bool)>,
-    /// The part of the word under the pointer on it, by character of it:
-    /// what `*` searches for, underlined.
+    /// The part of the word at the caret on it, by character of it: what
+    /// `*` searches for, underlined.
     pub word: Option<Range<usize>>,
+    /// The character of it the caret is on.
+    pub caret: Option<usize>,
 }
 
 /// Where the viewer's parts go, in output coordinates.
@@ -437,6 +439,23 @@ impl Painter {
                 p,
             );
         }
+        if let Some(ch) = row.caret {
+            let width = |t: &str| t.chars().count() as f32 * adv;
+            let x = (0.0, c.w as f32);
+            let ground = p.terminal_background;
+            let text = &row.text;
+            self.caret_block(
+                &mut c,
+                text,
+                ch,
+                x,
+                band(rect, scale),
+                width,
+                ground,
+                scale,
+                p,
+            );
+        }
         self.mono_text(
             &mut c,
             &row.text,
@@ -761,6 +780,7 @@ mod tests {
                     _ => Vec::new(),
                 },
                 word: (i == 1).then_some(2..6),
+                caret: (i == 1).then_some(3),
             })
             .collect();
         v.part = 0.4;

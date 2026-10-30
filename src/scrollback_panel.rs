@@ -28,7 +28,7 @@ const INSET: i32 = 4;
 
 /// The viewer's key hints, each a key it takes and what it does: the
 /// search's while it is open, and while its field has the keyboard only
-/// those.
+/// those; `v`'s while it is on.
 fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
     let hints: &[(&str, &str)] = match viewer.find_bar() {
         Some(bar) if bar.focused => &[
@@ -44,10 +44,16 @@ fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
             ("/", "find"),
             ("Esc", "close search"),
         ],
+        None if viewer.selecting() => &[
+            ("y", "copy"),
+            ("Enter", "copy and close"),
+            ("v", "stop selecting"),
+            ("Esc", "stop selecting"),
+        ],
         None => &[
             ("Ctrl+C", "copy"),
             ("Enter", "copy and close"),
-            ("Ctrl+A", "select all"),
+            ("v", "select"),
             ("/", "find"),
             ("*", "find word"),
             ("Esc", "close"),
@@ -168,6 +174,7 @@ impl Gerdr {
                 selected: viewer.row_selection(i),
                 found: viewer.row_found(i),
                 word: viewer.row_word(i),
+                caret: viewer.row_caret(i),
             })
             .collect();
         let note = match viewer.selected_lines() {
@@ -193,9 +200,8 @@ impl Gerdr {
     }
 
     /// A key while the viewer is open, `typed` with Shift and the layout
-    /// applied. `*` (`#` back) searches for the selection, or the word
-    /// under the pointer, while the search's field doesn't have the
-    /// keyboard.
+    /// applied. `*` (`#` back) searches for the selection, or the word at
+    /// the caret, while the search's field doesn't have the keyboard.
     pub fn scrollback_key(
         &mut self,
         mods: &ModifiersState,
@@ -212,14 +218,8 @@ impl Gerdr {
         if let Some(back) = star.filter(|_| !others)
             && !self.scrollback.as_ref()?.find_focused()
         {
-            let at = self.scrollback_view().and_then(|view| {
-                let layout = chrome::scrollback_layout(view.panel, &view.hints);
-                let on = chrome::scrollback_hit(&view, &layout, self.pointer);
-                (on == Some(ScrollbackHit::Text))
-                    .then(|| chrome::scrollback_char(&view, &layout, self.pointer))
-            });
-            if !self.scrollback.as_mut()?.star(at, back, fit) {
-                self.show_notice("No word under the pointer: point at one, or select text".into());
+            if !self.scrollback.as_mut()?.star(back, fit) {
+                self.show_notice("No word at the caret: move it to one, or select text".into());
             }
             return None;
         }
@@ -273,6 +273,7 @@ impl Gerdr {
             }
             Some(ScrollbackHit::Text) => {
                 let (row, col) = chrome::scrollback_point(&view, &layout, pos);
+                let (_, under) = chrome::scrollback_char(&view, &layout, pos);
                 let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
                 let Some(viewer) = self.scrollback.as_mut() else {
                     return;
@@ -290,6 +291,9 @@ impl Gerdr {
                 };
                 viewer.clicks = Some((now, pos, count));
                 viewer.press(row, col, extend, count);
+                if !extend {
+                    viewer.caret_to(row, under);
+                }
             }
             // A key hint: its key, pressed.
             Some(ScrollbackHit::Hint(i)) => {
@@ -340,12 +344,8 @@ impl Gerdr {
         let view = self.scrollback_view()?;
         let layout = chrome::scrollback_layout(view.panel, &view.hints);
         let hit = chrome::scrollback_hit(&view, &layout, pos);
-        let viewer = self.scrollback.as_mut()?;
-        viewer.hover =
+        self.scrollback.as_mut()?.hover =
             hit.filter(|hit| matches!(hit, ScrollbackHit::Hint(_) | ScrollbackHit::Search(_)));
-        // The word under it is underlined: what `*` searches for.
-        viewer.pointer = (hit == Some(ScrollbackHit::Text))
-            .then(|| chrome::scrollback_char(&view, &layout, pos));
         let Some(ScrollbackHit::Search(part)) = hit else {
             return None;
         };

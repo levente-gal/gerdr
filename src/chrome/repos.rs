@@ -483,8 +483,10 @@ pub struct DetailView {
     /// index into what it shows, each with whether it is the one gone to.
     /// Empty for none.
     pub found: Vec<Vec<(Range<usize>, bool)>>,
-    /// The row of `rows` the pointer is on and the word under it there,
-    /// by char index: what `*` searches for, underlined.
+    /// The row of `rows` the caret is on and the char of its line.
+    pub caret: Option<(usize, usize)>,
+    /// The row of `rows` the caret is on and the word at it there, by
+    /// char index: what `*` searches for, underlined.
     pub word: Option<(usize, Range<usize>)>,
     /// Where the places found are on the scrollbar: shares of all the
     /// rows from the top, each with whether it is the one gone to.
@@ -1394,7 +1396,9 @@ struct DetailLook {
     focused: bool,
     /// The places the search found on it (`DetailView::found`).
     found: Vec<(Range<usize>, bool)>,
-    /// The word under the pointer on it (`DetailView::word`).
+    /// The char the caret is on on it (`DetailView::caret`).
+    caret: Option<usize>,
+    /// The word at the caret on it (`DetailView::word`).
     word: Option<Range<usize>>,
 }
 
@@ -1422,6 +1426,9 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
         hover,
         focused: view.detail.focused,
         found: view.detail.found.get(i).cloned().unwrap_or_default(),
+        caret: (view.detail.caret)
+            .filter(|(j, _)| *j == i)
+            .map(|(_, col)| col),
         word: (view.detail.word.as_ref())
             .filter(|(j, _)| *j == i)
             .map(|(_, word)| word.clone()),
@@ -3641,6 +3648,10 @@ impl Painter {
                     scale,
                     p,
                 );
+                if let Some(ch) = look.caret {
+                    let ground = p.elevated;
+                    self.caret_block(c, text, ch, (tx, bend), row_band, width, ground, scale, p);
+                }
                 // A dot in the gutter: a comment is on it.
                 if mark.noted {
                     let d = (4.0 * s).round();

@@ -296,7 +296,7 @@ pub struct Panel {
     diff_roots: Vec<PathBuf>,
     pub(crate) hover: Option<ReposHit>,
     /// The diff row shown (by index into those in view) and the char of
-    /// its text under the pointer: the word `*` searches for, underlined.
+    /// its text under the pointer as it was pressed: the caret goes there.
     pub(crate) pointer_char: Option<(usize, usize)>,
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
@@ -332,11 +332,13 @@ pub struct Panel {
 }
 
 /// The diff's line cursor: the row it is on, and the row its range reaches
-/// back to (itself for none).
+/// back to (itself for none). On a line, its caret is on char `col` of it
+/// (the last, on a shorter one), kept as it goes up and down.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cursor {
     row: usize,
     from: usize,
+    col: usize,
     /// Who they are, to find them again as the rows change.
     keys: (Option<RowKey>, Option<RowKey>),
 }
@@ -1398,7 +1400,11 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "n / N, F3 / Shift+F3",
         "the next place found, the one before",
     ),
-    ("* / #", "find the word under the pointer, back for #"),
+    (
+        "h j k l w b e 0 ^ $",
+        "in the diff, move the caret, as in vim",
+    ),
+    ("* / #", "find the word at the caret, back for #"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -3291,8 +3297,8 @@ impl Panel {
             self.open_search(ctx);
             return None;
         }
-        // `*` (`#` back): the word under the pointer, as a whole word,
-        // with either focus but the field's.
+        // `*` (`#` back): the word at the caret, as a whole word, with
+        // either focus but the field's.
         let star = match typed {
             Keysym::asterisk | Keysym::KP_Multiply => Some(false),
             Keysym::numbersign => Some(true),
@@ -3303,14 +3309,12 @@ impl Panel {
             && !(mods.ctrl || mods.alt || mods.logo)
             && let Some(back) = star
         {
-            let at = self
-                .pointer_char
-                .and_then(|(i, col)| Some((self.detail_row_at(i, ctx)?, col)));
+            let at = self.caret();
             let found = at.is_some_and(|(row, col)| self.star_search(row, col, back, ctx));
-            return (!found).then_some(Outcome::Notice("No word under the pointer"));
+            return (!found).then_some(Outcome::Notice("No word at the caret"));
         }
         if self.focus == Focus::Detail
-            && let Some(outcome) = self.detail_press(mods, sym, ctx)
+            && let Some(outcome) = self.detail_press(mods, sym, typed, ctx)
         {
             return outcome;
         }
@@ -3536,10 +3540,16 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
-            ReposHit::DiffRow(_) => {
+            ReposHit::DiffRow(i) => {
                 self.focus = Focus::Detail;
                 if let Some(r) = diff_row {
                     self.set_cursor(r, None);
+                    // On a line, the caret goes to the char pressed.
+                    if let (Some((j, col)), Some(c)) = (self.pointer_char, &mut self.cursor)
+                        && j == i
+                    {
+                        c.col = col;
+                    }
                     self.select_diff_row(r, ctx);
                     // On a comment, it is edited.
                     if let Some(c) = self.comment_at(r) {
@@ -4130,7 +4140,11 @@ impl Panel {
                 found.clear();
                 row_buttons.clear();
             }
-            let word = self.pointer_char.and_then(|(i, col)| match rows.get(i)? {
+            let caret = self.caret().and_then(|(r, col)| {
+                let i = shown.iter().position(|&s| s == r)?;
+                matches!(rows.get(i)?, DetailRow::Line(_)).then_some((i, col))
+            });
+            let word = caret.and_then(|(i, col)| match rows.get(i)? {
                 DetailRow::Line(line) => Some((i, find::word_at(&line.text, col)?)),
                 _ => None,
             });
@@ -4139,6 +4153,7 @@ impl Panel {
                 title: self.diff_title(ctx),
                 search: self.search_bar(),
                 found,
+                caret,
                 word,
                 ticks: self.search_ticks(),
                 rows,
@@ -4336,6 +4351,9 @@ impl Panel {
             let from = cursor.keys.1.as_ref().and_then(|k| self.find_row(k));
             if let Some(row) = row {
                 self.set_cursor(row, Some(from.unwrap_or(row)));
+                if let Some(c) = &mut self.cursor {
+                    c.col = cursor.col;
+                }
             }
         }
     }
@@ -4421,7 +4439,111 @@ impl Panel {
     fn set_cursor(&mut self, row: usize, from: Option<usize>) {
         let from = from.unwrap_or(row);
         let keys = (self.row_key(row), self.row_key(from));
-        self.cursor = Some(Cursor { row, from, keys });
+        let col = self.cursor.as_ref().map_or(0, |c| c.col);
+        self.cursor = Some(Cursor {
+            row,
+            from,
+            col,
+            keys,
+        });
+    }
+
+    /// The text of diff row `r`, while it is a line.
+    fn line_text(&self, r: usize) -> Option<&str> {
+        let DiffRow::Line(k, f, h, l) = *self.diff_rows.get(r)? else {
+            return None;
+        };
+        let (_, file) = self.diff_file(k, f)?;
+        Some(&file.hunks.get(h)?.lines.get(l)?.text)
+    }
+
+    /// The diff row the caret is on and the char of its line: on the
+    /// cursor, while that is on a line.
+    fn caret(&self) -> Option<(usize, usize)> {
+        let cursor = self.cursor.as_ref()?;
+        let len = self.line_text(cursor.row)?.chars().count();
+        Some((cursor.row, cursor.col.min(len.saturating_sub(1))))
+    }
+
+    /// Put the caret on char `col` of diff row `row`, the diff scrolled
+    /// to show it and its file selected in the tree.
+    fn caret_to(&mut self, row: usize, col: usize, ctx: &Ctx) {
+        self.set_cursor(row, None);
+        if let Some(cursor) = &mut self.cursor {
+            cursor.col = col;
+        }
+        self.follow(row, ctx.page.1.max(1));
+        self.select_diff_row(row, ctx);
+    }
+
+    /// A key that moves the caret along its line, as vim's do: `h` and
+    /// `l` by a char, `w`, `b` and `e` by words (on to the lines after or
+    /// before), `0`, `^` and `$` to the line's start, first char and end.
+    /// The first puts the cursor on the first row in view. Whether `sym`
+    /// was one.
+    fn caret_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, ctx: &Ctx) -> bool {
+        if mods.ctrl || mods.alt || mods.logo {
+            return false;
+        }
+        let letter = !mods.shift
+            && matches!(
+                sym,
+                Keysym::h | Keysym::l | Keysym::w | Keysym::b | Keysym::e
+            );
+        let symbol = matches!(typed, Keysym::_0 | Keysym::asciicircum | Keysym::dollar);
+        if !(letter || symbol) {
+            return false;
+        }
+        if self.cursor.is_none() {
+            self.move_cursor(1, false, ctx);
+            return true;
+        }
+        let Some((row, col)) = self.caret() else {
+            return true;
+        };
+        let text = self.line_text(row).unwrap_or_default().to_owned();
+        let last = text.chars().count().saturating_sub(1);
+        // The next line on (`by` 1) or before (-1), and its text.
+        let line = |by: i64| {
+            let mut r = row as i64 + by;
+            while r >= 0 && (r as usize) < self.diff_rows.len() {
+                if let Some(text) = self.line_text(r as usize) {
+                    return Some((r as usize, text.to_owned()));
+                }
+                r += by;
+            }
+            None
+        };
+        let (row, col) = match (sym, typed) {
+            (Keysym::h, _) => (row, col.saturating_sub(1)),
+            (Keysym::l, _) => (row, (col + 1).min(last)),
+            (_, Keysym::_0) => (row, 0),
+            (_, Keysym::asciicircum) => (row, find::first_char(&text)),
+            (_, Keysym::dollar) => (row, last),
+            (Keysym::w, _) => match find::next_word(&text, col) {
+                Some(col) => (row, col),
+                None => match line(1) {
+                    Some((r, text)) => (r, find::first_char(&text)),
+                    None => (row, col),
+                },
+            },
+            (Keysym::b, _) => match find::prev_word(&text, col) {
+                Some(col) => (row, col),
+                None => match line(-1) {
+                    Some((r, text)) => (r, find::prev_word(&text, usize::MAX).unwrap_or(0)),
+                    None => (row, col),
+                },
+            },
+            _ => match find::word_end(&text, col + 1) {
+                Some(col) => (row, col),
+                None => match line(1).and_then(|(r, text)| Some((r, find::word_end(&text, 0)?))) {
+                    Some(at) => at,
+                    None => (row, col),
+                },
+            },
+        };
+        self.caret_to(row, col, ctx);
+        true
     }
 
     /// The comment diff row `r` is of.
@@ -5339,11 +5461,14 @@ impl Panel {
     /// cursor's file (else the one at the top) Space checks it, Left and
     /// Right fold and unfold it, and Enter opens it in Zed at the cursor's
     /// line (else the first in view). C comments on the cursor's lines, or
-    /// edits the comment it is on; Delete deletes that.
+    /// edits the comment it is on; Delete deletes that. `j` and `k` move
+    /// the cursor as Down and Up do, and some letters its caret
+    /// (`caret_key`).
     fn detail_press(
         &mut self,
         mods: &ModifiersState,
         sym: Keysym,
+        typed: Keysym,
         ctx: &Ctx,
     ) -> Option<Option<Outcome>> {
         let page = ctx.page.1.max(1);
@@ -5355,6 +5480,8 @@ impl Panel {
             _ if !(plain || diff && shift) => 0,
             Keysym::Down | Keysym::KP_Down => 1,
             Keysym::Up | Keysym::KP_Up => -1,
+            Keysym::j if diff && plain => 1,
+            Keysym::k if diff && plain => -1,
             Keysym::Page_Down | Keysym::KP_Page_Down => page as i64,
             Keysym::Page_Up | Keysym::KP_Page_Up => -(page as i64),
             Keysym::Home | Keysym::KP_Home => i64::MIN,
@@ -5371,6 +5498,9 @@ impl Panel {
         }
         if !diff {
             return None;
+        }
+        if self.caret_key(mods, sym, typed, ctx) {
+            return Some(None);
         }
         match sym {
             Keysym::Down | Keysym::KP_Down if alt => self.jump_file(1, ctx),
@@ -9122,7 +9252,7 @@ mod tests {
     }
 
     #[test]
-    fn star_finds_the_word_under_the_pointer_as_a_whole_word() {
+    fn star_finds_the_word_at_the_caret_as_a_whole_word() {
         let items = items();
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
@@ -9139,22 +9269,22 @@ mod tests {
             Keysym::numbersign,
         );
         // Typed into the field, it is the field's.
-        panel.pointer_char = Some((line_row(&panel, 0), 5));
+        panel.caret_to(line_row(&panel, 0), 5, &ctx);
         panel.focus = Focus::Field;
         panel.key(&shift, star, star, &ctx);
         assert!(panel.search.is_none());
         panel.focus = Focus::Tree;
         // On `id` of the first line: the next whole `id`, on the second,
-        // the diff taking the keys.
+        // the diff taking the keys, the caret on it.
         assert_eq!(panel.key(&shift, star, star, &ctx), None);
         let bar = panel.view("p", &ctx).detail.search.expect("open");
         assert!(bar.whole && !bar.focused);
         assert_eq!(bar.query.text, "id");
         assert_eq!(bar.count, "2 of 3");
-        assert_eq!(cursor_row(&panel), Some(line_row(&panel, 1)));
+        assert_eq!(panel.caret(), Some((line_row(&panel, 1), 11)));
         assert_eq!(panel.found_on(line_row(&panel, 2)), vec![(0..2, false)]);
         // `#`: back from it, round to the last.
-        panel.pointer_char = Some((line_row(&panel, 0), 4));
+        panel.caret_to(line_row(&panel, 0), 4, &ctx);
         panel.key(&shift, hash, hash, &ctx);
         assert_eq!(search_count(&panel, &ctx), "3 of 3");
         assert_eq!(cursor_row(&panel), Some(line_row(&panel, 2)));
@@ -9163,13 +9293,14 @@ mod tests {
         assert_eq!(search_count(&panel, &ctx), "1 of 3");
         panel.key(&shift, Keysym::N, Keysym::N, &ctx);
         assert_eq!(search_count(&panel, &ctx), "3 of 3");
-        // The word under the pointer is underlined, off a word the next.
+        // The word at the caret is underlined, off a word the next.
+        panel.caret_to(line_row(&panel, 1), 6, &ctx);
         let view = panel.view("p", &ctx);
         let second = |r: &DetailRow| matches!(r, DetailRow::Line(l) if l.text == "let idle = id;");
         let i = view.detail.rows.iter().position(second).unwrap();
-        panel.pointer_char = Some((i, 6));
-        assert_eq!(panel.view("p", &ctx).detail.word, Some((i, 4..8)));
-        panel.pointer_char = Some((i, 3));
+        assert_eq!(view.detail.caret, Some((i, 6)));
+        assert_eq!(view.detail.word, Some((i, 4..8)));
+        panel.caret_to(line_row(&panel, 1), 3, &ctx);
         assert_eq!(panel.view("p", &ctx).detail.word, Some((i, 4..8)));
         // Typed into, it finds anywhere again.
         panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
@@ -9177,13 +9308,70 @@ mod tests {
         let bar = panel.view("p", &ctx).detail.search.expect("open");
         assert!(!bar.whole);
         assert!(bar.count.ends_with("of 5"));
-        // Nothing under the pointer: it says so.
+        // The cursor off a line: it says so.
         press(&mut panel, none(), Keysym::Down, &ctx);
-        panel.pointer_char = None;
+        let head = panel
+            .diff_rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::File(..)));
+        panel.set_cursor(head.unwrap(), None);
         assert_eq!(
             panel.key(&shift, star, star, &ctx),
-            Some(Outcome::Notice("No word under the pointer"))
+            Some(Outcome::Notice("No word at the caret"))
         );
+    }
+
+    #[test]
+    fn the_caret_goes_along_the_diffs_lines_as_vims_does() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let lines = ["let id = 1;", "  foo(bar)"];
+        let g = panel.diff_gen;
+        panel.set_diffs(root("gerdr"), g, vec![added("src/a.rs", 'M', &lines)], &ctx);
+        let (r0, r1) = {
+            let at = |n: usize| {
+                let on = |r: &DiffRow| matches!(r, DiffRow::Line(_, _, _, l) if *l == n);
+                panel.diff_rows.iter().position(on).unwrap()
+            };
+            (at(0), at(1))
+        };
+        panel.focus = Focus::Detail;
+        // The first puts the cursor in view.
+        press(&mut panel, none(), Keysym::w, &ctx);
+        assert!(panel.cursor.is_some());
+        panel.caret_to(r0, 0, &ctx);
+        let mut went = Vec::new();
+        for k in [Keysym::w, Keysym::w, Keysym::w, Keysym::w, Keysym::w] {
+            press(&mut panel, none(), k, &ctx);
+            went.push(panel.caret().unwrap());
+        }
+        assert_eq!(went, [(r0, 4), (r0, 7), (r0, 9), (r0, 10), (r1, 2)]);
+        press(&mut panel, none(), Keysym::e, &ctx);
+        assert_eq!(panel.caret(), Some((r1, 4)));
+        press(&mut panel, none(), Keysym::e, &ctx);
+        assert_eq!(panel.caret(), Some((r1, 5)));
+        press(&mut panel, none(), Keysym::b, &ctx);
+        press(&mut panel, none(), Keysym::b, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 10)));
+        press(&mut panel, none(), Keysym::_0, &ctx);
+        press(&mut panel, none(), Keysym::l, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 1)));
+        press(&mut panel, none(), Keysym::h, &ctx);
+        press(&mut panel, none(), Keysym::h, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 0)));
+        // Up and down keep how far in it stands, on the line's last char
+        // for a shorter one.
+        let shift = mods(false, true, false);
+        panel.key(&shift, Keysym::dollar, Keysym::dollar, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 10)));
+        press(&mut panel, none(), Keysym::j, &ctx);
+        assert_eq!(panel.caret(), Some((r1, 9)));
+        press(&mut panel, none(), Keysym::k, &ctx);
+        assert_eq!(panel.caret(), Some((r0, 10)));
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        panel.key(&shift, Keysym::asciicircum, Keysym::asciicircum, &ctx);
+        assert_eq!(panel.caret(), Some((r1, 2)));
     }
 
     #[test]

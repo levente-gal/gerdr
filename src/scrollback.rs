@@ -11,8 +11,13 @@
 //! `/` or Ctrl+F searches it: every place found is tinted, the one gone
 //! to more, Enter goes to the next (Shift+Enter, the one before), round
 //! past the ends, and ticks on the scrollbar say where they all are. `*`
-//! (`#` back) searches for the selection, or the word under the pointer
-//! as a whole word, as vim's do.
+//! (`#` back) searches for the selection, or the word at the caret as a
+//! whole word, as vim's do.
+//!
+//! The caret is on a character, as vim's is: the keys move it as vim's
+//! do (the list following it), a click puts it there, and the places
+//! found take it. Shift with the arrows, or `v` (`V` by lines), select
+//! from it as it goes.
 
 use std::{ops::Range, time::Instant};
 
@@ -167,9 +172,14 @@ pub struct Scrollback {
     edge_at: Option<Instant>,
     /// What of the viewer is under the pointer.
     pub hover: Option<ScrollbackHit>,
-    /// The row (counted in all of them) and character of it the pointer
-    /// is on, while on the text: the word there is underlined.
-    pub pointer: Option<(i64, usize)>,
+    /// The character the caret is on: the word there is underlined.
+    caret: Spot,
+    /// How far into its row the caret stood as it began to go up or
+    /// down, to stand as far into the rows it goes by.
+    want: Option<usize>,
+    /// `v` (by characters) or `V` (by lines) is on: the selection goes
+    /// with the caret.
+    visual: Option<Grain>,
     /// The last press on the text: when, where, and how many came in a
     /// row, for double and triple clicks.
     pub clicks: Option<(Instant, Point<f64, Logical>, u8)>,
@@ -200,7 +210,9 @@ impl Scrollback {
             dragging: false,
             edge_at: None,
             hover: None,
-            pointer: None,
+            caret: Spot::default(),
+            want: None,
+            visual: None,
             clicks: None,
         }
     }
@@ -223,6 +235,14 @@ impl Scrollback {
         let max = fit.bounds(self.rows.len()).max;
         if let Some(up) = self.from_bottom.take() {
             self.scroll.jump((max - up as f64).max(0.0));
+            // The caret starts on the last row in view.
+            let last = (self.scroll.first() + fit.page.max(1)).min(self.rows.len());
+            if let Some(r) = last.checked_sub(1).and_then(|i| self.rows.get(i)) {
+                self.caret = Spot {
+                    line: r.line,
+                    ch: r.start,
+                };
+            }
         } else if self.scroll.pos() > max {
             self.scroll.jump(max);
         }
@@ -361,6 +381,7 @@ impl Scrollback {
     pub fn press(&mut self, row: i64, col: usize, extend: bool, count: u8) {
         let spot = self.spot(row, col);
         self.dragging = true;
+        self.visual = None;
         if extend && let Some(grain) = self.selection.map(|s| s.grain) {
             let span = self.span(spot, grain);
             if let Some(sel) = self.selection.as_mut() {
@@ -401,10 +422,172 @@ impl Scrollback {
         self.dragging
     }
 
-    /// The left button went up.
+    /// The left button went up: after a drag the caret is on the
+    /// selection's last character the pointer went to.
     pub fn release(&mut self) {
+        if self.dragging
+            && let Some(sel) = self.selection
+            && sel.range().0 != sel.range().1
+        {
+            let (a, b) = sel.range();
+            self.caret = if sel.cursor.0 >= sel.anchor.0 {
+                Spot {
+                    line: b.line,
+                    ch: b.ch.saturating_sub(1),
+                }
+            } else {
+                a
+            };
+            self.caret.ch = self.caret.ch.min(self.last_ch(self.caret.line));
+            self.want = None;
+        }
         self.dragging = false;
         self.edge_at = None;
+    }
+
+    /// Whether `v` (or `V`) is on.
+    pub fn selecting(&self) -> bool {
+        self.visual.is_some()
+    }
+
+    /// Put the caret on character `col` of row `row` (rows past either
+    /// end stand for the first or the last), as a click does.
+    pub fn caret_to(&mut self, row: i64, col: usize) {
+        let spot = self.spot(row, col);
+        let ch = spot.ch.min(self.last_ch(spot.line));
+        self.caret = Spot { ch, ..spot };
+        self.want = None;
+    }
+
+    /// The last character of line `line` the caret can be on.
+    fn last_ch(&self, line: usize) -> usize {
+        self.lines[line].chars().count().saturating_sub(1)
+    }
+
+    /// What the caret selects at `spot` going by `grain`: its character,
+    /// or its line.
+    fn caret_span(&self, spot: Spot, grain: Grain) -> (Spot, Spot) {
+        match grain {
+            Grain::Line => self.span(spot, Grain::Line),
+            _ => {
+                let len = self.lines[spot.line].chars().count();
+                let end = Spot {
+                    ch: (spot.ch + 1).min(len),
+                    ..spot
+                };
+                (spot, end)
+            }
+        }
+    }
+
+    /// Move the caret to `to`: with `extend` or `v`, the selection goes
+    /// with it from where it was, else there is none.
+    fn move_caret(&mut self, to: Spot, extend: bool) {
+        if extend || self.visual.is_some() {
+            let grain = self.visual.unwrap_or(Grain::Char);
+            let anchor = match self.selection {
+                Some(sel) if sel.range().0 != sel.range().1 => sel.anchor,
+                _ => self.caret_span(self.caret, grain),
+            };
+            let cursor = self.caret_span(to, grain);
+            self.selection = Some(Selection {
+                anchor,
+                cursor,
+                grain,
+            });
+        } else {
+            self.selection = None;
+        }
+        self.caret = to;
+    }
+
+    /// Where the caret goes `by` rows down (up, for negative), as far
+    /// into the row as it stood.
+    fn caret_rows(&mut self, by: i64) -> Spot {
+        let r = self.row_of(self.caret);
+        let Some(row) = self.rows.get(r) else {
+            return self.caret;
+        };
+        let want = *self.want.get_or_insert(self.caret.ch - row.start);
+        let last = self.rows.len().saturating_sub(1) as i64;
+        let to = self.rows[(r as i64).saturating_add(by).clamp(0, last) as usize];
+        let ch = (to.start + want).min(to.end.saturating_sub(1).max(to.start));
+        Spot {
+            line: to.line,
+            ch: ch.min(self.last_ch(to.line)),
+        }
+    }
+
+    /// Where vim's `w` takes the caret: the next word's start, on a later
+    /// line if none is on its own, or an empty line.
+    fn word_forward(&self) -> Spot {
+        let Spot { line, ch } = self.caret;
+        if let Some(ch) = find::next_word(&self.lines[line], ch) {
+            return Spot { line, ch };
+        }
+        for (n, text) in self.lines.iter().enumerate().skip(line + 1) {
+            if text.is_empty() {
+                return Spot { line: n, ch: 0 };
+            }
+            if !text.trim().is_empty() {
+                let ch = find::first_char(text);
+                return Spot { line: n, ch };
+            }
+        }
+        self.caret
+    }
+
+    /// Where vim's `b` takes it: the start of the word before, on an
+    /// earlier line if none is before it on its own, or an empty line.
+    fn word_back(&self) -> Spot {
+        let Spot { line, ch } = self.caret;
+        if let Some(ch) = find::prev_word(&self.lines[line], ch) {
+            return Spot { line, ch };
+        }
+        for n in (0..line).rev() {
+            let text = &self.lines[n];
+            if text.is_empty() {
+                return Spot { line: n, ch: 0 };
+            }
+            if let Some(ch) = find::prev_word(text, usize::MAX) {
+                return Spot { line: n, ch };
+            }
+        }
+        Spot { line: 0, ch: 0 }
+    }
+
+    /// Where vim's `e` takes it: the end of the word, or the next one's,
+    /// on a later line if none is on its own.
+    fn word_forward_end(&self) -> Spot {
+        let Spot { line, ch } = self.caret;
+        if let Some(ch) = find::word_end(&self.lines[line], ch + 1) {
+            return Spot { line, ch };
+        }
+        for (n, text) in self.lines.iter().enumerate().skip(line + 1) {
+            if let Some(ch) = find::word_end(text, 0) {
+                return Spot { line: n, ch };
+            }
+        }
+        self.caret
+    }
+
+    /// Scroll the list the least to show the caret's row whole, from
+    /// where it stands or else from `from` (where a page goes).
+    fn follow(&mut self, now: Instant, fit: Fit, from: Option<f64>) {
+        let row = self.row_of(self.caret) as f64;
+        let page = fit.page.max(1) as f64;
+        let b = fit.bounds(self.rows.len());
+        let pos = from.unwrap_or(self.scroll.pos());
+        let to = if row < pos {
+            row
+        } else if row + 1.0 > pos + page {
+            row + 1.0 - page
+        } else {
+            pos
+        };
+        if from.is_some() || to != pos {
+            self.scroll.glide_to(to, now, b);
+        }
     }
 
     /// Select all of it.
@@ -440,28 +623,122 @@ impl Scrollback {
             _ => Outcome::NothingSelected,
         };
         let page = fit.page.max(1) as f64;
-        let by = match sym {
+        let ctrl = mods.ctrl && !(mods.alt || mods.logo);
+        let plain = !(mods.ctrl || mods.alt || mods.logo);
+        match sym {
+            // Out of `v` first, the selection gone.
+            Keysym::Escape if plain && self.visual.is_some() => {
+                self.visual = None;
+                self.selection = None;
+                return None;
+            }
             Keysym::Escape | Keysym::q if !mods.ctrl => return Some(Outcome::Close),
             Keysym::Return | Keysym::KP_Enter => return Some(copy(true)),
             Keysym::c if mods.ctrl => return Some(copy(false)),
-            Keysym::y if !mods.ctrl => return Some(copy(false)),
+            Keysym::y if !mods.ctrl => {
+                let copied = copy(false);
+                self.visual = None;
+                return Some(copied);
+            }
             Keysym::a if mods.ctrl => {
+                self.visual = None;
                 self.select_all();
                 return None;
             }
-            Keysym::Up | Keysym::k => -1.0,
-            Keysym::Down | Keysym::j => 1.0,
-            Keysym::Page_Up | Keysym::b => -page,
-            Keysym::Page_Down | Keysym::space => page,
-            Keysym::Home => f64::MIN,
-            Keysym::g if !mods.shift => f64::MIN,
-            Keysym::End => f64::MAX,
-            Keysym::g => f64::MAX,
-            _ => return None,
+            Keysym::v | Keysym::V if plain => {
+                let grain = if mods.shift { Grain::Line } else { Grain::Char };
+                if self.visual == Some(grain) {
+                    self.visual = None;
+                    self.selection = None;
+                } else {
+                    self.visual = Some(grain);
+                    let span = self.caret_span(self.caret, grain);
+                    let anchor = match self.selection {
+                        Some(sel) if sel.range().0 != sel.range().1 => sel.anchor,
+                        _ => span,
+                    };
+                    self.selection = Some(Selection {
+                        anchor,
+                        cursor: span,
+                        grain,
+                    });
+                }
+                return None;
+            }
+            _ => {}
+        }
+        // The pages scroll the list as far as the caret goes.
+        let pages = match sym {
+            _ if !(plain || ctrl) => None,
+            Keysym::Page_Up | Keysym::KP_Page_Up if !mods.ctrl => Some(-page),
+            Keysym::Page_Down | Keysym::KP_Page_Down if !mods.ctrl => Some(page),
+            Keysym::space if plain && !mods.shift => Some(page),
+            Keysym::u if ctrl => Some(-(page / 2.0).ceil()),
+            Keysym::d if ctrl => Some((page / 2.0).ceil()),
+            _ => None,
         };
-        let b = fit.bounds(self.rows.len());
-        let to = (self.scroll.pos().round() + by).clamp(0.0, b.max);
-        self.scroll.glide_to(to, now, b);
+        let Spot { line, ch } = self.caret;
+        let arrows = matches!(
+            sym,
+            Keysym::Left
+                | Keysym::Right
+                | Keysym::Up
+                | Keysym::Down
+                | Keysym::KP_Left
+                | Keysym::KP_Right
+                | Keysym::KP_Up
+                | Keysym::KP_Down
+                | Keysym::Home
+                | Keysym::End
+                | Keysym::KP_Home
+                | Keysym::KP_End
+                | Keysym::Page_Up
+                | Keysym::Page_Down
+        );
+        let extend = mods.shift && arrows;
+        let last_line = self.lines.len() - 1;
+        let at = |line, ch| Spot { line, ch };
+        let mut keep_want = false;
+        let max = fit.bounds(self.rows.len()).max;
+        let paged = pages.map(|by| (self.scroll.pos().round() + by).clamp(0.0, max));
+        let to = if let Some(by) = pages {
+            keep_want = true;
+            self.caret_rows(by as i64)
+        } else if !plain {
+            return None;
+        } else {
+            match (sym, typed) {
+                (Keysym::Left | Keysym::KP_Left | Keysym::h, _) => at(line, ch.saturating_sub(1)),
+                (Keysym::Right | Keysym::KP_Right | Keysym::l, _) => {
+                    at(line, (ch + 1).min(self.last_ch(line)))
+                }
+                (Keysym::Up | Keysym::KP_Up | Keysym::k, _) => {
+                    keep_want = true;
+                    self.caret_rows(-1)
+                }
+                (Keysym::Down | Keysym::KP_Down | Keysym::j, _) => {
+                    keep_want = true;
+                    self.caret_rows(1)
+                }
+                (Keysym::w | Keysym::W, _) => self.word_forward(),
+                (Keysym::b | Keysym::B, _) => self.word_back(),
+                (Keysym::e | Keysym::E, _) => self.word_forward_end(),
+                (_, Keysym::_0) => at(line, 0),
+                (_, Keysym::asciicircum) => at(line, find::first_char(&self.lines[line])),
+                (_, Keysym::dollar) => at(line, self.last_ch(line)),
+                (Keysym::Home | Keysym::KP_Home, _) => at(0, 0),
+                (Keysym::g, _) if !mods.shift => at(0, 0),
+                (Keysym::End | Keysym::KP_End | Keysym::g | Keysym::G, _) => {
+                    at(last_line, find::first_char(&self.lines[last_line]))
+                }
+                _ => return None,
+            }
+        };
+        if !keep_want {
+            self.want = None;
+        }
+        self.move_caret(to, extend);
+        self.follow(now, fit, paged);
         None
     }
 
@@ -570,20 +847,20 @@ impl Scrollback {
     }
 
     /// Search for the selection when it is on one line, else for the word
-    /// at character `col` of row `row` (or the next after it on its line)
-    /// as a whole word, as vim's `*` does: to the next place after it, or
-    /// with `back` the one before (`#`), round past the ends. The list
-    /// keeps the keyboard, for `n` and `N`. Whether there was something to
-    /// search for.
-    pub fn star(&mut self, at: Option<(i64, usize)>, back: bool, fit: Fit) -> bool {
+    /// at the caret (or the next after it on its line) as a whole word,
+    /// as vim's `*` does: to the next place after it, or with `back` the
+    /// one before (`#`), round past the ends. The list keeps the
+    /// keyboard, for `n` and `N`. Whether there was something to search
+    /// for.
+    pub fn star(&mut self, back: bool, fit: Fit) -> bool {
         let selected = self
             .selection
             .map(|s| s.range())
             .filter(|(a, b)| a.line == b.line && a.ch < b.ch);
-        let (query, whole, from) = match (selected, at) {
-            (Some((a, b)), _) => (chars(&self.lines[a.line], a.ch, b.ch), false, a),
-            (None, Some((row, col))) if row >= 0 && (row as usize) < self.rows.len() => {
-                let spot = self.spot(row, col);
+        let (query, whole, from) = match selected {
+            Some((a, b)) => (chars(&self.lines[a.line], a.ch, b.ch), false, a),
+            None => {
+                let spot = self.caret;
                 let Some(word) = find::word_at(&self.lines[spot.line], spot.ch) else {
                     return false;
                 };
@@ -594,7 +871,6 @@ impl Scrollback {
                 };
                 (text, true, from)
             }
-            _ => return false,
         };
         let shown = self.shown_lines(fit);
         let find = self.find.get_or_insert_with(Find::default);
@@ -708,6 +984,8 @@ impl Scrollback {
         };
         find.current = Some(at);
         let (line, ch) = (find.hits[at].0, find.hits[at].1.start);
+        self.caret = Spot { line, ch };
+        self.want = None;
         let row = self.row_of(Spot { line, ch });
         let (first, page) = (self.scroll.first(), fit.page.max(1));
         if row < first || row >= first + page {
@@ -750,20 +1028,25 @@ impl Scrollback {
             .collect()
     }
 
-    /// The part on row `i` of the word under the pointer, by character
-    /// of the row: what `*` searches for, but while there is a selection
-    /// (which it searches for then) or a drag.
+    /// Where on row `i` the caret is, by character of the row.
+    pub fn row_caret(&self, i: usize) -> Option<usize> {
+        let row = self.rows.get(i)?;
+        (self.row_of(self.caret) == i).then(|| self.caret.ch - row.start)
+    }
+
+    /// The part on row `i` of the word at the caret, by character of the
+    /// row: what `*` searches for, but while there is a selection (which
+    /// it searches for then) or a drag.
     pub fn row_word(&self, i: usize) -> Option<Range<usize>> {
-        let (at, col) = self.pointer?;
         let row = self.rows.get(i)?;
         let selected = self.selection.is_some_and(|s| {
             let (a, b) = s.range();
             a != b
         });
-        if selected || self.dragging || at < 0 || at as usize >= self.rows.len() {
+        if selected || self.dragging {
             return None;
         }
-        let spot = self.spot(at, col);
+        let spot = self.caret;
         if spot.line != row.line {
             return None;
         }
@@ -1136,48 +1419,144 @@ mod tests {
     }
 
     #[test]
-    fn star_finds_the_word_under_the_pointer_or_else_the_selection() {
+    fn star_finds_the_word_at_the_caret_or_else_the_selection() {
         let mut s = viewer("let id = 1;\nlet idle = id;\nid(id_x)", 80, 10);
         let f = fit(80, 10);
         let none = ModifiersState::default();
         let now = Instant::now();
         // On `id`: the next place it is a word of its own, in the list.
-        assert!(s.star(Some((0, 5)), false, f));
+        s.caret_to(0, 5);
+        assert!(s.star(false, f));
         let bar = s.find_bar().unwrap();
         assert!(bar.whole && !bar.focused);
         assert_eq!(bar.query.text, "id");
         assert_eq!(count(&s), "2 of 3");
         assert_eq!(s.row_found(1), [(11..13, true)]);
         assert_eq!(s.row_found(2), [(0..2, false)]);
+        assert_eq!(s.row_caret(1), Some(11));
+        // `n` takes the caret on.
         s.key(&none, Keysym::n, Keysym::n, now, f);
         assert_eq!(count(&s), "3 of 3");
-        // The word under the pointer is underlined, on its row only.
-        s.pointer = Some((1, 6));
+        assert_eq!((s.row_caret(1), s.row_caret(2)), (None, Some(0)));
+        // The word at the caret is underlined, on its row only.
+        s.caret_to(1, 6);
         assert_eq!(s.row_word(1), Some(4..8));
         assert_eq!(s.row_word(0), None);
         // `#` goes back from it: round to the last.
-        assert!(s.star(Some((0, 4)), true, f));
+        s.caret_to(0, 4);
+        assert!(s.star(true, f));
         assert_eq!(count(&s), "3 of 3");
         // Past the line's last word there is none.
-        assert!(!s.star(Some((0, 40)), false, f));
-        assert!(!s.star(None, false, f));
+        s.caret_to(0, 40);
+        assert!(!s.star(false, f));
         // A selection is searched for as it is, in words too.
         s.press(1, 4, false, 1);
         s.drag_to(1, 6);
         s.release();
         // Then that is searched for, not the word.
         assert_eq!(s.row_word(1), None);
-        assert!(s.star(Some((0, 5)), false, f));
+        assert!(s.star(false, f));
         let bar = s.find_bar().unwrap();
         assert!(!bar.whole);
         assert_eq!(count(&s), "3 of 5");
         // Typed into, it finds anywhere again.
         s.selection = None;
-        assert!(s.star(Some((0, 5)), false, f));
+        s.caret_to(0, 5);
+        assert!(s.star(false, f));
         type_in(&mut s, "/", f);
         type_in(&mut s, "id", f);
         assert!(!s.find_bar().unwrap().whole);
         assert_eq!(s.find_bar().unwrap().count.split(" of ").nth(1), Some("5"));
+    }
+
+    /// Where the caret is: its row and the character of it.
+    fn caret(s: &Scrollback) -> (usize, usize) {
+        (0..s.row_count())
+            .find_map(|i| Some((i, s.row_caret(i)?)))
+            .unwrap()
+    }
+
+    #[test]
+    fn the_caret_goes_as_vims_does_and_the_list_follows_it() {
+        let text = "one two\n\n  three-four five\nlast";
+        let mut s = viewer(text, 80, 2);
+        let f = fit(80, 2);
+        let none = ModifiersState::default();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        let mut now = Instant::now();
+        let mut key = |s: &mut Scrollback, mods: &ModifiersState, k: Keysym| {
+            now += std::time::Duration::from_secs(5);
+            let out = s.key(mods, k, k, now, f);
+            s.tick(now + std::time::Duration::from_secs(2), f, 0.0);
+            out
+        };
+        // It starts on the last row in view.
+        assert_eq!((caret(&s), s.first()), ((3, 0), 2));
+        key(&mut s, &none, Keysym::g);
+        assert_eq!((caret(&s), s.first()), ((0, 0), 0));
+        // By words, stopping on an empty line, and runs of other chars.
+        let mut went = Vec::new();
+        for k in [Keysym::w, Keysym::w, Keysym::w, Keysym::w, Keysym::w] {
+            key(&mut s, &none, k);
+            went.push(caret(&s));
+        }
+        assert_eq!(went, [(0, 4), (1, 0), (2, 2), (2, 7), (2, 8)]);
+        // The list follows it down.
+        assert_eq!(s.first(), 1);
+        key(&mut s, &none, Keysym::e);
+        assert_eq!(caret(&s), (2, 11));
+        let mut went = Vec::new();
+        for _ in 0..5 {
+            key(&mut s, &none, Keysym::b);
+            went.push(caret(&s));
+        }
+        assert_eq!(went, [(2, 8), (2, 7), (2, 2), (1, 0), (0, 4)]);
+        assert_eq!(s.first(), 0);
+        // Along a line, kept on it.
+        key(&mut s, &none, Keysym::dollar);
+        assert_eq!(caret(&s), (0, 6));
+        key(&mut s, &none, Keysym::l);
+        assert_eq!(caret(&s), (0, 6));
+        key(&mut s, &none, Keysym::h);
+        key(&mut s, &none, Keysym::h);
+        assert_eq!(caret(&s), (0, 4));
+        // Down past an empty line, as far into the next as it stood.
+        key(&mut s, &none, Keysym::j);
+        assert_eq!(caret(&s), (1, 0));
+        key(&mut s, &none, Keysym::j);
+        assert_eq!(caret(&s), (2, 4));
+        key(&mut s, &none, Keysym::asciicircum);
+        assert_eq!(caret(&s), (2, 2));
+        key(&mut s, &none, Keysym::_0);
+        assert_eq!(caret(&s), (2, 0));
+        key(&mut s, &shift, Keysym::G);
+        assert_eq!((caret(&s), s.first()), ((3, 0), 2));
+        // `v` selects as it goes, `y` copies it.
+        key(&mut s, &none, Keysym::v);
+        key(&mut s, &none, Keysym::l);
+        key(&mut s, &none, Keysym::l);
+        let copied = Outcome::Copy {
+            text: "las".into(),
+            lines: 1,
+            close: false,
+        };
+        assert_eq!(key(&mut s, &none, Keysym::y), Some(copied));
+        // Moved without it, there is none.
+        key(&mut s, &none, Keysym::h);
+        assert_eq!(s.selected_lines(), None);
+        // Shift with the arrows selects, back up too; `V` by lines.
+        key(&mut s, &shift, Keysym::Up);
+        assert_eq!(s.selected_text().as_deref(), Some(" three-four five\nla"));
+        key(&mut s, &shift, Keysym::V);
+        key(&mut s, &none, Keysym::k);
+        assert_eq!(s.selected_lines(), Some(3));
+        // Esc leaves `v`, the selection gone; then it closes.
+        assert_eq!(key(&mut s, &none, Keysym::Escape), None);
+        assert_eq!(s.selected_lines(), None);
+        assert_eq!(key(&mut s, &none, Keysym::Escape), Some(Outcome::Close));
     }
 
     #[test]

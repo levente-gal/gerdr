@@ -20,6 +20,8 @@ const SEARCH_GAP: i32 = 2;
 /// to; how high a tick on the scrollbar is.
 const FOUND_TINT: f32 = 0.35;
 const FOUND_CURRENT_TINT: f32 = 0.75;
+/// How much of the accent the caret's block is, on the ground.
+const CARET_TINT: f32 = 0.6;
 const SEARCH_TICK: i32 = 2;
 
 /// The search: what is typed, what it says while empty, and how many
@@ -315,9 +317,9 @@ impl Painter {
         }
     }
 
-    /// Underline `word` of `text` (by char index), the word under the
-    /// pointer that `*` searches for, placed as `found_tints` places its
-    /// tints: at the bottom of the row band `(y, h)`.
+    /// Underline `word` of `text` (by char index), the word at the caret
+    /// that `*` searches for, placed as `found_tints` places its tints:
+    /// at the bottom of the row band `(y, h)`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn word_underline(
         &self,
@@ -339,6 +341,38 @@ impl Painter {
         let thick = (scale.round() as i32).max(1);
         let under = y + h - 2 * thick;
         c.fill(x0 as i32, under, (x1 - x0) as i32, thick, p.muted);
+    }
+
+    /// The caret: a block over character `ch` of `text` (past its end, a
+    /// space's width), placed as `found_tints` places its tints, in the
+    /// accent on `ground`, the text drawn over it after.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn caret_block(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        ch: usize,
+        (x, end): (f32, f32),
+        (y, h): (i32, i32),
+        width: impl Fn(&str) -> f32,
+        ground: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let byte = |n: usize| text.char_indices().nth(n).map(|(b, _)| b);
+        let x0 = x + width(&text[..byte(ch).unwrap_or(text.len())]);
+        let x1 = match byte(ch + 1).or(byte(ch).map(|_| text.len())) {
+            Some(b) => x + width(&text[..b]),
+            None => x0 + width(" "),
+        };
+        let (x0, x1) = (x0.round(), x1.min(end).round());
+        if x0 >= x1 {
+            return;
+        }
+        let border = ((scale.round() as i32).max(1)) as f32;
+        let (ty, th) = (y as f32 + border, h as f32 - 2.0 * border);
+        let color = mix(ground, p.accent, CARET_TINT);
+        c.rounded(x0, ty, x1 - x0, th, scale as f32, color);
     }
 }
 

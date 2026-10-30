@@ -2,6 +2,9 @@
 //! one after another without overlapping. A query all in lower case finds
 //! any case; one with an upper case letter, only that case. A whole word
 //! (vim's `*`) is found only as a word of its own, in its own case.
+//!
+//! A caret goes on by words as vim's `w`, `b` and `e` do, along a line:
+//! a word is a run of word characters, or of other ones but blanks.
 
 use std::ops::Range;
 
@@ -98,6 +101,52 @@ pub fn find(text: &str, query: &str, whole: bool) -> Vec<Range<usize>> {
     }
 }
 
+/// What a character is to the caret's word moves: a blank (0), part of a
+/// word (1), or of a run of other characters (2).
+fn class(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if is_word(c) {
+        1
+    } else {
+        2
+    }
+}
+
+/// The start of the next word after char `at` of `text`, as vim's `w`
+/// goes; none on the line.
+pub fn next_word(text: &str, at: usize) -> Option<usize> {
+    let cs: Vec<char> = text.chars().collect();
+    let here = class(*cs.get(at)?);
+    let past = (at..cs.len()).find(|&i| class(cs[i]) != here)?;
+    (past..cs.len()).find(|&i| class(cs[i]) != 0)
+}
+
+/// The start of the word before char `at` of `text` (or of the one it
+/// is in), as vim's `b` goes; none on the line.
+pub fn prev_word(text: &str, at: usize) -> Option<usize> {
+    let cs: Vec<char> = text.chars().collect();
+    let last = (0..at.min(cs.len())).rev().find(|&i| class(cs[i]) != 0)?;
+    let here = class(cs[last]);
+    let start = (0..last).rev().find(|&i| class(cs[i]) != here);
+    Some(start.map_or(0, |i| i + 1))
+}
+
+/// The last char of the word at or after char `from` of `text`, as vim's
+/// `e` goes from the char before; none on the line.
+pub fn word_end(text: &str, from: usize) -> Option<usize> {
+    let cs: Vec<char> = text.chars().collect();
+    let first = (from..cs.len()).find(|&i| class(cs[i]) != 0)?;
+    let here = class(cs[first]);
+    let past = (first..cs.len()).find(|&i| class(cs[i]) != here);
+    Some(past.unwrap_or(cs.len()) - 1)
+}
+
+/// The first char of `text` but a blank, as vim's `^` goes; 0 for none.
+pub fn first_char(text: &str) -> usize {
+    text.chars().position(|c| !c.is_whitespace()).unwrap_or(0)
+}
+
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
@@ -146,5 +195,27 @@ mod tests {
         assert_eq!(find_words(text, "id"), vec![0..2, 14..16, 25..27]);
         assert!(find_words(text, "").is_empty());
         assert_eq!(find(text, "id", false).len(), 7);
+    }
+
+    #[test]
+    fn the_caret_goes_by_words_and_runs_of_other_chars() {
+        let text = "  let foo = bar(1);";
+        assert_eq!(next_word(text, 0), Some(2));
+        assert_eq!(next_word(text, 2), Some(6));
+        assert_eq!(next_word(text, 6), Some(10));
+        assert_eq!(next_word(text, 14), Some(15));
+        assert_eq!(next_word(text, 15), Some(16));
+        assert_eq!(next_word(text, 17), None);
+        assert_eq!(prev_word(text, 16), Some(15));
+        assert_eq!(prev_word(text, 15), Some(12));
+        assert_eq!(prev_word(text, 13), Some(12));
+        assert_eq!(prev_word(text, 6), Some(2));
+        assert_eq!(prev_word(text, 2), None);
+        assert_eq!(word_end(text, 1), Some(4));
+        assert_eq!(word_end(text, 5), Some(8));
+        assert_eq!(word_end(text, 18), Some(18));
+        assert_eq!(word_end(text, 19), None);
+        assert_eq!(first_char(text), 2);
+        assert_eq!(first_char("   "), 0);
     }
 }
