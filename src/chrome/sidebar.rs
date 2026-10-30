@@ -652,8 +652,8 @@ impl CiView {
         self.chips.is_empty() && self.other_prs == 0
     }
 
-    /// Whether it needs no look: no run failed and no review waits. It is
-    /// then one mark on its workspace's header, not a section.
+    /// Whether it needs no look: no run failed and no review waits. Its
+    /// workspace may then fold itself.
     pub fn quiet(&self) -> bool {
         !self
             .chips
@@ -819,19 +819,19 @@ impl WorkspaceView {
         }
     }
 
-    /// Whether its CI shows as the mark on its header: while it needs no
-    /// look, or the workspace is folded.
+    /// Whether its CI shows as the mark on its header: while the
+    /// workspace is folded.
     fn ci_mark(&self) -> bool {
         self.ci
             .as_ref()
-            .is_some_and(|ci| !ci.is_empty() && (self.folded || ci.quiet()))
+            .is_some_and(|ci| !ci.is_empty() && self.folded)
     }
 
-    /// Its GitHub section, while it needs a look and the workspace shows
-    /// it.
+    /// Its GitHub section, while the workspace shows it: always, green or
+    /// not.
     fn ci_section(&self) -> Option<&CiView> {
         let ci = self.ci.as_ref()?;
-        (!self.folded && !ci.is_empty() && !ci.quiet()).then_some(ci)
+        (!self.folded && !ci.is_empty()).then_some(ci)
     }
 }
 
@@ -3700,34 +3700,36 @@ mod tests {
     }
 
     #[test]
-    fn a_green_ci_is_a_mark_on_the_header() {
+    fn a_green_ci_is_a_section_and_a_mark_while_folded() {
         let mut ws = workspace("gerdr", None, Some("main"));
-        ws.ci = Some(passing(&["main", "dev"]));
+        let mut green = passing(&["main", "dev"]);
+        green.other_prs = 3;
+        ws.ci = Some(green);
         assert_eq!(ws.ci.as_ref().unwrap().rollup(), CiState::Passed);
+        let layout = sidebar_layout(&[ws.clone()], &[], 240);
+        let section = layout.ci[0].as_ref().expect("a GitHub section");
+        assert!(section.others.is_some(), "the +N PRs count");
+        assert_eq!(layout.rows[0].ci, None);
+        // Folded, it is the mark at the right end of the branch's line.
+        ws.folded = true;
         let layout = sidebar_layout(&[ws.clone()], &[], 240);
         assert_eq!(layout.ci[0], None);
         let mark = layout.rows[0].ci.expect("a CI mark");
         assert_eq!(layout.hit(mid(mark)), Some(SidebarHit::CiMark(0)));
-        // At the right end of the branch's line.
         let row = layout.rows[0];
         assert_eq!(mark.loc.y, row.branch.unwrap().loc.y);
         assert_eq!(mark.loc.x + mark.size.w, row.close.loc.x + CLOSE_SLOT);
         assert_eq!(layout.blocks[0].size.h, BRANCHED + BLOCK_GAP);
-        // A review waiting makes it a section, and the mark goes.
-        ws.ci.as_mut().unwrap().chips[1].group = Group::Review;
-        let layout = sidebar_layout(&[ws.clone()], &[], 240);
-        assert!(layout.ci[0].is_some());
-        assert_eq!(layout.rows[0].ci, None);
-        // So does a run failing; the mark says so while folded.
+        // The mark says a run failed.
         let mut ci = passing(&["main", "dev"]);
         ci.chips[0].state = CiState::Failed;
         assert_eq!(ci.rollup(), CiState::Failed);
         ws.ci = Some(ci);
-        assert!(sidebar_layout(&[ws.clone()], &[], 240).ci[0].is_some());
-        ws.folded = true;
-        let layout = sidebar_layout(&[ws], &[], 240);
+        let layout = sidebar_layout(&[ws.clone()], &[], 240);
         assert_eq!(layout.ci[0], None);
         assert!(layout.rows[0].ci.is_some());
+        ws.folded = false;
+        assert!(sidebar_layout(&[ws], &[], 240).ci[0].is_some());
     }
 
     #[test]
