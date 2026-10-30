@@ -85,7 +85,7 @@ const CHILD_X: i32 = NAME_X - CHILD_PAD;
 const AGENT_ICON_X: i32 = CHILD_PAD - 1;
 /// Where a row's text starts under a header: after an agent's icon.
 const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
-/// The "×" at the right end of a header, and of a deletable agent row.
+/// The "×" at the right end of a header, and of a closable agent row.
 const CLOSE_SLOT: i32 = 22;
 /// The restart button left of a header's "×".
 const RESTART_SLOT: i32 = 22;
@@ -319,9 +319,8 @@ pub struct AgentView {
     /// The model it runs, as its status line reports it to herdr.
     pub model: Option<String>,
     pub lines: Vec<AgentLine>,
-    /// Whether it is history (a Cursor chat gone idle, a finished test run)
-    /// that a "×" on the row deletes from gerdr.
-    pub deletable: bool,
+    /// Whether a "×" on the row closes it (see `close_label`).
+    pub closable: bool,
     /// Its subagents that run.
     pub subagents: Vec<SubagentView>,
     /// Whether it also shows in the "Needs you" list at the top.
@@ -404,7 +403,7 @@ impl AgentView {
             name: info.name.clone(),
             model,
             lines,
-            deletable: false,
+            closable: true,
             subagents: Vec::new(),
             inbox: false,
             test: None,
@@ -464,7 +463,7 @@ impl AgentView {
             name: row.name.clone().filter(|n| !n.trim().is_empty()),
             model: chat.model.clone(),
             lines,
-            deletable: false,
+            closable: false,
             subagents,
             inbox: false,
             test: None,
@@ -502,6 +501,26 @@ impl AgentView {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" · ")
+    }
+
+    /// Whether it is busy: working, waiting on the user mid-run, or a
+    /// test still running. Closing one asks first.
+    pub fn running(&self) -> bool {
+        match self.test {
+            Some(test) => test == CiState::Running,
+            None => matches!(self.status, AgentStatus::Working | AgentStatus::Blocked),
+        }
+    }
+
+    /// What closing it does, as its "×" and menu say: a terminal agent or
+    /// a running test goes with its pane; a finished test run, its card;
+    /// a Cursor chat goes from gerdr until it changes again.
+    pub fn close_label(&self) -> &'static str {
+        match (&self.key, self.running()) {
+            (AgentKey::Herdr(_), _) | (AgentKey::Test(_), true) => "Close pane",
+            (AgentKey::Test(_), false) => "Dismiss",
+            _ => "Delete from gerdr",
+        }
     }
 
     /// What its row calls the agent: the name it was given, else its kind.
@@ -1584,7 +1603,7 @@ pub fn sidebar_layout_at(
         card_closes.push(
             ws_cards
                 .iter()
-                .filter(|(k, _)| cards[*k].deletable)
+                .filter(|(k, _)| cards[*k].closable)
                 .map(|(k, row)| (*k, card_close(*row, density)))
                 .collect(),
         );
@@ -2384,7 +2403,7 @@ impl Painter {
 
     /// An agent row on `under`: its status mark, its name or kind and what
     /// it is on, and at the right a "blocked" pill (an inbox row: its
-    /// workspace's name `place` instead; a deletable row under the pointer:
+    /// workspace's name `place` instead; a closable row under the pointer:
     /// its "×"), then a line per subagent that runs. Idle agents are muted;
     /// a blocked one's line carries the warning colour (its breathing is
     /// composed on top, see `pulse_band`). The row lightens under the
@@ -2462,7 +2481,7 @@ impl Painter {
         status_dot(c, dot, badge.dot, scale, p);
         let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
         let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
-        let end = if card.deletable && hover > 0.0 {
+        let end = if card.closable && hover > 0.0 {
             let close = card_close(rect, density);
             let color = if state.close {
                 p.text
@@ -3223,7 +3242,7 @@ mod tests {
                 .map(|cwd| AgentLine::Field(FOLDER.into(), cwd.into()))
                 .into_iter()
                 .collect(),
-            deletable: false,
+            closable: false,
             subagents: Vec::new(),
             inbox: false,
             test: None,
@@ -3800,10 +3819,10 @@ mod tests {
         gerdr.more_agents = vec!["cursor plan · A".into(), "cursor ask · B".into()];
         let workspaces = vec![gerdr, workspace("~", None, None)];
         let mut history = agent("p2", AgentStatus::Idle, None);
-        history.deletable = true;
+        history.closable = true;
         let agents = vec![vec![agent("p1", AgentStatus::Working, None), history]];
         let layout = sidebar_layout(&workspaces, &agents, 200);
-        // Only the deletable row has a "×", at its right end.
+        // Only the closable row has a "×", at its right end.
         assert_eq!(layout.card_closes[0].len(), 1);
         let (k, close) = layout.card_closes[0][0];
         let card = layout.cards[0].iter().find(|(c, _)| *c == k).unwrap().1;

@@ -34,7 +34,11 @@ impl Gerdr {
     /// The scrollbar under `pos` that nothing covers, and its thumb: the
     /// popup on top's, as a press finds it.
     fn bar_at(&self, pos: Point<f64, Logical>) -> Option<(Bar, Thumb)> {
-        if self.quit.is_some() || self.restart.is_some() || self.welcome.is_some() {
+        if self.quit.is_some()
+            || self.restart.is_some()
+            || self.confirm.is_some()
+            || self.welcome.is_some()
+        {
             return None;
         }
         let bars: &[Bar] = if self.project_menu.is_some() {

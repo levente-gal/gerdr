@@ -170,6 +170,7 @@ impl Gerdr {
     fn sidebar_covered(&self) -> bool {
         self.quit.is_some()
             || self.restart.is_some()
+            || self.confirm.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.switcher.is_some()
@@ -322,7 +323,7 @@ impl Gerdr {
     /// A press at `(x, y)` in the sidebar. Left click selects a workspace
     /// (a second one right after renames it: see `input`), "×" or middle
     /// click closes it; a left click on an agent card shows its pane, on
-    /// a history card's "×" deletes it from gerdr. A
+    /// its "×" closes it (see `Gerdr::close_agent`). A
     /// row held with the left button can be dragged to another place. The
     /// "+" opens the menu of what to add, the button left of it the
     /// repositories panel; the project's name left of them opens the
@@ -366,10 +367,8 @@ impl Gerdr {
             }
             (SidebarHit::CardClose(i, k), BTN_LEFT) => {
                 let card = self.agent_views().get(i).and_then(|c| c.get(k)).cloned();
-                match card.map(|c| c.key) {
-                    Some(AgentKey::Cursor(chat)) => self.delete_cursor_chat(&chat),
-                    Some(AgentKey::Test(pane_id)) => self.dismiss_test(&pane_id),
-                    _ => {}
+                if let Some(card) = card {
+                    self.close_agent(&card.key);
                 }
             }
             (SidebarHit::Ci(i) | SidebarHit::CiMark(i), BTN_LEFT) => self.focus_repo_tab(i),
@@ -562,8 +561,9 @@ impl Gerdr {
                 Some(Tooltip::new(&card.label(), rect).fields(card.tooltip_fields()))
             }
             SidebarHit::CardClose(i, k) => {
+                let card = agents.get(i)?.get(k)?;
                 let rect = layout.card_closes[i].iter().find(|(c, _)| *c == k)?.1;
-                Some(Tooltip::new("Delete from gerdr", rect))
+                Some(Tooltip::new(card.close_label(), rect))
             }
             SidebarHit::Subagent(i, k, j) => {
                 let task = &agents.get(i)?.get(k)?.subagents.get(j)?.task;
@@ -685,20 +685,18 @@ impl Gerdr {
                     "Focus",
                     MenuAction::FocusAgent(card.key.clone()),
                 )];
-                items.push(match card.dir {
+                items.push(match card.dir.clone() {
                     Some(cwd) => MenuItem::new("Copy path", MenuAction::CopyPath(cwd)),
                     None => MenuItem::new("Copy path", MenuAction::NewTerminal).enabled(false),
                 });
-                match (card.deletable, card.key) {
-                    (true, AgentKey::Cursor(chat)) => {
-                        let delete = MenuAction::DeleteCursorChat(chat);
-                        items.push(MenuItem::new("Delete from gerdr", delete));
-                    }
-                    (true, AgentKey::Test(pane_id)) => {
-                        let dismiss = MenuAction::DismissTest(pane_id);
-                        items.push(MenuItem::new("Dismiss", dismiss));
-                    }
-                    _ => {}
+                if card.closable {
+                    let label = card.close_label();
+                    let label = if card.running() {
+                        format!("{label}\u{2026}")
+                    } else {
+                        label.to_owned()
+                    };
+                    items.push(MenuItem::new(&label, MenuAction::CloseAgent(card.key)));
                 }
                 Some(MenuSpec { anchor: at, items })
             }

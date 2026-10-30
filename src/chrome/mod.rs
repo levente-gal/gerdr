@@ -17,6 +17,7 @@
 
 mod badge;
 mod canvas;
+mod confirm;
 mod consts;
 mod drop;
 #[cfg(test)]
@@ -59,6 +60,7 @@ use crate::anim::{FAST, Fade, SLOW, phase};
 // `chrome::X`. The canvas and the shapes stay inside.
 pub use badge::*;
 use canvas::*;
+pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
 pub use help::*;
@@ -137,6 +139,8 @@ pub struct ChromeView {
     pub quit: Option<QuitView>,
     /// Set while the restart dialog is open, over all but that.
     pub restart: Option<RestartView>,
+    /// Set while the confirm dialog is open, over all but the quit dialog.
+    pub confirm: Option<ConfirmView>,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
     /// Set while the worktrees popup is open.
@@ -175,6 +179,7 @@ pub struct Chrome {
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
     restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
+    confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
     repos: ReposLayers,
@@ -227,6 +232,7 @@ impl Chrome {
             welcome: Overlay::default(),
             quit: Overlay::default(),
             restart: Overlay::default(),
+            confirm: Overlay::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
@@ -345,6 +351,18 @@ impl Chrome {
             self.restart
                 .part(restart, now, true, |(restart, output, ..)| {
                     painter.restart_dialog(restart, *output, scale, theme.palette())
+                }),
+        );
+
+        // The confirm dialog covers all but the quit dialog.
+        let confirm = view.confirm.map(|confirm| {
+            let (loc, size) = shadowed(confirm_layout(output).panel);
+            ((confirm, output, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.confirm
+                .part(confirm, now, true, |(confirm, output, ..)| {
+                    painter.confirm_dialog(confirm, *output, scale, theme.palette())
                 }),
         );
 
@@ -929,6 +947,9 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         let layout = restart_layout(output, restart.rows.len());
         rects.extend(layout.rows);
         rects.extend(layout.buttons);
+    }
+    if view.confirm.is_some() {
+        rects.extend(confirm_layout(output).buttons);
     }
     if let Some(quit) = &view.quit {
         let quit = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());

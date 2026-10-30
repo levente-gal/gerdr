@@ -314,7 +314,7 @@ impl TestRun {
             name: None,
             model: None,
             lines,
-            deletable: self.outcome.is_some(),
+            closable: true,
             subagents: Vec::new(),
             inbox: false,
             test: Some(self.outcome.as_ref().map_or(CiState::Running, |o| o.state)),
@@ -653,7 +653,8 @@ mod tests {
             ("cargo test", Some("cargo test -q"))
         );
         assert_eq!(card.test, Some(CiState::Running));
-        assert!(!card.deletable);
+        assert!(card.closable && card.running());
+        assert_eq!(card.close_label(), "Close pane");
         runs[0].outcome = Some(Outcome {
             state: CiState::Failed,
             summary: Some("2 failed, 1 passed".into()),
@@ -662,6 +663,7 @@ mod tests {
         let card = runs[0].view();
         assert_eq!(card.title(), Some("2 failed, 1 passed · 3m 12s"));
         assert_eq!(card.test, Some(CiState::Failed));
-        assert!(card.deletable);
+        assert!(card.closable && !card.running());
+        assert_eq!(card.close_label(), "Dismiss");
     }
 }

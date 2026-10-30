@@ -12,7 +12,8 @@
 //! A chat that went idle stays as history (see `History`): those not in
 //! agent mode (asking, planning, debugging) until the user deletes them,
 //! the others while they are among the latest. A chat done with news can
-//! be deleted too: Cursor may never mark it read.
+//! be deleted too: Cursor may never mark it read. A chat closed while it
+//! runs is hidden, and deleted as its run leaves it once that ends.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -586,11 +587,15 @@ pub struct History {
     /// then: one that changes again is back.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deleted: BTreeMap<String, i64>,
+    /// The chats closed while they ran: hidden, and deleted once their run
+    /// is over (see `settle`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub closed: BTreeSet<String>,
 }
 
 impl History {
     pub fn is_empty(&self) -> bool {
-        self.kept.is_empty() && self.deleted.is_empty()
+        self.kept.is_empty() && self.deleted.is_empty() && self.closed.is_empty()
     }
 
     /// Whether chat `row` was deleted since it last changed.
@@ -604,9 +609,10 @@ impl History {
     /// let go those back in it or gone, and forget deletions of chats no
     /// longer read or changed since. Whether anything changed.
     pub fn update(&mut self, rows: &HashMap<String, ChatRow>) -> bool {
-        let before = (self.kept.len(), self.deleted.len());
+        let before = (self.kept.len(), self.deleted.len(), self.closed.len());
         self.deleted
             .retain(|id, at| rows.get(id).is_some_and(|row| row.updated_ms <= *at));
+        self.closed.retain(|id| rows.contains_key(id));
         self.kept
             .retain(|id| rows.get(id).is_some_and(|row| !row.agent_mode()));
         let mut added = false;
@@ -615,21 +621,51 @@ impl History {
                 added |= self.kept.insert(row.id.clone());
             }
         }
-        added || before != (self.kept.len(), self.deleted.len())
+        added || before != (self.kept.len(), self.deleted.len(), self.closed.len())
     }
 
-    /// Whether chat `chat`, done, was deleted since it last changed;
-    /// `hook` is what a hook said of it last, which may tell of a run
-    /// ended since that the database doesn't know yet.
+    /// Whether chat `chat` is hidden: closed while it ran, or done and
+    /// deleted since it last changed; `hook` is what a hook said of it
+    /// last, which may tell of a run ended since that the database doesn't
+    /// know yet.
     pub fn hides(&self, chat: &CursorChat, hook: Option<&HookEvent>) -> bool {
-        chat.status == AgentStatus::Done
-            && self.is_deleted(&chat.row)
-            && hook.is_none_or(|h| h.at_ms <= chat.row.updated_ms)
+        self.closed.contains(&chat.row.id)
+            || chat.status == AgentStatus::Done
+                && self.is_deleted(&chat.row)
+                && hook.is_none_or(|h| h.at_ms <= chat.row.updated_ms)
+    }
+
+    /// Close chat `row`, which runs: hidden until `settle` deletes it.
+    pub fn close(&mut self, row: &ChatRow) {
+        self.kept.remove(&row.id);
+        self.closed.insert(row.id.clone());
+    }
+
+    /// Delete the closed chats among `chats` whose run is over and known
+    /// to the database (`hooks` says what a hook said of each last), as
+    /// the run left them. Whether any was.
+    pub fn settle(&mut self, chats: &[CursorChat], hooks: &HashMap<String, HookEvent>) -> bool {
+        let over: Vec<&ChatRow> = chats
+            .iter()
+            .filter(|chat| self.closed.contains(&chat.row.id))
+            .filter(|chat| !matches!(chat.status, AgentStatus::Working | AgentStatus::Blocked))
+            .filter(|chat| {
+                let hook = hooks.get(&chat.row.id);
+                hook.is_none_or(|h| h.at_ms <= chat.row.updated_ms)
+            })
+            .map(|chat| &chat.row)
+            .collect();
+        for row in &over {
+            self.closed.remove(&row.id);
+            self.delete(row);
+        }
+        !over.is_empty()
     }
 
     /// Delete chat `row` from gerdr, until it changes again.
     pub fn delete(&mut self, row: &ChatRow) {
         self.kept.remove(&row.id);
+        self.closed.remove(&row.id);
         self.deleted.insert(row.id.clone(), row.updated_ms);
     }
 
@@ -645,7 +681,7 @@ impl History {
     pub fn pick<'a>(&self, idle: &[&'a CursorChat]) -> (Vec<&'a CursorChat>, Vec<&'a CursorChat>) {
         let (kept, others): (Vec<&CursorChat>, Vec<&CursorChat>) = idle
             .iter()
-            .filter(|chat| !self.is_deleted(&chat.row))
+            .filter(|chat| !self.is_deleted(&chat.row) && !self.closed.contains(&chat.row.id))
             .partition(|chat| self.kept.contains(&chat.row.id));
         let fit = kept.len().min(HISTORY_CARDS);
         let mut shown: Vec<&CursorChat> = kept[..fit].to_vec();
@@ -1169,9 +1205,12 @@ impl crate::Gerdr {
 
     /// Take in what Cursor's chats do now, and notify of what is news.
     fn cursor_changed(&mut self) {
-        let (idle, live): (Vec<CursorChat>, Vec<CursorChat>) = self
-            .cursor
-            .all(now_ms())
+        let all = self.cursor.all(now_ms());
+        let history = &mut self.projects.cursor_history;
+        if history.settle(&all, &self.cursor.hooks) {
+            self.projects.save();
+        }
+        let (idle, live): (Vec<CursorChat>, Vec<CursorChat>) = all
             .into_iter()
             .partition(|chat| chat.status == AgentStatus::Idle);
         let (history, hooks) = (&self.projects.cursor_history, &self.cursor.hooks);
@@ -1201,18 +1240,23 @@ impl crate::Gerdr {
         self.read_cursor_db();
     }
 
-    /// Delete idle or done Cursor chat `id` from gerdr: its card goes,
-    /// until the chat changes again.
+    /// Delete Cursor chat `id` from gerdr: its card goes, until the chat
+    /// changes again. One that runs goes now, and is deleted as its run
+    /// leaves it.
     pub fn delete_cursor_chat(&mut self, id: &str) {
         let Some(chat) = self
             .cursor_idle
             .iter()
-            .chain(self.cursor_chats.iter().filter(|chat| deletable(chat)))
+            .chain(&self.cursor_chats)
             .find(|chat| chat.row.id == id && self.cursor.rows.contains_key(id))
         else {
             return;
         };
-        self.projects.cursor_history.delete(&chat.row);
+        let history = &mut self.projects.cursor_history;
+        match chat.status {
+            AgentStatus::Working | AgentStatus::Blocked => history.close(&chat.row),
+            _ => history.delete(&chat.row),
+        }
         self.cursor_history_changed();
         self.cursor_changed();
     }
@@ -1259,8 +1303,7 @@ impl crate::Gerdr {
     }
 
     /// The cards of the Cursor chats under workspace `w`: those doing
-    /// something, then its history; the done ones and history can be
-    /// deleted.
+    /// something, then its history; those in the database can be deleted.
     pub fn cursor_cards(&self, w: usize) -> Vec<crate::chrome::AgentView> {
         let live = self
             .cursor_chats
@@ -1268,12 +1311,12 @@ impl crate::Gerdr {
             .filter(|chat| self.cursor_chat_place(chat) == Some(w))
             .map(|chat| {
                 let mut card = crate::chrome::AgentView::cursor(chat);
-                card.deletable = deletable(chat) && self.cursor.rows.contains_key(&chat.row.id);
+                card.closable = self.cursor.rows.contains_key(&chat.row.id);
                 card
             });
         let history = self.cursor_history(w).0.into_iter().map(|chat| {
             let mut card = crate::chrome::AgentView::cursor(chat);
-            card.deletable = true;
+            card.closable = true;
             card
         });
         live.chain(history).collect()
@@ -1311,12 +1354,6 @@ impl crate::Gerdr {
             })
             .collect()
     }
-}
-
-/// Whether live chat `chat` can be deleted from gerdr: it is done, so
-/// only the user's reading it in Cursor would end its card.
-fn deletable(chat: &CursorChat) -> bool {
-    chat.status == AgentStatus::Done
 }
 
 /// Whether app `command` starts Cursor.
@@ -2059,5 +2096,42 @@ mod tests {
             ..done
         };
         assert!(!history.hides(&changed, None));
+    }
+
+    #[test]
+    fn a_chat_closed_while_running_is_deleted_once_its_run_is_over() {
+        let mut history = History::default();
+        let row = moded("c1", "agent", 1_000);
+        let working = CursorChat {
+            status: AgentStatus::Working,
+            ..idle(row.clone())
+        };
+        history.close(&row);
+        assert!(history.hides(&working, None));
+        assert!(!history.settle(std::slice::from_ref(&working), &HashMap::new()));
+        // Over by the hooks, but the database doesn't know yet: still hidden.
+        let done = CursorChat {
+            status: AgentStatus::Done,
+            ..working.clone()
+        };
+        let hooks = HashMap::from([("c1".to_owned(), hook("stop", Some("completed"), 2_000))]);
+        assert!(!history.settle(std::slice::from_ref(&done), &hooks));
+        assert!(history.hides(&done, hooks.get("c1")));
+        // Once it does, deleted as the run left it: back when it changes.
+        let written = CursorChat {
+            row: ChatRow {
+                updated_ms: 2_500,
+                ..row
+            },
+            ..done
+        };
+        assert!(history.settle(std::slice::from_ref(&written), &hooks));
+        assert!(history.closed.is_empty());
+        assert!(history.hides(&written, hooks.get("c1")));
+        let again = CursorChat {
+            status: AgentStatus::Working,
+            ..written
+        };
+        assert!(!history.hides(&again, None));
     }
 }
