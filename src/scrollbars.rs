@@ -36,6 +36,7 @@ impl Gerdr {
     fn bar_at(&self, pos: Point<f64, Logical>) -> Option<(Bar, Thumb)> {
         if self.quit.is_some()
             || self.restart.is_some()
+            || self.checkout.is_some()
             || self.confirm.is_some()
             || self.welcome.is_some()
         {

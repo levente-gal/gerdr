@@ -17,6 +17,7 @@
 
 mod badge;
 mod canvas;
+mod checkout;
 mod confirm;
 mod consts;
 mod drop;
@@ -60,6 +61,7 @@ use crate::anim::{FAST, Fade, SLOW, phase};
 // `chrome::X`. The canvas and the shapes stay inside.
 pub use badge::*;
 use canvas::*;
+pub use checkout::*;
 pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
@@ -139,6 +141,8 @@ pub struct ChromeView {
     pub quit: Option<QuitView>,
     /// Set while the restart dialog is open, over all but that.
     pub restart: Option<RestartView>,
+    /// Set while the checkout dialog is open, over all but the quit dialog.
+    pub checkout: Option<CheckoutView>,
     /// Set while the confirm dialog is open, over all but the quit dialog.
     pub confirm: Option<ConfirmView>,
     /// Set while the project menu is open.
@@ -179,6 +183,7 @@ pub struct Chrome {
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
     restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
+    checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
@@ -232,6 +237,7 @@ impl Chrome {
             welcome: Overlay::default(),
             quit: Overlay::default(),
             restart: Overlay::default(),
+            checkout: Overlay::default(),
             confirm: Overlay::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
@@ -351,6 +357,18 @@ impl Chrome {
             self.restart
                 .part(restart, now, true, |(restart, output, ..)| {
                     painter.restart_dialog(restart, *output, scale, theme.palette())
+                }),
+        );
+
+        // The checkout dialog covers all but the quit dialog.
+        let checkout = view.checkout.map(|checkout| {
+            let (loc, size) = shadowed(checkout_layout(output, checkout.rows.len()).panel);
+            ((checkout, output, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.checkout
+                .part(checkout, now, true, |(checkout, output, ..)| {
+                    painter.checkout_dialog(checkout, *output, scale, theme.palette())
                 }),
         );
 
@@ -947,6 +965,9 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         let layout = restart_layout(output, restart.rows.len());
         rects.extend(layout.rows);
         rects.extend(layout.buttons);
+    }
+    if let Some(checkout) = &view.checkout {
+        rects.extend(checkout_layout(output, checkout.rows.len()).buttons);
     }
     if view.confirm.is_some() {
         rects.extend(confirm_layout(output).buttons);
