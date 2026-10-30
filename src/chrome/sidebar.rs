@@ -1661,8 +1661,9 @@ pub fn sidebar_layout_at(
 }
 
 /// Where the parts of the GitHub section showing `view` sit, its top left
-/// corner at `(x, y)` and `width` wide: a line per group of chips, the
-/// first with the count of other pull requests at its right end. Each line
+/// corner at `(x, y)` and `width` wide: a line per group of chips, then the
+/// count of other pull requests at the right end of the last line, or of a
+/// line of its own when it does not fit after the last chip. Each line
 /// starts with its group's label where an agent row's text starts, GitHub's
 /// mark left of the first; the chips follow in a column as wide as the
 /// widest label present and a gap, left to right, on a line under it (in
@@ -1671,13 +1672,6 @@ pub fn sidebar_layout_at(
 fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
     let top = y + CI_PAD;
     let end = x + width - CHILD_PAD;
-    let others = (view.other_prs > 0).then(|| {
-        let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
-        Rectangle::new(
-            (end - w, top + (CARD_LINE - PILL_HEIGHT) / 2).into(),
-            (w, PILL_HEIGHT).into(),
-        )
-    });
     let label_x = x + CHILD_TEXT_X - CHILD_X;
     let label_w = view
         .chips
@@ -1687,11 +1681,6 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
         .unwrap_or(0);
     let left = label_x + label_w + CI_LABEL_GAP - CI_CHIP_PAD;
     let right = end + CI_CHIP_PAD;
-    // The first line leaves the count its room.
-    let bound = |line: i32| match others {
-        Some(o) if line == 0 => o.loc.x - CI_CHIP_GAP,
-        _ => right,
-    };
     let line_y = |line: i32| top + line * CARD_LINE;
     let (mut chip_x, mut line, mut group) = (left, -1, None);
     let mut labels = Vec::new();
@@ -1705,16 +1694,27 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
                 let label =
                     Rectangle::new((label_x, line_y(line)).into(), (label_w, CARD_LINE).into());
                 labels.push((chip.group, label));
-            } else if chip_x > left && chip_x + full.min(bound(line) - left) > bound(line) {
+            } else if chip_x > left && chip_x + full.min(right - left) > right {
                 (chip_x, line) = (left, line + 1);
             }
-            let w = full.min((bound(line) - left).max(0));
+            let w = full.min((right - left).max(0));
             let rect = Rectangle::new((chip_x, line_y(line)).into(), (w, CARD_LINE).into());
             chip_x += w + CI_CHIP_GAP;
             rect
         })
         .collect();
-    let lines = (line + 1).max(others.is_some() as i32);
+    // The count after the last chip, or a line down when it does not fit.
+    let mut lines = line + 1;
+    let others = (view.other_prs > 0).then(|| {
+        let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+        if line < 0 || chip_x > end - w {
+            lines += 1;
+        }
+        Rectangle::new(
+            (end - w, line_y(lines - 1) + (CARD_LINE - PILL_HEIGHT) / 2).into(),
+            (w, PILL_HEIGHT).into(),
+        )
+    });
     let height = 2 * CI_PAD + lines * CARD_LINE;
     CiLayout {
         card: Rectangle::new((x, y).into(), (width, height).into()),
@@ -4016,6 +4016,44 @@ mod tests {
     }
 
     #[test]
+    fn the_pr_count_follows_the_last_chip() {
+        let section = |labels: &[&str], others, width| {
+            let mut ws = workspace("gerdr", None, None);
+            ws.ci = Some(ci_view(labels, others));
+            sidebar_layout(&[ws], &[], width).ci[0].clone().unwrap()
+        };
+        let line_of = |ci: &CiLayout, r: Rect| (r.loc.y - ci.card.loc.y - CI_PAD) / CARD_LINE;
+        let lines = |ci: &CiLayout| (ci.card.size.h - 2 * CI_PAD) / CARD_LINE;
+        // Two short branches leave the count room on their line.
+        let ci = section(&["main", "dev"], 5, 240);
+        let count = ci.others.unwrap();
+        assert_eq!(line_of(&ci, ci.chips[1]), 0);
+        assert_eq!(line_of(&ci, count), 0);
+        assert!(ci.chips[1].loc.x + ci.chips[1].size.w + CI_CHIP_GAP <= count.loc.x);
+        assert_eq!(lines(&ci), 1);
+        // Whatever the width, the count sits at the right end of the last
+        // chip line when it fits there, else alone on a line under it.
+        let labels = ["main", "dev", "#101", "#102", "#103"];
+        let mut wrapped = false;
+        for width in 160..320 {
+            let ci = section(&labels, 5, width);
+            let (count, last) = (ci.others.unwrap(), *ci.chips.last().unwrap());
+            let end = ci.card.loc.x + ci.card.size.w - super::CHILD_PAD;
+            assert_eq!(count.loc.x + count.size.w, end);
+            let fits = last.loc.x + last.size.w + CI_CHIP_GAP <= count.loc.x;
+            let below = i32::from(!fits);
+            wrapped |= !fits;
+            assert_eq!(line_of(&ci, count), line_of(&ci, last) + below);
+            assert_eq!(lines(&ci), line_of(&ci, last) + 1 + below);
+        }
+        assert!(wrapped, "some width leaves the count no room");
+        // No chips: the count alone, on one line.
+        let ci = section(&[], 3, 240);
+        assert_eq!(line_of(&ci, ci.others.unwrap()), 0);
+        assert_eq!(lines(&ci), 1);
+    }
+
+    #[test]
     fn ci_hits_name_the_chip_the_count_and_the_section() {
         let mut ws = workspace("gerdr", Some(AgentStatus::Idle), Some("main"));
         ws.ci = Some(ci_view(&["main", "#42"], 4));
@@ -4024,7 +4062,7 @@ mod tests {
         let layout = sidebar_layout(&workspaces, &agents, 240);
         let ci = layout.ci[1].as_ref().unwrap();
         let others = ci.others.expect("a count of other pull requests");
-        // The count at the first line's right end, after its chips.
+        // The count at the last chip line's right end, after its chips.
         assert!(others.loc.x + others.size.w <= ci.card.loc.x + ci.card.size.w);
         assert!(ci.chips[1].loc.x + ci.chips[1].size.w < others.loc.x);
         assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiPrs(1)));
