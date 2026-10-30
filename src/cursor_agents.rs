@@ -691,19 +691,22 @@ impl History {
     }
 }
 
-/// A workspace as placing a chat sees it: its folder and whether it is
-/// the project's Cursor workspace.
+/// A workspace as placing a chat sees it: its folder, the other worktrees
+/// of its folder's repository and whether it is the project's Cursor
+/// workspace.
 pub struct Spot<'a> {
     pub dir: &'a Path,
+    pub worktrees: Vec<&'a Path>,
     pub cursor: bool,
 }
 
 /// Which of `spots` a chat working in `paths` goes under: the one whose
-/// folder holds the likeliest path deepest (one in the home folder holds
-/// everything, so it doesn't count), else the Cursor workspace, if the
-/// path is in one of `project_dirs` or holds one (a chat at the root of a
-/// project whose workspaces are its subfolders), short of holding the home
-/// folder; `None` for a chat of another project.
+/// folder, or another worktree of whose repository, holds the likeliest
+/// path deepest (one in the home folder holds everything, so it doesn't
+/// count), else the Cursor workspace, if the path is in one of
+/// `project_dirs` or holds one (a chat at the root of a project whose
+/// workspaces are its subfolders), short of holding the home folder;
+/// `None` for a chat of another project.
 pub fn place(
     paths: &[PathBuf],
     spots: &[Spot],
@@ -711,12 +714,18 @@ pub fn place(
     home: Option<&Path>,
 ) -> Option<usize> {
     for path in paths {
+        // Its own folder before another worktree as deep.
         let holding = spots
             .iter()
             .enumerate()
-            .filter(|(_, s)| !s.cursor && Some(s.dir) != home && path.starts_with(s.dir))
-            .max_by_key(|(_, s)| s.dir.components().count());
-        if let Some((i, _)) = holding {
+            .filter(|(_, s)| !s.cursor && Some(s.dir) != home)
+            .flat_map(|(i, s)| {
+                let own = std::iter::once((i, s.dir, true));
+                own.chain(s.worktrees.iter().map(move |dir| (i, *dir, false)))
+            })
+            .filter(|(_, dir, _)| path.starts_with(dir))
+            .max_by_key(|(_, dir, own)| (dir.components().count(), *own));
+        if let Some((i, _, _)) = holding {
             return Some(i);
         }
     }
@@ -1276,6 +1285,9 @@ impl crate::Gerdr {
             .iter()
             .map(|ws| Spot {
                 dir: &ws.dir,
+                worktrees: self.git.get(&ws.dir).map_or_else(Vec::new, |git| {
+                    git.worktrees.iter().map(|w| w.path.as_path()).collect()
+                }),
                 cursor: ws.kind == crate::WorkspaceKind::Cursor,
             })
             .collect();
@@ -1754,18 +1766,22 @@ mod tests {
         let spots = [
             Spot {
                 dir: home,
+                worktrees: Vec::new(),
                 cursor: false,
             },
             Spot {
                 dir: Path::new("/home/u/app"),
+                worktrees: Vec::new(),
                 cursor: false,
             },
             Spot {
                 dir: Path::new("/home/u/app/api"),
+                worktrees: vec![Path::new("/home/u/app/api-perf")],
                 cursor: false,
             },
             Spot {
                 dir: Path::new("/home/u/app"),
+                worktrees: Vec::new(),
                 cursor: true,
             },
         ];
@@ -1781,11 +1797,15 @@ mod tests {
             at(&["/home/u/.cursor/worktrees/api/x", "/home/u/app/api"]),
             Some(2)
         );
+        // Another worktree of a workspace's repository goes by that
+        // workspace, though a workspace's folder holds it less deep.
+        assert_eq!(at(&["/home/u/app/api-perf/src"]), Some(2));
         // Not the home folder's workspace: another project's chat.
         assert_eq!(at(&["/home/u/other"]), None);
         // In the project but under no workspace: the Cursor one.
         let lone = [Spot {
             dir: Path::new("/home/u/app"),
+            worktrees: Vec::new(),
             cursor: true,
         }];
         let paths = [PathBuf::from("/home/u/app/web")];
