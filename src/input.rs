@@ -1101,6 +1101,11 @@ impl Gerdr {
         let covered = popup || self.help_hover.is_some();
         self.header_hover = false;
         let regions = self.regions_at(pos);
+        // The strip of agents closes off the sidebar (see
+        // `track_agent_strip`).
+        if covered || regions.sidebar.is_none() {
+            self.agent_strip = None;
+        }
         let tip = if covered {
             overlay_tip
         } else if let Some(layout) = &regions.sidebar {

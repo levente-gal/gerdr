@@ -16,6 +16,7 @@ mod checkout;
 mod chrome;
 mod ci;
 mod ci_watch;
+mod cli_agents;
 mod clipboard;
 mod config;
 mod confirm;
@@ -1029,8 +1030,9 @@ pub struct PendingEnter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     NewTab,
-    /// Cursor's agent CLI in a new tab of the active workspace.
-    NewCursorAgent,
+    /// The agent picker: an agent CLI in a new tab of the active
+    /// workspace.
+    NewAgent,
     CloseTab,
     NextTab,
     PrevTab,
@@ -1326,6 +1328,13 @@ pub struct Gerdr {
     pub apps: Vec<launch::App>,
     /// The apps installed on the system, offered in the run prompt.
     pub installed_apps: Vec<launch::App>,
+    /// The agent CLI commands the config file names (see `cli_agents`),
+    /// and the agent CLIs installed, as of the last look.
+    pub agent_config: std::collections::BTreeMap<String, String>,
+    pub cli_agents: Vec<cli_agents::CliAgent>,
+    /// The workspace whose header shows the strip of agents to start,
+    /// while the pointer is on its AI button or the strip.
+    pub agent_strip: Option<usize>,
     /// Where a read of the installed apps sends them; `None` until set up.
     pub installed_apps_tx: Option<channel::Sender<Vec<launch::App>>>,
 
@@ -3853,7 +3862,7 @@ impl Gerdr {
         }
         match action {
             Action::NewTab => self.new_tab(),
-            Action::NewCursorAgent => self.new_cursor_agent(self.active_workspace),
+            Action::NewAgent => self.open_agent_picker(self.active_workspace),
             Action::CloseTab => self.close_tab(tab),
             Action::NextTab if tabs > 0 => self.switch_tab((tab + 1) % tabs),
             Action::PrevTab if tabs > 0 => self.switch_tab((tab + tabs - 1) % tabs),
@@ -4847,6 +4856,9 @@ impl Gerdr {
                 }
                 view.ci = self.ci_view(ws);
                 view.restart = !self.workspace_restarts(w).is_empty();
+                if self.agent_strip == Some(w) {
+                    view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
+                }
                 view.more_agents = self
                     .cursor_history(w)
                     .1
@@ -5977,7 +5989,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance_dir = launch::instance_dir(&home, &socket_name.to_string_lossy());
     let zed_data = launch::zed_data_dir(&home, &instance_dir);
 
-    let (keymap, apps, ui, git_config, linear, keep_apps) = config::load();
+    let (keymap, apps, ui, git_config, linear, keep_apps, agent_config) = config::load();
     let saved_theme = std::fs::read_to_string(theme_file())
         .ok()
         .and_then(|s| ThemeMode::from_name(&s));
@@ -6077,6 +6089,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         apps,
         installed_apps: Vec::new(),
         installed_apps_tx: None,
+        cli_agents: cli_agents::installed(&agent_config),
+        agent_config,
+        agent_strip: None,
         projects: projects::Store::default(),
         project: None,
         project_lock: None,

@@ -37,8 +37,8 @@ use std::{
 use smithay::reexports::calloop::channel;
 
 use crate::{
-    Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, desktop, home_dir, hooks,
-    layout, state_dir, web_control,
+    Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, cli_agents, desktop,
+    home_dir, hooks, layout, state_dir, web_control,
 };
 
 /// The start of the class of the Ghostty gerdr keeps (see `Gerdr::shared_name`),
@@ -56,9 +56,6 @@ const BROWSER_APP_ID: &str = "dev.gerdr.browser";
 /// The program of Cursor, which a project keeps a workspace of its own for
 /// (see `Gerdr::open_cursor`).
 const CURSOR: &str = "cursor";
-
-/// The command of Cursor's agent CLI (see `Gerdr::new_cursor_agent`).
-const CURSOR_AGENT: &str = "cursor-agent";
 
 /// The name of the Cursor workspace.
 const CURSOR_WORKSPACE: &str = "Cursor";
@@ -291,13 +288,18 @@ impl Gerdr {
         self.show_active();
     }
 
-    /// Start Cursor's agent CLI in a new tab of workspace `w`, in its
-    /// folder: herdr shows it as an agent like any other.
-    pub fn new_cursor_agent(&mut self, w: usize) {
+    /// Start an agent CLI by `command` in a new tab of workspace `w`, in
+    /// its folder: herdr shows it as an agent like any other.
+    pub fn new_agent(&mut self, w: usize, command: &str) {
         let Some(dir) = self.workspaces.get(w).map(|ws| ws.dir.clone()) else {
             return;
         };
-        self.new_tab_running(w, &dir, CURSOR_AGENT.to_owned());
+        self.new_tab_running(w, &dir, command.to_owned());
+    }
+
+    /// Look for the installed agent CLIs again (see `cli_agents`).
+    pub fn refresh_cli_agents(&mut self) {
+        self.cli_agents = cli_agents::installed(&self.agent_config);
     }
 
     /// Show Cursor chat `id`: the project's Cursor, started if it isn't

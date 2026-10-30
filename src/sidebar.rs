@@ -247,6 +247,10 @@ impl Gerdr {
                 close: hit == Some(SidebarHit::Close(i)),
                 restart: hit == Some(SidebarHit::Restart(i)),
                 agent: hit == Some(SidebarHit::NewAgent(i)),
+                pick: match hit {
+                    Some(SidebarHit::PickAgent(w, k)) if w == i => Some(k),
+                    _ => None,
+                },
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
@@ -321,6 +325,32 @@ impl Gerdr {
         }
     }
 
+    /// Open the strip of agents on workspace `i`'s header while `hit` is on
+    /// its AI button, and keep it open while on the strip; close it off
+    /// them. Opening looks for the installed agents again.
+    pub(crate) fn track_agent_strip(&mut self, hit: Option<SidebarHit>) {
+        let open = match hit {
+            Some(SidebarHit::NewAgent(i)) => Some(i),
+            Some(SidebarHit::PickAgent(i, _)) => self.agent_strip.filter(|w| *w == i),
+            _ => None,
+        };
+        if open.is_some() && open != self.agent_strip {
+            self.refresh_cli_agents();
+        }
+        self.agent_strip = open;
+    }
+
+    /// The command of the agent in slot `k` of workspace `i`'s strip, as
+    /// `layout` has it; `None` on the ellipsis standing for those that
+    /// don't fit.
+    fn picked_agent(&self, layout: &SidebarLayout, i: usize, k: usize) -> Option<String> {
+        let slots = layout.rows.get(i)?.pick_slots();
+        if self.cli_agents.len() > slots && k + 1 == slots {
+            return None;
+        }
+        Some(self.cli_agents.get(k)?.command.clone())
+    }
+
     /// A press at `(x, y)` in the sidebar. Left click selects a workspace
     /// (a second one right after renames it: see `input`), "×" or middle
     /// click closes it; a left click on an agent card shows its pane, on
@@ -388,7 +418,11 @@ impl Gerdr {
             }
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
             (SidebarHit::Restart(i), BTN_LEFT) => self.restart_workspace(i),
-            (SidebarHit::NewAgent(i), BTN_LEFT) => self.new_cursor_agent(i),
+            (SidebarHit::NewAgent(i), BTN_LEFT) => self.open_agent_picker(i),
+            (SidebarHit::PickAgent(i, k), BTN_LEFT) => match self.picked_agent(&layout, i, k) {
+                Some(command) => self.new_agent(i, &command),
+                None => self.open_agent_picker(i),
+            },
             (SidebarHit::Worktrees(i), BTN_LEFT) => {
                 let dir = self.workspaces.get(i).map(|ws| ws.dir.clone());
                 self.open_worktrees(dir);
@@ -426,6 +460,7 @@ impl Gerdr {
     ) -> Option<Tooltip> {
         let hit = self.sidebar_hit(layout, pos);
         self.header_hover = self.project.is_some() && hit == Some(SidebarHit::Header);
+        self.track_agent_strip(hit);
         self.sidebar_hover
             .track(hit.map(SidebarHit::pill), Instant::now());
         let workspaces = self.workspace_views();
@@ -463,10 +498,26 @@ impl Gerdr {
                 })
             }
             SidebarHit::NewAgent(i) => {
-                let tip = Tooltip::new("New Cursor agent", layout.rows[i].agent);
-                Some(match self.keymap.help().key_for("new cursor agent", 0) {
+                let text = if self.cli_agents.is_empty() {
+                    "No agent CLI found on PATH"
+                } else {
+                    "New agent"
+                };
+                let tip = Tooltip::new(text, layout.rows[i].agent);
+                Some(match self.keymap.help().key_for("new agent", 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
+                })
+            }
+            SidebarHit::PickAgent(i, k) => {
+                let rect = layout.rows.get(i)?.pick(k)?;
+                Some(match self.picked_agent(layout, i, k) {
+                    Some(command) => {
+                        let agent = self.cli_agents.iter().find(|a| a.command == command)?;
+                        Tooltip::new(&format!("New {} agent", agent.name), rect)
+                            .fields(vec![("Runs".to_owned(), command)])
+                    }
+                    None => Tooltip::new("More agents…", rect),
                 })
             }
             SidebarHit::Restart(i) => {
@@ -712,8 +763,8 @@ impl Gerdr {
                 let mut items = vec![
                     hinted(MenuItem::new("New tab", MenuAction::NewTab(i)), "new tab"),
                     hinted(
-                        MenuItem::new("New Cursor agent", MenuAction::NewCursorAgent(i)),
-                        "new cursor agent",
+                        MenuItem::new("New agent…", MenuAction::NewAgent(i)),
+                        "new agent",
                     ),
                     MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),

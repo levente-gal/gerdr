@@ -34,12 +34,7 @@ const DEFAULT_PREFIX: &str = "Ctrl+B";
 /// it, default key).
 const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("new-tab", Action::NewTab, "new tab", "c"),
-    (
-        "new-cursor-agent",
-        Action::NewCursorAgent,
-        "new cursor agent",
-        "Shift+A",
-    ),
+    ("new-agent", Action::NewAgent, "new agent", "Shift+A"),
     ("next-tab", Action::NextTab, "next tab", "n"),
     ("previous-tab", Action::PrevTab, "previous tab", "p"),
     ("go-to-tab-1", Action::GotoTab(0), "go to tab 1", "1"),
@@ -260,7 +255,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
 /// has exactly one key (else each gets its own), under one label.
 const HELP_LINES: &[(&str, &[&str])] = &[
     ("new tab", &["new-tab"]),
-    ("new cursor agent", &["new-cursor-agent"]),
+    ("new agent", &["new-agent"]),
     ("next / previous tab", &["next-tab", "previous-tab"]),
     (
         "go to tab",
@@ -540,6 +535,11 @@ impl Keymap {
         let mut bindings: Vec<(Chord, usize)> = Vec::new();
         let mut configured = vec![false; ACTIONS.len()];
         for (name, keys) in config.actions {
+            // Its name while it started only Cursor's agent.
+            let name = match name.as_str() {
+                "new-cursor-agent" => "new-agent".to_owned(),
+                _ => name,
+            };
             let Some(idx) = ACTIONS.iter().position(|(n, ..)| *n == name) else {
                 problems.push(format!("unknown action `{name}`"));
                 continue;
@@ -700,7 +700,7 @@ mod tests {
     };
 
     fn from_config(text: &str) -> (Keymap, Vec<String>) {
-        let (keymap, _, _, _, _, problems, _) = config::from_text(text);
+        let (keymap, _, _, _, _, problems, ..) = config::from_text(text);
         (keymap, problems)
     }
 
@@ -725,7 +725,7 @@ mod tests {
             rows,
             [
                 "C: new tab",
-                "Shift+A: new cursor agent",
+                "Shift+A: new agent",
                 "N / P: next / previous tab",
                 "1–9: go to tab",
                 "Shift+X: close tab",
@@ -828,6 +828,16 @@ mod tests {
             Some(Action::Shortcuts)
         );
         assert_eq!(keymap.action(&mods(false, false), Keysym::slash), None);
+    }
+
+    #[test]
+    fn the_old_cursor_agent_name_binds_the_agent_picker() {
+        let (keymap, problems) = from_config("[keys]\nnew-cursor-agent = \"g\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::g),
+            Some(Action::NewAgent)
+        );
     }
 
     #[test]

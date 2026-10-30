@@ -27,9 +27,9 @@ pub enum MenuAction {
     ReposAction(ReposButton),
     /// The project's Cursor workspace (see `Gerdr::open_cursor`).
     NewCursor,
-    /// The Cursor agent CLI in a new tab of workspace `.0` (see
-    /// `Gerdr::new_cursor_agent`).
-    NewCursorAgent(usize),
+    /// The agent picker, for an agent CLI in a new tab of workspace `.0`
+    /// (see `Gerdr::open_agent_picker`).
+    NewAgent(usize),
     /// A GitHub page in a tab of workspace `.0` (see `Gerdr::open_page`).
     OpenPage(usize, String),
     /// The same in a new tab, even when a tab shows it already.
@@ -313,7 +313,7 @@ impl Gerdr {
             MenuAction::RenameWorkspace(w) => self.start_rename(RenameTarget::Workspace(w)),
             MenuAction::RestartWorkspace(w) => self.restart_workspace(w),
             MenuAction::ChooseRestarts(w) => self.choose_restarts(w),
-            MenuAction::NewCursorAgent(w) => self.new_cursor_agent(w),
+            MenuAction::NewAgent(w) => self.open_agent_picker(w),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);
                 self.new_tab();
