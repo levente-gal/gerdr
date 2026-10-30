@@ -310,6 +310,9 @@ pub struct Panel {
     /// they stay with the others, under no `Clean` heading, so that a
     /// line doesn't jump there as a batch commits and pushes it.
     pub(crate) stirred: HashSet<PathBuf>,
+    /// The batch chips clicked away, by (batch id, root): the next batch
+    /// shows its own.
+    pub(crate) seen_chips: HashSet<(u64, PathBuf)>,
     /// The repositories with nothing to do are hidden under their
     /// heading.
     pub(crate) clean_folded: bool,
@@ -598,6 +601,36 @@ impl BatchKind {
             BatchKind::StashDrop => "Drop stash",
         }
         .into()
+    }
+
+    /// What its chip says where it went through: `pushed`; the label says
+    /// the rest in the tip.
+    pub fn done(&self) -> &'static str {
+        match self {
+            BatchKind::Branch(_) | BatchKind::Switch(_) => "switched",
+            BatchKind::DeleteBranch { .. } => "deleted",
+            BatchKind::Commit { push: false, .. } => "committed",
+            BatchKind::Commit { push: true, .. } | BatchKind::Push { force: false } => "pushed",
+            BatchKind::Push { force: true } => "force pushed",
+            BatchKind::Fetch => "fetched",
+            BatchKind::Pull(Pull::Rebase) => "pulled (rebase)",
+            BatchKind::Pull(_) => "pulled",
+            BatchKind::Integrate {
+                how: Integrate::Merge,
+                ..
+            } => "merged",
+            BatchKind::Integrate {
+                how: Integrate::Rebase,
+                ..
+            } => "rebased",
+            BatchKind::MarkResolved => "resolved",
+            BatchKind::Continue => "continued",
+            BatchKind::Abort => "aborted",
+            BatchKind::Undo => "undone",
+            BatchKind::Stash => "stashed",
+            BatchKind::StashPop => "popped",
+            BatchKind::StashDrop => "dropped",
+        }
     }
 
     /// Whether it can't be taken back, so is asked about first: a force
@@ -3500,10 +3533,21 @@ impl Panel {
         let shown = page + usize::from(part > 0.0);
         let at = |i: usize| (i < shown && first + i < rows.len()).then_some(first + i);
         match hit {
-            ReposHit::Line(i) | ReposHit::Chip(i) | ReposHit::Mark(i, RepoMark::Dirty) => {
+            ReposHit::Line(i) | ReposHit::Mark(i, RepoMark::Dirty) => {
                 let k = at(i)?;
                 self.select(&rows, k, items, page);
                 self.focus = Focus::Tree;
+            }
+            ReposHit::Chip(i) => {
+                let k = at(i)?;
+                self.select(&rows, k, items, page);
+                self.focus = Focus::Tree;
+                // What the batch did there is seen: hide it.
+                let root = &items[rows[k].item()?].root;
+                if let Some(b) = ctx.batch.filter(|b| b.run(root).is_some()) {
+                    self.seen_chips.retain(|(id, _)| *id == b.id);
+                    self.seen_chips.insert((b.id, root.clone()));
+                }
             }
             ReposHit::Mark(i, mark) => {
                 let k = at(i)?;
@@ -3803,7 +3847,7 @@ impl Panel {
     }
 
     /// `item`'s state chip: the operation it is stopped in, else what the
-    /// last batch did to it, else a detached HEAD.
+    /// last batch did to it (unless clicked away), else a detached HEAD.
     fn chip(&self, item: &RepoItem, batch: Option<&Batch>) -> Option<Chip> {
         let chip = |text: &str, tone: Tone, tip: &str| {
             Some(Chip {
@@ -3837,12 +3881,14 @@ impl Panel {
             };
             return chip(&text, Tone::Error, &tip);
         }
-        if let Some(run) = batch.and_then(|b| b.run(&item.root)) {
+        let seen = |b: &Batch| self.seen_chips.contains(&(b.id, item.root.clone()));
+        if let Some(run) = batch.filter(|b| !seen(b)).and_then(|b| b.run(&item.root)) {
             let ctx_kind = batch.map(|b| &b.kind);
+            let done = batch.map(|b| b.kind.done()).unwrap_or_default();
             let batch = batch.map(|b| b.kind.label()).unwrap_or_default();
             match &run.state {
                 RunState::Done => {
-                    return chip("done", Tone::Success, &format!("{batch} went through here"));
+                    return chip(done, Tone::Success, &format!("{batch} went through here"));
                 }
                 RunState::Skipped(why) => {
                     return chip(
@@ -5935,7 +5981,7 @@ mod tests {
                 chip("detached", Tone::Warning),
                 chip("login needed", Tone::Error),
                 chip("nothing checked", Tone::Muted),
-                chip("done", Tone::Success),
+                chip("pulled", Tone::Success),
                 chip("conflict", Tone::Error),
             ]
         );
@@ -6112,6 +6158,60 @@ mod tests {
         assert_eq!(
             panel.click(ReposHit::Button(ReposButton::OpenWorkspace), &ctx),
             Some(Outcome::OpenWorkspace("/src/zed2".into()))
+        );
+    }
+
+    #[test]
+    fn a_clicked_chip_goes_until_the_next_batch() {
+        let items = merging(items());
+        let runs = ["gerdr", "herdr", "zed"].map(|n| run(n, RunState::Done));
+        let b = batch(BatchKind::Push { force: false }, runs.to_vec());
+        let ctx = ctx(&items, Some(&b));
+        let mut panel = Panel::new(&items);
+        for item in &items {
+            panel.set_open(item, false);
+        }
+        let chips = |panel: &Panel, ctx: &Ctx| -> Vec<Option<String>> {
+            repo_lines(&panel.view("p", ctx))
+                .iter()
+                .map(|l| l.chip.as_ref().map(|c| c.text.clone()))
+                .collect()
+        };
+        let line = |panel: &Panel, ctx: &Ctx, name: &str| {
+            let view = panel.view("p", ctx);
+            view.lines
+                .iter()
+                .position(|l| matches!(l, TreeLine::Repo(r) if r.label == name))
+                .unwrap()
+        };
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            chips(&panel, &ctx),
+            [some("pushed"), some("MERGING · 1"), some("pushed")]
+        );
+        let zed = line(&panel, &ctx, "zed");
+        panel.click(ReposHit::Chip(zed), &ctx);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("zed"))));
+        // A stopped merge is no batch's result: it stays.
+        let herdr = line(&panel, &ctx, "herdr");
+        panel.click(ReposHit::Chip(herdr), &ctx);
+        assert_eq!(
+            chips(&panel, &ctx),
+            [some("pushed"), some("MERGING · 1"), None]
+        );
+        // The next batch's chips show.
+        let next = Batch {
+            id: 2,
+            kind: BatchKind::Fetch,
+            runs: runs.to_vec(),
+        };
+        let ctx = super::Ctx {
+            batch: Some(&next),
+            ..ctx
+        };
+        assert_eq!(
+            chips(&panel, &ctx),
+            [some("fetched"), some("MERGING · 1"), some("fetched")]
         );
     }
 

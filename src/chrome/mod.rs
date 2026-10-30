@@ -17,6 +17,7 @@
 
 mod badge;
 mod canvas;
+mod confirm;
 mod consts;
 mod drop;
 #[cfg(test)]
@@ -59,6 +60,7 @@ use crate::anim::{FAST, Fade, SLOW, phase};
 // `chrome::X`. The canvas and the shapes stay inside.
 pub use badge::*;
 use canvas::*;
+pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
 pub use help::*;
@@ -137,6 +139,8 @@ pub struct ChromeView {
     pub quit: Option<QuitView>,
     /// Set while the restart dialog is open, over all but that.
     pub restart: Option<RestartView>,
+    /// Set while the confirm dialog is open, over all but the quit dialog.
+    pub confirm: Option<ConfirmView>,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
     /// Set while the worktrees popup is open.
@@ -151,6 +155,8 @@ pub struct ChromeView {
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
     pub pane_bars: Vec<PaneBarView>,
+    /// Where the button unzooming the zoomed pane floats, if one is.
+    pub unzoom: Option<Rect>,
     pub theme: Theme,
     pub density: Density,
     pub sidebar_width: i32,
@@ -173,6 +179,7 @@ pub struct Chrome {
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
     restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
+    confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
     repos: ReposLayers,
@@ -188,6 +195,8 @@ pub struct Chrome {
     blink_dot: Cached<(Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
+    /// The button over a zoomed pane: lit or not, theme, scale.
+    unzoom: Cached<(bool, Theme, f64)>,
     /// The strip along the focused pane's top edge.
     focus_strip: Cached<(Size<i32, Logical>, Theme, f64)>,
     /// The highlight where a held pane would land: its size, theme, scale.
@@ -223,6 +232,7 @@ impl Chrome {
             welcome: Overlay::default(),
             quit: Overlay::default(),
             restart: Overlay::default(),
+            confirm: Overlay::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
@@ -233,6 +243,7 @@ impl Chrome {
             spinner: Cached::default(),
             blink_dot: Cached::default(),
             pane_bars: Vec::new(),
+            unzoom: Cached::default(),
             focus_strip: Cached::default(),
             pane_drop: Cached::default(),
             hits: Cached::default(),
@@ -343,6 +354,18 @@ impl Chrome {
                 }),
         );
 
+        // The confirm dialog covers all but the quit dialog.
+        let confirm = view.confirm.map(|confirm| {
+            let (loc, size) = shadowed(confirm_layout(output).panel);
+            ((confirm, output, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.confirm
+                .part(confirm, now, true, |(confirm, output, ..)| {
+                    painter.confirm_dialog(confirm, *output, scale, theme.palette())
+                }),
+        );
+
         // The quit dialog covers everything.
         let quit = view.quit.map(|quit| {
             let layout = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());
@@ -445,7 +468,7 @@ impl Chrome {
         // The toasts, stacked at the bottom right of the app area, each
         // fading on its own. One leaving fades where the stack has it, which
         // holds its place until it is gone.
-        let layouts = toast_layout(&view.toasts, area);
+        let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
         for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
             if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
                 self.toasts.push((toast.id, Overlay::default()));
@@ -477,6 +500,17 @@ impl Chrome {
             parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
                 painter.toast(toast, *w, *hovered, scale, theme.palette())
             }));
+        }
+
+        // The button unzooming the zoomed pane, over it and under the
+        // toasts.
+        if let Some(button) = view.unzoom {
+            let hovered = button.to_f64().contains(pointer);
+            let buffer = self.unzoom.get((hovered, theme, scale), |(hovered, ..)| {
+                painter.unzoom_button(*hovered, scale, theme.palette())
+            });
+            let (loc, size) = shadowed(button);
+            parts.push(Part::new(buffer, loc, size, 1.0));
         }
 
         // The placeholders over the panes still waiting for their window,
@@ -836,10 +870,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
                 .map(|(_, rect)| rect),
         );
     }
+    rects.extend(view.unzoom);
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);
     }
-    let toasts = toast_layout(&view.toasts, area);
+    let toasts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
     for (layout, _) in toasts.iter().zip(&view.toasts).filter(|(_, t)| !t.leaving) {
         rects.push(layout.panel);
         rects.extend(layout.button);
@@ -912,6 +947,9 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         let layout = restart_layout(output, restart.rows.len());
         rects.extend(layout.rows);
         rects.extend(layout.buttons);
+    }
+    if view.confirm.is_some() {
+        rects.extend(confirm_layout(output).buttons);
     }
     if let Some(quit) = &view.quit {
         let quit = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());

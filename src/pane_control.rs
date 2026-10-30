@@ -999,9 +999,35 @@ impl Gerdr {
             })
     }
 
+    /// The zoomed pane of the active tab, and where the button floating
+    /// over it to unzoom it is, if one is.
+    pub fn unzoom_button(&self) -> Option<(u32, Rect)> {
+        let tab = self.tab()?;
+        let id = tab.zoomed()?;
+        let (_, rect) = tab
+            .shown_rects(self.content_rect())
+            .into_iter()
+            .find(|(pane, _)| *pane == id)?;
+        Some((id, chrome::unzoom_button_rect(rect)?))
+    }
+
+    /// The zoomed pane whose unzoom button is at `pos`, if it is.
+    pub fn unzoom_button_at(&self, pos: Point<f64, Logical>) -> Option<u32> {
+        self.unzoom_button()
+            .filter(|(_, rect)| rect.to_f64().contains(pos))
+            .map(|(id, _)| id)
+    }
+
     /// The pointer moved to `pos` over the app area with nothing open
-    /// over it: the tooltip for the bar button under it, if one is.
+    /// over it: the tooltip for the bar button or the unzoom button under
+    /// it, if one is.
     pub(crate) fn pane_bar_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        if let Some((_, rect)) = self
+            .unzoom_button()
+            .filter(|(_, rect)| rect.to_f64().contains(pos))
+        {
+            return Some(button_tooltip(BarButton::Unzoom, rect, &self.keymap.help()));
+        }
         let (id, BarHit::Button(button)) = self.pane_bar_at(pos)? else {
             return None;
         };

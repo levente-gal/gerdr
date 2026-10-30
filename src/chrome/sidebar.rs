@@ -85,7 +85,7 @@ const CHILD_X: i32 = NAME_X - CHILD_PAD;
 const AGENT_ICON_X: i32 = CHILD_PAD - 1;
 /// Where a row's text starts under a header: after an agent's icon.
 const CHILD_TEXT_X: i32 = NAME_X + STATUS_WIDTH + STATUS_GAP;
-/// The "×" at the right end of a header, and of a deletable agent row.
+/// The "×" at the right end of a header, and of a closable agent row.
 const CLOSE_SLOT: i32 = 22;
 /// The restart button left of a header's "×".
 const RESTART_SLOT: i32 = 22;
@@ -319,9 +319,8 @@ pub struct AgentView {
     /// The model it runs, as its status line reports it to herdr.
     pub model: Option<String>,
     pub lines: Vec<AgentLine>,
-    /// Whether it is history (a Cursor chat gone idle, a finished test run)
-    /// that a "×" on the row deletes from gerdr.
-    pub deletable: bool,
+    /// Whether a "×" on the row closes it (see `close_label`).
+    pub closable: bool,
     /// Its subagents that run.
     pub subagents: Vec<SubagentView>,
     /// Whether it also shows in the "Needs you" list at the top.
@@ -404,7 +403,7 @@ impl AgentView {
             name: info.name.clone(),
             model,
             lines,
-            deletable: false,
+            closable: true,
             subagents: Vec::new(),
             inbox: false,
             test: None,
@@ -464,7 +463,7 @@ impl AgentView {
             name: row.name.clone().filter(|n| !n.trim().is_empty()),
             model: chat.model.clone(),
             lines,
-            deletable: false,
+            closable: false,
             subagents,
             inbox: false,
             test: None,
@@ -502,6 +501,26 @@ impl AgentView {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" · ")
+    }
+
+    /// Whether it is busy: working, waiting on the user mid-run, or a
+    /// test still running. Closing one asks first.
+    pub fn running(&self) -> bool {
+        match self.test {
+            Some(test) => test == CiState::Running,
+            None => matches!(self.status, AgentStatus::Working | AgentStatus::Blocked),
+        }
+    }
+
+    /// What closing it does, as its "×" and menu say: a terminal agent or
+    /// a running test goes with its pane; a finished test run, its card;
+    /// a Cursor chat goes from gerdr until it changes again.
+    pub fn close_label(&self) -> &'static str {
+        match (&self.key, self.running()) {
+            (AgentKey::Herdr(_), _) | (AgentKey::Test(_), true) => "Close pane",
+            (AgentKey::Test(_), false) => "Dismiss",
+            _ => "Delete from gerdr",
+        }
     }
 
     /// What its row calls the agent: the name it was given, else its kind.
@@ -652,8 +671,8 @@ impl CiView {
         self.chips.is_empty() && self.other_prs == 0
     }
 
-    /// Whether it needs no look: no run failed and no review waits. It is
-    /// then one mark on its workspace's header, not a section.
+    /// Whether it needs no look: no run failed and no review waits. Its
+    /// workspace may then fold itself.
     pub fn quiet(&self) -> bool {
         !self
             .chips
@@ -819,19 +838,19 @@ impl WorkspaceView {
         }
     }
 
-    /// Whether its CI shows as the mark on its header: while it needs no
-    /// look, or the workspace is folded.
+    /// Whether its CI shows as the mark on its header: while the
+    /// workspace is folded.
     fn ci_mark(&self) -> bool {
         self.ci
             .as_ref()
-            .is_some_and(|ci| !ci.is_empty() && (self.folded || ci.quiet()))
+            .is_some_and(|ci| !ci.is_empty() && self.folded)
     }
 
-    /// Its GitHub section, while it needs a look and the workspace shows
-    /// it.
+    /// Its GitHub section, while the workspace shows it: always, green or
+    /// not.
     fn ci_section(&self) -> Option<&CiView> {
         let ci = self.ci.as_ref()?;
-        (!self.folded && !ci.is_empty() && !ci.quiet()).then_some(ci)
+        (!self.folded && !ci.is_empty()).then_some(ci)
     }
 }
 
@@ -1584,7 +1603,7 @@ pub fn sidebar_layout_at(
         card_closes.push(
             ws_cards
                 .iter()
-                .filter(|(k, _)| cards[*k].deletable)
+                .filter(|(k, _)| cards[*k].closable)
                 .map(|(k, row)| (*k, card_close(*row, density)))
                 .collect(),
         );
@@ -1642,8 +1661,9 @@ pub fn sidebar_layout_at(
 }
 
 /// Where the parts of the GitHub section showing `view` sit, its top left
-/// corner at `(x, y)` and `width` wide: a line per group of chips, the
-/// first with the count of other pull requests at its right end. Each line
+/// corner at `(x, y)` and `width` wide: a line per group of chips, then the
+/// count of other pull requests at the right end of the last line, or of a
+/// line of its own when it does not fit after the last chip. Each line
 /// starts with its group's label where an agent row's text starts, GitHub's
 /// mark left of the first; the chips follow in a column as wide as the
 /// widest label present and a gap, left to right, on a line under it (in
@@ -1652,13 +1672,6 @@ pub fn sidebar_layout_at(
 fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
     let top = y + CI_PAD;
     let end = x + width - CHILD_PAD;
-    let others = (view.other_prs > 0).then(|| {
-        let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
-        Rectangle::new(
-            (end - w, top + (CARD_LINE - PILL_HEIGHT) / 2).into(),
-            (w, PILL_HEIGHT).into(),
-        )
-    });
     let label_x = x + CHILD_TEXT_X - CHILD_X;
     let label_w = view
         .chips
@@ -1668,11 +1681,6 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
         .unwrap_or(0);
     let left = label_x + label_w + CI_LABEL_GAP - CI_CHIP_PAD;
     let right = end + CI_CHIP_PAD;
-    // The first line leaves the count its room.
-    let bound = |line: i32| match others {
-        Some(o) if line == 0 => o.loc.x - CI_CHIP_GAP,
-        _ => right,
-    };
     let line_y = |line: i32| top + line * CARD_LINE;
     let (mut chip_x, mut line, mut group) = (left, -1, None);
     let mut labels = Vec::new();
@@ -1686,16 +1694,27 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
                 let label =
                     Rectangle::new((label_x, line_y(line)).into(), (label_w, CARD_LINE).into());
                 labels.push((chip.group, label));
-            } else if chip_x > left && chip_x + full.min(bound(line) - left) > bound(line) {
+            } else if chip_x > left && chip_x + full.min(right - left) > right {
                 (chip_x, line) = (left, line + 1);
             }
-            let w = full.min((bound(line) - left).max(0));
+            let w = full.min((right - left).max(0));
             let rect = Rectangle::new((chip_x, line_y(line)).into(), (w, CARD_LINE).into());
             chip_x += w + CI_CHIP_GAP;
             rect
         })
         .collect();
-    let lines = (line + 1).max(others.is_some() as i32);
+    // The count after the last chip, or a line down when it does not fit.
+    let mut lines = line + 1;
+    let others = (view.other_prs > 0).then(|| {
+        let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+        if line < 0 || chip_x > end - w {
+            lines += 1;
+        }
+        Rectangle::new(
+            (end - w, line_y(lines - 1) + (CARD_LINE - PILL_HEIGHT) / 2).into(),
+            (w, PILL_HEIGHT).into(),
+        )
+    });
     let height = 2 * CI_PAD + lines * CARD_LINE;
     CiLayout {
         card: Rectangle::new((x, y).into(), (width, height).into()),
@@ -2384,7 +2403,7 @@ impl Painter {
 
     /// An agent row on `under`: its status mark, its name or kind and what
     /// it is on, and at the right a "blocked" pill (an inbox row: its
-    /// workspace's name `place` instead; a deletable row under the pointer:
+    /// workspace's name `place` instead; a closable row under the pointer:
     /// its "×"), then a line per subagent that runs. Idle agents are muted;
     /// a blocked one's line carries the warning colour (its breathing is
     /// composed on top, see `pulse_band`). The row lightens under the
@@ -2462,7 +2481,7 @@ impl Painter {
         status_dot(c, dot, badge.dot, scale, p);
         let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
         let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
-        let end = if card.deletable && hover > 0.0 {
+        let end = if card.closable && hover > 0.0 {
             let close = card_close(rect, density);
             let color = if state.close {
                 p.text
@@ -3223,7 +3242,7 @@ mod tests {
                 .map(|cwd| AgentLine::Field(FOLDER.into(), cwd.into()))
                 .into_iter()
                 .collect(),
-            deletable: false,
+            closable: false,
             subagents: Vec::new(),
             inbox: false,
             test: None,
@@ -3700,34 +3719,36 @@ mod tests {
     }
 
     #[test]
-    fn a_green_ci_is_a_mark_on_the_header() {
+    fn a_green_ci_is_a_section_and_a_mark_while_folded() {
         let mut ws = workspace("gerdr", None, Some("main"));
-        ws.ci = Some(passing(&["main", "dev"]));
+        let mut green = passing(&["main", "dev"]);
+        green.other_prs = 3;
+        ws.ci = Some(green);
         assert_eq!(ws.ci.as_ref().unwrap().rollup(), CiState::Passed);
+        let layout = sidebar_layout(&[ws.clone()], &[], 240);
+        let section = layout.ci[0].as_ref().expect("a GitHub section");
+        assert!(section.others.is_some(), "the +N PRs count");
+        assert_eq!(layout.rows[0].ci, None);
+        // Folded, it is the mark at the right end of the branch's line.
+        ws.folded = true;
         let layout = sidebar_layout(&[ws.clone()], &[], 240);
         assert_eq!(layout.ci[0], None);
         let mark = layout.rows[0].ci.expect("a CI mark");
         assert_eq!(layout.hit(mid(mark)), Some(SidebarHit::CiMark(0)));
-        // At the right end of the branch's line.
         let row = layout.rows[0];
         assert_eq!(mark.loc.y, row.branch.unwrap().loc.y);
         assert_eq!(mark.loc.x + mark.size.w, row.close.loc.x + CLOSE_SLOT);
         assert_eq!(layout.blocks[0].size.h, BRANCHED + BLOCK_GAP);
-        // A review waiting makes it a section, and the mark goes.
-        ws.ci.as_mut().unwrap().chips[1].group = Group::Review;
-        let layout = sidebar_layout(&[ws.clone()], &[], 240);
-        assert!(layout.ci[0].is_some());
-        assert_eq!(layout.rows[0].ci, None);
-        // So does a run failing; the mark says so while folded.
+        // The mark says a run failed.
         let mut ci = passing(&["main", "dev"]);
         ci.chips[0].state = CiState::Failed;
         assert_eq!(ci.rollup(), CiState::Failed);
         ws.ci = Some(ci);
-        assert!(sidebar_layout(&[ws.clone()], &[], 240).ci[0].is_some());
-        ws.folded = true;
-        let layout = sidebar_layout(&[ws], &[], 240);
+        let layout = sidebar_layout(&[ws.clone()], &[], 240);
         assert_eq!(layout.ci[0], None);
         assert!(layout.rows[0].ci.is_some());
+        ws.folded = false;
+        assert!(sidebar_layout(&[ws], &[], 240).ci[0].is_some());
     }
 
     #[test]
@@ -3800,10 +3821,10 @@ mod tests {
         gerdr.more_agents = vec!["cursor plan · A".into(), "cursor ask · B".into()];
         let workspaces = vec![gerdr, workspace("~", None, None)];
         let mut history = agent("p2", AgentStatus::Idle, None);
-        history.deletable = true;
+        history.closable = true;
         let agents = vec![vec![agent("p1", AgentStatus::Working, None), history]];
         let layout = sidebar_layout(&workspaces, &agents, 200);
-        // Only the deletable row has a "×", at its right end.
+        // Only the closable row has a "×", at its right end.
         assert_eq!(layout.card_closes[0].len(), 1);
         let (k, close) = layout.card_closes[0][0];
         let card = layout.cards[0].iter().find(|(c, _)| *c == k).unwrap().1;
@@ -3995,6 +4016,44 @@ mod tests {
     }
 
     #[test]
+    fn the_pr_count_follows_the_last_chip() {
+        let section = |labels: &[&str], others, width| {
+            let mut ws = workspace("gerdr", None, None);
+            ws.ci = Some(ci_view(labels, others));
+            sidebar_layout(&[ws], &[], width).ci[0].clone().unwrap()
+        };
+        let line_of = |ci: &CiLayout, r: Rect| (r.loc.y - ci.card.loc.y - CI_PAD) / CARD_LINE;
+        let lines = |ci: &CiLayout| (ci.card.size.h - 2 * CI_PAD) / CARD_LINE;
+        // Two short branches leave the count room on their line.
+        let ci = section(&["main", "dev"], 5, 240);
+        let count = ci.others.unwrap();
+        assert_eq!(line_of(&ci, ci.chips[1]), 0);
+        assert_eq!(line_of(&ci, count), 0);
+        assert!(ci.chips[1].loc.x + ci.chips[1].size.w + CI_CHIP_GAP <= count.loc.x);
+        assert_eq!(lines(&ci), 1);
+        // Whatever the width, the count sits at the right end of the last
+        // chip line when it fits there, else alone on a line under it.
+        let labels = ["main", "dev", "#101", "#102", "#103"];
+        let mut wrapped = false;
+        for width in 160..320 {
+            let ci = section(&labels, 5, width);
+            let (count, last) = (ci.others.unwrap(), *ci.chips.last().unwrap());
+            let end = ci.card.loc.x + ci.card.size.w - super::CHILD_PAD;
+            assert_eq!(count.loc.x + count.size.w, end);
+            let fits = last.loc.x + last.size.w + CI_CHIP_GAP <= count.loc.x;
+            let below = i32::from(!fits);
+            wrapped |= !fits;
+            assert_eq!(line_of(&ci, count), line_of(&ci, last) + below);
+            assert_eq!(lines(&ci), line_of(&ci, last) + 1 + below);
+        }
+        assert!(wrapped, "some width leaves the count no room");
+        // No chips: the count alone, on one line.
+        let ci = section(&[], 3, 240);
+        assert_eq!(line_of(&ci, ci.others.unwrap()), 0);
+        assert_eq!(lines(&ci), 1);
+    }
+
+    #[test]
     fn ci_hits_name_the_chip_the_count_and_the_section() {
         let mut ws = workspace("gerdr", Some(AgentStatus::Idle), Some("main"));
         ws.ci = Some(ci_view(&["main", "#42"], 4));
@@ -4003,7 +4062,7 @@ mod tests {
         let layout = sidebar_layout(&workspaces, &agents, 240);
         let ci = layout.ci[1].as_ref().unwrap();
         let others = ci.others.expect("a count of other pull requests");
-        // The count at the first line's right end, after its chips.
+        // The count at the last chip line's right end, after its chips.
         assert!(others.loc.x + others.size.w <= ci.card.loc.x + ci.card.size.w);
         assert!(ci.chips[1].loc.x + ci.chips[1].size.w < others.loc.x);
         assert_eq!(layout.hit(mid(others)), Some(SidebarHit::CiPrs(1)));

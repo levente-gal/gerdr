@@ -75,6 +75,19 @@ pub fn toast_layout(toasts: &[ToastView], area: Rect) -> Vec<ToastLayout> {
     layouts
 }
 
+/// The part of the app area `area` the toasts stack up from the bottom of:
+/// all of it, or what is above `unzoom`, the button over a zoomed pane, so
+/// that they leave it in sight.
+pub fn toast_area(area: Rect, unzoom: Option<Rect>) -> Rect {
+    match unzoom {
+        Some(button) => Rectangle::new(
+            area.loc,
+            (area.size.w, (button.loc.y - area.loc.y).max(0)).into(),
+        ),
+        None => area,
+    }
+}
+
 /// The button `w` wide of a toast in `panel`, at its right end.
 fn button_rect(panel: Rect, w: i32) -> Rect {
     let w = w.max(TOAST_BUTTON_MIN);
@@ -165,7 +178,9 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOAST_GAP, TOAST_HEIGHT, TOAST_MARGIN, TOAST_WIDTH, ToastView, toast_layout};
+    use super::{
+        TOAST_GAP, TOAST_HEIGHT, TOAST_MARGIN, TOAST_WIDTH, ToastView, toast_area, toast_layout,
+    };
     use crate::{chrome::Rect, toast::Level};
 
     fn toast(id: u64, action: Option<&str>) -> ToastView {
@@ -205,5 +220,16 @@ mod tests {
             toast_layout(&toasts, narrow)[0].panel.size.w,
             300 - 2 * TOAST_MARGIN
         );
+    }
+
+    #[test]
+    fn toasts_stack_above_the_unzoom_button() {
+        let area = Rect::new((200, 48).into(), (1000, 700).into());
+        assert_eq!(toast_area(area, None), area);
+        let button = Rect::new((1148, 696).into(), (36, 36).into());
+        let above = toast_area(area, Some(button));
+        let layouts = toast_layout(&[toast(1, None)], above);
+        let panel = layouts[0].panel;
+        assert!(panel.loc.y + panel.size.h < button.loc.y);
     }
 }

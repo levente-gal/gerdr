@@ -18,7 +18,7 @@ use smithay::{
 use crate::{
     Gerdr,
     anim::FAST,
-    chrome::{self, ToastView},
+    chrome::{self, Rect, ToastView},
     menu::MenuAction,
 };
 
@@ -157,6 +157,15 @@ impl Gerdr {
         self.toasts.retain(|toast| now < toast.until + LEAVE_TIME);
     }
 
+    /// Where the toasts stack up: over the app area, above the button
+    /// unzooming a zoomed pane.
+    pub fn toast_rect(&self) -> Rect {
+        chrome::toast_area(
+            self.content_rect(),
+            self.unzoom_button().map(|(_, rect)| rect),
+        )
+    }
+
     /// The toasts in the stack, oldest first, the ones going too.
     pub fn toast_views(&self) -> Vec<ToastView> {
         let now = Instant::now();
@@ -169,7 +178,7 @@ impl Gerdr {
         let now = Instant::now();
         self.expire_toasts(now);
         let views: Vec<ToastView> = self.toasts.iter().map(|toast| toast.view(now)).collect();
-        let layouts = chrome::toast_layout(&views, self.content_rect());
+        let layouts = chrome::toast_layout(&views, self.toast_rect());
         let i = layouts
             .iter()
             .zip(&views)

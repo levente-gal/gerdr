@@ -839,8 +839,8 @@ impl Gerdr {
 
     /// What the run prompt offers: the page of the workspace's repository,
     /// the apps named in the config file and the installed apps, the
-    /// commands typed before, then the inbox and the project file's
-    /// commands.
+    /// commands typed before, then the inbox, the rows importing other
+    /// apps' profiles and the project file's commands.
     fn run_items(&self) -> Vec<Item> {
         let icons = self.program_icons();
         let page = self
@@ -873,10 +873,21 @@ impl Gerdr {
         }));
         items.extend(self.cursor_agent_entry());
         items.push(self.inbox_entry());
-        items.extend(project_file_items(
-            self.project.as_deref(),
-            home_dir().as_deref(),
-        ));
+        let home = home_dir();
+        if let Some(home) = &home {
+            items.extend(profile_import::sources(home).into_iter().map(|source| {
+                Item::new(
+                    command_icon(&source.key, &icons),
+                    format!("Import {} profile", source.name),
+                    format!(
+                        "into gerdr, from {}",
+                        display(&source.from, Some(home), DETAIL_CHARS)
+                    ),
+                    Target::ImportProfile(source),
+                )
+            }));
+        }
+        items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
         self.weighed(items)
     }
 
@@ -1283,20 +1294,6 @@ impl Gerdr {
             display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
             Target::Settings,
         ));
-        if let Some(home) = &home {
-            let icons = self.program_icons();
-            items.extend(profile_import::sources(home).into_iter().map(|source| {
-                Item::new(
-                    command_icon(&source.key, &icons),
-                    format!("Import {} profile", source.name),
-                    format!(
-                        "into gerdr, from {}",
-                        display(&source.from, Some(home), DETAIL_CHARS)
-                    ),
-                    Target::ImportProfile(source),
-                )
-            }));
-        }
         items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
         self.weighed(items)
     }

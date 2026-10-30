@@ -223,6 +223,7 @@ impl Gerdr {
     fn tab_strip_covered(&self) -> bool {
         self.quit.is_some()
             || self.restart.is_some()
+            || self.confirm.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.switcher.is_some()
