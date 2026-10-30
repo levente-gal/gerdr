@@ -79,6 +79,7 @@ use crate::{
         ResultBar, RowMark, SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
+    find,
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
     review::{self, Comment, Quoted, Review},
@@ -295,8 +296,7 @@ pub struct Panel {
     diff_roots: Vec<PathBuf>,
     pub(crate) hover: Option<ReposHit>,
     /// The diff row shown (by index into those in view) and the char of
-    /// its text under the pointer, as the key `*` came: the word it
-    /// searches for.
+    /// its text under the pointer: the word `*` searches for, underlined.
     pub(crate) pointer_char: Option<(usize, usize)>,
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
@@ -1394,7 +1394,10 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "Enter / Shift+Enter",
         "in the search, the next place, the one before",
     ),
-    ("F3 / Shift+F3", "the next place found, the one before"),
+    (
+        "n / N, F3 / Shift+F3",
+        "the next place found, the one before",
+    ),
     ("* / #", "find the word under the pointer, back for #"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
@@ -3288,13 +3291,15 @@ impl Panel {
             self.open_search(ctx);
             return None;
         }
-        // `*` (`#` back): the word under the pointer, as a whole word.
+        // `*` (`#` back): the word under the pointer, as a whole word,
+        // with either focus but the field's.
         let star = match typed {
             Keysym::asterisk | Keysym::KP_Multiply => Some(false),
             Keysym::numbersign => Some(true),
             _ => None,
         };
-        if in_diff
+        if self.focus != Focus::Field
+            && self.tab() == DetailTab::Diff
             && !(mods.ctrl || mods.alt || mods.logo)
             && let Some(back) = star
         {
@@ -4125,11 +4130,16 @@ impl Panel {
                 found.clear();
                 row_buttons.clear();
             }
+            let word = self.pointer_char.and_then(|(i, col)| match rows.get(i)? {
+                DetailRow::Line(line) => Some((i, find::word_at(&line.text, col)?)),
+                _ => None,
+            });
             return DetailView {
                 tab,
                 title: self.diff_title(ctx),
                 search: self.search_bar(),
                 found,
+                word,
                 ticks: self.search_ticks(),
                 rows,
                 sticky: sticky.is_some(),
@@ -9128,13 +9138,14 @@ mod tests {
             Keysym::asterisk,
             Keysym::numbersign,
         );
-        // Not in the diff, it does nothing.
+        // Typed into the field, it is the field's.
         panel.pointer_char = Some((line_row(&panel, 0), 5));
+        panel.focus = Focus::Field;
         panel.key(&shift, star, star, &ctx);
         assert!(panel.search.is_none());
-        panel.focus = Focus::Detail;
+        panel.focus = Focus::Tree;
         // On `id` of the first line: the next whole `id`, on the second,
-        // the diff keeping the keys.
+        // the diff taking the keys.
         assert_eq!(panel.key(&shift, star, star, &ctx), None);
         let bar = panel.view("p", &ctx).detail.search.expect("open");
         assert!(bar.whole && !bar.focused);
@@ -9147,6 +9158,19 @@ mod tests {
         panel.key(&shift, hash, hash, &ctx);
         assert_eq!(search_count(&panel, &ctx), "3 of 3");
         assert_eq!(cursor_row(&panel), Some(line_row(&panel, 2)));
+        // `n` goes on, round past the end, `N` back.
+        press(&mut panel, none(), Keysym::n, &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 3");
+        panel.key(&shift, Keysym::N, Keysym::N, &ctx);
+        assert_eq!(search_count(&panel, &ctx), "3 of 3");
+        // The word under the pointer is underlined, off a word the next.
+        let view = panel.view("p", &ctx);
+        let second = |r: &DetailRow| matches!(r, DetailRow::Line(l) if l.text == "let idle = id;");
+        let i = view.detail.rows.iter().position(second).unwrap();
+        panel.pointer_char = Some((i, 6));
+        assert_eq!(panel.view("p", &ctx).detail.word, Some((i, 4..8)));
+        panel.pointer_char = Some((i, 3));
+        assert_eq!(panel.view("p", &ctx).detail.word, Some((i, 4..8)));
         // Typed into, it finds anywhere again.
         panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
         type_text(&mut panel, "id", &ctx);

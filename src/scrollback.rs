@@ -167,6 +167,9 @@ pub struct Scrollback {
     edge_at: Option<Instant>,
     /// What of the viewer is under the pointer.
     pub hover: Option<ScrollbackHit>,
+    /// The row (counted in all of them) and character of it the pointer
+    /// is on, while on the text: the word there is underlined.
+    pub pointer: Option<(i64, usize)>,
     /// The last press on the text: when, where, and how many came in a
     /// row, for double and triple clicks.
     pub clicks: Option<(Instant, Point<f64, Logical>, u8)>,
@@ -197,6 +200,7 @@ impl Scrollback {
             dragging: false,
             edge_at: None,
             hover: None,
+            pointer: None,
             clicks: None,
         }
     }
@@ -746,6 +750,28 @@ impl Scrollback {
             .collect()
     }
 
+    /// The part on row `i` of the word under the pointer, by character
+    /// of the row: what `*` searches for, but while there is a selection
+    /// (which it searches for then) or a drag.
+    pub fn row_word(&self, i: usize) -> Option<Range<usize>> {
+        let (at, col) = self.pointer?;
+        let row = self.rows.get(i)?;
+        let selected = self.selection.is_some_and(|s| {
+            let (a, b) = s.range();
+            a != b
+        });
+        if selected || self.dragging || at < 0 || at as usize >= self.rows.len() {
+            return None;
+        }
+        let spot = self.spot(at, col);
+        if spot.line != row.line {
+            return None;
+        }
+        let word = find::word_at(&self.lines[spot.line], spot.ch)?;
+        let (a, b) = (word.start.max(row.start), word.end.min(row.end));
+        (a < b).then(|| a - row.start..b - row.start)
+    }
+
     /// Where the places found are on the scrollbar: shares of all the
     /// rows from the top, one per row, each with whether it has the one
     /// gone to.
@@ -1125,6 +1151,10 @@ mod tests {
         assert_eq!(s.row_found(2), [(0..2, false)]);
         s.key(&none, Keysym::n, Keysym::n, now, f);
         assert_eq!(count(&s), "3 of 3");
+        // The word under the pointer is underlined, on its row only.
+        s.pointer = Some((1, 6));
+        assert_eq!(s.row_word(1), Some(4..8));
+        assert_eq!(s.row_word(0), None);
         // `#` goes back from it: round to the last.
         assert!(s.star(Some((0, 4)), true, f));
         assert_eq!(count(&s), "3 of 3");
@@ -1135,6 +1165,8 @@ mod tests {
         s.press(1, 4, false, 1);
         s.drag_to(1, 6);
         s.release();
+        // Then that is searched for, not the word.
+        assert_eq!(s.row_word(1), None);
         assert!(s.star(Some((0, 5)), false, f));
         let bar = s.find_bar().unwrap();
         assert!(!bar.whole);

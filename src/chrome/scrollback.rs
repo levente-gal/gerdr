@@ -71,6 +71,9 @@ pub struct ScrollbackRow {
     /// The places the search found on it, by character of it, each with
     /// whether it is the one gone to.
     pub found: Vec<(Range<usize>, bool)>,
+    /// The part of the word under the pointer on it, by character of it:
+    /// what `*` searches for, underlined.
+    pub word: Option<Range<usize>>,
 }
 
 /// Where the viewer's parts go, in output coordinates.
@@ -222,16 +225,37 @@ pub fn scrollback_hit(
 
 /// Which row and character `pos` is at, the row counted in all of them:
 /// before the first row or past the last when it is above or below them.
+/// The character is the one whose left edge is nearest, as a caret goes.
 pub fn scrollback_point(
     view: &ScrollbackView,
     layout: &ScrollbackLayout,
     pos: Point<f64, Logical>,
 ) -> (i64, usize) {
+    let (row, x) = scrollback_spot(view, layout, pos);
+    (row, x.round().max(0.0) as usize)
+}
+
+/// Which row and character `pos` is on, as `scrollback_point` finds them
+/// but the character the one under it.
+pub fn scrollback_char(
+    view: &ScrollbackView,
+    layout: &ScrollbackLayout,
+    pos: Point<f64, Logical>,
+) -> (i64, usize) {
+    let (row, x) = scrollback_spot(view, layout, pos);
+    (row, x.floor().max(0.0) as usize)
+}
+
+/// The row `pos` is at and how many characters it is in from the left.
+fn scrollback_spot(
+    view: &ScrollbackView,
+    layout: &ScrollbackLayout,
+    pos: Point<f64, Logical>,
+) -> (i64, f64) {
     let text = layout.text;
     let y = pos.y - text.loc.y as f64 + view.part * ROW as f64 - view.overscroll;
     let row = view.first as i64 + (y / ROW as f64).floor() as i64;
-    let col = ((pos.x - text.loc.x as f64) / advance()).round().max(0.0) as usize;
-    (row, col)
+    (row, (pos.x - text.loc.x as f64) / advance())
 }
 
 /// How far `pos` is past the top of the text (negative) or its bottom
@@ -423,6 +447,20 @@ impl Painter {
             scale,
             p.terminal_foreground,
         );
+        if let Some(word) = &row.word {
+            let width = |t: &str| t.chars().count() as f32 * adv;
+            let x = (0.0, c.w as f32);
+            self.word_underline(
+                &mut c,
+                &row.text,
+                word,
+                x,
+                band(rect, scale),
+                width,
+                scale,
+                p,
+            );
+        }
         c
     }
 
@@ -722,6 +760,7 @@ mod tests {
                     2 | 4 => vec![(17..23, i == 4)],
                     _ => Vec::new(),
                 },
+                word: (i == 1).then_some(2..6),
             })
             .collect();
         v.part = 0.4;

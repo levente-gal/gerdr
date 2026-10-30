@@ -483,6 +483,9 @@ pub struct DetailView {
     /// index into what it shows, each with whether it is the one gone to.
     /// Empty for none.
     pub found: Vec<Vec<(Range<usize>, bool)>>,
+    /// The row of `rows` the pointer is on and the word under it there,
+    /// by char index: what `*` searches for, underlined.
+    pub word: Option<(usize, Range<usize>)>,
     /// Where the places found are on the scrollbar: shares of all the
     /// rows from the top, each with whether it is the one gone to.
     pub ticks: Vec<(f64, bool)>,
@@ -1391,6 +1394,8 @@ struct DetailLook {
     focused: bool,
     /// The places the search found on it (`DetailView::found`).
     found: Vec<(Range<usize>, bool)>,
+    /// The word under the pointer on it (`DetailView::word`).
+    word: Option<Range<usize>>,
 }
 
 /// Row `i` of `view`'s detail, as drawn.
@@ -1417,6 +1422,9 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
         hover,
         focused: view.detail.focused,
         found: view.detail.found.get(i).cloned().unwrap_or_default(),
+        word: (view.detail.word.as_ref())
+            .filter(|(j, _)| *j == i)
+            .map(|(_, word)| word.clone()),
     }
 }
 
@@ -3675,6 +3683,10 @@ impl Painter {
                     at = range.end;
                 }
                 run(at, usize::MAX, p.text);
+                if let Some(word) = &look.word {
+                    let text = &line.text;
+                    self.word_underline(c, text, word, (tx, bend), row_band, width, scale, p);
+                }
             }
             DetailRow::Note(text) => {
                 self.mixed_text(

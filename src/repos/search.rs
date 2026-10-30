@@ -122,7 +122,8 @@ impl Panel {
     /// the next after it on its line), a changed or unchanged line, as a
     /// whole word, as vim's `*` does: to the next place after it, or with
     /// `back` the one before (`#`), round past the ends. The diff keeps
-    /// the keyboard, for F3. Whether there was a word to search for.
+    /// the keyboard, for `n` and `N`. Whether there was a word to search
+    /// for.
     pub(super) fn star_search(&mut self, row: usize, col: usize, back: bool, ctx: &Ctx) -> bool {
         let Some(DiffRow::Line(k, f, h, l)) = self.diff_rows.get(row).copied() else {
             return false;
@@ -213,7 +214,9 @@ impl Panel {
     }
 
     /// The keys for the search while open, with either focus: F3 goes on
-    /// (Shift+F3 back) and Esc closes it. Whether `sym` was one.
+    /// (Shift+F3 back), as `n` (`N` back) do but while the field below
+    /// the tree has the keyboard, and Esc closes it. Whether `sym` was
+    /// one.
     pub(super) fn search_open_key(
         &mut self,
         mods: &ModifiersState,
@@ -227,6 +230,9 @@ impl Panel {
         match sym {
             Keysym::Escape if !mods.shift => self.close_search(),
             Keysym::F3 => self.step_search(if mods.shift { -1 } else { 1 }, ctx),
+            Keysym::n | Keysym::N if self.focus != Focus::Field => {
+                self.step_search(if mods.shift { -1 } else { 1 }, ctx);
+            }
             _ => return false,
         }
         true

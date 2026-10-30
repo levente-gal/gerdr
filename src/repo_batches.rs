@@ -1001,12 +1001,16 @@ impl Gerdr {
         let panel = self.repos.panel.as_mut()?;
         if panel.scrolling(std::time::Instant::now()) {
             panel.hover = None;
+            panel.pointer_char = None;
             return None;
         }
         let layout = chrome::repos_layout(&view, self.output_size());
         let hit = chrome::repos_hit(&layout, pos);
+        // The word under it is underlined: what `*` searches for.
+        let at = chrome::repos_diff_char(&view, self.output_size(), pos);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.hover = hit;
+            panel.pointer_char = at;
         }
         // Icons say what they are; not over a question or an open menu.
         if view.sheet.is_some() {

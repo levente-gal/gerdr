@@ -314,6 +314,32 @@ impl Painter {
             c.rounded(x0, ty, x1 - x0, th, 2.0 * scale as f32, color);
         }
     }
+
+    /// Underline `word` of `text` (by char index), the word under the
+    /// pointer that `*` searches for, placed as `found_tints` places its
+    /// tints: at the bottom of the row band `(y, h)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn word_underline(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        word: &Range<usize>,
+        (x, end): (f32, f32),
+        (y, h): (i32, i32),
+        width: impl Fn(&str) -> f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+        let x0 = (x + width(&text[..byte(word.start)])).round();
+        let x1 = (x + width(&text[..byte(word.end)])).min(end).round();
+        if x0 >= x1 {
+            return;
+        }
+        let thick = (scale.round() as i32).max(1);
+        let under = y + h - 2 * thick;
+        c.fill(x0 as i32, under, (x1 - x0) as i32, thick, p.muted);
+    }
 }
 
 #[cfg(test)]

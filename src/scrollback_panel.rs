@@ -167,6 +167,7 @@ impl Gerdr {
                 text: viewer.row_text(i).to_owned(),
                 selected: viewer.row_selection(i),
                 found: viewer.row_found(i),
+                word: viewer.row_word(i),
             })
             .collect();
         let note = match viewer.selected_lines() {
@@ -215,7 +216,7 @@ impl Gerdr {
                 let layout = chrome::scrollback_layout(view.panel, &view.hints);
                 let on = chrome::scrollback_hit(&view, &layout, self.pointer);
                 (on == Some(ScrollbackHit::Text))
-                    .then(|| chrome::scrollback_point(&view, &layout, self.pointer))
+                    .then(|| chrome::scrollback_char(&view, &layout, self.pointer))
             });
             if !self.scrollback.as_mut()?.star(at, back, fit) {
                 self.show_notice("No word under the pointer: point at one, or select text".into());
@@ -339,8 +340,12 @@ impl Gerdr {
         let view = self.scrollback_view()?;
         let layout = chrome::scrollback_layout(view.panel, &view.hints);
         let hit = chrome::scrollback_hit(&view, &layout, pos);
-        self.scrollback.as_mut()?.hover =
+        let viewer = self.scrollback.as_mut()?;
+        viewer.hover =
             hit.filter(|hit| matches!(hit, ScrollbackHit::Hint(_) | ScrollbackHit::Search(_)));
+        // The word under it is underlined: what `*` searches for.
+        viewer.pointer = (hit == Some(ScrollbackHit::Text))
+            .then(|| chrome::scrollback_char(&view, &layout, pos));
         let Some(ScrollbackHit::Search(part)) = hit else {
             return None;
         };
