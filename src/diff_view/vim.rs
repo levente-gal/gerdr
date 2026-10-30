@@ -18,7 +18,7 @@ use std::{
 
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
-use super::{Ctx, DiffRow, Outcome, Panel, RowKey};
+use super::{Ctx, DiffRow, DiffView, Outcome, RowKey};
 use crate::{
     diff::LineKind,
     diff_edit::{self, Cut, FileEdit, Put, Spot},
@@ -31,7 +31,7 @@ const WAIT: Duration = Duration::from_secs(2);
 
 /// The diff's visual mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Visual {
+pub(crate) enum Visual {
     /// By chars, from char `col` of the line `key` is: row `row`, as the
     /// rows were last worked out.
     Chars { key: RowKey, row: usize, col: usize },
@@ -87,10 +87,10 @@ pub(super) struct CaretAfter {
 /// the file's path, the line's number and the lines the diff shows of it.
 type LineOf = (PathBuf, String, usize, Vec<(usize, String)>);
 
-/// A key as `Panel::key` takes it.
+/// A key as `DiffView::key` takes it.
 pub type Key = (ModifiersState, Keysym, Keysym);
 
-impl Panel {
+impl DiffView {
     /// A key for the diff's deletes, visual mode, counts and undo, while
     /// it has the keyboard: what it does, `None` for none of those.
     pub(super) fn vim_key(
@@ -224,12 +224,12 @@ impl Panel {
 
     fn find_row_of(&self, key: &RowKey) -> Option<usize> {
         let r = self.find_row(key)?;
-        matches!(self.diff_rows.get(r), Some(DiffRow::Line(..))).then_some(r)
+        matches!(self.rows.get(r), Some(DiffRow::Line(..))).then_some(r)
     }
 
     /// The chars selected by chars on the diff rows `shown`, by index
     /// among them.
-    pub(super) fn chosen(&self, shown: &[usize]) -> Vec<(usize, Range<usize>)> {
+    pub(crate) fn chosen(&self, shown: &[usize]) -> Vec<(usize, Range<usize>)> {
         let Some((Visual::Chars { row, col, .. }, (to, at))) =
             self.visual.as_ref().zip(self.caret())
         else {
@@ -255,7 +255,7 @@ impl Panel {
     /// The file and line of diff row `r`, and its file's lines shown: who
     /// a cut there is in, unless the line isn't in the file as it is now.
     fn line_of(&self, r: usize) -> Result<LineOf, &'static str> {
-        let Some(&DiffRow::Line(k, f, h, l)) = self.diff_rows.get(r) else {
+        let Some(&DiffRow::Line(k, f, h, l)) = self.rows.get(r) else {
             return Err("No line there");
         };
         let (root, file) = self.diff_file(k, f).ok_or("No line there")?;
@@ -394,7 +394,7 @@ impl Panel {
     /// within one hunk, so that no line the diff doesn't show goes.
     fn cut_chars(&self, a: (usize, usize), b: (usize, usize)) -> Option<Outcome> {
         let ((r0, c0), (r1, c1)) = ordered(a, b);
-        let hunk = |r: usize| match self.diff_rows.get(r) {
+        let hunk = |r: usize| match self.rows.get(r) {
             Some(&DiffRow::Line(k, f, h, _)) => Some((k, f, h)),
             _ => None,
         };
@@ -440,7 +440,7 @@ impl Panel {
         let mut numbers = Vec::new();
         let mut why = "No lines there";
         for r in rows {
-            let Some(&DiffRow::Line(k, f, ..)) = self.diff_rows.get(r) else {
+            let Some(&DiffRow::Line(k, f, ..)) = self.rows.get(r) else {
                 continue;
             };
             if file.get_or_insert((k, f)) != &(k, f) {
@@ -479,7 +479,7 @@ impl Panel {
             root,
             path,
             spot,
-            generation: self.diff_gen,
+            generation: self.reads,
             at: Instant::now(),
         });
     }
@@ -540,19 +540,19 @@ impl Panel {
         let Some(head) = self.header_row(&after.root, Some(&after.path)) else {
             return;
         };
-        let DiffRow::File(k, f) = self.diff_rows[head] else {
+        let DiffRow::File(k, f) = self.rows[head] else {
             return;
         };
         let Some((_, file)) = self.diff_file(k, f) else {
             return;
         };
         // The line it was on, else the nearest in the file.
-        let rows = (head..self.diff_rows.len()).take_while(|&r| match self.diff_rows[r] {
+        let rows = (head..self.rows.len()).take_while(|&r| match self.rows[r] {
             DiffRow::File(..) | DiffRow::Repo(_) | DiffRow::Gap => r == head,
             _ => true,
         });
         let near = rows
-            .filter_map(|r| match self.diff_rows[r] {
+            .filter_map(|r| match self.rows[r] {
                 DiffRow::Line(_, _, h, l) => {
                     let line = &file.hunks[h].lines[l];
                     (line.kind != LineKind::Removed)
@@ -567,7 +567,7 @@ impl Panel {
     }
 
     /// What the title says while a command is typed or visual mode is on.
-    pub(super) fn mode_title(&self) -> Option<String> {
+    pub(crate) fn mode_title(&self) -> Option<String> {
         let mode = match self.visual {
             Some(Visual::Chars { .. }) => "-- VISUAL -- d delete · y yank · Esc stop",
             Some(Visual::Lines) => "-- VISUAL LINE -- d delete · y yank · Esc stop",

@@ -572,7 +572,8 @@ pub struct DiffFile {
     pub path: String,
     /// `git::Change::code`.
     pub code: char,
-    pub check: Check,
+    /// Its checkbox: none where files aren't checked.
+    pub check: Option<Check>,
     pub folded: bool,
     pub added: usize,
     pub removed: usize,
@@ -1737,14 +1738,16 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
                 (at as f64 - detail_shift).round() as i32
             }
         };
-        if let DetailRow::File(_) = row {
+        if let DetailRow::File(file) = row {
             let fold = Rectangle::new((body.loc.x, ry).into(), (DIFF_FOLD, line_h).into());
-            let check = Rectangle::new(
-                (body.loc.x + DIFF_FOLD, ry).into(),
-                (DIFF_CHECK, line_h).into(),
-            );
             detail_folds.push((i, fold));
-            detail_checks.push((i, check));
+            if file.check.is_some() {
+                let check = Rectangle::new(
+                    (body.loc.x + DIFF_FOLD, ry).into(),
+                    (DIFF_CHECK, line_h).into(),
+                );
+                detail_checks.push((i, check));
+            }
         }
         detail_rows.push(Rectangle::new(
             (body.loc.x, ry).into(),
@@ -3471,17 +3474,21 @@ impl Painter {
                 icon_sdf(c, fold, scale, color, |x, y| {
                     expander_mark(!file.folded, x, y, s)
                 });
-                let side = CHECKBOX_SIZE;
-                let box_rect = Rectangle::new(
-                    (rect.loc.x + DIFF_FOLD + (DIFF_CHECK - side) / 2, rect.loc.y).into(),
-                    (side, rect.size.h).into(),
-                );
-                let check_hovered = look.hover == Some(ReposHit::DiffCheck(0));
-                self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
+                // Its checkbox, when files are checked here.
+                if let Some(check) = file.check {
+                    let side = CHECKBOX_SIZE;
+                    let box_rect = Rectangle::new(
+                        (rect.loc.x + DIFF_FOLD + (DIFF_CHECK - side) / 2, rect.loc.y).into(),
+                        (side, rect.size.h).into(),
+                    );
+                    let check_hovered = look.hover == Some(ReposHit::DiffCheck(0));
+                    self.checkbox(c, box_rect, check, check_hovered, scale, p);
+                }
                 // The status letter on a pill of its colour.
                 let tone = code_color(file.code, p);
                 let (bw, bh) = (px(DIFF_BADGE) as f32, px(DIFF_BADGE - 2) as f32);
-                let badge_x = px(rect.loc.x + DIFF_FOLD + DIFF_CHECK) as f32;
+                let check_w = if file.check.is_some() { DIFF_CHECK } else { 0 };
+                let badge_x = px(rect.loc.x + DIFF_FOLD + check_w) as f32;
                 let badge_y = (y as f32 + (h as f32 - bh) / 2.0).round();
                 c.rounded(
                     badge_x,
@@ -5049,7 +5056,7 @@ mod tests {
                         repo: Some("gerdr".into()),
                         path: "src/git.rs".into(),
                         code: 'M',
-                        check: Check::On,
+                        check: Some(Check::On),
                         added: 2,
                         removed: 1,
                         selected: true,

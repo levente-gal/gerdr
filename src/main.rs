@@ -21,6 +21,7 @@ mod cursor_agents;
 mod desktop;
 mod diff;
 mod diff_edit;
+mod diff_view;
 mod frecency;
 mod find;
 mod fuzzy;

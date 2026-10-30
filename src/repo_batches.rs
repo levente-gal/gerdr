@@ -523,7 +523,7 @@ impl Gerdr {
             _ => {
                 let mut panel = Panel::new(&self.repos.items);
                 if let Some(id) = &self.project {
-                    panel.review = review::load(None, id);
+                    panel.diff.review = review::load(None, id);
                 }
                 panel
             }
@@ -541,14 +541,14 @@ impl Gerdr {
 
     /// Save the panel's review comments with the project, if they changed.
     fn repos_save_review(&mut self) {
-        let Some(panel) = self.repos.panel.as_mut().filter(|p| p.review_dirty) else {
+        let Some(panel) = self.repos.panel.as_mut().filter(|p| p.diff.review_dirty) else {
             return;
         };
-        panel.review_dirty = false;
+        panel.diff.review_dirty = false;
         let Some(id) = self.project.as_deref() else {
             return;
         };
-        if let Err(err) = review::save(None, id, &panel.review) {
+        if let Err(err) = review::save(None, id, &panel.diff.review) {
             tracing::warn!("saving the review: {err}");
             self.toast(format!("Couldn't save the review: {err}"), Level::Error);
         }
@@ -660,7 +660,7 @@ impl Gerdr {
         let Some(panel) = self.repos.panel.as_mut() else {
             return;
         };
-        for (mods, sym, typed) in panel.take_held() {
+        for (mods, sym, typed) in panel.diff.take_held() {
             if let Some(outcome) = self.repos_key(&mods, sym, typed) {
                 self.apply_repos(outcome);
             }
@@ -803,7 +803,7 @@ impl Gerdr {
         // A press on a line puts the caret on the char there.
         let at = chrome::repos_diff_char(&view, self.output_size(), pos);
         if let Some(panel) = self.repos.panel.as_mut() {
-            panel.pointer_char = at;
+            panel.diff.pointer_char = at;
         }
         let double = self.is_double(pos);
         self.repos_hit(hit, double);
@@ -844,11 +844,11 @@ impl Gerdr {
         let outcome = panel.as_mut().and_then(|p| {
             if let (ReposHit::DiffRow(i), true, false) = (hit, shift, double) {
                 p.extend_detail_row(i, &ctx);
-                drags = p.drags_rows();
+                drags = p.drags_rows(&ctx);
                 return None;
             }
             let outcome = p.click(hit, &ctx);
-            drags = matches!(hit, ReposHit::DiffRow(_)) && !double && p.drags_rows();
+            drags = matches!(hit, ReposHit::DiffRow(_)) && !double && p.drags_rows(&ctx);
             match hit {
                 ReposHit::Line(i) if double && p.is_file_line(i, &ctx) => {
                     p.press(ReposButton::OpenInZed, &ctx)
@@ -1409,7 +1409,9 @@ impl Gerdr {
     /// where the edit left it once the diff is read again.
     fn repos_edited(&mut self, done: Done) {
         if let Some(panel) = &mut self.repos.panel {
-            panel.place_caret(done.root.clone(), done.path.clone(), done.then);
+            panel
+                .diff
+                .place_caret(done.root.clone(), done.path.clone(), done.then);
         }
         self.repos.undone.clear();
         self.repos.cuts.push(done);
@@ -1437,7 +1439,9 @@ impl Gerdr {
         match diff_edit::redo(&done, !again) {
             Ok(spot) => {
                 if let Some(panel) = &mut self.repos.panel {
-                    panel.place_caret(done.root.clone(), done.path.clone(), spot);
+                    panel
+                        .diff
+                        .place_caret(done.root.clone(), done.path.clone(), spot);
                 }
                 match again {
                     true => self.repos.cuts.push(done),

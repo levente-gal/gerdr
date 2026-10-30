@@ -11,16 +11,16 @@ use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
-use super::{Ctx, DiffRow, Focus, Outcome, Panel, action_key, move_to};
+use super::{Ctx, DiffRow, DiffView, Keys, Outcome, copy_key, move_to};
 use crate::{
-    chrome::{self, DetailTab, ReposButton, SearchBar, SearchPart},
+    chrome::{self, SearchBar, SearchPart},
     find,
     text_field::{Edit, TextField},
 };
 
 /// The search, while open.
 #[derive(Debug, Default)]
-pub(super) struct DiffSearch {
+pub(crate) struct DiffSearch {
     field: TextField,
     /// It has the keyboard (else the diff has, the places still tinted).
     pub(super) focused: bool,
@@ -64,7 +64,7 @@ enum Within {
 }
 
 /// A file header's path: after what a rename was called.
-pub(super) fn shown_path(file: &crate::diff::FileDiff) -> String {
+pub fn shown_path(file: &crate::diff::FileDiff) -> String {
     match &file.orig {
         Some(orig) => format!("{orig} → {}", file.path),
         None => file.path.clone(),
@@ -86,28 +86,30 @@ impl Hit {
     }
 }
 
-impl Panel {
-    /// The search has the keyboard.
-    pub(super) fn search_has_keys(&self) -> bool {
-        self.focus == Focus::Detail
-            && self.tab() == DetailTab::Diff
-            && self.search.as_ref().is_some_and(|s| s.focused)
+impl DiffView {
+    /// The search has the keyboard, the diff having it.
+    pub(super) fn search_has_keys(&self, ctx: &Ctx) -> bool {
+        ctx.keys == Keys::Diff && self.search_focused()
     }
 
-    /// The search's field, while it has the keyboard.
-    pub(super) fn search_field_mut(&mut self) -> Option<&mut TextField> {
-        if !self.search_has_keys() {
-            return None;
-        }
-        self.search.as_mut().map(|s| &mut s.field)
+    /// The search is open and takes the diff's keys.
+    pub fn search_focused(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.focused)
+    }
+
+    /// The search's field, while it takes the diff's keys.
+    pub fn search_field_mut(&mut self) -> Option<&mut TextField> {
+        self.search
+            .as_mut()
+            .filter(|s| s.focused)
+            .map(|s| &mut s.field)
     }
 
     /// Open the search on the diff, or give it the keyboard back with
     /// what it has typed selected.
-    pub(super) fn open_search(&mut self, ctx: &Ctx) {
-        self.set_tab(DetailTab::Diff);
-        self.focus = Focus::Detail;
-        let page = ctx.page.1.max(1);
+    pub fn open_search(&mut self, ctx: &Ctx) {
+        self.signals.focus = true;
+        let page = ctx.page.max(1);
         let from = match &self.cursor {
             Some(c) => c.row,
             None => self.diff_window(page).1.start,
@@ -132,8 +134,7 @@ impl Panel {
             return false;
         };
         let query: String = text.chars().skip(word.start).take(word.len()).collect();
-        self.set_tab(DetailTab::Diff);
-        self.focus = Focus::Detail;
+        self.signals.focus = true;
         let search = self.search.get_or_insert_with(DiffSearch::default);
         search.field.set(&query);
         search.focused = false;
@@ -176,8 +177,8 @@ impl Panel {
         let others = mods.ctrl || mods.alt || mods.logo;
         let plain = !(others || mods.shift);
         let only_shift = mods.shift && !others;
-        if action_key(mods, sym) == Some(ReposButton::CopyReview) {
-            return self.act(ReposButton::CopyReview, ctx);
+        if copy_key(mods, sym) {
+            return self.copy(ctx);
         }
         let next = matches!(sym, Keysym::Return | Keysym::KP_Enter | Keysym::F3);
         match sym {
@@ -215,13 +216,13 @@ impl Panel {
         ctx: &Ctx,
     ) -> bool {
         let others = mods.ctrl || mods.alt || mods.logo;
-        if self.search.is_none() || self.tab() != DetailTab::Diff || others {
+        if self.search.is_none() || others {
             return false;
         }
         match sym {
             Keysym::Escape if !mods.shift => self.close_search(),
             Keysym::F3 => self.step_search(if mods.shift { -1 } else { 1 }, ctx),
-            Keysym::n | Keysym::N if self.focus != Focus::Field => {
+            Keysym::n | Keysym::N if ctx.keys != Keys::Field => {
                 self.step_search(if mods.shift { -1 } else { 1 }, ctx);
             }
             _ => return false,
@@ -235,7 +236,7 @@ impl Panel {
             SearchPart::Open | SearchPart::Field => match &mut self.search {
                 Some(search) => {
                     search.focused = true;
-                    self.focus = Focus::Detail;
+                    self.signals.focus = true;
                 }
                 None => self.open_search(ctx),
             },
@@ -248,7 +249,7 @@ impl Panel {
     /// Go to the place found `by` (1 or -1) from the one gone to, round
     /// past the ends; from none, to the first from where the diff is.
     fn step_search(&mut self, by: i64, ctx: &Ctx) {
-        let page = ctx.page.1.max(1);
+        let page = ctx.page.max(1);
         let top = self.diff_window(page).1.start;
         let Some(search) = &mut self.search else {
             return;
@@ -298,12 +299,8 @@ impl Panel {
         else {
             return;
         };
-        if hit.within != Within::Path
-            && self
-                .diff_folded
-                .remove(&(hit.root.clone(), hit.path.clone()))
-        {
-            self.build_rows(ctx.items, self.diff_anchor());
+        if hit.within != Within::Path && self.folded.remove(&(hit.root.clone(), hit.path.clone())) {
+            self.build_rows(ctx.sections, self.diff_anchor());
         }
         let row = self
             .search
@@ -317,7 +314,7 @@ impl Panel {
         if let Some(cursor) = &mut self.cursor {
             cursor.col = hit.chars.start;
         }
-        let page = ctx.page.1.max(1);
+        let page = ctx.page.max(1);
         // Out of view or near an edge (under the pinned header), it goes
         // a third down the page.
         let room = (page / 4).min(3) as f64;
@@ -325,7 +322,7 @@ impl Panel {
         if self.shown_at(row, page).is_none_or(near) {
             let last = self.diff_last(page) as f64;
             let to = (row as f64 - (page / 3) as f64).clamp(0.0, last);
-            move_to(&mut self.detail_scroll, to);
+            move_to(&mut self.scroll, to);
         }
         self.select_diff_row(row, ctx);
     }
@@ -343,7 +340,7 @@ impl Panel {
         // The rows each place could show on, by who it is.
         let mut rows: HashMap<(usize, usize, Within), usize> = HashMap::new();
         let mut heads: HashMap<(usize, usize), usize> = HashMap::new();
-        for (r, row) in self.diff_rows.iter().enumerate() {
+        for (r, row) in self.rows.iter().enumerate() {
             match *row {
                 DiffRow::File(k, f) => {
                     heads.insert((k, f), r);
@@ -359,7 +356,7 @@ impl Panel {
             }
         }
         let mut hits = Vec::new();
-        for (k, root) in self.diff_roots.iter().enumerate() {
+        for (k, root) in self.roots.iter().enumerate() {
             let Some((_, files)) = self.diffs.get(root) else {
                 continue;
             };
@@ -409,7 +406,7 @@ impl Panel {
 
     /// The places found on diff row `r`, by char index into what it
     /// shows, each with whether it is the one gone to.
-    pub(super) fn found_on(&self, r: usize) -> Vec<(Range<usize>, bool)> {
+    pub(crate) fn found_on(&self, r: usize) -> Vec<(Range<usize>, bool)> {
         let Some(search) = &self.search else {
             return Vec::new();
         };
@@ -426,7 +423,7 @@ impl Panel {
     }
 
     /// The search as the detail's title row shows it.
-    pub(super) fn search_bar(&self) -> Option<SearchBar> {
+    pub(super) fn search_bar(&self, ctx: &Ctx) -> Option<SearchBar> {
         let search = self.search.as_ref()?;
         let query = search.field.line();
         let n = search.hits.len();
@@ -436,7 +433,7 @@ impl Panel {
             placeholder: "Find in the diff".into(),
             count,
             found: n > 0,
-            focused: self.search_has_keys(),
+            focused: self.search_has_keys(ctx),
             whole: search.whole,
         })
     }
@@ -444,11 +441,11 @@ impl Panel {
     /// Where the places found are on the diff's scrollbar, as shares of
     /// its rows from the top, each with whether it is the one gone to;
     /// one per row.
-    pub(super) fn search_ticks(&self) -> Vec<(f64, bool)> {
+    pub(crate) fn search_ticks(&self) -> Vec<(f64, bool)> {
         let Some(search) = &self.search else {
             return Vec::new();
         };
-        let total = self.diff_rows.len().max(1) as f64;
+        let total = self.rows.len().max(1) as f64;
         let current = search
             .current
             .and_then(|i| search.hits.get(i))
