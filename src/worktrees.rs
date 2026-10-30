@@ -33,7 +33,7 @@ use crate::{
         self, LineState, WorktreeButton, WorktreeEntry, WorktreeLine, WorktreesHit, WorktreesView,
     },
     fuzzy,
-    git::{self, Worktree},
+    git::{self, Untracked, Worktree},
     git_ops::Turn,
     input::Overlay,
     menu::MenuAction,
@@ -179,11 +179,13 @@ type Deleted = Vec<(String, PathBuf, Result<(), String>)>;
 enum Done {
     Deleted(Deleted),
     /// Checking worktree `path`'s branch out in the main worktree, with
-    /// what to say once it is.
+    /// what to say once it is, and how many untracked files came along
+    /// with it.
     CheckedOut {
         path: PathBuf,
         said: String,
         result: Result<(), String>,
+        brought: Result<usize, String>,
     },
 }
 
@@ -1087,7 +1089,12 @@ impl Gerdr {
                 if let Err(why) = git::checkout_check(&main.wt, &item.wt) {
                     return self.toast(why, Level::Warning);
                 }
-                self.checkout_worktree(item, main.wt.name());
+                let files = git::untracked(&item.wt.path);
+                if files.is_empty() {
+                    self.checkout_worktree(item, main.wt.name(), Vec::new());
+                } else {
+                    self.ask_checkout(item.wt, &item.main, main.wt.name(), files);
+                }
             }
             Outcome::Merge(path) => {
                 let Some(item) = find(&path) else { return };
@@ -1159,9 +1166,20 @@ impl Gerdr {
             .unwrap_or(item.workspace)
     }
 
+    /// Check worktree `path`'s branch out in its repository's main
+    /// worktree, called `main_name`, bringing untracked `files` of it
+    /// along, as the checkout dialog asked.
+    pub fn checkout_worktree_at(&mut self, path: &Path, main_name: String, files: Vec<Untracked>) {
+        let (_, items) = self.worktree_items(None);
+        if let Some(item) = items.into_iter().find(|i| i.wt.path == path) {
+            self.checkout_worktree(item, main_name, files);
+        }
+    }
+
     /// Check worktree `item`'s branch out in its repository's main worktree,
-    /// called `main_name`, off the event loop.
-    fn checkout_worktree(&mut self, item: Item, main_name: String) {
+    /// called `main_name`, off the event loop, then move its untracked
+    /// `files` there.
+    fn checkout_worktree(&mut self, item: Item, main_name: String, files: Vec<Untracked>) {
         if self.worktrees.busy.contains_key(&item.wt.path) {
             return;
         }
@@ -1183,14 +1201,20 @@ impl Gerdr {
             .busy
             .insert(item.wt.path.clone(), "checking out…");
         std::thread::spawn(move || {
-            let result = {
+            let (result, brought) = {
                 let _turn = Turn::take(&item.common, "a worktree checkout");
-                git::checkout_in_main(&item.main, &item.wt)
+                let result = git::checkout_in_main(&item.main, &item.wt);
+                let brought = match result {
+                    Ok(()) => git::bring_untracked(&item.wt.path, &item.main, &files),
+                    Err(_) => Ok(0),
+                };
+                (result, brought)
             };
             let _ = tx.send(Done::CheckedOut {
                 path: item.wt.path,
                 said,
                 result,
+                brought,
             });
         });
     }
@@ -1265,9 +1289,12 @@ impl Gerdr {
                 .loop_handle
                 .insert_source(rx, |event, _, state| match event {
                     channel::Event::Msg(Done::Deleted(deleted)) => state.worktrees_deleted(deleted),
-                    channel::Event::Msg(Done::CheckedOut { path, said, result }) => {
-                        state.worktree_checked_out(&path, said, result);
-                    }
+                    channel::Event::Msg(Done::CheckedOut {
+                        path,
+                        said,
+                        result,
+                        brought,
+                    }) => state.worktree_checked_out(&path, said, result, brought),
                     channel::Event::Closed => {}
                 });
             match inserted {
@@ -1283,11 +1310,28 @@ impl Gerdr {
 
     /// A worktree's branch was checked out in the main worktree, or failed
     /// to be.
-    fn worktree_checked_out(&mut self, path: &Path, said: String, result: Result<(), String>) {
+    fn worktree_checked_out(
+        &mut self,
+        path: &Path,
+        said: String,
+        result: Result<(), String>,
+        brought: Result<usize, String>,
+    ) {
         self.worktrees.busy.remove(path);
-        match result {
-            Ok(()) => self.toast(said, Level::Success),
-            Err(why) => self.toast(format!("Couldn't check it out: {why}"), Level::Error),
+        match (result, brought) {
+            (Err(why), _) => self.toast(format!("Couldn't check it out: {why}"), Level::Error),
+            (Ok(()), Ok(0)) => self.toast(said, Level::Success),
+            (Ok(()), Ok(n)) => {
+                let files = if n == 1 { "file" } else { "files" };
+                self.toast(
+                    format!("{said}; brought {n} untracked {files} along"),
+                    Level::Success,
+                );
+            }
+            (Ok(()), Err(why)) => self.toast(
+                format!("{said}, but not all its untracked files: {why}"),
+                Level::Warning,
+            ),
         }
         self.refresh_git();
     }

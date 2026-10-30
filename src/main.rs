@@ -12,6 +12,7 @@ mod agent_icons;
 mod agents;
 mod anim;
 mod app_icons;
+mod checkout;
 mod chrome;
 mod ci;
 mod ci_watch;
@@ -1386,6 +1387,8 @@ pub struct Gerdr {
     pub quit: Option<quit::QuitDialog>,
     /// The restart dialog, while it is open.
     pub restart: Option<restart::RestartDialog>,
+    /// The checkout dialog, while it is open.
+    pub checkout: Option<checkout::CheckoutDialog>,
     /// The confirm dialog, while it is open.
     pub confirm: Option<confirm::ConfirmDialog>,
     /// The event loop sources following the project's herdr session, removed
@@ -4738,6 +4741,7 @@ impl Gerdr {
         // These take every click.
         if self.quit.is_some()
             || self.restart.is_some()
+            || self.checkout.is_some()
             || self.confirm.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
@@ -4965,6 +4969,7 @@ impl Gerdr {
         self.welcome = None;
         self.quit = None;
         self.restart = None;
+        self.checkout = None;
         self.confirm = None;
         self.project = Some(id.to_owned());
         let instance = if alongside {
@@ -5719,6 +5724,7 @@ impl Gerdr {
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             restart: self.restart_view(),
+            checkout: self.checkout_view(),
             confirm: self.confirm_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
@@ -6074,6 +6080,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         toasts: VecDeque::new(),
         quit: None,
         restart: None,
+        checkout: None,
         confirm: None,
         herdr_sources: Vec::new(),
         herdr_poke: None,

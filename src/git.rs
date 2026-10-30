@@ -110,6 +110,9 @@ pub struct Worktree {
     pub main: bool,
     /// Some file in it is changed, staged or untracked.
     pub dirty: bool,
+    /// Some file git tracks in it is changed or staged; untracked ones
+    /// aside, which a checkout leaves where they are.
+    pub edited: bool,
     /// Its branch's changes are all in the main worktree's HEAD or a
     /// default branch, merged, squashed or picked (see `merged`): likely
     /// done with.
@@ -444,8 +447,12 @@ fn worktrees(dir: &Path, here: Option<&Path>) -> (Option<Worktree>, Vec<Worktree
                 .as_deref()
                 .is_some_and(|head| merged(dir, head, &also));
         w.fresh = branch && w.head.as_ref().is_some_and(|head| targets.contains(head));
-        w.dirty =
-            !w.gone && git(&w.path, &["status", "--porcelain"]).is_some_and(|o| !o.is_empty());
+        let changes = (!w.gone)
+            .then(|| git(&w.path, &["status", "--porcelain"]))
+            .flatten()
+            .unwrap_or_default();
+        w.dirty = !changes.is_empty();
+        w.edited = changes.lines().any(|l| !l.starts_with("??"));
     }
     let at = all.iter().position(|w| Some(w.path.as_path()) == here);
     (at.map(|i| all.remove(i)), all)
@@ -597,8 +604,10 @@ pub fn remove_worktree(main: &Path, w: &Worktree, force: bool) -> Result<(), Str
 }
 
 /// Why worktree `w`'s branch can't be checked out in the repository's main
-/// worktree `main` now, if anything stops it: uncommitted changes either
-/// side would stay behind or come along.
+/// worktree `main` now, if anything stops it: changes to tracked files
+/// either side would stay behind or come along. Untracked ones don't stop
+/// it: `w`'s are brought along or left behind (see `untracked`), and git
+/// refuses to switch over main's if the branch has the same file.
 pub fn checkout_check(main: &Worktree, w: &Worktree) -> Result<(), String> {
     let name = w.name();
     if w.main {
@@ -610,10 +619,10 @@ pub fn checkout_check(main: &Worktree, w: &Worktree) -> Result<(), String> {
     if w.gone {
         return Err(format!("{name}'s folder is gone"));
     }
-    if w.dirty {
+    if w.edited {
         return Err(format!("{name} has uncommitted changes"));
     }
-    if main.dirty {
+    if main.edited {
         return Err(format!("{} has uncommitted changes", main.name()));
     }
     Ok(())
@@ -635,6 +644,85 @@ pub fn checkout_in_main(main: &Path, w: &Worktree) -> Result<(), String> {
     Ok(())
 }
 
+/// An untracked file or folder of a worktree, for a checkout to bring
+/// along or leave behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Untracked {
+    /// From the worktree's top folder; a folder, all of it untracked, ends
+    /// in `/`.
+    pub path: String,
+    /// The untracked files in it, for a folder; 1 for a file.
+    pub files: usize,
+    /// It is a symbolic link.
+    pub link: bool,
+}
+
+/// The untracked files and folders in worktree `dir`, ignored ones left
+/// out, in git's order.
+pub fn untracked(dir: &Path) -> Vec<Untracked> {
+    let Some(out) = git(dir, &["status", "--porcelain=v2", "-z"]) else {
+        return Vec::new();
+    };
+    parse(&out)
+        .changes
+        .into_iter()
+        .filter(|c| c.code == '?')
+        .map(|c| {
+            let files = if c.path.ends_with('/') {
+                let args = ["ls-files", "--others", "--exclude-standard", "-z", "--"];
+                let listed = git(dir, &[&args[..], &[c.path.as_str()]].concat());
+                listed.map_or(0, |l| l.split('\0').filter(|f| !f.is_empty()).count())
+            } else {
+                1
+            };
+            let link = std::fs::symlink_metadata(dir.join(c.path.trim_end_matches('/')))
+                .is_ok_and(|m| m.file_type().is_symlink());
+            Untracked {
+                path: c.path,
+                files,
+                link,
+            }
+        })
+        .collect()
+}
+
+/// Which of `paths` (as `untracked` gives them) something in folder `main`
+/// is at already, so bringing them along would overwrite it.
+pub fn clashes(main: &Path, paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|p| std::fs::symlink_metadata(main.join(p.trim_end_matches('/'))).is_ok())
+        .cloned()
+        .collect()
+}
+
+/// Move `paths` (as `untracked` gives them) from worktree `from` to the
+/// same place in worktree `to`, making the folders they go in; how many
+/// files that moves. It stops at the first one that can't go, and says
+/// which are left in `from`. One something is at in `to` stays: nothing
+/// is overwritten.
+pub fn bring_untracked(from: &Path, to: &Path, paths: &[Untracked]) -> Result<usize, String> {
+    let mut moved = 0;
+    for (i, u) in paths.iter().enumerate() {
+        let path = u.path.trim_end_matches('/');
+        let (src, dst) = (from.join(path), to.join(path));
+        let result = if std::fs::symlink_metadata(&dst).is_ok() {
+            Err(format!("something is at {path} already"))
+        } else {
+            dst.parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::rename(&src, &dst))
+                .map_err(|e| e.to_string())
+        };
+        if let Err(why) = result {
+            let left: Vec<&str> = paths[i..].iter().map(|u| u.path.as_str()).collect();
+            return Err(format!("{why}; left behind: {}", left.join(", ")));
+        }
+        moved += u.files;
+    }
+    Ok(moved)
+}
+
 /// Why worktree `w` can't be squashed into the main worktree at `main` now,
 /// if anything stops it.
 pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
@@ -654,7 +742,7 @@ pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
     if w.fresh {
         return Err(format!("{name} has no commit of its own"));
     }
-    if w.dirty {
+    if w.edited {
         return Err(format!("{name} has uncommitted changes"));
     }
     let status = git_run(main, &["status", "--porcelain=v2", "--branch", "-z"])?;
@@ -662,7 +750,7 @@ pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
     let Some(target) = main_status.branch else {
         return Err("The main worktree has no branch checked out".into());
     };
-    if main_status.dirty {
+    if main_status.changes.iter().any(|c| c.code != '?') {
         return Err(format!("{target} has uncommitted changes"));
     }
     Ok(())
@@ -833,8 +921,9 @@ fn code(xy: &str) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        Change, GitStatus, InProgress, Worktree, checkout_check, checkout_in_main, parse,
-        parse_worktrees, pick_remote, remote_to_web, remove_worktree, squash_check, status,
+        Change, GitStatus, InProgress, Worktree, bring_untracked, checkout_check, checkout_in_main,
+        clashes, parse, parse_worktrees, pick_remote, remote_to_web, remove_worktree, squash_check,
+        status, untracked,
     };
     use std::{
         path::{Path, PathBuf},
@@ -994,7 +1083,12 @@ mod tests {
         let path = repo.worktree("wip");
         std::fs::write(path.join("scratch"), "x").unwrap();
         let (wip, main) = (repo.find("wip"), repo.find("main"));
-        assert!(wip.dirty && !wip.merged);
+        assert!(wip.dirty && !wip.edited && !wip.merged);
+        // An untracked file doesn't stop a squash; an edited one does.
+        assert_eq!(squash_check(&repo.0, &wip), Ok(()));
+        std::fs::write(path.join("wip"), "edited").unwrap();
+        let wip = repo.find("wip");
+        assert!(wip.edited);
         assert!(squash_check(&repo.0, &wip).is_err());
         assert!(remove_worktree(&repo.0, &wip, false).is_err());
         assert!(path.exists());
@@ -1017,18 +1111,62 @@ mod tests {
         let left = status.worktrees.iter().find(|w| w.path == path).unwrap();
         assert_eq!(left.branch, None);
         assert_eq!(left.head, topic.head);
-        // Uncommitted changes either side stop it.
+        // Changes to tracked files either side stop it.
         std::fs::write(path.join("scratch"), "x").unwrap();
-        let dirty = Worktree {
+        let edited = Worktree {
             dirty: true,
+            edited: true,
             ..topic.clone()
         };
-        assert!(checkout_check(&main, &dirty).is_err());
+        assert!(checkout_check(&main, &edited).is_err());
         let main = Worktree {
             dirty: true,
+            edited: true,
             ..main
         };
         assert!(checkout_check(&main, &topic).is_err());
+    }
+
+    #[test]
+    fn untracked_files_come_along_or_stay() {
+        let repo = Repo::new();
+        let path = repo.worktree("topic");
+        std::fs::create_dir_all(path.join("dev/new")).unwrap();
+        std::fs::write(path.join("dev/a.py"), "a").unwrap();
+        std::fs::write(path.join("dev/new/b.py"), "b").unwrap();
+        std::fs::write(path.join("dev/new/c.py"), "c").unwrap();
+        std::os::unix::fs::symlink("/nowhere", path.join("venv")).unwrap();
+        std::fs::write(repo.0.join(".git/info/exclude"), "*.log\n").unwrap();
+        std::fs::write(path.join("out.log"), "ignored").unwrap();
+        let (topic, main) = (repo.find("topic"), repo.find("main"));
+        assert!(topic.dirty && !topic.edited);
+        assert_eq!(checkout_check(&main, &topic), Ok(()));
+        let found = untracked(&path);
+        let shown: Vec<(&str, usize, bool)> = found
+            .iter()
+            .map(|u| (u.path.as_str(), u.files, u.link))
+            .collect();
+        assert_eq!(shown, [("dev/", 3, false), ("venv", 1, true)]);
+        // One main has already stays put, and so do those after it.
+        std::fs::write(repo.0.join("dev"), "mine").unwrap();
+        let paths: Vec<String> = found.iter().map(|u| u.path.clone()).collect();
+        assert_eq!(clashes(&repo.0, &paths), ["dev/"]);
+        let refused = bring_untracked(&path, &repo.0, &found).unwrap_err();
+        assert!(refused.ends_with("left behind: dev/, venv"), "{refused}");
+        assert!(path.join("dev/a.py").exists());
+        std::fs::remove_file(repo.0.join("dev")).unwrap();
+        assert!(clashes(&repo.0, &paths).is_empty());
+        checkout_in_main(&repo.0, &topic).unwrap();
+        assert_eq!(bring_untracked(&path, &repo.0, &found), Ok(4));
+        assert_eq!(
+            std::fs::read_to_string(repo.0.join("dev/new/c.py")).unwrap(),
+            "c"
+        );
+        assert!(std::fs::symlink_metadata(repo.0.join("venv")).is_ok());
+        assert!(!path.join("dev").exists());
+        // Ignored files stay.
+        assert!(path.join("out.log").exists());
+        assert!(untracked(&path).is_empty());
     }
 
     #[test]
