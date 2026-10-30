@@ -1294,11 +1294,14 @@ impl Gerdr {
 
     /// Worktrees were deleted, or failed to be.
     fn worktrees_deleted(&mut self, deleted: Deleted) {
-        let mut gone = Vec::new();
+        let (mut gone, mut paths) = (Vec::new(), Vec::new());
         for (name, path, result) in deleted {
             self.worktrees.busy.remove(&path);
             match result {
-                Ok(()) => gone.push(name),
+                Ok(()) => {
+                    gone.push(name);
+                    paths.push(path);
+                }
                 Err(why) => self.toast(format!("Couldn't delete {name}: {why}"), Level::Error),
             }
         }
@@ -1307,6 +1310,8 @@ impl Gerdr {
             [name] => self.toast(format!("Deleted {name}"), Level::Success),
             names => self.toast(format!("Deleted {} worktrees", names.len()), Level::Success),
         }
+        // Their review comments go with them.
+        self.forget_worktree_reviews(&paths);
         self.refresh_git();
     }
 

@@ -4,7 +4,10 @@
 //! can't). The panel copies them all as one Markdown text to paste into an
 //! agent. Kept per project in `~/.local/share/gerdr/reviews/<id>.json`,
 //! written atomically (see `projects::write_atomic`); a file that can't be
-//! read reads as empty, and is set aside.
+//! read reads as empty, and is set aside. Those on worktrees' diffs (see
+//! `worktree_diff`) are kept by worktree in `reviews/worktrees.json`, and
+//! dropped once the worktree is gone, on another branch, left alone for
+//! `WORKTREE_DAYS`, or past the `WORKTREE_MOST` saved last.
 
 use std::{
     collections::BTreeMap,
@@ -18,6 +21,11 @@ use crate::diff::{FileDiff, LineKind};
 
 /// The file's format version.
 pub const VERSION: u32 = 1;
+
+/// How long a worktree's review is kept after it was last saved.
+pub const WORKTREE_DAYS: u64 = 30;
+/// How many worktrees' reviews are kept at most: those saved last.
+pub const WORKTREE_MOST: usize = 50;
 
 /// A diff line as a comment quotes it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +239,132 @@ pub fn save(root: Option<&Path>, project: &str, review: &Review) -> std::io::Res
     crate::projects::write_atomic(&path, &bytes)
 }
 
+/// The reviews written on worktrees' diffs, by worktree folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktrees {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub worktrees: BTreeMap<PathBuf, Kept>,
+}
+
+impl Default for Worktrees {
+    fn default() -> Self {
+        Worktrees {
+            version: VERSION,
+            worktrees: BTreeMap::new(),
+        }
+    }
+}
+
+/// A worktree's review, with the branch it was on and when it was saved
+/// (seconds since the Unix epoch).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    pub branch: Option<String>,
+    pub saved: u64,
+    pub review: Review,
+}
+
+impl Worktrees {
+    /// The review of the worktree at `path`, on `branch`: none kept for
+    /// another branch (the folder used again for another worktree).
+    pub fn get(&self, path: &Path, branch: Option<&str>) -> Review {
+        match self.worktrees.get(path) {
+            Some(kept) if kept.branch.as_deref() == branch => kept.review.clone(),
+            _ => Review::default(),
+        }
+    }
+
+    /// Keep `review` for the worktree at `path`, on `branch`, saved at
+    /// `now`; an empty one drops what was kept.
+    pub fn put(&mut self, path: &Path, branch: Option<&str>, review: &Review, now: u64) {
+        if review.is_empty() {
+            self.worktrees.remove(path);
+            return;
+        }
+        let kept = Kept {
+            branch: branch.map(str::to_owned),
+            saved: now,
+            review: review.clone(),
+        };
+        self.worktrees.insert(path.to_path_buf(), kept);
+    }
+
+    /// Drop the review of the worktree at `path`, deleted; whether there
+    /// was one.
+    pub fn forget(&mut self, path: &Path) -> bool {
+        self.worktrees.remove(path).is_some()
+    }
+
+    /// Drop the reviews of worktrees no longer there (by `exists`), those
+    /// saved more than `WORKTREE_DAYS` before `now`, and past the
+    /// `WORKTREE_MOST` saved last; whether any went.
+    pub fn prune(&mut self, now: u64, exists: impl Fn(&Path) -> bool) -> bool {
+        let before = self.worktrees.len();
+        let oldest = now.saturating_sub(WORKTREE_DAYS * 24 * 60 * 60);
+        self.worktrees
+            .retain(|path, kept| kept.saved >= oldest && !kept.review.is_empty() && exists(path));
+        if self.worktrees.len() > WORKTREE_MOST {
+            let mut by_age: Vec<(u64, PathBuf)> = (self.worktrees.iter())
+                .map(|(path, kept)| (kept.saved, path.clone()))
+                .collect();
+            by_age.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            for (_, path) in by_age.into_iter().skip(WORKTREE_MOST) {
+                self.worktrees.remove(&path);
+            }
+        }
+        self.worktrees.len() != before
+    }
+}
+
+/// Where the worktrees' reviews are kept, under `root` (gerdr's data
+/// folder by default).
+pub fn worktrees_file(root: Option<&Path>) -> PathBuf {
+    let root = root.map_or_else(crate::projects::data_dir, Path::to_path_buf);
+    root.join("reviews").join("worktrees.json")
+}
+
+/// The worktrees' reviews, as saved under `root`; none when there are
+/// none or they can't be read (then set aside, as `load` does).
+pub fn load_worktrees(root: Option<&Path>) -> Worktrees {
+    let path = worktrees_file(root);
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Worktrees::default(),
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", path.display());
+            crate::projects::set_aside(&path);
+            return Worktrees::default();
+        }
+    };
+    serde_json::from_slice(&raw).unwrap_or_else(|err| {
+        tracing::warn!("reading {}: {err}", path.display());
+        crate::projects::set_aside(&path);
+        Worktrees::default()
+    })
+}
+
+/// Save the worktrees' reviews under `root`; with none, the file goes.
+pub fn save_worktrees(root: Option<&Path>, reviews: &Worktrees) -> std::io::Result<()> {
+    let path = worktrees_file(root);
+    if reviews.worktrees.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    let bytes = serde_json::to_vec_pretty(reviews).map_err(std::io::Error::other)?;
+    crate::projects::write_atomic(&path, &bytes)
+}
+
+/// The time now, in seconds since the Unix epoch.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +469,77 @@ mod tests {
         save(Some(&dir), "web", &Review::default()).unwrap();
         assert!(!file(Some(&dir), "web").exists());
         assert_eq!(load(Some(&dir), "web"), Review::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worktrees_keep_their_review_on_their_branch() {
+        let review = Review {
+            comments: vec![comment(&[line(LineKind::Added, 1, "x")], "y")],
+            ..Review::default()
+        };
+        let wt = Path::new("/r/.wt/x");
+        let mut reviews = Worktrees::default();
+        reviews.put(wt, Some("feat/x"), &review, 100);
+        assert_eq!(reviews.get(wt, Some("feat/x")), review);
+        // The folder used again for another branch: not its comments.
+        assert!(reviews.get(wt, Some("feat/y")).is_empty());
+        assert!(reviews.get(Path::new("/r/.wt/z"), None).is_empty());
+        // Emptied, or deleted, it is dropped.
+        reviews.put(wt, Some("feat/x"), &Review::default(), 200);
+        assert!(reviews.worktrees.is_empty());
+        reviews.put(wt, Some("feat/x"), &review, 200);
+        assert!(reviews.forget(wt));
+        assert!(!reviews.forget(wt));
+    }
+
+    #[test]
+    fn worktree_reviews_gone_old_or_too_many_are_pruned() {
+        let review = Review {
+            comments: vec![comment(&[line(LineKind::Added, 1, "x")], "y")],
+            ..Review::default()
+        };
+        let day = 24 * 60 * 60;
+        let now = 100 * day;
+        let mut reviews = Worktrees::default();
+        reviews.put(Path::new("/gone"), None, &review, now);
+        reviews.put(
+            Path::new("/old"),
+            None,
+            &review,
+            now - (WORKTREE_DAYS + 1) * day,
+        );
+        reviews.put(Path::new("/recent"), None, &review, now - day);
+        let exists = |p: &Path| p != Path::new("/gone");
+        assert!(reviews.prune(now, exists));
+        let kept: Vec<&Path> = reviews.worktrees.keys().map(PathBuf::as_path).collect();
+        assert_eq!(kept, [Path::new("/recent")]);
+        assert!(!reviews.prune(now, exists));
+        // Past the most kept, those saved first go.
+        for n in 0..WORKTREE_MOST + 5 {
+            let path = PathBuf::from(format!("/wt/{n:03}"));
+            reviews.put(&path, None, &review, now - 1000 + n as u64);
+        }
+        assert!(reviews.prune(now, |_| true));
+        assert_eq!(reviews.worktrees.len(), WORKTREE_MOST);
+        assert!(!reviews.worktrees.contains_key(Path::new("/recent")));
+        assert!(!reviews.worktrees.contains_key(Path::new("/wt/004")));
+        assert!(reviews.worktrees.contains_key(Path::new("/wt/005")));
+    }
+
+    #[test]
+    fn worktree_reviews_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("gerdr-wt-review-{}", std::process::id()));
+        let review = Review {
+            comments: vec![comment(&[line(LineKind::Added, 1, "x")], "y")],
+            ..Review::default()
+        };
+        let mut reviews = Worktrees::default();
+        reviews.put(Path::new("/r/.wt/x"), Some("x"), &review, 5);
+        save_worktrees(Some(&dir), &reviews).unwrap();
+        assert_eq!(load_worktrees(Some(&dir)), reviews);
+        save_worktrees(Some(&dir), &Worktrees::default()).unwrap();
+        assert!(!worktrees_file(Some(&dir)).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

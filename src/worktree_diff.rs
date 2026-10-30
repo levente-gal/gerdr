@@ -4,7 +4,9 @@
 //! panel's diff view (`diff_view`), alone across the panel. A main
 //! worktree's is what isn't committed. Its keys, clicks, comments, search
 //! and vim's edits are the diff's own; Esc closes it, back to the popup.
-//! It is read again with every Git status read.
+//! It is read again with every Git status read. Its review comments are
+//! saved by worktree (see `review::Worktrees`), and go with it when it is
+//! deleted.
 
 use std::{
     path::{Path, PathBuf},
@@ -322,11 +324,7 @@ impl crate::Gerdr {
             self.repos.kept = Some((self.project.clone(), panel));
         }
         self.repos.close_worktree();
-        let review = self
-            .repos
-            .worktree_reviews
-            .remove(&root)
-            .unwrap_or_default();
+        let review = self.worktree_reviews().get(&root, branch.as_deref());
         let wd = WorktreeDiff::new(root, label, branch, target, workspace, review);
         self.repos.worktree = Some(wd);
         self.worktree_diff_read();
@@ -334,8 +332,67 @@ impl crate::Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// The reviews of worktrees' diffs: read when first wanted, those of
+    /// worktrees gone, on another branch or too old dropped.
+    fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
+        if self.repos.worktree_reviews.is_none() {
+            let mut reviews = crate::review::load_worktrees(None);
+            if reviews.prune(crate::review::now(), Path::is_dir) {
+                self.save_worktree_reviews(&reviews);
+            }
+            self.repos.worktree_reviews = Some(reviews);
+        }
+        self.repos.worktree_reviews.get_or_insert_default()
+    }
+
+    /// Write the worktrees' reviews, saying so when that fails.
+    fn save_worktree_reviews(&mut self, reviews: &crate::review::Worktrees) {
+        if let Err(err) = crate::review::save_worktrees(None, reviews) {
+            tracing::warn!("saving the worktrees' reviews: {err}");
+            self.toast(
+                format!("Couldn't save the review: {err}"),
+                crate::toast::Level::Error,
+            );
+        }
+    }
+
+    /// Save the worktree diff's review, if it changed: with the others,
+    /// pruned.
+    fn worktree_save_review(&mut self) {
+        let Some(wd) = self
+            .repos
+            .worktree
+            .as_mut()
+            .filter(|wd| wd.diff.review_dirty)
+        else {
+            return;
+        };
+        wd.diff.review_dirty = false;
+        let (root, branch, review) = (wd.root.clone(), wd.branch.clone(), wd.diff.review.clone());
+        let now = crate::review::now();
+        let reviews = self.worktree_reviews();
+        reviews.put(&root, branch.as_deref(), &review, now);
+        reviews.prune(now, Path::is_dir);
+        let reviews = reviews.clone();
+        self.save_worktree_reviews(&reviews);
+    }
+
+    /// Drop the reviews of the worktrees at `paths`, deleted.
+    pub(crate) fn forget_worktree_reviews(&mut self, paths: &[PathBuf]) {
+        let reviews = self.worktree_reviews();
+        let mut gone = false;
+        for path in paths {
+            gone |= reviews.forget(path);
+        }
+        if gone {
+            let reviews = reviews.clone();
+            self.save_worktree_reviews(&reviews);
+        }
+    }
+
     /// Close the worktree's diff, back to the worktrees popup.
     pub(crate) fn close_worktree_diff(&mut self) {
+        self.worktree_save_review();
         self.repos.close_worktree();
         self.worktrees.unpark();
         self.refresh_pointer_focus();
@@ -419,6 +476,7 @@ impl crate::Gerdr {
     /// What a key or click on the worktree's diff asked for, as the
     /// panel asks it; why it did nothing said briefly.
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
+        self.worktree_save_review();
         let error = self
             .repos
             .worktree
