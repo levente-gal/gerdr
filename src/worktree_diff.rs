@@ -46,8 +46,10 @@ pub struct WorktreeDiff {
     /// Read once at least; and why the last read failed.
     pub read: bool,
     pub error: Option<String>,
-    /// A read is under way.
+    /// A read is under way; and another is wanted once it is in, as a
+    /// file was edited from the diff meanwhile.
     pub reading: bool,
+    pub again: bool,
     pub diff: DiffView,
     pub hover: Option<ReposHit>,
     /// The sheet asking whether to delete the review, while open: the
@@ -509,6 +511,11 @@ impl crate::Gerdr {
         let Some(wd) = self.repos.worktree.as_mut().filter(|wd| wd.is(&root)) else {
             return;
         };
+        // Read from before the edit: the read after it is the one to show.
+        if std::mem::take(&mut wd.again) {
+            wd.reading = false;
+            return self.worktree_diff_read();
+        }
         wd.set_read(read, env);
         let held = wd.diff.take_held();
         for (mods, sym, typed) in held {

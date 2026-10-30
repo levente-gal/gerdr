@@ -1816,6 +1816,21 @@ impl DiffView {
             .collect()
     }
 
+    /// A file of the checkout at `root` was edited from the diff: its diff
+    /// wants reading again now, the other checkouts' not, without waiting
+    /// for Git status to be read again.
+    pub fn reread(&mut self, root: &Path) {
+        let read = self.reads;
+        self.reads += 1;
+        // Those read for the last read of the changes still are up to date
+        // (none of them is being read: that would be for a later read).
+        for (other, (generation, _)) in &mut self.diffs {
+            if other != root && *generation == read {
+                *generation = self.reads;
+            }
+        }
+    }
+
     /// A checkout's diff came back, its files in the order to show them,
     /// read for read `generation` of its changes: kept unless one read
     /// later is, or the checkout is gone or clean; the diff stays on what

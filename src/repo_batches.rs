@@ -1452,10 +1452,25 @@ impl Gerdr {
         if let Some(diff) = self.repos.diff_mut() {
             diff.place_caret(done.root.clone(), done.path.clone(), done.then);
         }
+        let root = done.root.clone();
         self.repos.undone.clear();
         self.repos.cuts.push(done);
         if self.repos.cuts.len() > CUTS {
             self.repos.cuts.remove(0);
+        }
+        self.repos_reread(&root);
+    }
+
+    /// A file of the repository at `root` was edited from the diff: its
+    /// diff read again straight away, not after Git status is (still read
+    /// again, for the tree and the rest).
+    fn repos_reread(&mut self, root: &Path) {
+        if let Some(wd) = self.repos.worktree.as_mut() {
+            wd.again |= wd.reading;
+            self.worktree_diff_read();
+        } else if let Some(panel) = self.repos.panel.as_mut() {
+            panel.diff.reread(root);
+            self.repos_detail();
         }
         self.refresh_git();
     }
@@ -1480,11 +1495,12 @@ impl Gerdr {
                 if let Some(diff) = self.repos.diff_mut() {
                     diff.place_caret(done.root.clone(), done.path.clone(), spot);
                 }
+                let root = done.root.clone();
                 match again {
                     true => self.repos.cuts.push(done),
                     false => self.repos.undone.push(done),
                 }
-                self.refresh_git();
+                self.repos_reread(&root);
             }
             Err(why) => self.show_notice(why),
         }

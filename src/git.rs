@@ -756,19 +756,26 @@ pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the status of each of `dirs` on a thread of its own, and hand those
-/// in a repository to `send`.
+/// Read the status of each of `dirs` on a thread of its own, all at once,
+/// and hand those in a repository to `send`: a round takes as long as the
+/// slowest folder, not all of them one after another.
 pub fn read_all(
     dirs: Vec<PathBuf>,
     send: impl FnOnce(HashMap<PathBuf, GitStatus>) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        send(
-            dirs.into_iter()
-                .filter_map(|dir| Some((status(&dir)?, dir)))
+        let read = std::thread::scope(|scope| {
+            let reads: Vec<_> = dirs
+                .into_iter()
+                .map(|dir| scope.spawn(move || Some((status(&dir)?, dir))))
+                .collect();
+            reads
+                .into_iter()
+                .filter_map(|read| read.join().ok().flatten())
                 .map(|(status, dir)| (dir, status))
-                .collect(),
-        )
+                .collect()
+        });
+        send(read)
     });
 }
 
