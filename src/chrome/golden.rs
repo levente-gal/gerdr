@@ -993,6 +993,52 @@ fn dump_overlays() {
             painter.confirm_dialog(&confirm, (800, 600).into(), scale, p),
             px(confirm_w + shadow),
         );
+        let row = |path: &str, files, link, clash| super::CheckoutRow {
+            path: path.into(),
+            files,
+            link,
+            clash,
+        };
+        for (name, rows, can_bring) in [
+            (
+                "checkout",
+                vec![
+                    row("dev/measure_optimize_detail.py", 1, false, false),
+                    row("dev/measure_optimize_tree.py", 1, false, false),
+                    row("app/services/new/", 3, false, false),
+                    row("venv", 1, true, false),
+                ],
+                true,
+            ),
+            (
+                "checkout_clash",
+                vec![
+                    row("dev/measure.py", 1, false, false),
+                    row("venv", 1, true, true),
+                ],
+                true,
+            ),
+        ] {
+            let view = super::CheckoutView {
+                branch: "feature/optimization-performance".into(),
+                main: "services-api".into(),
+                worktree: "services-api-perf".into(),
+                rows,
+                can_bring,
+                selected: if can_bring { 2 } else { 1 },
+                hover: None,
+            };
+            let w = super::checkout_layout((800, 600).into(), view.rows.len())
+                .panel
+                .size
+                .w;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.checkout_dialog(&view, (800, 600).into(), scale, p),
+                px(w + shadow),
+            );
+        }
         let quit_w = super::quit_layout((800, 600).into(), quit().rows.len(), false)
             .panel
             .size

@@ -2490,7 +2490,7 @@ impl Painter {
     /// from) in the second, cut off at the end when it doesn't fit.
     /// Returns where it ends.
     #[allow(clippy::too_many_arguments)]
-    fn name_first(
+    pub(super) fn name_first(
         &self,
         c: &mut Canvas,
         path: &str,

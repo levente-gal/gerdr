@@ -165,6 +165,10 @@ pub(super) const QUIT_BUTTONS: &[(&str, i32)] = &[("Cancel", 84), ("Quit", 84)];
 /// projects.
 pub(super) const SWITCH_BUTTONS: &[(&str, i32)] =
     &[("Cancel", 84), ("Switch", 84), ("Open in new gerdr", 148)];
+/// Cancel, Leave behind, Bring along: labels and widths, when checking a
+/// worktree's branch out with its untracked files.
+pub(super) const CHECKOUT_BUTTONS: &[(&str, i32)] =
+    &[("Cancel", 84), ("Leave behind", 112), ("Bring along", 108)];
 pub(super) const BUTTON_RADIUS: f32 = 6.0;
 
 /// The sidebar header's project name: the gap between it and its chevron,

@@ -86,7 +86,6 @@ use crate::{
     },
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
-    review::Review,
     scroll::{Bounds, Motion, Scroll},
     text_field::{self, Edit, TextField},
     worktree_diff::WorktreeDiff,
@@ -139,8 +138,8 @@ pub struct Repos {
     /// A worktree's diff, shown in the panel in its place, while open.
     pub(crate) worktree: Option<WorktreeDiff>,
     /// The review comments written on worktrees' diffs, by worktree, as
-    /// they were closed.
-    pub(crate) worktree_reviews: HashMap<PathBuf, Review>,
+    /// saved: read once they are wanted.
+    pub(crate) worktree_reviews: Option<crate::review::Worktrees>,
 }
 
 impl Repos {
@@ -156,15 +155,9 @@ impl Repos {
         self.close_worktree();
     }
 
-    /// Close the worktree's diff, its review kept for when it is shown
-    /// again.
+    /// Close the worktree's diff: its review is saved with every change.
     pub fn close_worktree(&mut self) {
-        if let Some(wd) = self.worktree.take() {
-            let review = wd.diff.review;
-            if !review.is_empty() || self.worktree_reviews.contains_key(&wd.root) {
-                self.worktree_reviews.insert(wd.root, review);
-            }
-        }
+        self.worktree = None;
     }
 
     /// The diff shown: the worktree's, else the panel's.
