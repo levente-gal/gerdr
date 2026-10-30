@@ -43,7 +43,7 @@ impl Side {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Node {
     Leaf(u32),
     Split {

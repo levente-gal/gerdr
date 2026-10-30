@@ -61,6 +61,8 @@ pub enum MenuAction {
     SwapPane(u32, Side),
     /// Turn the split pane `id` of the active tab is in.
     FlipPane(u32),
+    /// Zoom pane `id` of the active tab to fill it, or unzoom it.
+    ZoomPane(u32),
     /// Move pane `id` of the active tab to tab `t` of the workspace, or a
     /// new tab (`None`).
     PaneToTab(u32, Option<usize>),
@@ -334,6 +336,7 @@ impl Gerdr {
             MenuAction::MovePane(id, side) => self.move_pane(id, side),
             MenuAction::SwapPane(id, side) => self.swap_pane(id, side),
             MenuAction::FlipPane(id) => self.flip_pane(id),
+            MenuAction::ZoomPane(id) => self.zoom_pane(id),
             MenuAction::PaneToTab(id, to) => self.move_pane_to_tab(id, to),
             MenuAction::Scrollback(id) => self.open_scrollback(id),
             MenuAction::RestartPane(id) => {

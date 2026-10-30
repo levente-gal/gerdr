@@ -830,7 +830,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     for bar in view.pane_bars.iter().filter(|bar| bar.visible) {
         rects.push(bar.rect);
         rects.extend(
-            pane_bar_buttons(bar.rect, bar.buttons)
+            pane_bar_buttons(bar.rect, bar.buttons, bar.zoom)
                 .into_iter()
                 .map(|(_, rect)| rect),
         );

@@ -185,6 +185,8 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "flip the pane's split",
         "Space",
     ),
+    // herdr's and tmux's zoom.
+    ("zoom-pane", Action::ZoomPane, "zoom pane", "z"),
     // tmux's break-pane.
     (
         "pane-to-new-tab",
@@ -301,6 +303,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
         &["swap-left", "swap-down", "swap-up", "swap-right"],
     ),
     ("flip the pane's split", &["flip-pane"]),
+    ("zoom pane to fill the tab, or unzoom", &["zoom-pane"]),
     ("move pane to a new tab", &["pane-to-new-tab"]),
     ("next / previous pane", &["next-pane", "previous-pane"]),
     ("light / dark theme", &["toggle-theme"]),
@@ -737,6 +740,7 @@ mod tests {
                 "Shift+H / J / K / L: move pane left / down / up / right",
                 "Alt+H / J / K / L: swap pane left / down / up / right",
                 "Space: flip the pane's split",
+                "Z: zoom pane to fill the tab, or unzoom",
                 "!: move pane to a new tab",
                 "Tab / Shift+Tab: next / previous pane",
                 "T: light / dark theme",
@@ -867,6 +871,10 @@ mod tests {
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::space),
             Some(Action::FlipPane)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::z),
+            Some(Action::ZoomPane)
         );
         // "!" is Shift and the 1 key, which alone still goes to tab 1.
         assert_eq!(

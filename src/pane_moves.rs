@@ -1,6 +1,6 @@
 //! Moving the panes of a tab about: to the side of a neighbour or to the
-//! tab's edge, swapped with a neighbour, their split turned, or off to
-//! another tab. Each move edits the tab's layout (see `layout`) and keeps
+//! tab's edge, swapped with a neighbour, their split turned, zoomed to fill
+//! the tab, or off to another tab. Each move edits the tab's layout (see `layout`) and keeps
 //! the moved pane focused. herdr hears of swaps (best effort) and of panes
 //! moved to another tab (it must: gerdr's tabs are matched to herdr's by
 //! their panes on restore). It refuses to move a pane within its tab, so
@@ -58,6 +58,19 @@ impl Gerdr {
         if flipped {
             self.arrange();
         }
+    }
+
+    /// Zoom pane `id` of the shown tab to fill it, focused, as herdr's
+    /// prefix+z does; or, zoomed already, give the others their places
+    /// back. Any change to the layout ends the zoom too, and so does
+    /// focusing another pane of the tab (see `Gerdr::focus`).
+    pub fn zoom_pane(&mut self, id: u32) {
+        let Some(tab) = self.shown_tab_mut().filter(|t| has_leaf(t, id)) else {
+            return;
+        };
+        tab.toggle_zoom(id);
+        self.arrange();
+        self.focus_pane(|_| Some(id));
     }
 
     /// Put pane `id` of the shown tab on `side` of pane `target` of it.

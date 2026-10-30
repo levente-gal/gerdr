@@ -155,6 +155,7 @@ fn tabs() -> Vec<TabView> {
             restart: Some(true),
             github: false,
             agent: Some(crate::agent_icons::AgentIcon::Claude),
+            zoomed: false,
         },
         TabView {
             title: "zsh".into(),
@@ -178,6 +179,7 @@ fn pane_bar() -> PaneBarView {
         can_back: false,
         can_forward: false,
         buttons: BarButtons::Terminal,
+        zoom: None,
         focused: true,
         lit: true,
         hover: Some(BarButton::Restart),
