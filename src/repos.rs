@@ -79,6 +79,7 @@ use crate::{
         ResultBar, RowMark, SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
+    diff_edit::FileEdit,
     find,
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
@@ -88,6 +89,7 @@ use crate::{
 };
 
 mod search;
+mod vim;
 
 use search::DiffSearch;
 
@@ -129,6 +131,10 @@ pub struct Repos {
     /// The tree's share of the panel's width, dragged on the line between
     /// the tree and the detail; `None` for the default.
     pub(crate) tree_share: Option<f64>,
+    /// The cuts made from the diff, the last last, to undo; and those
+    /// undone, to do again.
+    pub(crate) cuts: Vec<crate::diff_edit::Done>,
+    pub(crate) undone: Vec<crate::diff_edit::Done>,
 }
 
 impl Repos {
@@ -329,6 +335,14 @@ pub struct Panel {
     noted: HashSet<(usize, usize, usize, usize)>,
     /// The diff's search, while open.
     search: Option<DiffSearch>,
+    /// The diff's visual mode, while on.
+    visual: Option<vim::Visual>,
+    /// What is typed of a vim command so far.
+    pending: vim::Pending,
+    /// Where the caret goes once the diff is read again after a cut, and
+    /// the keys typed meanwhile, held till then.
+    caret_after: Option<vim::CaretAfter>,
+    queued: Vec<vim::Key>,
 }
 
 /// The diff's line cursor: the row it is on, and the row its range reaches
@@ -956,6 +970,11 @@ pub enum Outcome {
     Grouping(Grouping),
     /// Say this briefly.
     Notice(&'static str),
+    /// Cut this out of a file, as a delete in the diff asks.
+    Cut(FileEdit),
+    /// Undo the last cut; do the last undone again.
+    UndoCut,
+    RedoCut,
 }
 
 /// A tree line, by index: a repository of `Ctx::items`, a folder of its
@@ -1405,6 +1424,15 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "in the diff, move the caret, as in vim",
     ),
     ("* / #", "find the word at the caret, back for #"),
+    (
+        "x X D dd dw de d$ 3dd",
+        "in the diff, delete from the file, as in vim",
+    ),
+    (
+        "v / V, then d",
+        "select by chars, by lines; delete it from the file",
+    ),
+    ("u / U", "undo the last delete, do it again"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -2673,6 +2701,11 @@ impl Panel {
                 .any(|i| i.root == *root && !i.status.changes.is_empty())
         });
         self.diff_folded.retain(|(root, path)| changed(root, path));
+        self.forget_caret(|root| {
+            !items
+                .iter()
+                .any(|i| i.root == root && !i.status.changes.is_empty())
+        });
         self.settle(items, ctx.page.0);
         // The diff or log may have changed with it.
         self.detail_stale = true;
@@ -3244,6 +3277,13 @@ impl Panel {
             self.fold_all(true, ctx);
             return None;
         }
+        let in_diff = self.focus == Focus::Detail && self.tab() == DetailTab::Diff;
+        if in_diff && self.hold_key((*mods, sym, typed)) {
+            return None;
+        }
+        if in_diff && let Some(outcome) = self.vim_key(mods, sym, typed, ctx) {
+            return outcome;
+        }
         if self.search_open_key(mods, sym, ctx) {
             return None;
         }
@@ -3257,7 +3297,6 @@ impl Panel {
         // Shift with the arrows or the pages scrolls the detail, with
         // either focus; in the diff, with its own, they reach the cursor's
         // range further.
-        let in_diff = self.focus == Focus::Detail && self.tab() == DetailTab::Diff;
         if plain && mods.shift && !in_diff {
             let page = ctx.page.1.max(1) as i64;
             let by = match sym {
@@ -4153,6 +4192,7 @@ impl Panel {
                 title: self.diff_title(ctx),
                 search: self.search_bar(),
                 found,
+                chosen: self.chosen(&shown),
                 caret,
                 word,
                 ticks: self.search_ticks(),
@@ -4207,6 +4247,9 @@ impl Panel {
 
     /// Over the diff: `All changes · 2 repositories · 5 files · +12 −3`.
     fn diff_title(&self, ctx: &Ctx) -> String {
+        if let Some(mode) = self.mode_title() {
+            return mode;
+        }
         let dirty: Vec<&RepoItem> = ctx
             .items
             .iter()
@@ -4356,6 +4399,7 @@ impl Panel {
                 }
             }
         }
+        self.find_visual();
     }
 
     /// Comment `c`'s rows, in file `at`; the editor's in its place while
@@ -4468,7 +4512,12 @@ impl Panel {
     /// Put the caret on char `col` of diff row `row`, the diff scrolled
     /// to show it and its file selected in the tree.
     fn caret_to(&mut self, row: usize, col: usize, ctx: &Ctx) {
-        self.set_cursor(row, None);
+        // Selecting by lines, the range reaches on.
+        let from = match self.visual {
+            Some(vim::Visual::Lines) => self.cursor.as_ref().map(|c| c.from),
+            _ => None,
+        };
+        self.set_cursor(row, from);
         if let Some(cursor) = &mut self.cursor {
             cursor.col = col;
         }
@@ -4501,6 +4550,19 @@ impl Panel {
         let Some((row, col)) = self.caret() else {
             return true;
         };
+        let (row, col) = self.caret_target((row, col), sym, typed);
+        self.caret_to(row, col, ctx);
+        true
+    }
+
+    /// Where the caret goes from char `col` of diff row `row` with a
+    /// key `caret_key` takes.
+    fn caret_target(
+        &self,
+        (row, col): (usize, usize),
+        sym: Keysym,
+        typed: Keysym,
+    ) -> (usize, usize) {
         let text = self.line_text(row).unwrap_or_default().to_owned();
         let last = text.chars().count().saturating_sub(1);
         // The next line on (`by` 1) or before (-1), and its text.
@@ -4514,7 +4576,7 @@ impl Panel {
             }
             None
         };
-        let (row, col) = match (sym, typed) {
+        match (sym, typed) {
             (Keysym::h, _) => (row, col.saturating_sub(1)),
             (Keysym::l, _) => (row, (col + 1).min(last)),
             (_, Keysym::_0) => (row, 0),
@@ -4541,9 +4603,7 @@ impl Panel {
                     None => (row, col),
                 },
             },
-        };
-        self.caret_to(row, col, ctx);
-        true
+        }
     }
 
     /// The comment diff row `r` is of.
@@ -5490,7 +5550,8 @@ impl Panel {
         };
         if by != 0 {
             if diff {
-                self.move_cursor(by, shift, ctx);
+                let lines = self.visual == Some(vim::Visual::Lines);
+                self.move_cursor(by, shift || lines, ctx);
             } else {
                 self.scroll_by(by, true, ctx);
             }
@@ -5573,11 +5634,12 @@ impl Panel {
             return;
         }
         let anchor = self.diff_anchor();
-        self.diffs.insert(root, (generation, files));
+        self.diffs.insert(root.clone(), (generation, files));
         // Read in another order, if the files were listed another way since.
         self.order_diffs(items);
         self.diff_cols = ctx.cols;
         self.build_rows(items, anchor);
+        self.caret_placed(&root, generation, ctx);
     }
 
     /// The sheet, as shown.
@@ -9372,6 +9434,175 @@ mod tests {
         press(&mut panel, none(), Keysym::Down, &ctx);
         panel.key(&shift, Keysym::asciicircum, Keysym::asciicircum, &ctx);
         assert_eq!(panel.caret(), Some((r1, 2)));
+    }
+
+    #[test]
+    fn vims_deletes_cut_the_file_at_the_caret() {
+        use crate::diff_edit::{Cut, Spot};
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let text =
+            "diff --git a/f b/f\n@@ -1,3 +1,3 @@\n ctx(a, b);\n-old\n+let id = 1;\n+\tfoo(bar)\n";
+        let mut file = crate::diff::parse(text).pop().unwrap();
+        file.path = "src/a.rs".into();
+        file.code = 'M';
+        let g = panel.diff_gen;
+        panel.set_diffs(root("gerdr"), g, vec![file], &ctx);
+        let at = |panel: &Panel, n: usize| {
+            let on = |r: &DiffRow| matches!(r, DiffRow::Line(_, _, _, l) if *l == n);
+            panel.diff_rows.iter().position(on).unwrap()
+        };
+        let (ctx_row, old, id, foo) = (at(&panel, 0), at(&panel, 1), at(&panel, 2), at(&panel, 3));
+        panel.focus = Focus::Detail;
+        let spot = |line, col| Spot { line, col };
+        let cut = |o: Option<Outcome>| match o {
+            Some(Outcome::Cut(edit)) => {
+                assert_eq!((edit.root, edit.path.as_str()), (root("gerdr"), "src/a.rs"));
+                assert_eq!(edit.shown.len(), 3);
+                (edit.cut, edit.caret)
+            }
+            other => panic!("not a cut: {other:?}"),
+        };
+        let keys = |panel: &mut Panel, keys: &str| {
+            let mut last = None;
+            for c in keys.chars() {
+                let sym = Keysym::from_char(c);
+                let shift = mods(false, c.is_uppercase() || "$^".contains(c), false);
+                last = panel.key(&shift, Keysym::from_char(c.to_ascii_lowercase()), sym, &ctx);
+            }
+            last
+        };
+        // Lines, by their numbers in the file: `dd`, a count, `dj`, `dk`.
+        panel.caret_to(id, 4, &ctx);
+        assert_eq!(
+            cut(keys(&mut panel, "dd")),
+            (Cut::Lines(vec![2]), spot(2, 4))
+        );
+        assert_eq!(cut(keys(&mut panel, "3dd")).0, Cut::Lines(vec![2, 3, 4]));
+        assert_eq!(cut(keys(&mut panel, "dj")).0, Cut::Lines(vec![2, 3]));
+        assert_eq!(cut(keys(&mut panel, "d2k")).0, Cut::Lines(vec![1, 2]));
+        // Chars along the line, never past it.
+        assert_eq!(
+            cut(keys(&mut panel, "x")).0,
+            Cut::Chars(spot(2, 4), spot(2, 5))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "2x")).0,
+            Cut::Chars(spot(2, 4), spot(2, 6))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "X")).0,
+            Cut::Chars(spot(2, 3), spot(2, 4))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "D")).0,
+            Cut::Chars(spot(2, 4), spot(2, 11))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "d$")).0,
+            Cut::Chars(spot(2, 4), spot(2, 11))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "dw")).0,
+            Cut::Chars(spot(2, 4), spot(2, 7))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "de")).0,
+            Cut::Chars(spot(2, 4), spot(2, 6))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "db")).0,
+            Cut::Chars(spot(2, 0), spot(2, 4))
+        );
+        assert_eq!(
+            cut(keys(&mut panel, "d0")).0,
+            Cut::Chars(spot(2, 0), spot(2, 4))
+        );
+        // On the line's last word, `dw` takes it to the end.
+        panel.caret_to(id, 10, &ctx);
+        assert_eq!(
+            cut(keys(&mut panel, "dw")).0,
+            Cut::Chars(spot(2, 10), spot(2, 11))
+        );
+        // Esc forgets the `d`; a removed line isn't in the file.
+        assert_eq!(keys(&mut panel, "d"), None);
+        assert_eq!(
+            panel.key(&none(), Keysym::Escape, Keysym::Escape, &ctx),
+            None
+        );
+        assert_eq!(keys(&mut panel, "j"), None);
+        assert_eq!(panel.caret().map(|(r, _)| r), Some(foo));
+        panel.caret_to(old, 0, &ctx);
+        assert_eq!(
+            keys(&mut panel, "dd"),
+            Some(Outcome::Notice("A removed line isn't in the file"))
+        );
+        // A count moves on as many times.
+        panel.caret_to(ctx_row, 0, &ctx);
+        keys(&mut panel, "3j");
+        assert_eq!(panel.caret().map(|(r, _)| r), Some(foo));
+        // By lines with V, over the removed line; Shift with the arrows too.
+        panel.caret_to(ctx_row, 0, &ctx);
+        assert_eq!(keys(&mut panel, "Vjj"), None);
+        assert_eq!(
+            panel.mode_title().as_deref(),
+            Some("-- VISUAL LINE -- d delete · Esc stop")
+        );
+        assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
+        assert!(panel.visual.is_none());
+        panel.caret_to(id, 0, &ctx);
+        panel.key(&mods(false, true, false), Keysym::Down, Keysym::Down, &ctx);
+        assert_eq!(cut(keys(&mut panel, "x")).0, Cut::Lines(vec![2, 3]));
+        // By chars with v, on to the next line; shown as chosen.
+        panel.caret_to(id, 4, &ctx);
+        keys(&mut panel, "vj");
+        let shown: Vec<usize> = (0..panel.diff_rows.len()).collect();
+        assert_eq!(panel.chosen(&shown), [(id, 4..11), (foo, 0..5)]);
+        assert_eq!(
+            cut(keys(&mut panel, "d")).0,
+            Cut::Chars(spot(2, 4), spot(3, 5))
+        );
+        assert!(panel.chosen(&shown).is_empty());
+        // `u` and `U` undo and do again.
+        assert_eq!(keys(&mut panel, "u"), Some(Outcome::UndoCut));
+        assert_eq!(keys(&mut panel, "U"), Some(Outcome::RedoCut));
+    }
+
+    #[test]
+    fn after_a_cut_the_caret_goes_back_to_its_line() {
+        use crate::diff_edit::Spot;
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let g = panel.diff_gen;
+        let lines = ["one", "two", "three"];
+        panel.set_diffs(root("gerdr"), g, vec![added("src/a.rs", 'M', &lines)], &ctx);
+        panel.focus = Focus::Detail;
+        panel.place_caret(root("gerdr"), "src/a.rs".into(), Spot { line: 3, col: 2 });
+        // A read for the Git status read before stays where it was.
+        panel.set_diffs(root("gerdr"), g, vec![added("src/a.rs", 'M', &lines)], &ctx);
+        assert!(panel.caret().is_none());
+        let lines = ["one", "three"];
+        panel.set_diffs(
+            root("gerdr"),
+            g + 1,
+            vec![added("src/a.rs", 'M', &lines)],
+            &ctx,
+        );
+        let (row, col) = panel.caret().unwrap();
+        assert_eq!((panel.line_text(row), col), (Some("three"), 2));
+        // Keys typed while it is read again wait for it.
+        panel.place_caret(root("gerdr"), "src/a.rs".into(), Spot { line: 1, col: 0 });
+        assert_eq!(press(&mut panel, none(), Keysym::x, &ctx), None);
+        assert!(panel.take_held().is_empty());
+        panel.set_diffs(
+            root("gerdr"),
+            g + 2,
+            vec![added("src/a.rs", 'M', &lines)],
+            &ctx,
+        );
+        assert_eq!(panel.take_held(), [(none(), Keysym::x, Keysym::x)]);
     }
 
     #[test]

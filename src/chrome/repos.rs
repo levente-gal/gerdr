@@ -483,6 +483,8 @@ pub struct DetailView {
     /// index into what it shows, each with whether it is the one gone to.
     /// Empty for none.
     pub found: Vec<Vec<(Range<usize>, bool)>>,
+    /// The chars selected in visual mode, per row of `rows` with some.
+    pub chosen: Vec<(usize, Range<usize>)>,
     /// The row of `rows` the caret is on and the char of its line.
     pub caret: Option<(usize, usize)>,
     /// The row of `rows` the caret is on and the word at it there, by
@@ -1396,6 +1398,8 @@ struct DetailLook {
     focused: bool,
     /// The places the search found on it (`DetailView::found`).
     found: Vec<(Range<usize>, bool)>,
+    /// The chars selected on it (`DetailView::chosen`).
+    chosen: Option<Range<usize>>,
     /// The char the caret is on on it (`DetailView::caret`).
     caret: Option<usize>,
     /// The word at the caret on it (`DetailView::word`).
@@ -1426,6 +1430,9 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
         hover,
         focused: view.detail.focused,
         found: view.detail.found.get(i).cloned().unwrap_or_default(),
+        chosen: (view.detail.chosen.iter())
+            .find(|(j, _)| *j == i)
+            .map(|(_, chars)| chars.clone()),
         caret: (view.detail.caret)
             .filter(|(j, _)| *j == i)
             .map(|(_, col)| col),
@@ -3637,6 +3644,9 @@ impl Painter {
                 }
                 let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
                 let text = &line.text;
+                if let Some(chars) = &look.chosen {
+                    self.chosen_tint(c, text, chars, (tx, bend), row_band, width, scale, p);
+                }
                 self.found_tints(
                     c,
                     text,

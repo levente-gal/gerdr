@@ -252,7 +252,7 @@ fn colour(lang: &syntax::Lang, lines: &mut [Line]) {
 }
 
 /// `text` with its tabs as four spaces, as the panel draws them.
-fn expand(text: &str) -> String {
+pub fn expand(text: &str) -> String {
     text.replace('\t', "    ")
 }
 

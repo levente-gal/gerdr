@@ -22,6 +22,8 @@ const FOUND_TINT: f32 = 0.35;
 const FOUND_CURRENT_TINT: f32 = 0.75;
 /// How much of the accent the caret's block is, on the ground.
 const CARET_TINT: f32 = 0.6;
+/// How much of the accent is in the ground under what is selected.
+const CHOSEN_TINT: f32 = 0.4;
 const SEARCH_TICK: i32 = 2;
 
 /// The search: what is typed, what it says while empty, and how many
@@ -341,6 +343,43 @@ impl Painter {
         let thick = (scale.round() as i32).max(1);
         let under = y + h - 2 * thick;
         c.fill(x0 as i32, under, (x1 - x0) as i32, thick, p.muted);
+    }
+
+    /// Characters `chars` of `text` selected: a band under them, placed
+    /// as `found_tints` places its tints; a space's width for none, as on
+    /// an empty line.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn chosen_tint(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        chars: &Range<usize>,
+        (x, end): (f32, f32),
+        (y, h): (i32, i32),
+        width: impl Fn(&str) -> f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+        let x0 = x + width(&text[..byte(chars.start)]);
+        let mut x1 = x + width(&text[..byte(chars.end)]);
+        if x1 <= x0 {
+            x1 = x0 + width(" ");
+        }
+        let (x0, x1) = (x0.round(), x1.min(end).round());
+        if x0 >= x1 {
+            return;
+        }
+        let border = ((scale.round() as i32).max(1)) as f32;
+        let (ty, th) = (y as f32 + border, h as f32 - 2.0 * border);
+        c.rounded(
+            x0,
+            ty,
+            x1 - x0,
+            th,
+            scale as f32,
+            mix(p.elevated, p.accent, CHOSEN_TINT),
+        );
     }
 
     /// The caret: a block over character `ch` of `text` (past its end, a

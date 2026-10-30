@@ -25,6 +25,7 @@ use crate::{
         self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, SearchPart, Tone,
         TreeLine, TreeTool,
     },
+    diff_edit::{self, FileEdit},
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
@@ -38,6 +39,8 @@ use crate::{
 
 /// How many repositories a batch works in at once.
 const BATCH_THREADS: usize = 4;
+/// How many cuts made from the diff can be undone.
+const CUTS: usize = 100;
 
 /// Opening the panel fetches the repositories last fetched longer ago.
 const FETCH_AGE: Duration = Duration::from_secs(5 * 60);
@@ -648,6 +651,20 @@ impl Gerdr {
             panel.refresh(&ctx);
         }
         self.repos_detail();
+        self.repos_replay();
+    }
+
+    /// The keys typed in the diff while it was read again after a cut,
+    /// now that it is (or it no longer will be).
+    fn repos_replay(&mut self) {
+        let Some(panel) = self.repos.panel.as_mut() else {
+            return;
+        };
+        for (mods, sym, typed) in panel.take_held() {
+            if let Some(outcome) = self.repos_key(&mods, sym, typed) {
+                self.apply_repos(outcome);
+            }
+        }
     }
 
     /// A Git status read came in.
@@ -1256,6 +1273,9 @@ impl Gerdr {
                 self.projects.save();
             }
             Outcome::Notice(text) => self.show_notice(text.into()),
+            Outcome::Cut(edit) => self.repos_cut(edit),
+            Outcome::UndoCut => self.repos_undo_cut(false),
+            Outcome::RedoCut => self.repos_undo_cut(true),
             Outcome::Batch { .. }
             | Outcome::Confirmed { .. }
             | Outcome::CreateBranch { .. }
@@ -1342,6 +1362,55 @@ impl Gerdr {
                     ),
                 }
             }
+        }
+    }
+
+    /// Cut `edit` out of its file, the caret to go where the cut was once
+    /// the diff is read again.
+    fn repos_cut(&mut self, edit: FileEdit) {
+        match diff_edit::apply(&edit) {
+            Ok(done) => {
+                if let Some(panel) = &mut self.repos.panel {
+                    panel.place_caret(done.root.clone(), done.path.clone(), done.then);
+                }
+                self.repos.undone.clear();
+                self.repos.cuts.push(done);
+                if self.repos.cuts.len() > CUTS {
+                    self.repos.cuts.remove(0);
+                }
+                self.refresh_git();
+            }
+            Err(why) => self.show_notice(why),
+        }
+    }
+
+    /// Undo the last cut, or (`again`) do the last undone again, unless
+    /// its file changed since.
+    fn repos_undo_cut(&mut self, again: bool) {
+        let done = match again {
+            true => self.repos.undone.pop(),
+            false => self.repos.cuts.pop(),
+        };
+        let Some(done) = done else {
+            let none = if again {
+                "Nothing to do again"
+            } else {
+                "Nothing to undo"
+            };
+            return self.show_notice(none.into());
+        };
+        match diff_edit::redo(&done, !again) {
+            Ok(spot) => {
+                if let Some(panel) = &mut self.repos.panel {
+                    panel.place_caret(done.root.clone(), done.path.clone(), spot);
+                }
+                match again {
+                    true => self.repos.cuts.push(done),
+                    false => self.repos.undone.push(done),
+                }
+                self.refresh_git();
+            }
+            Err(why) => self.show_notice(why),
         }
     }
 
@@ -1745,6 +1814,7 @@ impl Gerdr {
                 }
                 // Read again if the status moved on meanwhile.
                 self.repos_detail();
+                self.repos_replay();
             }
             RepoEvent::Fetched => {
                 self.repos.fetches = self.repos.fetches.saturating_sub(1);
