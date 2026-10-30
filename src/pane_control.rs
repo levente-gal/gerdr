@@ -853,20 +853,21 @@ impl Gerdr {
     }
 
     /// What the bar of `pane` shows: what runs in it, for a terminal;
-    /// where its page can go, for a web page the extension follows (one it
-    /// doesn't can only have its address copied).
+    /// its address and where its page can go, for a web page the extension
+    /// follows (one it doesn't can only have its address copied).
     fn pane_bar_of(&self, pane: &Pane) -> BarContent {
         if let Some(herdr) = &pane.herdr {
             return self.pane_bar_content(&herdr.pane_id);
         }
         let content = app_bar_content(pane);
-        if web_page(pane).is_none() {
+        let Some(url) = web_page(pane) else {
             return content;
-        }
+        };
         let follows = self.web_control.follows(pane.id);
         // Where the page couldn't say, the way is left open.
         let history = self.web_control.history(pane.id);
         BarContent {
+            label: url.to_owned(),
             can_restart: follows,
             can_back: follows && history.back != Some(false),
             can_forward: follows && history.forward != Some(false),

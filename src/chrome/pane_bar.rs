@@ -4,9 +4,9 @@
 
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
-    PANE_BAR_HEIGHT, Painter, Palette, Rect, SHADOW, STATUS_GAP, STATUS_WIDTH, centred_dot,
-    chevron_side, copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop,
-    text_lines, zoom_corners,
+    PANE_BAR_HEIGHT, Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band,
+    centred_dot, chevron_side, copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark,
+    stop, text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -101,27 +101,56 @@ pub fn unzoom_button_rect(pane: Rect) -> Option<Rect> {
     })
 }
 
-/// Where the buttons of a bar with `kind`'s sit, left to right, at its
+/// Where the buttons of a bar with `kind`'s sit, left to right: those
+/// leading it at its start (see `BarButtons::leading`), the rest at its
 /// right end; last the zoom button, if `zoom` (see `zoom_button`).
 pub fn pane_bar_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<(BarButton, Rect)> {
-    let right = bar.loc.x + bar.size.w - BAR_INSET;
-    let buttons: Vec<_> = kind
-        .buttons()
-        .iter()
-        .copied()
-        .chain(zoom_button(zoom))
-        .collect();
-    let n = buttons.len() as i32;
-    let at = |i: i32| {
+    let (leading, trailing) = kind.buttons().split_at(kind.leading());
+    let trailing: Vec<_> = trailing.iter().copied().chain(zoom_button(zoom)).collect();
+    let step = BAR_BUTTON + BAR_BUTTON_GAP;
+    let at = |x: i32| Rectangle::new((x, bar.loc.y).into(), (BAR_BUTTON, bar.size.h).into());
+    let left = bar.loc.x + BAR_INSET;
+    let n = trailing.len() as i32;
+    let right = bar.loc.x + bar.size.w - BAR_INSET - n * step + BAR_BUTTON_GAP;
+    let leading = (0..)
+        .zip(leading)
+        .map(|(i, &button)| (button, at(left + i * step)));
+    let trailing = (0..)
+        .zip(trailing)
+        .map(|(i, button)| (button, at(right + i * step)));
+    leading.chain(trailing).collect()
+}
+
+/// How far the address field of a web page's bar keeps from the buttons
+/// either side of it, and from the bar's top and bottom.
+const BAR_FIELD_GAP: i32 = 4;
+const BAR_FIELD_INSET: i32 = 3;
+
+/// Where the read-only field with a web page's address sits in a bar with
+/// `kind`'s buttons and the zoom button if `zoom`: all the room between
+/// the buttons at its start and those at its end. None for a bar that
+/// shows no address, or has no room for one.
+pub fn pane_bar_field(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Option<Rect> {
+    if kind != BarButtons::Web {
+        return None;
+    }
+    let buttons = pane_bar_buttons(bar, kind, zoom);
+    let lead = kind.leading();
+    let left = buttons[..lead]
+        .last()
+        .map_or(bar.loc.x + BAR_INSET, |(_, r)| r.loc.x + r.size.w)
+        + BAR_FIELD_GAP;
+    let right = buttons
+        .get(lead)
+        .map_or(bar.loc.x + bar.size.w - BAR_INSET, |(_, r)| r.loc.x)
+        - BAR_FIELD_GAP;
+    let h = bar.size.h - 2 * BAR_FIELD_INSET;
+    (right - left >= BAR_BUTTON && h > 0).then(|| {
         Rectangle::new(
-            (right - (i + 1) * BAR_BUTTON - i * BAR_BUTTON_GAP, bar.loc.y).into(),
-            (BAR_BUTTON, bar.size.h).into(),
+            (left, bar.loc.y + BAR_FIELD_INSET).into(),
+            (right - left, h).into(),
         )
-    };
-    (0..n)
-        .zip(buttons)
-        .map(|(i, button)| (button, at(n - 1 - i)))
-        .collect()
+    })
 }
 
 /// The zoom button of a bar whose pane is zoomed (`Some(true)`) or can be
@@ -177,7 +206,8 @@ pub enum BarButtons {
     None,
     /// A terminal: its scrollback, and restart and stop what runs in it.
     Terminal,
-    /// A web page: back, forward, reload, and copy its address.
+    /// A web page: back, forward and reload at the start, its address in
+    /// a field filling the rest, and copy it at the end.
     Web,
 }
 
@@ -193,6 +223,15 @@ impl BarButtons {
                 BarButton::Reload,
                 BarButton::CopyUrl,
             ],
+        }
+    }
+
+    /// How many of the buttons lead the bar, at its start; the rest are
+    /// at its end.
+    pub fn leading(self) -> usize {
+        match self {
+            Self::Web => 3,
+            Self::None | Self::Terminal => 0,
         }
     }
 }
@@ -223,6 +262,7 @@ pub struct PaneBarView {
     /// Where the bar goes on the output when shown in full; no height while
     /// it is hidden and still.
     pub rect: Rect,
+    /// What runs, or a web page's address.
     pub label: String,
     /// A word after the label, such as "exited" or "stopping…".
     pub note: Option<&'static str>,
@@ -322,8 +362,10 @@ impl Painter {
     }
 
     /// A pane's bar: a mark saying how its command is, the command (or the
-    /// page's title) and a note after it, then, with the pointer over it,
-    /// its buttons. Drawn `view.slide` pixels up, cut off at the top.
+    /// app's title) and a note after it, then, with the pointer over it,
+    /// its buttons. A web page's has its buttons always, and its address
+    /// in a field between them. Drawn `view.slide` pixels up, cut off at
+    /// the top.
     pub(super) fn pane_bar(
         &self,
         view: &PaneBarView,
@@ -348,6 +390,31 @@ impl Painter {
         let up = -view.slide;
         let bar = Rectangle::new((0, up).into(), full);
         let buttons = pane_bar_buttons(bar, view.buttons, view.zoom);
+        if view.buttons == BarButtons::Web {
+            if let Some(field) = pane_bar_field(bar, view.buttons, view.zoom) {
+                let (x, y, w, h) = rect_px(field, scale);
+                let (b, r) = (line as f32, 4.0 * s);
+                c.rounded(x, y, w, h, r, p.border);
+                let fill = mix(p.elevated, p.element, 0.6);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                let pad = px(6) as f32;
+                let color = if view.focused { p.text } else { p.muted };
+                let band = band(field, scale);
+                let label = &view.label;
+                self.text(
+                    &mut c,
+                    label,
+                    DETAIL_FONT_SIZE,
+                    x + pad,
+                    x + w - pad,
+                    band,
+                    scale,
+                    color,
+                );
+            }
+            self.bar_buttons(&mut c, view, buttons, background, scale, p);
+            return c.into_buffer(true);
+        }
         let mark = Rectangle::new((PADDING as i32, up).into(), (STATUS_WIDTH, full.h).into());
         // The marks the sidebar's agent chips use: a ring for waiting, an
         // open ring for busy. A running command's is a blinking dot,
@@ -404,9 +471,23 @@ impl Painter {
             );
         }
 
-        if !view.lit {
-            return c.into_buffer(true);
+        if view.lit {
+            self.bar_buttons(&mut c, view, buttons, background, scale, p);
         }
+        c.into_buffer(true)
+    }
+
+    /// The buttons of a pane's bar, at `buttons`, over its `background`.
+    fn bar_buttons(
+        &self,
+        c: &mut Canvas,
+        view: &PaneBarView,
+        buttons: Vec<(BarButton, Rect)>,
+        background: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
         for (button, rect) in buttons {
             let enabled = match button {
                 BarButton::Restart => view.can_restart,
@@ -437,28 +518,23 @@ impl Painter {
             };
             match button {
                 BarButton::Restart | BarButton::Reload => {
-                    icon_sdf(&mut c, rect, scale, color, |x, y| restart_arrow(x, y, s))
+                    icon_sdf(c, rect, scale, color, |x, y| restart_arrow(x, y, s))
                 }
-                BarButton::Stop => icon_sdf(&mut c, rect, scale, color, |x, y| stop(x, y, s)),
+                BarButton::Stop => icon_sdf(c, rect, scale, color, |x, y| stop(x, y, s)),
                 BarButton::Back | BarButton::Forward => {
                     let left = button == BarButton::Back;
-                    icon_sdf(&mut c, rect, scale, color, |x, y| {
-                        chevron_side(left, x, y, s)
-                    })
+                    icon_sdf(c, rect, scale, color, |x, y| chevron_side(left, x, y, s))
                 }
-                BarButton::CopyUrl => icon_sdf(&mut c, rect, scale, color, |x, y| copy(x, y, s)),
+                BarButton::CopyUrl => icon_sdf(c, rect, scale, color, |x, y| copy(x, y, s)),
                 BarButton::Scrollback => {
-                    icon_sdf(&mut c, rect, scale, color, |x, y| text_lines(x, y, s))
+                    icon_sdf(c, rect, scale, color, |x, y| text_lines(x, y, s))
                 }
                 BarButton::Zoom | BarButton::Unzoom => {
                     let unzoom = button == BarButton::Unzoom;
-                    icon_sdf(&mut c, rect, scale, color, |x, y| {
-                        zoom_corners(unzoom, x, y, s)
-                    })
+                    icon_sdf(c, rect, scale, color, |x, y| zoom_corners(unzoom, x, y, s))
                 }
             }
         }
-        c.into_buffer(true)
     }
 }
 
@@ -467,7 +543,8 @@ mod tests {
     use super::{
         BAR_REVEAL, BarButton, BarButtons, BarHit, BarStatus, FOCUS_STRIP, PaneBarView,
         UNZOOM_BUTTON, UNZOOM_MARGIN, focus_strip, focus_strip_rect, pane_bar_buttons,
-        pane_bar_hit, pane_bar_rects, pane_bar_rects_shown, pointer_reveals, unzoom_button_rect,
+        pane_bar_field, pane_bar_hit, pane_bar_rects, pane_bar_rects_shown, pointer_reveals,
+        unzoom_button_rect,
     };
     use crate::chrome::{BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
 
@@ -590,7 +667,35 @@ mod tests {
     }
 
     #[test]
-    fn pane_bar_buttons_sit_right_and_do_not_overlap() {
+    fn a_web_bar_leads_with_its_steps_and_fills_the_rest_with_its_address() {
+        let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
+        for zoom in [None, Some(false)] {
+            let buttons = pane_bar_buttons(bar, BarButtons::Web, zoom);
+            let (_, reload) = buttons[2];
+            assert_eq!(buttons[0].1.loc.x, 200 + BAR_INSET);
+            assert_eq!(buttons[3].0, BarButton::CopyUrl);
+            let field = pane_bar_field(bar, BarButtons::Web, zoom).unwrap();
+            assert!(field.loc.x >= reload.loc.x + reload.size.w);
+            assert!(field.loc.x + field.size.w <= buttons[3].1.loc.x);
+            assert!(field.loc.y > 50 && field.loc.y + field.size.h < 50 + PANE_BAR_HEIGHT);
+            // The field is the label: a click there holds the pane.
+            let mid = field.to_f64().loc + field.to_f64().size.downscale(2.0).to_point();
+            assert_eq!(
+                pane_bar_hit(bar, BarButtons::Web, zoom, mid),
+                Some(BarHit::Label)
+            );
+        }
+        // Copy sits at the end, or just before the zoom button.
+        let buttons = pane_bar_buttons(bar, BarButtons::Web, None);
+        let (_, copy) = buttons.last().unwrap();
+        assert_eq!(copy.loc.x + copy.size.w, 200 + 600 - BAR_INSET);
+        assert_eq!(pane_bar_field(bar, BarButtons::Terminal, None), None);
+        let narrow = Rect::new((0, 0).into(), (120, PANE_BAR_HEIGHT).into());
+        assert_eq!(pane_bar_field(narrow, BarButtons::Web, Some(false)), None);
+    }
+
+    #[test]
+    fn pane_bar_buttons_do_not_overlap() {
         let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
         let kinds = [BarButtons::Terminal, BarButtons::Web, BarButtons::None];
         for (kind, zoom) in kinds
@@ -606,6 +711,7 @@ mod tests {
                 BarButton::Zoom
             };
             assert_eq!(order, [kind.buttons(), &[zoom_button]].concat());
+            assert!(kind.leading() < order.len());
             let (_, last) = buttons.last().unwrap();
             assert_eq!(last.loc.x + last.size.w, 200 + 600 - BAR_INSET);
             for pair in buttons.windows(2) {
