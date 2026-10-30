@@ -4722,8 +4722,8 @@ impl Gerdr {
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
             return None;
         }
-        // The help panel takes the clicks on it.
-        if self.help_hit(pos).is_some() {
+        // The help panel and the unzoom button take the clicks on them.
+        if self.help_hit(pos).is_some() || self.unzoom_button_at(pos).is_some() {
             return None;
         }
         self.surface_under(pos)
@@ -5696,6 +5696,7 @@ impl Gerdr {
             scrollback: self.scrollback_view(),
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
+            unzoom: self.unzoom_button().map(|(_, rect)| rect),
             theme: self.theme(),
             density: self.density,
             sidebar_width: self.sidebar_width,

@@ -151,6 +151,8 @@ pub struct ChromeView {
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
     pub pane_bars: Vec<PaneBarView>,
+    /// Where the button unzooming the zoomed pane floats, if one is.
+    pub unzoom: Option<Rect>,
     pub theme: Theme,
     pub density: Density,
     pub sidebar_width: i32,
@@ -188,6 +190,8 @@ pub struct Chrome {
     blink_dot: Cached<(Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
+    /// The button over a zoomed pane: lit or not, theme, scale.
+    unzoom: Cached<(bool, Theme, f64)>,
     /// The strip along the focused pane's top edge.
     focus_strip: Cached<(Size<i32, Logical>, Theme, f64)>,
     /// The highlight where a held pane would land: its size, theme, scale.
@@ -233,6 +237,7 @@ impl Chrome {
             spinner: Cached::default(),
             blink_dot: Cached::default(),
             pane_bars: Vec::new(),
+            unzoom: Cached::default(),
             focus_strip: Cached::default(),
             pane_drop: Cached::default(),
             hits: Cached::default(),
@@ -445,7 +450,7 @@ impl Chrome {
         // The toasts, stacked at the bottom right of the app area, each
         // fading on its own. One leaving fades where the stack has it, which
         // holds its place until it is gone.
-        let layouts = toast_layout(&view.toasts, area);
+        let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
         for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
             if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
                 self.toasts.push((toast.id, Overlay::default()));
@@ -477,6 +482,17 @@ impl Chrome {
             parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
                 painter.toast(toast, *w, *hovered, scale, theme.palette())
             }));
+        }
+
+        // The button unzooming the zoomed pane, over it and under the
+        // toasts.
+        if let Some(button) = view.unzoom {
+            let hovered = button.to_f64().contains(pointer);
+            let buffer = self.unzoom.get((hovered, theme, scale), |(hovered, ..)| {
+                painter.unzoom_button(*hovered, scale, theme.palette())
+            });
+            let (loc, size) = shadowed(button);
+            parts.push(Part::new(buffer, loc, size, 1.0));
         }
 
         // The placeholders over the panes still waiting for their window,
@@ -836,10 +852,11 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
                 .map(|(_, rect)| rect),
         );
     }
+    rects.extend(view.unzoom);
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);
     }
-    let toasts = toast_layout(&view.toasts, area);
+    let toasts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
     for (layout, _) in toasts.iter().zip(&view.toasts).filter(|(_, t)| !t.leaving) {
         rects.push(layout.panel);
         rects.extend(layout.button);

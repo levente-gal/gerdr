@@ -696,6 +696,13 @@ impl Gerdr {
             }
             return true;
         }
+        // The button floating over a zoomed pane unzooms it.
+        if let Some(id) = self.unzoom_button_at(location) {
+            if button == BTN_LEFT {
+                self.zoom_pane(id);
+            }
+            return true;
+        }
         if button == BTN_LEFT
             && let Some(drag) = self.divider_at(location)
         {
@@ -923,9 +930,10 @@ impl Gerdr {
                 None => RegionHit::Nothing,
             };
         }
-        // Over the apps: the toasts, the pane bars' buttons, a placeholder's.
+        // Over the apps: the toasts, the pane bars' buttons, a placeholder's,
+        // the one unzooming a zoomed pane.
         let views = self.toast_views();
-        let toasts = chrome::toast_layout(&views, self.content_rect());
+        let toasts = chrome::toast_layout(&views, self.toast_rect());
         if toasts
             .iter()
             .zip(&views)
@@ -935,6 +943,7 @@ impl Gerdr {
         }
         if matches!(self.pane_bar_at(pos), Some((_, BarHit::Button(_))))
             || self.placeholder_button_at(pos).is_some()
+            || self.unzoom_button_at(pos).is_some()
         {
             return RegionHit::Control;
         }

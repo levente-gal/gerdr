@@ -4,9 +4,9 @@
 
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
-    PANE_BAR_HEIGHT, Painter, Palette, Rect, STATUS_GAP, STATUS_WIDTH, centred_dot, chevron_side,
-    copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop, text_lines,
-    zoom_corners,
+    PANE_BAR_HEIGHT, Painter, Palette, Rect, SHADOW, STATUS_GAP, STATUS_WIDTH, centred_dot,
+    chevron_side, copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop,
+    text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -77,6 +77,28 @@ pub fn focus_strip(size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryR
     let mut c = Canvas::new(physical(size, scale));
     c.fill(0, 0, c.w, c.h, p.accent);
     c.into_buffer(false)
+}
+
+/// The round button floating over a zoomed pane to unzoom it: this big,
+/// and this far in from the pane's bottom right corner.
+pub const UNZOOM_BUTTON: i32 = 36;
+pub const UNZOOM_MARGIN: i32 = 16;
+
+/// Where the button unzooming the pane at `pane` floats: in its bottom
+/// right corner, or nowhere when the pane is too small to hold it.
+pub fn unzoom_button_rect(pane: Rect) -> Option<Rect> {
+    let room = UNZOOM_BUTTON + 2 * UNZOOM_MARGIN;
+    (pane.size.w >= room && pane.size.h >= room).then(|| {
+        let edge = UNZOOM_MARGIN + UNZOOM_BUTTON;
+        Rectangle::new(
+            (
+                pane.loc.x + pane.size.w - edge,
+                pane.loc.y + pane.size.h - edge,
+            )
+                .into(),
+            (UNZOOM_BUTTON, UNZOOM_BUTTON).into(),
+        )
+    })
 }
 
 /// Where the buttons of a bar with `kind`'s sit, left to right, at its
@@ -271,6 +293,34 @@ impl PaneBarView {
 }
 
 impl Painter {
+    /// The button floating over a zoomed pane: a round panel with its
+    /// shadow and the unzoom icon, lit while `hovered`.
+    pub(super) fn unzoom_button(
+        &self,
+        hovered: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let size = Size::from((UNZOOM_BUTTON, UNZOOM_BUTTON));
+        let mut c = self.popup(size, UNZOOM_BUTTON as f32 / 2.0, scale, p);
+        // The icon a little bigger than on the bars, to fill the disc.
+        let s = scale as f32 * 1.25;
+        let button = Rectangle::new((SHADOW, SHADOW).into(), size);
+        if hovered {
+            let inset = Rectangle::new(
+                (SHADOW + 3, SHADOW + 3).into(),
+                (UNZOOM_BUTTON - 6, UNZOOM_BUTTON - 6).into(),
+            );
+            let (x, y, w, h) = rect_px(inset, scale);
+            c.rounded(x, y, w, h, w / 2.0, p.selected);
+        }
+        let color = if hovered { p.text } else { p.muted };
+        icon_sdf(&mut c, button, scale, color, |x, y| {
+            zoom_corners(true, x, y, s)
+        });
+        c.into_buffer(false)
+    }
+
     /// A pane's bar: a mark saying how its command is, the command (or the
     /// page's title) and a note after it, then, with the pointer over it,
     /// its buttons. Drawn `view.slide` pixels up, cut off at the top.
@@ -416,8 +466,8 @@ impl Painter {
 mod tests {
     use super::{
         BAR_REVEAL, BarButton, BarButtons, BarHit, BarStatus, FOCUS_STRIP, PaneBarView,
-        focus_strip, focus_strip_rect, pane_bar_buttons, pane_bar_hit, pane_bar_rects,
-        pane_bar_rects_shown, pointer_reveals,
+        UNZOOM_BUTTON, UNZOOM_MARGIN, focus_strip, focus_strip_rect, pane_bar_buttons,
+        pane_bar_hit, pane_bar_rects, pane_bar_rects_shown, pointer_reveals, unzoom_button_rect,
     };
     use crate::chrome::{BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
 
@@ -458,6 +508,21 @@ mod tests {
             )
         );
         assert_eq!(pane_bar_rects_shown(pane, true), (bar, client));
+    }
+
+    #[test]
+    fn the_unzoom_button_floats_in_the_bottom_right_corner() {
+        let pane = Rect::new((200, 50).into(), (600, 400).into());
+        let button = unzoom_button_rect(pane).unwrap();
+        assert_eq!(button.size.w, UNZOOM_BUTTON);
+        assert_eq!(button.loc.x + UNZOOM_BUTTON + UNZOOM_MARGIN, 800);
+        assert_eq!(button.loc.y + UNZOOM_BUTTON + UNZOOM_MARGIN, 450);
+        let tiny = Rect::new((0, 0).into(), (UNZOOM_BUTTON, 400).into());
+        assert_eq!(unzoom_button_rect(tiny), None);
+        let painter = Painter::new();
+        for theme in [Theme::Dark, Theme::Light] {
+            painter.unzoom_button(true, 2.0, theme.palette());
+        }
     }
 
     #[test]
