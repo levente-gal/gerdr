@@ -223,21 +223,22 @@ impl Gerdr {
     /// Where the shown project already runs the VS Code `command` starts
     /// (see `vs_code_of`), or waits for its window: its workspace, tab and
     /// leaf. A second one would only open an editor window of the same copy
-    /// (for Cursor, not its Agents window), so a project keeps one.
+    /// (for Cursor, not its Agents window), so a project keeps one. Another
+    /// window of a kept one counts once shown (see `Pane::window_of`).
     fn running_vs_code(&self, command: &str) -> Option<(usize, usize, u32)> {
         let key = vs_code_of(command)?;
-        let same = |c: &Option<String>| c.as_deref().and_then(vs_code_of).as_ref() == Some(&key);
+        let same = |c: Option<&str>| c.and_then(vs_code_of).as_ref() == Some(&key);
         self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             ws.tabs.iter().enumerate().find_map(|(t, tab)| {
                 let shown = tab
                     .panes
                     .iter()
-                    .find(|p| same(&p.app_command))
+                    .find(|p| same(p.app_command.as_deref().or(p.window_of.as_deref())))
                     .map(|p| p.id);
                 let waiting = || {
                     tab.expected
                         .iter()
-                        .find(|e| same(&e.app_command))
+                        .find(|e| same(e.app_command.as_deref()))
                         .map(|e| e.pane)
                 };
                 Some((w, t, shown.or_else(waiting)?))
@@ -334,7 +335,7 @@ impl Gerdr {
         let tab = self.workspaces.get(w)?.tabs.get(t)?;
         match tab.panes.iter().find(|p| p.id == leaf) {
             Some(pane) if self.is_kept_window(&pane.window) => {
-                self.kept_pid(pane.app_command.as_deref()?)
+                self.kept_pid(pane.app_command.as_deref().or(pane.window_of.as_deref())?)
             }
             Some(pane) => self.window_pid(&pane.window),
             None => tab.expected.iter().find(|e| e.pane == leaf)?.pid,

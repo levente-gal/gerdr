@@ -4032,8 +4032,11 @@ impl Gerdr {
                     e.timed_out = true;
                     overdue.push((e.pane, e.label()));
                 }
-                // A launched app's window can't be told apart once its processes are gone.
-                let grace = if e.app_id.is_empty() {
+                // A launched app's window can't be told apart once its
+                // processes are gone; a kept one's comes through the
+                // server's client, maybe after what started it handed off
+                // to the app running there (a second `cursor`).
+                let grace = if e.app_id.is_empty() && !e.kept {
                     Duration::ZERO
                 } else {
                     HANDOFF_GRACE
