@@ -532,9 +532,7 @@ impl DiffView {
                 }
                 let at = Some((k, f));
                 for (h, hunk) in file.hunks.iter().enumerate() {
-                    if h > 0 || !hunk.context.is_empty() {
-                        rows.push(DiffRow::Hunk(k, f, h));
-                    }
+                    rows.push(DiffRow::Hunk(k, f, h));
                     for l in 0..hunk.lines.len() {
                         rows.push(DiffRow::Line(k, f, h, l));
                         for &c in under.get(&(h, l)).into_iter().flatten() {

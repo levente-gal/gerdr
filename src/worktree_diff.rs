@@ -743,6 +743,7 @@ mod tests {
                 DetailRow::File(file) => format!("file {} {:?}", file.path, file.check),
                 DetailRow::Line(line) => line.text.clone(),
                 DetailRow::Text(line) => line.text.clone(),
+                DetailRow::Hunk { context, .. } => format!("@ {context}"),
                 other => format!("{other:?}"),
             })
             .collect()
@@ -770,9 +771,11 @@ mod tests {
             [
                 "repo gerdr",
                 "file a.rs None",
+                "@ ",
                 "a",
                 "b",
                 "file new.rs None",
+                "@ ",
                 "n"
             ]
         );
@@ -792,6 +795,7 @@ mod tests {
         assert_eq!(key(&mut wd, none(), Keysym::Down), None);
         assert_eq!(key(&mut wd, none(), Keysym::space), None);
         // A comment on a line, then copied for an agent.
+        key(&mut wd, none(), Keysym::Down);
         key(&mut wd, none(), Keysym::Down);
         key(&mut wd, none(), Keysym::Down);
         key(&mut wd, none(), Keysym::c);
@@ -847,25 +851,26 @@ mod tests {
         // On a line, its line at the caret's char.
         key(&mut wd, Keysym::Down);
         key(&mut wd, Keysym::Down);
+        key(&mut wd, Keysym::Down);
         key(&mut wd, Keysym::g);
         assert_eq!(opened(key(&mut wd, Keysym::space)).1, at(2, Some(0)));
         // `g` and another key: nothing, and Space is its own again.
         key(&mut wd, Keysym::g);
         assert_eq!(key(&mut wd, Keysym::k), None);
-        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(3));
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(4));
         assert_eq!(wd.diff.mode_title(), None);
         assert_eq!(key(&mut wd, Keysym::space), None);
         // Ctrl+click: the caret on the char pressed, there in Zed.
-        wd.diff.pointer_char = Some((2, 0));
-        let (paths, place) = opened(wd.goto_row(2, ENV));
+        wd.diff.pointer_char = Some((3, 0));
+        let (paths, place) = opened(wd.goto_row(3, ENV));
         assert_eq!((paths, place), (vec!["a.rs".to_owned()], at(1, Some(0))));
-        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(2));
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(3));
         // On a comment, its line, the comment not edited.
         key(&mut wd, Keysym::c);
         key(&mut wd, Keysym::o);
         key(&mut wd, Keysym::Return);
         assert_eq!(wd.diff.review.comments.len(), 1);
-        assert_eq!(opened(wd.goto_row(3, ENV)).1, at(1, None));
+        assert_eq!(opened(wd.goto_row(4, ENV)).1, at(1, None));
         assert!(wd.diff.editing.is_none());
     }
 
@@ -882,8 +887,8 @@ mod tests {
             ..Since::default()
         };
         wd.set_read(Ok((since, vec![file])), ENV);
-        assert_eq!(texts(&wd)[2], "gone");
-        let (_, place) = opened(wd.goto_row(2, ENV));
+        assert_eq!(texts(&wd)[3], "gone");
+        let (_, place) = opened(wd.goto_row(3, ENV));
         assert_eq!(place.map(|at| at.col), Some(None));
     }
 
@@ -907,6 +912,7 @@ mod tests {
         let mut wd = read();
         let mut key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
         for sym in [
+            Keysym::Down,
             Keysym::Down,
             Keysym::Down,
             Keysym::Down,
