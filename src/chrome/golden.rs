@@ -55,6 +55,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             ci: None,
             folded: false,
             restart: false,
+            picks: Vec::new(),
         },
         WorkspaceView {
             name: "~".into(),
@@ -69,6 +70,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             ci: None,
             folded: false,
             restart: false,
+            picks: Vec::new(),
         },
     ]
 }
@@ -1111,6 +1113,38 @@ fn dump_overlays() {
                     header_lit: false,
                     state: SidebarState {
                         rows: vec![hovered],
+                        ..SidebarState::default()
+                    },
+                },
+                (260, 520).into(),
+                scale,
+                p,
+            ),
+            px(260),
+        );
+        // The same, its AI button's strip of agents open, one lit.
+        let mut picking = workspaces();
+        picking[0].picks = vec![
+            crate::agent_icons::AgentIcon::Claude,
+            crate::agent_icons::AgentIcon::Cursor,
+            crate::agent_icons::AgentIcon::OpenCode,
+        ];
+        dump(
+            &dir,
+            &format!("sidebar_agent_strip_{tag}"),
+            painter.sidebar_view(
+                &SidebarView {
+                    workspaces: picking,
+                    agents: many_agents(),
+                    active: Some(0),
+                    project: Some("aft".into()),
+                    header_lit: false,
+                    state: SidebarState {
+                        rows: vec![RowState {
+                            pick: Some(1),
+                            agent: false,
+                            ..hovered
+                        }],
                         ..SidebarState::default()
                     },
                 },

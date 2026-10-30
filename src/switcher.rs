@@ -40,7 +40,6 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
-    agent_icons::AgentIcon,
     agents::AgentKey,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
@@ -77,9 +76,9 @@ pub enum Target {
     Shortcuts,
     /// The inbox panel.
     Inbox,
-    /// Cursor's agent CLI in a new tab of the shown workspace (see
-    /// `Gerdr::new_cursor_agent`).
-    CursorAgent,
+    /// An agent CLI's command, to run in a new tab of workspace `.0` (see
+    /// `Gerdr::new_agent`).
+    NewAgent(usize, String),
     /// The config file, to edit.
     Settings,
     /// A project's file, by id, to edit in a new tab.
@@ -114,7 +113,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
-            | Target::CursorAgent
+            | Target::NewAgent(..)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -136,7 +135,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
-            | Target::CursorAgent
+            | Target::NewAgent(..)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -720,7 +719,7 @@ fn frecency_key(
         Target::Workspace(w) => format!("workspace:{}", workspace_dir(*w)?.display()),
         Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
         Target::Agent(key) => format!("agent:{key}"),
-        Target::CursorAgent => "cursor-agent".to_owned(),
+        Target::NewAgent(_, command) => format!("agent-cli:{command}"),
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
         Target::App(command) | Target::Command(command) | Target::RepoPage(command) => {
@@ -801,6 +800,23 @@ impl Gerdr {
         self.query_zoxide();
     }
 
+    /// Open the switcher as the agent picker: a row per installed agent
+    /// CLI, to start in a new tab of workspace `w`.
+    pub fn open_agent_picker(&mut self, w: usize) {
+        self.refresh_cli_agents();
+        let items = self.agent_entries(w);
+        if items.is_empty() {
+            self.toast("No agent CLI found on PATH".into(), Level::Info);
+            return;
+        }
+        self.project_menu = None;
+        self.inbox.close();
+        self.scrollback = None;
+        let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
+        switcher.set_room(self.switcher_room());
+        self.switcher = Some(switcher);
+    }
+
     /// Open the switcher as the run prompt, for a command to launch in
     /// `place`, and look for installed apps again meanwhile.
     pub fn open_run_prompt(&mut self, place: Place) {
@@ -871,7 +887,7 @@ impl Gerdr {
                 Target::Command(command),
             )
         }));
-        items.extend(self.cursor_agent_entry());
+        items.extend(self.agent_entries(self.active_workspace));
         items.push(self.inbox_entry());
         let home = home_dir();
         if let Some(home) = &home {
@@ -891,21 +907,26 @@ impl Gerdr {
         self.weighed(items)
     }
 
-    /// The row starting Cursor's agent CLI in the shown workspace, naming
-    /// it; none without one.
-    fn cursor_agent_entry(&self) -> Option<Item> {
-        let ws = self.workspace()?;
-        let icon = AgentIcon::Cursor
-            .picture()
-            .map_or(ItemIcon::Command, |picture| {
-                ItemIcon::Picture(picture.clone())
-            });
-        Some(Item::new(
-            icon,
-            "New Cursor agent",
-            format!("in {}", ws.name),
-            Target::CursorAgent,
-        ))
+    /// A row per installed agent CLI, starting it in workspace `w`,
+    /// naming it; none without it.
+    fn agent_entries(&self, w: usize) -> Vec<Item> {
+        let Some(ws) = self.workspaces.get(w) else {
+            return Vec::new();
+        };
+        self.cli_agents
+            .iter()
+            .map(|agent| {
+                let icon = agent.icon.picture().map_or(ItemIcon::Command, |picture| {
+                    ItemIcon::Picture(picture.clone())
+                });
+                Item::new(
+                    icon,
+                    format!("New {} agent", agent.name),
+                    format!("in {}", ws.name),
+                    Target::NewAgent(w, agent.command.clone()),
+                )
+            })
+            .collect()
     }
 
     /// The row opening the inbox, saying how many items its button counts.
@@ -1112,7 +1133,7 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
-            Target::CursorAgent => self.new_cursor_agent(self.active_workspace),
+            Target::NewAgent(w, command) => self.new_agent(w, &command),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),

@@ -336,6 +336,33 @@ pub(super) fn restart_arrow(x: f32, y: f32, s: f32) -> f32 {
     ring.min(head)
 }
 
+/// Signed distance to a sparkle centred on the origin, about 12 logical
+/// pixels across: a four-pointed star with a small one at its upper
+/// right. The AI agents.
+pub(super) fn sparkle(x: f32, y: f32, s: f32) -> f32 {
+    // A star of four points: two rhombi crossed, each arm `long` from its
+    // centre and `wide` across at it.
+    let star = |cx: f32, cy: f32, long: f32, wide: f32| {
+        let rhombus = |x: f32, y: f32, a: f32, b: f32| {
+            let (qx, qy) = (x.abs(), y.abs());
+            let h =
+                ((-2.0 * (qx * a - qy * b) + (a * a - b * b)) / (a * a + b * b)).clamp(-1.0, 1.0);
+            let d = (qx - 0.5 * a * (1.0 - h)).hypot(qy - 0.5 * b * (1.0 + h));
+            d * (qx * b + qy * a - a * b).signum()
+        };
+        let (x, y) = (x - cx, y - cy);
+        rhombus(x, y, wide, long).min(rhombus(x, y, long, wide))
+    };
+    star(-s, s, 4.8 * s, 1.5 * s).min(star(3.6 * s, -3.6 * s, 2.2 * s, 0.75 * s))
+}
+
+/// Signed distance to an ellipsis centred on the origin: three dots in a
+/// row. More of them, elsewhere.
+pub(super) fn ellipsis(x: f32, y: f32, s: f32) -> f32 {
+    let dot = |cx: f32| (x - cx * s).hypot(y) - 1.2 * s;
+    dot(-3.6).min(dot(0.0)).min(dot(3.6))
+}
+
 /// Signed distance to a "×" centred on the origin: forget.
 pub(super) fn cross(x: f32, y: f32, s: f32) -> f32 {
     let arm = 3.8 * s;
