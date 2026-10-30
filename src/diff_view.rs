@@ -1516,12 +1516,17 @@ impl DiffView {
             }
             return buttons;
         }
-        // Every hunk's header in view puts the hunk back.
+        // Every hunk's header in view puts the hunk back: no key does
+        // that, R putting back the change at the caret.
+        let hunk = Hint {
+            key: String::new(),
+            ..hint(B::Restore)
+        };
         let mut buttons: Vec<(usize, Hint)> = shown
             .iter()
             .enumerate()
             .filter(|(_, r)| matches!(self.rows.get(**r), Some(DiffRow::Hunk(..))))
-            .map(|(i, _)| (i, hint(B::Restore)))
+            .map(|(i, _)| (i, hunk.clone()))
             .collect();
         let Some(cursor) = &self.cursor else {
             return buttons;

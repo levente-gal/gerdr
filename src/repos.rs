@@ -8261,6 +8261,10 @@ mod tests {
             keys(&mut panel, "R"),
             Some(Outcome::Notice("No change there"))
         );
+        // `V` on one line: that line alone.
+        panel.caret_to(at(&panel, 6), 0, &ctx);
+        assert_eq!(keys(&mut panel, "V"), None);
+        assert_eq!(restore(keys(&mut panel, "R")), (vec![6], vec![]));
         // The lines selected only: `}` and the removed line.
         panel.caret_to(at(&panel, 3), 0, &ctx);
         assert_eq!(keys(&mut panel, "Vjj"), None);
@@ -8281,6 +8285,15 @@ mod tests {
                 .iter()
                 .any(|(j, h)| *j == i && h.button == ReposButton::Restore)
         };
+        // No key puts the hunk back, so its button shows none.
+        let key = |i: usize| {
+            let restore = |(j, h): &&(usize, Hint)| *j == i && h.button == ReposButton::Restore;
+            view.detail
+                .row_buttons
+                .iter()
+                .find(restore)
+                .map(|(_, h)| h.key.clone())
+        };
         assert!(on(hunk));
         let line = view
             .detail
@@ -8288,6 +8301,8 @@ mod tests {
             .iter()
             .position(|r| matches!(r, DetailRow::Line(l) if l.text == "new"));
         assert!(on(line.unwrap()));
+        assert_eq!(key(hunk).as_deref(), Some(""));
+        assert_eq!(key(line.unwrap()).as_deref(), Some("R"));
         assert_eq!(
             restore(panel.click(ReposHit::DiffRestore(hunk), &ctx)),
             (vec![2, 3, 4, 6], put(6, "\told"))

@@ -15,6 +15,8 @@ impl DiffView {
     pub(super) fn restore_here(&mut self) -> Option<Outcome> {
         let cursor = self.cursor.as_ref()?;
         let (row, from) = (cursor.row, cursor.from);
+        // In visual mode, the lines selected, even just the one.
+        let selecting = self.visual.is_some() || from != row;
         let rows = match (self.visual.take(), self.caret()) {
             (Some(Visual::Chars { row: start, .. }), Some((at, _))) => {
                 start.min(at)..=start.max(at)
@@ -25,7 +27,7 @@ impl DiffView {
             cursor.from = cursor.row;
             cursor.keys.1 = cursor.keys.0.clone();
         }
-        if rows.start() != rows.end() {
+        if selecting {
             return self.restore_rows(rows);
         }
         let Some(&DiffRow::Line(k, f, h, l)) = self.rows.get(row) else {
