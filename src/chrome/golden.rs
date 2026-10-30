@@ -87,7 +87,7 @@ fn agents() -> Vec<Vec<AgentView>> {
                 AgentLine::Field("Folder".into(), "gerdr/src".into()),
                 AgentLine::Field("Tokens".into(), "12k".into()),
             ],
-            deletable: false,
+            closable: false,
             subagents: Vec::new(),
             inbox: false,
             test: None,
@@ -978,6 +978,20 @@ fn dump_overlays() {
                 p,
             ),
             px(640 + shadow),
+        );
+        let confirm = super::ConfirmView {
+            title: "Close \u{201c}claude\u{201d}?".into(),
+            body: "It is working: closing its pane stops it".into(),
+            go: "Close pane",
+            selected: 1,
+            hover: None,
+        };
+        let confirm_w = super::confirm_layout((800, 600).into()).panel.size.w;
+        dump(
+            &dir,
+            &format!("confirm_{tag}"),
+            painter.confirm_dialog(&confirm, (800, 600).into(), scale, p),
+            px(confirm_w + shadow),
         );
         let quit_w = super::quit_layout((800, 600).into(), quit().rows.len(), false)
             .panel

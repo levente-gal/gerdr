@@ -17,6 +17,7 @@ mod ci;
 mod ci_watch;
 mod clipboard;
 mod config;
+mod confirm;
 mod cursor_agents;
 mod desktop;
 mod diff;
@@ -1383,6 +1384,8 @@ pub struct Gerdr {
     pub quit: Option<quit::QuitDialog>,
     /// The restart dialog, while it is open.
     pub restart: Option<restart::RestartDialog>,
+    /// The confirm dialog, while it is open.
+    pub confirm: Option<confirm::ConfirmDialog>,
     /// The event loop sources following the project's herdr session, removed
     /// when switching to another project.
     pub herdr_sources: Vec<RegistrationToken>,
@@ -2844,6 +2847,29 @@ impl Gerdr {
         ws.tabs[t].focused = Some(window);
         self.show_active();
         true
+    }
+
+    /// Close herdr pane `pane_id` and what shows it; its tab goes too if
+    /// that was all it held.
+    pub(crate) fn close_herdr_pane(&mut self, pane_id: &str) {
+        let is_it = |h: &Option<herdr::PaneInfo>| h.as_ref().is_some_and(|p| p.pane_id == pane_id);
+        let mut panes = Vec::new();
+        for tab in self.workspaces.iter().flat_map(|ws| &ws.tabs) {
+            let shown = tab.panes.iter().filter(|p| is_it(&p.herdr));
+            panes.extend(shown.map(|p| (Some(p.window.clone()), p.herdr.clone())));
+            let starting = tab.expected.iter().filter(|e| is_it(&e.herdr));
+            panes.extend(starting.map(|e| (None, e.herdr.clone())));
+        }
+        if panes.is_empty() {
+            // Nothing shows it: herdr alone has it.
+            if let Some(herdr) = self.herdr.as_mut()
+                && let Err(err) = herdr.pane_close(pane_id)
+            {
+                tracing::warn!("herdr: {err}");
+            }
+            return;
+        }
+        self.close_panes(panes);
     }
 
     /// The agent rows of each workspace, in sidebar order. Those of the
@@ -4710,6 +4736,7 @@ impl Gerdr {
         // These take every click.
         if self.quit.is_some()
             || self.restart.is_some()
+            || self.confirm.is_some()
             || self.welcome.is_some()
             || self.project_menu.is_some()
             || self.worktrees.is_open()
@@ -4936,6 +4963,7 @@ impl Gerdr {
         self.welcome = None;
         self.quit = None;
         self.restart = None;
+        self.confirm = None;
         self.project = Some(id.to_owned());
         let instance = if alongside {
             format!("{id}@{}", self.socket_name.to_string_lossy())
@@ -5689,6 +5717,7 @@ impl Gerdr {
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             restart: self.restart_view(),
+            confirm: self.confirm_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
             repos: self.repos_view(),
@@ -6043,6 +6072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         toasts: VecDeque::new(),
         quit: None,
         restart: None,
+        confirm: None,
         herdr_sources: Vec::new(),
         herdr_poke: None,
         idle_since: HashMap::new(),

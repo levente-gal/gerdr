@@ -725,7 +725,7 @@ mod tests {
             name: None,
             model: Some("opus".into()),
             lines: Vec::new(),
-            deletable: false,
+            closable: false,
             subagents: Vec::new(),
             inbox: false,
             test: None,
