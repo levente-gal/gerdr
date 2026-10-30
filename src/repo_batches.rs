@@ -1951,6 +1951,10 @@ impl Gerdr {
         else {
             return;
         };
+        // Off to Zed: not back to the worktrees popup.
+        if worktree.is_some() {
+            self.worktrees.close();
+        }
         self.close_repos();
         if w != self.active_workspace {
             self.switch_workspace(w);

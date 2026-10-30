@@ -143,6 +143,9 @@ impl WorktreeDiff {
         if let Some(why) = &self.error {
             return why.clone();
         }
+        if !self.read {
+            return "reading…".into();
+        }
         match (&self.target, self.since.commits) {
             (None, _) => "uncommitted changes".into(),
             (Some(target), 0) => format!("no commits of its own on {target}"),
