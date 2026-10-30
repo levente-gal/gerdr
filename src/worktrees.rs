@@ -1074,7 +1074,9 @@ impl Gerdr {
                 let (names, _) = self.popup_items();
                 let label = names.get(item.repo).cloned().unwrap_or_default();
                 let target = (!item.wt.main).then(|| item.target.clone());
-                self.open_worktree_diff(item.wt.path, label, item.wt.branch, target, w);
+                let home = self.worktree_home(&item);
+                let at = (w, home);
+                self.open_worktree_diff(item.wt.path, label, item.wt.branch, target, at);
             }
             Outcome::Checkout(path) => {
                 let Some(item) = find(&path) else { return };
@@ -1157,6 +1159,19 @@ impl Gerdr {
             .iter()
             .position(own)
             .unwrap_or(item.workspace)
+    }
+
+    /// The workspace whose checkout worktree `item` is (the worktree its
+    /// folder is in), the active one first.
+    fn worktree_home(&self, item: &Item) -> Option<usize> {
+        let own = |ws: &crate::Workspace| {
+            let here = self.git.get(&ws.dir).and_then(|s| s.here.as_ref());
+            here.is_some_and(|here| here.path == item.wt.path)
+        };
+        if self.workspace().is_some_and(own) {
+            return Some(self.active_workspace);
+        }
+        self.workspaces.iter().position(own)
     }
 
     /// Check worktree `item`'s branch out in its repository's main worktree,

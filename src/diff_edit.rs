@@ -118,6 +118,12 @@ fn byte_at(line: &str, col: usize) -> usize {
     line.len()
 }
 
+/// The column Zed opens `line` at for its char shown at `col` (tabs shown
+/// as four): from 1, a tab one char.
+pub fn zed_column(line: &str, col: usize) -> usize {
+    line[..byte_at(line, col)].chars().count() + 1
+}
+
 /// The byte of `line` the chars shown before `col` end at: past a tab
 /// `col` is within.
 fn end_at(line: &str, col: usize) -> usize {
@@ -403,6 +409,18 @@ mod tests {
         assert_eq!(after, "a");
         let (after, _) = cut("a\nb\n", &Cut::Lines(vec![1, 2])).unwrap();
         assert_eq!(after, "");
+    }
+
+    #[test]
+    fn zed_columns_count_a_tab_as_one_char() {
+        assert_eq!(zed_column("let x", 0), 1);
+        assert_eq!(zed_column("let x", 4), 5);
+        // Within the tab, or after it.
+        assert_eq!(zed_column("\tif", 2), 1);
+        assert_eq!(zed_column("\tif", 5), 3);
+        assert_eq!(zed_column("é = 1", 2), 3);
+        // Past its end, after its last.
+        assert_eq!(zed_column("ab", 9), 3);
     }
 
     #[test]

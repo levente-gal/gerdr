@@ -38,7 +38,8 @@
 //! pages move a cursor over its rows (with Shift, reaching a range back),
 //! Alt+Up/Down go to the file before or after, and for the cursor's file
 //! Space checks it, Left/Right fold it (on a line, move the caret) and
-//! Enter opens it in Zed at the cursor's line. C writes a comment on the
+//! Enter opens it in Zed at the cursor's line (`g` Space and Ctrl+click
+//! too, at the caret's char; on a file's header, the file). C writes a comment on the
 //! range's lines (or edits the one the cursor is on): Shift+Enter breaks
 //! its line, Enter keeps it, Esc drops it; Delete deletes it, Ctrl+Shift+C copies the review, and
 //! "Clear review" deletes it all, asked first. Ctrl+N opens the branch
@@ -916,10 +917,12 @@ pub enum Outcome {
         text: String,
         count: usize,
     },
-    /// Open these files of the repository at `root` in its workspace's Zed.
+    /// Open these files of the repository at `root` in its workspace's
+    /// Zed, the first at `at` (else where Zed puts it).
     OpenInZed {
         root: PathBuf,
         paths: Vec<String>,
+        at: Option<diff_view::Position>,
     },
     /// Run the command that failed in the repository at `root` in a new
     /// tab, for the user to answer its prompts.
@@ -1169,7 +1172,7 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
     use diff_view::Outcome as D;
     match outcome {
         D::Copy { text, count } => Outcome::Copy { text, count },
-        D::OpenInZed { root, paths } => Outcome::OpenInZed { root, paths },
+        D::OpenInZed { root, paths, at } => Outcome::OpenInZed { root, paths, at },
         D::Notice(notice) => Outcome::Notice(notice),
         D::Cut(edit) => Outcome::Cut(edit),
         D::Yank(edit) => Outcome::Yank(edit),
@@ -1378,6 +1381,10 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "fold a repository, a folder or a diff file header; move the caret",
     ),
     ("Enter", "open the file in Zed; fold a repository or folder"),
+    (
+        "g Space / Ctrl+click",
+        "in the diff, open the code in Zed at the caret; on a file's name, the file",
+    ),
     ("Alt+F", "list the files by folder, or flat"),
     ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
     ("Ctrl+D / Ctrl+T", "the diff, the log"),
@@ -2815,7 +2822,11 @@ impl Panel {
                     None => conflicted_files(stopped()?),
                 };
                 let root = item.root.clone();
-                Ok(Outcome::OpenInZed { root, paths })
+                Ok(Outcome::OpenInZed {
+                    root,
+                    paths,
+                    at: None,
+                })
             }
             B::MarkResolved => {
                 let item = stopped()?;
@@ -3648,6 +3659,17 @@ impl Panel {
         }
         diff_ctx!(self, ctx, dctx);
         let outcome = self.diff.open_detail_row(i, &dctx);
+        self.diff_done(outcome, ctx)
+    }
+
+    /// Ctrl+click on row `i` of the diff: the cursor there, and its code
+    /// opened in Zed (`DiffView::goto_detail_row`).
+    pub fn goto_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
+        if self.tab() != DetailTab::Diff {
+            return None;
+        }
+        diff_ctx!(self, ctx, dctx);
+        let outcome = self.diff.goto_detail_row(i, &dctx);
         self.diff_done(outcome, ctx)
     }
 
@@ -5537,7 +5559,8 @@ mod tests {
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::OpenInZed {
                 root: root("gerdr"),
-                paths: vec!["src/git.rs".into()]
+                paths: vec!["src/git.rs".into()],
+                at: None,
             })
         );
         // The diff, ten rows, two in view: Shift+Down scrolls it.
@@ -6886,7 +6909,11 @@ mod tests {
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::OpenInZed {
                 root: root("gerdr"),
-                paths: vec!["src/git.rs:2".into()],
+                paths: vec!["src/git.rs".into()],
+                at: Some(diff_view::Position {
+                    line: 2,
+                    col: Some(0),
+                }),
             })
         );
         // On a line, Left moves the caret, folding nothing.
@@ -6928,7 +6955,11 @@ mod tests {
             panel.open_detail_row(3, &ctx),
             Some(Outcome::OpenInZed {
                 root: root("gerdr"),
-                paths: vec!["src/git.rs:2".into()],
+                paths: vec!["src/git.rs".into()],
+                at: Some(diff_view::Position {
+                    line: 2,
+                    col: Some(0),
+                }),
             })
         );
         // Under the pinned header, rows are one down.
@@ -6988,7 +7019,8 @@ mod tests {
             press(&mut panel, ctrl(), Keysym::e, &ctx),
             Some(Outcome::OpenInZed {
                 root: root("herdr"),
-                paths: vec!["src/api.rs".into()]
+                paths: vec!["src/api.rs".into()],
+                at: None,
             })
         );
         assert_eq!(
@@ -7004,7 +7036,8 @@ mod tests {
             press(&mut panel, ctrl(), Keysym::e, &ctx),
             Some(Outcome::OpenInZed {
                 root: root("herdr"),
-                paths: vec!["README.md".into()]
+                paths: vec!["README.md".into()],
+                at: None,
             })
         );
     }

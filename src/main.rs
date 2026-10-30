@@ -3699,27 +3699,13 @@ impl Gerdr {
     /// `dir` on top, a terminal in `dir` below, and show it. The Zed is
     /// launched by command, so the tab brings it back on `dir` when restored.
     pub fn new_project_tab(&mut self, w: usize, dir: &Path) {
-        if w >= self.workspaces.len() {
-            return;
-        }
-        if w != self.active_workspace {
-            self.switch_workspace(w);
-        }
-        let zed = self.new_pane_id();
-        let mut tab = Tab {
-            layout: Some(Node::Leaf(zed)),
-            ..Default::default()
-        };
-        let mut expected = Expected::new(None, launch::ZED_APP_ID, zed, true);
-        expected.app_command = Some(format!(
+        let command = format!(
             "zed -n {}",
             crate::desktop::shell_quote(&dir.to_string_lossy())
-        ));
-        tab.expected.push(expected);
-        let ws = &mut self.workspaces[w];
-        ws.tabs.push(tab);
-        let t = ws.tabs.len() - 1;
-        ws.active_tab = t;
+        );
+        let Some((t, zed)) = self.push_zed_tab(w, command) else {
+            return;
+        };
         let run = Some((dir.to_path_buf(), None));
         if let Some((pid, herdr)) = self.start_terminal_running(w, Some(t), Dir::Down, run) {
             let term = self.new_pane_id();
@@ -3734,6 +3720,42 @@ impl Gerdr {
         self.launch_next_zed();
         self.prune();
         self.show_active();
+    }
+
+    /// Open a tab in workspace `w` with a Zed alone, launched by `command`
+    /// (`zed -n <folder> …`, which brings it back when restored), and show
+    /// it.
+    pub fn new_zed_tab(&mut self, w: usize, command: String) {
+        if self.push_zed_tab(w, command).is_none() {
+            return;
+        }
+        self.launch_next_zed();
+        self.prune();
+        self.show_active();
+    }
+
+    /// A new tab in workspace `w`, active, waiting for a Zed launched by
+    /// `command`: the tab's index and the Zed's pane id.
+    fn push_zed_tab(&mut self, w: usize, command: String) -> Option<(usize, u32)> {
+        if w >= self.workspaces.len() {
+            return None;
+        }
+        if w != self.active_workspace {
+            self.switch_workspace(w);
+        }
+        let zed = self.new_pane_id();
+        let mut tab = Tab {
+            layout: Some(Node::Leaf(zed)),
+            ..Default::default()
+        };
+        let mut expected = Expected::new(None, launch::ZED_APP_ID, zed, true);
+        expected.app_command = Some(command);
+        tab.expected.push(expected);
+        let ws = &mut self.workspaces[w];
+        ws.tabs.push(tab);
+        let t = ws.tabs.len() - 1;
+        ws.active_tab = t;
+        Some((t, zed))
     }
 
     /// Split the focused pane like herdr: it keeps the left or top half, a

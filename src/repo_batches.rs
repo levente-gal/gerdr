@@ -25,7 +25,9 @@ use crate::{
         self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, SearchPart, Tone,
         TreeLine, TreeTool,
     },
+    desktop,
     diff_edit::{self, Done, FileEdit, Put},
+    diff_view::Position,
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
@@ -823,13 +825,13 @@ impl Gerdr {
     /// A click on `hit` in the panel, the second of a double click when
     /// `double`.
     fn repos_hit(&mut self, hit: ReposHit, double: bool) {
-        // Shift+click on a diff row reaches the cursor's range there.
-        let shift = self
-            .seat
-            .get_keyboard()
-            .is_some_and(|k| k.modifier_state().shift);
+        // Shift+click on a diff row reaches the cursor's range there;
+        // Ctrl+click opens the code there in Zed.
+        let mods = self.seat.get_keyboard().map(|k| k.modifier_state());
+        let shift = mods.is_some_and(|m| m.shift);
+        let ctrl = mods.is_some_and(|m| m.ctrl && !m.shift);
         if self.repos.worktree.is_some() {
-            return self.worktree_diff_hit(hit, double, shift);
+            return self.worktree_diff_hit(hit, double, shift, ctrl);
         }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
@@ -856,6 +858,9 @@ impl Gerdr {
         };
         let mut drags = false;
         let outcome = panel.as_mut().and_then(|p| {
+            if let (ReposHit::DiffRow(i), true) = (hit, ctrl) {
+                return p.goto_detail_row(i, &ctx);
+            }
             if let (ReposHit::DiffRow(i), true, false) = (hit, shift, double) {
                 p.extend_detail_row(i, &ctx);
                 drags = p.drags_rows(&ctx);
@@ -1356,7 +1361,7 @@ impl Gerdr {
                 let kind = batch.kind.clone();
                 self.start_batch(kind, jobs);
             }
-            Outcome::OpenInZed { root, paths } => self.repos_open_in_zed(&root, &paths),
+            Outcome::OpenInZed { root, paths, at } => self.repos_open_in_zed(&root, &paths, at),
             Outcome::Copy { text, count } => {
                 self.copy_text(text);
                 let what = if count == 1 {
@@ -1936,26 +1941,37 @@ impl Gerdr {
         }
     }
 
-    /// Open `paths` of the repository at `root` in its workspace's Zed; in
-    /// a terminal tab showing `git status` when the workspace has no Zed.
-    fn repos_open_in_zed(&mut self, root: &Path, paths: &[String]) {
+    /// Open `paths` of the checkout at `root` (the first at `at`) in the
+    /// Zed of the workspace whose checkout it is; in a terminal tab
+    /// showing `git status` when that workspace has no Zed. A worktree no
+    /// workspace is in opens in a Zed tab on it, made the first time.
+    fn repos_open_in_zed(&mut self, root: &Path, paths: &[String], at: Option<Position>) {
         let worktree = (self.repos.worktree.as_ref())
             .filter(|wd| wd.is(root))
-            .map(|wd| wd.workspace);
-        let Some(w) = worktree
-            .or_else(|| {
+            .map(|wd| (wd.workspace, wd.home));
+        let home = match worktree {
+            Some((_, home)) => home,
+            None => {
                 let item = self.repos.items.iter().find(|i| i.root == root);
                 item.map(|i| i.workspace)
-            })
-            .filter(|&w| w < self.workspaces.len())
-        else {
+            }
+        };
+        let home = home.filter(|&w| w < self.workspaces.len());
+        let Some(w) = home.or(worktree.map(|(w, _)| w)) else {
             return;
         };
+        let mut files: Vec<PathBuf> = paths.iter().map(|path| root.join(path)).collect();
+        if let (Some(first), Some(at)) = (files.first_mut(), at) {
+            *first = zed_place(first, at);
+        }
         // Off to Zed: not back to the worktrees popup.
         if worktree.is_some() {
             self.worktrees.close();
         }
         self.close_repos();
+        if home.is_none() {
+            return self.open_in_worktree_zed(w, root, &files);
+        }
         if w != self.active_workspace {
             self.switch_workspace(w);
         }
@@ -1972,21 +1988,75 @@ impl Gerdr {
         };
         self.switch_tab(t);
         self.focus(Some(window));
-        // `--existing`: in the Zed window used last, the one just focused.
+        self.zed_open_existing(root, &files);
+    }
+
+    /// Open `files` of the worktree at `root` in the Zed on it (launched
+    /// `zed -n <root> …`), in whichever workspace; else in a new tab with
+    /// one, in workspace `w`.
+    fn open_in_worktree_zed(&mut self, w: usize, root: &Path, files: &[PathBuf]) {
+        let lead = format!("zed -n {}", desktop::shell_quote(&root.to_string_lossy()));
+        let on_root = |command: Option<&str>| {
+            command.is_some_and(|c| c == lead || c.starts_with(&format!("{lead} ")))
+        };
+        let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
+            ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+                let pane = tab
+                    .panes
+                    .iter()
+                    .find(|p| crate::is_zed(&p.window) && on_root(p.app_command.as_deref()))?;
+                Some((w, t, pane.window.clone()))
+            })
+        });
+        let Some((w, t, window)) = found else {
+            let quoted: Vec<String> = files
+                .iter()
+                .map(|f| desktop::shell_quote(&f.to_string_lossy()))
+                .collect();
+            let command = [lead].into_iter().chain(quoted).collect::<Vec<_>>();
+            return self.new_zed_tab(w, command.join(" "));
+        };
+        if w != self.active_workspace {
+            self.switch_workspace(w);
+        }
+        self.switch_tab(t);
+        self.focus(Some(window));
+        self.zed_open_existing(root, files);
+    }
+
+    /// Hand `files` (`root` with none) to the Zed window used last, the
+    /// one just focused.
+    fn zed_open_existing(&mut self, root: &Path, files: &[PathBuf]) {
         let mut zed = Command::new("zed");
         zed.arg("--user-data-dir")
             .arg(&self.zed_data)
             .arg("--existing");
-        if paths.is_empty() {
+        if files.is_empty() {
             zed.arg(root);
         }
-        for path in paths {
-            zed.arg(root.join(path));
-        }
+        zed.args(files);
         if self.spawn(zed, root, "zed").is_none() {
             self.toast("Zed didn't open the files".into(), Level::Error);
         }
     }
+}
+
+/// `file` as Zed's command line takes it to open it at `at`: `:line`,
+/// then `:column` (see `diff_edit::zed_column`) when its line can be read.
+fn zed_place(file: &Path, at: Position) -> PathBuf {
+    let text = at
+        .col
+        .and_then(|col| Some((std::fs::read_to_string(file).ok()?, col)));
+    let column = text.and_then(|(text, col)| {
+        let line = text.lines().nth(at.line.checked_sub(1)?)?;
+        Some(diff_edit::zed_column(line, col))
+    });
+    let mut place = file.as_os_str().to_owned();
+    place.push(format!(":{}", at.line));
+    if let Some(column) = column {
+        place.push(format!(":{column}"));
+    }
+    PathBuf::from(place)
 }
 
 /// The tip of part `part` of the diff's search, as `layout` has it.

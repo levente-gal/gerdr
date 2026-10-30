@@ -33,8 +33,11 @@ pub struct WorktreeDiff {
     /// What its branch merges into; none for a main worktree, diffed
     /// against its HEAD.
     pub target: Option<String>,
-    /// The workspace its files open in.
+    /// The workspace a Zed tab on it opens in.
     pub workspace: usize,
+    /// The workspace whose checkout it is, whose Zed its files open in;
+    /// none, and they open in a Zed tab on it.
+    pub home: Option<usize>,
     /// What it changed since it forked, as last read.
     pub since: Since,
     /// Read once at least; and why the last read failed.
@@ -233,6 +236,13 @@ impl WorktreeDiff {
         outcome.map(Done::Diff)
     }
 
+    /// Ctrl+click on row `i`: the cursor there, and its code opened in
+    /// Zed.
+    pub fn goto_row(&mut self, i: usize, env: Env) -> Option<Done> {
+        let outcome = self.with_diff(env, |diff, ctx| diff.goto_detail_row(i, ctx));
+        outcome.map(Done::Diff)
+    }
+
     /// Moved by `motion` at `now`.
     pub fn scroll(&mut self, motion: Motion, now: Instant, env: Env) {
         self.with_diff(env, |diff, ctx| diff.scroll(motion, now, ctx));
@@ -299,7 +309,8 @@ impl crate::Gerdr {
 
     /// Show the diff of the worktree at `root` (of repository `label`, on
     /// `branch`) against `target`, in place of the worktrees popup, which
-    /// it goes back to when closed; its files open in workspace
+    /// it goes back to when closed; its files open in the Zed of workspace
+    /// `home`, whose checkout it is, else in a Zed tab on it in workspace
     /// `workspace`.
     pub fn open_worktree_diff(
         &mut self,
@@ -307,7 +318,7 @@ impl crate::Gerdr {
         label: String,
         branch: Option<String>,
         target: Option<String>,
-        workspace: usize,
+        (workspace, home): (usize, Option<usize>),
     ) {
         self.switcher = None;
         self.project_menu = None;
@@ -327,7 +338,8 @@ impl crate::Gerdr {
             .worktree_reviews
             .remove(&root)
             .unwrap_or_default();
-        let wd = WorktreeDiff::new(root, label, branch, target, workspace, review);
+        let mut wd = WorktreeDiff::new(root, label, branch, target, workspace, review);
+        wd.home = home;
         self.repos.worktree = Some(wd);
         self.worktree_diff_read();
         // It takes the pointer from the client under it.
@@ -447,13 +459,22 @@ impl crate::Gerdr {
 
     /// A click on `hit` in the worktree's diff, the second of a double
     /// click when `double`: the press, held, drags the cursor's range.
-    pub(crate) fn worktree_diff_hit(&mut self, hit: ReposHit, double: bool, shift: bool) {
+    /// With Shift it reaches the range there; with Ctrl it opens the code
+    /// there in Zed.
+    pub(crate) fn worktree_diff_hit(
+        &mut self,
+        hit: ReposHit,
+        double: bool,
+        shift: bool,
+        ctrl: bool,
+    ) {
         let env = self.worktree_env();
         let Some(wd) = self.repos.worktree.as_mut() else {
             return;
         };
         let mut drags = false;
         let done = match (hit, shift, double) {
+            (ReposHit::DiffRow(i), _, _) if ctrl => wd.goto_row(i, env),
             (ReposHit::DiffRow(i), true, false) => {
                 wd.extend_row(i, env);
                 drags = wd.drags_rows(env);
@@ -668,16 +689,79 @@ mod tests {
         );
         // Enter opens the cursor's line in Zed, in the worktree.
         let opened = key(&mut wd, none(), Keysym::Return);
-        let Some(Done::Diff(Outcome::OpenInZed { root, paths })) = opened else {
+        let Some(Done::Diff(Outcome::OpenInZed { root, paths, at })) = opened else {
             panic!("{opened:?}");
         };
-        assert_eq!((root, paths), (wd.root.clone(), vec!["a.rs:1".to_owned()]));
+        assert_eq!((root, paths), (wd.root.clone(), vec!["a.rs".to_owned()]));
+        assert_eq!(at.map(|at| at.line), Some(1));
         // `/` searches it; Esc closes the search, then the diff.
         key(&mut wd, none(), Keysym::slash);
         assert!(wd.diff.search_focused());
         assert_eq!(key(&mut wd, none(), Keysym::Escape), None);
         assert!(!wd.diff.search_focused());
         assert_eq!(key(&mut wd, none(), Keysym::Escape), Some(Done::Close));
+    }
+
+    /// What opening asked for: the paths, and where in the first.
+    fn opened(done: Option<Done>) -> (Vec<String>, Option<diff_view::Position>) {
+        match done {
+            Some(Done::Diff(Outcome::OpenInZed { paths, at, .. })) => (paths, at),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn g_space_and_ctrl_click_open_the_code_at_the_caret() {
+        let mut wd = read();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let at = |line, col| Some(diff_view::Position { line, col });
+        // On a file's header: the file, Zed putting it where it was.
+        wd.click(ReposHit::DiffRow(1), ENV);
+        assert_eq!(key(&mut wd, Keysym::g), None);
+        assert_eq!(wd.diff.mode_title().as_deref(), Some("g"));
+        let (paths, place) = opened(key(&mut wd, Keysym::space));
+        assert_eq!((paths, place), (vec!["a.rs".to_owned()], None));
+        // On a line, its line at the caret's char.
+        key(&mut wd, Keysym::Down);
+        key(&mut wd, Keysym::Down);
+        key(&mut wd, Keysym::g);
+        assert_eq!(opened(key(&mut wd, Keysym::space)).1, at(2, Some(0)));
+        // `g` and another key: nothing, and Space is its own again.
+        key(&mut wd, Keysym::g);
+        assert_eq!(key(&mut wd, Keysym::k), None);
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(3));
+        assert_eq!(wd.diff.mode_title(), None);
+        assert_eq!(key(&mut wd, Keysym::space), None);
+        // Ctrl+click: the caret on the char pressed, there in Zed.
+        wd.diff.pointer_char = Some((2, 0));
+        let (paths, place) = opened(wd.goto_row(2, ENV));
+        assert_eq!((paths, place), (vec!["a.rs".to_owned()], at(1, Some(0))));
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(2));
+        // On a comment, its line, the comment not edited.
+        key(&mut wd, Keysym::c);
+        key(&mut wd, Keysym::o);
+        key(&mut wd, Keysym::Return);
+        assert_eq!(wd.diff.review.comments.len(), 1);
+        assert_eq!(opened(wd.goto_row(3, ENV)).1, at(1, None));
+        assert!(wd.diff.editing.is_none());
+    }
+
+    #[test]
+    fn a_removed_line_opens_at_its_line_alone() {
+        let mut wd = read();
+        let mut file = crate::diff::parse("diff --git a/f b/f\n@@ -1,2 +1 @@\n-gone\n kept\n")
+            .pop()
+            .unwrap();
+        file.path = "a.rs".into();
+        file.code = 'M';
+        let since = Since {
+            changes: vec![change("a.rs", 'M')],
+            ..Since::default()
+        };
+        wd.set_read(Ok((since, vec![file])), ENV);
+        assert_eq!(texts(&wd)[2], "gone");
+        let (_, place) = opened(wd.goto_row(2, ENV));
+        assert_eq!(place.map(|at| at.col), Some(None));
     }
 
     #[test]

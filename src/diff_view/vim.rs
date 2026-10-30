@@ -39,11 +39,13 @@ pub(crate) enum Visual {
     Lines,
 }
 
-/// What is typed of a command so far: a count, and `d` or `y`.
+/// What is typed of a command so far: a count, and `d` or `y`; or `g`,
+/// Space after it opening the code at the caret in Zed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Pending {
     count: usize,
     op: Option<Op>,
+    go: bool,
 }
 
 /// What a motion after it does.
@@ -91,8 +93,9 @@ type LineOf = (PathBuf, String, usize, Vec<(usize, String)>);
 pub type Key = (ModifiersState, Keysym, Keysym);
 
 impl DiffView {
-    /// A key for the diff's deletes, visual mode, counts and undo, while
-    /// it has the keyboard: what it does, `None` for none of those.
+    /// A key for the diff's deletes, visual mode, counts, undo and `g`
+    /// Space, while it has the keyboard: what it does, `None` for none of
+    /// those.
     pub(super) fn vim_key(
         &mut self,
         mods: &ModifiersState,
@@ -117,6 +120,15 @@ impl DiffView {
                 ..pending
             };
             return Some(None);
+        }
+        // `g` Space: as Zed's, the code at the caret in Zed; `g` and
+        // anything else, nothing.
+        if pending.go {
+            if sym != Keysym::space || mods.shift {
+                return Some(None);
+            }
+            let r = self.open_target(ctx.page.max(1));
+            return Some(r.and_then(|r| self.open_diff_row(r)));
         }
         let count = pending.count.max(1);
         if let Some(op) = pending.op {
@@ -144,6 +156,13 @@ impl DiffView {
                 self.pending = Pending {
                     op: Some(op),
                     ..pending
+                };
+                None
+            }
+            Keysym::g => {
+                self.pending = Pending {
+                    go: true,
+                    ..Pending::default()
                 };
                 None
             }
@@ -573,7 +592,7 @@ impl DiffView {
             Some(Visual::Lines) => "-- VISUAL LINE -- d delete · y yank · Esc stop",
             None => "",
         };
-        let Pending { count, op } = self.pending;
+        let Pending { count, op, go } = self.pending;
         let count = if count > 0 {
             count.to_string()
         } else {
@@ -584,7 +603,8 @@ impl DiffView {
             Some(Op::Yank) => "y",
             None => "",
         };
-        let typed = format!("{count}{op}");
+        let go = if go { "g" } else { "" };
+        let typed = format!("{count}{op}{go}");
         match (typed.is_empty(), mode.is_empty()) {
             (true, true) => None,
             (true, false) => Some(mode.into()),

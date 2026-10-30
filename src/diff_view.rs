@@ -26,7 +26,7 @@ use crate::{
         Check, Density, DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone,
         Hint, ReposButton, ReposHit, RowMark,
     },
-    diff::FileDiff,
+    diff::{FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
     find,
     git::Change,
@@ -110,10 +110,12 @@ pub enum Outcome {
         text: String,
         count: usize,
     },
-    /// Open these files of the checkout at `root` in its Zed.
+    /// Open these files of the checkout at `root` in its Zed, the first at
+    /// `at` (else where Zed puts it).
     OpenInZed {
         root: PathBuf,
         paths: Vec<String>,
+        at: Option<Position>,
     },
     /// Check the file at `path` of the checkout at `root`, or uncheck it.
     Toggle {
@@ -131,6 +133,15 @@ pub enum Outcome {
     /// Undo the last cut; do the last undone again.
     UndoCut,
     RedoCut,
+}
+
+/// Where in a file Zed opens it: a line (from 1) and, on one in the file
+/// as it is now, the caret's char of it as the diff shows it (tabs as
+/// four, as `diff_edit::Spot` has it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    pub line: usize,
+    pub col: Option<usize>,
 }
 
 /// Where the diff's cursor went: a checkout's header, or a file.
@@ -1599,36 +1610,93 @@ impl DiffView {
         }
     }
 
-    /// Open the file shown as row `i` of the detail pane in Zed, at that
-    /// line (or at its first hunk's).
+    /// Open the file shown as row `i` of the detail pane in Zed, there
+    /// (`open_diff_row`).
     pub fn open_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
         let r = self.detail_row_at(i, ctx)?;
         self.open_diff_row(r)
     }
 
-    /// Open the file diff row `r` is in in Zed, at its line: a line's own,
-    /// else the first of its hunk or file.
+    /// Open the file diff row `r` is in in Zed: at a line's own (at the
+    /// caret's char, the cursor on it), at the first of a hunk, at a
+    /// comment's last; at none on its header, Zed putting it where it was.
     fn open_diff_row(&self, r: usize) -> Option<Outcome> {
         let row = *self.rows.get(r)?;
         let (k, f) = row.file()?;
         let (root, file) = self.diff_file(k, f)?;
-        let number = match row {
-            DiffRow::Line(_, _, h, l) => Some(file.hunks[h].lines[l].number),
+        let at = match row {
+            DiffRow::Line(_, _, h, l) => {
+                let line = &file.hunks[h].lines[l];
+                let col = (line.kind != LineKind::Removed)
+                    .then(|| self.caret().filter(|&(row, _)| row == r))
+                    .flatten()
+                    .map(|(_, col)| col);
+                Some(Position {
+                    line: line.number,
+                    col,
+                })
+            }
             DiffRow::Comment { c, .. } => {
                 let comment = self.review.comments.get(c);
-                comment.and_then(|c| c.lines.last()).map(|q| q.number)
+                let line = comment.and_then(|c| c.lines.last()).map(|q| q.number);
+                line.map(|line| Position { line, col: None })
             }
-            DiffRow::Hunk(_, _, h) => file.hunks[h].lines.first().map(|l| l.number),
-            _ => file.hunks.first()?.lines.first().map(|l| l.number),
-        };
-        let path = match number.filter(|_| file.code != 'D') {
-            Some(n) => format!("{}:{n}", file.path),
-            None => file.path.clone(),
+            DiffRow::Hunk(_, _, h) => file.hunks[h].lines.first().map(|l| Position {
+                line: l.number,
+                col: None,
+            }),
+            _ => None,
         };
         Some(Outcome::OpenInZed {
             root: root.to_path_buf(),
-            paths: vec![path],
+            paths: vec![file.path.clone()],
+            at: at.filter(|_| file.code != 'D'),
         })
+    }
+
+    /// The row Enter (and `g` Space) opens in Zed: the cursor's, else the
+    /// first line in view of the file at the top, else its header.
+    fn open_target(&self, page: usize) -> Option<usize> {
+        if let Some(cursor) = &self.cursor {
+            return Some(cursor.row);
+        }
+        let head = self.current_file(page)?;
+        let (_, range) = self.diff_window(page);
+        let file = self.rows[head].file();
+        let line = range
+            .clone()
+            .find(|&r| matches!(self.rows[r], DiffRow::Line(..)) && self.rows[r].file() == file);
+        Some(line.unwrap_or(head))
+    }
+
+    /// Ctrl+click on row `i` of the detail pane: the cursor there (the
+    /// caret on the char pressed), and its code opened in Zed there; a
+    /// file's header opens the file. A comment isn't edited.
+    pub fn goto_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
+        self.rewrap(ctx);
+        if self.editing.is_some() {
+            let key = self.detail_row_at(i, ctx).and_then(|r| self.row_key(r));
+            self.save_comment(ctx);
+            let r = key.and_then(|k| self.find_row(&k))?;
+            return self.goto_row(r, i, ctx);
+        }
+        let r = self.detail_row_at(i, ctx)?;
+        self.goto_row(r, i, ctx)
+    }
+
+    /// The cursor on diff row `r`, shown as row `i`, the caret on the char
+    /// pressed there; and its code opened in Zed.
+    fn goto_row(&mut self, r: usize, i: usize, ctx: &Ctx) -> Option<Outcome> {
+        self.signals.focus = true;
+        self.leave_visual();
+        self.set_cursor(r, None);
+        if let (Some((j, col)), Some(c)) = (self.pointer_char, &mut self.cursor)
+            && j == i
+        {
+            c.col = col;
+        }
+        self.select_diff_row(r, ctx);
+        self.open_diff_row(r)
     }
 
     /// A key while the diff has the keyboard; `None` when it isn't one of
@@ -1638,7 +1706,7 @@ impl DiffView {
     /// cursor's file (else the one at the top) Space checks it, Left and
     /// Right fold and unfold it (off a line, where they move the caret),
     /// and Enter opens it in Zed at the cursor's
-    /// line (else the first in view). C comments on the cursor's lines, or
+    /// line and caret (else the first line in view; `open_target`). C comments on the cursor's lines, or
     /// edits the comment it is on; Delete deletes that. `j` and `k` move
     /// the cursor as Down and Up do, and some letters its caret
     /// (`caret_key`).
@@ -1687,16 +1755,8 @@ impl DiffView {
                 }
             }
             Keysym::Return | Keysym::KP_Enter if plain => {
-                if let Some(cursor) = &self.cursor {
-                    return Some(self.open_diff_row(cursor.row));
-                }
-                let head = self.current_file(page)?;
-                let (_, range) = self.diff_window(page);
-                let file = self.rows[head].file();
-                let line = range.clone().find(|&r| {
-                    matches!(self.rows[r], DiffRow::Line(..)) && self.rows[r].file() == file
-                });
-                return Some(self.open_diff_row(line.unwrap_or(head)));
+                let r = self.open_target(page)?;
+                return Some(self.open_diff_row(r));
             }
             Keysym::c if plain => self.comment_here(ctx),
             Keysym::Delete | Keysym::KP_Delete if plain => self.delete_comment(ctx),
