@@ -345,7 +345,8 @@ impl Chrome {
 
         // The quit dialog covers everything.
         let quit = view.quit.map(|quit| {
-            let (loc, size) = shadowed(quit_layout(output, quit.switch_to.is_some()).panel);
+            let layout = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());
+            let (loc, size) = shadowed(layout.panel);
             ((quit, output, theme, scale), loc, size)
         });
         parts.extend(self.quit.part(quit, now, true, |(quit, output, ..)| {
@@ -913,8 +914,8 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
         rects.extend(layout.buttons);
     }
     if let Some(quit) = &view.quit {
-        let quit = quit_layout(output, quit.switch_to.is_some());
-        rects.push(quit.checkbox);
+        let quit = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());
+        rects.extend(quit.rows);
         rects.extend(quit.buttons);
     }
     rects

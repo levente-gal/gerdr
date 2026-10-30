@@ -1364,7 +1364,7 @@ impl Gerdr {
                 self.refresh_project_menu();
             }
             Outcome::Stop(id) => {
-                self.stop_project(&id);
+                self.stop_project(&id, crate::projects::Stops::ALL);
                 self.refresh_project_menu();
             }
             Outcome::Settings(id) => {

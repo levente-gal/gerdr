@@ -9,9 +9,9 @@ use super::{
     AgentLine, AgentView, BarButton, BarButtons, BarStatus, FormField, FormView, Help, HelpHit,
     HelpPress, InboxButton, InboxDetailView, InboxIcon, InboxLine, InboxRow, InboxTone, InboxView,
     ItemIcon, MenuEntry, MenuHit, MenuRow, MenuView, Painter, PaneBarView, PlaceholderButton,
-    PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitView, Rect, RowState, SidebarState,
-    SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode, ToastView,
-    TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
+    PlaceholderView, ProjectMenuView, ProjectRow, QuitHit, QuitRow, QuitView, Rect, RowState,
+    SidebarState, SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode,
+    ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
 use crate::{
     Action, WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level,
@@ -379,11 +379,21 @@ fn welcome() -> WelcomeView {
 }
 
 fn quit() -> QuitView {
+    let row = |label: &str, detail: &str, checked| QuitRow {
+        label: label.into(),
+        detail: detail.into(),
+        checked,
+    };
     QuitView {
         project: "aft".into(),
-        selected: 2,
-        dont_ask: true,
-        hover: Some(QuitHit::Button(1)),
+        rows: vec![
+            row("Terminals and agents", "herdr session", true),
+            row("Cursor", "kept running", false),
+            row("Don't ask again", "", true),
+        ],
+        cursor: 1,
+        selected: 1,
+        hover: Some(QuitHit::Button(0)),
         switch_to: None,
     }
 }
@@ -737,7 +747,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xeac2e664137d8223, // menu
         0x1abd611161da9a5d, // switcher
         0xe4d55e0a322e116f, // welcome
-        0x59378f4fb455dd74, // quit
+        0x39a556744c89a255, // quit
         0xd5fbf9747a465bfc, // project_menu
         0x8ee98ca10770cddc, // project_form
         0xa135931fecb12b15, // toast
@@ -751,7 +761,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x1483bdc67e595289, // menu
         0x256730c796797af7, // switcher
         0xc6a2b9324f6b7b75, // welcome
-        0xca6aac6e936af23a, // quit
+        0xe9c8747e5c764143, // quit
         0xde799af24ea3160e, // project_menu
         0x8d221a9b0c1b93a2, // project_form
         0x03fe8c8c1a28bb89, // toast
@@ -765,7 +775,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x3276e8655270d746, // menu
         0x8ebdb3ee4ddea3a3, // switcher
         0x0bf38b649779155b, // welcome
-        0x9141f1eb6dfa4384, // quit
+        0x9d538d4e1ed748f3, // quit
         0xa0b64fb50d67fbc2, // project_menu
         0x6c3fd3a9752c217d, // project_form
         0x09527b9387445087, // toast
@@ -779,7 +789,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x129626ffb502a663, // menu
         0xd9a115e473634844, // switcher
         0x2408bfddb0031e83, // welcome
-        0xea36deb588723e15, // quit
+        0x37d743dd24ddd24b, // quit
         0xf7d02feda2f8909b, // project_menu
         0xf77024bdb9b54f61, // project_form
         0x3a08c772671fb90b, // toast
@@ -966,6 +976,16 @@ fn dump_overlays() {
                 p,
             ),
             px(640 + shadow),
+        );
+        let quit_w = super::quit_layout((800, 600).into(), quit().rows.len(), false)
+            .panel
+            .size
+            .w;
+        dump(
+            &dir,
+            &format!("quit_{tag}"),
+            painter.quit_dialog(&quit(), (800, 600).into(), scale, p),
+            px(quit_w + shadow),
         );
         dump(
             &dir,

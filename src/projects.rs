@@ -43,6 +43,10 @@ pub struct Store {
     /// checked.
     #[serde(default)]
     pub quit_choice: Option<QuitChoice>,
+    /// What the quit or switch dialog was last told to stop, checked
+    /// again the next time it asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_picks: Option<Stops>,
     #[serde(default)]
     pub projects: Vec<Project>,
     /// Which of Cursor's idle chats stay shown and which were deleted.
@@ -66,6 +70,8 @@ struct State {
     last_active: Option<String>,
     #[serde(default)]
     quit_choice: Option<QuitChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_picks: Option<Stops>,
     #[serde(default, skip_serializing_if = "History::is_empty")]
     cursor_history: History,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -150,8 +156,44 @@ pub enum Loaded {
 pub enum QuitChoice {
     /// Keep the project's session running in the background.
     Keep,
-    /// Stop the project's session.
+    /// Stop the project's session and its apps kept running.
     Stop,
+    /// Stop what is checked.
+    Stops(Stops),
+}
+
+impl QuitChoice {
+    /// What quitting stops.
+    pub fn stops(self) -> Stops {
+        match self {
+            Self::Keep => Stops::default(),
+            Self::Stop => Stops::ALL,
+            Self::Stops(stops) => stops,
+        }
+    }
+}
+
+/// What of a project to stop when gerdr quits or shows another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stops {
+    /// Its herdr session: its terminals and agents.
+    #[serde(default)]
+    pub session: bool,
+    /// Its apps kept running (see `keep`), Cursor by default.
+    #[serde(default)]
+    pub apps: bool,
+}
+
+impl Stops {
+    pub const ALL: Self = Self {
+        session: true,
+        apps: true,
+    };
+
+    /// Whether it stops anything.
+    pub fn any(self) -> bool {
+        self.session || self.apps
+    }
 }
 
 /// Whether the project was left running. A crash or a reboot leaves it
@@ -365,6 +407,7 @@ impl Store {
         self.version = state.version;
         self.last_active = state.last_active;
         self.quit_choice = state.quit_choice;
+        self.stop_picks = state.stop_picks;
         self.cursor_history = state.cursor_history;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
@@ -375,6 +418,7 @@ impl Store {
             version: self.version,
             last_active: self.last_active.clone(),
             quit_choice: self.quit_choice,
+            stop_picks: self.stop_picks,
             cursor_history: self.cursor_history.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
@@ -1461,7 +1505,14 @@ mod tests {
         Store {
             version: VERSION,
             last_active: Some("api".into()),
-            quit_choice: Some(QuitChoice::Keep),
+            quit_choice: Some(QuitChoice::Stops(Stops {
+                session: false,
+                apps: true,
+            })),
+            stop_picks: Some(Stops {
+                session: true,
+                apps: false,
+            }),
             cursor_history: History::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
@@ -2582,5 +2633,19 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
         let project = migrate(Some(&live[2..]), Some(saved)).unwrap();
         assert_eq!(project.workspaces[0].herdr_id.as_deref(), Some("w9"));
         assert_eq!(migrate(Some(&[]), None), None);
+    }
+
+    #[test]
+    fn quit_choices_before_picks_still_read() {
+        let read = |text: &str| serde_json::from_str::<QuitChoice>(text).unwrap().stops();
+        assert_eq!(read(r#""keep""#), Stops::default());
+        assert_eq!(read(r#""stop""#), Stops::ALL);
+        assert_eq!(
+            read(r#"{"stops":{"apps":true}}"#),
+            Stops {
+                session: false,
+                apps: true
+            }
+        );
     }
 }

@@ -1227,9 +1227,9 @@ pub struct Gerdr {
     pub keeper: Option<keep::Keeper>,
     /// Whether gerdr said that keeping apps running needs wprs.
     pub keep_warned: bool,
-    /// The project to stop once another is shown instead (see
-    /// `ask_switch`).
-    pub stop_left: Option<String>,
+    /// The project to stop once another is shown instead, and what of it
+    /// (see `ask_switch`).
+    pub stop_left: Option<(String, projects::Stops)>,
     /// The Cursor chat last shown from its card, whose card is filled
     /// while Cursor has the keyboard.
     pub cursor_opened: Option<String>,
@@ -3797,7 +3797,7 @@ impl Gerdr {
             Action::Scrollback if self.scrollback.is_some() => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
             // Nothing to keep running without a project.
-            Action::Quit if self.project.is_none() => self.quit_app(false),
+            Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
             Action::Quit => self.open_quit(),
             Action::CyclePane(step) => self.focus_pane(|tab| {
                 let shown = tab.shown();
@@ -4863,18 +4863,23 @@ impl Gerdr {
         self.show_active();
         if let Some(left) = left {
             // Asked for when switching (see `ask_switch`).
-            let stop = self.stop_left.take().as_ref() == Some(&left);
+            let stops = self
+                .stop_left
+                .take()
+                .filter(|(stop, _)| *stop == left)
+                .map(|(_, stops)| stops)
+                .unwrap_or_default();
             let name = |id: &str| self.projects.project(id).map(|p| p.name.clone());
             if let (Some(new), Some(old)) = (name(id), name(&left)) {
-                let notice = if stop {
+                let notice = if stops.session {
                     projects::stop_notice(&new, &old)
                 } else {
                     projects::switch_notice(&new, &old)
                 };
                 self.show_notice(notice);
             }
-            if stop {
-                self.stop_project(&left);
+            if stops.any() {
+                self.stop_project(&left, stops);
             }
             self.previous_project = Some(left);
         }
@@ -5175,19 +5180,22 @@ impl Gerdr {
     }
 
     /// Stop project `id`'s herdr session, off the event loop, and its apps
-    /// kept running (see `keep`); not the shown one. `project_stopped`
-    /// takes it from there.
-    pub fn stop_project(&mut self, id: &str) {
+    /// kept running (see `keep`), as far as `stops` says; not the shown
+    /// one. `project_stopped` takes it from there.
+    pub fn stop_project(&mut self, id: &str, stops: projects::Stops) {
         if self.project.as_deref() == Some(id) {
             return tracing::warn!("not stopping project {id}: it is the one shown");
         }
         let Some(session) = self.projects.project(id).map(|p| p.session.clone()) else {
             return tracing::warn!("no project {id} to stop");
         };
-        if !self.stopping.insert(id.to_owned()) {
+        if stops.apps {
+            self.stop_kept(id);
+        }
+        // Only its apps: the project runs on.
+        if !stops.session || !self.stopping.insert(id.to_owned()) {
             return;
         }
-        self.stop_kept(id);
         // Neither running nor stopped until it answers.
         self.running.remove(id);
         if self.stop_status.is_none() {
@@ -5297,16 +5305,18 @@ impl Gerdr {
             .collect()
     }
 
-    /// End gerdr, stopping the project's session if `stop`. It counts as
-    /// stopped only once it is.
-    pub fn quit_app(&mut self, stop: bool) {
+    /// End gerdr, stopping what `stops` says of the project. It counts as
+    /// stopped only once its session is.
+    pub fn quit_app(&mut self, stops: projects::Stops) {
         self.take_web_urls(web_pages::read_now(self.web_panes(), &self.instance_dir));
         self.record_tabs();
         self.close_web_control();
-        let stopped = stop && self.stop_session();
-        // Its apps kept running go with it: their windows close with the
+        let stopped = stops.session && self.stop_session();
+        // Its apps kept running go if asked: their windows close with the
         // others (see `close_windows`).
-        if stop && let Some(id) = self.project.clone() {
+        if stops.apps
+            && let Some(id) = self.project.clone()
+        {
             self.stop_kept(&id);
         }
         if stopped

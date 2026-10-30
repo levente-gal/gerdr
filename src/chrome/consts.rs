@@ -145,28 +145,26 @@ pub(super) const HINT_KEY_GAP: i32 = 6;
 pub(super) const FOCUS_RING: f32 = 1.5;
 pub(super) const FOCUS_GAP: f32 = 2.0;
 
-/// The quit dialog, centred on the output: title, question, the "Don't ask
-/// again" checkbox, and the buttons at the bottom right.
-pub(super) const QUIT_WIDTH: i32 = 420;
-pub(super) const QUIT_HEIGHT: i32 = 190;
+/// The quit dialog, centred on the output: title, question, a checkbox
+/// row per thing to stop and "Don't ask again", and the buttons at the
+/// bottom right.
+pub(super) const QUIT_WIDTH: i32 = 440;
 pub(super) const QUIT_PADDING: i32 = 20;
 pub(super) const QUIT_TITLE: i32 = 24;
 pub(super) const QUIT_BODY: i32 = 22;
 pub(super) const QUIT_LINE_GAP: i32 = 10;
 /// The checkbox row: the box and its label, all of it clickable.
 pub(super) const CHECKBOX_ROW: i32 = 24;
-pub(super) const CHECKBOX_WIDTH: i32 = 150;
 pub(super) const CHECKBOX_SIZE: i32 = 16;
 pub(super) const CHECKBOX_GAP: i32 = 8;
 pub(super) const QUIT_BUTTON: i32 = 32;
 pub(super) const QUIT_BUTTON_GAP: i32 = 8;
-/// Cancel, Stop project, Keep running: labels and widths.
-pub(super) const QUIT_BUTTONS: [(&str, i32); 3] =
-    [("Cancel", 84), ("Stop project", 116), ("Keep running", 124)];
+/// Cancel, Quit: labels and widths.
+pub(super) const QUIT_BUTTONS: &[(&str, i32)] = &[("Cancel", 84), ("Quit", 84)];
 /// Cancel, Switch, Open in new gerdr: labels and widths, when switching
 /// projects.
-pub(super) const SWITCH_BUTTONS: [(&str, i32); 3] =
-    [("Cancel", 84), ("Switch", 84), ("Open in new gerdr", 148)];
+pub(super) const SWITCH_BUTTONS: &[(&str, i32)] =
+    &[("Cancel", 84), ("Switch", 84), ("Open in new gerdr", 148)];
 pub(super) const BUTTON_RADIUS: f32 = 6.0;
 
 /// The sidebar header's project name: the gap between it and its chevron,

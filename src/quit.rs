@@ -1,15 +1,16 @@
-//! Closing gerdr with a project open: keep its session running in the
-//! background (the default), or stop it. "Don't ask again" remembers the
-//! choice; the quit action (prefix, Shift+Q) asks again regardless.
+//! Closing gerdr with a project open asks what of it to stop: its herdr
+//! session (its terminals and agents), its apps kept running (Cursor, see
+//! `keep`), both or neither; the rest keeps running in the background.
+//! The picks are checked again the next time. "Don't ask again" does them
+//! without asking; the quit action (prefix, Shift+Q) asks again regardless.
 //!
-//! Switching to another project asks the same dialog whether to stop the
-//! one shown, its apps, terminals and agents, or keep it running and open
-//! the other in a new gerdr (the default).
+//! Switching to another project asks the same of the one shown, or to keep
+//! it running and open the other in a new gerdr (the default).
 //!
-//! Left/Right and Tab move between the buttons, Enter presses the selected
-//! one, K and S press Keep running and Stop project (N and S, Open in new
-//! gerdr and Switch, when switching), Space checks "Don't ask again", Esc
-//! cancels.
+//! Up/Down move between the checkboxes and Space checks one; Left/Right
+//! and Tab move between the buttons, Enter presses the selected one, Q
+//! presses Quit (N and S, Open in new gerdr and Switch, when switching),
+//! Esc cancels.
 
 use std::{os::unix::process::CommandExt, path::PathBuf, process::Stdio};
 
@@ -20,37 +21,140 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
-    chrome::{self, QuitHit, QuitView},
-    herdr, launch,
-    projects::QuitChoice,
+    chrome::{self, QuitHit, QuitRow, QuitView},
+    herdr, keep, launch,
+    projects::{QuitChoice, Stops},
     toast::Level,
 };
 
-const STOP: usize = 1;
-const KEEP: usize = 2;
+/// Quit, or Switch when switching.
+const GO: usize = 1;
+/// Open in new gerdr, when switching.
+const NEW_GERDR: usize = 2;
+
+/// A checkbox of the quit dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Check {
+    /// Stop the herdr session.
+    Session,
+    /// Stop the apps kept running.
+    Apps,
+    DontAsk,
+}
 
 /// The quit dialog's state, while it is open.
 #[derive(Debug)]
 pub struct QuitDialog {
-    /// 0 Cancel, 1 Stop project, 2 Keep running (as `QuitView::selected`);
-    /// when switching, 0 Cancel, 1 Switch, 2 Open in new gerdr.
+    /// 0 Cancel, 1 Quit (as `QuitView::selected`); when switching,
+    /// 0 Cancel, 1 Switch, 2 Open in new gerdr.
     pub selected: usize,
+    /// What is checked to stop.
+    pub stops: Stops,
     pub dont_ask: bool,
+    /// The apps the project keeps running, as named for people: no row
+    /// for them when there are none.
+    pub apps: Vec<String>,
+    /// The row under the keyboard's cursor.
+    pub cursor: usize,
     /// What the pointer is over.
     pub hover: Option<QuitHit>,
     /// The switch to another project it asks about, if not quitting.
     pub switch: Option<Switch>,
 }
 
-impl Default for QuitDialog {
-    /// Keep running selected, as the safe choice.
-    fn default() -> Self {
+impl QuitDialog {
+    /// Asking to quit, with `stops` checked: Quit selected.
+    fn quitting(stops: Stops, apps: Vec<String>, dont_ask: bool) -> Self {
         Self {
-            selected: KEEP,
-            dont_ask: false,
+            selected: GO,
+            stops,
+            dont_ask,
+            apps,
+            cursor: 0,
             hover: None,
             switch: None,
         }
+    }
+
+    /// Asking about `switch`, with `stops` checked: Open in new gerdr
+    /// selected, as the safe choice.
+    fn switching(stops: Stops, apps: Vec<String>, switch: Switch) -> Self {
+        Self {
+            selected: NEW_GERDR,
+            switch: Some(switch),
+            ..Self::quitting(stops, apps, false)
+        }
+    }
+
+    /// The checkboxes, in order.
+    fn rows(&self) -> Vec<Check> {
+        let mut rows = vec![Check::Session];
+        if !self.apps.is_empty() {
+            rows.push(Check::Apps);
+        }
+        if self.switch.is_none() {
+            rows.push(Check::DontAsk);
+        }
+        rows
+    }
+
+    fn checked(&self, check: Check) -> bool {
+        match check {
+            Check::Session => self.stops.session,
+            Check::Apps => self.stops.apps,
+            Check::DontAsk => self.dont_ask,
+        }
+    }
+
+    /// Check row `i`, or uncheck it.
+    fn toggle(&mut self, i: usize) {
+        match self.rows().get(i) {
+            Some(Check::Session) => self.stops.session = !self.stops.session,
+            Some(Check::Apps) => self.stops.apps = !self.stops.apps,
+            Some(Check::DontAsk) => self.dont_ask = !self.dont_ask,
+            None => {}
+        }
+    }
+
+    /// What pressing button `button` asks for.
+    fn press(&self, button: usize) -> Outcome {
+        match button {
+            GO => Outcome::Go {
+                stops: self.stops,
+                remember: self.dont_ask,
+            },
+            NEW_GERDR if self.switch.is_some() => Outcome::NewGerdr,
+            _ => Outcome::Cancel,
+        }
+    }
+
+    /// Handle a key: `sym` is the key's own symbol (`typed`, with Shift and
+    /// the layout applied, isn't needed).
+    fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+        let plain = !(mods.ctrl || mods.alt || mods.logo);
+        let switching = self.switch.is_some();
+        let last = self.rows().len() - 1;
+        match sym {
+            Keysym::Escape => return Some(Outcome::Cancel),
+            Keysym::Return | Keysym::KP_Enter => return Some(self.press(self.selected)),
+            Keysym::Up | Keysym::KP_Up => self.cursor = self.cursor.saturating_sub(1),
+            Keysym::Down | Keysym::KP_Down => self.cursor = (self.cursor + 1).min(last),
+            Keysym::space if plain => self.toggle(self.cursor),
+            Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => self.step(-1),
+            Keysym::Tab if mods.shift => self.step(-1),
+            Keysym::Right | Keysym::KP_Right | Keysym::Tab => self.step(1),
+            Keysym::q | Keysym::Q if plain && !switching => return Some(self.press(GO)),
+            Keysym::n | Keysym::N if plain && switching => return Some(self.press(NEW_GERDR)),
+            Keysym::s | Keysym::S if plain && switching => return Some(self.press(GO)),
+            _ => {}
+        }
+        None
+    }
+
+    /// Move the selection `by` buttons, wrapping around.
+    fn step(&mut self, by: isize) {
+        let buttons = if self.switch.is_some() { 3 } else { 2 };
+        self.selected = (self.selected as isize + by).rem_euclid(buttons) as usize;
     }
 }
 
@@ -82,53 +186,15 @@ pub enum Then {
 /// What the quit dialog asks gerdr to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Quit, leaving the session running; `remember` if "Don't ask again" was
-    /// checked.
-    Keep {
+    /// Quit, or switch, stopping `stops` of the project shown; `remember`
+    /// if "Don't ask again" was checked.
+    Go {
+        stops: Stops,
         remember: bool,
     },
-    /// Quit and stop the session.
-    Stop {
-        remember: bool,
-    },
+    /// Switching: keep the project shown and open the other in a new gerdr.
+    NewGerdr,
     Cancel,
-}
-
-impl QuitDialog {
-    /// What pressing button `button` asks for.
-    fn press(&self, button: usize) -> Outcome {
-        let remember = self.dont_ask;
-        match button {
-            STOP => Outcome::Stop { remember },
-            KEEP => Outcome::Keep { remember },
-            _ => Outcome::Cancel,
-        }
-    }
-
-    /// Handle a key: `sym` is the key's own symbol (`typed`, with Shift and
-    /// the layout applied, isn't needed).
-    fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        let plain = !(mods.ctrl || mods.alt || mods.logo);
-        let switching = self.switch.is_some();
-        match sym {
-            Keysym::Escape => return Some(Outcome::Cancel),
-            Keysym::Return | Keysym::KP_Enter => return Some(self.press(self.selected)),
-            Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => self.step(-1),
-            Keysym::Tab if mods.shift => self.step(-1),
-            Keysym::Right | Keysym::KP_Right | Keysym::Tab => self.step(1),
-            Keysym::space if plain && !switching => self.dont_ask = !self.dont_ask,
-            Keysym::k | Keysym::K if plain && !switching => return Some(self.press(KEEP)),
-            Keysym::n | Keysym::N if plain && switching => return Some(self.press(KEEP)),
-            Keysym::s | Keysym::S if plain => return Some(self.press(STOP)),
-            _ => {}
-        }
-        None
-    }
-
-    /// Move the selection `by` buttons, wrapping around.
-    fn step(&mut self, by: isize) {
-        self.selected = (self.selected as isize + by).rem_euclid(3) as usize;
-    }
 }
 
 impl Gerdr {
@@ -136,22 +202,23 @@ impl Gerdr {
     /// was remembered, or ask.
     pub fn request_quit(&mut self) {
         let Some(id) = self.project.as_deref() else {
-            self.quit_app(false);
+            self.quit_app(Stops::default());
             return;
         };
-        // Not connected to its session: ask only if it runs all the same.
+        // Not connected to its session: ask only if it or its apps run all
+        // the same.
         if self.herdr.is_none()
             && !self
                 .projects
                 .project(id)
                 .is_some_and(|p| herdr::is_running(&p.session))
+            && keep::app_names(id).is_empty()
         {
-            self.quit_app(false);
+            self.quit_app(Stops::default());
             return;
         }
         match self.projects.quit_choice {
-            Some(QuitChoice::Keep) => self.quit_app(false),
-            Some(QuitChoice::Stop) => self.quit_app(true),
+            Some(choice) => self.quit_app(choice.stops()),
             None => self.open_quit(),
         }
     }
@@ -159,12 +226,29 @@ impl Gerdr {
     /// Ask, even if a choice was remembered.
     pub fn open_quit(&mut self) {
         self.project_menu = None;
-        self.quit = Some(QuitDialog {
-            dont_ask: self.projects.quit_choice.is_some(),
-            ..QuitDialog::default()
-        });
+        self.quit = Some(QuitDialog::quitting(
+            self.stop_picks(),
+            self.shown_apps(),
+            self.projects.quit_choice.is_some(),
+        ));
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
+    }
+
+    /// What to check to stop: as picked last.
+    fn stop_picks(&self) -> Stops {
+        self.projects
+            .stop_picks
+            .or(self.projects.quit_choice.map(QuitChoice::stops))
+            .unwrap_or_default()
+    }
+
+    /// The apps the shown project keeps running (see `keep::app_names`).
+    fn shown_apps(&self) -> Vec<String> {
+        self.project
+            .as_deref()
+            .map(keep::app_names)
+            .unwrap_or_default()
     }
 
     /// A key while the quit dialog has the keyboard; what to do once the
@@ -181,30 +265,32 @@ impl Gerdr {
 
     /// Do what the quit dialog asked.
     pub fn apply_quit(&mut self, outcome: Outcome) {
+        if let Outcome::Go { stops, .. } = outcome {
+            self.projects.stop_picks = Some(stops);
+        }
         if let Some(switch) = self.quit.as_mut().and_then(|d| d.switch.take()) {
             self.quit = None;
             self.refresh_pointer_focus();
             return match outcome {
-                Outcome::Stop { .. } => self.switch_now(switch, true),
-                Outcome::Keep { .. } => self.open_in_new_gerdr(switch),
+                Outcome::Go { stops, .. } => {
+                    self.projects.save();
+                    self.switch_now(switch, stops)
+                }
+                Outcome::NewGerdr => self.open_in_new_gerdr(switch),
                 Outcome::Cancel if switch.created => self.forget_project(&switch.id),
                 Outcome::Cancel => {}
             };
         }
-        let (choice, remember) = match outcome {
-            Outcome::Cancel => {
-                self.quit = None;
-                // Gone, what is under the pointer gets it back.
-                self.refresh_pointer_focus();
-                return;
-            }
-            Outcome::Keep { remember } => (QuitChoice::Keep, remember),
-            Outcome::Stop { remember } => (QuitChoice::Stop, remember),
+        let Outcome::Go { stops, remember } = outcome else {
+            self.quit = None;
+            // Gone, what is under the pointer gets it back.
+            self.refresh_pointer_focus();
+            return;
         };
-        self.projects.quit_choice = remember.then_some(choice);
+        self.projects.quit_choice = remember.then_some(QuitChoice::Stops(stops));
         self.projects.save();
         self.quit = None;
-        self.quit_app(choice == QuitChoice::Stop);
+        self.quit_app(stops);
     }
 
     /// Show project `switch.id` as `switch.then` says: right away when no
@@ -213,24 +299,29 @@ impl Gerdr {
     pub fn ask_switch(&mut self, switch: Switch) {
         let shown = self.project.as_deref();
         if shown.is_none_or(|id| id == switch.id) {
-            return self.switch_now(switch, false);
+            return self.switch_now(switch, Stops::default());
         }
         // Not a question: it can't be shown here anyway.
         if self.open_elsewhere(&switch.id) {
             return self.refuse_open(&switch.id);
         }
         self.project_menu = None;
-        self.quit = Some(QuitDialog {
-            switch: Some(switch),
-            ..QuitDialog::default()
-        });
+        self.quit = Some(QuitDialog::switching(
+            self.stop_picks(),
+            self.shown_apps(),
+            switch,
+        ));
         self.refresh_pointer_focus();
     }
 
-    /// Show the project `switch` is about, stopping the one left if
-    /// `stop` (see `show_project`).
-    fn switch_now(&mut self, switch: Switch, stop: bool) {
-        self.stop_left = stop.then(|| self.project.clone()).flatten();
+    /// Show the project `switch` is about, stopping what `stops` says of
+    /// the one left (see `show_project`).
+    fn switch_now(&mut self, switch: Switch, stops: Stops) {
+        self.stop_left = self
+            .project
+            .clone()
+            .filter(|_| stops.any())
+            .map(|id| (id, stops));
         match switch.then {
             Then::Enter { pick, folders } => self.enter_project(&switch.id, pick, folders),
             Then::Open { folder, kind } => self.enter_project_with(&switch.id, folder, kind),
@@ -285,11 +376,11 @@ impl Gerdr {
         };
         let outcome = match quit_hit(&layout, pos) {
             Some(QuitHit::Button(button)) => Some(dialog.press(button)),
-            Some(QuitHit::Checkbox) if dialog.switch.is_none() => {
-                dialog.dont_ask = !dialog.dont_ask;
+            Some(QuitHit::Row(row)) => {
+                dialog.cursor = row;
+                dialog.toggle(row);
                 None
             }
-            Some(QuitHit::Checkbox) => None,
             None if layout.panel.to_f64().contains(pos) => None,
             None => Some(Outcome::Cancel),
         };
@@ -301,8 +392,11 @@ impl Gerdr {
 
     /// Where the quit dialog's parts go, as it asks now.
     pub fn quit_layout(&self) -> chrome::QuitLayout {
-        let switching = self.quit.as_ref().is_some_and(|d| d.switch.is_some());
-        chrome::quit_layout(self.output_size(), switching)
+        let (rows, switching) = self
+            .quit
+            .as_ref()
+            .map_or((0, false), |d| (d.rows().len(), d.switch.is_some()));
+        chrome::quit_layout(self.output_size(), rows, switching)
     }
 
     /// The pointer moved while the quit dialog is open.
@@ -320,10 +414,27 @@ impl Gerdr {
                 .project(id)
                 .map_or_else(|| id.to_owned(), |p| p.name.clone())
         };
+        let rows = dialog
+            .rows()
+            .into_iter()
+            .map(|check| {
+                let (label, detail) = match check {
+                    Check::Session => ("Terminals and agents".into(), "herdr session"),
+                    Check::Apps => (dialog.apps.join(", "), "kept running"),
+                    Check::DontAsk => ("Don't ask again".into(), ""),
+                };
+                QuitRow {
+                    label,
+                    detail: detail.into(),
+                    checked: dialog.checked(check),
+                }
+            })
+            .collect();
         Some(QuitView {
             project: self.project.as_deref().map(name).unwrap_or_default(),
+            rows,
+            cursor: dialog.cursor,
             selected: dialog.selected,
-            dont_ask: dialog.dont_ask,
             hover: dialog.hover,
             switch_to: dialog.switch.as_ref().map(|s| name(&s.id)),
         })
@@ -336,10 +447,10 @@ fn quit_hit(layout: &chrome::QuitLayout, pos: Point<f64, Logical>) -> Option<Qui
         return Some(QuitHit::Button(button));
     }
     layout
-        .checkbox
-        .to_f64()
-        .contains(pos)
-        .then_some(QuitHit::Checkbox)
+        .rows
+        .iter()
+        .position(|r| r.to_f64().contains(pos))
+        .map(QuitHit::Row)
 }
 
 #[cfg(test)]
@@ -350,29 +461,83 @@ mod tests {
         dialog.key(&ModifiersState::default(), sym)
     }
 
+    fn cursor() -> Vec<String> {
+        vec!["Cursor".into()]
+    }
+
+    fn switch() -> Switch {
+        Switch {
+            id: "aft".into(),
+            then: Then::Enter {
+                pick: true,
+                folders: Vec::new(),
+            },
+            created: false,
+        }
+    }
+
     #[test]
-    fn keep_running_is_the_default() {
-        let mut dialog = QuitDialog::default();
-        assert_eq!(dialog.selected, KEEP);
+    fn quit_stops_what_was_picked() {
+        let stops = Stops {
+            session: true,
+            apps: false,
+        };
+        let mut dialog = QuitDialog::quitting(stops, cursor(), false);
+        assert_eq!(dialog.selected, GO);
         assert_eq!(
             press(&mut dialog, Keysym::Return),
-            Some(Outcome::Keep { remember: false })
+            Some(Outcome::Go {
+                stops,
+                remember: false
+            })
         );
     }
 
     #[test]
+    fn rows_check_with_space() {
+        let mut dialog = QuitDialog::quitting(Stops::default(), cursor(), false);
+        assert_eq!(dialog.rows(), [Check::Session, Check::Apps, Check::DontAsk]);
+        press(&mut dialog, Keysym::Down);
+        assert_eq!(press(&mut dialog, Keysym::space), None);
+        assert_eq!(
+            dialog.stops,
+            Stops {
+                session: false,
+                apps: true
+            }
+        );
+        press(&mut dialog, Keysym::Down);
+        press(&mut dialog, Keysym::Down);
+        assert_eq!(dialog.cursor, 2);
+        press(&mut dialog, Keysym::space);
+        press(&mut dialog, Keysym::Up);
+        press(&mut dialog, Keysym::Up);
+        press(&mut dialog, Keysym::Up);
+        press(&mut dialog, Keysym::space);
+        assert_eq!(
+            press(&mut dialog, Keysym::q),
+            Some(Outcome::Go {
+                stops: Stops::ALL,
+                remember: true
+            })
+        );
+    }
+
+    #[test]
+    fn no_apps_row_without_apps() {
+        let dialog = QuitDialog::quitting(Stops::ALL, Vec::new(), true);
+        assert_eq!(dialog.rows(), [Check::Session, Check::DontAsk]);
+        let dialog = QuitDialog::switching(Stops::ALL, cursor(), switch());
+        assert_eq!(dialog.rows(), [Check::Session, Check::Apps]);
+    }
+
+    #[test]
     fn selection_cycles_and_wraps() {
-        let mut dialog = QuitDialog::default();
+        let mut dialog = QuitDialog::quitting(Stops::default(), Vec::new(), false);
         assert_eq!(press(&mut dialog, Keysym::Right), None);
         assert_eq!(dialog.selected, 0);
         press(&mut dialog, Keysym::Left);
-        assert_eq!(dialog.selected, KEEP);
-        press(&mut dialog, Keysym::Left);
-        assert_eq!(dialog.selected, STOP);
-        press(&mut dialog, Keysym::Tab);
-        assert_eq!(dialog.selected, KEEP);
-        press(&mut dialog, Keysym::ISO_Left_Tab);
-        assert_eq!(dialog.selected, STOP);
+        assert_eq!(dialog.selected, GO);
         let shift = ModifiersState {
             shift: true,
             ..Default::default()
@@ -383,78 +548,36 @@ mod tests {
     }
 
     #[test]
-    fn enter_presses_the_selected_button() {
-        let mut dialog = QuitDialog::default();
-        press(&mut dialog, Keysym::Left);
-        assert_eq!(
-            press(&mut dialog, Keysym::KP_Enter),
-            Some(Outcome::Stop { remember: false })
-        );
-    }
-
-    #[test]
-    fn space_checks_dont_ask_again() {
-        let mut dialog = QuitDialog::default();
-        assert_eq!(press(&mut dialog, Keysym::space), None);
-        assert!(dialog.dont_ask);
-        assert_eq!(
-            press(&mut dialog, Keysym::Return),
-            Some(Outcome::Keep { remember: true })
-        );
-        press(&mut dialog, Keysym::space);
-        assert!(!dialog.dont_ask);
-    }
-
-    #[test]
     fn switching_keys() {
-        let mut dialog = QuitDialog {
-            switch: Some(Switch {
-                id: "aft".into(),
-                then: Then::Enter {
-                    pick: true,
-                    folders: Vec::new(),
-                },
-                created: false,
-            }),
-            ..Default::default()
+        let stops = Stops {
+            session: false,
+            apps: true,
         };
-        assert_eq!(
-            press(&mut dialog, Keysym::Return),
-            Some(Outcome::Keep { remember: false })
-        );
-        assert_eq!(press(&mut dialog, Keysym::space), None);
-        assert!(!dialog.dont_ask);
-        assert_eq!(press(&mut dialog, Keysym::k), None);
-        assert_eq!(
-            press(&mut dialog, Keysym::n),
-            Some(Outcome::Keep { remember: false })
-        );
+        let mut dialog = QuitDialog::switching(stops, cursor(), switch());
+        assert_eq!(press(&mut dialog, Keysym::Return), Some(Outcome::NewGerdr));
+        assert_eq!(press(&mut dialog, Keysym::q), None);
+        assert_eq!(press(&mut dialog, Keysym::n), Some(Outcome::NewGerdr));
         assert_eq!(
             press(&mut dialog, Keysym::s),
-            Some(Outcome::Stop { remember: false })
+            Some(Outcome::Go {
+                stops,
+                remember: false
+            })
         );
+        press(&mut dialog, Keysym::Tab);
+        assert_eq!(dialog.selected, 0);
     }
 
     #[test]
-    fn letters_and_escape() {
-        let mut dialog = QuitDialog {
-            dont_ask: true,
-            ..Default::default()
-        };
+    fn escape_and_other_keys() {
+        let mut dialog = QuitDialog::quitting(Stops::default(), Vec::new(), true);
         assert_eq!(press(&mut dialog, Keysym::Escape), Some(Outcome::Cancel));
-        assert_eq!(
-            press(&mut dialog, Keysym::k),
-            Some(Outcome::Keep { remember: true })
-        );
-        assert_eq!(
-            press(&mut dialog, Keysym::s),
-            Some(Outcome::Stop { remember: true })
-        );
         let ctrl = ModifiersState {
             ctrl: true,
             ..Default::default()
         };
-        assert_eq!(dialog.key(&ctrl, Keysym::s), None);
+        assert_eq!(dialog.key(&ctrl, Keysym::q), None);
+        assert_eq!(press(&mut dialog, Keysym::s), None);
         assert_eq!(press(&mut dialog, Keysym::x), None);
     }
 }

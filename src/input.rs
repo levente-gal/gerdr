@@ -815,7 +815,7 @@ impl Gerdr {
         // Over an overlay, only its own controls count.
         if self.quit.is_some() {
             let quit = self.quit_layout();
-            let mut controls = quit.buttons.iter().chain(std::iter::once(&quit.checkbox));
+            let mut controls = quit.buttons.iter().chain(&quit.rows);
             return if controls.any(|rect| rect.to_f64().contains(pos)) {
                 RegionHit::Control
             } else {

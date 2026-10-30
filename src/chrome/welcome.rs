@@ -558,7 +558,7 @@ mod tests {
         running_label, welcome_label, welcome_layout, welcome_mark, welcome_page,
     };
     use crate::chrome::{
-        Painter, QuitHit, QuitView, Rect, TabStripView, TabView, Theme, ThemeMode, inside,
+        Painter, QuitHit, QuitRow, QuitView, Rect, TabStripView, TabView, Theme, ThemeMode, inside,
     };
     use crate::text_field::Line;
     use smithay::utils::{Logical, Size};
@@ -730,8 +730,13 @@ mod tests {
                     painter.welcome(&view, size, scale, theme.palette());
                     let quit = QuitView {
                         project: "aft".into(),
-                        selected: 2,
-                        dont_ask: scale > 1.0,
+                        rows: vec![QuitRow {
+                            label: "Don't ask again".into(),
+                            detail: String::new(),
+                            checked: scale > 1.0,
+                        }],
+                        cursor: 0,
+                        selected: 1,
                         hover: Some(QuitHit::Button(1)),
                         switch_to: None,
                     };

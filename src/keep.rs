@@ -233,6 +233,28 @@ pub fn stop(id: &str) {
     }
 }
 
+/// The programs of the apps project `id` keeps running, each once and
+/// named for people: "Cursor".
+pub fn app_names(id: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for app in read(id).apps {
+        let Some(program) = launch::program_name(&app.command) else {
+            continue;
+        };
+        let mut chars = program.chars();
+        let name: String = chars
+            .next()
+            .into_iter()
+            .flat_map(char::to_uppercase)
+            .chain(chars)
+            .collect();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 impl Gerdr {
     /// Whether `command` keeps running when gerdr quits: its program is
     /// one `[keep] apps` names, and a project is shown.
