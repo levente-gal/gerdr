@@ -49,6 +49,7 @@ fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
             ("Enter", "copy and close"),
             ("Ctrl+A", "select all"),
             ("/", "find"),
+            ("*", "find word"),
             ("Esc", "close"),
         ],
     };
@@ -191,7 +192,9 @@ impl Gerdr {
     }
 
     /// A key while the viewer is open, `typed` with Shift and the layout
-    /// applied.
+    /// applied. `*` (`#` back) searches for the selection, or the word
+    /// under the pointer, while the search's field doesn't have the
+    /// keyboard.
     pub fn scrollback_key(
         &mut self,
         mods: &ModifiersState,
@@ -199,6 +202,26 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let (_, fit) = self.scrollback_place()?;
+        let star = match typed {
+            Keysym::asterisk | Keysym::KP_Multiply => Some(false),
+            Keysym::numbersign => Some(true),
+            _ => None,
+        };
+        let others = mods.ctrl || mods.alt || mods.logo;
+        if let Some(back) = star.filter(|_| !others)
+            && !self.scrollback.as_ref()?.find_focused()
+        {
+            let at = self.scrollback_view().and_then(|view| {
+                let layout = chrome::scrollback_layout(view.panel, &view.hints);
+                let on = chrome::scrollback_hit(&view, &layout, self.pointer);
+                (on == Some(ScrollbackHit::Text))
+                    .then(|| chrome::scrollback_point(&view, &layout, self.pointer))
+            });
+            if !self.scrollback.as_mut()?.star(at, back, fit) {
+                self.show_notice("No word under the pointer: point at one, or select text".into());
+            }
+            return None;
+        }
         self.scrollback
             .as_mut()?
             .key(mods, sym, typed, Instant::now(), fit)

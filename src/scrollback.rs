@@ -10,7 +10,9 @@
 //!
 //! `/` or Ctrl+F searches it: every place found is tinted, the one gone
 //! to more, Enter goes to the next (Shift+Enter, the one before), round
-//! past the ends, and ticks on the scrollbar say where they all are.
+//! past the ends, and ticks on the scrollbar say where they all are. `*`
+//! (`#` back) searches for the selection, or the word under the pointer
+//! as a whole word, as vim's do.
 
 use std::{ops::Range, time::Instant};
 
@@ -116,6 +118,9 @@ struct Find {
     field: TextField,
     /// It has the keyboard (else the list has, the places still tinted).
     focused: bool,
+    /// It finds what is typed only as a whole word (`*`), until it is
+    /// typed into.
+    whole: bool,
     /// Every place found, in order: a line, and characters of it.
     hits: Vec<(usize, Range<usize>)>,
     /// The place gone to, by index into `hits`.
@@ -504,6 +509,7 @@ impl Scrollback {
         }
         match find.field.key(mods, sym, typed) {
             Edit::Changed => {
+                find.whole = false;
                 self.find_hits();
                 self.find_near(fit);
                 true
@@ -537,20 +543,78 @@ impl Scrollback {
             .map(|f| &mut f.field)
     }
 
-    /// Open the search, or give it the keyboard back with what it has
-    /// typed selected: it looks around what is in view, the list as
-    /// `fit` lays it out.
-    pub fn open_find(&mut self, fit: Fit) {
+    /// The first and the last line in view, the list as `fit` lays it
+    /// out.
+    fn shown_lines(&self, fit: Fit) -> (usize, usize) {
         let first = self.scroll.first();
         let line = |row: usize| self.rows.get(row).map_or(0, |r| r.line);
         let last = (first + fit.page.max(1))
             .min(self.rows.len())
             .saturating_sub(1);
-        let shown = (line(first), line(last));
+        (line(first), line(last))
+    }
+
+    /// Open the search, or give it the keyboard back with what it has
+    /// typed selected: it looks around what is in view, the list as
+    /// `fit` lays it out.
+    pub fn open_find(&mut self, fit: Fit) {
+        let shown = self.shown_lines(fit);
         let find = self.find.get_or_insert_with(Find::default);
         find.focused = true;
         find.shown = shown;
         find.field.select_all();
+    }
+
+    /// Search for the selection when it is on one line, else for the word
+    /// at character `col` of row `row` (or the next after it on its line)
+    /// as a whole word, as vim's `*` does: to the next place after it, or
+    /// with `back` the one before (`#`), round past the ends. The list
+    /// keeps the keyboard, for `n` and `N`. Whether there was something to
+    /// search for.
+    pub fn star(&mut self, at: Option<(i64, usize)>, back: bool, fit: Fit) -> bool {
+        let selected = self
+            .selection
+            .map(|s| s.range())
+            .filter(|(a, b)| a.line == b.line && a.ch < b.ch);
+        let (query, whole, from) = match (selected, at) {
+            (Some((a, b)), _) => (chars(&self.lines[a.line], a.ch, b.ch), false, a),
+            (None, Some((row, col))) if row >= 0 && (row as usize) < self.rows.len() => {
+                let spot = self.spot(row, col);
+                let Some(word) = find::word_at(&self.lines[spot.line], spot.ch) else {
+                    return false;
+                };
+                let text = chars(&self.lines[spot.line], word.start, word.end);
+                let from = Spot {
+                    line: spot.line,
+                    ch: word.start,
+                };
+                (text, true, from)
+            }
+            _ => return false,
+        };
+        let shown = self.shown_lines(fit);
+        let find = self.find.get_or_insert_with(Find::default);
+        find.field.set(&query);
+        find.focused = false;
+        find.whole = whole;
+        find.shown = shown;
+        self.find_hits();
+        let Some(find) = self.find.as_ref() else {
+            return true;
+        };
+        let place = |(line, chars): &(usize, Range<usize>)| (*line, chars.start);
+        let from = (from.line, from.ch);
+        let at = if back {
+            let before = find.hits.iter().rposition(|h| place(h) < from);
+            before.or(find.hits.len().checked_sub(1))
+        } else {
+            let after = find.hits.iter().position(|h| place(h) > from);
+            after.or((!find.hits.is_empty()).then_some(0))
+        };
+        if let Some(at) = at {
+            self.go_to_found(at, fit);
+        }
+        true
     }
 
     /// Close the search: nothing is tinted any more.
@@ -585,13 +649,13 @@ impl Scrollback {
         let Some(find) = self.find.as_mut() else {
             return;
         };
-        let query = find.field.line().text;
+        let (query, whole) = (find.field.line().text, find.whole);
         find.hits = self
             .lines
             .iter()
             .enumerate()
             .flat_map(|(n, line)| {
-                find::find_all(line, &query)
+                find::find(line, &query, whole)
                     .into_iter()
                     .map(move |r| (n, r))
             })
@@ -660,6 +724,7 @@ impl Scrollback {
             placeholder: "Find in the scrollback".into(),
             found: n > 0,
             focused: find.focused,
+            whole: find.whole,
         })
     }
 
@@ -1042,6 +1107,45 @@ mod tests {
             s.key(&none, Keysym::Escape, Keysym::Escape, now, f),
             Some(Outcome::Close)
         );
+    }
+
+    #[test]
+    fn star_finds_the_word_under_the_pointer_or_else_the_selection() {
+        let mut s = viewer("let id = 1;\nlet idle = id;\nid(id_x)", 80, 10);
+        let f = fit(80, 10);
+        let none = ModifiersState::default();
+        let now = Instant::now();
+        // On `id`: the next place it is a word of its own, in the list.
+        assert!(s.star(Some((0, 5)), false, f));
+        let bar = s.find_bar().unwrap();
+        assert!(bar.whole && !bar.focused);
+        assert_eq!(bar.query.text, "id");
+        assert_eq!(count(&s), "2 of 3");
+        assert_eq!(s.row_found(1), [(11..13, true)]);
+        assert_eq!(s.row_found(2), [(0..2, false)]);
+        s.key(&none, Keysym::n, Keysym::n, now, f);
+        assert_eq!(count(&s), "3 of 3");
+        // `#` goes back from it: round to the last.
+        assert!(s.star(Some((0, 4)), true, f));
+        assert_eq!(count(&s), "3 of 3");
+        // Past the line's last word there is none.
+        assert!(!s.star(Some((0, 40)), false, f));
+        assert!(!s.star(None, false, f));
+        // A selection is searched for as it is, in words too.
+        s.press(1, 4, false, 1);
+        s.drag_to(1, 6);
+        s.release();
+        assert!(s.star(Some((0, 5)), false, f));
+        let bar = s.find_bar().unwrap();
+        assert!(!bar.whole);
+        assert_eq!(count(&s), "3 of 5");
+        // Typed into, it finds anywhere again.
+        s.selection = None;
+        assert!(s.star(Some((0, 5)), false, f));
+        type_in(&mut s, "/", f);
+        type_in(&mut s, "id", f);
+        assert!(!s.find_bar().unwrap().whole);
+        assert_eq!(s.find_bar().unwrap().count.split(" of ").nth(1), Some("5"));
     }
 
     #[test]

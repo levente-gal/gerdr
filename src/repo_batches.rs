@@ -725,6 +725,18 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Outcome> {
+        // `*` searches for the word under the pointer.
+        if matches!(
+            typed,
+            Keysym::asterisk | Keysym::KP_Multiply | Keysym::numbersign
+        ) {
+            let at = self
+                .repos_view()
+                .and_then(|view| chrome::repos_diff_char(&view, self.output_size(), self.pointer));
+            if let Some(panel) = self.repos.panel.as_mut() {
+                panel.pointer_char = at;
+            }
+        }
         let page = self.repos_page();
         let (density, tree_share, cols) = self.repos_env();
         let Repos {
@@ -1250,6 +1262,7 @@ impl Gerdr {
                 self.projects.repo_grouping = grouping;
                 self.projects.save();
             }
+            Outcome::Notice(text) => self.show_notice(text.into()),
             Outcome::Batch { .. }
             | Outcome::Confirmed { .. }
             | Outcome::CreateBranch { .. }

@@ -2185,6 +2185,25 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     Some(ReposHit::Panel)
 }
 
+/// The diff line shown (by index into `DetailView::rows`) and the char of
+/// its text at `pos`, on an output of `size`, if `pos` is on one.
+pub fn repos_diff_char(
+    view: &ReposView,
+    size: Size<i32, Logical>,
+    pos: Point<f64, Logical>,
+) -> Option<(usize, usize)> {
+    let layout = repos_layout(view, size);
+    let Some(ReposHit::DiffRow(i)) = repos_hit(&layout, pos) else {
+        return None;
+    };
+    let DetailRow::Line(_) = view.detail.rows.get(i)? else {
+        return None;
+    };
+    let x = pos.x - (layout.detail_rows.get(i)?.loc.x + DIFF_INSET) as f64;
+    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    (x >= 0.0).then(|| (i, (x / advance).floor() as usize))
+}
+
 /// The panel's field, for the caret and selection, on an output of `size`.
 pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
     let layout = repos_layout(view, size);
@@ -5277,6 +5296,7 @@ mod tests {
             count: "2 of 3".into(),
             found: true,
             focused: true,
+            whole: false,
         });
         let mut found = vec![Vec::new(); view.detail.rows.len()];
         // "git.rs", then "src".
@@ -5898,6 +5918,38 @@ mod tests {
         assert_eq!(spot.area, repos_layout(&view, size).field);
         assert_eq!(spot.line, view.field);
         assert!(spot.text.0 < spot.text.1);
+    }
+
+    #[test]
+    fn the_pointer_on_a_diff_line_is_a_char_of_its_text() {
+        let view = full();
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let layout = repos_layout(&view, size);
+        let i = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Line(_)))
+            .expect("a line");
+        let rect = layout.detail_rows[i];
+        let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
+        let x0 = (rect.loc.x + DIFF_INSET) as f64;
+        let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
+        let at = |x: f64| repos_diff_char(&view, size, (x, y).into());
+        assert_eq!(at(x0 + 0.5 * advance), Some((i, 0)));
+        assert_eq!(at(x0 + 3.5 * advance), Some((i, 3)));
+        // Left of its text, or on a row that is no line: none.
+        assert_eq!(at(x0 - 2.0), None);
+        let head = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| !matches!(r, DetailRow::Line(_)));
+        if let Some(h) = head {
+            let r = layout.detail_rows[h];
+            let pos = (x0 + advance, r.loc.y as f64 + r.size.h as f64 / 2.0);
+            assert_eq!(repos_diff_char(&view, size, pos.into()), None);
+        }
     }
 
     #[test]

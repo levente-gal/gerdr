@@ -1,6 +1,7 @@
 //! Finding a query in text, as the diff's search does: every place it is,
 //! one after another without overlapping. A query all in lower case finds
-//! any case; one with an upper case letter, only that case.
+//! any case; one with an upper case letter, only that case. A whole word
+//! (vim's `*`) is found only as a word of its own, in its own case.
 
 use std::ops::Range;
 
@@ -40,6 +41,63 @@ pub fn find_all(text: &str, query: &str) -> Vec<Range<usize>> {
     found
 }
 
+/// Whether `c` is part of a word for a whole-word search: a letter, a
+/// digit or `_`, as vim's `*` takes them.
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The word at char `at` of `text`, by char index; off a word, the next
+/// one after it on the line, as vim's `*` takes it. None past the last.
+pub fn word_at(text: &str, at: usize) -> Option<Range<usize>> {
+    let cs: Vec<char> = text.chars().collect();
+    let first = (at..cs.len()).find(|&i| is_word(cs[i]))?;
+    let start = if first == at {
+        (0..at)
+            .rev()
+            .find(|&i| !is_word(cs[i]))
+            .map_or(0, |i| i + 1)
+    } else {
+        first
+    };
+    let end = (start..cs.len())
+        .find(|&i| !is_word(cs[i]))
+        .unwrap_or(cs.len());
+    Some(start..end)
+}
+
+/// Where `word` is in `text` as a word of its own, not part of a longer
+/// one, by char index, in its own case only; none for an empty word.
+pub fn find_words(text: &str, word: &str) -> Vec<Range<usize>> {
+    let word: Vec<char> = word.chars().collect();
+    let cs: Vec<char> = text.chars().collect();
+    let n = word.len();
+    let mut found = Vec::new();
+    if n == 0 {
+        return found;
+    }
+    let apart = |i: Option<usize>| i.and_then(|i| cs.get(i)).is_none_or(|&c| !is_word(c));
+    let mut at = 0;
+    while at + n <= cs.len() {
+        if cs[at..at + n] == word[..] && apart(at.checked_sub(1)) && apart(Some(at + n)) {
+            found.push(at..at + n);
+            at += n;
+        } else {
+            at += 1;
+        }
+    }
+    found
+}
+
+/// `find_all`, or for a `whole` word, `find_words`.
+pub fn find(text: &str, query: &str, whole: bool) -> Vec<Range<usize>> {
+    if whole {
+        find_words(text, query)
+    } else {
+        find_all(text, query)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
@@ -68,5 +126,25 @@ mod tests {
         assert!(find_all("text", "").is_empty());
         assert!(find_all("ab", "abc").is_empty());
         assert!(find_all("", "a").is_empty());
+    }
+
+    #[test]
+    fn a_word_is_the_one_at_a_place_or_the_next_after_it() {
+        let text = "let foo_bar = baz(1);";
+        assert_eq!(word_at(text, 5), Some(4..11));
+        assert_eq!(word_at(text, 4), Some(4..11));
+        // Off a word, the next one on.
+        assert_eq!(word_at(text, 11), Some(14..17));
+        assert_eq!(word_at(text, 0), Some(0..3));
+        assert_eq!(word_at(text, 19), None);
+        assert_eq!(word_at("", 0), None);
+    }
+
+    #[test]
+    fn a_whole_word_is_found_only_on_its_own_in_its_case() {
+        let text = "id idle id_x (id) Id xid id";
+        assert_eq!(find_words(text, "id"), vec![0..2, 14..16, 25..27]);
+        assert!(find_words(text, "").is_empty());
+        assert_eq!(find(text, "id", false).len(), 7);
     }
 }

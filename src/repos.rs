@@ -294,6 +294,10 @@ pub struct Panel {
     diff_rows: Vec<DiffRow>,
     diff_roots: Vec<PathBuf>,
     pub(crate) hover: Option<ReposHit>,
+    /// The diff row shown (by index into those in view) and the char of
+    /// its text under the pointer, as the key `*` came: the word it
+    /// searches for.
+    pub(crate) pointer_char: Option<(usize, usize)>,
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
     pub(crate) sheet: Option<Sheet>,
@@ -948,6 +952,8 @@ pub enum Outcome {
     OpenWorkspace(PathBuf),
     /// The files are listed this way now: remember it.
     Grouping(Grouping),
+    /// Say this briefly.
+    Notice(&'static str),
 }
 
 /// A tree line, by index: a repository of `Ctx::items`, a folder of its
@@ -1389,6 +1395,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
         "in the search, the next place, the one before",
     ),
     ("F3 / Shift+F3", "the next place found, the one before"),
+    ("* / #", "find the word under the pointer, back for #"),
     ("Ctrl+S", "switch them all to a branch"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -3280,6 +3287,22 @@ impl Panel {
         if in_diff && plain && typed == Keysym::slash {
             self.open_search(ctx);
             return None;
+        }
+        // `*` (`#` back): the word under the pointer, as a whole word.
+        let star = match typed {
+            Keysym::asterisk | Keysym::KP_Multiply => Some(false),
+            Keysym::numbersign => Some(true),
+            _ => None,
+        };
+        if in_diff
+            && !(mods.ctrl || mods.alt || mods.logo)
+            && let Some(back) = star
+        {
+            let at = self
+                .pointer_char
+                .and_then(|(i, col)| Some((self.detail_row_at(i, ctx)?, col)));
+            let found = at.is_some_and(|(row, col)| self.star_search(row, col, back, ctx));
+            return (!found).then_some(Outcome::Notice("No word under the pointer"));
         }
         if self.focus == Focus::Detail
             && let Some(outcome) = self.detail_press(mods, sym, ctx)
@@ -9086,6 +9109,57 @@ mod tests {
     /// What the search says it found.
     fn search_count(panel: &Panel, ctx: &Ctx) -> String {
         panel.view("p", ctx).detail.search.expect("open").count
+    }
+
+    #[test]
+    fn star_finds_the_word_under_the_pointer_as_a_whole_word() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let lines = ["let id = 1;", "let idle = id;", "id(id_x)"];
+        let g = panel.diff_gen;
+        panel.set_diffs(root("gerdr"), g, vec![added("src/a.rs", 'M', &lines)], &ctx);
+        let line_row = |panel: &Panel, n: usize| {
+            let at = |r: &DiffRow| matches!(r, DiffRow::Line(_, _, _, l) if *l == n);
+            panel.diff_rows.iter().position(at).unwrap()
+        };
+        let (shift, star, hash) = (
+            mods(false, true, false),
+            Keysym::asterisk,
+            Keysym::numbersign,
+        );
+        // Not in the diff, it does nothing.
+        panel.pointer_char = Some((line_row(&panel, 0), 5));
+        panel.key(&shift, star, star, &ctx);
+        assert!(panel.search.is_none());
+        panel.focus = Focus::Detail;
+        // On `id` of the first line: the next whole `id`, on the second,
+        // the diff keeping the keys.
+        assert_eq!(panel.key(&shift, star, star, &ctx), None);
+        let bar = panel.view("p", &ctx).detail.search.expect("open");
+        assert!(bar.whole && !bar.focused);
+        assert_eq!(bar.query.text, "id");
+        assert_eq!(bar.count, "2 of 3");
+        assert_eq!(cursor_row(&panel), Some(line_row(&panel, 1)));
+        assert_eq!(panel.found_on(line_row(&panel, 2)), vec![(0..2, false)]);
+        // `#`: back from it, round to the last.
+        panel.pointer_char = Some((line_row(&panel, 0), 4));
+        panel.key(&shift, hash, hash, &ctx);
+        assert_eq!(search_count(&panel, &ctx), "3 of 3");
+        assert_eq!(cursor_row(&panel), Some(line_row(&panel, 2)));
+        // Typed into, it finds anywhere again.
+        panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
+        type_text(&mut panel, "id", &ctx);
+        let bar = panel.view("p", &ctx).detail.search.expect("open");
+        assert!(!bar.whole);
+        assert!(bar.count.ends_with("of 5"));
+        // Nothing under the pointer: it says so.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        panel.pointer_char = None;
+        assert_eq!(
+            panel.key(&shift, star, star, &ctx),
+            Some(Outcome::Notice("No word under the pointer"))
+        );
     }
 
     #[test]
