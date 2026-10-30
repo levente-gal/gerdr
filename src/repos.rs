@@ -6407,6 +6407,16 @@ mod tests {
         // A read for an earlier status read, coming late, is dropped.
         panel.set_diffs(root("gerdr"), 0, vec![], &ctx);
         assert_eq!(panel.diff.diffs[&root("gerdr")].1.len(), 1);
+        // A file edited from the diff has its repository's read again, not
+        // the others', and a read from before the edit doesn't do.
+        read_diffs(&mut panel, &ctx);
+        let before = panel.diff.reads;
+        panel.diff.reread(&root("gerdr"));
+        let wanted = panel.diffs_wanted(&ctx);
+        assert_eq!(wanted.len(), 1);
+        assert_eq!(wanted[0].0, root("gerdr"));
+        panel.set_diffs(root("gerdr"), before, vec![], &ctx);
+        assert_eq!(panel.diffs_wanted(&ctx).len(), 1);
         // Selecting a line in the tree scrolls the diff to it.
         read_diffs(&mut panel, &ctx);
         panel.focus = Focus::Tree;
