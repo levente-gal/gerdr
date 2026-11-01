@@ -469,8 +469,9 @@ impl Gerdr {
                     }
                     return;
                 }
-                // Nothing scrolls behind an overlay; the open panel's list
-                // moves instead (see `scroll`), and over a dialog nothing.
+                // Nothing scrolls behind an overlay; what the one on top
+                // lists moves instead (see `overlay_scroll`), if it lists
+                // anything.
                 if let Some(top) = self.grabbing_overlay() {
                     if let Some(motion) = motion {
                         self.overlay_scroll(top, motion);

@@ -234,9 +234,25 @@ impl Gerdr {
     }
 
     /// The wheel or the touchpad moved over `overlay`: its list moves,
-    /// if it has one.
+    /// if it has one. The restart dialog's commands and the welcome
+    /// screen's projects move by whole rows.
     pub fn overlay_scroll(&mut self, overlay: Overlay, motion: Motion) {
         match overlay {
+            Overlay::Restart => {
+                let rows = self.restart.as_ref().map_or(0, |d| d.rows.len());
+                let layout = chrome::restart_layout(self.output_size(), rows);
+                let rows = self.motion_rows(motion, row_pitch(&layout.rows));
+                if rows != 0 {
+                    self.restart_scroll(rows);
+                }
+            }
+            Overlay::Welcome => {
+                let layout = chrome::welcome_layout(self.output_size(), 2, false, false);
+                let rows = self.motion_rows(motion, row_pitch(&layout.rows));
+                if rows != 0 {
+                    self.welcome_scroll(rows);
+                }
+            }
             Overlay::ProjectMenu => self.project_menu_scroll(motion),
             Overlay::Worktrees => self.worktrees_scroll(motion),
             Overlay::Repos => self.repos_scroll(motion),
@@ -248,9 +264,27 @@ impl Gerdr {
     }
 }
 
+/// How far apart `rows`, laid out one under the other, are: from the top
+/// of one to the next, or the height of the one there is.
+fn row_pitch(rows: &[chrome::Rect]) -> f64 {
+    match rows {
+        [first, second, ..] => (second.loc.y - first.loc.y) as f64,
+        [only] => only.size.h as f64,
+        [] => 1.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_are_as_far_apart_as_they_are_laid_out() {
+        let row = |y| chrome::Rect::new((0, y).into(), (100, 28).into());
+        assert_eq!(row_pitch(&[row(10), row(42), row(74)]), 32.0);
+        assert_eq!(row_pitch(&[row(10)]), 28.0);
+        assert_eq!(row_pitch(&[]), 1.0);
+    }
 
     #[test]
     fn every_overlay_stacks_once() {
