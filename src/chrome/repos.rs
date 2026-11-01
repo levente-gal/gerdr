@@ -16,13 +16,14 @@
 //! Actions the footer has no room for go behind a "more" button.
 
 use super::{
-    BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE, Density,
-    FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
-    HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
-    Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, SearchBar, SearchPart,
-    arrow, band, check, chevron_down, coverage, field_text, focus_ring, folder, found_split,
-    found_within, git_branch, icon_sdf, measure, measure_bold, measure_mono, mix, phys, physical,
-    plus, rect_px, rounded_rect, search_spots, segment, trash,
+    BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
+    Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
+    HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
+    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW,
+    SMALL_FONT_SIZE, SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text,
+    folder, found_split, found_within, git_branch, icon_sdf, magnifier, measure, measure_bold,
+    measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, search_field_text,
+    search_spots, segment, trash,
 };
 use std::ops::Range;
 
@@ -73,10 +74,9 @@ const REPOS_FOLDER: i32 = 20;
 const BRANCH_ICON: i32 = 14;
 /// The room between the tree's toolbar's groups of buttons.
 const REPOS_TOOL_GAP: i32 = 12;
-/// The scrollbar at the right of the tree and of the detail: its width,
-/// and the shortest its thumb gets.
+/// The scrollbar at the right of the tree and of the detail: its width
+/// (its thumb's least height is every scrollbar's, see `Thumb::of`).
 const SCROLLBAR: i32 = 6;
-const SCROLLBAR_MIN: i32 = 24;
 /// A checkbox's clickable room, a repository's expander's, and a file's
 /// status letter column with the gap before it.
 const REPOS_CHECK: i32 = 28;
@@ -636,6 +636,9 @@ pub struct SheetView {
 pub enum ReposButton {
     Commit,
     CommitPush,
+    /// The last commit amended with the checked files, and the message if
+    /// one is typed.
+    Amend,
     Push,
     ForcePush,
     Fetch,
@@ -680,6 +683,8 @@ pub enum ReposButton {
     /// (asked first, on a sheet).
     CopyReview,
     ClearReview,
+    /// The review, sent to the agent running in its workspace.
+    SendReview,
     /// A comment on the diff lines picked; the comment being written
     /// kept, dropped, or (one written before) deleted.
     Comment,
@@ -707,6 +712,7 @@ impl ReposButton {
         match self {
             ReposButton::Commit => "Commit",
             ReposButton::CommitPush => "Commit and push",
+            ReposButton::Amend => "Amend last commit",
             ReposButton::Push => "Push",
             ReposButton::ForcePush => "Force push",
             ReposButton::Fetch => "Fetch",
@@ -739,6 +745,7 @@ impl ReposButton {
             ReposButton::CreateMissing => "Create where missing",
             ReposButton::EditName => "Edit name",
             ReposButton::CopyReview => "Copy review",
+            ReposButton::SendReview => "Send to agent",
             ReposButton::ClearReview => "Clear review",
             ReposButton::Comment => "Comment",
             ReposButton::SaveComment => "Save",
@@ -1415,49 +1422,26 @@ fn tree_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
     (track, layout.lines.len().min(whole))
 }
 
-/// Where the thumb of a scrollbar in `track` goes for a list of `total`
-/// rows showing `shown` of them from row `pos` (to the fraction): its top,
-/// in logical pixels to the fraction, and its height. None when they all
-/// fit.
-fn thumb_place(track: Rect, pos: f64, shown: usize, total: usize) -> Option<(f64, i32)> {
-    if total <= shown || shown == 0 {
-        return None;
-    }
-    let h = track.size.h as f64;
-    let thumb = (h * shown as f64 / total as f64)
-        .max((SCROLLBAR_MIN as f64).min(h))
-        .min(h)
-        .round();
-    let pos = pos.clamp(0.0, (total - shown) as f64);
-    let top = track.loc.y as f64 + (h - thumb) * pos / (total - shown) as f64;
-    Some((top, thumb as i32))
+/// The scrollbar in `track` of a list of `total` rows showing `shown` of
+/// them from row `pos` (to the fraction), as every scrollbar is placed
+/// (`Thumb::of`); none when they all fit.
+fn rows_thumb(track: Rect, pos: f64, shown: usize, total: usize) -> Option<super::Thumb> {
+    let bar = super::ListBar {
+        down: pos,
+        total: total as f64,
+    };
+    super::Thumb::of(track, shown as f64, bar)
 }
 
 /// The scrollbars of the tree and of the detail in `layout`, each where
 /// its list does not all show.
 pub fn repos_thumbs(view: &ReposView, layout: &ReposLayout) -> [Option<super::Thumb>; 2] {
-    let thumb = |(track, shown): (Rect, usize), pos: f64, total: usize| {
-        let (top, h) = thumb_place(track, pos, shown, total)?;
-        Some(super::Thumb {
-            track,
-            top,
-            h: h as f64,
-            last: (total - shown) as f64,
-        })
-    };
+    let (tree, shown) = tree_bar(view, layout);
+    let tree = rows_thumb(tree, view.first as f64 + view.part, shown, view.total);
     let detail = &view.detail;
-    [
-        thumb(
-            tree_bar(view, layout),
-            view.first as f64 + view.part,
-            view.total,
-        ),
-        thumb(
-            detail_bar(view, layout),
-            detail.first as f64 + detail.part,
-            detail.total,
-        ),
-    ]
+    let (track, shown) = detail_bar(view, layout);
+    let pos = detail.first as f64 + detail.part;
+    [tree, rows_thumb(track, pos, shown, detail.total)]
 }
 
 /// How wide the detail's rows are in a pane `w` wide: short of its
@@ -2371,17 +2355,20 @@ pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> Fi
         .detail_search
         .iter()
         .find(|(part, _)| *part == SearchPart::Field);
-    let (area, line) = match (&view.branch.menu, layout.branch_search) {
-        (Some(menu), Some(search)) => (search, &menu.query),
+    // Both searches start with a magnifier; the commit message doesn't.
+    let (area, line, text) = match (&view.branch.menu, layout.branch_search) {
+        (Some(menu), Some(search)) => (search, &menu.query, search_field_text(search, scale)),
         _ => match (&view.detail.search, diff_search) {
-            (Some(bar), Some(&(_, field))) if bar.focused => (field, &bar.query),
-            _ => (layout.field, &view.field),
+            (Some(bar), Some(&(_, field))) if bar.focused => {
+                (field, &bar.query, search_field_text(field, scale))
+            }
+            _ => (layout.field, &view.field, field_text(layout.field, scale)),
         },
     };
     FieldSpot {
         size: FONT_SIZE,
         area,
-        text: field_text(area, scale),
+        text,
         line: line.clone(),
     }
 }
@@ -2433,23 +2420,12 @@ pub(super) fn scrollbar(
     scale: f64,
     p: &Palette,
 ) {
-    if total <= shown || shown == 0 {
+    let Some(t) = rows_thumb(track, first as f64, shown, total) else {
         return;
-    }
-    let s = scale as f32;
-    let (x, y, w, h) = rect_px(track, scale);
-    let min = (SCROLLBAR_MIN as f32 * s).min(h);
-    let thumb_h = (h * shown as f32 / total as f32).max(min).min(h);
-    let first = first.min(total - shown) as f32;
-    let thumb_y = y + ((h - thumb_h) * first / (total - shown) as f32).round();
-    c.rounded(
-        x,
-        thumb_y,
-        w,
-        thumb_h,
-        w / 2.0,
-        mix(p.elevated, p.muted, 0.45),
-    );
+    };
+    let (x, _, w, _) = rect_px(track, scale);
+    let (top, h) = ((t.top * scale).round() as f32, (t.h * scale).round() as f32);
+    c.rounded(x, top, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
 }
 
 /// The colour of a change's status letter (`git::Change::code`) in `p`.
@@ -2940,12 +2916,6 @@ impl Painter {
         x
     }
 
-    fn thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryRenderBuffer {
-        let mut c = Canvas::new(physical(size, scale));
-        let (w, h) = (c.w as f32, c.h as f32);
-        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
-        c.into_buffer(false)
-    }
     /// A tree line in its `(rect, checkbox, expander)` (buffer
     /// coordinates): its highlight, then a repository's or a file's line.
     fn tree_line(
@@ -4002,6 +3972,10 @@ impl Painter {
                     h,
                     mix(p.elevated, p.accent, 0.7),
                 );
+                // What the search found in it, tinted on the card.
+                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let found = &look.found;
+                self.found_tints(c, text, found, (tx, bend), row_band, width, fill, scale, p);
                 self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, p.text);
             }
             DetailRow::Editor {
@@ -4547,11 +4521,20 @@ impl Painter {
         let (b, r) = ((scale.round() as i32).max(1) as f32, BUTTON_RADIUS * s);
         c.rounded(x, y, w, h, r, p.accent);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        // The magnifier every query field starts with, where the diff's
+        // search has it.
+        let mark = Rectangle::new(
+            (search.loc.x + PADDING as i32 / 2, search.loc.y).into(),
+            (MENU_MARK_WIDTH, search.size.h).into(),
+        );
+        icon_sdf(c, mark, scale, p.placeholder, |x, y| {
+            magnifier(x, y, 0.9 * s)
+        });
         self.edit_line(
             c,
             &menu.query,
             &menu.placeholder,
-            field_text(search, scale),
+            search_field_text(search, scale),
             band(search, scale),
             true,
             FONT_SIZE,
@@ -4778,37 +4761,13 @@ impl Painter {
             let hovered = view.hover == Some(ReposHit::Button(button));
             let rect = shift(rect);
             let focused = i == sheet.default;
-            if i == last && sheet.danger {
-                self.danger_button(c, button.label(), rect, (hovered, focused), scale, p);
-            } else {
-                let look = (hovered, focused);
-                self.button(c, button.label(), rect, look, i == last, scale, p);
-            }
+            let style = match i == last {
+                true if sheet.danger => ButtonStyle::Destructive,
+                true => ButtonStyle::Primary,
+                false => ButtonStyle::Plain,
+            };
+            self.button(c, button.label(), rect, (hovered, focused), style, scale, p);
         }
-    }
-
-    /// A button in `rect` like `Painter::button`'s primary one, but in the
-    /// error colour: it loses what can't be got back.
-    fn danger_button(
-        &self,
-        c: &mut Canvas,
-        label: &str,
-        rect: Rect,
-        (hovered, focused): (bool, bool),
-        scale: f64,
-        p: &Palette,
-    ) {
-        let (x, y, w, h) = rect_px(rect, scale);
-        if focused {
-            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.error);
-        }
-        let fill = if hovered {
-            mix(p.error, p.text, 0.12)
-        } else {
-            p.error
-        };
-        c.rounded(x, y, w, h, BUTTON_RADIUS * scale as f32, fill);
-        self.centered(c, label, FONT_SIZE, rect, scale, p.on_accent);
     }
 }
 
@@ -5044,11 +5003,11 @@ impl ReposLayers {
             ));
             let (track, shown) = tree_bar(view, layout);
             let pos = view.first as f64 + view.part;
-            if let Some((top, h)) = thumb_place(track, pos, shown, view.total) {
-                let size = Size::from((SCROLLBAR, h));
+            if let Some(t) = rows_thumb(track, pos, shown, view.total) {
+                let size = Size::from((SCROLLBAR, t.h as i32));
                 let buffer =
-                    tree_thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
-                let at = Point::from((track.loc.x as f64, top));
+                    tree_thumb.get((size, theme, scale), |_| painter.bar_thumb(size, scale, p));
+                let at = Point::from((track.loc.x as f64, t.top));
                 over.push(super::Part::new(buffer, track.loc, size, 1.0).at(at));
             }
             let row_h = repos_row(view.density);
@@ -5107,10 +5066,10 @@ fn detail_parts(
         parts.push(Part::new(buffer, track.loc, track.size, 1.0));
     }
     let pos = detail.first as f64 + detail.part;
-    if let Some((top, h)) = thumb_place(track, pos, shown, detail.total) {
-        let size = Size::from((SCROLLBAR, h));
-        let buffer = thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
-        let at = Point::from((track.loc.x as f64, top));
+    if let Some(t) = rows_thumb(track, pos, shown, detail.total) {
+        let size = Size::from((SCROLLBAR, t.h as i32));
+        let buffer = thumb.get((size, theme, scale), |_| painter.bar_thumb(size, scale, p));
+        let at = Point::from((track.loc.x as f64, t.top));
         parts.push(Part::new(buffer, track.loc, size, 1.0).at(at));
     }
     let list = layout.detail_list;
@@ -6097,6 +6056,9 @@ mod tests {
             assert!(within(menu, search) && search.loc.y + search.size.h <= rows[0].loc.y);
             assert_eq!(repos_hit(&l, centre(search)), Some(ReposHit::BranchMenu));
             assert_eq!(repos_field(&view, size, 1.0).area, search);
+            // Its text starts after the magnifier, as painted.
+            let text = repos_field(&view, size, 1.0).text;
+            assert_eq!(text, search_field_text(search, 1.0));
             let closed = ReposView {
                 branch: full().branch,
                 ..view.clone()

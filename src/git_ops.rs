@@ -908,13 +908,49 @@ pub fn commit_paths(dir: &Path, paths: &[String], msg: &str) -> OpResult {
     }
     let top = top(dir);
     let mut op = Op::new(&top);
+    add_paths(&mut op, &top, paths)?;
+    let mut args = vec!["--literal-pathspecs", "commit", "-m", msg, "--only", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    op.run(&args)?;
+    op.done()
+}
+
+/// Amend the last commit with `paths` (as `commit_paths` takes them; none
+/// to only reword it), and only them: its message replaced by `msg`, or
+/// kept without one. Other files already staged stay staged, out of it.
+/// No commit yet is `Blocked`.
+pub fn amend_paths(dir: &Path, paths: &[String], msg: Option<&str>) -> OpResult {
+    let top = top(dir);
+    let mut op = Op::new(&top);
+    if head_oid(&top).is_none() {
+        return Err(op.blocked("no commit to amend"));
+    }
+    add_paths(&mut op, &top, paths)?;
+    let mut args = vec!["--literal-pathspecs", "commit", "--amend"];
+    match msg {
+        Some(msg) => args.extend(["-m", msg]),
+        None => args.push("--no-edit"),
+    }
+    // `--only` without paths leaves what is staged out: a reword.
+    args.push("--only");
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend(paths.iter().map(String::as_str));
+    }
+    op.run(&args)?;
+    op.done()
+}
+
+/// Stage `paths` (from the worktree's top folder `top`) for a commit of
+/// only them: `add -A` of those on disk or in the index.
+fn add_paths(op: &mut Op, top: &Path, paths: &[String]) -> Result<(), Failed> {
     // `add` fails on a path matching nothing on disk or in the index, as
     // the old path of a rename staged with `git mv` is: that one is in
     // HEAD only, which `commit --only` looks in too.
     let listed = {
         let mut args = vec!["--literal-pathspecs", "ls-files", "-z", "--"];
         args.extend(paths.iter().map(String::as_str));
-        query(&top, &args).unwrap_or_default()
+        query(top, &args).unwrap_or_default()
     };
     let indexed: Vec<&str> = listed.split('\0').filter(|p| !p.is_empty()).collect();
     let addable = |path: &&String| {
@@ -930,10 +966,7 @@ pub fn commit_paths(dir: &Path, paths: &[String], msg: &str) -> OpResult {
         args.extend(add);
         op.run(&args)?;
     }
-    let mut args = vec!["--literal-pathspecs", "commit", "-m", msg, "--only", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    op.run(&args)?;
-    op.done()
+    Ok(())
 }
 
 /// Push the branch: plain `git push` when its upstream is the same-named
@@ -2277,6 +2310,49 @@ mod tests {
         write(dir, "d/x", "again");
         commit_paths(&dir.join("d"), &["d/x".into()], "inside").unwrap();
         assert_eq!(committed(dir), ["M d/x"]);
+    }
+
+    #[test]
+    fn amend_takes_the_paths_and_the_message_into_the_last_commit() {
+        let fx = Fx::local();
+        let dir = &fx.repo;
+        commit(dir, "a", "one");
+        let parent = rev(dir, "HEAD~1");
+        write(dir, "a", "two");
+        write(dir, "b", "new");
+        write(dir, "staged.txt", "staged");
+        git(dir, &["add", "staged.txt"]);
+        // The file checked comes in, the message stays without one.
+        let log = amend_paths(dir, &["b".into()], None).unwrap();
+        assert!(
+            log.last()
+                .unwrap()
+                .command
+                .contains("commit --amend --no-edit --only -- b")
+        );
+        assert_eq!(rev(dir, "HEAD~1"), parent);
+        assert_eq!(git(dir, &["log", "-1", "--format=%s"]).trim(), "one");
+        assert_eq!(committed(dir), ["A b", "M a"]);
+        // What wasn't checked is as it was.
+        assert_eq!(git(dir, &["show", ":staged.txt"]), "staged");
+        assert_eq!(read(dir, "a"), "two");
+        // Without paths it only rewords, what is staged left out.
+        amend_paths(dir, &[], Some("reworded")).unwrap();
+        assert_eq!(git(dir, &["log", "-1", "--format=%s"]).trim(), "reworded");
+        assert_eq!(committed(dir), ["A b", "M a"]);
+        assert_eq!(rev(dir, "HEAD~1"), parent);
+    }
+
+    #[test]
+    fn amend_before_the_first_commit_is_blocked() {
+        let fx = Fx::local();
+        git(&fx.root, &["init", "-q", "-b", "main", "unborn"]);
+        let dir = fx.root.join("unborn");
+        write(&dir, "one", "1");
+        assert_eq!(
+            failure(amend_paths(&dir, &["one".into()], Some("x"))),
+            Failure::Blocked("no commit to amend".into())
+        );
     }
 
     #[test]

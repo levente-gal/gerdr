@@ -193,6 +193,10 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("pushing…");
             chain(log, git_ops::push(dir, task.remote.as_deref(), false))
         }
+        BatchKind::Amend { msg, .. } => {
+            step("amending…");
+            git_ops::amend_paths(dir, &task.job.files, msg.as_deref())
+        }
         BatchKind::Push { force } => {
             step("pushing…");
             git_ops::push(dir, task.remote.as_deref(), *force)
@@ -609,6 +613,65 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// The agent the review goes to, by its pane and what it is called:
+    /// one in the workspace of a repository commented on (working in that
+    /// repository first), else in the workspace shown.
+    fn review_agent(&self) -> Option<(String, String)> {
+        let panel = self.repos.panel.as_ref()?;
+        let mut roots: Vec<&Path> = Vec::new();
+        for comment in &panel.diff.review.comments {
+            if !roots.contains(&comment.root.as_path()) {
+                roots.push(&comment.root);
+            }
+        }
+        let item_of = |root: &&Path| self.repos.items.iter().find(|i| i.root == *root);
+        let mut workspaces: Vec<usize> = roots
+            .iter()
+            .filter_map(item_of)
+            .map(|i| i.workspace)
+            .collect();
+        workspaces.push(self.active_workspace);
+        for w in workspaces {
+            let Some(id) = self.workspaces.get(w).and_then(|ws| ws.herdr_id()) else {
+                continue;
+            };
+            let here: Vec<&crate::herdr::AgentInfo> = self
+                .agents
+                .iter()
+                .filter(|a| a.workspace_id == id)
+                .collect();
+            let in_repo = here.iter().find(|a| {
+                let dir = a.foreground_cwd.as_ref().or(a.cwd.as_ref());
+                dir.is_some_and(|dir| roots.iter().any(|root| dir.starts_with(root)))
+            });
+            if let Some(agent) = in_repo.or(here.first()) {
+                return Some((agent.pane_id.clone(), agent.label().to_owned()));
+            }
+        }
+        None
+    }
+
+    /// Send the review (`text`, `count` comments) to its agent, as typed
+    /// there and sent with Enter; said either way.
+    fn repos_send_review(&mut self, text: &str, count: usize) {
+        let what = if count == 1 {
+            "1 review comment".to_owned()
+        } else {
+            format!("{count} review comments")
+        };
+        let Some((pane, label)) = self.review_agent() else {
+            return self
+                .show_warning("No agent runs in this workspace: copy the review instead".into());
+        };
+        let Some(herdr) = self.herdr.as_mut() else {
+            return self.show_error("herdr isn't running: copy the review instead".into());
+        };
+        match herdr.send_line(&pane, text.trim_end()) {
+            Ok(()) => self.show_success(format!("Sent {what} to {label}")),
+            Err(err) => self.show_error(format!("Couldn't send the review to {label}: {err}")),
+        }
+    }
+
     /// Save the panel's review comments with the project, if they changed.
     fn repos_save_review(&mut self) {
         let Some(panel) = self.repos.panel.as_mut().filter(|p| p.diff.review_dirty) else {
@@ -700,6 +763,10 @@ impl Gerdr {
     /// The panel's state brought in line with the last Git status read,
     /// and the detail it wants read.
     fn repos_refresh(&mut self) {
+        let agent = self.review_agent().map(|(_, label)| label);
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.agent = agent;
+        }
         let page = self.repos_page();
         let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
@@ -1494,6 +1561,7 @@ impl Gerdr {
                 };
                 self.toast(format!("Copied {what} for an AI agent"), Level::Success);
             }
+            Outcome::SendReview { text, count } => self.repos_send_review(&text, count),
             Outcome::RunInTerminal(root) => {
                 let Some(item) = self.repos.items.iter().find(|i| i.root == root) else {
                     return;
@@ -1856,7 +1924,10 @@ impl Gerdr {
             };
             let undo = match (&kind, &previous) {
                 (BatchKind::Undo, Some(undone)) => {
-                    let soft = matches!(undone.kind, BatchKind::Commit { .. });
+                    let soft = matches!(
+                        undone.kind,
+                        BatchKind::Commit { .. } | BatchKind::Amend { .. }
+                    );
                     undone
                         .run(&job.root)
                         .and_then(|r| Some((r.before.clone()?, r.after.clone()?, soft)))
@@ -2187,7 +2258,7 @@ impl Gerdr {
         let (summary, tone) = batch.summary();
         let batch_started = batch.started;
         match batch.kind {
-            BatchKind::Commit { .. } if done => {
+            BatchKind::Commit { .. } | BatchKind::Amend { .. } if done => {
                 if let Some(panel) = self.repos.panel.as_mut() {
                     panel.clear_field();
                 }

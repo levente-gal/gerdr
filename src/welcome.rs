@@ -337,6 +337,10 @@ impl Welcome {
             let last = first + shown.len();
             subtitle += &format!(" \u{b7} {}\u{2013}{last} of {total}", first + 1);
         }
+        let scroll = (total > shown.len() && !shown.is_empty()).then_some(chrome::ListBar {
+            down: first as f64,
+            total: total as f64,
+        });
         WelcomeView {
             greeting,
             subtitle,
@@ -351,6 +355,7 @@ impl Welcome {
             note,
             in_app: self.in_app,
             quit_keys,
+            scroll,
         }
     }
 }
@@ -418,6 +423,13 @@ impl Gerdr {
                 return true;
             }
             _ => {}
+        }
+        // On the scrollbar: the thumb comes under the pointer.
+        if let Some(thumb) = self.welcome_thumb().filter(|t| t.takes(pos)) {
+            if thumb.on_thumb(pos.y).is_none() {
+                self.welcome_scroll_to(thumb.pos_at(pos.y - thumb.h / 2.0));
+            }
+            return true;
         }
         let Some(welcome) = self.welcome.as_mut() else {
             return false;
@@ -521,6 +533,28 @@ impl Gerdr {
         let page = self.welcome_page();
         if let Some(welcome) = self.welcome.as_mut() {
             welcome.scroll_by(by, page);
+        }
+    }
+
+    /// The welcome screen's scrollbar, while not all its projects show.
+    pub(crate) fn welcome_thumb(&self) -> Option<chrome::Thumb> {
+        let view = self.welcome_view()?;
+        let layout = chrome::welcome_layout(
+            self.output_size(),
+            view.rows.len(),
+            view.naming.is_some(),
+            view.note.is_some(),
+        );
+        chrome::welcome_thumb(&view, &layout)
+    }
+
+    /// Scroll the welcome screen's projects so the first shown is `at`
+    /// (a row, to the fraction), as its scrollbar's thumb dragged says.
+    pub(crate) fn welcome_scroll_to(&mut self, at: f64) {
+        let page = self.welcome_page();
+        if let Some(welcome) = self.welcome.as_mut() {
+            let first = welcome.first_shown(page) as isize;
+            welcome.scroll_by(at.round() as isize - first, page);
         }
     }
 
@@ -852,5 +886,14 @@ mod tests {
         assert_eq!(&*w.query, "foo ");
         press(&mut w, Keysym::BackSpace);
         assert_eq!(&*w.query, "foo");
+    }
+
+    #[test]
+    fn the_view_says_where_the_list_stands_while_not_all_show() {
+        let mut w = welcome(&["a", "b", "c", "d", "e"]);
+        assert_eq!(view(&w).scroll.map(|b| (b.down, b.total)), Some((0.0, 5.0)));
+        w.scroll_by(2, 3);
+        assert_eq!(view(&w).scroll.map(|b| b.down), Some(2.0));
+        assert_eq!(view(&welcome(&["a", "b"])).scroll, None);
     }
 }

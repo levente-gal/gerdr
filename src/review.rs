@@ -52,7 +52,8 @@ pub struct Comment {
     pub root: PathBuf,
     /// From `root`.
     pub path: String,
-    /// The lines it is on, as they were when it was written: never empty.
+    /// The lines it is on, as they were when it was written; none for a
+    /// comment on the whole file.
     pub lines: Vec<Quoted>,
     /// What it says; lines broken with `\n`.
     pub text: String,
@@ -180,16 +181,21 @@ pub fn markdown(
             } else {
                 ""
             };
-            out.push_str(&format!("\n### `{}`{stale}\n\n```diff\n", place(c)));
-            for q in &c.lines {
-                let sign = match q.kind {
-                    LineKind::Added => '+',
-                    LineKind::Removed => '-',
-                    LineKind::Context => ' ',
-                };
-                out.push_str(&format!("{sign}{}\n", q.text));
+            // On the whole file: no lines to quote.
+            if c.lines.is_empty() {
+                out.push_str(&format!("\n### `{}` (the whole file){stale}\n\n", place(c)));
+            } else {
+                out.push_str(&format!("\n### `{}`{stale}\n\n```diff\n", place(c)));
+                for q in &c.lines {
+                    let sign = match q.kind {
+                        LineKind::Added => '+',
+                        LineKind::Removed => '-',
+                        LineKind::Context => ' ',
+                    };
+                    out.push_str(&format!("{sign}{}\n", q.text));
+                }
+                out.push_str("```\n\n");
             }
-            out.push_str("```\n\n");
             out.push_str(c.text.trim_end());
             out.push('\n');
         }

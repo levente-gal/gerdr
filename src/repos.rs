@@ -99,6 +99,8 @@ pub const FOLD_FILES: usize = 200;
 
 /// How many of the branch menu's longest branches it is measured by.
 const WIDEST: usize = 3;
+/// Why the review can't be sent to an agent.
+const NO_AGENT: &str = "No agent runs in this workspace: start one, or copy the review";
 
 /// The panel, while open, and the batch running or last run.
 #[derive(Default)]
@@ -356,6 +358,9 @@ pub struct Panel {
     pub(crate) edited: HashSet<(PathBuf, String)>,
     /// The stash picked in the Stashes tab, by line (0 the newest).
     pub(crate) stash_pick: usize,
+    /// What the agent the review would be sent to is called; `None` while
+    /// none runs in its workspaces. Kept up by the host.
+    pub(crate) agent: Option<String>,
 }
 
 /// The branch picker's menu: where its lines stand, and the branch Enter
@@ -566,6 +571,13 @@ pub enum BatchKind {
         msg: String,
         push: bool,
     },
+    /// Amend the last commit with the job's files (none to only reword
+    /// it), its message replaced by `msg` if there is one; `pushed` when
+    /// the commit is on an upstream already, so it is asked first.
+    Amend {
+        msg: Option<String>,
+        pushed: bool,
+    },
     Push {
         force: bool,
     },
@@ -602,6 +614,7 @@ impl BatchKind {
             BatchKind::DeleteBranch { .. } => "Delete branch",
             BatchKind::Commit { push: false, .. } => "Commit",
             BatchKind::Commit { push: true, .. } => "Commit and push",
+            BatchKind::Amend { .. } => "Amend last commit",
             BatchKind::Push { force: false } => "Push",
             BatchKind::Push { force: true } => "Force push",
             BatchKind::Fetch => "Fetch",
@@ -635,6 +648,7 @@ impl BatchKind {
             BatchKind::Branch(_) | BatchKind::Switch(_) => "switched",
             BatchKind::DeleteBranch { .. } => "deleted",
             BatchKind::Commit { push: false, .. } => "committed",
+            BatchKind::Amend { .. } => "amended",
             BatchKind::Commit { push: true, .. } | BatchKind::Push { force: false } => "pushed",
             BatchKind::Push { force: true } => "force pushed",
             BatchKind::Fetch => "fetched",
@@ -660,11 +674,13 @@ impl BatchKind {
     }
 
     /// Whether it can't be taken back, so is asked about first: a force
-    /// push, an abort, an undo, a branch or a stash dropped.
+    /// push, an abort, an undo, a branch or a stash dropped, a pushed
+    /// commit amended.
     pub fn confirmed_first(&self) -> bool {
         matches!(
             self,
             BatchKind::Push { force: true }
+                | BatchKind::Amend { pushed: true, .. }
                 | BatchKind::Abort
                 | BatchKind::Undo
                 | BatchKind::DeleteBranch { .. }
@@ -698,6 +714,7 @@ impl BatchKind {
             BatchKind::Branch(_)
                 | BatchKind::Switch(_)
                 | BatchKind::Commit { push: false, .. }
+                | BatchKind::Amend { .. }
                 | BatchKind::Pull(_)
                 | BatchKind::Integrate { .. }
         )
@@ -980,6 +997,12 @@ pub enum Outcome {
     RetryFailed,
     /// Put the review, as Markdown, on the clipboard: `count` comments.
     Copy {
+        text: String,
+        count: usize,
+    },
+    /// Send the review, as Markdown, to the agent of its workspace:
+    /// `count` comments.
+    SendReview {
         text: String,
         count: usize,
     },
@@ -1365,6 +1388,12 @@ const ACTIONS: &[Action] = {
             what: "commit them, then push",
         },
         Action {
+            button: B::Amend,
+            chord: alt(&[Keysym::a, Keysym::A]),
+            key: "Alt+A",
+            what: "amend the last commit with the checked files; a message typed replaces its own",
+        },
+        Action {
             button: B::Push,
             chord: ctrl(&[Keysym::p, Keysym::P]),
             key: "Ctrl+P",
@@ -1550,7 +1579,7 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("Alt+Up / Down", "in the diff, the file before or after"),
     (
         "c / Del Del",
-        "in the diff, comment on the lines (or edit the comment); delete it",
+        "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it",
     ),
     (
         "Enter / Shift+Enter",
@@ -1682,6 +1711,7 @@ fn menu_integrate(button: ReposButton) -> Option<Integrate> {
 fn confirm_button(kind: &BatchKind) -> ReposButton {
     match kind {
         BatchKind::Push { force: true } => ReposButton::ForcePush,
+        BatchKind::Amend { .. } => ReposButton::Amend,
         BatchKind::Abort => ReposButton::Abort,
         BatchKind::Undo => ReposButton::Undo,
         BatchKind::DeleteBranch { .. } => ReposButton::DeleteBranch,
@@ -2501,6 +2531,10 @@ impl Panel {
                 format!("{verb} stash@{{{n}}}")
             }
             B::DiscardFile => "discard changes…".into(),
+            B::SendReview => match &self.agent {
+                Some(agent) => format!("send to {agent}"),
+                None => "send to agent".into(),
+            },
             B::Fetch => match self.picked(items).len() {
                 0 => "fetch all".into(),
                 n => format!("fetch {n}"),
@@ -3233,6 +3267,41 @@ impl Panel {
                     jobs,
                 })
             }
+            B::Amend => {
+                let ks = self.targets(items);
+                if ks.is_empty() {
+                    return Err(Why::other("Select a repository first"));
+                }
+                let mut jobs = Vec::new();
+                let mut pushed = false;
+                for k in ks {
+                    let item = &items[k];
+                    if item.status.head.is_none() {
+                        return Err(Why::other(format!("{} has no commit to amend", item.label)));
+                    }
+                    // On its upstream already: nothing ahead of it.
+                    pushed |= item.status.upstream.is_some() && item.status.ahead == 0;
+                    let mut files = Vec::new();
+                    for change in &item.status.changes {
+                        if self.file_checked(item, change) {
+                            files.push(change.path.clone());
+                            files.extend(change.orig.clone());
+                        }
+                    }
+                    let root = item.root.clone();
+                    jobs.push(Job { root, files });
+                }
+                let msg = Some(self.field.trim().to_owned()).filter(|m| !m.is_empty());
+                if msg.is_none() && jobs.iter().all(|j| j.files.is_empty()) {
+                    return Err(Why::Field(
+                        "Check the files to add, or type the new message first".into(),
+                    ));
+                }
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Amend { msg, pushed },
+                    jobs,
+                })
+            }
             B::Push => run(BatchKind::Push { force: false }, targets),
             B::ForcePush => run(BatchKind::Push { force: true }, targets),
             B::Fetch => {
@@ -3390,6 +3459,17 @@ impl Panel {
                     .map(from_diff)
                     .map_err(Why::other)
             }
+            B::SendReview if self.agent.is_none() && !self.diff.review.is_empty() => {
+                Err(Why::other(NO_AGENT))
+            }
+            B::SendReview => {
+                diff_ctx!(self, ctx, dctx);
+                match self.diff.copy_review(&dctx).map(from_diff) {
+                    Ok(Outcome::Copy { text, count }) => Ok(Outcome::SendReview { text, count }),
+                    Ok(other) => Ok(other),
+                    Err(why) => Err(Why::other(why)),
+                }
+            }
             B::ClearReview if self.diff.review.is_empty() => Err(Why::other(NO_REVIEW)),
             B::DropOutdated if self.diff.outdated_count() == 0 => {
                 Err(Why::other("No comment is on lines no longer in the diff"))
@@ -3468,6 +3548,14 @@ impl Panel {
                         format!("delete the local branch {name}")
                     }
                     BatchKind::StashDrop(n) => format!("drop stash@{{{n}}} for good"),
+                    BatchKind::Amend { .. } => match status {
+                        Some(s) if s.upstream.is_some() && s.ahead == 0 => {
+                            "rewrite its last commit, which is pushed: \
+                             putting it up again takes a force push"
+                                .into()
+                        }
+                        _ => "rewrite its last commit".into(),
+                    },
                     BatchKind::Discard => {
                         let n = job.files.len();
                         let files = if n == 1 { "1 file" } else { "files" };
@@ -4718,7 +4806,7 @@ impl Panel {
         if selected.is_some_and(in_conflict) {
             buttons.extend([B::OpenInZed, B::MarkResolved, B::Continue, B::Abort]);
         } else {
-            buttons.extend([B::Commit, B::CommitPush, B::Push]);
+            buttons.extend([B::Commit, B::CommitPush, B::Push, B::Amend]);
             // After a rebase the branch and its upstream both moved on.
             if selected.is_some_and(|i| i.status.ahead > 0 && i.status.behind > 0) {
                 buttons.push(B::ForcePush);
@@ -4751,7 +4839,7 @@ impl Panel {
             }
         }
         if !self.diff.review.is_empty() {
-            buttons.extend([B::CopyReview, B::ClearReview]);
+            buttons.extend([B::CopyReview, B::SendReview, B::ClearReview]);
         }
         buttons.push(B::Help);
         buttons
@@ -5854,6 +5942,59 @@ mod tests {
         assert_eq!(
             press(&mut panel, ctrl_shift(), Keysym::Return, &ctx),
             commit(true)
+        );
+    }
+
+    #[test]
+    fn amend_takes_the_checked_files_and_asks_first_when_pushed() {
+        let mut items = items();
+        // gerdr's last commit isn't up yet.
+        items[0].status.ahead = 1;
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "gerdr");
+        // Nothing to add and no message: it asks for one.
+        assert_eq!(press(&mut panel, alt(), Keysym::a, &ctx), None);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Check the files to add, or type the new message first")
+        );
+        let mut panel = Panel::new(&items);
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::a, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Amend {
+                    msg: None,
+                    pushed: false,
+                },
+                jobs: vec![job("gerdr", &["src/git.rs"])],
+            })
+        );
+        // zed's is on its upstream: rewording it is asked about first.
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "zed");
+        panel.field.set("Reworded");
+        let kind = BatchKind::Amend {
+            msg: Some("Reworded".into()),
+            pushed: true,
+        };
+        assert_eq!(press(&mut panel, alt(), Keysym::a, &ctx), None);
+        assert!(matches!(&panel.sheet, Some(Sheet::Confirm { kind: k, .. }) if *k == kind));
+        assert_eq!(
+            panel.press(ReposButton::Amend, &ctx),
+            Some(Outcome::Batch {
+                kind,
+                jobs: vec![job("zed", &[])],
+            })
+        );
+        assert!(
+            BatchKind::Amend {
+                msg: None,
+                pushed: false
+            }
+            .undoable()
         );
     }
 
@@ -7564,6 +7705,26 @@ mod tests {
                 .iter()
                 .any(|h| h.button == ReposButton::CopyReview)
         );
+        // Sent to an agent only while one runs in the workspace.
+        let send = |panel: &Panel| {
+            let hints = panel.view("p", &ctx).hints;
+            let hint = hints.iter().find(|h| h.button == ReposButton::SendReview);
+            hint.map(|h| (h.label.clone(), h.disabled.clone()))
+        };
+        assert_eq!(
+            send(&panel),
+            Some(("send to agent".into(), Some(NO_AGENT.into())))
+        );
+        assert_eq!(panel.press(ReposButton::SendReview, &ctx), None);
+        panel.agent = Some("claude".into());
+        assert_eq!(send(&panel), Some(("send to claude".into(), None)));
+        assert_eq!(
+            panel.press(ReposButton::SendReview, &ctx),
+            Some(Outcome::SendReview {
+                text: text.clone(),
+                count: 1
+            })
+        );
 
         // A line added above, it stays under b.
         let g = panel.diff.reads + 1;
@@ -7646,6 +7807,49 @@ mod tests {
         );
         assert_eq!(press(&mut panel, ctrl_shift(), Keysym::C, &ctx), None);
         assert_eq!(panel.error.as_deref(), Some(NO_REVIEW));
+    }
+
+    #[test]
+    fn a_comment_on_a_file_header_is_on_the_whole_file() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 30);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        let header = panel
+            .diff
+            .rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::File(..)))
+            .expect("a file's header");
+        panel.diff.set_cursor(header, None);
+        press(&mut panel, none(), Keysym::c, &ctx);
+        assert!(panel.diff.editing.is_some(), "{:?}", panel.error);
+        type_text(&mut panel, "split it", &ctx);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        let comment = &panel.diff.review.comments[0];
+        assert!(comment.lines.is_empty());
+        assert_eq!(comment.text, "split it");
+        // Shown under the header, before the file's hunks.
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[header + 1], "> split it");
+        assert_eq!(panel.diff.outdated_count(), 0);
+        let Some(Outcome::Copy { text, .. }) = press(&mut panel, ctrl_shift(), Keysym::C, &ctx)
+        else {
+            panic!("not copied");
+        };
+        assert!(
+            text.contains("### `src/git.rs` (the whole file)\n\nsplit it\n"),
+            "{text}"
+        );
+        // The diff's search finds what comments say too.
+        panel.focus = Focus::Detail;
+        panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
+        type_text(&mut panel, "split", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 1");
+        assert_eq!(cursor_row(&panel), Some(header + 1));
+        assert_eq!(panel.diff.found_on(header + 1), vec![(0..5, true)]);
     }
 
     #[test]
