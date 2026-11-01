@@ -55,7 +55,10 @@ use smithay::{
     utils::{Logical, Point, Rectangle, Size},
 };
 
-use crate::anim::{FAST, Fade, SLOW, phase};
+use crate::{
+    anim::{FAST, Fade, SLOW, phase},
+    overlay::Overlay as Kind,
+};
 
 // One surface per module; the rest of gerdr reaches all of it as
 // `chrome::X`. The canvas and the shapes stay inside.
@@ -299,7 +302,7 @@ impl Chrome {
     pub fn elements(
         &mut self,
         renderer: &mut GlesRenderer,
-        view: ChromeView,
+        mut view: ChromeView,
     ) -> Vec<ChromeElement> {
         let now = view.now;
         let scale = view.scale;
@@ -336,188 +339,219 @@ impl Chrome {
             parts.push(Part::new(buffer, Point::from((0, 0)), output, 1.0));
         }
 
-        // The tooltip, by what it is about, over all else: it is offered
-        // only for what nothing covers, or by the popup it is on.
-        let tooltip = view.tooltip.map(|tip| {
-            let w = painter.tooltip_width(&tip, output.w - 2 * HELP_MARGIN, scale);
-            let size = (w, tip.height()).into();
-            let (loc, size) = shadowed(tooltip_layout(tip.anchor, size, output));
-            ((tip, w, theme, scale), loc, size)
-        });
-        parts.extend(self.tooltip.part(tooltip, now, true, |(tip, w, ..)| {
-            painter.tooltip(tip, *w, scale, theme.palette())
-        }));
-
-        // The restart dialog covers all but the quit dialog.
-        let restart = view.restart.map(|restart| {
-            let (loc, size) = shadowed(restart_layout(output, restart.rows.len()).panel);
-            ((restart, output, theme, scale), loc, size)
-        });
-        parts.extend(
-            self.restart
-                .part(restart, now, true, |(restart, output, ..)| {
-                    painter.restart_dialog(restart, *output, scale, theme.palette())
-                }),
-        );
-
-        // The checkout dialog covers all but the quit dialog.
-        let checkout = view.checkout.map(|checkout| {
-            let (loc, size) = shadowed(checkout_layout(output, checkout.rows.len()).panel);
-            ((checkout, output, theme, scale), loc, size)
-        });
-        parts.extend(
-            self.checkout
-                .part(checkout, now, true, |(checkout, output, ..)| {
-                    painter.checkout_dialog(checkout, *output, scale, theme.palette())
-                }),
-        );
-
-        // The confirm dialog covers all but the quit dialog.
-        let confirm = view.confirm.map(|confirm| {
-            let (loc, size) = shadowed(confirm_layout(output).panel);
-            ((confirm, output, theme, scale), loc, size)
-        });
-        parts.extend(
-            self.confirm
-                .part(confirm, now, true, |(confirm, output, ..)| {
-                    painter.confirm_dialog(confirm, *output, scale, theme.palette())
-                }),
-        );
-
-        // The quit dialog covers everything.
-        let quit = view.quit.map(|quit| {
-            let layout = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());
-            let (loc, size) = shadowed(layout.panel);
-            ((quit, output, theme, scale), loc, size)
-        });
-        parts.extend(self.quit.part(quit, now, true, |(quit, output, ..)| {
-            painter.quit_dialog(quit, *output, scale, theme.palette())
-        }));
-
-        // The welcome screen covers all the rest; while it is fully there,
-        // nothing under it is drawn.
-        let welcome = view
-            .welcome
-            .map(|welcome| ((welcome, output, theme, scale), Point::from((0, 0)), output));
-        let welcome_part =
-            self.welcome
-                .part_over(welcome, now, SLOW, false, |(welcome, output, ..)| {
-                    painter.welcome(welcome, *output, scale, theme.palette())
-                });
-        let covered = welcome_part.as_ref().is_some_and(|part| part.alpha >= 1.0);
-        parts.extend(welcome_part);
-        if covered {
-            return render_parts(renderer, parts, scale);
-        }
-
-        // The context menu, under its anchor: over the popups it may open
-        // on.
-        let menu = view.context_menu.map(|menu| {
-            let (panel, _) = menu_layout(menu.anchor, &menu.rows, output);
-            let (loc, size) = shadowed(panel);
-            ((menu, theme, scale), loc, size)
-        });
-        parts.extend(self.menu.part(menu, now, true, |(menu, ..)| {
-            painter.menu(menu, scale, theme.palette())
-        }));
-
-        // The worktrees popup, over the sidebar and the apps.
-        parts.extend(
-            self.worktrees
-                .parts(view.worktrees, output, theme, scale, now, painter),
-        );
-
-        // The repositories panel, over nearly everything.
-        parts.extend(
-            self.repos
-                .parts(view.repos, output, theme, scale, now, painter),
-        );
-
-        // The inbox panel, as high.
-        parts.extend(self.inbox.parts(
-            view.inbox,
-            output,
-            theme,
-            scale,
-            now,
-            painter,
-            Some((dot, blink)),
-        ));
-
-        // The scrollback viewer, over its pane.
-        parts.extend(
-            self.scrollback
-                .parts(view.scrollback, theme, scale, now, painter),
-        );
-
-        // The project menu reaches over the sidebar and the apps.
-        parts.extend(self.project_menu.parts(
-            view.project_menu,
-            output,
-            theme,
-            scale,
-            now,
-            painter,
-        ));
-
-        // The switcher at the top of the app area.
-        parts.extend(self.switcher.parts(
-            view.switcher,
-            area,
-            theme,
-            scale,
-            now,
-            painter,
-            Some((dot, blink)),
-        ));
-
-        // The help panel, centred at the bottom of the app area.
-        let pinned = view.help_pinned;
-        let help = view.prefix.as_deref().map(|help| {
-            let layout = painter.help_layout(help, area.size.w - 2 * HELP_MARGIN, pinned, scale);
-            let (loc, size) = shadowed(help_rect(&layout, area));
-            ((layout, view.help_hover, theme, scale), loc, size)
-        });
-        parts.extend(self.help.part(help, now, true, |(layout, hover, ..)| {
-            let help = view.prefix.as_deref().expect("the help the layout is of");
-            painter.help_panel(help, layout, *hover, scale, theme.palette())
-        }));
-
-        // The toasts, stacked at the bottom right of the app area, each
-        // fading on its own. One leaving fades where the stack has it, which
-        // holds its place until it is gone.
-        let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
-        for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
-            if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
-                self.toasts.push((toast.id, Overlay::default()));
+        // The overlays, top first in their one order (see
+        // `crate::overlay`): what takes a click is what shows on top.
+        for kind in Kind::ORDER {
+            match kind {
+                // The tooltip, by what it is about, over all else: it is
+                // offered only for what nothing covers, or by the popup it
+                // is on.
+                Kind::Tooltip => {
+                    let tooltip = view.tooltip.take().map(|tip| {
+                        let w = painter.tooltip_width(&tip, output.w - 2 * HELP_MARGIN, scale);
+                        let size = (w, tip.height()).into();
+                        let (loc, size) = shadowed(tooltip_layout(tip.anchor, size, output));
+                        ((tip, w, theme, scale), loc, size)
+                    });
+                    parts.extend(self.tooltip.part(tooltip, now, true, |(tip, w, ..)| {
+                        painter.tooltip(tip, *w, scale, theme.palette())
+                    }));
+                }
+                // The quit dialog covers everything.
+                Kind::Quit => {
+                    let quit = view.quit.take().map(|quit| {
+                        let layout = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());
+                        let (loc, size) = shadowed(layout.panel);
+                        ((quit, output, theme, scale), loc, size)
+                    });
+                    parts.extend(self.quit.part(quit, now, true, |(quit, output, ..)| {
+                        painter.quit_dialog(quit, *output, scale, theme.palette())
+                    }));
+                }
+                // The other dialogs cover all but the quit dialog.
+                Kind::Restart => {
+                    let restart = view.restart.take().map(|restart| {
+                        let (loc, size) =
+                            shadowed(restart_layout(output, restart.rows.len()).panel);
+                        ((restart, output, theme, scale), loc, size)
+                    });
+                    parts.extend(
+                        self.restart
+                            .part(restart, now, true, |(restart, output, ..)| {
+                                painter.restart_dialog(restart, *output, scale, theme.palette())
+                            }),
+                    );
+                }
+                Kind::Checkout => {
+                    let checkout = view.checkout.take().map(|checkout| {
+                        let (loc, size) =
+                            shadowed(checkout_layout(output, checkout.rows.len()).panel);
+                        ((checkout, output, theme, scale), loc, size)
+                    });
+                    parts.extend(self.checkout.part(
+                        checkout,
+                        now,
+                        true,
+                        |(checkout, output, ..)| {
+                            painter.checkout_dialog(checkout, *output, scale, theme.palette())
+                        },
+                    ));
+                }
+                Kind::Confirm => {
+                    let confirm = view.confirm.take().map(|confirm| {
+                        let (loc, size) = shadowed(confirm_layout(output).panel);
+                        ((confirm, output, theme, scale), loc, size)
+                    });
+                    parts.extend(
+                        self.confirm
+                            .part(confirm, now, true, |(confirm, output, ..)| {
+                                painter.confirm_dialog(confirm, *output, scale, theme.palette())
+                            }),
+                    );
+                }
+                // The context menu, under its anchor: over the popups it
+                // may open on.
+                Kind::ContextMenu => {
+                    let menu = view.context_menu.take().map(|menu| {
+                        let (panel, _) = menu_layout(menu.anchor, &menu.rows, output);
+                        let (loc, size) = shadowed(panel);
+                        ((menu, theme, scale), loc, size)
+                    });
+                    parts.extend(self.menu.part(menu, now, true, |(menu, ..)| {
+                        painter.menu(menu, scale, theme.palette())
+                    }));
+                }
+                // The toasts, stacked at the bottom right of the app area,
+                // each fading on its own, over every popup but the menu and
+                // the dialogs. One leaving fades where the stack has it,
+                // which holds its place until it is gone.
+                Kind::Toasts => {
+                    let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
+                    for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
+                        if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
+                            self.toasts.push((toast.id, Overlay::default()));
+                        }
+                    }
+                    for (id, overlay) in self.toasts.iter_mut() {
+                        let i = view.toasts.iter().position(|toast| toast.id == *id);
+                        if let Some(i) = i.filter(|&i| view.toasts[i].leaving) {
+                            overlay.place = Some(shadowed(layouts[i].panel));
+                        }
+                        let shown = i.filter(|&i| !view.toasts[i].leaving).map(|i| {
+                            let layout = &layouts[i];
+                            let hovered = layout
+                                .button
+                                .is_some_and(|button| button.to_f64().contains(pointer));
+                            let (loc, size) = shadowed(layout.panel);
+                            (
+                                (
+                                    view.toasts[i].clone(),
+                                    layout.panel.size.w,
+                                    hovered,
+                                    theme,
+                                    scale,
+                                ),
+                                loc,
+                                size,
+                            )
+                        });
+                        parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
+                            painter.toast(toast, *w, *hovered, scale, theme.palette())
+                        }));
+                    }
+                }
+                // The welcome screen covers all the rest; while it is fully
+                // there, nothing under it is drawn.
+                Kind::Welcome => {
+                    let welcome = view.welcome.take().map(|welcome| {
+                        ((welcome, output, theme, scale), Point::from((0, 0)), output)
+                    });
+                    let welcome_part = self.welcome.part_over(
+                        welcome,
+                        now,
+                        SLOW,
+                        false,
+                        |(welcome, output, ..)| {
+                            painter.welcome(welcome, *output, scale, theme.palette())
+                        },
+                    );
+                    let covered = welcome_part.as_ref().is_some_and(|part| part.alpha >= 1.0);
+                    parts.extend(welcome_part);
+                    if covered {
+                        return render_parts(renderer, parts, scale);
+                    }
+                }
+                // The help panel, centred at the bottom of the app area,
+                // over the panels it may be pinned over.
+                Kind::Help => {
+                    let pinned = view.help_pinned;
+                    let help = view.prefix.as_deref().map(|help| {
+                        let layout =
+                            painter.help_layout(help, area.size.w - 2 * HELP_MARGIN, pinned, scale);
+                        let (loc, size) = shadowed(help_rect(&layout, area));
+                        ((layout, view.help_hover, theme, scale), loc, size)
+                    });
+                    parts.extend(self.help.part(help, now, true, |(layout, hover, ..)| {
+                        let help = view.prefix.as_deref().expect("the help the layout is of");
+                        painter.help_panel(help, layout, *hover, scale, theme.palette())
+                    }));
+                }
+                // The project menu reaches over the sidebar and the apps.
+                Kind::ProjectMenu => parts.extend(self.project_menu.parts(
+                    view.project_menu.take(),
+                    output,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                )),
+                // The worktrees popup, over the sidebar and the apps.
+                Kind::Worktrees => parts.extend(self.worktrees.parts(
+                    view.worktrees.take(),
+                    output,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                )),
+                // The repositories panel, over nearly everything.
+                Kind::Repos => parts.extend(self.repos.parts(
+                    view.repos.take(),
+                    output,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                )),
+                // The inbox panel, as high.
+                Kind::Inbox => parts.extend(self.inbox.parts(
+                    view.inbox.take(),
+                    output,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                    Some((dot, blink)),
+                )),
+                // The scrollback viewer, over its pane.
+                Kind::Scrollback => parts.extend(self.scrollback.parts(
+                    view.scrollback.take(),
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                )),
+                // The switcher at the top of the app area.
+                Kind::Switcher => parts.extend(self.switcher.parts(
+                    view.switcher.take(),
+                    area,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                    Some((dot, blink)),
+                )),
             }
-        }
-        for (id, overlay) in self.toasts.iter_mut() {
-            let i = view.toasts.iter().position(|toast| toast.id == *id);
-            if let Some(i) = i.filter(|&i| view.toasts[i].leaving) {
-                overlay.place = Some(shadowed(layouts[i].panel));
-            }
-            let shown = i.filter(|&i| !view.toasts[i].leaving).map(|i| {
-                let layout = &layouts[i];
-                let hovered = layout
-                    .button
-                    .is_some_and(|button| button.to_f64().contains(pointer));
-                let (loc, size) = shadowed(layout.panel);
-                (
-                    (
-                        view.toasts[i].clone(),
-                        layout.panel.size.w,
-                        hovered,
-                        theme,
-                        scale,
-                    ),
-                    loc,
-                    size,
-                )
-            });
-            parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
-                painter.toast(toast, *w, *hovered, scale, theme.palette())
-            }));
         }
 
         // The button unzooming the zoomed pane, over it and under the
