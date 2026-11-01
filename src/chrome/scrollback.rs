@@ -11,8 +11,8 @@ use std::ops::Range;
 use super::{
     FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
     HINT_KEY_GAP, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE, SearchBar,
-    SearchPart, band, field_text, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix,
-    phys, physical, rect_px, search_spots,
+    SearchPart, band, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix, phys,
+    physical, rect_px, search_field_text, search_spots,
 };
 use crate::scrollback::{Fit, Ink, Style};
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -274,7 +274,7 @@ pub fn scrollback_field(view: &ScrollbackView, scale: f64) -> Option<FieldSpot> 
     Some(FieldSpot {
         size: FONT_SIZE,
         area,
-        text: field_text(area, scale),
+        text: search_field_text(area, scale),
         line: bar.query.clone(),
     })
 }
@@ -984,6 +984,8 @@ mod tests {
         }
         let field = scrollback_field(&searching, 1.0).unwrap();
         assert_eq!(field.area, parts[0].1);
+        // Its text starts after the magnifier, as `search_bar` paints it.
+        assert_eq!(field.text, search_field_text(field.area, 1.0));
         // Clicked away, the field leaves the keyboard and the caret.
         let mut blurred = searching.clone();
         blurred.search.as_mut().unwrap().focused = false;

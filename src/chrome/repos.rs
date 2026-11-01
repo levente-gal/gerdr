@@ -19,10 +19,11 @@ use super::{
     BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
     Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
-    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE,
-    SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text, folder,
-    found_split, found_within, git_branch, icon_sdf, measure, measure_bold, measure_mono, mix,
-    phys, physical, plus, rect_px, rounded_rect, search_spots, segment, trash,
+    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW,
+    SMALL_FONT_SIZE, SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text,
+    folder, found_split, found_within, git_branch, icon_sdf, magnifier, measure, measure_bold,
+    measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, search_field_text,
+    search_spots, segment, trash,
 };
 use std::ops::Range;
 
@@ -2371,17 +2372,20 @@ pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> Fi
         .detail_search
         .iter()
         .find(|(part, _)| *part == SearchPart::Field);
-    let (area, line) = match (&view.branch.menu, layout.branch_search) {
-        (Some(menu), Some(search)) => (search, &menu.query),
+    // Both searches start with a magnifier; the commit message doesn't.
+    let (area, line, text) = match (&view.branch.menu, layout.branch_search) {
+        (Some(menu), Some(search)) => (search, &menu.query, search_field_text(search, scale)),
         _ => match (&view.detail.search, diff_search) {
-            (Some(bar), Some(&(_, field))) if bar.focused => (field, &bar.query),
-            _ => (layout.field, &view.field),
+            (Some(bar), Some(&(_, field))) if bar.focused => {
+                (field, &bar.query, search_field_text(field, scale))
+            }
+            _ => (layout.field, &view.field, field_text(layout.field, scale)),
         },
     };
     FieldSpot {
         size: FONT_SIZE,
         area,
-        text: field_text(area, scale),
+        text,
         line: line.clone(),
     }
 }
@@ -4547,11 +4551,20 @@ impl Painter {
         let (b, r) = ((scale.round() as i32).max(1) as f32, BUTTON_RADIUS * s);
         c.rounded(x, y, w, h, r, p.accent);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        // The magnifier every query field starts with, where the diff's
+        // search has it.
+        let mark = Rectangle::new(
+            (search.loc.x + PADDING as i32 / 2, search.loc.y).into(),
+            (MENU_MARK_WIDTH, search.size.h).into(),
+        );
+        icon_sdf(c, mark, scale, p.placeholder, |x, y| {
+            magnifier(x, y, 0.9 * s)
+        });
         self.edit_line(
             c,
             &menu.query,
             &menu.placeholder,
-            field_text(search, scale),
+            search_field_text(search, scale),
             band(search, scale),
             true,
             FONT_SIZE,
@@ -6073,6 +6086,9 @@ mod tests {
             assert!(within(menu, search) && search.loc.y + search.size.h <= rows[0].loc.y);
             assert_eq!(repos_hit(&l, centre(search)), Some(ReposHit::BranchMenu));
             assert_eq!(repos_field(&view, size, 1.0).area, search);
+            // Its text starts after the magnifier, as painted.
+            let text = repos_field(&view, size, 1.0).text;
+            assert_eq!(text, search_field_text(search, 1.0));
             let closed = ReposView {
                 branch: full().branch,
                 ..view.clone()
