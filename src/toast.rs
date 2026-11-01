@@ -113,7 +113,7 @@ impl Toast {
     }
 
     /// Whether the toast is on its way out at `now`.
-    fn leaving(&self, now: Instant) -> bool {
+    pub(crate) fn leaving(&self, now: Instant) -> bool {
         self.paused.is_none() && now >= self.until
     }
 

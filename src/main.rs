@@ -881,6 +881,11 @@ usage: gerdr [--project <name>] [--attach] [--] [folder…]
   --attach          join a project even if another gerdr has it open
   -h, --help        show this help
   -V, --version     show the version
+
+files:
+  settings  $XDG_CONFIG_HOME/gerdr/config.toml (~/.config/gerdr/config.toml)
+  projects  ~/.local/share/gerdr/projects/<id>.json and state.json
+  log       $XDG_STATE_HOME/gerdr/gerdr.log (~/.local/state/gerdr/gerdr.log)
 ";
 
 /// What gerdr was started with.
@@ -1167,6 +1172,13 @@ pub struct Gerdr {
     pub density: Density,
     /// Whether the sidebar shows its "Needs you" list, from the config file.
     pub needs_you: bool,
+    /// Whether agents that need the user say so with a desktop
+    /// notification, from the config file.
+    pub notify: bool,
+    /// When the config file was last read as written (see
+    /// `Gerdr::watch_settings`).
+    pub settings_modified: Option<std::time::SystemTime>,
+    /// How wide the sidebar is, kept in `state.json` for the next start.
     pub sidebar_width: i32,
     /// The next pane id to hand out.
     pub next_pane: u32,
@@ -1496,6 +1508,14 @@ pub struct Gerdr {
 }
 
 impl Gerdr {
+    /// Something went wrong that the user must fix (a tool missing, a file
+    /// unreadable): kept in the problems list under `source` (and so in the
+    /// log), and said in an error toast.
+    pub fn report_problem(&mut self, source: &'static str, text: String) {
+        problems::report(source, text.clone());
+        self.show_error(text);
+    }
+
     pub fn output_size(&self) -> Size<i32, Logical> {
         let mode = self.output.current_mode().unwrap();
         mode.size.to_f64().to_logical(self.scale()).to_i32_round()
@@ -1713,7 +1733,12 @@ impl Gerdr {
                 Some(pid)
             }
             Err(err) => {
-                tracing::error!("spawn {:?} failed: {err}", cmd.get_program());
+                let program = cmd.get_program().to_string_lossy().into_owned();
+                let why = match err.kind() {
+                    std::io::ErrorKind::NotFound => format!("{program} isn't installed or not on PATH"),
+                    _ => format!("{program} didn't start: {err}"),
+                };
+                self.report_problem("spawn", why);
                 None
             }
         }
@@ -1791,9 +1816,17 @@ impl Gerdr {
                 herdr.workspace_create(&dir, &name, kind == WorkspaceKind::Project, &env)
             }
         };
-        let pane = pane
-            .inspect_err(|err| tracing::warn!("herdr: {err}; starting a plain terminal"))
-            .ok()?;
+        let pane = match pane {
+            Ok(pane) => pane,
+            Err(err) => {
+                // It goes on as a plain terminal, which won't persist.
+                self.show_warning(format!(
+                    "herdr didn't open a terminal ({err}): this one won't persist"
+                ));
+                return None;
+            }
+        };
+        let herdr = self.herdr.as_mut()?;
         let socket = herdr.socket().to_path_buf();
         if new_workspace {
             self.mirror_herdr(&record, &pane.workspace_id);
@@ -1932,10 +1965,10 @@ impl Gerdr {
         let (mut herdr, start) = match herdr::Herdr::connect_or_start(session, &self.socket_name) {
             Ok(connected) => connected,
             Err(err) => {
-                tracing::warn!("{err}; terminals won't persist");
-                return self.toast(err, Level::Error);
+                return self.report_problem("herdr", format!("{err}: terminals won't persist"));
             }
         };
+        problems::clear("herdr");
         let mut workspaces = herdr.workspace_list().unwrap_or_default();
         // A restarted server answers before it has brought back all it
         // saved. Those that come later are shown and run again as they come
@@ -2037,10 +2070,9 @@ impl Gerdr {
                     .into_iter()
                     .for_each(|event| state.on_herdr_event(event)),
                 Err(()) => {
-                    tracing::warn!("herdr server went away; new terminals won't persist");
-                    state.toast(
-                        "herdr server went away; new terminals won't persist".into(),
-                        Level::Error,
+                    state.report_problem(
+                        "herdr",
+                        "herdr's server went away: new terminals won't persist".into(),
                     );
                     state.herdr = None;
                     state.herdr_poke = None;
@@ -2749,7 +2781,7 @@ impl Gerdr {
             .collect();
         self.agent_since = since;
         self.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
-        if let Some(notifier) = self.notifier.as_mut() {
+        if let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
             for news in news {
                 notifier.send(&news.key.to_string(), &news.summary, &news.body);
             }
@@ -3554,8 +3586,18 @@ impl Gerdr {
             cmd.arg(format!("--filename={}/", start.display()));
         }
         match cmd.spawn() {
-            Ok(child) => self.picker = Some((child, purpose)),
-            Err(err) => tracing::warn!("folder picker (zenity) failed to start: {err}"),
+            Ok(child) => {
+                problems::clear("zenity");
+                self.picker = Some((child, purpose));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => self.report_problem(
+                "zenity",
+                "Can't ask for a folder: zenity isn't installed (install it, or type the path)"
+                    .into(),
+            ),
+            Err(err) => {
+                self.report_problem("zenity", format!("The folder picker (zenity) didn't start: {err}"))
+            }
         }
     }
 
@@ -5604,6 +5646,10 @@ impl Gerdr {
                 RunState::Kept
             };
         }
+        // Opened again as big, with the sidebar as wide.
+        let size = self.output_size();
+        self.projects.window_size = Some((size.w, size.h));
+        self.projects.sidebar_width = Some(self.sidebar_width);
         self.projects.save();
         self.close_cursor_socket();
         self.loop_signal.stop();
@@ -5648,7 +5694,14 @@ impl Gerdr {
     /// Without herdr, projects can't run: the welcome screen says so.
     fn start_project(&mut self, name: Option<&str>, folders: Vec<PathBuf>) {
         if !herdr::is_installed() {
-            tracing::warn!("herdr isn't installed: projects can't run");
+            let skipped = match name {
+                Some(name) => format!(": {name} isn't shown"),
+                None => String::new(),
+            };
+            problems::report(
+                "herdr",
+                format!("herdr isn't installed: install it and put it on PATH to run projects{skipped}"),
+            );
             return self.open_welcome(false);
         }
         let last = self
@@ -5895,6 +5948,28 @@ fn retain_active<T>(items: &mut Vec<T>, active: &mut usize, keep: impl Fn(&T) ->
     items.len() != before
 }
 
+/// How big gerdr's window opens the first time, in logical pixels; after,
+/// as it was left.
+const WINDOW_SIZE: (i32, i32) = (1400, 900);
+
+/// The look to start with: the later choice of the theme toggle (kept in
+/// `theme_file`) and `[ui] theme` (`named`): the file's when it was
+/// written after the toggle, else the toggle's; the system's by default.
+fn start_theme(named: Option<ThemeMode>) -> ThemeMode {
+    let file = theme_file();
+    let toggled = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|s| ThemeMode::from_name(&s));
+    let toggled_at = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+    match (named, toggled) {
+        (Some(named), Some(toggled)) => match (config::modified(), toggled_at) {
+            (Some(written), Some(at)) if at > written => toggled,
+            _ => named,
+        },
+        (named, toggled) => named.or(toggled).unwrap_or_default(),
+    }
+}
+
 /// Where the theme choice (system, dark or light) is kept between runs.
 fn theme_file() -> PathBuf {
     home_dir()
@@ -5927,6 +6002,28 @@ fn extend_path() {
         // SAFETY: called at the start of `main`, before any other thread.
         unsafe { std::env::set_var("PATH", path) };
     }
+}
+
+/// Log to stderr (warnings, or as `RUST_LOG` says) and to `log_path`
+/// (gerdr's own news from info up, everything's warnings): started from a
+/// desktop entry, stderr goes nowhere.
+fn init_logging() {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let stderr = fmt::layer().with_writer(std::io::stderr).with_filter(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+    );
+    let file = launch::append_log(&log_path()).map(|file| {
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .with_filter(EnvFilter::new("warn,gerdr=info"))
+    });
+    tracing_subscriber::registry().with(stderr).with(file).init();
+}
+
+/// gerdr's own log: `gerdr.log` in its state folder.
+pub fn log_path() -> PathBuf {
+    state_dir().join("gerdr.log")
 }
 
 /// gerdr's state folder, for logs: `$XDG_STATE_HOME/gerdr`, by default
@@ -5990,11 +6087,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    init_logging();
+    // Before the window opens, which takes the size it was left at.
+    let (store, loaded) = projects::Store::load();
 
     extend_path();
     // The portal can be slow to answer: asked now, alongside the setup.
@@ -6009,9 +6104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_title("gerdr")
         .with_name("gerdr", "gerdr")
         .with_window_icon(app_icons::window_icon())
-        .with_inner_size(smithay::reexports::winit::dpi::LogicalSize::new(
-            1400.0, 900.0,
-        ));
+        .with_inner_size({
+            let (w, h) = store.window_size.unwrap_or(WINDOW_SIZE);
+            smithay::reexports::winit::dpi::LogicalSize::new(w.max(320) as f64, h.max(240) as f64)
+        });
     let (mut backend, winit_loop) = winit::init_from_attributes::<GlesRenderer>(attrs)?;
 
     // Output that mirrors the host window.
@@ -6080,11 +6176,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance_dir = launch::instance_dir(&home, &socket_name.to_string_lossy());
     let zed_data = launch::zed_data_dir(&home, &instance_dir);
 
-    let (keymap, apps, ui, git_config, linear, keep_apps, agent_config) = config::load();
+    let settings = config::load();
+    let config::Settings {
+        keymap,
+        apps,
+        ui,
+        git: git_config,
+        linear,
+        keep: keep_apps,
+        agents: agent_config,
+        problems: settings_problems,
+    } = settings;
     anim::set_motion(ui.motion);
-    let saved_theme = std::fs::read_to_string(theme_file())
-        .ok()
-        .and_then(|s| ThemeMode::from_name(&s));
     let mut state = Gerdr {
         start_time: Instant::now(),
         display_handle: dh.clone(),
@@ -6098,11 +6201,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspaces: Vec::new(),
         active_workspace: 0,
         chrome: Chrome::new(),
-        theme_mode: ui.theme.or(saved_theme).unwrap_or_default(),
+        theme_mode: start_theme(ui.theme),
         system_dark: true,
         density: ui.density,
         needs_you: ui.needs_you,
-        sidebar_width: SIDEBAR_WIDTH,
+        notify: ui.notify,
+        settings_modified: config::modified(),
+        sidebar_width: store
+            .sidebar_width
+            .unwrap_or(SIDEBAR_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
         next_pane: 0,
         drag: None,
         reorder: None,
@@ -6357,10 +6465,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     // The first run turns the session gerdr used before projects into one.
-    let (store, loaded) = projects::Store::load();
     state.projects = store;
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
+    }
+    state.settings_problems(&settings_problems, false);
+    if let Some(problem) = problems::list().into_iter().find(|p| p.source == "store") {
+        state.show_error(problem.text);
     }
     // Before the first terminals, which take the look's colours with them,
     // when the look follows the system; any other look can do without it.
@@ -6379,7 +6490,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_web_pages();
     state.watch_ci();
     state.watch_issues();
-    state.connect_notifier();
+    if state.notify {
+        state.connect_notifier();
+    }
+    state.watch_settings();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
     state.watch_profile_imports();

@@ -58,6 +58,12 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// How wide the sidebar was left, in logical pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<i32>,
+    /// How big gerdr's window was left, in logical pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_size: Option<(i32, i32)>,
     #[serde(skip)]
     books: Books,
 }
@@ -78,6 +84,10 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_width: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_size: Option<(i32, i32)>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -377,7 +387,10 @@ impl Store {
                 Self::load_legacy(&root.join("projects.json"), books, first_run)
             }
             Err(err) => {
-                tracing::warn!("reading {}: {err}", dir.display());
+                crate::problems::report(
+                    "store",
+                    format!("Couldn't read the projects in {}: {err}", dir.display()),
+                );
                 let mut store = Self {
                     books,
                     ..Self::empty()
@@ -411,6 +424,8 @@ impl Store {
         self.cursor_history = state.cursor_history;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.sidebar_width = state.sidebar_width;
+        self.window_size = state.window_size;
     }
 
     fn state(&self) -> State {
@@ -422,6 +437,8 @@ impl Store {
             cursor_history: self.cursor_history.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            sidebar_width: self.sidebar_width,
+            window_size: self.window_size,
         }
     }
 
@@ -900,17 +917,31 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Move the unreadable file at `path` out of the way of the next save, as
 /// `<path>.bad-<unix time>`; whether it is out of the way.
+///
+/// What it did goes to the problems list (see `problems`): the user may
+/// want what was in it.
 pub(crate) fn set_aside(path: &Path) -> bool {
     let bad = bad_name(path, now());
     match std::fs::rename(path, &bad) {
         Ok(()) => {
-            tracing::warn!("set {} aside as {}", path.display(), bad.display());
+            let name = bad.file_name().unwrap_or_default().to_string_lossy();
+            crate::problems::report(
+                "store",
+                format!(
+                    "{} couldn't be read: it is kept as {name} (see the log)",
+                    path.display()
+                ),
+            );
             true
         }
         Err(err) => {
-            tracing::warn!(
-                "setting {} aside: {err}; it won't be saved over",
-                path.display()
+            tracing::warn!("setting {} aside: {err}", path.display());
+            crate::problems::report(
+                "store",
+                format!(
+                    "{} couldn't be read nor set aside: it won't be saved over",
+                    path.display()
+                ),
             );
             false
         }
@@ -1516,6 +1547,8 @@ mod tests {
             cursor_history: History::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            sidebar_width: Some(280),
+            window_size: Some((1600, 1000)),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

@@ -472,18 +472,21 @@ impl Gerdr {
             Some(user) => format!("{hello}, {user}"),
             None => hello.into(),
         };
-        // Without herdr, projects live only as long as gerdr.
+        // Without herdr, projects live only as long as gerdr; projects that
+        // couldn't be read are said, else "Start your first project" would
+        // be all there is.
         let note = welcome
             .herdr_missing
-            .then(|| "herdr isn't installed — projects won't keep running".into())
-            .or_else(|| welcome.refused.clone());
+            .then(|| "herdr isn't installed: put it on PATH to keep projects running".into())
+            .or_else(|| welcome.refused.clone())
+            .or_else(|| {
+                let store = crate::problems::list()
+                    .into_iter()
+                    .find(|p| p.source == "store");
+                store.map(|p| p.text)
+            });
         // The prefix and the key after it that quit, for the bar at the bottom.
-        let help = self.keymap.help();
-        let quit_keys = help
-            .rows
-            .iter()
-            .find(|(_, label)| label.trim_end_matches('…') == "quit")
-            .map(|(keys, _)| format!("{} {keys}", help.prefix));
+        let quit_keys = self.action_keys(crate::Action::Quit);
         Some(welcome.view(
             self.welcome_page(),
             greeting,
