@@ -47,7 +47,7 @@ use crate::{
     desktop, fuzzy, git, home_dir,
     input::Overlay,
     launch::{self, Place},
-    paths::{display, tilde},
+    paths::tilde,
     profile_import,
     project_list::RowTops,
     projects::Project,
@@ -56,9 +56,6 @@ use crate::{
     toast::Level,
     tooltip::Tooltip,
 };
-
-/// How long a path in a row's detail may get.
-const DETAIL_CHARS: usize = 60;
 
 /// What an item switches to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -660,7 +657,14 @@ impl Switcher {
         if self.chips() {
             hints.push(("Tab", "category"));
         }
-        hints.push(("Esc", if self.query.is_empty() { "close" } else { "clear" }));
+        hints.push((
+            "Esc",
+            if self.query.is_empty() {
+                "close"
+            } else {
+                "clear"
+            },
+        ));
         hints
             .into_iter()
             .map(|(keys, what)| (keys.to_owned(), what.to_owned()))
@@ -779,7 +783,7 @@ fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
             Item::new(
                 ItemIcon::Settings,
                 "Project file",
-                display(&crate::projects::project_file(id), home, DETAIL_CHARS),
+                tilde(&crate::projects::project_file(id), home),
                 Target::ProjectFile(id.to_owned()),
             )
         })
@@ -901,10 +905,7 @@ impl Gerdr {
                 Item::new(
                     command_icon(&source.key, &icons),
                     format!("Import {} profile", source.name),
-                    format!(
-                        "into gerdr, from {}",
-                        display(&source.from, Some(home), DETAIL_CHARS)
-                    ),
+                    format!("into gerdr, from {}", tilde(&source.from, Some(home))),
                     Target::ImportProfile(source),
                 )
             }));
@@ -1245,13 +1246,10 @@ impl Gerdr {
             .zip(self.workspace_views())
             .enumerate()
         {
-            let detail: Vec<String> = [
-                Some(display(&ws.dir, home.as_deref(), DETAIL_CHARS)),
-                view.branch,
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let detail: Vec<String> = [Some(tilde(&ws.dir, home.as_deref())), view.branch]
+                .into_iter()
+                .flatten()
+                .collect();
             let icon = match view.icon {
                 Some(picture) => ItemIcon::Picture(picture),
                 None => ItemIcon::Workspace(ws.kind),
@@ -1304,7 +1302,7 @@ impl Gerdr {
             items.push(Item::new(
                 ItemIcon::Folder,
                 label,
-                display(dir, home.as_deref(), DETAIL_CHARS),
+                tilde(dir, home.as_deref()),
                 Target::Folder(dir.clone()),
             ));
         }
@@ -1318,7 +1316,7 @@ impl Gerdr {
         items.push(Item::new(
             ItemIcon::Settings,
             "Settings file",
-            display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
+            tilde(&crate::config::config_file(), home.as_deref()),
             Target::Settings,
         ));
         items.extend(project_file_items(self.project.as_deref(), home.as_deref()));

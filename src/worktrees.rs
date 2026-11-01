@@ -1560,7 +1560,10 @@ mod tests {
         popup.key(&ctrl(), Keysym::j, &items, 10);
         popup.key(&ctrl(), Keysym::k, &items, 10);
         assert_eq!(popup.selected(&items), Some(1));
-        assert_eq!(popup.key(&ctrl(), Keysym::r, &items, 10), Some(Outcome::Refresh));
+        assert_eq!(
+            popup.key(&ctrl(), Keysym::r, &items, 10),
+            Some(Outcome::Refresh)
+        );
         assert_eq!(
             popup.key(&ctrl_shift(), Keysym::S, &items, 10),
             Some(Outcome::Merge("/src/r/.wt/wip".into()))

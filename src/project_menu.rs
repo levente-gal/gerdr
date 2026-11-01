@@ -281,6 +281,11 @@ impl ProjectMenu {
             items.push(Item::Section("Recent"));
             items.extend(recent.into_iter().map(Item::Project));
         }
+        // What was typed matches no project: say so over the rows that
+        // start one.
+        if items.is_empty() && !self.query.trim().is_empty() {
+            items.push(Item::Section("No project matches"));
+        }
         items.push(Item::New);
         items.extend((0..self.folders.len()).map(Item::Folder));
         self.places =
@@ -1713,7 +1718,11 @@ mod tests {
         assert_eq!(labels(&m), ["# Current", "aft", "New project \"aft\"…"]);
         assert_eq!(selected(&m), "aft");
         type_text(&mut m, "zzz");
-        assert_eq!(labels(&m), ["New project \"aftzzz\"…"]);
+        // It says nothing matches, over the row starting one.
+        assert_eq!(
+            labels(&m),
+            ["# No project matches", "New project \"aftzzz\"…"]
+        );
         assert_eq!(selected(&m), "New project \"aftzzz\"…");
     }
 

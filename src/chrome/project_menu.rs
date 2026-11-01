@@ -5,15 +5,15 @@ use super::layers::{Part, RowCache};
 use super::{
     BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, CARET_WIDTH, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
     FIELD_GAP, FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING,
-    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KIND_CHOICES, KIND_HEIGHT,
-    LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER,
-    PROJECT_MENU_INPUT, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING,
-    PROJECT_MENU_ROW, PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette,
-    ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
-    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect, SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE,
-    SUGGESTION_ROW, band, commands_prompt, cross, field_text, file, focus_ring, folder,
-    footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil, phys, plus, rect_px,
-    stop,
+    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE,
+    MENU_MARK_GAP, MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
+    PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
+    PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow,
+    QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
+    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, ROW_INSET, Rect, SETTINGS_BUTTONS,
+    SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross, field_text, file,
+    focus_ring, folder, footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil,
+    phys, plus, rect_px, stop,
 };
 use crate::WorkspaceKind;
 use crate::project_list::RowTops;
@@ -824,7 +824,7 @@ impl Painter {
         p: &Palette,
     ) -> Canvas {
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
@@ -1004,7 +1004,7 @@ impl Painter {
 
         // The highlight stops short of the rows above and below.
         let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = (MENU_RADIUS - 2.0) * s;
+        let r = ROW_HIGHLIGHT_RADIUS * s;
         let confirm = matches!(
             entry,
             MenuEntry::Project {
@@ -1017,8 +1017,9 @@ impl Painter {
         } else if look.selected {
             c.rounded(x, y, w, h, r, p.selected);
         } else if look.hovered {
-            let t = 0.5 * look.hover_alpha as f32 / 16.0;
-            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, t));
+            // Fading in to the one hover colour.
+            let t = look.hover_alpha as f32 / 16.0;
+            c.rounded(x, y, w, h, r, mix(p.elevated, p.element, t));
         }
 
         // A keycap at the right end of the row; returns where it starts.

@@ -9,9 +9,9 @@
 
 use super::{
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
-    FOOTER_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE,
-    MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
-    PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
+    FieldSpot, HELP_MARGIN, HELP_PADDING, KEY_FONT_SIZE, LABEL_FONT_SIZE, MENU_MARK_GAP,
+    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
+    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, STROKE, agent_icon, band, cross, dot_slot, folder, footer_height,
     footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil,
     phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, row_dot, segment,
@@ -36,13 +36,13 @@ const INBOX_LIST_SHARE: f64 = 0.4;
 const INBOX_LIST_MIN: i32 = 260;
 /// The room above and below the list's rows, and beside them.
 const INBOX_PAD: i32 = PROJECT_MENU_PADDING;
-/// The list's scrollbar, and the gap before it; its thumb is never
-/// shorter than `THUMB_MIN`.
-const SCROLLBAR: i32 = 6;
+/// The list's scrollbar, as wide as every popup's, and the gap before
+/// it.
+const SCROLLBAR: i32 = 4;
 const SCROLLBAR_GAP: i32 = 4;
-const THUMB_MIN: i32 = 24;
-/// The scope toggle's segments in the title row: "This workspace" and
-/// "All", and how far it keeps from the right edge.
+/// The scope toggle's segments in a title row: "This workspace" and
+/// "All", and how far it keeps from the right edge. The worktrees popup
+/// has the same toggle.
 const SCOPE_OWN: i32 = 124;
 const SCOPE_ALL: i32 = 52;
 const SCOPE_INSET: i32 = 14;
@@ -379,21 +379,25 @@ fn thumb_place(
     track: Rect,
     page: usize,
 ) -> Option<(Point<f64, Logical>, Size<i32, Logical>)> {
-    if view.total <= page || page == 0 || track.size.h <= 0 {
+    let thumb = list_thumb(view, track, page)?;
+    Some((
+        (track.loc.x as f64, thumb.top).into(),
+        (track.size.w, thumb.h as i32).into(),
+    ))
+}
+
+/// The scrollbar along `track` for `view`, `page` rows shown at once, as
+/// every popup's (`chrome::Thumb`), in rows: the list stands at its first
+/// row shown and the part of it scrolled past.
+fn list_thumb(view: &InboxView, track: Rect, page: usize) -> Option<super::Thumb> {
+    if page == 0 {
         return None;
     }
-    let h = track.size.h as f64;
-    let thumb_h = (h * page as f64 / view.total as f64)
-        .max((THUMB_MIN as f64).min(h))
-        .min(h)
-        .round();
-    let last = (view.total - page) as f64;
-    let pos = (view.first as f64 + view.part).min(last);
-    let y = track.loc.y as f64 + (h - thumb_h) * pos / last;
-    Some((
-        (track.loc.x as f64, y).into(),
-        (track.size.w, thumb_h as i32).into(),
-    ))
+    let bar = super::ListBar {
+        down: view.first as f64 + view.part,
+        total: view.total as f64,
+    };
+    super::Thumb::of(track, page as f64, bar)
 }
 
 /// The list's scrollbar in `layout` for `view` on an `output`, where the
@@ -403,15 +407,7 @@ pub fn inbox_thumb(
     layout: &InboxLayout,
     output: Size<i32, Logical>,
 ) -> Option<super::Thumb> {
-    let track = scroll_track(layout.list);
-    let page = inbox_page(output);
-    let (loc, size) = thumb_place(view, track, page)?;
-    Some(super::Thumb {
-        track,
-        top: loc.y,
-        h: size.h as f64,
-        last: (view.total - page) as f64,
-    })
+    list_thumb(view, scroll_track(layout.list), inbox_page(output))
 }
 
 /// The list's scrollbar track, at the right of `list`.
@@ -433,7 +429,6 @@ pub fn inbox_page(size: Size<i32, Logical>) -> usize {
     let (list, _) = body(panel_rect(size), footer_height(usize::MAX));
     ((list.size.h - 2 * INBOX_PAD) / INBOX_ROW).max(1) as usize
 }
-
 
 /// How wide a row's button is: its label and the room either side.
 fn row_button_width(button: &InboxButton) -> i32 {
@@ -625,6 +620,24 @@ fn field_text(view: &InboxView, query: Rect, scale: f64) -> (f32, f32) {
     }
 }
 
+/// The scope toggle's segments at the right of the title row `title`, as
+/// (for every workspace, rect): "This workspace", then "All".
+pub(super) fn scope_segments(title: Rect) -> Vec<(bool, Rect)> {
+    let y = title.loc.y + (title.size.h - ROW_BUTTON) / 2;
+    let all_x = title.loc.x + title.size.w - SCOPE_INSET - SCOPE_ALL;
+    let own_x = all_x - SCOPE_OWN;
+    vec![
+        (
+            false,
+            Rectangle::new((own_x, y).into(), (SCOPE_OWN, ROW_BUTTON).into()),
+        ),
+        (
+            true,
+            Rectangle::new((all_x, y).into(), (SCOPE_ALL, ROW_BUTTON).into()),
+        ),
+    ]
+}
+
 /// Where the parts of the inbox panel showing `view` go, on an output of
 /// `size`: the title row (the scope toggle at its right), the field, the
 /// list at the left and the detail at the right, then the footer.
@@ -633,19 +646,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let (x, top, w) = (panel.loc.x, panel.loc.y, panel.size.w);
     let title = Rectangle::new(panel.loc, (w, INBOX_TITLE).into());
     let scope = if view.all.is_some() {
-        let y = top + (INBOX_TITLE - ROW_BUTTON) / 2;
-        let all_x = x + w - SCOPE_INSET - SCOPE_ALL;
-        let own_x = all_x - SCOPE_OWN;
-        vec![
-            (
-                false,
-                Rectangle::new((own_x, y).into(), (SCOPE_OWN, ROW_BUTTON).into()),
-            ),
-            (
-                true,
-                Rectangle::new((all_x, y).into(), (SCOPE_ALL, ROW_BUTTON).into()),
-            ),
-        ]
+        scope_segments(title)
     } else {
         Vec::new()
     };
@@ -985,7 +986,7 @@ impl Painter {
     ) -> Canvas {
         let layout = inbox_layout(view, size);
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let border = px(1).max(1);
         let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
@@ -1057,7 +1058,8 @@ impl Painter {
         c
     }
 
-    /// The scrollbar's thumb, of `size`.
+    /// The scrollbar's thumb, of `size`, as `bar_thumb` draws it, to blit.
+    #[cfg(test)]
     fn inbox_thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> Canvas {
         let mut c = Canvas::new(super::physical(size, scale));
         let (w, h) = (c.w as f32, c.h as f32);
@@ -1215,8 +1217,29 @@ impl Painter {
                 p.warning,
             );
         }
-        // One outlined track behind both segments.
-        if let (Some((_, first)), Some((_, last))) = (scope.first(), scope.last()) {
+        let hover = match view.hover {
+            Some(InboxHit::Scope(all)) => Some(all),
+            _ => None,
+        };
+        if let Some(on) = view.all {
+            self.scope_toggle(c, scope, on, hover, scale, p);
+        }
+    }
+
+    /// The scope toggle of `segments` (see `scope_segments`): one outlined
+    /// track behind both, the scope shown (every workspace when `all`)
+    /// filled, the one under the pointer (`hover`) lighter. The inbox and
+    /// the worktrees popup draw it alike.
+    pub(super) fn scope_toggle(
+        &self,
+        c: &mut Canvas,
+        segments: &[(bool, Rect)],
+        all: bool,
+        hover: Option<bool>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        if let (Some((_, first)), Some((_, last))) = (segments.first(), segments.last()) {
             let track = first.merge(*last);
             let pad = SCOPE_TRACK_PAD;
             let track = Rectangle::new(
@@ -1225,38 +1248,23 @@ impl Painter {
             );
             self.inbox_pill(c, track, p.element, scale, p);
         }
-        for &(all, rect) in scope {
-            self.inbox_scope(c, view, all, rect, scale, p);
+        for &(segment, rect) in segments {
+            let on = segment == all;
+            let fill = if on {
+                Some(p.selected)
+            } else if hover == Some(segment) {
+                Some(mix(p.element, p.selected, 0.5))
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, (BUTTON_RADIUS - 2.0) * scale as f32, fill);
+            }
+            let label = if segment { "All" } else { "This workspace" };
+            let color = if on { p.text } else { p.muted };
+            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
         }
-    }
-
-    /// The scope toggle's segment for every workspace (`all`) or the
-    /// active one's, in `rect` on the toggle's track: filled when it is
-    /// the scope shown, lighter under the pointer.
-    fn inbox_scope(
-        &self,
-        c: &mut Canvas,
-        view: &InboxView,
-        all: bool,
-        rect: Rect,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let on = view.all == Some(all);
-        let fill = if on {
-            Some(p.selected)
-        } else if view.hover == Some(InboxHit::Scope(all)) {
-            Some(mix(p.element, p.selected, 0.5))
-        } else {
-            None
-        };
-        if let Some(fill) = fill {
-            let (x, y, w, h) = rect_px(rect, scale);
-            c.rounded(x, y, w, h, (BUTTON_RADIUS - 2.0) * scale as f32, fill);
-        }
-        let label = if all { "All" } else { "This workspace" };
-        let color = if on { p.text } else { p.muted };
-        self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
     }
 
     /// An outlined pill in `rect`, filled with `fill`.
@@ -1438,11 +1446,11 @@ impl Painter {
 
         // The highlight stops short of the rows above and below.
         let (hy, hh) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = (MENU_RADIUS + 2.0) * s;
+        let r = ROW_HIGHLIGHT_RADIUS * s;
         let ground = if key.selected {
             p.selected
         } else if key.hovered {
-            mix(p.elevated, p.selected, 0.5)
+            p.element
         } else {
             p.elevated
         };
@@ -1904,7 +1912,7 @@ impl InboxLayers {
             let track = scroll_track(layout.list);
             if let Some((loc, size)) = thumb_place(view, track, inbox_page(output)) {
                 let buffer = thumb.get((size, theme, scale), |(size, ..)| {
-                    painter.inbox_thumb(*size, scale, p).into_buffer(false)
+                    painter.bar_thumb(*size, scale, p)
                 });
                 parts.push(Part::new(buffer, track.loc, size, 1.0).at(loc));
             }
