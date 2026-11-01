@@ -20,15 +20,19 @@
 //! focuses the pane, and its buttons restart or stop what runs in it.
 //!
 //! A right press on a region opens its context menu, which then takes
-//! every press and key (the arrows walk it, Enter picks, Esc closes; any
-//! other key closes it and goes nowhere). A double click on a workspace
+//! every press and key (the arrows walk it, Enter picks, Esc closes; the
+//! prefix closes it and goes on to be armed, any other key closes it and
+//! goes nowhere). A double click on a workspace
 //! row or a tab renames it: the keys go to the name until Enter keeps it
 //! or Esc drops it. Esc otherwise takes down the tooltip and the pinned
 //! help and still reaches the app; a press off the pinned help closes it
 //! too. The pointer is a hand over whatever can be clicked, and an open
 //! hand over what can be dragged.
 
-use std::time::{Duration, Instant};
+use std::{
+    cell::Cell,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::input::{
@@ -91,6 +95,42 @@ pub(crate) const BTN_MIDDLE: u32 = 0x112;
 /// double (or triple) click.
 pub(crate) const MULTI_CLICK: Duration = Duration::from_millis(400);
 pub(crate) const MULTI_CLICK_SLOP: f64 = 4.0;
+
+thread_local! {
+    /// Whether Ctrl, held down as the prefix was armed, may be held from
+    /// it still: it is, until Ctrl goes down again (see `after_prefix`).
+    static CTRL_FROM_PREFIX: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The prefix was armed with `mods` held: Ctrl among them may stay held
+/// for the key after it.
+fn arm_prefix(mods: &ModifiersState) {
+    CTRL_FROM_PREFIX.set(mods.ctrl);
+}
+
+/// The action the key `sym` pressed after the prefix with `mods` held
+/// picks in `keymap`, and the modifiers it is taken with. Ctrl that may
+/// be held from the prefix (`carried`) picks the key alone where that
+/// has an action, and Ctrl with the key only where it alone has none;
+/// Ctrl pressed again after the prefix picks Ctrl with the key first.
+fn after_prefix(
+    keymap: &crate::keys::Keymap,
+    mods: &ModifiersState,
+    sym: Keysym,
+    carried: bool,
+) -> (ModifiersState, Option<Action>) {
+    if carried && mods.ctrl {
+        let alone = ModifiersState {
+            ctrl: false,
+            ..*mods
+        };
+        if let Some(action) = keymap.action(&alone, sym) {
+            return (alone, Some(action));
+        }
+        return (alone, keymap.action(mods, sym));
+    }
+    (*mods, keymap.action(mods, sym))
+}
 
 /// What a key gerdr kept from the apps does, once the keyboard is free again.
 enum Intercepted {
@@ -248,7 +288,11 @@ impl Gerdr {
                             .raw_latin_sym_or_raw_current_sym()
                             .unwrap_or(handle.modified_sym());
                         // Modifiers pass through so Shift can be held for the key after the prefix.
+                        // Ctrl pressed again after the prefix is meant for the key after it.
                         if sym.is_modifier_key() {
+                            if matches!(sym, Keysym::Control_L | Keysym::Control_R) {
+                                CTRL_FROM_PREFIX.set(false);
+                            }
                             return FilterResult::Forward;
                         }
                         let top = state.key_overlay();
@@ -274,17 +318,16 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(None);
                         }
-                        // The menu takes its keys; any other closes it and
-                        // goes nowhere else, neither to a panel under it nor
-                        // to an app. Only the prefix goes on, to be armed or
-                        // to pick an action.
+                        // The menu takes every key (see `menu_key`): what
+                        // isn't one of its own closes it and goes nowhere
+                        // else, neither to a panel under it nor to an app.
+                        // Only the prefix, or the key after it, closes it and
+                        // goes on, to be armed or to pick an action.
                         if top == Some(overlay::Overlay::ContextMenu) {
-                            if state.menu_key(sym) {
-                                state.suppressed_keys.push(code);
-                                return FilterResult::Intercept(None);
-                            }
-                            state.close_menu();
-                            if !(state.prefix_armed || state.keymap.is_prefix(mods, sym)) {
+                            if state.prefix_armed || state.keymap.is_prefix(mods, sym) {
+                                state.close_menu();
+                            } else {
+                                state.menu_key(sym);
                                 state.suppressed_keys.push(code);
                                 return FilterResult::Intercept(None);
                             }
@@ -317,6 +360,7 @@ impl Gerdr {
                             }
                             if state.keymap.is_prefix(mods, sym) {
                                 state.prefix_armed = true;
+                                arm_prefix(mods);
                                 return FilterResult::Intercept(None);
                             }
                             let typed = handle.modified_sym();
@@ -339,6 +383,7 @@ impl Gerdr {
                         }
                         if state.keymap.is_prefix(mods, sym) {
                             state.prefix_armed = true;
+                            arm_prefix(mods);
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
@@ -469,8 +514,9 @@ impl Gerdr {
                     }
                     return;
                 }
-                // Nothing scrolls behind an overlay; the open panel's list
-                // moves instead (see `scroll`), and over a dialog nothing.
+                // Nothing scrolls behind an overlay; what the one on top
+                // lists moves instead (see `overlay_scroll`), if it lists
+                // anything.
                 if let Some(top) = self.grabbing_overlay() {
                     if let Some(motion) = motion {
                         self.overlay_scroll(top, motion);
@@ -766,20 +812,22 @@ impl Gerdr {
     }
 
     /// The key pressed after the prefix, over open `over` (or over the
-    /// apps): what it asks for, if it works there. Esc, and the prefix
-    /// again over an overlay, cancel; the key that opened `over` closes
-    /// it; any other key says why it does nothing.
+    /// apps): what it asks for, if it works there (see `after_prefix`).
+    /// Esc, and the prefix again over an overlay, cancel; the key that
+    /// opened `over` closes it; any other key says why it does nothing.
     fn prefix_key(
         &mut self,
         over: Option<overlay::Overlay>,
         mods: &ModifiersState,
         sym: Keysym,
     ) -> Option<Intercepted> {
+        let carried = CTRL_FROM_PREFIX.replace(false);
         if sym == Keysym::Escape || self.keymap.is_prefix(mods, sym) {
             return None;
         }
-        let keys = format!("{} {}", self.keymap.help().prefix, key_name(mods, sym));
-        let Some(action) = self.keymap.action(mods, sym) else {
+        let (mods, action) = after_prefix(&self.keymap, mods, sym, carried);
+        let keys = format!("{} {}", self.keymap.help().prefix, key_name(&mods, sym));
+        let Some(action) = action else {
             self.show_warning(format!("No shortcut on {keys}"));
             return None;
         };
@@ -939,6 +987,11 @@ impl Gerdr {
         } else {
             None
         };
+        // The toast under the pointer waits there; the others go on.
+        if !self.toasts.is_empty() {
+            let over = (at == Some(overlay::Overlay::Toasts)).then_some(pos);
+            self.toast_hover(over);
+        }
         // The region under the pointer lights up, with nothing open
         // over it, and may offer a tooltip. Its layout is worked
         // out once for the event.
@@ -1384,6 +1437,37 @@ mod tests {
         assert!(works_over(O::Welcome, &Action::Quit));
         assert!(!works_over(O::Welcome, &Action::Repos));
         assert!(works_over(O::Switcher, &Action::Inbox));
+    }
+
+    #[test]
+    fn ctrl_held_from_the_prefix_picks_the_key_alone_and_pressed_again_with_ctrl() {
+        // After Ctrl+B, X and Ctrl+X do different things.
+        let (keymap, ..) = crate::config::from_text("[keys]\nnew-tab = \"Ctrl+X\"\n");
+        let none = ModifiersState::default();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        let alone = keymap.action(&none, Keysym::x);
+        assert!(alone.is_some() && alone != Some(Action::NewTab));
+        // Ctrl still down from the prefix: the key alone.
+        assert_eq!(after_prefix(&keymap, &ctrl, Keysym::x, true), (none, alone));
+        // Ctrl pressed again after the prefix: Ctrl+X.
+        assert_eq!(
+            after_prefix(&keymap, &ctrl, Keysym::x, false),
+            (ctrl, Some(Action::NewTab))
+        );
+        // Ctrl let go of: the key alone, either way.
+        assert_eq!(after_prefix(&keymap, &none, Keysym::x, true).1, alone);
+        // A key with an action only with Ctrl takes it, Ctrl held from the
+        // prefix or not.
+        let config = "[keys]\nnew-tab = \"Ctrl+X\"\nclose-pane = []\n";
+        let (keymap, ..) = crate::config::from_text(config);
+        assert_eq!(keymap.action(&none, Keysym::x), None);
+        assert_eq!(
+            after_prefix(&keymap, &ctrl, Keysym::x, true).1,
+            Some(Action::NewTab)
+        );
     }
 
     #[test]

@@ -109,7 +109,7 @@ pub struct ChromeView {
     /// When the view was taken, for what moves with time.
     pub now: Instant,
     /// Where the pointer is (window coordinates): the toasts' buttons and
-    /// the placeholders' Retry and Close light up under it.
+    /// "×"s and the placeholders' Retry and Close light up under it.
     pub pointer: Point<f64, Logical>,
     /// The help panel is pinned open, rather than up for the prefix: it
     /// then carries a title and an Esc hint.
@@ -259,8 +259,6 @@ impl Chrome {
         }
     }
 
-    /// How wide a toast's button labelled `label` is (see
-    /// `Painter::toast_button_width`).
     /// What `pos` is over in the help panel listing `help` in the app
     /// `area`, `pinned` open or up for the prefix; `None` off it.
     pub fn help_hit(
@@ -271,8 +269,10 @@ impl Chrome {
         scale: f64,
         pos: Point<f64, Logical>,
     ) -> Option<HelpHit> {
-        let width = area.size.w - 2 * HELP_MARGIN;
-        let layout = self.painter.help_layout(help, width, pinned, scale);
+        let max = (area.size.w - 2 * HELP_MARGIN, area.size.h - 2 * HELP_MARGIN);
+        let layout = self
+            .painter
+            .help_layout_within(help, max.into(), pinned, scale);
         let panel = help_rect(&layout, area);
         if !panel.to_f64().contains(pos) {
             return None;
@@ -284,6 +284,8 @@ impl Chrome {
         Some(hit.map_or(HelpHit::Panel, |(hit, _)| hit))
     }
 
+    /// How wide a toast's button labelled `label` is (see
+    /// `Painter::toast_button_width`).
     pub fn toast_button_width(&self, label: &str) -> i32 {
         self.painter.toast_button_width(label)
     }
@@ -364,9 +366,10 @@ impl Chrome {
                         let (loc, size) = shadowed(layout.panel);
                         ((quit, output, theme, scale), loc, size)
                     });
-                    parts.extend(self.quit.part(quit, now, true, |(quit, output, ..)| {
+                    let part = self.quit.part(quit, now, true, |(quit, output, ..)| {
                         painter.quit_dialog(quit, *output, scale, theme.palette())
-                    }));
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 // The other dialogs cover all but the quit dialog.
                 Kind::Restart => {
@@ -375,12 +378,12 @@ impl Chrome {
                             shadowed(restart_layout(output, restart.rows.len()).panel);
                         ((restart, output, theme, scale), loc, size)
                     });
-                    parts.extend(
-                        self.restart
-                            .part(restart, now, true, |(restart, output, ..)| {
-                                painter.restart_dialog(restart, *output, scale, theme.palette())
-                            }),
-                    );
+                    let part = self
+                        .restart
+                        .part(restart, now, true, |(restart, output, ..)| {
+                            painter.restart_dialog(restart, *output, scale, theme.palette())
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 Kind::Checkout => {
                     let checkout = view.checkout.take().map(|checkout| {
@@ -388,26 +391,24 @@ impl Chrome {
                             shadowed(checkout_layout(output, checkout.rows.len()).panel);
                         ((checkout, output, theme, scale), loc, size)
                     });
-                    parts.extend(self.checkout.part(
-                        checkout,
-                        now,
-                        true,
-                        |(checkout, output, ..)| {
+                    let part = self
+                        .checkout
+                        .part(checkout, now, true, |(checkout, output, ..)| {
                             painter.checkout_dialog(checkout, *output, scale, theme.palette())
-                        },
-                    ));
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 Kind::Confirm => {
                     let confirm = view.confirm.take().map(|confirm| {
                         let (loc, size) = shadowed(confirm_layout(output).panel);
                         ((confirm, output, theme, scale), loc, size)
                     });
-                    parts.extend(
-                        self.confirm
-                            .part(confirm, now, true, |(confirm, output, ..)| {
-                                painter.confirm_dialog(confirm, *output, scale, theme.palette())
-                            }),
-                    );
+                    let part = self
+                        .confirm
+                        .part(confirm, now, true, |(confirm, output, ..)| {
+                            painter.confirm_dialog(confirm, *output, scale, theme.palette())
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 // The context menu, under its anchor: over the popups it
                 // may open on.
@@ -439,15 +440,13 @@ impl Chrome {
                         }
                         let shown = i.filter(|&i| !view.toasts[i].leaving).map(|i| {
                             let layout = &layouts[i];
-                            let hovered = layout
-                                .button
-                                .is_some_and(|button| button.to_f64().contains(pointer));
+                            let lit = layout.spot_at(pointer);
                             let (loc, size) = shadowed(layout.panel);
                             (
                                 (
                                     view.toasts[i].clone(),
                                     layout.panel.size.w,
-                                    hovered,
+                                    lit,
                                     theme,
                                     scale,
                                 ),
@@ -455,8 +454,8 @@ impl Chrome {
                                 size,
                             )
                         });
-                        parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
-                            painter.toast(toast, *w, *hovered, scale, theme.palette())
+                        parts.extend(overlay.part(shown, now, true, |(toast, w, lit, ..)| {
+                            painter.toast_lit(toast, *w, *lit, scale, theme.palette())
                         }));
                     }
                 }
@@ -486,8 +485,8 @@ impl Chrome {
                 Kind::Help => {
                     let pinned = view.help_pinned;
                     let help = view.prefix.as_deref().map(|help| {
-                        let layout =
-                            painter.help_layout(help, area.size.w - 2 * HELP_MARGIN, pinned, scale);
+                        let max = (area.size.w - 2 * HELP_MARGIN, area.size.h - 2 * HELP_MARGIN);
+                        let layout = painter.help_layout_within(help, max.into(), pinned, scale);
                         let (loc, size) = shadowed(help_rect(&layout, area));
                         ((layout, view.help_hover, theme, scale), loc, size)
                     });
@@ -669,6 +668,16 @@ fn shadowed(panel: Rect) -> (Point<i32, Logical>, Size<i32, Logical>) {
     )
 }
 
+/// A modal dialog's `part`, if it shows, and the scrim dimming the
+/// `output` under it, fading in and out with it.
+fn scrimmed(part: Option<Part>, output: Size<i32, Logical>, p: &Palette) -> Vec<Part> {
+    let Some(part) = part else {
+        return Vec::new();
+    };
+    let dim = scrim(Rectangle::from_size(output), part.alpha, p);
+    vec![part, dim]
+}
+
 /// The blinking `dot` at each of `rects` (output coordinates), `alpha`
 /// opaque: in front of the surface they are on, so pushed before it.
 fn push_dots(
@@ -724,9 +733,9 @@ struct Overlay<K> {
     more: Vec<Part>,
 }
 
-/// A toast's overlay: the toast, its width, whether its button is lit,
-/// the theme and the scale.
-type ToastOverlay = Overlay<(ToastView, i32, bool, Theme, f64)>;
+/// A toast's overlay: the toast, its width, what of it is lit (its
+/// button or its "×"), the theme and the scale.
+type ToastOverlay = Overlay<(ToastView, i32, Option<ToastSpot>, Theme, f64)>;
 
 /// A popup's inputs while it is there: its cache key, where it goes and
 /// the logical size it covers.
@@ -892,22 +901,23 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     };
     let strip = &view.tab_strip;
     let strip_size = (strip_w, tab_strip_height(view.density)).into();
-    let layout = tab_layout(
-        strip.tabs.len(),
-        strip_size,
-        strip.prefix,
-        strip.overflow(),
-        strip.watch.is_some(),
-        strip.inbox.is_some(),
+    let layout = strip.layout(strip_size);
+    rects.extend(
+        layout
+            .tabs
+            .iter()
+            .chain(&layout.closes)
+            .filter(|r| r.size.w > 0)
+            .map(|r| shift(*r)),
     );
-    rects.extend(layout.tabs.iter().chain(&layout.closes).map(|r| shift(*r)));
-    if !layout.tabs.is_empty() {
+    if layout.plus.size.w > 0 {
         rects.push(shift(layout.plus));
     }
     rects.extend(
         layout
-            .overflow
+            .more
             .into_iter()
+            .chain(layout.overflow)
             .chain(layout.prefix)
             .chain(layout.watch)
             .chain(layout.inbox)
@@ -1037,4 +1047,28 @@ pub(super) fn inside(outer: Rect, inner: Rect) -> bool {
         && inner.loc.y >= outer.loc.y
         && inner.loc.x + inner.size.w <= outer.loc.x + outer.size.w
         && inner.loc.y + inner.size.h <= outer.loc.y + outer.size.h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dialog_dims_all_under_it_as_far_as_it_has_faded_in() {
+        let p = Theme::Dark.palette();
+        let output: Size<i32, Logical> = (1920, 1080).into();
+        let dialog = Part::new(
+            &MemoryRenderBuffer::default(),
+            (700, 400).into(),
+            (520, 280).into(),
+            0.5,
+        );
+        let parts = scrimmed(Some(dialog), output, p);
+        // The dialog in front, then the scrim over the whole output.
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].stretched && parts[1].stretched);
+        assert_eq!(parts[1].size, output);
+        assert_eq!(parts[1].alpha, p.scrim * 0.5);
+        assert!(scrimmed(None, output, p).is_empty());
+    }
 }

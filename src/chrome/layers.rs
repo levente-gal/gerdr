@@ -130,7 +130,6 @@ thread_local! {
 /// The scrim behind a modal dialog: `area` (the output, logical) dimmed
 /// as far as the theme's `scrim` says, times `alpha`, the dialog's own
 /// fade. It goes in the parts just under the dialog's, over all the rest.
-#[allow(dead_code)] // The dialogs take it up in wave 2.
 pub(super) fn scrim(area: Rect, alpha: f32, p: &Palette) -> Part {
     let buffer = SCRIM.with(MemoryRenderBuffer::clone);
     Part {
