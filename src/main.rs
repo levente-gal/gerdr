@@ -4128,11 +4128,11 @@ impl Gerdr {
                 let command = record.command.clone().unwrap_or_default();
                 if let Some(i) = record.skip.iter().position(|c| *c == command) {
                     record.skip.remove(i);
-                    format!("`{command}` runs again when the project comes back")
+                    format!("`{command}` runs again after a reboot")
                 } else {
                     record.skip.push(command.clone());
                     format!(
-                        "`{command}` won't run again when the project comes back · its tab shows \u{2298}"
+                        "`{command}` won't run again after a reboot · its tab shows \u{2298}"
                     )
                 }
             }

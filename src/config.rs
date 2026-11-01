@@ -502,11 +502,20 @@ const TEMPLATE: &str = "\
 # [keys]
 # # A key is modifiers (Ctrl, Alt, Shift, Super) and a key name joined by
 # # \"+\": \"Shift+Tab\", \"F12\", \"Down\". Letters are the same either case,
-# # so \"Shift+X\" needs its Shift. An action given keys loses its default
-# # ones; [] leaves it none. The prefix is Ctrl+B by default.
+# # so \"Shift+X\" needs its Shift. A character typed with Shift (\"?\",
+# # \"!\", \"@\") is Shift and the key it is on in the keyboard's layout;
+# # one the layout types only with AltGr is a mistake: name the key it is
+# # on instead. Ctrl still held from the prefix doesn't count: a key
+# # with Ctrl in it takes pressing Ctrl again. An action given keys
+# # loses its default ones; [] leaves it none. The prefix is Ctrl+B by
+# # default. open-workspace was called open-project, and new-agent
+# # new-cursor-agent: the old names still work, with a word that they
+# # changed.
 # prefix = \"Ctrl+A\"
 # new-tab = \"t\"
 # toggle-theme = [\"Alt+T\", \"F12\"]
+# open-workspace = \"o\"
+# rename-tab = [\",\", \"F2\"]
 #
 # [apps]
 # # Run by `sh` in the workspace folder.
