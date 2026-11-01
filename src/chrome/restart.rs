@@ -2,15 +2,17 @@
 //! restarting it runs again (see `crate::restart`).
 
 use super::{
-    BUTTON_RADIUS, CHECKBOX_GAP, CHECKBOX_ROW, Check, FONT_SIZE, HELP_RADIUS, LABEL_FONT_SIZE,
-    Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING,
-    QUIT_TITLE, Rect, SHADOW, band, focus_ring, mix, phys, rect_px,
+    CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, DialogButton, FONT_SIZE, LABEL_FONT_SIZE,
+    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
+    QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, mix, phys, rect_px,
 };
+use crate::restart::more_rows;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-/// The dialog's width.
-const RESTART_WIDTH: i32 = 560;
+/// The keys the dialog takes besides its buttons, said by them while all
+/// rows show.
+const KEYS: [(&str, &str); 1] = [("Space", "check")];
 /// The gap between rows, and the room between the last and the buttons.
 const ROW_GAP: i32 = 4;
 const ROWS_END: i32 = 16;
@@ -31,6 +33,8 @@ pub struct RestartView {
     pub rows: Vec<RestartRow>,
     /// The row under the keyboard's cursor.
     pub cursor: usize,
+    /// The first row shown, when not all fit.
+    pub top: usize,
     /// The selected button: 0 Cancel, 1 Restart.
     pub selected: usize,
     pub hover: Option<RestartHit>,
@@ -49,7 +53,7 @@ pub struct RestartRow {
 /// What the pointer is over in the restart dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartHit {
-    /// Index as in `RestartView::rows`.
+    /// Index as in `RestartView::rows` (not counting from `top`).
     Row(usize),
     /// Index as in `RestartView::selected`.
     Button(usize),
@@ -61,7 +65,8 @@ pub struct RestartLayout {
     pub panel: Rect,
     pub title: Rect,
     pub body: Rect,
-    /// One per row that fits, from the first.
+    /// One per row that fits: the slots the rows from `RestartView::top`
+    /// are shown in.
     pub rows: Vec<Rect>,
     /// Cancel, Restart.
     pub buttons: [Rect; 2],
@@ -75,7 +80,7 @@ pub fn restart_layout(size: Size<i32, Logical>, rows: usize) -> RestartLayout {
     let fit = ((size.h - 2 * MARGIN - fixed) / (CHECKBOX_ROW + ROW_GAP)).max(1) as usize;
     let shown = rows.min(fit);
     let height = fixed + shown as i32 * (CHECKBOX_ROW + ROW_GAP);
-    let width = RESTART_WIDTH.min(size.w);
+    let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
             ((size.w - width) / 2).max(0),
@@ -121,8 +126,9 @@ pub fn restart_layout(size: Size<i32, Logical>, rows: usize) -> RestartLayout {
 
 impl Painter {
     /// The restart dialog for an output of `size`, inside a margin of
-    /// `SHADOW` holding its drop shadow: a checkbox row per command, its
-    /// folder after it, and Cancel and Restart.
+    /// `SHADOW` holding its drop shadow: a checkbox row per command shown
+    /// (from `top`), its folder after it, how many more there are, and
+    /// Cancel and Restart.
     pub(super) fn restart_dialog(
         &self,
         view: &RestartView,
@@ -132,8 +138,7 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = restart_layout(size, view.rows.len());
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
-        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
         let shift = |r: Rect| {
@@ -147,7 +152,10 @@ impl Painter {
         let (title_x, title_end) = phys(title, scale);
         self.text(
             &mut c,
-            &format!("Restart commands in \u{201c}{}\u{201d}", view.workspace),
+            &format!(
+                "Restart which commands in \u{201c}{}\u{201d}?",
+                view.workspace
+            ),
             LABEL_FONT_SIZE,
             title_x,
             title_end,
@@ -159,7 +167,7 @@ impl Painter {
         let (body_x, body_end) = phys(body, scale);
         self.text(
             &mut c,
-            "Uncheck what shouldn't run again; asked again for new commands",
+            "The checked ones stop and run again; a new command is asked about",
             FONT_SIZE,
             body_x,
             body_end,
@@ -170,8 +178,9 @@ impl Painter {
 
         // A row per command: lit under the keyboard's cursor or the
         // pointer, its checkbox, the command, then where it runs.
-        let r = BUTTON_RADIUS * s;
-        for (i, (rect, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
+        let r = ROW_HIGHLIGHT_RADIUS * s;
+        let shown = view.rows.iter().enumerate().skip(view.top);
+        for (rect, (i, row)) in layout.rows.iter().zip(shown) {
             let rect = shift(*rect);
             let hovered = view.hover == Some(RestartHit::Row(i));
             let (x, y, w, h) = rect_px(rect, scale);
@@ -217,30 +226,46 @@ impl Painter {
             );
         }
 
-        // The buttons; Restart, the default, in the accent.
-        let b = px(1).max(1) as f32;
-        for (i, (rect, (label, _))) in layout.buttons.iter().zip(BUTTONS).enumerate() {
-            let rect = shift(*rect);
-            let (x, y, w, h) = rect_px(rect, scale);
-            let hovered = view.hover == Some(RestartHit::Button(i));
-            if view.selected == i {
-                focus_ring(&mut c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
+        // At the left of the buttons, how many rows don't show, else the
+        // keys besides the buttons; then the buttons, Restart, the
+        // default, in the accent.
+        let first = shift(layout.buttons[0]);
+        let left = shift(layout.body).loc.x;
+        let end = first.loc.x - QUIT_BUTTON_GAP;
+        match more_rows(view.top, layout.rows.len(), view.rows.len()) {
+            Some(more) => {
+                let spot = Rectangle::new(
+                    (left, first.loc.y).into(),
+                    (end - left, first.size.h).into(),
+                );
+                let (x, end) = phys(spot, scale);
+                self.text(
+                    &mut c,
+                    &more,
+                    FONT_SIZE,
+                    x,
+                    end,
+                    band(spot, scale),
+                    scale,
+                    p.muted,
+                );
             }
-            let color = if i == 1 {
-                let fill = if hovered {
-                    mix(p.accent, p.text, 0.12)
-                } else {
-                    p.accent
-                };
-                c.rounded(x, y, w, h, r, fill);
-                p.on_accent
+            None => {
+                let row = Rectangle::new((left, first.loc.y).into(), (0, first.size.h).into());
+                self.dialog_keys(&mut c, &KEYS, row, end, scale, p);
+            }
+        }
+        for (i, (rect, (label, _))) in layout.buttons.iter().zip(BUTTONS).enumerate() {
+            let look = if i == 1 {
+                DialogButton::Primary
             } else {
-                let fill = if hovered { p.selected } else { p.element };
-                c.rounded(x, y, w, h, r, p.border);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                p.text
+                DialogButton::Plain
             };
-            self.centered(&mut c, label, FONT_SIZE, rect, scale, color);
+            let state = (
+                view.hover == Some(RestartHit::Button(i)),
+                view.selected == i,
+            );
+            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
         }
         c.into_buffer(false)
     }

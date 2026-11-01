@@ -8,9 +8,11 @@
 //! command comes, restarting runs the chosen ones without asking. The
 //! workspace's menu opens the dialog anyway, to change them.
 //!
-//! Up/Down move between the rows, Space checks the one under the cursor,
-//! Left/Right and Tab move between the buttons, Enter presses the selected
-//! one (Restart, by default), Esc cancels.
+//! Up/Down (PgUp/PgDn, Home/End) move between the rows, scrolling them
+//! when more than fit, Space checks the one under the cursor, Left/Right
+//! and Tab move between the buttons, Enter presses the selected one
+//! (Restart, by default: the dialog is a pick, and what stops starts
+//! again), Esc cancels.
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -97,9 +99,11 @@ pub struct RestartDialog {
     pub rows: Vec<Row>,
     /// The row under the keyboard's cursor.
     pub cursor: usize,
+    /// The first row shown, when not all fit.
+    pub top: usize,
     /// The selected button: 0 Cancel, 1 Restart.
     pub selected: usize,
-    /// What the pointer is over.
+    /// What the pointer is over; a row by its index in `rows`.
     pub hover: Option<RestartHit>,
 }
 
@@ -126,15 +130,23 @@ impl RestartDialog {
         }
     }
 
-    /// Handle a key: `sym` is the key's own symbol.
-    fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+    /// Handle a key, `fit` rows shown at once: `sym` is the key's own
+    /// symbol.
+    fn key(&mut self, mods: &ModifiersState, sym: Keysym, fit: usize) -> Option<Outcome> {
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let last = self.rows.len().saturating_sub(1);
+        let page = fit.saturating_sub(1).max(1);
         match sym {
             Keysym::Escape => return Some(Outcome::Cancel),
             Keysym::Return | Keysym::KP_Enter => return Some(self.press(self.selected)),
             Keysym::Up | Keysym::KP_Up => self.cursor = self.cursor.saturating_sub(1),
             Keysym::Down | Keysym::KP_Down => self.cursor = (self.cursor + 1).min(last),
+            Keysym::Page_Up | Keysym::KP_Page_Up => self.cursor = self.cursor.saturating_sub(page),
+            Keysym::Page_Down | Keysym::KP_Page_Down => {
+                self.cursor = (self.cursor + page).min(last)
+            }
+            Keysym::Home | Keysym::KP_Home => self.cursor = 0,
+            Keysym::End | Keysym::KP_End => self.cursor = last,
             Keysym::space if plain => self.toggle(self.cursor),
             Keysym::Left
             | Keysym::KP_Left
@@ -144,7 +156,39 @@ impl RestartDialog {
             | Keysym::Tab => self.selected = 1 - self.selected,
             _ => {}
         }
+        self.reveal(fit);
         None
+    }
+
+    /// Scroll so the cursor's row is among the `fit` shown.
+    fn reveal(&mut self, fit: usize) {
+        let fit = fit.max(1);
+        if self.cursor < self.top {
+            self.top = self.cursor;
+        } else if self.cursor >= self.top + fit {
+            self.top = self.cursor + 1 - fit;
+        }
+        self.top = self.top.min(self.rows.len().saturating_sub(fit));
+    }
+
+    /// Scroll `by` rows (down when positive), `fit` shown at once, the
+    /// cursor kept among them.
+    fn scroll(&mut self, by: isize, fit: usize) {
+        let most = self.rows.len().saturating_sub(fit.max(1));
+        self.top = self.top.saturating_add_signed(by).min(most);
+        self.cursor = self.cursor.clamp(self.top, self.top + fit.max(1) - 1);
+    }
+}
+
+/// What the restart dialog says of the rows it doesn't show: `top` above
+/// the `shown` ones, the rest of `total` below.
+pub fn more_rows(top: usize, shown: usize, total: usize) -> Option<String> {
+    let below = total.saturating_sub(top + shown);
+    match (top, below) {
+        (0, 0) => None,
+        (0, below) => Some(format!("{below} more below")),
+        (above, 0) => Some(format!("{above} more above")),
+        (above, below) => Some(format!("{above} more above \u{b7} {below} below")),
     }
 }
 
@@ -158,9 +202,8 @@ impl Gerdr {
         }
         let commands: Vec<&str> = restarts.iter().map(|(_, c)| c.command.as_str()).collect();
         match plan(&commands, self.restart_choices(w)) {
-            Plan::Run(chosen) if chosen.is_empty() => {
-                self.show_notice("No command chosen to restart".into());
-            }
+            // None picked to run again: asked which, rather than nothing.
+            Plan::Run(chosen) if chosen.is_empty() => self.choose_restarts(w),
             Plan::Run(chosen) => {
                 let picked = chosen.into_iter().map(|i| restarts[i].clone()).collect();
                 self.restart_commands(picked);
@@ -208,6 +251,7 @@ impl Gerdr {
             workspace: w,
             rows,
             cursor: 0,
+            top: 0,
             selected: RESTART,
             hover: None,
         });
@@ -217,7 +261,23 @@ impl Gerdr {
 
     /// A key while the restart dialog has the keyboard.
     pub fn restart_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        self.restart.as_mut()?.key(mods, sym)
+        let fit = self.restart_fit();
+        self.restart.as_mut()?.key(mods, sym, fit)
+    }
+
+    /// Scroll the restart dialog's rows `by` rows (down when positive),
+    /// as the wheel over it does.
+    pub fn restart_scroll(&mut self, by: isize) {
+        let fit = self.restart_fit();
+        if let Some(dialog) = self.restart.as_mut() {
+            dialog.scroll(by, fit);
+        }
+    }
+
+    /// How many rows the restart dialog shows at once.
+    fn restart_fit(&self) -> usize {
+        let rows = self.restart.as_ref().map_or(0, |d| d.rows.len());
+        chrome::restart_layout(self.output_size(), rows).rows.len()
     }
 
     /// Do what the restart dialog asked: keep the choices in the
@@ -253,7 +313,7 @@ impl Gerdr {
             .map(|r| (r.pane_id, r.captured))
             .collect();
         if picked.is_empty() {
-            self.show_notice("Nothing restarted; restart asks again for new commands".into());
+            self.show_notice("Nothing restarted \u{b7} a new command is asked about".into());
         } else {
             self.restart_commands(picked);
         }
@@ -266,7 +326,7 @@ impl Gerdr {
             return false;
         };
         let layout = chrome::restart_layout(size, dialog.rows.len());
-        let outcome = match restart_hit(&layout, pos) {
+        let outcome = match restart_hit(&layout, dialog.top, pos) {
             Some(RestartHit::Button(button)) => Some(dialog.press(button)),
             Some(RestartHit::Row(row)) => {
                 dialog.cursor = row;
@@ -287,7 +347,7 @@ impl Gerdr {
         let size = self.output_size();
         if let Some(dialog) = self.restart.as_mut() {
             let layout = chrome::restart_layout(size, dialog.rows.len());
-            dialog.hover = restart_hit(&layout, pos);
+            dialog.hover = restart_hit(&layout, dialog.top, pos);
         }
     }
 
@@ -328,14 +388,20 @@ impl Gerdr {
             workspace,
             rows,
             cursor: dialog.cursor,
+            top: dialog.top,
             selected: dialog.selected,
             hover: dialog.hover,
         })
     }
 }
 
-/// What `pos` (output coordinates) is over in the restart dialog.
-fn restart_hit(layout: &chrome::RestartLayout, pos: Point<f64, Logical>) -> Option<RestartHit> {
+/// What `pos` (output coordinates) is over in the restart dialog, its
+/// rows shown from `top`.
+fn restart_hit(
+    layout: &chrome::RestartLayout,
+    top: usize,
+    pos: Point<f64, Logical>,
+) -> Option<RestartHit> {
     if let Some(button) = layout.buttons.iter().position(|b| b.to_f64().contains(pos)) {
         return Some(RestartHit::Button(button));
     }
@@ -343,7 +409,7 @@ fn restart_hit(layout: &chrome::RestartLayout, pos: Point<f64, Logical>) -> Opti
         .rows
         .iter()
         .position(|r| r.to_f64().contains(pos))
-        .map(RestartHit::Row)
+        .map(|slot| RestartHit::Row(top + slot))
 }
 
 #[cfg(test)]
@@ -410,13 +476,41 @@ mod tests {
             workspace: 0,
             rows: (0..n).map(row).collect(),
             cursor: 0,
+            top: 0,
             selected: RESTART,
             hover: None,
         }
     }
 
     fn press(dialog: &mut RestartDialog, sym: Keysym) -> Option<Outcome> {
-        dialog.key(&ModifiersState::default(), sym)
+        dialog.key(&ModifiersState::default(), sym, 8)
+    }
+
+    #[test]
+    fn more_rows_than_fit_scroll_with_the_cursor_and_say_so() {
+        let mut d = dialog(12);
+        assert_eq!(more_rows(d.top, 8, 12).as_deref(), Some("4 more below"));
+        for _ in 0..9 {
+            press(&mut d, Keysym::Down);
+        }
+        assert_eq!((d.cursor, d.top), (9, 2));
+        assert_eq!(
+            more_rows(d.top, 8, 12).as_deref(),
+            Some("2 more above \u{b7} 2 below")
+        );
+        press(&mut d, Keysym::End);
+        assert_eq!((d.cursor, d.top), (11, 4));
+        assert_eq!(more_rows(d.top, 8, 12).as_deref(), Some("4 more above"));
+        press(&mut d, Keysym::Home);
+        assert_eq!((d.cursor, d.top), (0, 0));
+        press(&mut d, Keysym::Page_Down);
+        assert_eq!(d.cursor, 7);
+        // The wheel scrolls, keeping the cursor in sight.
+        d.scroll(10, 8);
+        assert_eq!((d.top, d.cursor), (4, 7));
+        d.scroll(-10, 8);
+        assert_eq!((d.top, d.cursor), (0, 7));
+        assert_eq!(more_rows(0, 3, 3), None);
     }
 
     #[test]

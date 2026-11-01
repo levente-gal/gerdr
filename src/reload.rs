@@ -375,34 +375,49 @@ impl Gerdr {
                     .map(|problem| format!("{}: {problem}", project.name)),
             );
         }
-        for problem in errors.iter().chain(&problems) {
+        // All of them kept, as the toast says only the first.
+        crate::problems::clear("store");
+        for problem in &errors {
+            crate::problems::report("store", problem.clone());
+        }
+        for problem in &problems {
             tracing::warn!("reloading the project files: {problem}");
         }
         // A project whose file is gone has no order left to take.
         self.order_pending.retain(|id| store.project(id).is_some());
         self.projects = store;
         self.projects.save();
-        match shown_edited {
+        let reshown = match shown_edited {
             Some(id) if self.projects.project(&id).is_some() => {
                 self.project_lock = lock;
                 self.show_project(&id, false);
+                self.projects.project(&id).map(|p| p.name.clone())
             }
-            Some(_) => self.open_welcome(false),
-            None => {}
-        }
+            Some(_) => {
+                self.open_welcome(false);
+                None
+            }
+            None => None,
+        };
+        let done = match reshown {
+            Some(name) => format!("Reloaded the project files · {name} shown again as edited"),
+            None => "Reloaded the project files".to_owned(),
+        };
         self.refresh_project_menu();
         self.refresh_switcher();
         // What couldn't be read is told before what couldn't be done.
+        // The rest are in the log.
         match (errors.as_slice(), problems.as_slice()) {
             ([one], _) => self.toast(one.clone(), Level::Error),
-            ([first, rest @ ..], _) => {
-                self.toast(format!("{first} (and {} more)", rest.len()), Level::Error)
-            }
-            ([], []) => self.toast("Reloaded the project files".into(), Level::Info),
-            ([], [one]) => self.toast(format!("Reloaded the project files; {one}"), Level::Warning),
+            ([first, rest @ ..], _) => self.toast(
+                format!("{first} \u{b7} {} more in the log", rest.len()),
+                Level::Error,
+            ),
+            ([], []) => self.toast(done, Level::Success),
+            ([], [one]) => self.toast(format!("{done} \u{b7} {one}"), Level::Warning),
             ([], [first, rest @ ..]) => self.toast(
                 format!(
-                    "Reloaded the project files; {first} (and {} more)",
+                    "{done} \u{b7} {first} \u{b7} {} more in the log",
                     rest.len()
                 ),
                 Level::Warning,

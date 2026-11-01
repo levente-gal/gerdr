@@ -3,15 +3,15 @@
 //! (see `crate::checkout`).
 
 use super::{
-    BUTTON_RADIUS, CHECKOUT_BUTTONS, FONT_SIZE, HELP_RADIUS, LABEL_FONT_SIZE, Painter, Palette,
-    QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
-    band, focus_ring, mix, phys, rect_px,
+    CHECKOUT_BUTTONS, DIALOG_WIDTH, DialogButton, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS,
+    Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING,
+    QUIT_TITLE, Rect, SHADOW, band, phys,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-/// The dialog's width.
-const CHECKOUT_WIDTH: i32 = 560;
+/// The keys the dialog takes besides its buttons, said by them.
+const KEYS: [(&str, &str); 2] = [("B", "bring"), ("L", "leave")];
 /// A file's row, the gap between rows, and the room between the last and
 /// the buttons.
 const ROW: i32 = 24;
@@ -78,7 +78,7 @@ pub fn checkout_layout(size: Size<i32, Logical>, rows: usize) -> CheckoutLayout 
     let fit = ((size.h - 2 * MARGIN - fixed) / (ROW + ROW_GAP)).max(1) as usize;
     let shown = rows.min(fit).min(MAX_ROWS);
     let height = fixed + shown as i32 * (ROW + ROW_GAP);
-    let width = CHECKOUT_WIDTH.min(size.w);
+    let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
             ((size.w - width) / 2).max(0),
@@ -153,8 +153,7 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = checkout_layout(size, view.rows.len());
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
-        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
         let shift = |r: Rect| {
@@ -265,40 +264,26 @@ impl Painter {
             }
         }
 
-        // The buttons; Bring along, the default, in the accent, dimmed
-        // while it can't be pressed.
-        let r = BUTTON_RADIUS * s;
-        let b = px(1).max(1) as f32;
+        // The keys besides the buttons, at their left; then the buttons:
+        // Bring along, the default, in the accent, plain and dimmed while
+        // it can't be pressed (its label still readable).
+        let first = shift(layout.buttons[0]);
+        let keys_row = Rectangle::new(
+            (shift(layout.body).loc.x, first.loc.y).into(),
+            (0, first.size.h).into(),
+        );
+        let keys: &[(&str, &str)] = if view.can_bring { &KEYS } else { &KEYS[1..] };
+        let keys_end = first.loc.x - QUIT_BUTTON_GAP;
+        self.dialog_keys(&mut c, keys, keys_row, keys_end, scale, p);
         let last = CHECKOUT_BUTTONS.len() - 1;
         for (i, (rect, (label, _))) in layout.buttons.iter().zip(CHECKOUT_BUTTONS).enumerate() {
-            let rect = shift(*rect);
-            let (x, y, w, h) = rect_px(rect, scale);
-            let off = i == last && !view.can_bring;
-            let hovered = view.hover == Some(i) && !off;
-            if view.selected == i {
-                focus_ring(&mut c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
-            }
-            let color = if i == last {
-                let fill = if off {
-                    mix(p.accent, p.elevated, 0.6)
-                } else if hovered {
-                    mix(p.accent, p.text, 0.12)
-                } else {
-                    p.accent
-                };
-                c.rounded(x, y, w, h, r, fill);
-                if off {
-                    mix(p.on_accent, p.elevated, 0.4)
-                } else {
-                    p.on_accent
-                }
-            } else {
-                let fill = if hovered { p.selected } else { p.element };
-                c.rounded(x, y, w, h, r, p.border);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                p.text
+            let look = match i {
+                _ if i < last => DialogButton::Plain,
+                _ if view.can_bring => DialogButton::Primary,
+                _ => DialogButton::Off,
             };
-            self.centered(&mut c, label, FONT_SIZE, rect, scale, color);
+            let state = (view.hover == Some(i), view.selected == i);
+            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
         }
         c.into_buffer(false)
     }

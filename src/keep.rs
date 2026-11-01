@@ -319,10 +319,9 @@ impl Gerdr {
         if !available() {
             if !self.keep_warned {
                 self.keep_warned = true;
-                self.toast(
-                    "Install wprs (wprsd and wprsc) to keep apps running when gerdr quits".into(),
-                    Level::Warning,
-                );
+                let text = "Install wprs (wprsd and wprsc) to keep apps running when gerdr quits";
+                crate::problems::report("wprs", text);
+                self.toast(text.into(), Level::Warning);
             }
             return None;
         }
