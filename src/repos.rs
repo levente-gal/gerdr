@@ -1553,7 +1553,7 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ),
     (
         "/ / Ctrl+F",
-        "in the diff, find: its lines, paths, hunks, comments (Ctrl+Shift+F from anywhere)",
+        "in the diff, find its lines, paths, hunks; capitals match case (Ctrl+Shift+F from anywhere)",
     ),
     (
         "Enter / Shift+Enter",
@@ -7626,6 +7626,44 @@ mod tests {
         press(&mut panel, none(), Keysym::Right, &ctx);
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert!(panel.sheet.is_none() && panel.diff.review.is_empty());
+    }
+
+    #[test]
+    fn a_long_file_shows_its_first_lines_till_asked_for_all() {
+        use crate::diff::FILE_LINES;
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        let many: Vec<String> = (0..FILE_LINES + 5).map(|n| n.to_string()).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let g = panel.diff.reads;
+        let files = vec![added("src/git.rs", 'M', &many)];
+        panel.set_diffs(root("gerdr"), g, files, &ctx);
+        let more = |panel: &Panel| {
+            (0..panel.diff.rows.len())
+                .find(|&r| matches!(panel.diff.rows[r], crate::diff_view::DiffRow::More(..)))
+        };
+        let at = more(&panel).expect("a row saying there are more");
+        // Right after the lines shown, saying how many more.
+        assert_eq!(
+            panel.diff.line_text(at - 1),
+            Some(&*(FILE_LINES - 1).to_string())
+        );
+        panel.diff.scroll.jump(at as f64);
+        let view = panel.view("p", &ctx);
+        let i = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Note(n) if n.starts_with("… 5 more lines")));
+        assert!(i.is_some(), "{:?}", detail_rows(&view));
+        // Enter on it shows them all.
+        panel.focus = Focus::Detail;
+        panel.diff.set_cursor(at, None);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert_eq!(more(&panel), None);
+        assert_eq!(panel.diff.line_text(at), Some(&*FILE_LINES.to_string()));
     }
 
     #[test]

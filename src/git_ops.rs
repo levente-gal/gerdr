@@ -2651,7 +2651,7 @@ mod tests {
         write(dir, "big", &big);
         let d = repo_diff(dir, &[change("big", None, '?')]);
         assert_eq!(d[0].added, 6000);
-        assert_eq!(d[0].notes, ["… 4000 more lines"]);
+        assert_eq!(d[0].hunks[0].lines.len(), 6000);
 
         // A new file's code is coloured as its own language.
         write(dir, "new.rs", "fn main() {}\n");

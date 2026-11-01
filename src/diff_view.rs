@@ -26,7 +26,7 @@ use crate::{
         Check, Density, DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone,
         Hint, ReposButton, ReposHit, RowMark, Tone,
     },
-    diff::{FileDiff, LineKind},
+    diff::{FILE_LINES, FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
     find,
     git::Change,
@@ -190,6 +190,8 @@ pub struct DiffView {
     pub(crate) reads: u64,
     /// Files folded, by (root, path).
     pub(crate) folded: HashSet<(PathBuf, String)>,
+    /// Long files shown whole, past `diff::FILE_LINES`, by (root, path).
+    pub(crate) whole: HashSet<(PathBuf, String)>,
     /// Rows it can be scrolled past its end: a file folded near it keeps
     /// its header where it was. Scrolling back takes them away.
     pub(crate) slack: usize,
@@ -283,6 +285,9 @@ pub(crate) enum DiffRow {
     Hunk(usize, usize, usize),
     Line(usize, usize, usize, usize),
     Note(usize, usize, usize),
+    /// After the first `diff::FILE_LINES` lines of a long file: how many
+    /// more there are, Enter or a click showing them.
+    More(usize, usize),
     /// Row `i` of comment `c` (by index into `review.comments`), in file
     /// `at` (as `file`), or with the comments whose lines are gone.
     Comment {
@@ -313,7 +318,8 @@ impl DiffRow {
             DiffRow::File(k, f)
             | DiffRow::Hunk(k, f, _)
             | DiffRow::Line(k, f, _, _)
-            | DiffRow::Note(k, f, _) => Some((k, f)),
+            | DiffRow::Note(k, f, _)
+            | DiffRow::More(k, f) => Some((k, f)),
             DiffRow::Comment { at, .. }
             | DiffRow::Editor { at, .. }
             | DiffRow::EditorHint { at } => at,
@@ -553,9 +559,20 @@ impl DiffView {
                     continue;
                 }
                 let at = Some((k, f));
-                for (h, hunk) in file.hunks.iter().enumerate() {
+                // A long file's first lines, till asked for them all.
+                let whole = self.whole.contains(&key);
+                let total: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+                let mut shown = 0;
+                'hunks: for (h, hunk) in file.hunks.iter().enumerate() {
+                    if !whole && shown >= FILE_LINES {
+                        break;
+                    }
                     rows.push(DiffRow::Hunk(k, f, h));
                     for l in 0..hunk.lines.len() {
+                        if !whole && shown >= FILE_LINES {
+                            break 'hunks;
+                        }
+                        shown += 1;
                         rows.push(DiffRow::Line(k, f, h, l));
                         for &c in under.get(&(h, l)).into_iter().flatten() {
                             self.push_comment(&mut rows, at, c);
@@ -564,6 +581,9 @@ impl DiffView {
                             self.push_editor(&mut rows, at);
                         }
                     }
+                }
+                if !whole && total > FILE_LINES {
+                    rows.push(DiffRow::More(k, f));
                 }
                 rows.extend((0..file.notes.len()).map(|n| DiffRow::Note(k, f, n)));
             }
@@ -1445,6 +1465,13 @@ impl DiffView {
                 DetailRow::Line(file.hunks[h].lines[l].clone())
             }
             (DiffRow::Note(_, _, n), Some((_, file))) => DetailRow::Note(file.notes[n].clone()),
+            (DiffRow::More(..), Some((_, file))) => {
+                let total: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+                let more = total.saturating_sub(FILE_LINES);
+                DetailRow::Note(format!(
+                    "… {more} more lines · Enter or a click shows them all"
+                ))
+            }
             (DiffRow::Comment { c, i, .. }, _) => {
                 let (Some(comment), Some(wrap)) =
                     (self.review.comments.get(c), self.comment_wraps.get(c))
@@ -1685,6 +1712,20 @@ impl DiffView {
         }
     }
 
+    /// Show the long file whose last row shown is diff row `r` whole;
+    /// whether it was that row.
+    fn show_whole(&mut self, r: usize, ctx: &Ctx) -> bool {
+        if !matches!(self.rows.get(r), Some(DiffRow::More(..))) {
+            return false;
+        }
+        let Some(key) = self.diff_path(r) else {
+            return false;
+        };
+        self.whole.insert(key);
+        self.build_rows(ctx.sections, self.diff_anchor());
+        true
+    }
+
     /// Scroll the diff to the next file's header (`by` 1) or the one
     /// before (-1), selecting it in the tree.
     fn jump_file(&mut self, by: i64, ctx: &Ctx) {
@@ -1854,6 +1895,9 @@ impl DiffView {
             }
             Keysym::Return | Keysym::KP_Enter if plain => {
                 let r = self.open_target(page)?;
+                if self.show_whole(r, ctx) {
+                    return Some(None);
+                }
                 return Some(self.open_diff_row(r));
             }
             Keysym::c if plain => self.comment_here(ctx),
@@ -1936,6 +1980,7 @@ impl DiffView {
         };
         self.diffs.retain(|root, _| dirty(root));
         self.folded.retain(|(root, path)| changed(root, path));
+        self.whole.retain(|(root, path)| changed(root, path));
         self.forget_caret(|root| !dirty(root));
         self.reads += 1;
         self.build_rows(items, anchor);
@@ -2211,10 +2256,12 @@ impl DiffView {
                         c.col = col;
                     }
                     self.select_diff_row(r, ctx);
-                    // On a comment, it is edited.
+                    // On a comment, it is edited; on a long file's last
+                    // row shown, the rest show.
                     if let Some(c) = self.comment_at(r) {
                         self.edit_comment(c, ctx);
                     }
+                    self.show_whole(r, ctx);
                 }
                 Some(None)
             }
