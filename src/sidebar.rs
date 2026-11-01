@@ -8,7 +8,7 @@ use std::{path::Path, time::Instant};
 use smithay::utils::{Logical, Point};
 
 use crate::{
-    Action, Gerdr, Reorderable,
+    Action, Gerdr, Reorderable, WorkspaceKind,
     agents::AgentKey,
     anim::quantize,
     chrome::{
@@ -24,6 +24,7 @@ use crate::{
     launch,
     menu::{MenuAction, MenuItem, MenuSpec},
     paths,
+    projects::VenvSetting,
     rename::RenameTarget,
     repo_batches::repos_tip,
     scroll::{Bounds, Motion},
@@ -60,13 +61,24 @@ fn worktrees_tooltip(worktrees: &[Worktree], root: Option<&Path>, anchor: Rect) 
     Tooltip::new(&text, anchor).rows(rows)
 }
 
+/// What a workspace's tooltip says of the venv its new shells activate.
+fn venv_word(venv: &VenvSetting) -> String {
+    match venv {
+        VenvSetting::Auto => "Auto (the one each shell finds)".into(),
+        VenvSetting::Off => "Off".into(),
+        VenvSetting::Path(path) => path.display().to_string(),
+    }
+}
+
 /// The tooltip of workspace `ws`'s header, about `anchor`: its name, then
-/// its branch, where its tabs are and what runs in them, each when known.
-fn workspace_tooltip(ws: &WorkspaceView, anchor: Rect) -> Tooltip {
+/// its branch, where its tabs are and what runs in them, and the venv its
+/// new shells activate (`venv`, for one with shells), each when known.
+fn workspace_tooltip(ws: &WorkspaceView, anchor: Rect, venv: Option<&VenvSetting>) -> Tooltip {
     let fields = [
         ("Branch", ws.branch.clone()),
         ("Folder", Some(ws.place.clone())),
         ("Tabs", Some(ws.activity.clone())),
+        ("Python venv", venv.map(venv_word)),
     ]
     .into_iter()
     .filter_map(|(label, value)| Some((label.to_owned(), value.filter(|v| !v.is_empty())?)))
@@ -99,6 +111,17 @@ impl Gerdr {
             let project = self.project.as_deref()?;
             self.projects.record(project, &ws.record)?.folded
         })
+    }
+
+    /// The venv new shells of workspace `w` activate, as its record keeps
+    /// it: none for a workspace without shells (Cursor's).
+    fn workspace_venv(&self, w: usize) -> Option<&VenvSetting> {
+        let ws = self.workspaces.get(w)?;
+        if ws.kind == WorkspaceKind::Cursor {
+            return None;
+        }
+        let project = self.project.as_deref()?;
+        Some(&self.projects.record(project, &ws.record)?.venv)
     }
 
     /// Fold workspace `w` in the sidebar if it shows what is under its
@@ -635,7 +658,7 @@ impl Gerdr {
             }
             SidebarHit::Name(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                Some(workspace_tooltip(&ws.0, row.title))
+                Some(workspace_tooltip(&ws.0, row.title, self.workspace_venv(i)))
             }
             SidebarHit::Fold(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
@@ -726,7 +749,7 @@ impl Gerdr {
             }
             SidebarHit::Row(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                Some(workspace_tooltip(&ws.0, row.title))
+                Some(workspace_tooltip(&ws.0, row.title, self.workspace_venv(i)))
             }
             SidebarHit::Header => {
                 self.project.as_ref()?;
@@ -919,5 +942,29 @@ impl Gerdr {
                 ),
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VenvSetting, workspace_tooltip};
+    use crate::{WorkspaceKind, chrome::Rect, chrome::WorkspaceView};
+
+    #[test]
+    fn a_workspace_tooltip_says_which_venv_its_shells_activate() {
+        let ws = WorkspaceView::new("api".into(), WorkspaceKind::Terminal, &[]);
+        let venv = |setting: Option<&VenvSetting>| {
+            let tip = workspace_tooltip(&ws, Rect::default(), setting);
+            tip.fields
+                .into_iter()
+                .find(|(label, _)| label == "Python venv")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(venv(Some(&VenvSetting::Off)).as_deref(), Some("Off"));
+        assert!(venv(Some(&VenvSetting::Auto)).unwrap().starts_with("Auto"));
+        let path = VenvSetting::Path(".venv-3.12".into());
+        assert_eq!(venv(Some(&path)).as_deref(), Some(".venv-3.12"));
+        // A workspace without shells says nothing of it.
+        assert_eq!(venv(None), None);
     }
 }

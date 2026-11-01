@@ -607,13 +607,27 @@ pub fn button_unavailable(button: BarButton, content: &BarContent) -> Option<&'s
 }
 
 /// What a bar's label says when the pointer rests on it at `rect`: all
-/// of what runs, and what the pointer can do there.
-pub fn label_tooltip(label: &str, rect: Rect) -> Tooltip {
-    Tooltip::new(label, rect).fields(vec![
+/// of what runs, whether it runs again after a restart (`restart`, when
+/// the pane has a command kept for one), and what the pointer can do
+/// there.
+pub fn label_tooltip(label: &str, rect: Rect, restart: Option<bool>) -> Tooltip {
+    let mut fields: Vec<(String, String)> = restart
+        .map(|again| {
+            let word = if again {
+                "Runs again"
+            } else {
+                "Won't run again"
+            };
+            ("After a restart".into(), word.into())
+        })
+        .into_iter()
+        .collect();
+    fields.extend([
         ("Drag".into(), "move the pane".into()),
         ("Double-click".into(), "zoom or unzoom".into()),
         ("Right-click".into(), "more".into()),
-    ])
+    ]);
+    Tooltip::new(label, rect).fields(fields)
 }
 
 /// What a bar button says when the pointer rests on it at `rect`.
@@ -1054,7 +1068,14 @@ impl Gerdr {
         let bar = chrome::pane_bar_rects(rect).0;
         let content = self.pane_bar_of(pane);
         let BarHit::Button(button) = hit else {
-            return Some(label_tooltip(&content.label, bar));
+            // Whether its command runs again after a restart: what the
+            // toggle's toast said, kept in sight.
+            let restart = pane
+                .herdr
+                .as_ref()
+                .and_then(|herdr| self.pane_record(herdr))
+                .and_then(|r| Some(!r.skip.contains(r.command.as_ref()?)));
+            return Some(label_tooltip(&content.label, bar, restart));
         };
         let (_, rect) = chrome::pane_bar_buttons(bar, kind, tab.bar_zoom(id))
             .into_iter()
@@ -1911,9 +1932,17 @@ mod tests {
         );
         assert_eq!(button_unavailable(BarButton::Forward, &followed), None);
         assert_eq!(button_unavailable(BarButton::Reload, &followed), None);
-        let tip = label_tooltip("npm run dev", Rect::default());
+        let tip = label_tooltip("npm run dev", Rect::default(), None);
         assert_eq!(tip.text, "npm run dev");
         assert!(tip.fields.iter().any(|(k, _)| k == "Double-click"));
+        assert!(!tip.fields.iter().any(|(k, _)| k == "After a restart"));
+        let skipped = label_tooltip("npm run dev", Rect::default(), Some(false));
+        assert_eq!(
+            skipped.fields[0],
+            ("After a restart".into(), "Won't run again".into())
+        );
+        let kept = label_tooltip("npm run dev", Rect::default(), Some(true));
+        assert_eq!(kept.fields[0].1, "Runs again");
     }
 
     #[test]
