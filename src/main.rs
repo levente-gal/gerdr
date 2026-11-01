@@ -3789,15 +3789,26 @@ impl Gerdr {
     }
 
     /// Close the focused pane; its space goes to its sibling once its window is gone.
+    /// One where something runs asks first (see `Gerdr::ask_close_pane`).
     pub fn close_pane(&mut self) {
-        let Some(tab) = self.tab() else { return };
-        if let Some(pane) = tab
-            .panes
-            .iter()
-            .find(|p| Some(&p.window) == tab.focused.as_ref())
-        {
-            self.close_panes(vec![(Some(pane.window.clone()), pane.herdr.clone())]);
+        let Some(id) = self.tab().and_then(Tab::focused_id) else {
+            return;
+        };
+        match self.running_in_pane(id) {
+            Some(what) => self.ask_close_pane(id, what),
+            None => self.close_pane_now(id),
         }
+    }
+
+    /// Close pane `id` of the active tab without asking.
+    pub fn close_pane_now(&mut self, id: u32) {
+        let Some(pane) = self
+            .tab()
+            .and_then(|tab| tab.panes.iter().find(|p| p.id == id))
+        else {
+            return;
+        };
+        self.close_panes(vec![(Some(pane.window.clone()), pane.herdr.clone())]);
     }
 
     /// Close every pane in the tab; the tab goes away once their windows do.

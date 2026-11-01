@@ -853,6 +853,14 @@ impl Gerdr {
         )
     }
 
+    /// What runs in pane `id` of the active tab, as its bar says it, if
+    /// a command runs there or is being stopped.
+    pub fn running_in_pane(&self, id: u32) -> Option<String> {
+        let pane = self.tab()?.panes.iter().find(|p| p.id == id)?;
+        let content = self.pane_bar_of(pane);
+        matches!(content.status, BarStatus::Running | BarStatus::Working).then_some(content.label)
+    }
+
     /// What the bar of `pane` shows: what runs in it, for a terminal;
     /// its address and where its page can go, for a web page the extension
     /// follows (one it doesn't can only have its address copied).
