@@ -2,9 +2,9 @@
 //! with the Shortcuts action: then it carries a title and a way out.
 
 use super::{
-    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_MARGIN,
-    HELP_PADDING, HELP_RADIUS, HELP_ROW_HEIGHT, HELP_TITLE_HEIGHT, KEY_FONT_SIZE, Painter, Palette,
-    Rect, SHADOW, SMALL_FONT_SIZE, rect_px,
+    CAP_GAP, CAP_PADDING, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_MARGIN, HELP_PADDING,
+    HELP_ROW_HEIGHT, HELP_TITLE_HEIGHT, KEY_FONT_SIZE, POPUP_RADIUS, Painter, Palette, Rect,
+    SHADOW, SMALL_FONT_SIZE, keycap_text,
 };
 use crate::Action;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -57,13 +57,59 @@ pub enum HelpHit {
     Panel,
 }
 
+/// The most columns the help panel splits into to fit the height it has.
+const HELP_MAX_COLUMNS: usize = 3;
+
 impl Help {
-    /// The key for the action the panel calls `label`, the `nth` of its
-    /// alternatives, with the prefix before it: "Ctrl+B Shift+T". None
-    /// for an action the panel does not list, or fewer alternatives.
+    /// The key for the action the panel calls `label` (in any case, or
+    /// as it was called before its labels started with a verb), the
+    /// `nth` of its alternatives, with the prefix before it: "Ctrl+B
+    /// Shift+T". None for an action the panel does not list, or fewer
+    /// alternatives. A key listed without the modifiers it shares with
+    /// the first ("Alt+H / J") gets them back.
     pub fn key_for(&self, label: &str, nth: usize) -> Option<String> {
-        let (keys, _) = self.rows.iter().find(|(_, l)| l == label)?;
-        let key = keys.split(" / ").nth(nth)?;
+        let label = crate::keys::help_label(label);
+        let (keys, _) = self
+            .rows
+            .iter()
+            .find(|(_, l)| l.eq_ignore_ascii_case(label))?;
+        self.nth_key(keys, nth)
+    }
+
+    /// The key that runs `action`, the `nth` of those that do, with the
+    /// prefix before it: "Ctrl+B C". None when fewer keys run it.
+    pub fn key_of(&self, action: Action, nth: usize) -> Option<String> {
+        let wanted = Some(HelpPress::Action(action));
+        self.rows
+            .iter()
+            .zip(&self.presses)
+            .flat_map(|((keys, _), presses)| {
+                let count = keys.split(" / ").count();
+                (0..count)
+                    .filter(move |k| presses.get(*k).copied().flatten() == wanted)
+                    .map(move |k| (keys, k))
+            })
+            .nth(nth)
+            .and_then(|(keys, k)| self.nth_key(keys, k))
+    }
+
+    /// The `nth` key of a row's `keys`, with the modifiers of the first
+    /// it was written without, after the prefix.
+    fn nth_key(&self, keys: &str, nth: usize) -> Option<String> {
+        let mut all = keys.split(" / ");
+        let first = all.clone().next()?;
+        let key = all.nth(nth)?;
+        // "Ctrl++" is Ctrl and "+": its modifiers run up to the last key.
+        let mods = |key: &str| match key.strip_suffix('+') {
+            Some(rest) if rest.is_empty() || rest.ends_with('+') => rest.len(),
+            _ => key.rfind('+').map_or(0, |i| i + 1),
+        };
+        let shared = &first[..mods(first)];
+        let key = if nth > 0 && mods(key) == 0 && !shared.is_empty() {
+            format!("{shared}{key}")
+        } else {
+            key.to_owned()
+        };
         Some(format!("{} {key}", self.prefix))
     }
 
@@ -105,11 +151,16 @@ pub fn help_rect(layout: &HelpLayout, area: Rect) -> Rect {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HelpLayout {
     pub size: Size<i32, Logical>,
+    /// Rows in a column.
     pub rows: i32,
     pub key_width: i32,
     pub column_width: i32,
     /// Pinned open: a title and an Esc hint over the prefix line.
     pub pinned: bool,
+    /// How many of the help's rows show: all of them, unless even split
+    /// into columns they don't fit the height there is. Then the last
+    /// place says how many more there are.
+    pub shown: usize,
 }
 
 impl HelpLayout {
@@ -125,8 +176,24 @@ impl HelpLayout {
 }
 
 impl Painter {
-    /// Size the help panel: two columns when they fit in `max_width`, else one.
+    /// Size the help panel: two columns when they fit in `max_width`, else
+    /// one, as tall as it needs.
     pub fn help_layout(&self, help: &Help, max_width: i32, pinned: bool, scale: f64) -> HelpLayout {
+        self.help_layout_within(help, (max_width, i32::MAX).into(), pinned, scale)
+    }
+
+    /// Size the help panel to fit `max` (the app area, less its margins):
+    /// two columns when they fit its width, more when that is what it
+    /// takes to fit its height, and if even then it is too tall, only the
+    /// rows that fit, the last place saying how many more there are.
+    pub fn help_layout_within(
+        &self,
+        help: &Help,
+        max: Size<i32, Logical>,
+        pinned: bool,
+        scale: f64,
+    ) -> HelpLayout {
+        let max_width = max.w;
         let widest = |widths: &mut dyn Iterator<Item = f32>| {
             // Measured at the output scale, where glyph advances are rounded differently.
             widths
@@ -147,23 +214,39 @@ impl Painter {
                 .map(|(_, action)| self.text_width(action, FONT_SIZE, scale)),
         );
         let column_width = key_width + HELP_KEY_GAP + action_width;
-        let columns = if 2 * column_width + HELP_COLUMN_GAP + 2 * HELP_PADDING <= max_width {
-            2
-        } else {
-            1
+        let fits_width = |columns: usize| {
+            columns as i32 * column_width
+                + (columns as i32 - 1) * HELP_COLUMN_GAP
+                + 2 * HELP_PADDING
+                <= max_width
         };
-        let rows = help.rows.len().div_ceil(columns) as i32;
+        let head = if pinned {
+            HELP_PINNED_TITLE + HELP_TITLE_HEIGHT
+        } else {
+            HELP_TITLE_HEIGHT
+        };
+        // How many rows a column has room for.
+        let room = ((max.h.saturating_sub(head + HELP_PADDING)) / HELP_ROW_HEIGHT).max(1) as usize;
+        let n = help.rows.len();
+        let mut columns = if fits_width(2) { 2 } else { 1 };
+        while n.div_ceil(columns) > room && columns < HELP_MAX_COLUMNS && fits_width(columns + 1) {
+            columns += 1;
+        }
+        let rows = n.div_ceil(columns).min(room).max(1);
+        let shown = n.min(rows * columns);
         let w = columns as i32 * column_width
             + (columns as i32 - 1) * HELP_COLUMN_GAP
             + 2 * HELP_PADDING;
         let mut layout = HelpLayout {
             size: (w, 0).into(),
-            rows,
+            rows: rows as i32,
             key_width,
             column_width,
             pinned,
+            // The last place says how many more there are.
+            shown: if shown < n { shown - 1 } else { n },
         };
-        layout.size.h = layout.head() + rows * HELP_ROW_HEIGHT + HELP_PADDING;
+        layout.size.h = layout.head() + layout.rows * HELP_ROW_HEIGHT + HELP_PADDING;
         layout
     }
 
@@ -192,7 +275,7 @@ impl Painter {
             spots.push((HelpHit::Close, rect));
         }
         let head = layout.head();
-        for (i, (keys, _)) in help.rows.iter().enumerate() {
+        for (i, (keys, _)) in help.rows.iter().enumerate().take(layout.shown) {
             let (column, row) = (i as i32 / layout.rows, i as i32 % layout.rows);
             let x = origin.x + HELP_PADDING + column * (layout.column_width + HELP_COLUMN_GAP);
             let y = origin.y + head + row * HELP_ROW_HEIGHT;
@@ -208,7 +291,7 @@ impl Painter {
             let sep = width("/", KEY_FONT_SIZE) + 2.0 * CAP_GAP as f32;
             let mut pen = x as f32;
             for (k, key) in keys.split(" / ").enumerate() {
-                let cap = width(key, KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32;
+                let cap = width(&keycap_text(key), KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32;
                 if presses
                     .and_then(|keys| keys.get(k))
                     .is_some_and(|p| p.is_some())
@@ -235,7 +318,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let mut c = self.popup(layout.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(layout.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let border = px(1).max(1);
         let (ox, oy) = (px(SHADOW), px(SHADOW));
@@ -249,8 +332,7 @@ impl Painter {
                 (rect.loc.x, rect.loc.y + inset).into(),
                 (rect.size.w, rect.size.h - 2 * inset).into(),
             );
-            let (x, y, w, h) = rect_px(rect, scale);
-            c.rounded(x, y, w, h, BUTTON_RADIUS * scale as f32, p.selected);
+            self.row_highlight(&mut c, rect, (false, 1.0), scale, p);
         }
 
         let (pad, max_x) = (ox + px(HELP_PADDING), ox + px(layout.size.w - HELP_PADDING));
@@ -305,16 +387,36 @@ impl Painter {
             p.border_variant,
         );
 
-        for (i, (keys, action)) in help.rows.iter().enumerate() {
+        let place = |i: usize| {
             let (column, row) = (i as i32 / layout.rows, i as i32 % layout.rows);
             let x = SHADOW + HELP_PADDING + column * (layout.column_width + HELP_COLUMN_GAP);
             let y = SHADOW + head + row * HELP_ROW_HEIGHT;
-            let band = (px(y), px(HELP_ROW_HEIGHT));
+            (x, (px(y), px(HELP_ROW_HEIGHT)))
+        };
+        for (i, (keys, action)) in help.rows.iter().enumerate().take(layout.shown) {
+            let (x, band) = place(i);
             let column_end = px(x + layout.column_width) as f32;
             self.keycaps(&mut c, keys, px(x) as f32, band, scale, p);
             let action_x = px(x + layout.key_width + HELP_KEY_GAP) as f32;
             self.text(
                 &mut c, action, FONT_SIZE, action_x, column_end, band, scale, p.text,
+            );
+        }
+        let more = help.rows.len() - layout.shown;
+        if more > 0 {
+            // Too many to show: the last place says how many are left out.
+            let (x, band) = place(layout.shown);
+            let column_end = px(x + layout.column_width) as f32;
+            let text = format!("{more} more: give the window more room");
+            self.text(
+                &mut c,
+                &text,
+                SMALL_FONT_SIZE,
+                px(x) as f32,
+                column_end,
+                band,
+                scale,
+                p.muted,
             );
         }
         c.into_buffer(false)
@@ -342,6 +444,62 @@ mod tests {
         assert_eq!(pinned.size.w, armed.size.w);
         assert_eq!(pinned.size.h, armed.size.h + HELP_PINNED_TITLE);
         assert!(pinned.pinned && !armed.pinned);
+    }
+
+    #[test]
+    fn a_short_area_splits_the_panel_and_then_cuts_it() {
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        let help = Help {
+            prefix: "Ctrl+B".into(),
+            rows: (0..30).map(|i| ("c".into(), format!("row {i}"))).collect(),
+            presses: Vec::new(),
+        };
+        let tall = painter.help_layout(&help, 4000, false, 1.0);
+        assert_eq!((tall.rows, tall.shown), (15, 30));
+        // Too short for two columns of 15: three of 10.
+        let h = tall.size.h - 5 * super::HELP_ROW_HEIGHT;
+        let split = painter.help_layout_within(&help, (4000, h).into(), false, 1.0);
+        assert_eq!((split.rows, split.shown), (10, 30));
+        assert!(split.size.h <= h && split.size.w > tall.size.w);
+        // One column, too short for it all: as many as fit, then a line
+        // saying how many more.
+        let narrow = tall.column_width + 2 * super::HELP_PADDING;
+        let cut = painter.help_layout_within(&help, (narrow, h).into(), false, 1.0);
+        assert_eq!(cut.rows, 10);
+        assert_eq!(cut.shown, 9);
+        assert!(cut.size.h <= h);
+    }
+
+    #[test]
+    fn keys_are_found_by_label_old_or_new_and_by_action() {
+        let help = Help {
+            prefix: "Ctrl+B".into(),
+            rows: vec![
+                ("C".into(), "Open a new tab".into()),
+                ("Alt+H / J".into(), "Swap pane left / down".into()),
+            ],
+            presses: vec![
+                vec![Some(HelpPress::Action(Action::NewTab))],
+                vec![
+                    Some(HelpPress::Action(Action::NextTab)),
+                    Some(HelpPress::Action(Action::PrevTab)),
+                ],
+            ],
+        };
+        assert_eq!(help.key_for("open a new tab", 0), Some("Ctrl+B C".into()));
+        assert_eq!(help.key_for("new tab", 0), Some("Ctrl+B C".into()));
+        assert_eq!(help.key_for("new tab", 1), None);
+        // The second key gets the modifiers it shares with the first.
+        assert_eq!(
+            help.key_for("Swap pane left / down", 1),
+            Some("Ctrl+B Alt+J".into())
+        );
+        assert_eq!(help.key_of(Action::NewTab, 0), Some("Ctrl+B C".into()));
+        assert_eq!(help.key_of(Action::PrevTab, 0), Some("Ctrl+B Alt+J".into()));
+        assert_eq!(help.key_of(Action::Quit, 0), None);
     }
 
     #[test]
