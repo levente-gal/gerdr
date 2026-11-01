@@ -376,6 +376,7 @@ mod tests {
             text: text.into(),
             raw: None,
             number,
+            old: number,
             words: Vec::new(),
             syntax: Vec::new(),
         }

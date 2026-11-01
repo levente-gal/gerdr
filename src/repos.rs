@@ -1437,7 +1437,10 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
         "Esc",
         "back a step: the field or the diff to the tree, then close",
     ),
-    ("Up / Down", "select a line; in the diff, move the cursor"),
+    (
+        "Up / Down, Ctrl+K / J",
+        "select a line; in the diff, move the cursor",
+    ),
     ("PgUp / PgDn", "a page of lines"),
     (
         "Shift+Up / Down",
@@ -1456,7 +1459,10 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("Typing", "in the tree, starts the commit message"),
     ("Alt+F", "list the files by folder, or flat"),
     ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
-    ("Alt+1 / 2 / 3", "the diff, the log, the stashes"),
+    (
+        "Alt+1 / 2 / 3, Ctrl+D",
+        "the diff, the log, the stashes; Ctrl+D the diff (in it, half a page)",
+    ),
     ("Ctrl+S", "switch them all to a branch picked in the menu"),
     ("Ctrl+N", "create a branch: type its name"),
     ("Ctrl+Enter", "in the branch menu, create the branch typed"),
@@ -3639,6 +3645,12 @@ impl Panel {
             self.set_tab(tab);
             return None;
         }
+        // Ctrl+D shows the diff, as it does in the other popups; with the
+        // diff's keys it goes half a page down (vim's), taken above.
+        if only_ctrl && matches!(sym, Keysym::d | Keysym::D) {
+            self.set_tab(DetailTab::Diff);
+            return None;
+        }
         let in_diff = self.focus == Focus::Detail && self.tab() == DetailTab::Diff;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         // Esc steps back: the field (its message kept) or the detail give
@@ -3734,9 +3746,13 @@ impl Panel {
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let tree = self.focus == Focus::Tree;
         let row = at.map(|k| rows[k]);
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         let moved = match sym {
             Keysym::Down | Keysym::KP_Down => step(1),
             Keysym::Up | Keysym::KP_Up => step(-1),
+            // Ctrl+J and Ctrl+K move as Down and Up do, in every list.
+            Keysym::j | Keysym::J if only_ctrl => step(1),
+            Keysym::k | Keysym::K if only_ctrl => step(-1),
             Keysym::Page_Down | Keysym::KP_Page_Down => step(page as isize),
             Keysym::Page_Up | Keysym::KP_Page_Up => step(-(page as isize)),
             Keysym::Home | Keysym::KP_Home if tree => step(-n),
@@ -8753,6 +8769,37 @@ mod tests {
             restore(panel.click(ReposHit::DiffRestore(hunk), &ctx)),
             (vec![2, 3, 4, 6], put(6, "\told"))
         );
+    }
+
+    #[test]
+    fn lines_have_numbers_and_a_long_ones_caret_stays_in_view() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let long = "x".repeat(300);
+        let g = panel.diff.reads;
+        let files = vec![added("src/git.rs", 'M', &["a", &long])];
+        panel.set_diffs(root("gerdr"), g, files, &ctx);
+        let view = panel.view("p", &ctx);
+        assert_eq!(view.detail.gutter, 2);
+        assert_eq!(view.detail.skipped, None);
+        // The caret far along the long line: it is shown from a char on,
+        // the caret moved back by as many.
+        let row = (0..panel.diff.rows.len())
+            .find(|&r| panel.diff.line_text(r) == Some(&long))
+            .unwrap();
+        panel.diff.set_cursor(row, None);
+        panel.focus = Focus::Detail;
+        press(&mut panel, none(), Keysym::dollar, &ctx);
+        let view = panel.view("p", &ctx);
+        let (i, skip) = view.detail.skipped.expect("shown from a char on");
+        let room = crate::chrome::diff_line_room(ctx.cols, 2);
+        assert_eq!(view.detail.caret, Some((i, 299 - skip)));
+        assert!(299 - skip < room);
+        let DetailRow::Line(line) = &view.detail.rows[i] else {
+            panic!();
+        };
+        assert_eq!(line.text.chars().count(), 300 - skip);
     }
 
     #[test]

@@ -420,6 +420,31 @@ fn label_of(root: &Path, ctx: &Ctx) -> String {
     )
 }
 
+/// How many chars past the caret show before a long line's row ends.
+const CARET_ROOM: usize = 6;
+
+/// `line` shown from char `skip` on: its text, its words' and colours'
+/// ranges moved by as many, those before it gone.
+fn skip_chars(line: &mut crate::diff::Line, skip: usize) {
+    let byte = line
+        .text
+        .char_indices()
+        .nth(skip)
+        .map_or(line.text.len(), |(b, _)| b);
+    line.text.drain(..byte);
+    let shift = |r: &Range<usize>| r.start.saturating_sub(skip)..r.end.saturating_sub(skip);
+    line.words = line
+        .words
+        .iter()
+        .map(shift)
+        .filter(|r| !r.is_empty())
+        .collect();
+    line.syntax = (line.syntax.iter())
+        .map(|(r, kind)| (shift(r), *kind))
+        .filter(|(r, _)| !r.is_empty())
+        .collect();
+}
+
 /// Whether `sym` with `mods` is Ctrl+Shift+C, copying the review.
 fn copy_key(mods: &ModifiersState, sym: Keysym) -> bool {
     mods.ctrl && mods.shift && !(mods.alt || mods.logo) && matches!(sym, Keysym::c | Keysym::C)
@@ -1790,7 +1815,11 @@ impl DiffView {
         let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
         let alt = mods.alt && !(mods.ctrl || mods.logo || mods.shift);
         let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+        let only_ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
         let by = match sym {
+            // Ctrl+J and Ctrl+K move as Down and Up do, in every list.
+            Keysym::j | Keysym::J if only_ctrl => 1,
+            Keysym::k | Keysym::K if only_ctrl => -1,
             _ if !(plain || shift) => 0,
             Keysym::Down | Keysym::KP_Down => 1,
             Keysym::Up | Keysym::KP_Up => -1,
@@ -1965,18 +1994,54 @@ impl DiffView {
             let i = shown.iter().position(|&s| s == r)?;
             matches!(rows.get(i)?, DetailRow::Line(_)).then_some((i, col))
         });
-        let word = caret.and_then(|(i, col)| match rows.get(i)? {
+        let mut word = caret.and_then(|(i, col)| match rows.get(i)? {
             DetailRow::Line(line) => Some((i, find::word_at(&line.text, col)?)),
             _ => None,
+        });
+        // The line numbers, as wide as the widest in view.
+        let widest = rows
+            .iter()
+            .filter_map(|row| match row {
+                DetailRow::Line(line) => Some(line.number.max(line.old)),
+                _ => None,
+            })
+            .max();
+        let gutter = widest.map_or(0, |n| n.to_string().len().max(2));
+        // The caret's line too long for the row: shown from a char on that
+        // keeps the caret in view, a few chars from the edge.
+        let mut chosen = self.chosen(&shown);
+        let mut caret = caret;
+        let room = crate::chrome::diff_line_room(ctx.cols, gutter);
+        let skipped = caret.and_then(|(i, col)| {
+            let skip = (col + CARET_ROOM).checked_sub(room).filter(|&n| n > 0)?;
+            let DetailRow::Line(line) = &mut rows[i] else {
+                return None;
+            };
+            skip_chars(line, skip);
+            let shift = |r: &mut Range<usize>| {
+                *r = r.start.saturating_sub(skip)..r.end.saturating_sub(skip);
+            };
+            found[i].iter_mut().for_each(|(r, _)| shift(r));
+            chosen
+                .iter_mut()
+                .filter(|(j, _)| *j == i)
+                .for_each(|(_, r)| shift(r));
+            word.iter_mut()
+                .filter(|(j, _)| *j == i)
+                .for_each(|(_, r)| shift(r));
+            caret = Some((i, col - skip));
+            Some((i, skip))
         });
         DetailView {
             tab: DetailTab::Diff,
             title: self.title(ctx),
             search: self.search_bar(ctx),
             found,
-            chosen: self.chosen(&shown),
+            chosen,
             caret,
             word,
+            gutter,
+            skipped,
             ticks: self.search_ticks(),
             rows,
             sticky: sticky.is_some(),

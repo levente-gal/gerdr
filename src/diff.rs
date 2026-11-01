@@ -57,6 +57,9 @@ pub struct Line {
     pub raw: Option<String>,
     /// Where it is in the file as it is now; a removed line, where it was.
     pub number: usize,
+    /// Where it was in the file before (the diff's base); 0 for an added
+    /// line, which wasn't.
+    pub old: usize,
     /// The words changed from the line it pairs with, by char index
     /// into `text`; empty when it pairs with none, or is all changed.
     pub words: Words,
@@ -109,8 +112,10 @@ struct Section {
     renamed: Option<String>,
     /// Inside a hunk (past the header).
     in_hunk: bool,
-    /// The next line's number in the file as it is now.
+    /// The next line's number in the file as it is now, and in the file
+    /// before.
     number: usize,
+    old: usize,
     /// Lines kept, and lines past `FILE_LINES` dropped.
     kept: usize,
     dropped: usize,
@@ -126,6 +131,7 @@ impl Section {
             renamed: None,
             in_hunk: false,
             number: 1,
+            old: 1,
             kept: 0,
             dropped: 0,
         }
@@ -135,11 +141,15 @@ impl Section {
         if let Some(rest) = raw.strip_prefix("@@") {
             self.in_hunk = true;
             let (numbers, context) = rest.split_once("@@").unwrap_or((rest, ""));
-            self.number = numbers
-                .split_whitespace()
-                .find_map(|n| n.strip_prefix('+'))
-                .and_then(|n| n.split(',').next()?.parse().ok())
-                .unwrap_or(1);
+            let start = |sign: char| {
+                numbers
+                    .split_whitespace()
+                    .find_map(|n| n.strip_prefix(sign))
+                    .and_then(|n| n.split(',').next()?.parse().ok())
+                    .unwrap_or(1)
+            };
+            self.number = start('+');
+            self.old = start('-');
             if self.kept < FILE_LINES {
                 self.diff.hunks.push(Hunk {
                     context: expand(context.trim()),
@@ -174,6 +184,13 @@ impl Section {
         if kind != LineKind::Removed {
             self.number += 1;
         }
+        let old = match kind {
+            LineKind::Added => 0,
+            _ => {
+                self.old += 1;
+                self.old - 1
+            }
+        };
         if self.kept >= FILE_LINES {
             self.dropped += 1;
             return;
@@ -185,6 +202,7 @@ impl Section {
                 text: expand(text),
                 raw: text.contains('\t').then(|| text.to_owned()),
                 number,
+                old,
                 words: Vec::new(),
                 syntax: Vec::new(),
             });
@@ -538,6 +556,11 @@ mod tests {
             (LineKind::Removed, "let x = 1;", 2)
         );
         assert_eq!((l[2].kind, l[2].number), (LineKind::Added, 2));
+        // Where each was before: an added line wasn't.
+        let olds: Vec<usize> = l.iter().map(|l| l.old).collect();
+        assert_eq!(olds, [1, 2, 0]);
+        let h = &a.hunks[1].lines;
+        assert_eq!((h[0].old, h[1].old, h[2].old), (10, 0, 11));
         assert_eq!(l[1].words, [8..9]);
         assert_eq!(l[2].words, [8..9]);
         // A tab-led line is no context line; kept as a note instead.
@@ -630,6 +653,7 @@ mod tests {
             text: text.into(),
             raw: None,
             number: 1,
+            old: 1,
             words: Vec::new(),
             syntax: Vec::new(),
         })
