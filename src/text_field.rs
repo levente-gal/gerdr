@@ -5,11 +5,14 @@
 //! A `TextField` keeps its text, a caret and a selection, and what undo
 //! goes back to. Its `key` takes the usual keys: arrows (with Ctrl by
 //! words, with Shift selecting), Home and End, Backspace and Delete (with
-//! Ctrl by words), Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+Z and Ctrl+Shift+Z or
-//! Ctrl+Y, and Ctrl+W and Ctrl+U as in shells. Any key it has nothing to do
-//! with (Home with the caret at the start) is left to the overlay, which
-//! lets it act on its list. So an overlay passes its field the keys first,
-//! and keeps those the field doesn't take.
+//! Ctrl or, for Backspace, Alt by words), Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+Z
+//! and Ctrl+Shift+Z or Ctrl+Y, and Ctrl+W and Ctrl+U as in shells; a
+//! multi-line field takes Ctrl+K too, deleting to the end of the line. A
+//! one-line field leaves Ctrl+K to its overlay, where it moves the list's
+//! selection. Any key it has nothing to do with (Home with the caret at
+//! the start) is left to the overlay, which lets it act on its list. So an
+//! overlay passes its field the keys first, and keeps those the field
+//! doesn't take.
 //!
 //! A paste reaches a field the way a typed character does. Ctrl+V (see
 //! `is_paste`) over an overlay reads the clipboard off the event loop, and
@@ -287,6 +290,11 @@ impl TextField {
                 None => Edit::Ignored,
             };
         }
+        // Alt+Backspace deletes a word back, as in shells and editors.
+        if mods.alt && !mods.ctrl && !mods.logo && sym == Keysym::BackSpace {
+            let caret = self.line.caret;
+            return self.delete(word_start(&self.line.text, caret, class)..caret);
+        }
         if mods.alt || mods.logo {
             return Edit::Ignored;
         }
@@ -344,6 +352,14 @@ impl TextField {
             Keysym::Delete | Keysym::KP_Delete if ctrl => self.delete(caret..word_end(text, caret)),
             Keysym::Delete | Keysym::KP_Delete => self.delete(caret..next_char(text, caret)),
             Keysym::u | Keysym::U if ctrl => self.delete(0..caret),
+            // To the end of the line; with the caret there, the line break.
+            Keysym::k | Keysym::K if ctrl && self.multiline => {
+                let to = match line_end(text, caret) {
+                    to if to == caret => next_char(text, caret),
+                    to => to,
+                };
+                self.delete(caret..to)
+            }
             Keysym::a | Keysym::A if ctrl => {
                 if selection == (0..end) {
                     return Edit::Ignored;
@@ -619,6 +635,31 @@ mod tests {
             out.insert(at, mark);
         }
         out
+    }
+
+    #[test]
+    fn alt_backspace_deletes_a_word_and_ctrl_k_the_rest_of_the_line() {
+        let alt = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        let mut f = TextField::from("docker compose up");
+        assert_eq!(press(&mut f, &alt, Keysym::BackSpace), Edit::Changed);
+        assert_eq!(shown(&f), "docker compose |");
+        // A one-line field leaves Ctrl+K to its list.
+        f.line.caret = 7;
+        f.line.anchor = 7;
+        assert_eq!(press(&mut f, &with(true, false), Keysym::k), Edit::Ignored);
+        let mut f = TextField::multiline("one two\nthree");
+        f.line.caret = 3;
+        f.line.anchor = 3;
+        assert_eq!(press(&mut f, &with(true, false), Keysym::k), Edit::Changed);
+        assert_eq!(shown(&f), "one|\nthree");
+        // At the end of a line it joins the next.
+        assert_eq!(press(&mut f, &with(true, false), Keysym::k), Edit::Changed);
+        assert_eq!(shown(&f), "one|three");
+        assert_eq!(press(&mut f, &with(true, false), Keysym::z), Edit::Changed);
+        assert_eq!(shown(&f), "one|\nthree");
     }
 
     #[test]
