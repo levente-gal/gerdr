@@ -41,7 +41,7 @@ mod vim;
 
 use search::DiffSearch;
 
-pub const NO_REVIEW: &str = "No review comments: in the diff, press C on a line";
+pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line";
 
 /// A checkout the diff shows, as its host lends it.
 #[derive(Clone, Copy, Debug)]
@@ -396,17 +396,10 @@ pub fn move_to(scroll: &mut Scroll, pos: f64) {
     }
 }
 
-/// The key a diff button is pressed with, as its chip says.
+/// The key a diff button is pressed with, as its chip says: the panel's
+/// one table of keys has it (`repos::key_name`).
 fn key_name(button: ReposButton) -> &'static str {
-    use ReposButton as B;
-    match button {
-        B::CopyReview => "Ctrl+Shift+C",
-        B::Comment => "C",
-        B::Restore => "R",
-        B::SaveComment => "Enter",
-        B::DiscardComment => "Esc",
-        _ => "",
-    }
+    crate::repos::key_name(button)
 }
 
 /// What the checkout at `root` is called: its section's label, else its
@@ -2003,15 +1996,16 @@ impl DiffView {
         if self.search_has_keys(ctx) {
             return Some(self.search_key(mods, sym, typed, ctx));
         }
+        // Ctrl+Shift+F from anywhere; Ctrl+F with the diff's keys.
+        let in_diff = ctx.keys == Keys::Diff;
         if mods.ctrl
-            && mods.shift
+            && (mods.shift || in_diff)
             && !(mods.alt || mods.logo)
             && matches!(sym, Keysym::f | Keysym::F)
         {
             self.open_search(ctx);
             return Some(None);
         }
-        let in_diff = ctx.keys == Keys::Diff;
         if self.editing.is_some() && in_diff {
             return Some(self.editor_key(mods, sym, typed, ctx));
         }

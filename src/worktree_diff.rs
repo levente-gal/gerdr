@@ -16,11 +16,11 @@ use std::{
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use crate::{
-    chrome::{Density, DetailView, ReposButton, ReposHit, SheetView},
+    chrome::{Density, DetailView, Hint, ReposButton, ReposHit, SheetView},
     diff::FileDiff,
     diff_view::{self, DiffView, Keys, Section},
     git_ops::Since,
-    repos::sheet_step,
+    repos::{diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
     review::Review,
     scroll::Motion,
 };
@@ -55,6 +55,8 @@ pub struct WorktreeDiff {
     /// The sheet asking whether to delete the review, while open: the
     /// button Enter presses, by index into `CLEAR_BUTTONS`.
     pub clearing: Option<usize>,
+    /// The keys sheet (F1), while open: the line it is scrolled to.
+    pub help: Option<usize>,
 }
 
 /// The buttons of the sheet asking whether to delete the review: Cancel,
@@ -70,6 +72,8 @@ pub struct Env {
     /// (`chrome::diff_only_cols`).
     pub cols: usize,
     pub density: Density,
+    /// How many lines a sheet shows (`chrome::repos_sheet_rows`).
+    pub sheet_rows: usize,
 }
 
 /// What a key or a click asked for.
@@ -222,19 +226,76 @@ impl WorktreeDiff {
             self.sheet_press(button, env);
             return None;
         }
+        // The keys sheet scrolls; any other key closes it.
+        if let Some(top) = self.help.as_mut() {
+            let len = diff_help_lines().len();
+            if !scroll_lines(top, len, env.sheet_rows, sym) {
+                self.help = None;
+            }
+            return None;
+        }
+        let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+        if sym == Keysym::F1 && plain {
+            self.help = Some(0);
+            return None;
+        }
         let outcome = self.with_diff(env, |diff, ctx| diff.key(mods, sym, typed, ctx));
         let done = match outcome {
             Some(outcome) => outcome.map(Done::Diff),
-            None => {
-                let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-                (sym == Keysym::Escape && plain).then_some(Done::Close)
-            }
+            None => (sym == Keysym::Escape && plain).then_some(Done::Close),
         };
         self.asked(done)
     }
 
+    /// Do `button`, as the footer or a menu asks: a sheet's, the keys
+    /// sheet, closing, or one of the diff's.
+    pub fn press(&mut self, button: ReposButton, env: Env) -> Option<Done> {
+        match button {
+            ReposButton::Help => {
+                self.help = Some(0);
+                None
+            }
+            ReposButton::Close if self.help.is_some() => {
+                self.help = None;
+                None
+            }
+            ReposButton::Close => Some(Done::Close),
+            button => self.click(ReposHit::Button(button), env),
+        }
+    }
+
+    /// The footer's actions: writing a comment, the review copied or
+    /// deleted while there is one, the keys and closing.
+    pub fn hints(&self) -> Vec<Hint> {
+        use ReposButton as B;
+        let mut buttons = vec![B::Comment];
+        if !self.diff.review.is_empty() {
+            buttons.extend([B::CopyReview, B::ClearReview]);
+        }
+        buttons.extend([B::Help, B::Close]);
+        buttons
+            .into_iter()
+            .map(|button| Hint {
+                button,
+                label: match button {
+                    B::Comment => "comment on the lines".into(),
+                    B::Close => "close".into(),
+                    button => button.label().to_lowercase(),
+                },
+                key: key_name(button).into(),
+                disabled: None,
+            })
+            .collect()
+    }
+
     /// A click on `hit`, in the panel; the sheet takes them while open.
     pub fn click(&mut self, hit: ReposHit, env: Env) -> Option<Done> {
+        if self.help.is_some() {
+            if hit == ReposHit::Button(ReposButton::Close) {
+                self.help = None;
+            }
+            return None;
+        }
         if self.clearing.is_some() {
             if let ReposHit::Button(button) = hit {
                 self.sheet_press(button, env);
@@ -269,8 +330,20 @@ impl WorktreeDiff {
         }
     }
 
-    /// The sheet asking whether to delete the review, while open.
+    /// The sheet over the diff, while open: its keys, or asking whether to
+    /// delete the review.
     pub fn sheet(&self, env: Env) -> Option<SheetView> {
+        if let Some(top) = self.help {
+            let lines = diff_help_lines();
+            let top = top.min(lines.len().saturating_sub(1));
+            return Some(SheetView {
+                title: help_title("Keys in a worktree's diff", top, lines.len()),
+                lines: lines[top..].to_vec(),
+                buttons: vec![ReposButton::Close],
+                default: 0,
+                danger: false,
+            });
+        }
         let choice = self.clearing?;
         let sections = self.sections();
         let lead = self.lead();
@@ -375,6 +448,7 @@ impl crate::Gerdr {
             page: crate::chrome::diff_only_page(size, self.density),
             cols: crate::chrome::diff_only_cols(size),
             density: self.density,
+            sheet_rows: crate::chrome::repos_sheet_rows(size, true),
         }
     }
 
@@ -547,7 +621,7 @@ impl crate::Gerdr {
             placeholder: String::new(),
             error: None,
             result: None,
-            hints: Vec::new(),
+            hints: wd.hints(),
             detail: wd.view(env),
             sheet: wd.sheet(env),
             empty: String::new(),
@@ -574,6 +648,18 @@ impl crate::Gerdr {
         match done? {
             Done::Close => Some(crate::repos::Outcome::Close),
             Done::Diff(outcome) => Some(crate::repos::from_diff(outcome)),
+        }
+    }
+
+    /// Do `button` in the worktree's diff, as its footer or a menu asks.
+    pub(crate) fn worktree_diff_press(&mut self, button: ReposButton) {
+        let env = self.worktree_env();
+        let Some(wd) = self.repos.worktree.as_mut() else {
+            return;
+        };
+        let done = wd.press(button, env);
+        if let Some(outcome) = self.worktree_done(done) {
+            self.apply_repos(outcome);
         }
     }
 
@@ -606,6 +692,7 @@ impl crate::Gerdr {
         };
         let mut drags = false;
         let done = match (hit, shift, double) {
+            (ReposHit::Button(button), ..) => wd.press(button, env),
             (ReposHit::DiffRow(i), _, _) if ctrl => wd.goto_row(i, env),
             (ReposHit::DiffRow(i), true, false) => {
                 wd.extend_row(i, env);
@@ -688,6 +775,7 @@ mod tests {
     };
 
     const ENV: Env = Env {
+        sheet_rows: 10,
         page: 20,
         cols: 60,
         density: Density::Comfortable,
@@ -835,6 +923,26 @@ mod tests {
         assert!(wd.diff.search_focused());
         assert_eq!(key(&mut wd, none(), Keysym::Escape), None);
         assert!(!wd.diff.search_focused());
+        // F1 lists its keys, scrolled by the arrows; Esc closes the list,
+        // then the diff.
+        assert_eq!(key(&mut wd, none(), Keysym::F1), None);
+        let sheet = wd.sheet(ENV).expect("the keys");
+        assert_eq!(sheet.lines[0].0, "Esc");
+        assert!(sheet.lines.iter().any(|(k, ..)| k == "c / Del"));
+        key(&mut wd, none(), Keysym::Down);
+        assert_eq!(wd.sheet(ENV).expect("the keys").lines[0].0, "F1");
+        assert_eq!(key(&mut wd, none(), Keysym::Escape), None);
+        assert!(wd.sheet(ENV).is_none());
+        // Its footer has the review's actions (a comment is written),
+        // the keys and closing.
+        let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
+        use ReposButton as B;
+        let all = [B::Comment, B::CopyReview, B::ClearReview, B::Help, B::Close];
+        assert_eq!(hints, all);
+        assert_eq!(wd.press(ReposButton::Help, ENV), None);
+        assert!(wd.sheet(ENV).is_some());
+        wd.press(ReposButton::Close, ENV);
+        assert!(wd.sheet(ENV).is_none());
         assert_eq!(key(&mut wd, none(), Keysym::Escape), Some(Done::Close));
     }
 

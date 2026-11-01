@@ -31,28 +31,27 @@
 //! fold every repository and folder, or unfold them all. A folder checks
 //! and folds as a whole.
 //!
-//! Keys: Tab moves from the tree to the detail to the field. In the tree
-//! Up/Down select, Space checks, Left/Right fold, Enter opens a file in
-//! Zed or folds a repository or folder, and typing goes to the field; Shift with
-//! Up/Down or the pages scrolls the detail. In the diff the arrows and the
-//! pages move a cursor over its rows (with Shift, reaching a range back),
-//! Alt+Up/Down go to the file before or after, and for the cursor's file
-//! Space checks it, Left/Right fold it (on a line, move the caret) and
-//! Enter opens it in Zed at the cursor's line (`g` Space and Ctrl+click
-//! too, at the caret's char; on a file's header, the file). C writes a comment on the
-//! range's lines (or edits the one the cursor is on): Shift+Enter breaks
-//! its line, Enter keeps it, Esc drops it; Delete deletes it, Ctrl+Shift+C copies the review, and
-//! "Clear review" deletes it all, asked first. Ctrl+N opens the branch
-//! picker to create a branch (in it, Ctrl+Enter creates the one typed),
-//! Ctrl+Enter
-//! commits (Ctrl+Shift+Enter then pushes), Ctrl+P pushes (Ctrl+Shift+P force
-//! pushes), Ctrl+F fetches, Ctrl+L pulls, Ctrl+M merges the default
-//! branch in (Ctrl+Shift+M rebases on it), Alt+M merges a branch picked
-//! in (Alt+Shift+M rebases on it), Ctrl+E opens the conflicts in Zed,
-//! Ctrl+R marks a file resolved, Ctrl+G continues (Ctrl+Shift+Delete
-//! aborts), Alt+Z undoes the last batch, Alt+R retries what failed, Alt+S
-//! stashes (Alt+Shift+S pops), Ctrl+D and Ctrl+T show the diff and the
-//! log, Ctrl+S opens the branch picker, F1 lists the keys; Esc closes.
+//! Keys: Tab moves from the tree to the detail to the field, Shift+Tab
+//! back; Esc steps back to the tree (the message typed kept), then
+//! closes. In the tree Up/Down select, Space checks, Left/Right fold,
+//! Enter opens a file in Zed or folds a repository or folder, and typing
+//! goes to the field; Shift with Up/Down or the pages scrolls the detail.
+//! In the diff the arrows and the pages move a cursor over its rows (with
+//! Shift, reaching a range back), Alt+Up/Down go to the file before or
+//! after, and for the cursor's file Space checks it, Left/Right fold it
+//! (on a line, move the caret) and Enter opens it in Zed at the cursor's
+//! line (`g` Space and Ctrl+click too, at the caret's char; on a file's
+//! header, the file). `c` writes a comment on the range's lines (or edits
+//! the one the cursor is on): Shift+Enter breaks its line, Enter or Esc
+//! keeps it; Delete deletes it, Ctrl+Shift+C copies the review, and
+//! "Clear review" deletes it all, asked first. Alt+1, 2 and 3 show the
+//! diff, the log and the stashes; Ctrl+S opens the branch picker, Ctrl+N
+//! it to create a branch (in it, Ctrl+Enter creates the one typed), Alt+Del
+//! it to delete one. The actions' chords (`ACTIONS`, which F1 lists with
+//! the rest) work with either focus: Ctrl+Enter commits, Ctrl+P pushes,
+//! Ctrl+F fetches (in the diff, finds), Ctrl+M merges the default branch
+//! in, Alt+D marks a file resolved, Ctrl+R reads them all again (in the
+//! diff, redoes), and so on.
 //! What can't be taken back (a force push, an abort, an undo, a branch or
 //! stash deleted) asks first, on a sheet. On a repository's line, a click
 //! on the arrow up pushes it, on the arrow down pulls it, and on its stash
@@ -231,6 +230,8 @@ pub struct Ctx<'a> {
     /// How many characters a review comment's row of the diff holds
     /// (`chrome::repos_detail_cols`).
     pub cols: usize,
+    /// How many lines a sheet shows at once (`chrome::repos_sheet_rows`).
+    pub sheet_rows: usize,
 }
 
 /// How the tree lists a repository's changed files: a line each with its
@@ -314,7 +315,7 @@ pub struct Panel {
     pub(crate) tree_scroll: Scroll,
     /// Where the log or the stashes stand, in rows.
     pub(crate) detail_scroll: Scroll,
-    /// The tab asked for with Ctrl+D / Ctrl+T, else the diff.
+    /// The tab asked for with Alt+1 / 2 / 3, else the diff.
     pub(crate) tab: Option<DetailTab>,
     /// The log or stashes read for, and what they say.
     pub(crate) detail: Option<(DetailKey, String)>,
@@ -369,6 +370,8 @@ pub enum MenuAction {
     Switch,
     /// Merge it into the branch checked out, or rebase that onto it.
     Integrate(Integrate),
+    /// Delete it, where it is a local branch (asked first).
+    Delete,
 }
 
 /// A branch the picker offers: its names (more than one for a group of
@@ -485,8 +488,8 @@ pub enum Sheet {
         lines: Vec<(String, String, Tone)>,
         choice: usize,
     },
-    /// The panel's keys.
-    Help { choice: usize },
+    /// The panel's keys, from line `top` on.
+    Help { choice: usize, top: usize },
     /// Before dropping the review's comments.
     ClearReview { choice: usize },
     /// What the check before `kind` found, per repository in `jobs`.
@@ -581,8 +584,8 @@ impl BatchKind {
             BatchKind::Integrate { how, from } => {
                 let from = from.as_ref().map(|names| names.join(" / "));
                 return match (how, from) {
-                    (Integrate::Merge, None) => "Merge base".into(),
-                    (Integrate::Rebase, None) => "Rebase on base".into(),
+                    (Integrate::Merge, None) => "Merge default branch in".into(),
+                    (Integrate::Rebase, None) => "Rebase onto default branch".into(),
                     (Integrate::Merge, Some(from)) => format!("Merge {from}"),
                     (Integrate::Rebase, Some(from)) => format!("Rebase onto {from}"),
                 };
@@ -937,6 +940,8 @@ pub enum Outcome {
     /// Undo the last cut; do the last undone again.
     UndoCut,
     RedoCut,
+    /// Read the repositories' status and diffs again.
+    Refresh,
 }
 
 /// A tree line, by index: a repository of `Ctx::items`, a folder of its
@@ -1152,6 +1157,17 @@ fn diff_keys(focus: Focus) -> Keys {
     }
 }
 
+/// The detail tab Alt and a digit shows: 1 the diff, 2 the log, 3 the
+/// stashes.
+fn tab_key(sym: Keysym) -> Option<DetailTab> {
+    match sym {
+        Keysym::_1 | Keysym::KP_1 => Some(DetailTab::Diff),
+        Keysym::_2 | Keysym::KP_2 => Some(DetailTab::Log),
+        Keysym::_3 | Keysym::KP_3 => Some(DetailTab::Stashes),
+        _ => None,
+    }
+}
+
 /// The selected tree line, while a file.
 fn selected_file(selected: &Option<Selected>) -> Option<(&Path, &str)> {
     match selected {
@@ -1193,49 +1209,335 @@ impl Why {
     }
 }
 
-/// The action a key asks for, with either focus: before the field, as
-/// Ctrl+Shift+Delete would otherwise delete a word there.
-fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
+/// A chord: the modifiers held, exactly, and the symbols it is pressed
+/// with (both cases of a letter: Shift changes the symbol).
+#[derive(Clone, Copy, Debug)]
+struct Chord {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    syms: &'static [Keysym],
+}
+
+impl Chord {
+    /// Whether `sym` with `mods` is it.
+    fn matches(&self, mods: &ModifiersState, sym: Keysym) -> bool {
+        !mods.logo
+            && (mods.ctrl, mods.shift, mods.alt) == (self.ctrl, self.shift, self.alt)
+            && self.syms.contains(&sym)
+    }
+}
+
+const fn ctrl(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        ctrl: true,
+        shift: false,
+        alt: false,
+        syms,
+    }
+}
+
+const fn ctrl_shift(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        shift: true,
+        ..ctrl(syms)
+    }
+}
+
+const fn alt(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        ctrl: false,
+        shift: false,
+        alt: true,
+        syms,
+    }
+}
+
+const fn alt_shift(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        shift: true,
+        ..alt(syms)
+    }
+}
+
+const ENTER: &[Keysym] = &[Keysym::Return, Keysym::KP_Enter];
+const DELETE: &[Keysym] = &[Keysym::Delete, Keysym::KP_Delete];
+
+/// An action of the panel with a chord of its own, pressed with either
+/// focus (before the field, as Ctrl+Shift+Delete would otherwise delete a
+/// word there): the button it presses, its chord, the key as the footer
+/// shows it, and what it does as the keys sheet (F1) says. `action_key`,
+/// the footer's keys and the sheet all read it.
+struct Action {
+    button: ReposButton,
+    chord: Chord,
+    key: &'static str,
+    what: &'static str,
+}
+
+/// The panel's actions with a chord, as F1 lists them.
+const ACTIONS: &[Action] = {
     use ReposButton as B;
-    if mods.logo {
-        return None;
-    }
-    let shift = mods.shift;
-    if sym == Keysym::F1 && !mods.ctrl && !mods.alt {
-        return Some(B::Help);
-    }
-    if mods.alt && !mods.ctrl {
-        return match sym {
-            Keysym::z | Keysym::Z => Some(B::Undo),
-            Keysym::r | Keysym::R => Some(B::RetryFailed),
-            Keysym::m | Keysym::M if shift => Some(B::RebaseFrom),
-            Keysym::m | Keysym::M => Some(B::MergeFrom),
-            Keysym::s | Keysym::S if shift => Some(B::StashPop),
-            Keysym::s | Keysym::S => Some(B::Stash),
-            _ => None,
-        };
-    }
-    if !mods.ctrl || mods.alt {
-        return None;
-    }
-    // Shift changes the symbol: match both cases.
-    let button = match sym {
-        Keysym::Return | Keysym::KP_Enter if shift => B::CommitPush,
-        Keysym::Return | Keysym::KP_Enter => B::Commit,
-        Keysym::c | Keysym::C if shift => B::CopyReview,
-        Keysym::p | Keysym::P if shift => B::ForcePush,
-        Keysym::p | Keysym::P => B::Push,
-        Keysym::f | Keysym::F if !shift => B::Fetch,
-        Keysym::l | Keysym::L => B::Pull,
-        Keysym::m | Keysym::M if shift => B::Rebase,
-        Keysym::m | Keysym::M => B::Merge,
-        Keysym::e | Keysym::E => B::OpenInZed,
-        Keysym::r | Keysym::R => B::MarkResolved,
-        Keysym::g | Keysym::G => B::Continue,
-        Keysym::Delete | Keysym::KP_Delete if shift => B::Abort,
-        _ => return None,
-    };
-    Some(button)
+    &[
+        Action {
+            button: B::Commit,
+            chord: ctrl(ENTER),
+            key: "Ctrl+Enter",
+            what: "commit the checked files with the message",
+        },
+        Action {
+            button: B::CommitPush,
+            chord: ctrl_shift(ENTER),
+            key: "Ctrl+Shift+Enter",
+            what: "commit them, then push",
+        },
+        Action {
+            button: B::Push,
+            chord: ctrl(&[Keysym::p, Keysym::P]),
+            key: "Ctrl+P",
+            what: "push the checked repositories, else the selected",
+        },
+        Action {
+            button: B::ForcePush,
+            chord: ctrl_shift(&[Keysym::p, Keysym::P]),
+            key: "Ctrl+Shift+P",
+            what: "force push them, with lease (asked first)",
+        },
+        Action {
+            button: B::Fetch,
+            chord: ctrl(&[Keysym::f, Keysym::F]),
+            key: "Ctrl+F",
+            what: "fetch the checked, else all; in the diff, find",
+        },
+        Action {
+            button: B::Pull,
+            chord: ctrl(&[Keysym::l, Keysym::L]),
+            key: "Ctrl+L",
+            what: "pull the checked, else the selected",
+        },
+        Action {
+            button: B::Merge,
+            chord: ctrl(&[Keysym::m, Keysym::M]),
+            key: "Ctrl+M",
+            what: "merge the default branch into the branch checked out",
+        },
+        Action {
+            button: B::Rebase,
+            chord: ctrl_shift(&[Keysym::m, Keysym::M]),
+            key: "Ctrl+Shift+M",
+            what: "rebase the branch checked out onto the default branch",
+        },
+        Action {
+            button: B::MergeFrom,
+            chord: alt(&[Keysym::m, Keysym::M]),
+            key: "Alt+M",
+            what: "merge a branch picked in the menu into the one checked out",
+        },
+        Action {
+            button: B::RebaseFrom,
+            chord: alt_shift(&[Keysym::m, Keysym::M]),
+            key: "Alt+Shift+M",
+            what: "rebase the branch checked out onto one picked",
+        },
+        Action {
+            button: B::OpenInZed,
+            chord: ctrl(&[Keysym::e, Keysym::E]),
+            key: "Ctrl+E",
+            what: "open the file, or the conflicts, in Zed",
+        },
+        Action {
+            button: B::MarkResolved,
+            chord: alt(&[Keysym::d, Keysym::D]),
+            key: "Alt+D",
+            what: "mark the conflicted file resolved (on a repository, all)",
+        },
+        Action {
+            button: B::Continue,
+            chord: ctrl(&[Keysym::g, Keysym::G]),
+            key: "Ctrl+G",
+            what: "continue the merge or rebase stopped on conflicts",
+        },
+        Action {
+            button: B::Abort,
+            chord: ctrl_shift(DELETE),
+            key: "Ctrl+Shift+Del",
+            what: "abort it, back to before it (asked first)",
+        },
+        Action {
+            button: B::Undo,
+            chord: alt(&[Keysym::z, Keysym::Z]),
+            key: "Alt+Z",
+            what: "undo the last batch (asked first)",
+        },
+        Action {
+            button: B::RetryFailed,
+            chord: alt(&[Keysym::r, Keysym::R]),
+            key: "Alt+R",
+            what: "retry what failed in the last batch",
+        },
+        Action {
+            button: B::Stash,
+            chord: alt(&[Keysym::s, Keysym::S]),
+            key: "Alt+S",
+            what: "stash the selected repository's changes",
+        },
+        Action {
+            button: B::StashPop,
+            chord: alt_shift(&[Keysym::s, Keysym::S]),
+            key: "Alt+Shift+S",
+            what: "pop the selected repository's newest stash",
+        },
+        Action {
+            button: B::DeleteBranchMenu,
+            chord: alt(DELETE),
+            key: "Alt+Del",
+            what: "delete a local branch picked in the menu (asked first)",
+        },
+        Action {
+            button: B::CopyReview,
+            chord: ctrl_shift(&[Keysym::c, Keysym::C]),
+            key: "Ctrl+Shift+C",
+            what: "copy the review comments for an AI agent",
+        },
+        Action {
+            button: B::Refresh,
+            chord: ctrl(&[Keysym::r, Keysym::R]),
+            key: "Ctrl+R",
+            what: "read the repositories again; in the diff, redo as vim's",
+        },
+        Action {
+            button: B::Help,
+            chord: Chord {
+                ctrl: false,
+                shift: false,
+                alt: false,
+                syms: &[Keysym::F1],
+            },
+            key: "F1",
+            what: "list the keys",
+        },
+    ]
+};
+
+/// The panel's other keys, taken where the focus is, as F1 lists them
+/// before the actions: the key, what it does.
+const FOCUS_KEYS: &[(&str, &str)] = &[
+    (
+        "Tab / Shift+Tab",
+        "the tree, the diff, the field; the other way",
+    ),
+    (
+        "Esc",
+        "back a step: the field or the diff to the tree, then close",
+    ),
+    ("Up / Down", "select a line; in the diff, move the cursor"),
+    ("PgUp / PgDn", "a page of lines"),
+    (
+        "Shift+Up / Down",
+        "scroll the diff or log; in the diff, reach a range",
+    ),
+    ("Space", "check the line, or the diff's file"),
+    ("Ctrl+A", "check everything, or nothing"),
+    (
+        "Left / Right",
+        "in the tree, fold or unfold the line; in the diff, move the caret (on a header, fold it)",
+    ),
+    (
+        "Enter",
+        "on a file, open it in Zed; on a repository or folder, fold it",
+    ),
+    ("Typing", "in the tree, starts the commit message"),
+    ("Alt+F", "list the files by folder, or flat"),
+    ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
+    ("Alt+1 / 2 / 3", "the diff, the log, the stashes"),
+    ("Ctrl+S", "switch them all to a branch picked in the menu"),
+    ("Ctrl+N", "create a branch: type its name"),
+    ("Ctrl+Enter", "in the branch menu, create the branch typed"),
+    ("Del", "in the branch menu, delete the branch picked"),
+    ("Alt+Up / Down", "in the diff, the file before or after"),
+    (
+        "c / Del",
+        "in the diff, comment on the lines (or edit the comment); delete it",
+    ),
+    (
+        "Enter / Shift+Enter",
+        "in a comment, keep it; a new line (Esc keeps it too)",
+    ),
+    (
+        "g Space / Ctrl+click",
+        "in the diff, open the code in Zed at the caret; on a file's name, the file",
+    ),
+    (
+        "/ / Ctrl+F",
+        "in the diff, find: its lines, paths, hunks, comments (Ctrl+Shift+F from anywhere)",
+    ),
+    (
+        "Enter / Shift+Enter",
+        "in the search, the next place, the one before",
+    ),
+    (
+        "n / N, F3 / Shift+F3",
+        "the next place found, the one before",
+    ),
+    (
+        "h j k l w b e 0 ^ $",
+        "in the diff, move the caret, as in vim",
+    ),
+    (
+        "gg G { } Ctrl+U Ctrl+D",
+        "in the diff, the top, the end, the hunk before or after, half a page",
+    ),
+    ("* / #", "find the word at the caret, back for #"),
+    (
+        "x X D dd dw de d$ 3dd",
+        "in the diff, delete from the file, as in vim",
+    ),
+    (
+        "v / V, then d",
+        "select by chars, by lines; delete it from the file",
+    ),
+    (
+        "yy yw y$ Y, p / P",
+        "in the diff, yank (and copy); paste after, before",
+    ),
+    (
+        "Shift+R",
+        "in the diff, restore the change at the caret or the lines selected",
+    ),
+    (
+        "u / U or Ctrl+R",
+        "undo the last edit to this file, do it again",
+    ),
+    ("Right click", "the actions, on a line or anywhere"),
+];
+
+/// The keys of a worktree's diff (`worktree_diff`), as its keys sheet
+/// lists them: the diff's own, and Esc.
+pub fn diff_help_lines() -> Vec<(String, String, Tone)> {
+    let diff = FOCUS_KEYS
+        .iter()
+        .filter(|(_, what)| what.starts_with("in the diff") || what.starts_with("in a comment"));
+    let shared = FOCUS_KEYS
+        .iter()
+        .filter(|(key, _)| matches!(*key, "PgUp / PgDn" | "* / #" | "Right click"));
+    [
+        ("Esc", "close the diff, back to the worktrees"),
+        ("F1", "list the keys"),
+    ]
+    .iter()
+    .chain(diff)
+    .chain(shared)
+    .chain([("Ctrl+Shift+C", "copy the review comments for an AI agent")].iter())
+    .map(|(key, what)| (key.to_string(), what.to_string(), Tone::Normal))
+    .collect()
+}
+
+/// The action a key asks for, with either focus.
+fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
+    ACTIONS
+        .iter()
+        .find(|a| a.chord.matches(mods, sym))
+        .map(|a| a.button)
 }
 
 /// Whether `item` is stopped on conflicts: an operation half-way, or
@@ -1244,44 +1546,22 @@ fn in_conflict(item: &RepoItem) -> bool {
     item.status.op.is_some() || item.status.changes.iter().any(Change::conflicted)
 }
 
-/// `button`'s key, as the footer shows it; empty for those without one.
-fn key_name(button: ReposButton) -> &'static str {
+/// `button`'s key, as the footer and the diff's chips show it: its
+/// chord's, else the key that presses it where it is; empty for those
+/// without one.
+pub(crate) fn key_name(button: ReposButton) -> &'static str {
     use ReposButton as B;
+    if let Some(action) = ACTIONS.iter().find(|a| a.button == button) {
+        return action.key;
+    }
     match button {
-        B::Commit => "Ctrl+Enter",
-        B::CommitPush => "Ctrl+Shift+Enter",
-        B::Push => "Ctrl+P",
-        B::ForcePush => "Ctrl+Shift+P",
-        B::Fetch => "Ctrl+F",
-        B::Pull => "Ctrl+L",
-        B::Merge => "Ctrl+M",
-        B::Rebase => "Ctrl+Shift+M",
-        B::MergeFrom => "Alt+M",
-        B::RebaseFrom => "Alt+Shift+M",
-        B::OpenInZed => "Ctrl+E",
-        B::MarkResolved => "Ctrl+R",
-        B::Continue => "Ctrl+G",
-        B::Abort => "Ctrl+Shift+Del",
-        B::Undo => "Alt+Z",
-        B::RetryFailed => "Alt+R",
-        B::Stash => "Alt+S",
-        B::StashPop => "Alt+Shift+S",
-        B::Help => "F1",
-        B::CopyReview => "Ctrl+Shift+C",
-        B::Comment => "C",
-        B::Restore => "R",
+        B::Comment => "c",
+        B::Restore => "Shift+R",
         B::SaveComment => "Enter",
         B::DiscardComment => "Esc",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
-        B::RunInTerminal
-        | B::OpenWorkspace
-        | B::StashDrop
-        | B::DeleteBranch
-        | B::SwitchExisting
-        | B::CreateMissing
-        | B::ClearReview
-        | B::DeleteComment => "",
+        _ => "",
     }
 }
 
@@ -1390,81 +1670,44 @@ fn missing(jobs: &[Job], have: &[(PathBuf, Found)]) -> Vec<Job> {
         .collect()
 }
 
-/// The panel's keys, as the help sheet lists them: the key, what it does.
-const HELP_KEYS: &[(&str, &str)] = &[
-    ("Tab", "the tree, the diff, the field"),
-    ("Up / Down", "select a line; in the diff, move the cursor"),
-    ("PgUp / PgDn", "a page of lines"),
-    (
-        "Shift+Up / Down",
-        "scroll the diff or log; in the diff, a range",
-    ),
-    ("Alt+Up / Down", "in the diff, the file before or after"),
-    (
-        "C / Del",
-        "in the diff, comment on the lines; delete a comment",
-    ),
-    ("Shift+Enter", "in a comment, a new line; Enter keeps it"),
-    ("Ctrl+Shift+C", "copy the review comments for an AI agent"),
-    ("Space", "check the line, or the diff's file"),
-    ("Ctrl+A", "check everything, or nothing"),
-    (
-        "Left / Right",
-        "fold a repository, a folder or a diff file header; move the caret",
-    ),
-    ("Enter", "open the file in Zed; fold a repository or folder"),
-    (
-        "g Space / Ctrl+click",
-        "in the diff, open the code in Zed at the caret; on a file's name, the file",
-    ),
-    ("Alt+F", "list the files by folder, or flat"),
-    ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
-    ("Ctrl+D / Ctrl+T", "the diff, the log"),
-    (
-        "/ / Ctrl+Shift+F",
-        "find in the diff: its lines, paths, hunks",
-    ),
-    (
-        "Enter / Shift+Enter",
-        "in the search, the next place, the one before",
-    ),
-    (
-        "n / N, F3 / Shift+F3",
-        "the next place found, the one before",
-    ),
-    (
-        "h j k l w b e 0 ^ $",
-        "in the diff, move the caret, as in vim",
-    ),
-    ("* / #", "find the word at the caret, back for #"),
-    (
-        "x X D dd dw de d$ 3dd",
-        "in the diff, delete from the file, as in vim",
-    ),
-    (
-        "v / V, then d",
-        "select by chars, by lines; delete it from the file",
-    ),
-    (
-        "yy yw y$ Y, p / P",
-        "in the diff, yank (and copy); paste after, before",
-    ),
-    (
-        "R",
-        "in the diff, restore the change at the caret or the lines selected",
-    ),
-    (
-        "u / U",
-        "undo the last delete, paste or restore, do it again",
-    ),
-    ("Ctrl+S", "switch them all to a branch"),
-    ("Ctrl+N", "create a branch: type its name"),
-    ("Ctrl+Enter", "in the branch menu, create the branch typed"),
-    ("Del", "delete the branch picked in the menu"),
-    ("Alt+Z / Alt+R", "undo the last batch, retry what failed"),
-    ("Right click", "the actions, on a line or anywhere"),
-    ("Esc", "close"),
-];
+/// Scroll a list of `len` lines with `rows` in view, standing at line
+/// `top`, by `sym`: the arrows a line, the pages a page, Home and End to
+/// the ends. Whether `sym` was one of those.
+pub fn scroll_lines(top: &mut usize, len: usize, rows: usize, sym: Keysym) -> bool {
+    let last = len.saturating_sub(rows.max(1));
+    let page = rows.max(2) - 1;
+    *top = match sym {
+        Keysym::Down | Keysym::KP_Down => *top + 1,
+        Keysym::Up | Keysym::KP_Up => top.saturating_sub(1),
+        Keysym::Page_Down | Keysym::KP_Page_Down => *top + page,
+        Keysym::Page_Up | Keysym::KP_Page_Up => top.saturating_sub(page),
+        Keysym::Home | Keysym::KP_Home => 0,
+        Keysym::End | Keysym::KP_End => last,
+        _ => return false,
+    }
+    .min(last);
+    true
+}
+
+/// The keys sheet's title, `title`, saying where it stands when its
+/// `len` lines are scrolled to line `top`.
+pub fn help_title(title: &str, top: usize, len: usize) -> String {
+    match top {
+        0 => format!("{title} · Up/Down for more"),
+        _ => format!("{title} · from {} of {len}", top + 1),
+    }
+}
+
+/// Every key of the panel, as the keys sheet (F1) lists them: those
+/// taken where the focus is, then the actions'.
+fn help_lines() -> Vec<(String, String, Tone)> {
+    let focus = FOCUS_KEYS.iter().map(|&(key, what)| (key, what));
+    let actions = ACTIONS.iter().map(|a| (a.key, a.what));
+    focus
+        .chain(actions)
+        .map(|(key, what)| (key.to_owned(), what.to_owned(), Tone::Normal))
+        .collect()
+}
 
 /// `n` repositories, in words.
 fn repos(n: usize) -> String {
@@ -2217,13 +2460,16 @@ impl Panel {
 
     /// The branches the menu shows: those with every word typed in its
     /// search in their name, whatever the case; to merge or rebase, not
-    /// the one they are all on.
+    /// the one they are all on; to delete, those that can be.
     fn shown_branches(&self, ctx: &Ctx) -> Vec<Branch> {
         let mut branches = self.branches(ctx);
         if self.menu_action() != MenuAction::Switch
             && let Some(current) = self.current_branch(ctx)
         {
             branches.retain(|b| b.names.join(" / ") != current);
+        }
+        if self.menu_action() == MenuAction::Delete {
+            branches.retain(|b| self.delete_jobs(b, ctx).is_ok());
         }
         let query = self.branch_menu.as_ref().map(|m| m.query.to_lowercase());
         let words: Vec<&str> = query.as_deref().unwrap_or("").split_whitespace().collect();
@@ -2304,7 +2550,10 @@ impl Panel {
                 rows: shown.iter().map(|b| b.label.clone()).collect(),
                 deletable: shown
                     .iter()
-                    .map(|&b| switch && self.delete_jobs(b, ctx).is_ok())
+                    .map(|&b| {
+                        let deletes = switch || menu.action == MenuAction::Delete;
+                        deletes && self.delete_jobs(b, ctx).is_ok()
+                    })
                     .collect(),
                 current: current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
@@ -2328,6 +2577,8 @@ impl Panel {
                     "No branch matches".into()
                 } else if switch {
                     "No branch they all have".into()
+                } else if menu.action == MenuAction::Delete {
+                    "No local branch to delete: not the one checked out".into()
                 } else {
                     "No other branch they all have".into()
                 },
@@ -2341,6 +2592,7 @@ impl Panel {
                     MenuAction::Integrate(Integrate::Rebase) => {
                         format!("Find a branch to rebase {} onto", self.current_name(ctx))
                     }
+                    MenuAction::Delete => "Find a local branch to delete".into(),
                 },
             }
         });
@@ -2388,7 +2640,7 @@ impl Panel {
                     .unwrap_or(0);
                 (scroll_to(&menu_lines(&branches), picked, 0.0, page), picked)
             }
-            MenuAction::Integrate(_) => (0.0, 0),
+            MenuAction::Integrate(_) | MenuAction::Delete => (0.0, 0),
         };
         self.error = None;
         self.branch_menu = Some(BranchMenu {
@@ -2470,7 +2722,8 @@ impl Panel {
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         let switch = self.menu_action() == MenuAction::Switch;
         let on_create = self.branch_menu.as_ref()?.on_create;
-        if switch && plain && !on_create && matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
+        let deletes = switch || self.menu_action() == MenuAction::Delete;
+        if deletes && plain && !on_create && matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
             let picked = self.branch_menu.as_ref()?.picked;
             return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
         }
@@ -2510,6 +2763,9 @@ impl Panel {
             }
             Keysym::Return | Keysym::KP_Enter => {
                 let picked = menu.picked;
+                if menu.action == MenuAction::Delete {
+                    return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
+                }
                 return self.pick_branch(picked, ctx);
             }
             Keysym::Escape => {
@@ -2595,6 +2851,10 @@ impl Panel {
         // None found: the menu stays for another search.
         let branch = self.shown_branches(ctx).into_iter().nth(k)?;
         let action = self.menu_action();
+        // To delete, asked on a sheet over the menu.
+        if action == MenuAction::Delete {
+            return self.delete_branch(k, ctx);
+        }
         self.branch_menu = None;
         if ctx.batch.is_some_and(|b| !b.finished()) {
             self.error = Some("Wait for the batch to finish".into());
@@ -2625,6 +2885,7 @@ impl Panel {
                 how,
                 from: Some(branch.names),
             },
+            MenuAction::Delete => return None,
         };
         Some(Outcome::Batch { kind, jobs })
     }
@@ -2747,6 +3008,7 @@ impl Panel {
                 | B::SaveComment
                 | B::DiscardComment
                 | B::DeleteComment
+                | B::Refresh
         );
         if !local && ctx.batch.is_some_and(|b| !b.finished()) {
             return Err(Why::other("Wait for the batch to finish"));
@@ -2893,7 +3155,7 @@ impl Panel {
                 if left > 0 {
                     let files = if left == 1 { "file" } else { "files" };
                     return Err(Why::other(format!(
-                        "Resolve {left} conflicted {files} first (Ctrl+R)"
+                        "Resolve {left} conflicted {files} first (Alt+D)"
                     )));
                 }
                 let k = items.iter().position(|i| i.root == item.root);
@@ -2949,6 +3211,12 @@ impl Panel {
                 _ => Err(Why::other("Not checked out elsewhere")),
             },
             B::Help => Err(Why::other("Press F1 for the keys")),
+            B::Refresh => Ok(Outcome::Refresh),
+            // It opens the branch menu (see `act`), when it can.
+            B::DeleteBranchMenu => Err(Why::other(
+                self.menu_blocked(ctx)
+                    .unwrap_or("Pick the branch in the menu"),
+            )),
             B::CopyReview => {
                 diff_ctx!(self, ctx, dctx);
                 (self.diff.copy_review(&dctx))
@@ -3074,7 +3342,7 @@ impl Panel {
         }
         if button == ReposButton::Help {
             self.branch_menu = None;
-            self.sheet = Some(Sheet::Help { choice: 0 });
+            self.sheet = Some(Sheet::Help { choice: 0, top: 0 });
             return None;
         }
         {
@@ -3086,6 +3354,10 @@ impl Panel {
         }
         if let Some(how) = menu_integrate(button) {
             self.open_branch_menu(MenuAction::Integrate(how), ctx);
+            return None;
+        }
+        if button == ReposButton::DeleteBranchMenu {
+            self.open_branch_menu(MenuAction::Delete, ctx);
             return None;
         }
         match self.plan(button, ctx) {
@@ -3213,6 +3485,11 @@ impl Panel {
     /// button, Enter presses it, Esc cancels.
     fn sheet_key(&mut self, mods: &ModifiersState, sym: Keysym, ctx: &Ctx) -> Option<Outcome> {
         let sheet = self.sheet.as_mut()?;
+        if let Sheet::Help { top, .. } = sheet
+            && scroll_lines(top, help_lines().len(), ctx.sheet_rows, sym)
+        {
+            return None;
+        }
         let buttons = sheet_buttons(sheet);
         let (Sheet::Preflight { choice, .. }
         | Sheet::Diverged { choice, .. }
@@ -3352,10 +3629,20 @@ impl Panel {
             self.fold_all(true, ctx);
             return None;
         }
+        if only_alt && let Some(tab) = tab_key(sym) {
+            self.set_tab(tab);
+            return None;
+        }
         let in_diff = self.focus == Focus::Detail && self.tab() == DetailTab::Diff;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
+        // Esc steps back: the field (its message kept) or the detail give
+        // the keyboard to the tree; from there it closes.
         if sym == Keysym::Escape && plain {
-            return Some(Outcome::Close);
+            if self.focus == Focus::Tree {
+                return Some(Outcome::Close);
+            }
+            self.focus = Focus::Tree;
+            return None;
         }
         if let Some(button) = action_key(mods, sym) {
             return self.act(button, ctx);
@@ -3377,24 +3664,14 @@ impl Panel {
                 return None;
             }
         }
-        if mods.ctrl && !mods.alt && !mods.logo {
-            match sym {
-                Keysym::d | Keysym::D => {
-                    self.set_tab(DetailTab::Diff);
-                    return None;
-                }
-                Keysym::t | Keysym::T => {
-                    self.set_tab(DetailTab::Log);
-                    return None;
-                }
-                _ => {}
-            }
-        }
+        // Tab goes round the tree, the detail and the field; Shift+Tab the
+        // other way.
         if plain && matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) {
-            self.focus = match self.focus {
-                Focus::Tree => Focus::Detail,
-                Focus::Detail => Focus::Field,
-                Focus::Field => Focus::Tree,
+            let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+            self.focus = match (self.focus, back) {
+                (Focus::Tree, false) | (Focus::Field, true) => Focus::Detail,
+                (Focus::Detail, false) | (Focus::Tree, true) => Focus::Field,
+                (Focus::Field, false) | (Focus::Detail, true) => Focus::Tree,
             };
             return None;
         }
@@ -3544,7 +3821,9 @@ impl Panel {
             return match hit {
                 ReposHit::BranchCreate => self.create_branch(ctx),
                 ReposHit::BranchRow(i) => self.pick_branch(branch(i)?, ctx),
-                ReposHit::BranchDelete(i) if self.menu_action() == MenuAction::Switch => {
+                ReposHit::BranchDelete(i)
+                    if matches!(self.menu_action(), MenuAction::Switch | MenuAction::Delete) =>
+                {
                     self.delete_branch(branch(i)?, ctx)
                 }
                 ReposHit::BranchMenu => None,
@@ -3998,7 +4277,7 @@ impl Panel {
                         Failure::Other => (
                             "failed",
                             Tone::Error,
-                            format!("{batch} failed: see the log (Ctrl+T)"),
+                            format!("{batch} failed: see the log (Alt+2)"),
                         ),
                     };
                     // What git said first: the hint alone hides it.
@@ -4470,12 +4749,11 @@ impl Panel {
                 let (title, lines) = self.diff.clear_sheet(&dctx);
                 (title, lines, *choice)
             }
-            Sheet::Help { choice } => {
-                let lines = HELP_KEYS
-                    .iter()
-                    .map(|(key, what)| (key.to_string(), what.to_string(), Tone::Normal))
-                    .collect();
-                ("Keys in the repositories panel".to_owned(), lines, *choice)
+            Sheet::Help { choice, top } => {
+                let lines = help_lines();
+                let top = (*top).min(lines.len().saturating_sub(1));
+                let title = help_title("Keys in the repositories panel", top, lines.len());
+                (title, lines[top..].to_vec(), *choice)
             }
         };
         let buttons = sheet_buttons(sheet);
@@ -4782,6 +5060,7 @@ mod tests {
             density: Density::Comfortable,
             tree_share: crate::chrome::REPOS_TREE_SHARE,
             cols: 40,
+            sheet_rows: 12,
         }
     }
 
@@ -5018,7 +5297,7 @@ mod tests {
                 from: None
             }
             .label(),
-            "Rebase on base"
+            "Rebase onto default branch"
         );
         assert_eq!(BatchKind::Push { force: true }.label(), "Force push");
         assert!(
@@ -5476,11 +5755,32 @@ mod tests {
         assert_eq!(help.label, "keys");
         assert_eq!(press(&mut panel, none(), Keysym::F1, &ctx), None);
         let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
-        assert_eq!(sheet.title, "Keys in the repositories panel");
-        assert_eq!(sheet.lines.len(), HELP_KEYS.len());
-        assert_eq!(sheet.lines[0].0, "Tab");
+        assert_eq!(
+            sheet.title,
+            "Keys in the repositories panel · Up/Down for more"
+        );
+        assert_eq!(sheet.lines.len(), FOCUS_KEYS.len() + ACTIONS.len());
+        assert_eq!(sheet.lines[0].0, "Tab / Shift+Tab");
         assert_eq!(sheet.buttons, [ReposButton::Close]);
         assert_eq!(help.disabled, None);
+        // Every action's key is listed, from the table the keys come from.
+        for action in ACTIONS {
+            assert!(sheet.lines.iter().any(|(key, ..)| key == action.key));
+            assert_eq!(key_name(action.button), action.key);
+        }
+        // It scrolls, no further than its last page.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(sheet.lines[0].0, FOCUS_KEYS[1].0);
+        assert!(
+            sheet
+                .title
+                .ends_with(&format!("from 2 of {}", help_lines().len()))
+        );
+        press(&mut panel, none(), Keysym::End, &ctx);
+        let rest = panel.view("p", &ctx).sheet.expect("a sheet").lines.len();
+        assert_eq!(rest, ctx.sheet_rows);
+        press(&mut panel, none(), Keysym::Home, &ctx);
         // Enter or Esc closes it, and so does a click on its button.
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());
@@ -5640,7 +5940,7 @@ mod tests {
         let sheet = panel.view("p", &ctx).sheet.unwrap();
         assert_eq!(
             sheet.title,
-            "Merge base: 1 clean · 1 would conflict · 1 blocked"
+            "Merge default branch in: 1 clean · 1 would conflict · 1 blocked"
         );
         assert_eq!(
             sheet.lines[1],
@@ -5857,19 +6157,44 @@ mod tests {
         assert_eq!(panel.field.line().caret, 0);
         assert_eq!(panel.view("p", &ctx).selected, Some(1));
         assert!(panel.view("p", &ctx).field_focused);
-        // Tab goes round: the tree, the detail, the field.
+        // Tab goes round: the tree, the detail, the field; Shift+Tab
+        // the other way.
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Tree);
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Detail);
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Field);
-        // Esc closes, from the field too.
+        press(
+            &mut panel,
+            mods(false, true, false),
+            Keysym::ISO_Left_Tab,
+            &ctx,
+        );
+        assert_eq!(panel.focus, Focus::Detail);
+        press(
+            &mut panel,
+            mods(false, true, false),
+            Keysym::ISO_Left_Tab,
+            &ctx,
+        );
+        assert_eq!(panel.focus, Focus::Tree);
+        press(
+            &mut panel,
+            mods(false, true, false),
+            Keysym::ISO_Left_Tab,
+            &ctx,
+        );
+        assert_eq!(panel.focus, Focus::Field);
+        // Esc steps back: from the field to the tree, the message kept;
+        // then it closes.
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
+        assert_eq!(&*panel.field, "fix it");
         assert_eq!(
             press(&mut panel, none(), Keysym::Escape, &ctx),
             Some(Outcome::Close)
         );
-        assert_eq!(panel.focus, Focus::Field);
         // Ctrl+A in the field selects its text instead of checking.
         panel.focus = Focus::Field;
         press(&mut panel, ctrl(), Keysym::a, &ctx);
@@ -6455,7 +6780,7 @@ mod tests {
         assert!(file.selected);
         // The repository's log, with what the batch ran there.
         select(&mut panel, "gerdr");
-        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        press(&mut panel, alt(), Keysym::_2, &ctx);
         let log = DetailKey {
             root: root("gerdr"),
             file: None,
@@ -6491,8 +6816,8 @@ mod tests {
         // A file's line, its repository's log.
         select_file(&mut panel, "gerdr", "src/git.rs");
         assert_eq!(panel.detail_wanted(&ctx), None);
-        // Ctrl+D, the diff again, where the selection is.
-        press(&mut panel, ctrl(), Keysym::d, &ctx);
+        // Alt+1, the diff again, where the selection is.
+        press(&mut panel, alt(), Keysym::_1, &ctx);
         assert_eq!(panel.detail_wanted(&ctx), None);
         assert_eq!(panel.diff.scroll.pos(), 1.0);
     }
@@ -6554,7 +6879,7 @@ mod tests {
         assert_eq!(panel.view("p", &ctx).detail.part, 0.0);
         // A log too, from its top.
         select(&mut panel, "gerdr");
-        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        press(&mut panel, alt(), Keysym::_2, &ctx);
         let log = DetailKey {
             root: root("gerdr"),
             file: None,
@@ -7067,7 +7392,7 @@ mod tests {
         let hints = panel.view("p", &ctx).hints;
         assert_eq!(
             hints[2].disabled.as_deref(),
-            Some("Resolve 1 conflicted file first (Ctrl+R)")
+            Some("Resolve 1 conflicted file first (Alt+D)")
         );
         assert_eq!(
             press(&mut panel, ctrl(), Keysym::e, &ctx),
@@ -7079,6 +7404,10 @@ mod tests {
         );
         assert_eq!(
             press(&mut panel, ctrl(), Keysym::r, &ctx),
+            Some(Outcome::Refresh)
+        );
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::d, &ctx),
             Some(Outcome::Batch {
                 kind: BatchKind::MarkResolved,
                 jobs: vec![job("herdr", &["src/api.rs"])]
@@ -7447,6 +7776,23 @@ mod tests {
         assert!(matches!(
             panel.click(ReposHit::Button(ReposButton::DeleteBranch), &ctx),
             Some(Outcome::Batch {
+                kind: BatchKind::DeleteBranch { .. },
+                ..
+            })
+        ));
+        // Alt+Del opens the menu to delete one: only those that can be,
+        // Enter asking.
+        panel.branch_menu = None;
+        panel.sheet = None;
+        press(&mut panel, alt(), Keysym::Delete, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["main / master", "feat/x"]);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.placeholder, "Find a local branch to delete");
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(matches!(
+            panel.sheet,
+            Some(Sheet::Confirm {
                 kind: BatchKind::DeleteBranch { .. },
                 ..
             })
@@ -8341,7 +8687,7 @@ mod tests {
             .position(|r| matches!(r, DetailRow::Line(l) if l.text == "new"));
         assert!(on(line.unwrap()));
         assert_eq!(key(hunk).as_deref(), Some(""));
-        assert_eq!(key(line.unwrap()).as_deref(), Some("R"));
+        assert_eq!(key(line.unwrap()).as_deref(), Some("Shift+R"));
         assert_eq!(
             restore(panel.click(ReposHit::DiffRestore(hunk), &ctx)),
             (vec![2, 3, 4, 6], put(6, "\told"))
@@ -8618,10 +8964,13 @@ mod tests {
         press(&mut panel, none(), Keysym::F3, &ctx);
         assert_eq!(cursor_row(&panel), Some(8));
         assert_eq!(search_count(&panel, &ctx), "2 of 3");
-        // Esc closes the search first, then the panel.
+        // Esc closes the search first, then gives the tree the keys,
+        // then closes the panel.
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.search.is_none());
         assert!(panel.view("p", &ctx).detail.found.iter().all(Vec::is_empty));
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
         assert_eq!(
             press(&mut panel, none(), Keysym::Escape, &ctx),
             Some(Outcome::Close)
@@ -8629,7 +8978,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_f_searches_and_ctrl_f_still_fetches() {
+    fn ctrl_f_finds_in_the_diff_and_fetches_elsewhere() {
         let items = items();
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
@@ -8644,6 +8993,13 @@ mod tests {
         assert_eq!(search_count(&panel, &ctx), "1 of 1");
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.search.is_none());
+        // With the diff's keys, Ctrl+F finds too.
+        assert_eq!(press(&mut panel, ctrl(), Keysym::f, &ctx), None);
+        assert!(panel.search_has_keys());
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        // With the tree's, it fetches.
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert_eq!(panel.focus, Focus::Tree);
         let fetch = press(&mut panel, ctrl(), Keysym::f, &ctx);
         assert!(matches!(
             fetch,

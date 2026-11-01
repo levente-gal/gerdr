@@ -500,12 +500,13 @@ impl Gerdr {
     }
 
     /// What the panel's views and keys need of the chrome: the density,
-    /// the tree's share of the panel, and how many characters a review
-    /// comment's row of the diff holds.
-    fn repos_env(&self) -> (Density, f64, usize) {
+    /// the tree's share of the panel, how many characters a review
+    /// comment's row of the diff holds, and how many lines a sheet shows.
+    fn repos_env(&self) -> (Density, f64, usize, usize) {
         let share = self.repos.tree_share.unwrap_or(chrome::REPOS_TREE_SHARE);
         let cols = chrome::repos_detail_cols(self.output_size(), share);
-        (self.density, share, cols)
+        let sheet = chrome::repos_sheet_rows(self.output_size(), false);
+        (self.density, share, cols, sheet)
     }
 
     /// Open the repositories panel: as it was left, for the same project.
@@ -631,7 +632,7 @@ impl Gerdr {
     /// and the detail it wants read.
     fn repos_refresh(&mut self) {
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -653,6 +654,7 @@ impl Gerdr {
                 density,
                 tree_share,
                 cols,
+                sheet_rows,
             };
             panel.refresh(&ctx);
         }
@@ -688,7 +690,7 @@ impl Gerdr {
     /// thread.
     fn repos_detail(&mut self) {
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Some(panel) = self.repos.panel.as_ref() else {
             return;
         };
@@ -703,6 +705,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let diffs = panel.diffs_wanted(&ctx);
         let key = panel
@@ -753,7 +756,7 @@ impl Gerdr {
             return self.worktree_diff_key(mods, sym, typed);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -774,6 +777,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
@@ -834,7 +838,7 @@ impl Gerdr {
             return self.worktree_diff_hit(hit, double, shift, ctrl);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -855,6 +859,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let mut drags = false;
         let outcome = panel.as_mut().and_then(|p| {
@@ -889,9 +894,6 @@ impl Gerdr {
     /// and a menu of the actions opens; elsewhere in the panel, the menu
     /// alone.
     pub fn repos_right_click(&mut self, pos: Point<f64, Logical>) {
-        if self.repos.worktree.is_some() {
-            return;
-        }
         let Some(view) = self.repos_view() else {
             return;
         };
@@ -902,6 +904,13 @@ impl Gerdr {
         };
         if view.sheet.is_some() || view.branch.menu.is_some() {
             return;
+        }
+        // A worktree's diff: its footer's actions.
+        if self.repos.worktree.is_some() {
+            let at = chrome::Rect::new((pos.x as i32, pos.y as i32).into(), (1, 1).into());
+            let hints: Vec<&Hint> = view.hints.iter().collect();
+            let spec = repos_menu_spec(&hints, None, at);
+            return self.open_menu(spec);
         }
         let line = match hit {
             ReposHit::Line(i)
@@ -933,8 +942,11 @@ impl Gerdr {
 
     /// Do `button`, as a menu asks.
     pub fn repos_press(&mut self, button: ReposButton) {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_press(button);
+        }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -955,6 +967,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let outcome = panel.as_mut().and_then(|p| p.press(button, &ctx));
         self.repos_detail();
@@ -995,7 +1008,7 @@ impl Gerdr {
             return self.worktree_diff_drag(by, row);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1016,6 +1029,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let Some(p) = panel.as_mut() else {
             return;
@@ -1167,7 +1181,7 @@ impl Gerdr {
             .as_ref()
             .is_some_and(|(menu, _)| menu.to_f64().contains(pos));
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1188,6 +1202,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let Some(panel) = panel.as_mut() else {
             return;
@@ -1209,7 +1224,7 @@ impl Gerdr {
             return self.worktree_diff_scroll_to(pos);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1230,6 +1245,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         if let Some(panel) = panel.as_mut() {
             panel.stand_at(pos, detail, &ctx);
@@ -1246,7 +1262,7 @@ impl Gerdr {
             return false;
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1267,6 +1283,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let Some(panel) = panel.as_mut() else {
             return false;
@@ -1284,7 +1301,7 @@ impl Gerdr {
             return self.worktree_diff_view();
         }
         let panel = self.repos.panel.as_ref()?;
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let ctx = Ctx {
             items: &self.repos.items,
             batch: self.repos.batch.as_ref(),
@@ -1296,6 +1313,7 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
         };
         let title = self
             .project
@@ -1317,6 +1335,10 @@ impl Gerdr {
             Outcome::Cut(edit) => self.repos_cut(edit),
             Outcome::Yank(edit) => self.repos_yank(edit),
             Outcome::Paste(put) => self.repos_paste(put),
+            Outcome::Refresh => {
+                self.refresh_git();
+                self.repos_read();
+            }
             Outcome::UndoCut => self.repos_undo_cut(false),
             Outcome::RedoCut => self.repos_undo_cut(true),
             Outcome::Batch { .. }
@@ -1885,7 +1907,7 @@ impl Gerdr {
             } => {
                 self.repos.reading_diffs.remove(&root);
                 let page = self.repos_page();
-                let (density, tree_share, cols) = self.repos_env();
+                let (density, tree_share, cols, sheet_rows) = self.repos_env();
                 let Repos {
                     panel,
                     batch,
@@ -1906,6 +1928,7 @@ impl Gerdr {
                     density,
                     tree_share,
                     cols,
+                    sheet_rows,
                 };
                 if let Some(panel) = panel.as_mut() {
                     panel.set_diffs(root, generation, files, &ctx);

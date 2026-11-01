@@ -8,8 +8,8 @@
 //! the diff is read again. `y` yanks as `d` deletes (`yy`, `yw`, `Y`, a
 //! selection) and copies it too; `p` puts what was yanked or deleted
 //! last after the caret (whole lines under its line), `P` before. `u`
-//! undoes the last cut, paste or restore (see `restore`), `U` does it
-//! again.
+//! undoes the last cut, paste or restore (see `restore`), `U` or Ctrl+R
+//! does it again.
 
 use std::{
     ops::Range,
@@ -104,6 +104,12 @@ impl DiffView {
         typed: Keysym,
         ctx: &Ctx,
     ) -> Option<Option<Outcome>> {
+        // Ctrl+R does again, as vim's does.
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
+        if only_ctrl && matches!(sym, Keysym::r | Keysym::R) {
+            self.pending = Pending::default();
+            return Some(Some(Outcome::RedoCut));
+        }
         if mods.ctrl || mods.alt || mods.logo {
             return None;
         }

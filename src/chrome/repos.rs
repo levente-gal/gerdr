@@ -676,6 +676,10 @@ pub enum ReposButton {
     DeleteComment,
     /// The change at the diff's cursor, or a hunk, put back as it was.
     Restore,
+    /// Read the repositories' status and diffs again.
+    Refresh,
+    /// The branch menu, to pick a local branch to delete.
+    DeleteBranchMenu,
 }
 
 impl ReposButton {
@@ -688,8 +692,8 @@ impl ReposButton {
             ReposButton::ForcePush => "Force push",
             ReposButton::Fetch => "Fetch",
             ReposButton::Pull => "Pull",
-            ReposButton::Merge => "Merge base",
-            ReposButton::Rebase => "Rebase on base",
+            ReposButton::Merge => "Merge default branch in",
+            ReposButton::Rebase => "Rebase onto default branch",
             ReposButton::MergeFrom => "Merge from…",
             ReposButton::RebaseFrom => "Rebase onto…",
             ReposButton::OpenInZed => "Open in Zed",
@@ -722,6 +726,8 @@ impl ReposButton {
             ReposButton::DiscardComment => "Discard",
             ReposButton::DeleteComment => "Delete",
             ReposButton::Restore => "Restore",
+            ReposButton::Refresh => "Refresh",
+            ReposButton::DeleteBranchMenu => "Delete a branch…",
         }
     }
 }
@@ -1219,6 +1225,21 @@ pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) 
     (tree.max(1) as usize, detail.max(1) as usize)
 }
 
+/// How many lines a sheet over the panel shows at once on an output of
+/// `size`, with the error line, the result bar and the footer all there
+/// (as `repos_page`); with the diff alone across the panel when
+/// `diff_only`.
+pub fn repos_sheet_rows(size: Size<i32, Logical>, diff_only: bool) -> usize {
+    let panel = panel_rect(size);
+    let bottom = match diff_only {
+        true => footer_h(REPOS_FOOTER_ROWS),
+        false => REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS),
+    };
+    let middle = panel.size.h - REPOS_HEADER - bottom;
+    let fixed = 2 * SHEET_PAD + SHEET_TITLE + 2 * SHEET_GAP + SHEET_BUTTON;
+    ((middle - 2 * REPOS_PAD - fixed) / SHEET_LINE).max(1) as usize
+}
+
 /// How many characters of the monospace font a review comment's row of
 /// the diff holds, on an output of `size` with the tree's share `share`.
 pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
@@ -1227,9 +1248,10 @@ pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
 }
 
 /// How many diff rows the panel shows at once with the diff alone across
-/// it (`ReposView::diff_only`), on an output of `size`.
+/// it (`ReposView::diff_only`), on an output of `size`: with the footer's
+/// rows all there, as `repos_page`.
 pub fn diff_only_page(size: Size<i32, Logical>, density: Density) -> usize {
-    let middle = panel_rect(size).size.h - REPOS_HEADER;
+    let middle = panel_rect(size).size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
     let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
     detail.max(1) as usize
 }
@@ -1639,12 +1661,14 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let row_h = repos_row(view.density);
     let line_h = repos_detail_line(view.density);
 
-    // From the bottom up: the footer, the result bar, the error, the field.
-    let (rows, overflow) = match only {
-        true => (Vec::new(), Vec::new()),
-        false => hint_rows(&view.hints, inner_w),
+    // From the bottom up: the footer, the result bar, the error, the field;
+    // the diff alone has a footer only, while it has actions.
+    let (rows, overflow) = hint_rows(&view.hints, inner_w);
+    let footer_height = if only && view.hints.is_empty() {
+        0
+    } else {
+        footer_h(rows.len())
     };
-    let footer_height = if only { 0 } else { footer_h(rows.len()) };
     let footer_y = bottom_edge - footer_height;
     let footer = Rectangle::new((x, footer_y).into(), (w, footer_height).into());
     let mut y = footer_y;
@@ -2696,16 +2720,19 @@ impl Painter {
         let bar = view.detail.search.as_ref();
         self.search_bar(&mut c, bar, &search, count, hover, scale, p);
 
-        // The field, what went wrong, the result bar and the footer.
-        if only {
+        // The field, what went wrong, the result bar and the footer; the
+        // diff alone has the footer only, while it has actions.
+        if only && view.hints.is_empty() {
             return c;
         }
-        let field = shift(layout.field);
-        across(
-            &mut c,
-            px(field.loc.y - (REPOS_FIELD_ROW - REPOS_FIELD) / 2) - border,
-        );
-        self.repos_field_box(&mut c, view, field, scale, p);
+        if !only {
+            let field = shift(layout.field);
+            across(
+                &mut c,
+                px(field.loc.y - (REPOS_FIELD_ROW - REPOS_FIELD) / 2) - border,
+            );
+            self.repos_field_box(&mut c, view, field, scale, p);
+        }
         if let (Some(error), Some(rect)) = (&view.error, parts.error) {
             let rect = shift(rect);
             let (x, right) = phys(rect, scale);
@@ -5135,7 +5162,7 @@ mod tests {
                 hint(MergeFrom, "Alt+M", None),
                 hint(RebaseFrom, "Alt+Shift+M", None),
                 hint(OpenInZed, "Ctrl+E", None),
-                hint(MarkResolved, "Ctrl+R", None),
+                hint(MarkResolved, "Alt+D", None),
                 hint(Continue, "Ctrl+G", None),
                 hint(Abort, "Ctrl+Shift+Del", None),
                 hint(Stash, "Alt+S", None),
@@ -5683,7 +5710,11 @@ mod tests {
             title: "Worktree · feat/x".into(),
             summary: "2 commits on main".into(),
             lines: Vec::new(),
-            hints: Vec::new(),
+            hints: vec![
+                hint(ReposButton::Comment, "c", None),
+                hint(ReposButton::Help, "F1", None),
+                hint(ReposButton::Close, "Esc", None),
+            ],
             result: None,
             error: None,
             diff_only: true,
@@ -5698,15 +5729,20 @@ mod tests {
             let view = diff_only();
             let l = repos_layout(&view, size);
             let hit = |r: Rect| repos_hit(&l, centre(r));
-            // No tree, picker, tabs, field or footer: the diff across it.
+            // No tree, picker, tabs or field: the diff across it, over
+            // the footer's actions.
             assert_eq!(l.detail.loc.x, l.panel.loc.x);
             assert_eq!(l.detail.size.w, l.panel.size.w);
+            assert_eq!(l.detail.loc.y + l.detail.size.h, l.footer.loc.y);
             assert_eq!(
-                l.detail.loc.y + l.detail.size.h,
+                l.footer.loc.y + l.footer.size.h,
                 l.panel.loc.y + l.panel.size.h
             );
             assert!(l.tree_tools.is_empty() && l.detail_tabs.is_empty());
-            assert!(l.buttons.is_empty() && l.more.is_none());
+            assert_eq!(l.buttons.len(), 3);
+            for (b, r) in &l.buttons {
+                assert_eq!(hit(*r), Some(ReposHit::Button(*b)));
+            }
             for r in [l.branch, l.field, l.splitter, l.tree] {
                 assert!(r.size.w == 0 || r.size.h == 0, "{r:?}");
             }
