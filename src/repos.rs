@@ -90,6 +90,10 @@ use crate::{
     worktree_diff::WorktreeDiff,
 };
 
+/// How long the line saying why an action wasn't done stays; one saying
+/// what is under way (ending in `…`) stays while it is.
+const WHY_LIVES: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// A repository changing this many files or more starts folded.
 pub const FOLD_FILES: usize = 200;
 
@@ -335,6 +339,8 @@ pub struct Panel {
     pub(crate) hover: Option<ReposHit>,
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
+    /// That line as first shown, and when: it goes after `WHY_LIVES`.
+    pub(crate) error_shown: std::cell::RefCell<Option<(String, SystemTime)>>,
     pub(crate) sheet: Option<Sheet>,
     /// Where the selected line was among the tree's lines: what is
     /// selected once it is gone.
@@ -3500,6 +3506,8 @@ impl Panel {
     /// back (a force push, an abort, an undo, a stash dropped) is asked
     /// about on a sheet first.
     fn act(&mut self, button: ReposButton, ctx: &Ctx) -> Option<Outcome> {
+        // Said again, the line why shows anew.
+        self.error_shown.replace(None);
         if self.sheet.is_some() {
             return self.sheet_press(button, ctx);
         }
@@ -3724,6 +3732,7 @@ impl Panel {
             self.focus = Focus::Detail;
         }
         if let Some(error) = signals.error {
+            self.error_shown.replace(None);
             self.error = error;
         }
         let Some(moved) = signals.moved else {
@@ -5122,7 +5131,7 @@ impl Panel {
             } else {
                 "Commit message".into()
             },
-            error: self.error.clone(),
+            error: self.why(ctx.now),
             result,
             hints: self.hints(ctx),
             detail: self.detail_view(ctx),
@@ -5133,6 +5142,26 @@ impl Panel {
             grouping: self.grouping,
             diff_only: false,
         }
+    }
+
+    /// The line saying why the last action wasn't done, at `now`: gone
+    /// `WHY_LIVES` after it was first shown, but one saying what is under
+    /// way.
+    fn why(&self, now: SystemTime) -> Option<String> {
+        let mut shown = self.error_shown.borrow_mut();
+        let Some(error) = self.error.as_ref() else {
+            *shown = None;
+            return None;
+        };
+        let since = match &*shown {
+            Some((text, at)) if text == error => *at,
+            _ => {
+                *shown = Some((error.clone(), now));
+                now
+            }
+        };
+        let old = now.duration_since(since).is_ok_and(|d| d >= WHY_LIVES);
+        (!old || error.ends_with('…')).then(|| error.clone())
     }
 
     /// The log or stashes the selection wants read, when not read yet (or
@@ -6305,6 +6334,29 @@ mod tests {
         assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
         let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
         assert_eq!(sheet.title, "Drop stash@{1} in 1 repository?");
+    }
+
+    #[test]
+    fn why_an_action_wasnt_done_goes_after_a_while() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "herdr");
+        press(&mut panel, alt(), Keysym::s, &ctx);
+        let said = Some("Nothing to stash in herdr".to_owned());
+        assert_eq!(panel.view("p", &ctx).error, said);
+        let later = |s: u64| super::Ctx {
+            now: ctx.now + Duration::from_secs(s),
+            ..ctx
+        };
+        assert_eq!(panel.view("p", &later(7)).error, said);
+        assert_eq!(panel.view("p", &later(9)).error, None);
+        // Asked again, it says so again.
+        press(&mut panel, alt(), Keysym::s, &later(9));
+        assert_eq!(panel.view("p", &later(10)).error, said);
+        // What is under way stays.
+        panel.error = Some("Checking merge…".into());
+        assert!(panel.view("p", &later(100)).error.is_some());
     }
 
     #[test]
