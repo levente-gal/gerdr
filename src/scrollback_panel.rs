@@ -127,6 +127,34 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Read the viewer's pane again, for what it printed since the viewer
+    /// opened (see `Scrollback::reload`).
+    pub fn reload_scrollback(&mut self) {
+        let Some(pane_id) = self.scrollback.as_ref().map(|v| v.pane_id.clone()) else {
+            return;
+        };
+        let read = match self.herdr.as_mut() {
+            Some(herdr) => herdr.pane_scrollback(&pane_id),
+            None => Err("no herdr session".into()),
+        };
+        let text = match read {
+            Ok((text, _)) => text,
+            Err(err) => {
+                tracing::warn!("scrollback of {pane_id}: {err}");
+                return self.show_error(format!("Couldn't read the pane's output again: {err}"));
+            }
+        };
+        let Some((_, fit)) = self.scrollback_place() else {
+            return;
+        };
+        if let Some(viewer) = self.scrollback.as_mut() {
+            viewer.reload(&text, fit);
+            let n = viewer.line_count();
+            let s = if n == 1 { "" } else { "s" };
+            self.show_success(format!("Snapshot read again: {n} line{s}"));
+        }
+    }
+
     /// Close the viewer.
     pub fn close_scrollback(&mut self) {
         self.scrollback = None;
@@ -185,7 +213,7 @@ impl Gerdr {
         };
         Some(ScrollbackView {
             panel,
-            title: format!("Scrollback · {}", viewer.label),
+            title: format!("Scrollback snapshot · {}", viewer.label),
             note,
             rows,
             first,
@@ -240,6 +268,7 @@ impl Gerdr {
                     self.close_scrollback();
                 }
             }
+            Outcome::Reload => self.reload_scrollback(),
             Outcome::NothingSelected => {
                 self.show_notice(
                     "Nothing selected: drag over the text, or press V and move the caret".into(),

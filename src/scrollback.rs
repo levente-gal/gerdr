@@ -5,6 +5,9 @@
 //! its own, so a selection goes on while it does: dragged past an edge,
 //! or with the wheel turned while the button is held.
 //!
+//! It is a snapshot: what the pane had as it opened, until Ctrl+R reads
+//! it again.
+//!
 //! Lines are wrapped at the viewer's width (herdr joins those it wrapped),
 //! and a place in them is a character of a line (see `Spot`).
 //!
@@ -147,6 +150,8 @@ pub enum Outcome {
     },
     /// Copying, with nothing selected.
     NothingSelected,
+    /// Read the pane's output again.
+    Reload,
 }
 
 /// The viewer as it stands.
@@ -189,18 +194,11 @@ impl Scrollback {
     /// The viewer over gerdr pane `pane` (herdr's `pane_id`), showing
     /// `text`, the pane's view `from_bottom` rows up from its bottom.
     pub fn new(pane: u32, pane_id: String, label: String, text: &str, from_bottom: u64) -> Self {
-        let mut lines: Vec<String> = text
-            .split('\n')
-            .map(|line| line.trim_end_matches('\r').to_owned())
-            .collect();
-        while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.pop();
-        }
         Self {
             pane,
             pane_id,
             label,
-            lines,
+            lines: split(text),
             rows: Vec::new(),
             cols: 0,
             scroll: Scroll::default(),
@@ -215,6 +213,41 @@ impl Scrollback {
             visual: None,
             clicks: None,
         }
+    }
+
+    /// Show `text`, the pane's output read again, in place of what it
+    /// showed, the list as `fit` lays it out: at the bottom it stays
+    /// there, for what came since, else the line at the top stays there.
+    /// The caret stays on its line as far as there is one, the selection
+    /// goes, and the search finds again.
+    pub fn reload(&mut self, text: &str, fit: Fit) {
+        let max = fit.bounds(self.rows.len()).max;
+        let bottom = self.scroll.pos() >= max - 0.5;
+        let top = self.rows.get(self.scroll.first()).map_or(0, |r| r.line);
+        self.lines = split(text);
+        self.rows = wrap(&self.lines, self.cols.max(1));
+        let last = self.lines.len() - 1;
+        if bottom {
+            self.from_bottom = Some(0);
+        } else {
+            let row = self.row_of(Spot {
+                line: top.min(last),
+                ch: 0,
+            });
+            self.scroll.jump(row as f64);
+        }
+        let line = self.caret.line.min(last);
+        self.caret = Spot {
+            line,
+            ch: self.caret.ch.min(self.last_ch(line)),
+        };
+        self.want = None;
+        self.selection = None;
+        self.visual = None;
+        self.dragging = false;
+        self.edge_at = None;
+        self.find_hits();
+        self.fit(fit);
     }
 
     /// Lay the list out for `fit`: wrapped again for another width, the
@@ -635,6 +668,7 @@ impl Scrollback {
             }
             Keysym::Escape | Keysym::q if !mods.ctrl => return Some(Outcome::Close),
             Keysym::Return | Keysym::KP_Enter => return Some(copy(true)),
+            Keysym::r | Keysym::R if ctrl => return Some(Outcome::Reload),
             Keysym::c if mods.ctrl => return Some(copy(false)),
             Keysym::y if !mods.ctrl => {
                 let copied = copy(false);
@@ -1152,6 +1186,19 @@ impl Scrollback {
     }
 }
 
+/// The lines of `text` as herdr gives it, without the blank ones at its
+/// end (the rows under the prompt) but one.
+fn split(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_owned())
+        .collect();
+    while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
 /// Characters `from` up to `to` of `line`.
 fn chars(line: &str, from: usize, to: usize) -> String {
     line.chars()
@@ -1367,6 +1414,41 @@ mod tests {
             s.key(&none, Keysym::q, Keysym::q, now, f),
             Some(Outcome::Close)
         );
+    }
+
+    #[test]
+    fn ctrl_r_reads_again_at_the_bottom_or_where_it_stood() {
+        let text = |n: usize| (0..n).map(|i| format!("line {i}\n")).collect::<String>();
+        let f = fit(80, 10);
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let mut s = viewer(&text(30), 80, 10);
+        assert_eq!(
+            s.key(&ctrl, Keysym::r, Keysym::r, now, f),
+            Some(Outcome::Reload)
+        );
+        // At the bottom, it shows what came since.
+        assert_eq!(s.first(), 20);
+        s.select_all();
+        s.reload(&text(40), f);
+        assert_eq!((s.line_count(), s.first()), (40, 30));
+        assert!(!s.has_selection());
+        // Up the list, the line at the top stays there.
+        s.scroll_to(5.0, f);
+        s.reload(&text(50), f);
+        assert_eq!((s.line_count(), s.first()), (50, 5));
+        // The search finds in what is read.
+        type_in(&mut s, "/", f);
+        type_in(&mut s, "line 5", f);
+        assert_eq!(count(&s), "1 of 1");
+        s.reload(&text(60), f);
+        assert_eq!(count(&s), "11 found");
+        // Fewer lines than it stood at: it stands at the bottom.
+        s.reload(&text(3), f);
+        assert_eq!((s.line_count(), s.first()), (3, 0));
     }
 
     /// Type `text` into what has the keyboard.
