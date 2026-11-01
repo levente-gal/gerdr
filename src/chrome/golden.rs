@@ -379,6 +379,7 @@ fn welcome() -> WelcomeView {
         note: Some("herdr isn't installed".into()),
         in_app: true,
         quit_keys: Some("Ctrl+B q".into()),
+        scroll: None,
     }
 }
 
