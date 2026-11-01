@@ -142,6 +142,7 @@ impl InboxItem {
             Detail::Ci { .. } => I::Failed,
             Detail::Issue { .. } => I::Ticket,
             Detail::Todo { .. } => I::Todo,
+            Detail::Unread { .. } => I::Failed,
         }
     }
 }
@@ -162,6 +163,9 @@ pub enum Target {
     Link(String),
     /// Edit the todo (its workspace, if linked, is switched to).
     Todo(TodoId),
+    /// Read the issues again, the panel left open: an item saying they
+    /// couldn't be.
+    Refresh,
 }
 
 /// What can be done to an item.
@@ -281,6 +285,11 @@ pub enum Detail {
         /// Its workspace's name, if linked.
         workspace: Option<String>,
         created: u64,
+    },
+    /// What couldn't be read, in place of what would be listed.
+    Unread {
+        /// Why, as the source said it.
+        why: String,
     },
 }
 
@@ -632,6 +641,10 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             field("Written", crate::projects::ago(now, *created));
             block_title = Some("Todo".to_owned());
             block = text.lines().map(str::to_owned).collect();
+        }
+        Detail::Unread { why } => {
+            field("Why", why.clone());
+            field("Again", "Enter or Ctrl+R reads it again".to_owned());
         }
     }
     InboxDetailView {

@@ -93,6 +93,8 @@ impl Gerdr {
         self.ci_asked = roots.clone();
         if roots.is_empty() {
             self.ci.clear();
+            // Nothing to read: nothing failed to be.
+            crate::problems::clear(ci::CI_PROBLEMS);
             return;
         }
         self.ci_pending = true;

@@ -151,7 +151,7 @@ pub fn fetch(root: &Path, watched: &Watched) -> Result<RepoCi, String> {
     let (host, slug) = crate::git::web_url(root)
         .as_deref()
         .and_then(github_repository)
-        .ok_or_else(|| "not a GitHub repository".to_owned())?;
+        .ok_or_else(|| NOT_GITHUB.to_owned())?;
     let repo = if host == "github.com" {
         slug.clone()
     } else {
@@ -277,8 +277,32 @@ fn open_pulls(root: &Path, host: &str, slug: &str) -> Result<usize, String> {
     Ok(reply.data.repository.pull_requests.total_count)
 }
 
+/// Where the problems reading the CI come from, for `problems::report`.
+pub const CI_PROBLEMS: &str = "ci:github";
+
+/// What `read` of the CI came to, as problems: a repository GitHub hosts
+/// whose CI couldn't be read, by its folder.
+fn ci_problems(read: &[(PathBuf, Result<RepoCi, String>)]) -> Vec<String> {
+    read.iter()
+        .filter_map(|(root, ci)| match ci {
+            Err(err) if err != NOT_GITHUB => {
+                let name = root.file_name().unwrap_or(root.as_os_str());
+                Some(format!(
+                    "Couldn't read the CI of {}: {err}",
+                    name.to_string_lossy()
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Why `fetch` reads nothing of a repository GitHub doesn't host.
+const NOT_GITHUB: &str = "not a GitHub repository";
+
 /// `fetch` each of `roots` off the event loop, side by side, and `send`
-/// what came of each.
+/// what came of each. What couldn't be read goes to `problems::report`
+/// (see `CI_PROBLEMS`); a round read whole lets go of it.
 pub fn read_all(
     roots: Vec<PathBuf>,
     watched: Watched,
@@ -299,8 +323,9 @@ pub fn read_all(
                     })
                 })
                 .collect();
-            reads.into_iter().map(joined).collect()
+            reads.into_iter().map(joined).collect::<Vec<_>>()
         });
+        crate::issues::set_problems(CI_PROBLEMS, ci_problems(&read));
         send(read)
     });
 }

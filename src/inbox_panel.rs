@@ -539,6 +539,10 @@ impl Gerdr {
         if matches!(item.target, Target::Todo(_)) && item.workspace.is_none() {
             return;
         }
+        // What couldn't be read is read again; the panel stays.
+        if item.target == Target::Refresh {
+            return self.apply_inbox(Outcome::Refresh);
+        }
         self.close_inbox();
         match item.target {
             Target::Agent(key) => self.focus_agent(&key),
@@ -551,6 +555,7 @@ impl Gerdr {
                     self.switch_workspace(w);
                 }
             }
+            Target::Refresh => {}
         }
     }
 
@@ -757,6 +762,15 @@ impl Gerdr {
         if repos.is_empty() && tickets.is_empty() && linear.is_none() {
             self.inbox.issues.last = IssuesRead::default();
             self.inbox.issues.at = Some(Instant::now());
+            // Nothing to read: nothing failed to be.
+            for source in [
+                issues::GITHUB_PROBLEMS,
+                issues::TICKET_PROBLEMS,
+                issues::BOARD_PROBLEMS,
+                issues::LINEAR_PROBLEMS,
+            ] {
+                crate::problems::clear(source);
+            }
             return;
         }
         self.inbox.issues.pending = true;
