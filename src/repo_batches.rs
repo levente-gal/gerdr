@@ -193,6 +193,10 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("pushing…");
             chain(log, git_ops::push(dir, task.remote.as_deref(), false))
         }
+        BatchKind::Amend { msg, .. } => {
+            step("amending…");
+            git_ops::amend_paths(dir, &task.job.files, msg.as_deref())
+        }
         BatchKind::Push { force } => {
             step("pushing…");
             git_ops::push(dir, task.remote.as_deref(), *force)
@@ -1856,7 +1860,10 @@ impl Gerdr {
             };
             let undo = match (&kind, &previous) {
                 (BatchKind::Undo, Some(undone)) => {
-                    let soft = matches!(undone.kind, BatchKind::Commit { .. });
+                    let soft = matches!(
+                        undone.kind,
+                        BatchKind::Commit { .. } | BatchKind::Amend { .. }
+                    );
                     undone
                         .run(&job.root)
                         .and_then(|r| Some((r.before.clone()?, r.after.clone()?, soft)))
@@ -2187,7 +2194,7 @@ impl Gerdr {
         let (summary, tone) = batch.summary();
         let batch_started = batch.started;
         match batch.kind {
-            BatchKind::Commit { .. } if done => {
+            BatchKind::Commit { .. } | BatchKind::Amend { .. } if done => {
                 if let Some(panel) = self.repos.panel.as_mut() {
                     panel.clear_field();
                 }

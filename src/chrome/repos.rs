@@ -636,6 +636,9 @@ pub struct SheetView {
 pub enum ReposButton {
     Commit,
     CommitPush,
+    /// The last commit amended with the checked files, and the message if
+    /// one is typed.
+    Amend,
     Push,
     ForcePush,
     Fetch,
@@ -707,6 +710,7 @@ impl ReposButton {
         match self {
             ReposButton::Commit => "Commit",
             ReposButton::CommitPush => "Commit and push",
+            ReposButton::Amend => "Amend last commit",
             ReposButton::Push => "Push",
             ReposButton::ForcePush => "Force push",
             ReposButton::Fetch => "Fetch",

@@ -566,6 +566,13 @@ pub enum BatchKind {
         msg: String,
         push: bool,
     },
+    /// Amend the last commit with the job's files (none to only reword
+    /// it), its message replaced by `msg` if there is one; `pushed` when
+    /// the commit is on an upstream already, so it is asked first.
+    Amend {
+        msg: Option<String>,
+        pushed: bool,
+    },
     Push {
         force: bool,
     },
@@ -602,6 +609,7 @@ impl BatchKind {
             BatchKind::DeleteBranch { .. } => "Delete branch",
             BatchKind::Commit { push: false, .. } => "Commit",
             BatchKind::Commit { push: true, .. } => "Commit and push",
+            BatchKind::Amend { .. } => "Amend last commit",
             BatchKind::Push { force: false } => "Push",
             BatchKind::Push { force: true } => "Force push",
             BatchKind::Fetch => "Fetch",
@@ -635,6 +643,7 @@ impl BatchKind {
             BatchKind::Branch(_) | BatchKind::Switch(_) => "switched",
             BatchKind::DeleteBranch { .. } => "deleted",
             BatchKind::Commit { push: false, .. } => "committed",
+            BatchKind::Amend { .. } => "amended",
             BatchKind::Commit { push: true, .. } | BatchKind::Push { force: false } => "pushed",
             BatchKind::Push { force: true } => "force pushed",
             BatchKind::Fetch => "fetched",
@@ -660,11 +669,13 @@ impl BatchKind {
     }
 
     /// Whether it can't be taken back, so is asked about first: a force
-    /// push, an abort, an undo, a branch or a stash dropped.
+    /// push, an abort, an undo, a branch or a stash dropped, a pushed
+    /// commit amended.
     pub fn confirmed_first(&self) -> bool {
         matches!(
             self,
             BatchKind::Push { force: true }
+                | BatchKind::Amend { pushed: true, .. }
                 | BatchKind::Abort
                 | BatchKind::Undo
                 | BatchKind::DeleteBranch { .. }
@@ -698,6 +709,7 @@ impl BatchKind {
             BatchKind::Branch(_)
                 | BatchKind::Switch(_)
                 | BatchKind::Commit { push: false, .. }
+                | BatchKind::Amend { .. }
                 | BatchKind::Pull(_)
                 | BatchKind::Integrate { .. }
         )
@@ -1365,6 +1377,12 @@ const ACTIONS: &[Action] = {
             what: "commit them, then push",
         },
         Action {
+            button: B::Amend,
+            chord: alt(&[Keysym::a, Keysym::A]),
+            key: "Alt+A",
+            what: "amend the last commit with the checked files; a message typed replaces its own",
+        },
+        Action {
             button: B::Push,
             chord: ctrl(&[Keysym::p, Keysym::P]),
             key: "Ctrl+P",
@@ -1682,6 +1700,7 @@ fn menu_integrate(button: ReposButton) -> Option<Integrate> {
 fn confirm_button(kind: &BatchKind) -> ReposButton {
     match kind {
         BatchKind::Push { force: true } => ReposButton::ForcePush,
+        BatchKind::Amend { .. } => ReposButton::Amend,
         BatchKind::Abort => ReposButton::Abort,
         BatchKind::Undo => ReposButton::Undo,
         BatchKind::DeleteBranch { .. } => ReposButton::DeleteBranch,
@@ -3233,6 +3252,41 @@ impl Panel {
                     jobs,
                 })
             }
+            B::Amend => {
+                let ks = self.targets(items);
+                if ks.is_empty() {
+                    return Err(Why::other("Select a repository first"));
+                }
+                let mut jobs = Vec::new();
+                let mut pushed = false;
+                for k in ks {
+                    let item = &items[k];
+                    if item.status.head.is_none() {
+                        return Err(Why::other(format!("{} has no commit to amend", item.label)));
+                    }
+                    // On its upstream already: nothing ahead of it.
+                    pushed |= item.status.upstream.is_some() && item.status.ahead == 0;
+                    let mut files = Vec::new();
+                    for change in &item.status.changes {
+                        if self.file_checked(item, change) {
+                            files.push(change.path.clone());
+                            files.extend(change.orig.clone());
+                        }
+                    }
+                    let root = item.root.clone();
+                    jobs.push(Job { root, files });
+                }
+                let msg = Some(self.field.trim().to_owned()).filter(|m| !m.is_empty());
+                if msg.is_none() && jobs.iter().all(|j| j.files.is_empty()) {
+                    return Err(Why::Field(
+                        "Check the files to add, or type the new message first".into(),
+                    ));
+                }
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Amend { msg, pushed },
+                    jobs,
+                })
+            }
             B::Push => run(BatchKind::Push { force: false }, targets),
             B::ForcePush => run(BatchKind::Push { force: true }, targets),
             B::Fetch => {
@@ -3468,6 +3522,14 @@ impl Panel {
                         format!("delete the local branch {name}")
                     }
                     BatchKind::StashDrop(n) => format!("drop stash@{{{n}}} for good"),
+                    BatchKind::Amend { .. } => match status {
+                        Some(s) if s.upstream.is_some() && s.ahead == 0 => {
+                            "rewrite its last commit, which is pushed: \
+                             putting it up again takes a force push"
+                                .into()
+                        }
+                        _ => "rewrite its last commit".into(),
+                    },
                     BatchKind::Discard => {
                         let n = job.files.len();
                         let files = if n == 1 { "1 file" } else { "files" };
@@ -4718,7 +4780,7 @@ impl Panel {
         if selected.is_some_and(in_conflict) {
             buttons.extend([B::OpenInZed, B::MarkResolved, B::Continue, B::Abort]);
         } else {
-            buttons.extend([B::Commit, B::CommitPush, B::Push]);
+            buttons.extend([B::Commit, B::CommitPush, B::Push, B::Amend]);
             // After a rebase the branch and its upstream both moved on.
             if selected.is_some_and(|i| i.status.ahead > 0 && i.status.behind > 0) {
                 buttons.push(B::ForcePush);
@@ -5854,6 +5916,59 @@ mod tests {
         assert_eq!(
             press(&mut panel, ctrl_shift(), Keysym::Return, &ctx),
             commit(true)
+        );
+    }
+
+    #[test]
+    fn amend_takes_the_checked_files_and_asks_first_when_pushed() {
+        let mut items = items();
+        // gerdr's last commit isn't up yet.
+        items[0].status.ahead = 1;
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "gerdr");
+        // Nothing to add and no message: it asks for one.
+        assert_eq!(press(&mut panel, alt(), Keysym::a, &ctx), None);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Check the files to add, or type the new message first")
+        );
+        let mut panel = Panel::new(&items);
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::a, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Amend {
+                    msg: None,
+                    pushed: false,
+                },
+                jobs: vec![job("gerdr", &["src/git.rs"])],
+            })
+        );
+        // zed's is on its upstream: rewording it is asked about first.
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "zed");
+        panel.field.set("Reworded");
+        let kind = BatchKind::Amend {
+            msg: Some("Reworded".into()),
+            pushed: true,
+        };
+        assert_eq!(press(&mut panel, alt(), Keysym::a, &ctx), None);
+        assert!(matches!(&panel.sheet, Some(Sheet::Confirm { kind: k, .. }) if *k == kind));
+        assert_eq!(
+            panel.press(ReposButton::Amend, &ctx),
+            Some(Outcome::Batch {
+                kind,
+                jobs: vec![job("zed", &[])],
+            })
+        );
+        assert!(
+            BatchKind::Amend {
+                msg: None,
+                pushed: false
+            }
+            .undoable()
         );
     }
 
