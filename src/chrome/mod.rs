@@ -271,8 +271,10 @@ impl Chrome {
         scale: f64,
         pos: Point<f64, Logical>,
     ) -> Option<HelpHit> {
-        let width = area.size.w - 2 * HELP_MARGIN;
-        let layout = self.painter.help_layout(help, width, pinned, scale);
+        let max = (area.size.w - 2 * HELP_MARGIN, area.size.h - 2 * HELP_MARGIN);
+        let layout = self
+            .painter
+            .help_layout_within(help, max.into(), pinned, scale);
         let panel = help_rect(&layout, area);
         if !panel.to_f64().contains(pos) {
             return None;
@@ -486,8 +488,8 @@ impl Chrome {
                 Kind::Help => {
                     let pinned = view.help_pinned;
                     let help = view.prefix.as_deref().map(|help| {
-                        let layout =
-                            painter.help_layout(help, area.size.w - 2 * HELP_MARGIN, pinned, scale);
+                        let max = (area.size.w - 2 * HELP_MARGIN, area.size.h - 2 * HELP_MARGIN);
+                        let layout = painter.help_layout_within(help, max.into(), pinned, scale);
                         let (loc, size) = shadowed(help_rect(&layout, area));
                         ((layout, view.help_hover, theme, scale), loc, size)
                     });
@@ -892,22 +894,23 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     };
     let strip = &view.tab_strip;
     let strip_size = (strip_w, tab_strip_height(view.density)).into();
-    let layout = tab_layout(
-        strip.tabs.len(),
-        strip_size,
-        strip.prefix,
-        strip.overflow(),
-        strip.watch.is_some(),
-        strip.inbox.is_some(),
+    let layout = strip.layout(strip_size);
+    rects.extend(
+        layout
+            .tabs
+            .iter()
+            .chain(&layout.closes)
+            .filter(|r| r.size.w > 0)
+            .map(|r| shift(*r)),
     );
-    rects.extend(layout.tabs.iter().chain(&layout.closes).map(|r| shift(*r)));
-    if !layout.tabs.is_empty() {
+    if layout.plus.size.w > 0 {
         rects.push(shift(layout.plus));
     }
     rects.extend(
         layout
-            .overflow
+            .more
             .into_iter()
+            .chain(layout.overflow)
             .chain(layout.prefix)
             .chain(layout.watch)
             .chain(layout.inbox)
