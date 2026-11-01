@@ -626,8 +626,9 @@ impl Scrollback {
         let ctrl = mods.ctrl && !(mods.alt || mods.logo);
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         match sym {
-            // Out of `v` first, the selection gone.
-            Keysym::Escape if plain && self.visual.is_some() => {
+            // Out of `v` first, the selection gone; a selection made
+            // with the pointer goes before the viewer does too.
+            Keysym::Escape if plain && (self.visual.is_some() || self.has_selection()) => {
                 self.visual = None;
                 self.selection = None;
                 return None;
@@ -745,14 +746,17 @@ impl Scrollback {
     /// Whether the search took a key: `/` or Ctrl+F open it (or give it
     /// the keyboard back), Enter or F3 go to the next place (with Shift
     /// the one before; `n` and `N` while the list has the keyboard), Esc
-    /// closes it, Tab gives the keyboard to the list. While it has the
-    /// keyboard its field takes every other key but those that scroll
-    /// the list and, when it has nothing for them, those with Ctrl.
+    /// clears what is typed and then closes it (with the list's selection
+    /// gone first), Tab and Shift+Tab move the keyboard between it and
+    /// the list. While it has the keyboard its field takes every other
+    /// key but those that scroll the list and, when it has nothing for
+    /// them, those with Ctrl.
     fn find_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, fit: Fit) -> bool {
         let others = mods.ctrl || mods.alt || mods.logo;
         let plain = !(others || mods.shift);
         let only_shift = mods.shift && !others;
         let focused = self.find_focused();
+        let selected = self.has_selection();
         let opens = match sym {
             Keysym::f | Keysym::F => mods.ctrl && !(mods.alt || mods.logo),
             // Typed into the field, it is the field's.
@@ -777,15 +781,26 @@ impl Scrollback {
             return true;
         }
         match sym {
+            Keysym::Escape if plain && focused && !find.field.line().text.is_empty() => {
+                find.field.set("");
+                find.whole = false;
+                self.find_hits();
+                return true;
+            }
+            // The selection goes first (see `key`).
+            Keysym::Escape if plain && !focused && selected => return false,
             Keysym::Escape if plain => {
                 self.close_find();
                 return true;
             }
-            _ if !focused => return false,
-            Keysym::Tab if plain => {
-                find.focused = false;
+            Keysym::Tab | Keysym::ISO_Left_Tab if plain || only_shift => {
+                find.focused = !focused;
+                if find.focused {
+                    find.field.select_all();
+                }
                 return true;
             }
+            _ if !focused => return false,
             _ => {}
         }
         match find.field.key(mods, sym, typed) {
@@ -809,6 +824,18 @@ impl Scrollback {
                 !(scrolls || mods.ctrl)
             }
         }
+    }
+
+    /// Whether something is selected, with the pointer, the keys or `v`.
+    pub fn has_selection(&self) -> bool {
+        self.selected_lines().is_some()
+    }
+
+    /// Whether what is typed in the search is empty (or it is closed).
+    pub fn find_empty(&self) -> bool {
+        self.find
+            .as_ref()
+            .is_none_or(|f| f.field.line().text.is_empty())
     }
 
     /// Whether the search has the keyboard.
@@ -1327,8 +1354,17 @@ mod tests {
             s.key(&none, Keysym::Return, Keysym::Return, now, f),
             Some(Outcome::Copy { close: true, .. })
         ));
+        // Esc lets go of the selection first, then closes; so does `q`
+        // at once.
+        assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
+        assert!(!s.has_selection());
         assert_eq!(
             s.key(&none, Keysym::Escape, Keysym::Escape, now, f),
+            Some(Outcome::Close)
+        );
+        s.key(&ctrl, Keysym::a, Keysym::a, now, f);
+        assert_eq!(
+            s.key(&none, Keysym::q, Keysym::q, now, f),
             Some(Outcome::Close)
         );
     }
@@ -1391,9 +1427,15 @@ mod tests {
         s.key(&ctrl, Keysym::a, Keysym::a, now, f);
         type_in(&mut s, "error", f);
         assert_eq!(count(&s), "6 of 6");
+        // Esc clears what is typed, then closes the search.
+        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
+        assert!(s.find_focused() && s.find_empty());
+        assert_eq!(count(&s), "");
+        assert!(s.row_found(53).is_empty());
+        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
+        assert!(s.find_bar().is_none());
         // With none in view (five rows of it), the nearest above.
         let f = fit(80, 5);
-        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
         s.scroll_to(25.0, f);
         type_in(&mut s, "/", f);
         s.key(&ctrl, Keysym::a, Keysym::a, now, f);
@@ -1408,6 +1450,18 @@ mod tests {
         assert_eq!(s.first(), 32);
         s.key(&shift, Keysym::N, Keysym::N, now, f);
         assert_eq!(count(&s), "3 of 6");
+        // Shift+Tab (or Tab) gives them back to the search, and again
+        // to the list.
+        let left_tab = Keysym::ISO_Left_Tab;
+        s.key(&shift, left_tab, left_tab, now, f);
+        assert!(s.find_focused());
+        s.key(&none, Keysym::Tab, Keysym::Tab, now, f);
+        assert!(!s.find_focused());
+        // A selection goes before the search does.
+        s.key(&shift, Keysym::Right, Keysym::Right, now, f);
+        assert!(s.has_selection());
+        assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
+        assert!(!s.has_selection() && s.find_bar().is_some());
         // Esc closes the search first, then the viewer.
         assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
         assert!(s.find_bar().is_none());
