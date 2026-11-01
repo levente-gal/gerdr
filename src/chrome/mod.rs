@@ -109,7 +109,7 @@ pub struct ChromeView {
     /// When the view was taken, for what moves with time.
     pub now: Instant,
     /// Where the pointer is (window coordinates): the toasts' buttons and
-    /// the placeholders' Retry and Close light up under it.
+    /// "×"s and the placeholders' Retry and Close light up under it.
     pub pointer: Point<f64, Logical>,
     /// The help panel is pinned open, rather than up for the prefix: it
     /// then carries a title and an Esc hint.
@@ -259,8 +259,6 @@ impl Chrome {
         }
     }
 
-    /// How wide a toast's button labelled `label` is (see
-    /// `Painter::toast_button_width`).
     /// What `pos` is over in the help panel listing `help` in the app
     /// `area`, `pinned` open or up for the prefix; `None` off it.
     pub fn help_hit(
@@ -286,6 +284,8 @@ impl Chrome {
         Some(hit.map_or(HelpHit::Panel, |(hit, _)| hit))
     }
 
+    /// How wide a toast's button labelled `label` is (see
+    /// `Painter::toast_button_width`).
     pub fn toast_button_width(&self, label: &str) -> i32 {
         self.painter.toast_button_width(label)
     }
@@ -440,15 +440,13 @@ impl Chrome {
                         }
                         let shown = i.filter(|&i| !view.toasts[i].leaving).map(|i| {
                             let layout = &layouts[i];
-                            let hovered = layout
-                                .button
-                                .is_some_and(|button| button.to_f64().contains(pointer));
+                            let lit = layout.spot_at(pointer);
                             let (loc, size) = shadowed(layout.panel);
                             (
                                 (
                                     view.toasts[i].clone(),
                                     layout.panel.size.w,
-                                    hovered,
+                                    lit,
                                     theme,
                                     scale,
                                 ),
@@ -456,8 +454,8 @@ impl Chrome {
                                 size,
                             )
                         });
-                        parts.extend(overlay.part(shown, now, true, |(toast, w, hovered, ..)| {
-                            painter.toast(toast, *w, *hovered, scale, theme.palette())
+                        parts.extend(overlay.part(shown, now, true, |(toast, w, lit, ..)| {
+                            painter.toast_lit(toast, *w, *lit, scale, theme.palette())
                         }));
                     }
                 }
@@ -735,9 +733,9 @@ struct Overlay<K> {
     more: Vec<Part>,
 }
 
-/// A toast's overlay: the toast, its width, whether its button is lit,
-/// the theme and the scale.
-type ToastOverlay = Overlay<(ToastView, i32, bool, Theme, f64)>;
+/// A toast's overlay: the toast, its width, what of it is lit (its
+/// button or its "×"), the theme and the scale.
+type ToastOverlay = Overlay<(ToastView, i32, Option<ToastSpot>, Theme, f64)>;
 
 /// A popup's inputs while it is there: its cache key, where it goes and
 /// the logical size it covers.

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::toast::Level;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-use smithay::utils::{Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A toast: this wide at most, this high with one line of text (with two,
 /// `TOAST_TALL`), this far in from the app area's bottom right corner,
@@ -36,6 +36,8 @@ const TOAST_BUTTON_GAP: i32 = 12;
 const TOAST_CLOSE: i32 = 20;
 const TOAST_CLOSE_INSET: i32 = 8;
 const TOAST_CLOSE_GAP: i32 = 6;
+/// The corners of the "×"'s highlight under the pointer.
+const TOAST_CLOSE_RADIUS: f32 = 4.0;
 const TOAST_RADIUS: f32 = 8.0;
 
 /// What a toast shows: which one it is (to fade each in and out on its
@@ -59,6 +61,30 @@ pub struct ToastLayout {
     pub panel: Rect,
     pub button: Option<Rect>,
     pub close: Rect,
+}
+
+/// What of a toast lights up under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastSpot {
+    /// Its button, which does what it says.
+    Button,
+    /// Its "×", which dismisses it.
+    Close,
+}
+
+impl ToastLayout {
+    /// What of the toast is at `pos` (window coordinates): its button, its
+    /// "×", or neither.
+    pub fn spot_at(&self, pos: Point<f64, Logical>) -> Option<ToastSpot> {
+        let on = |rect: Rect| rect.to_f64().contains(pos);
+        if on(self.close) {
+            Some(ToastSpot::Close)
+        } else if self.button.is_some_and(on) {
+            Some(ToastSpot::Button)
+        } else {
+            None
+        }
+    }
 }
 
 /// Where `toasts` (oldest first) stack in `area`: the newest at the
@@ -191,15 +217,29 @@ impl Painter {
         (first.trim_end(), rest.trim_start())
     }
 
-    /// A toast `w` wide, inside a margin of `SHADOW` holding its drop
-    /// shadow: its level's bar at the left, its text on one line or two
-    /// (the second cut with "…"), its button, lit when `hovered`, and the
-    /// "×" dismissing it.
+    /// `toast_lit`, with only its button lit, when `hovered`.
+    #[cfg(test)]
     pub(super) fn toast(
         &self,
         view: &ToastView,
         w: i32,
         hovered: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let lit = hovered.then_some(ToastSpot::Button);
+        self.toast_lit(view, w, lit, scale, p)
+    }
+
+    /// A toast `w` wide, inside a margin of `SHADOW` holding its drop
+    /// shadow: its level's bar at the left, its text on one line or two
+    /// (the second cut with "…"), its button and the "×" dismissing it,
+    /// the one of them `lit` lit.
+    pub(super) fn toast_lit(
+        &self,
+        view: &ToastView,
+        w: i32,
+        lit: Option<ToastSpot>,
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
@@ -221,11 +261,18 @@ impl Painter {
             level_color(view.level, p),
         );
         let close = close_rect(panel);
-        icon_sdf(&mut c, close, scale, p.muted, |x, y| cross(x, y, 0.75 * s));
+        let close_lit = lit == Some(ToastSpot::Close);
+        if close_lit {
+            let (x, y, w, h) = rect_px(close, scale);
+            c.rounded(x, y, w, h, TOAST_CLOSE_RADIUS * s, p.element);
+        }
+        let ink = if close_lit { p.text } else { p.muted };
+        icon_sdf(&mut c, close, scale, ink, |x, y| cross(x, y, 0.75 * s));
         let text_x = x + inset + bar_w + TOAST_PADDING as f32 * s;
         let mut text_end = (close.loc.x - TOAST_CLOSE_GAP) as f32 * s;
         if let Some(label) = &view.action {
             let button = button_rect(panel, close, view.button_w);
+            let hovered = lit == Some(ToastSpot::Button);
             self.button(&mut c, label, button, (hovered, false), false, scale, p);
             text_end = button.loc.x as f32 * s - TOAST_BUTTON_GAP as f32 * s;
         }
@@ -262,13 +309,24 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        TOAST_GAP, TOAST_HEIGHT, TOAST_MARGIN, TOAST_TALL, TOAST_WIDTH, ToastView, toast_area,
-        toast_height, toast_layout,
+        TOAST_GAP, TOAST_HEIGHT, TOAST_MARGIN, TOAST_TALL, TOAST_WIDTH, ToastSpot, ToastView,
+        toast_area, toast_height, toast_layout,
     };
     use crate::{
         chrome::{Painter, Rect, Theme, inside},
         toast::Level,
     };
+    use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+
+    /// The bytes `buffer` holds.
+    fn pixels(buffer: &MemoryRenderBuffer) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let _ = buffer.clone().render().draw(|mem| {
+            bytes.extend_from_slice(mem);
+            Ok::<_, ()>(Vec::new())
+        });
+        bytes
+    }
 
     fn toast(id: u64, action: Option<&str>) -> ToastView {
         ToastView {
@@ -330,6 +388,31 @@ mod tests {
                 painter.toast(&long, TOAST_WIDTH, true, scale, theme.palette());
             }
         }
+    }
+
+    #[test]
+    fn the_pointer_lights_a_toasts_button_or_its_close() {
+        let area = Rect::new((0, 0).into(), (1000, 700).into());
+        let toasts = [toast(1, Some("Retry")), toast(2, None)];
+        let layouts = toast_layout(&toasts, area);
+        let centre = |r: Rect| (r.loc.x as f64 + 2.0, r.loc.y as f64 + 2.0).into();
+        let button = layouts[0].button.unwrap();
+        assert_eq!(layouts[0].spot_at(centre(button)), Some(ToastSpot::Button));
+        assert_eq!(
+            layouts[0].spot_at(centre(layouts[0].close)),
+            Some(ToastSpot::Close)
+        );
+        assert_eq!(
+            layouts[1].spot_at(centre(layouts[1].close)),
+            Some(ToastSpot::Close)
+        );
+        // Elsewhere on the toast, nothing lights up.
+        assert_eq!(layouts[1].spot_at(centre(layouts[1].panel)), None);
+        let painter = Painter::new();
+        let p = Theme::Dark.palette();
+        let plain = painter.toast_lit(&toasts[0], TOAST_WIDTH, None, 1.0, p);
+        let lit = painter.toast_lit(&toasts[0], TOAST_WIDTH, Some(ToastSpot::Close), 1.0, p);
+        assert_ne!(pixels(&plain), pixels(&lit));
     }
 
     #[test]

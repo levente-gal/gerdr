@@ -939,6 +939,11 @@ impl Gerdr {
         } else {
             None
         };
+        // The toast under the pointer waits there; the others go on.
+        if !self.toasts.is_empty() {
+            let over = (at == Some(overlay::Overlay::Toasts)).then_some(pos);
+            self.toast_hover(over);
+        }
         // The region under the pointer lights up, with nothing open
         // over it, and may offer a tooltip. Its layout is worked
         // out once for the event.
