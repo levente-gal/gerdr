@@ -1456,7 +1456,7 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("Del", "in the branch menu, delete the branch picked"),
     ("Alt+Up / Down", "in the diff, the file before or after"),
     (
-        "c / Del",
+        "c / Del Del",
         "in the diff, comment on the lines (or edit the comment); delete it",
     ),
     (
@@ -1558,7 +1558,6 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
         B::Comment => "c",
         B::Restore => "Shift+R",
         B::SaveComment => "Enter",
-        B::DiscardComment => "Esc",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
         _ => "",
@@ -6981,7 +6980,12 @@ mod tests {
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(
             rows[5..9],
-            ["| why", "| and b", "~ Shift+Enter breaks the line", "+c"]
+            [
+                "| why",
+                "| and b",
+                "~ Shift+Enter breaks the line · Enter or Esc keeps it",
+                "+c"
+            ]
         );
         // The editor has the keys: Tab and Up don't leave it.
         press(&mut panel, none(), Keysym::Up, &ctx);
@@ -7028,13 +7032,17 @@ mod tests {
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(rows[3..9], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
 
-        // C on it edits it; Esc drops the edit, not the panel.
+        // c on it edits it; Esc keeps the edit, and doesn't close the
+        // panel.
         panel.diff.set_cursor(6, None);
         press(&mut panel, none(), Keysym::c, &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
+        type_text(&mut panel, "!", &ctx);
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.editing.is_none());
-        assert_eq!(panel.diff.review.comments[0].text, "why\nand b");
+        assert_eq!(panel.diff.review.comments[0].text, "why\nand b!");
+        panel.diff.review.comments[0].text = "why\nand b".into();
+        panel.diff.rebuild(&sections(&items));
 
         // b gone, it is listed with those whose lines are gone.
         let g = g + 1;
@@ -7057,9 +7065,15 @@ mod tests {
         };
         assert!(text.contains("`src/git.rs:1-2` (the code changed since)"));
 
-        // Delete on it deletes it.
+        // Delete on it arms it, saying so; again deletes it.
         panel.diff.review_dirty = false;
         panel.diff.set_cursor(n - 2, None);
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Press Del again to delete the comment")
+        );
+        assert!(!panel.diff.review.is_empty());
         press(&mut panel, none(), Keysym::Delete, &ctx);
         assert!(panel.diff.review.is_empty() && panel.diff.review_dirty);
         assert!(
@@ -8541,6 +8555,41 @@ mod tests {
     }
 
     #[test]
+    fn gg_g_the_braces_and_half_pages_move_the_diffs_cursor() {
+        use crate::diff_view::DiffRow;
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        panel.focus = Focus::Detail;
+        let rows = panel.diff.rows.clone();
+        let shift = mods(false, true, false);
+        // G the end, gg the top.
+        press(&mut panel, shift, Keysym::G, &ctx);
+        assert_eq!(cursor_row(&panel), Some(rows.len() - 1));
+        press(&mut panel, none(), Keysym::g, &ctx);
+        press(&mut panel, none(), Keysym::g, &ctx);
+        assert_eq!(cursor_row(&panel), Some(0));
+        // } and { the hunk (or file) after and before.
+        let heads: Vec<usize> = (0..rows.len())
+            .filter(|&r| matches!(rows[r], DiffRow::Hunk(..) | DiffRow::File(..)))
+            .collect();
+        press(&mut panel, shift, Keysym::braceright, &ctx);
+        assert_eq!(cursor_row(&panel), Some(heads[0]));
+        press(&mut panel, shift, Keysym::braceright, &ctx);
+        assert_eq!(cursor_row(&panel), Some(heads[1]));
+        press(&mut panel, shift, Keysym::braceleft, &ctx);
+        assert_eq!(cursor_row(&panel), Some(heads[0]));
+        // Ctrl+D and Ctrl+U half a page.
+        let at = cursor_row(&panel).unwrap();
+        press(&mut panel, ctrl(), Keysym::d, &ctx);
+        assert_eq!(cursor_row(&panel), Some(at + 3));
+        press(&mut panel, ctrl(), Keysym::u, &ctx);
+        assert_eq!(cursor_row(&panel), Some(at));
+    }
+
+    #[test]
     fn the_caret_goes_along_the_diffs_lines_as_vims_does() {
         let items = items();
         let ctx = ctx(&items, None);
@@ -8805,7 +8854,7 @@ mod tests {
         assert_eq!(keys(&mut panel, "Vjj"), None);
         assert_eq!(
             panel.diff.mode_title().as_deref(),
-            Some("-- VISUAL LINE -- d delete · y yank · R restore · Esc stop")
+            Some("-- VISUAL LINE -- d delete · y yank · Shift+R restore · Esc stop")
         );
         assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
         assert!(panel.diff.visual.is_none());

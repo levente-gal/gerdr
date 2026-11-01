@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(key(&mut wd, none(), Keysym::F1), None);
         let sheet = wd.sheet(ENV).expect("the keys");
         assert_eq!(sheet.lines[0].0, "Esc");
-        assert!(sheet.lines.iter().any(|(k, ..)| k == "c / Del"));
+        assert!(sheet.lines.iter().any(|(k, ..)| k == "c / Del Del"));
         key(&mut wd, none(), Keysym::Down);
         assert_eq!(wd.sheet(ENV).expect("the keys").lines[0].0, "F1");
         assert_eq!(key(&mut wd, none(), Keysym::Escape), None);
@@ -971,9 +971,14 @@ mod tests {
         key(&mut wd, Keysym::Down);
         key(&mut wd, Keysym::g);
         assert_eq!(opened(key(&mut wd, Keysym::space)).1, at(2, Some(0)));
-        // `g` and another key: nothing, and Space is its own again.
+        // `g` and another key: what `g` takes is said, and Space is its
+        // own again.
         key(&mut wd, Keysym::g);
-        assert_eq!(key(&mut wd, Keysym::k), None);
+        let said = "After g: Space opens in Zed, g goes to the top";
+        assert_eq!(
+            key(&mut wd, Keysym::k),
+            Some(Done::Diff(Outcome::Notice(said)))
+        );
         assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(4));
         assert_eq!(wd.diff.mode_title(), None);
         assert_eq!(key(&mut wd, Keysym::space), None);

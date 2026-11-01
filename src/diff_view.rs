@@ -223,6 +223,9 @@ pub struct DiffView {
     pub(crate) visual: Option<vim::Visual>,
     /// What is typed of a vim command so far.
     pending: vim::Pending,
+    /// The comment (by index into `review.comments`) a first Del armed:
+    /// the next deletes it.
+    delete_armed: Option<usize>,
     /// Where the caret goes once the diff is read again after a cut, and
     /// the keys typed meanwhile, held till then.
     caret_after: Option<vim::CaretAfter>,
@@ -965,7 +968,8 @@ impl DiffView {
     }
 
     /// Delete the comment the cursor is on, the cursor going to the row
-    /// over it.
+    /// over it: the first press arms it (and says so), the second, with
+    /// the cursor still on it, deletes it.
     fn delete_comment(&mut self, ctx: &Ctx) {
         let Some(cursor) = &self.cursor else {
             return;
@@ -973,6 +977,14 @@ impl DiffView {
         let Some(c) = self.comment_at(cursor.row) else {
             return;
         };
+        if self.delete_armed != Some(c) {
+            self.delete_armed = Some(c);
+            let why = "Press Del again to delete the comment";
+            self.signals.error = Some(Some(why.into()));
+            return;
+        }
+        self.delete_armed = None;
+        self.signals.error = Some(None);
         let first = self.find_row(&RowKey::Comment(c)).unwrap_or(cursor.row);
         let above = self.cursor_stop(first.saturating_sub(1), -1);
         self.set_cursor(above, None);
@@ -1016,8 +1028,9 @@ impl DiffView {
     }
 
     /// A key while a comment is being written, which takes them all: Enter
-    /// (or Ctrl+Enter) keeps it, Shift+Enter breaks the line, Esc drops
-    /// it; Ctrl+Shift+C copies the review still.
+    /// (or Ctrl+Enter) keeps it, and so does Esc (a draft is never thrown
+    /// away by it: the Discard button does that), Shift+Enter breaks the
+    /// line; Ctrl+Shift+C copies the review still.
     fn editor_key(
         &mut self,
         mods: &ModifiersState,
@@ -1033,12 +1046,7 @@ impl DiffView {
             return self.copy(ctx);
         }
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
-        if sym == Keysym::Escape && plain {
-            self.editing = None;
-            self.build_rows(ctx.sections, self.diff_anchor());
-            return None;
-        }
-        if enter && (plain || only_ctrl) {
+        if enter && (plain || only_ctrl) || sym == Keysym::Escape && plain {
             self.save_comment(ctx);
             return None;
         }
@@ -1436,7 +1444,7 @@ impl DiffView {
                 }
             }
             (DiffRow::EditorHint { .. }, _) => {
-                DetailRow::Note("Shift+Enter breaks the line".into())
+                DetailRow::Note("Shift+Enter breaks the line · Enter or Esc keeps it".into())
             }
             (DiffRow::Outdated(None), _) => DetailRow::Hunk {
                 context: "Comments on lines no longer in the diff".into(),
@@ -1813,7 +1821,10 @@ impl DiffView {
                 return Some(self.open_diff_row(r));
             }
             Keysym::c if plain => self.comment_here(ctx),
-            Keysym::Delete | Keysym::KP_Delete if plain => self.delete_comment(ctx),
+            Keysym::Delete | Keysym::KP_Delete if plain => {
+                self.delete_comment(ctx);
+                return Some(None);
+            }
             _ => return None,
         }
         Some(None)
@@ -1993,6 +2004,10 @@ impl DiffView {
             return None;
         }
         self.rewrap(ctx);
+        // Any key but Del lets an armed comment be.
+        if !matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
+            self.delete_armed = None;
+        }
         if self.search_has_keys(ctx) {
             return Some(self.search_key(mods, sym, typed, ctx));
         }
