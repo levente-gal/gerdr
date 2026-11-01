@@ -127,14 +127,7 @@ impl Gerdr {
         let in_strip = |pick: fn(&chrome::TabLayout, usize) -> Option<Rect>, t: usize| {
             let view = self.tab_strip_view();
             let strip = self.tab_strip_rect();
-            let layout = chrome::tab_layout(
-                view.tabs.len(),
-                strip.size,
-                view.prefix,
-                view.overflow(),
-                view.watch.is_some(),
-                view.inbox.is_some(),
-            );
+            let layout = view.layout(strip.size);
             let mut rect = pick(&layout, t)?;
             rect.loc += strip.loc;
             Some(rect)
