@@ -985,7 +985,6 @@ impl Keymap {
 
 /// How the help panel names the key pressed with `mods` held, like
 /// "Shift+Q" or "?" (Shift and the slash key).
-#[allow(dead_code)] // input.rs takes it up in wave 2.
 pub fn chord_label(mods: &ModifiersState, sym: Keysym) -> String {
     Chord::pressed(mods, sym).label()
 }

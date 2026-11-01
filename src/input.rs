@@ -40,7 +40,7 @@ use smithay::{
         KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
-        keyboard::{FilterResult, Keycode, Keysym, ModifiersState, xkb},
+        keyboard::{FilterResult, Keycode, Keysym, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, CursorIcon, MotionEvent},
     },
     reexports::{
@@ -200,7 +200,7 @@ fn over_panel(action: &Action) -> bool {
 }
 
 /// Whether `action`, picked with the prefix, works over open `over`.
-fn works_over(over: overlay::Overlay, action: &Action) -> bool {
+pub(crate) fn works_over(over: overlay::Overlay, action: &Action) -> bool {
     match over {
         overlay::Overlay::Welcome => over_welcome(action),
         _ => over_panel(action),
@@ -224,28 +224,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
 /// How a notice names the key pressed with `mods` held, like "Shift+Q"
 /// (the help panel's way).
 fn key_name(mods: &ModifiersState, sym: Keysym) -> String {
-    let key = match sym {
-        Keysym::Escape => "Esc".to_owned(),
-        Keysym::Return => "Enter".to_owned(),
-        Keysym::space => "Space".to_owned(),
-        _ => match sym.key_char().filter(|c| !c.is_control()) {
-            Some(c) => c.to_uppercase().collect(),
-            None => xkb::keysym_get_name(sym),
-        },
-    };
-    let held = [
-        (mods.ctrl, "Ctrl+"),
-        (mods.alt, "Alt+"),
-        (mods.shift, "Shift+"),
-        (mods.logo, "Super+"),
-    ];
-    let mut name: String = held
-        .iter()
-        .filter(|(on, _)| *on)
-        .map(|(_, name)| *name)
-        .collect();
-    name.push_str(&key);
-    name
+    crate::keys::chord_label(mods, sym)
 }
 
 fn drag_cursor(drag: &Drag) -> CursorIcon {

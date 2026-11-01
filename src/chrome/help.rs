@@ -195,7 +195,7 @@ impl HelpLayout {
 impl Painter {
     /// Size the help panel: two columns when they fit in `max_width`, else
     /// one, as tall as it needs.
-    #[cfg_attr(not(test), allow(dead_code))] // Tests only, once chrome uses `help_layout_within`.
+    #[cfg(test)]
     pub fn help_layout(&self, help: &Help, max_width: i32, pinned: bool, scale: f64) -> HelpLayout {
         self.help_layout_within(help, (max_width, i32::MAX).into(), pinned, scale)
     }

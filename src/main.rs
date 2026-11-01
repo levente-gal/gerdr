@@ -6078,19 +6078,7 @@ fn prefix_works(over: Overlay, action: Action) -> bool {
     if over.toggled_by() == Some(action) {
         return true;
     }
-    match over {
-        Overlay::Welcome => matches!(action, Action::ToggleTheme | Action::Quit),
-        _ => matches!(
-            action,
-            Action::ToggleTheme
-                | Action::Quit
-                | Action::Shortcuts
-                | Action::Projects
-                | Action::Inbox
-                | Action::Repos
-                | Action::Worktrees
-        ),
-    }
+    crate::input::works_over(over, &action)
 }
 
 /// Move the item at `active` to place `to`, keeping `active` on it.
