@@ -47,7 +47,7 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr, Pane, Tab,
+    Action, Gerdr, Pane, Tab,
     anim::{self, Fade},
     chrome::{self, BarButton, BarButtons, BarHit, BarStatus, Help, PaneBarView, Rect},
     herdr::{Herdr, PaneState, Process, ProcessInfo},
@@ -576,40 +576,10 @@ impl BarStates {
     }
 }
 
-/// What the help calls each thing a bar offers: its own description, its
-/// group's, and its place in the group (see `keys::HELP_LINES`).
-const SPLIT_RIGHT_HELP: (&str, &str, usize) = ("split pane right", "split pane right / down", 0);
-const SPLIT_DOWN_HELP: (&str, &str, usize) = ("split pane down", "split pane right / down", 1);
-const RESTART_HELP: (&str, &str, usize) = (
-    "restart the pane's command",
-    "restart / stop the pane's command",
-    0,
-);
-const STOP_HELP: (&str, &str, usize) = (
-    "stop the pane's command",
-    "restart / stop the pane's command",
-    1,
-);
-const CLOSE_PANE_HELP: (&str, &str, usize) = ("close pane", "close pane", 0);
-const SCROLLBACK_HELP: (&str, &str, usize) = (
-    "select and copy the scrollback",
-    "select and copy the scrollback",
-    0,
-);
-const FLIP_HELP: (&str, &str, usize) = ("flip the pane's split", "flip the pane's split", 0);
-const PANE_TO_NEW_TAB_HELP: (&str, &str, usize) =
-    ("move pane to a new tab", "move pane to a new tab", 0);
-const ZOOM_HELP: (&str, &str, usize) = (
-    "zoom pane to fill the tab, or unzoom",
-    "zoom pane to fill the tab, or unzoom",
-    0,
-);
-
-/// The key for `what` (one of the `_HELP` triples), if `help` lists one.
-/// The key for one of the bar's actions, as the help lists it: on its own
-/// line (`own`) or as the `index`th of its group's line (`group`).
-fn hint_for(help: &Help, (own, group, index): (&str, &str, usize)) -> Option<String> {
-    help.key_for(own, 0).or_else(|| help.key_for(group, index))
+/// The key for one of the bar's actions, as the help lists it: the first
+/// that runs `action`.
+fn hint_for(help: &Help, action: Action) -> Option<String> {
+    help.key_of(action, 0)
 }
 
 /// Why `button` can't be pressed on a bar showing `content`, if it can't.
@@ -649,17 +619,23 @@ pub fn label_tooltip(label: &str, rect: Rect) -> Tooltip {
 /// What a bar button says when the pointer rests on it at `rect`.
 pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
     let (text, what) = match button {
-        BarButton::Scrollback => ("Select and copy", Some(SCROLLBACK_HELP)),
-        BarButton::Restart => ("Restart", Some(RESTART_HELP)),
-        BarButton::Stop => ("Stop", Some(STOP_HELP)),
+        BarButton::Scrollback => ("Select and copy", Some(Action::Scrollback)),
+        BarButton::Restart => ("Restart", Some(Action::RestartPane)),
+        BarButton::Stop => ("Stop", Some(Action::StopPane)),
         BarButton::Back => ("Back", None),
         BarButton::Forward => ("Forward", None),
         // The restart key loads a web page again.
-        BarButton::Reload => ("Reload", Some(RESTART_HELP)),
+        BarButton::Reload => ("Reload", Some(Action::RestartPane)),
         BarButton::CopyUrl => ("Copy URL", None),
-        BarButton::Zoom => ("Zoom pane (or double-click the bar)", Some(ZOOM_HELP)),
-        BarButton::Unzoom => ("Unzoom pane (or double-click the bar)", Some(ZOOM_HELP)),
-        BarButton::Close => ("Close pane", Some(CLOSE_PANE_HELP)),
+        BarButton::Zoom => (
+            "Zoom pane (or double-click the bar)",
+            Some(Action::ZoomPane),
+        ),
+        BarButton::Unzoom => (
+            "Unzoom pane (or double-click the bar)",
+            Some(Action::ZoomPane),
+        ),
+        BarButton::Close => ("Close pane", Some(Action::ClosePane)),
     };
     let tip = Tooltip::new(text, rect);
     match what.and_then(|what| hint_for(help, what)) {
@@ -683,19 +659,19 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
         item(
             "Split right",
             MenuAction::SplitPane(id, Dir::Right),
-            SPLIT_RIGHT_HELP,
+            Action::Split(Dir::Right),
             true,
         ),
         item(
             "Split down",
             MenuAction::SplitPane(id, Dir::Down),
-            SPLIT_DOWN_HELP,
+            Action::Split(Dir::Down),
             true,
         ),
         item(
             "Flip split",
             MenuAction::FlipPane(id),
-            FLIP_HELP,
+            Action::FlipPane,
             content.pane_count > 1,
         ),
         item(
@@ -705,13 +681,13 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
                 "Zoom pane"
             },
             MenuAction::ZoomPane(id),
-            ZOOM_HELP,
+            Action::ZoomPane,
             content.pane_count > 1,
         ),
         item(
             "Move to new tab",
             MenuAction::PaneToTab(id, None),
-            PANE_TO_NEW_TAB_HELP,
+            Action::PaneToNewTab,
             // Alone in its tab, it has a tab of its own already.
             content.pane_count > 1,
         ),
@@ -730,28 +706,28 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             item(
                 "Reload",
                 MenuAction::WebStep(id, WebStep::Reload),
-                RESTART_HELP,
+                Action::RestartPane,
                 content.can_restart,
             ),
             MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)),
         ]),
         _ => items.extend([
             item(
-                "Select and copy…",
+                "Select and copy",
                 MenuAction::Scrollback(id),
-                SCROLLBACK_HELP,
+                Action::Scrollback,
                 true,
             ),
             item(
                 "Restart",
                 MenuAction::RestartPane(id),
-                RESTART_HELP,
+                Action::RestartPane,
                 content.can_restart,
             ),
             item(
                 "Stop",
                 MenuAction::StopPane(id),
-                STOP_HELP,
+                Action::StopPane,
                 content.can_stop,
             ),
         ]),
@@ -759,7 +735,7 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
     items.push(item(
         "Close pane",
         MenuAction::ClosePane(id),
-        CLOSE_PANE_HELP,
+        Action::ClosePane,
         true,
     ));
     MenuSpec {
@@ -1943,28 +1919,38 @@ mod tests {
     #[test]
     fn key_hints_come_from_the_help() {
         let help = crate::keys::Keymap::default().help();
-        assert_eq!(hint_for(&help, RESTART_HELP).as_deref(), Some("Ctrl+B A"));
-        assert_eq!(hint_for(&help, STOP_HELP).as_deref(), Some("Ctrl+B S"));
         assert_eq!(
-            hint_for(&help, SPLIT_RIGHT_HELP).as_deref(),
+            hint_for(&help, Action::RestartPane).as_deref(),
+            Some("Ctrl+B A")
+        );
+        assert_eq!(
+            hint_for(&help, Action::StopPane).as_deref(),
+            Some("Ctrl+B S")
+        );
+        assert_eq!(
+            hint_for(&help, Action::Split(Dir::Right)).as_deref(),
             Some("Ctrl+B V")
         );
         assert_eq!(
-            hint_for(&help, SPLIT_DOWN_HELP).as_deref(),
+            hint_for(&help, Action::Split(Dir::Down)).as_deref(),
             Some("Ctrl+B -")
         );
         assert_eq!(
-            hint_for(&help, CLOSE_PANE_HELP).as_deref(),
+            hint_for(&help, Action::ClosePane).as_deref(),
             Some("Ctrl+B X")
         );
         // An action on a line of its own, with several keys: the first.
+        let restart = Some(crate::chrome::HelpPress::Action(Action::RestartPane));
         let own = Help {
             prefix: "Ctrl+A".into(),
-            rows: vec![("r / Shift+R".into(), "restart the pane's command".into())],
-            presses: Vec::new(),
+            rows: vec![("r / Shift+R".into(), "Restart the pane's command".into())],
+            presses: vec![vec![restart; 2]],
         };
-        assert_eq!(hint_for(&own, RESTART_HELP).as_deref(), Some("Ctrl+A r"));
-        assert_eq!(hint_for(&own, STOP_HELP), None);
+        assert_eq!(
+            hint_for(&own, Action::RestartPane).as_deref(),
+            Some("Ctrl+A r")
+        );
+        assert_eq!(hint_for(&own, Action::StopPane), None);
     }
 
     #[test]
@@ -2004,7 +1990,7 @@ mod tests {
                 "Move to new tab",
                 "Move to tab: zsh",
                 "Move to tab: vim notes",
-                "Select and copy…",
+                "Select and copy",
                 "Restart",
                 "Stop",
                 "Close pane"

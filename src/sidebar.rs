@@ -8,7 +8,7 @@ use std::{path::Path, time::Instant};
 use smithay::utils::{Logical, Point};
 
 use crate::{
-    Gerdr, Reorderable,
+    Action, Gerdr, Reorderable,
     agents::AgentKey,
     anim::quantize,
     chrome::{
@@ -530,9 +530,9 @@ impl Gerdr {
                     layout.plus,
                 );
                 let help = self.keymap.help();
-                let keys: Vec<_> = ["terminal workspace in home", "open project"]
+                let keys: Vec<_> = [Action::NewTerminal, Action::NewProject]
                     .into_iter()
-                    .filter_map(|label| help.key_for(label, 0))
+                    .filter_map(|action| help.key_of(action, 0))
                     .collect();
                 Some(if keys.is_empty() {
                     tip
@@ -543,14 +543,14 @@ impl Gerdr {
             SidebarHit::Repos => {
                 let (changed, stuck) = self.repos_changed();
                 let tip = Tooltip::new(&repos_tip(changed, stuck), layout.repos);
-                Some(match self.keymap.help().key_for("repositories", 0) {
+                Some(match self.keymap.help().key_of(Action::Repos, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
             }
             SidebarHit::Close(i) => {
                 let tip = Tooltip::new("Close workspace", layout.rows[i].close);
-                Some(match self.keymap.help().key_for("close workspace", 0) {
+                Some(match self.keymap.help().key_of(Action::CloseWorkspace, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -562,7 +562,7 @@ impl Gerdr {
                     "New agent"
                 };
                 let tip = Tooltip::new(text, layout.rows[i].agent);
-                Some(match self.keymap.help().key_for("new agent", 0) {
+                Some(match self.keymap.help().key_of(Action::NewAgent, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -672,7 +672,7 @@ impl Gerdr {
                      which lists repos, pull requests and tickets too",
                     layout.inbox_title?,
                 );
-                Some(match self.keymap.help().key_for("inbox", 0) {
+                Some(match self.keymap.help().key_of(Action::Inbox, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -719,7 +719,7 @@ impl Gerdr {
             SidebarHit::Attention(i, _) => {
                 let lines = layout.rows.get(i)?.attention?;
                 let tip = Tooltip::new("Review, merge or delete", lines);
-                Some(match self.keymap.help().key_for("worktrees", 0) {
+                Some(match self.keymap.help().key_of(Action::Worktrees, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -731,7 +731,7 @@ impl Gerdr {
             SidebarHit::Header => {
                 self.project.as_ref()?;
                 let tip = Tooltip::new("Project menu: switch, add or stop projects", layout.header);
-                Some(match self.keymap.help().key_for("projects", 0) {
+                Some(match self.keymap.help().key_of(Action::Projects, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -850,27 +850,30 @@ impl Gerdr {
                 let i = hit.row()?;
                 let dir = self.workspaces.get(i)?.dir.clone();
                 let help = self.keymap.help();
-                let hinted = |item: MenuItem, label: &str| match help.key_for(label, 0) {
+                let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
                     Some(key) => item.hint(&key),
                     None => item,
                 };
                 let mut items = vec![
-                    hinted(MenuItem::new("New tab", MenuAction::NewTab(i)), "new tab"),
+                    hinted(
+                        MenuItem::new("New tab", MenuAction::NewTab(i)),
+                        Action::NewTab,
+                    ),
                     hinted(
                         MenuItem::new("New agent…", MenuAction::NewAgent(i)),
-                        "new agent",
+                        Action::NewAgent,
                     ),
                     MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
                 ];
                 let git = self.git.get(&dir);
                 if git.is_some_and(|g| g.root.is_some()) {
-                    let item = MenuItem::new("Repositories…", MenuAction::Repos);
-                    items.push(hinted(item, "repositories"));
+                    let item = MenuItem::new("Repositories", MenuAction::Repos);
+                    items.push(hinted(item, Action::Repos));
                 }
                 if git.is_some_and(|g| !g.worktrees.is_empty()) {
-                    let item = MenuItem::new("Worktrees…", MenuAction::Worktrees(dir));
-                    items.push(hinted(item, "worktrees"));
+                    let item = MenuItem::new("Worktrees", MenuAction::Worktrees(dir));
+                    items.push(hinted(item, Action::Worktrees));
                 }
                 let restartable = !self.workspace_restarts(i).is_empty();
                 let restart = MenuItem::new("Restart commands", MenuAction::RestartWorkspace(i));
@@ -880,7 +883,7 @@ impl Gerdr {
                 items.push(choose.enabled(restartable));
                 items.push(hinted(
                     MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
-                    "close workspace",
+                    Action::CloseWorkspace,
                 ));
                 Some(MenuSpec { anchor: at, items })
             }
@@ -893,7 +896,7 @@ impl Gerdr {
     /// same.
     pub(crate) fn sidebar_plus_menu(&self, layout: &SidebarLayout) -> MenuSpec {
         let help = self.keymap.help();
-        let hinted = |item: MenuItem, label: &str| match help.key_for(label, 0) {
+        let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
             Some(key) => item.hint(&key),
             None => item,
         };
@@ -902,15 +905,18 @@ impl Gerdr {
             items: vec![
                 hinted(
                     MenuItem::new("Terminal workspace in home", MenuAction::NewTerminal),
-                    "terminal workspace in home",
+                    Action::NewTerminal,
                 ),
                 MenuItem::new("Terminal workspace in a folder…", MenuAction::OpenFolder),
                 hinted(
                     MenuItem::new("Zed workspace in a folder…", MenuAction::NewProject),
-                    "open project",
+                    Action::NewProject,
                 ),
                 MenuItem::new("Cursor workspace", MenuAction::NewCursor),
-                hinted(MenuItem::new("Open inbox", MenuAction::Inbox), "inbox"),
+                hinted(
+                    MenuItem::new("Open inbox", MenuAction::Inbox),
+                    Action::Inbox,
+                ),
             ],
         }
     }
