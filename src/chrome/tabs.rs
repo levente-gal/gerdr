@@ -33,7 +33,7 @@ pub struct TabView {
     /// What runs in its panes: agents, foreground processes, terminal
     /// titles; the distinct ones, split by "  |  ". Idle shells say nothing.
     pub activity: String,
-    /// Whether its focused terminal's command runs again after a restart:
+    /// Whether its focused terminal's command runs again after a reboot:
     /// `None` when nothing runs in it.
     pub restart: Option<bool>,
     /// Whether its focused pane shows a GitHub page: its tab carries
@@ -159,7 +159,7 @@ impl TabView {
         }
         parts.extend(self.branch.as_deref());
         if self.restart == Some(false) {
-            parts.push("⊘ won't run again after a restart");
+            parts.push("⊘ won't run again after a reboot");
         }
         parts.join(" · ")
     }
@@ -814,7 +814,7 @@ impl Painter {
                 });
                 right = right.min(px(mark.loc.x) as f32);
             }
-            // What runs in the tab won't run again after a restart: say so
+            // What runs in the tab won't run again after a reboot: say so
             // before the "×" and the dot.
             if tab.restart == Some(false) {
                 let mark_w = px(STATUS_WIDTH) as f32;
