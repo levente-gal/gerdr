@@ -333,7 +333,7 @@ pub(super) fn menu_entries(
             let h = entry_height(entry);
             let rect = Rectangle::new((x, start + top.round() as i32).into(), (w, h).into());
             let buttons = match entry {
-                MenuEntry::Project { row, .. } if EntryLook::of(view, i).hovered => {
+                MenuEntry::Project { row, .. } if EntryLook::of(view, i).buttons() => {
                     row_button_rects(&row_buttons(row), rect)
                 }
                 _ => Vec::new(),
@@ -423,9 +423,16 @@ impl EntryLook {
             hover_alpha: if hovered { view.hover_alpha } else { 0 },
         }
     }
+
+    /// Whether the entry shows its row buttons: when selected, so they
+    /// follow the keyboard, and under the pointer.
+    fn buttons(&self) -> bool {
+        self.selected || self.hovered
+    }
 }
 
-/// The buttons a project row shows under the pointer, left to right:
+/// The buttons a project row shows, selected or under the pointer, left
+/// to right:
 /// settings, its file and rename always; stop while its session may run,
 /// and forget, unless it is the current project.
 pub(super) fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
@@ -923,7 +930,7 @@ impl Painter {
         c.fill(0, 0, w, h, p.elevated);
         let rect = Rectangle::from_size(size);
         let buttons = match entry {
-            MenuEntry::Project { row, .. } if look.hovered => {
+            MenuEntry::Project { row, .. } if look.buttons() => {
                 row_button_rects(&row_buttons(row), rect)
             }
             _ => Vec::new(),
@@ -1069,7 +1076,7 @@ impl Painter {
                 if confirm {
                     self.text(
                         c,
-                        &format!("Press Delete again to forget {}", row.name),
+                        &format!("Press Del again to forget {}", row.name),
                         FONT_SIZE,
                         label_x,
                         end,
@@ -1956,7 +1963,10 @@ mod tests {
         let mut view = list_view();
         let l = project_menu_layout(&view, size);
         let hit = |view: &ProjectMenuView, pos| project_menu_hit(view, size, pos);
-        assert!(l.entries.iter().all(|(_, buttons)| buttons.is_empty()));
+        // Only the selected project has its buttons, unhovered.
+        for (i, (_, buttons)) in l.entries.iter().enumerate() {
+            assert_eq!(buttons.is_empty(), view.selected != Some(i), "entry {i}");
+        }
         assert_eq!(hit(&view, centre(l.query)), Some(MenuHit::Query));
         let corner = (l.footer.loc.x as f64 + 2.0, l.footer.loc.y as f64 + 2.0);
         assert_eq!(hit(&view, corner.into()), Some(MenuHit::Panel));
@@ -1966,8 +1976,8 @@ mod tests {
             assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Entry(i)));
         }
 
-        // Row buttons: only on the hovered project row, and which depend on
-        // whether it is current and runs.
+        // Row buttons: on the hovered project row (and the selected one),
+        // and which depend on whether it is current and runs.
         use RowButton::{Forget, ProjectFile, Rename, Settings, Stop};
         let expected: [&[RowButton]; 8] = [
             &[],
@@ -1979,13 +1989,14 @@ mod tests {
             &[],
             &[],
         ];
-        for (i, want) in expected.iter().enumerate() {
+        for i in 0..expected.len() {
             for hover in [MenuHit::Entry(i), MenuHit::Button(i, Rename)] {
                 view.hover = Some(hover);
                 let l = project_menu_layout(&view, size);
                 for (j, (rect, buttons)) in l.entries.iter().enumerate() {
                     let shown: Vec<_> = buttons.iter().map(|(b, _)| *b).collect();
-                    assert_eq!(shown, if i == j { want.to_vec() } else { vec![] });
+                    let on = i == j || view.selected == Some(j);
+                    assert_eq!(shown, if on { expected[j].to_vec() } else { vec![] });
                     for (button, b) in buttons {
                         assert_eq!(hit(&view, centre(*b)), Some(MenuHit::Button(j, *button)));
                     }

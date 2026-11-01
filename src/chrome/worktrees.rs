@@ -223,10 +223,13 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         (w - 2 * PROJECT_MENU_PADDING).max(0),
     );
     let start = query.loc.y + query.size.h + PROJECT_MENU_PADDING;
-    let with_buttons = match view.hover {
+    // The selected row has its buttons, and so has the one under the
+    // pointer: the buttons follow the selection, the pointer reaches them.
+    let hovered = match view.hover {
         Some(WorktreesHit::Entry(i) | WorktreesHit::Button(i, _)) => Some(i),
-        _ => view.selected,
+        _ => None,
     };
+    let with_buttons = |i: usize| view.selected == Some(i) || hovered == Some(i);
     let entries = view
         .entries
         .iter()
@@ -236,7 +239,7 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
             let size = (row_w, height(entry)).into();
             let rect = Rectangle::new((row_x, top.round() as i32).into(), size);
             let buttons = match entry {
-                WorktreeEntry::Worktree(line) if with_buttons == Some(i) => {
+                WorktreeEntry::Worktree(line) if with_buttons(i) => {
                     button_rects(&line.buttons, rect)
                 }
                 _ => Vec::new(),
@@ -983,14 +986,15 @@ mod tests {
             size,
         );
         assert!(unscoped.scope.is_empty());
-        // Hovering another row moves the buttons there.
+        // Hovering another row shows its buttons too; the selected one
+        // keeps its own.
         let hovered = WorktreesView {
             hover: Some(WorktreesHit::Entry(1)),
             ..v
         };
         let l = worktrees_layout(&hovered, size);
         assert_eq!(l.entries[1].1.len(), 1);
-        assert!(l.entries[2].1.is_empty());
+        assert_eq!(l.entries[2].1.len(), 4);
     }
 
     #[test]

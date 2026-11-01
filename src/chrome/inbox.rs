@@ -662,10 +662,13 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let window = list_window(list);
     let (row_x, row_w) = row_span(list);
     let (start, end) = (window.loc.y as f64, (window.loc.y + window.size.h) as f64);
-    let with_buttons = match view.hover {
+    // The selected row has its buttons, and so has the one under the
+    // pointer: the buttons follow the selection, the pointer reaches them.
+    let hovered = match view.hover {
         Some(InboxHit::Row(i) | InboxHit::Button(i, _)) => Some(i),
-        _ => view.selected,
+        _ => None,
     };
+    let with_buttons = |i: usize| view.selected == Some(i) || hovered == Some(i);
     let rows = view
         .rows
         .iter()
@@ -680,7 +683,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
             let rect = Rectangle::new((row_x, top.round() as i32).into(), (row_w, h).into());
             let buttons = match row {
                 _ if !shown => Vec::new(),
-                InboxRow::Item(line) if with_buttons == Some(i) => {
+                InboxRow::Item(line) if with_buttons(i) => {
                     row_buttons(&line.buttons, item_line(rect))
                 }
                 _ => Vec::new(),
@@ -2516,13 +2519,14 @@ mod tests {
         for (k, b) in l.rows[1].1.iter().enumerate() {
             assert_eq!(inbox_hit(&v, &l, centre(*b)), Some(InboxHit::Button(1, k)));
         }
-        // Hovering another item moves the buttons there.
+        // Hovering another item shows its buttons too; the selected one
+        // keeps its own.
         let hovered = InboxView {
             hover: Some(InboxHit::Row(2)),
             ..v.clone()
         };
         let lh = inbox_layout(&hovered, size);
-        assert!(lh.rows[1].1.is_empty() && lh.rows[2].1.len() == 3);
+        assert!(lh.rows[1].1.len() == 3 && lh.rows[2].1.len() == 3);
         assert!(lh.rows[0].1.is_empty());
         // The detail's buttons.
         assert_eq!(l.detail_buttons.len(), 4);
