@@ -233,6 +233,19 @@ pub fn footer_height(hints: usize) -> i32 {
     PROJECT_MENU_FOOTER + (footer_rows(hints) - 1) * FOOTER_ROW
 }
 
+/// How high the footer is with `hints` across `w`, measured: a row for
+/// each they take, so a second row is kept only when they need it.
+pub(super) fn measured_footer_height(hints: &[(&str, &str)], w: i32) -> i32 {
+    let tall = Rectangle::new((0, 0).into(), (w, footer_height(hints.len())).into());
+    let rows = footer_hint_spots(hints, tall)
+        .iter()
+        .map(|(_, r)| r.loc.y)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        .max(1) as i32;
+    PROJECT_MENU_FOOTER + (rows - 1) * FOOTER_ROW
+}
+
 /// Where the project menu's settings form parts go, in output coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsLayout {
@@ -265,7 +278,7 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
             (entries, None, None)
         }
     };
-    let footer_h = footer_height(view.hints.len());
+    let footer_h = measured_footer_height(&hint_strs(&view.hints), w);
     let bottom = (y + PROJECT_MENU_PADDING + footer_h)
         .min(size.h - HELP_MARGIN)
         .max(top + PROJECT_MENU_INPUT + footer_h);

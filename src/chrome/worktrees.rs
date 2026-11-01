@@ -172,11 +172,19 @@ pub struct WorktreesLayout {
     pub hints: Vec<(usize, Rect)>,
 }
 
+/// Where the worktrees popup's top is on an output of `size`: a sixth of
+/// the way down.
+fn worktrees_top(size: Size<i32, Logical>) -> i32 {
+    (size.h / 6).max(HELP_MARGIN)
+}
+
 /// How many entries the worktrees popup shows at once on an output of
-/// `size`.
+/// `size`: as many as fit between its top and the bottom margin with the
+/// footer at its tallest.
 pub fn worktrees_page(size: Size<i32, Logical>) -> usize {
     let room = size.h
-        - 2 * HELP_MARGIN
+        - worktrees_top(size)
+        - HELP_MARGIN
         - WORKTREES_TITLE
         - PROJECT_MENU_INPUT
         - 2 * PROJECT_MENU_PADDING
@@ -191,7 +199,7 @@ pub fn worktrees_page(size: Size<i32, Logical>) -> usize {
 pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> WorktreesLayout {
     let w = WORKTREES_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let x = ((size.w - w) / 2).max(0);
-    let top = (size.h / 6).max(HELP_MARGIN);
+    let top = worktrees_top(size);
     let title = Rectangle::new((x, top).into(), (w, WORKTREES_TITLE).into());
     let scope = if view.repo.is_some() {
         let y = top + (WORKTREES_TITLE - ROW_BUTTON) / 2;
@@ -244,7 +252,7 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
     // for the line saying there are none.
     let y = start + view.list_height.max(PROJECT_MENU_ROW);
     let list = Rectangle::new((row_x, start).into(), (row_w, y - start).into());
-    let footer_h = footer_height(view.hints.len());
+    let footer_h = super::measured_footer_height(&hint_strs(&view.hints), w);
     let bottom = y + PROJECT_MENU_PADDING + footer_h;
     let footer = Rectangle::new((x, bottom - footer_h).into(), (w, footer_h).into());
     WorktreesLayout {
@@ -1115,6 +1123,30 @@ mod tests {
         let tall = worktrees_page((800, 4000).into());
         assert_eq!(tiny, WORKTREES_MIN_ROWS as usize);
         assert_eq!(tall, WORKTREES_MAX_ROWS as usize);
+    }
+
+    #[test]
+    fn a_full_page_keeps_the_footer_on_the_output() {
+        let hint = |k: &str| (k.to_owned(), "does a thing".to_owned());
+        let hints: Vec<_> = ["Enter", "Ctrl+S", "Ctrl+Shift+S", "Del", "Shift+Del", "Ctrl+O"]
+            .into_iter()
+            .map(hint)
+            .collect();
+        for h in (560..=1200).step_by(40) {
+            let size: Size<i32, Logical> = (1280, h).into();
+            let page = worktrees_page(size) as i32;
+            if page == WORKTREES_MIN_ROWS {
+                continue;
+            }
+            let v = WorktreesView {
+                list_height: page * WORKTREES_ROW,
+                hints: hints.clone(),
+                ..view()
+            };
+            let l = worktrees_layout(&v, size);
+            let bottom = l.panel.loc.y + l.panel.size.h;
+            assert!(bottom <= h - HELP_MARGIN, "{h}: {bottom}");
+        }
     }
 
     /// A list of two repositories' worktrees, longer than it is high, at

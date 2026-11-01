@@ -434,19 +434,6 @@ pub fn inbox_page(size: Size<i32, Logical>) -> usize {
     ((list.size.h - 2 * INBOX_PAD) / INBOX_ROW).max(1) as usize
 }
 
-/// How high the footer is with `hints` across `w`: a row for each they
-/// take, so a second row is kept only when they need it.
-fn footer_height_for(hints: &[(&str, &str)], w: i32) -> i32 {
-    let tall = Rectangle::new((0, 0).into(), (w, footer_height(hints.len())).into());
-    let spots = footer_hint_spots(hints, tall);
-    let rows = spots
-        .iter()
-        .map(|(_, r)| r.loc.y)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        .max(1) as i32;
-    PROJECT_MENU_FOOTER + (rows - 1) * FOOTER_ROW
-}
 
 /// How wide a row's button is: its label and the room either side.
 fn row_button_width(button: &InboxButton) -> i32 {
@@ -664,7 +651,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     };
     let query = Rectangle::new((x, top + INBOX_TITLE).into(), (w, INBOX_FIELD).into());
     let hints = hint_strs(&view.hints);
-    let footer_h = footer_height_for(&hints, w);
+    let footer_h = super::measured_footer_height(&hints, w);
     let footer = Rectangle::new(
         (x, top + panel.size.h - footer_h).into(),
         (w, footer_h).into(),
