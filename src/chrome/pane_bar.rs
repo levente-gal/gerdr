@@ -1,6 +1,13 @@
 //! The bar over each pane: what it shows, its buttons, how it hides and
 //! shows, and how it is drawn; and the strip marking the focused pane,
 //! whatever it shows.
+//!
+//! A hidden bar leaves its grip behind: a thin band along the pane's top
+//! edge with room of its own, a dot for what runs, the title small and a
+//! faint close button, so every pane can be found, closed and held. The
+//! pointer on the grip brings the whole bar out, grown from it. A bar out
+//! has all its buttons, whatever the pane shows, faint until the pointer
+//! is over it.
 
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
@@ -16,10 +23,16 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 /// its hidden bar out.
 pub const BAR_REVEAL: i32 = 8;
 /// How far a bar slides from under the top edge of its pane as it shows,
-/// and back as it hides: its whole height.
-pub const BAR_SLIDE: i32 = PANE_BAR_HEIGHT;
+/// and back as it hides: all but its grip (see `PANE_GRIP`).
+pub const BAR_SLIDE: i32 = PANE_BAR_HEIGHT - PANE_GRIP;
 /// The strip along the top edge of the focused pane: this high.
 pub const FOCUS_STRIP: i32 = 2;
+/// How high a hidden bar's grip is (see the module doc).
+pub const PANE_GRIP: i32 = 8;
+/// The size of a grip's title.
+const GRIP_FONT_SIZE: f32 = 7.5;
+/// How big a grip's dot is.
+const GRIP_DOT: i32 = 4;
 
 /// A pane's place split in two: its bar on top, and the rest for its
 /// window, which keeps at least a pixel. The bar as it is when shown; see
@@ -29,14 +42,11 @@ pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
 }
 
 /// A pane's place split in two: its bar on top, and the rest for its
-/// window. A hidden bar (`shown` false) has no height, and the window takes
-/// its room; a shown one leaves the window at least a pixel.
+/// window, which keeps at least a pixel. A hidden bar (`shown` false)
+/// keeps only its grip, `PANE_GRIP` high, and the window takes the rest.
 pub fn pane_bar_rects_shown(pane: Rect, shown: bool) -> (Rect, Rect) {
-    let h = if shown {
-        PANE_BAR_HEIGHT.min(pane.size.h - 1).max(0)
-    } else {
-        0
-    };
+    let h = if shown { PANE_BAR_HEIGHT } else { PANE_GRIP };
+    let h = h.min(pane.size.h - 1).max(0);
     let bar = Rectangle::new(pane.loc, (pane.size.w, h).into());
     let client = Rectangle::new(
         (pane.loc.x, pane.loc.y + h).into(),
@@ -309,6 +319,12 @@ impl PaneBarView {
         (self.rect.loc, (self.rect.size.w, h).into(), self.alpha)
     }
 
+    /// Whether no more than its grip shows: it is drawn as the grip.
+    pub fn is_grip(&self) -> bool {
+        let h = self.placement().1.h;
+        h > 0 && h <= PANE_GRIP && self.rect.size.h > PANE_GRIP
+    }
+
     /// Where its mark goes on the output: at its start, `slide` up with
     /// the rest of it.
     fn mark(&self) -> Rect {
@@ -326,7 +342,10 @@ impl PaneBarView {
     /// and the dot is not slid under its pane's top edge.
     pub fn blinker(&self) -> Option<Rect> {
         let dot = centred_dot(self.mark());
-        (self.status == BarStatus::Running && self.rect.size.h > 0 && dot.loc.y >= self.rect.loc.y)
+        (self.status == BarStatus::Running
+            && self.rect.size.h > 0
+            && !self.is_grip()
+            && dot.loc.y >= self.rect.loc.y)
             .then_some(dot)
     }
 
@@ -370,10 +389,12 @@ impl Painter {
     }
 
     /// A pane's bar: a mark saying how its command is, the command (or the
-    /// app's title) and a note after it, then, with the pointer over it,
-    /// its buttons. A web page's has its buttons always, and its address
-    /// in a field between them. Drawn `view.slide` pixels up, cut off at
-    /// the top.
+    /// app's title, cut in the middle so it keeps its end) and a note
+    /// after it, then its buttons, faint unless the pointer is over the
+    /// bar. A web page's has its address in a field between its buttons.
+    /// Drawn `view.slide` pixels up, cut off at the top; no more than its
+    /// grip showing, drawn as the grip (see `pane_grip`). A focused pane's
+    /// ends in a line in the accent.
     pub(super) fn pane_bar(
         &self,
         view: &PaneBarView,
@@ -386,13 +407,22 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let line = px(1).max(1);
+        if view.is_grip() {
+            self.pane_grip(&mut c, view, scale, p);
+            return c.into_buffer(true);
+        }
         let background = if view.focused {
             p.tab_active
         } else {
             p.tab_bar
         };
         c.fill(0, 0, c.w, c.h, background);
-        c.fill(0, c.h - line, c.w, line, p.border_variant);
+        if view.focused {
+            let accent = px(FOCUS_STRIP).max(1);
+            c.fill(0, c.h - accent, c.w, accent, p.accent);
+        } else {
+            c.fill(0, c.h - line, c.w, line, p.border_variant);
+        }
 
         // Everything is laid out in the full bar, then moved up by the slide.
         let up = -view.slide;
@@ -432,19 +462,18 @@ impl Painter {
             BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
                 status_mark(AgentStatus::Idle, x, y, s)
             }),
-            BarStatus::Working => icon_sdf(&mut c, mark, scale, p.warning, |x, y| {
+            // Busy, as an agent busy is everywhere else: in the accent.
+            BarStatus::Working => icon_sdf(&mut c, mark, scale, p.accent, |x, y| {
                 status_mark(AgentStatus::Working, x, y, s)
             }),
         }
 
-        // The note keeps its room; the label is cut short before it. With
-        // the buttons hidden, both reach the bar's end.
-        let band = (px(up), px(up + full.h));
+        // The note keeps its room; the label is cut short before it.
+        let band = band(bar, scale);
         let x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
-        let end_x = match buttons.first() {
-            Some((_, first)) if view.lit => first.loc.x,
-            _ => full.w - BAR_INSET,
-        };
+        let end_x = buttons
+            .first()
+            .map_or(full.w - BAR_INSET, |(_, first)| first.loc.x);
         let right = px(end_x - BAR_NOTE_GAP) as f32;
         let note_w = view.note.map_or(0.0, |note| {
             self.text_width(note, DETAIL_FONT_SIZE, scale) + px(BAR_NOTE_GAP) as f32
@@ -453,15 +482,18 @@ impl Painter {
         let (label_color, note_color) = match view.status {
             _ if !view.focused => (p.muted, p.placeholder),
             BarStatus::Running => (p.text, p.muted),
-            BarStatus::Working => (p.text, p.warning),
-            BarStatus::Idle | BarStatus::Exited => (p.muted, p.placeholder),
+            BarStatus::Working => (p.text, p.accent),
+            // Focused, it says what it is plainly enough to read.
+            BarStatus::Idle | BarStatus::Exited => (p.text, p.muted),
         };
+        let label_right = (right - note_w).max(x);
+        let label = self.cut_middle(&view.label, DETAIL_FONT_SIZE, label_right - x, scale);
         let end = self.text(
             &mut c,
-            &view.label,
+            &label,
             DETAIL_FONT_SIZE,
             x,
-            (right - note_w).max(x),
+            label_right,
             band,
             scale,
             label_color,
@@ -479,10 +511,86 @@ impl Painter {
             );
         }
 
-        if view.lit {
-            self.bar_buttons(&mut c, view, buttons, background, scale, p);
-        }
+        self.bar_buttons(&mut c, view, buttons, background, scale, p);
         c.into_buffer(true)
+    }
+
+    /// A hidden pane's grip over the whole of `c`: a dot while something
+    /// runs or has run, the title small and cut in the middle, and the
+    /// close button faint at its end. A focused pane's is tinted with the
+    /// accent and ends in an accent line, so the focus shows from afar.
+    fn pane_grip(&self, c: &mut Canvas, view: &PaneBarView, scale: f64, p: &Palette) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (_, size, _) = view.placement();
+        let background = if view.focused {
+            mix(p.tab_bar, p.accent, 0.22)
+        } else {
+            p.tab_bar
+        };
+        c.fill(0, 0, c.w, c.h, background);
+        let line = px(1).max(1);
+        let edge = if view.focused {
+            p.accent
+        } else {
+            p.border_variant
+        };
+        c.fill(0, c.h - line, c.w, line, edge);
+        let grip = Rectangle::new((0, 0).into(), size);
+        let dot = match view.status {
+            BarStatus::Running | BarStatus::Working => Some(p.accent),
+            BarStatus::Exited => Some(p.placeholder),
+            BarStatus::Idle => None,
+        };
+        if let Some(color) = dot {
+            let at = Rectangle::new(
+                (
+                    PADDING as i32 + (STATUS_WIDTH - GRIP_DOT) / 2,
+                    (size.h - GRIP_DOT) / 2,
+                )
+                    .into(),
+                (GRIP_DOT, GRIP_DOT).into(),
+            );
+            let (x, y, w, h) = rect_px(at, scale);
+            c.rounded(x, y, w, h, w / 2.0, color);
+        }
+        let close = pane_bar_buttons(grip, BarButtons::None, None)
+            .into_iter()
+            .find(|(b, _)| *b == BarButton::Close)
+            .map(|(_, r)| r)
+            .unwrap_or(grip);
+        let x = px(PADDING as i32 + STATUS_WIDTH + STATUS_GAP) as f32;
+        let right = px(close.loc.x - BAR_NOTE_GAP) as f32;
+        let label = self.cut_middle(&view.label, GRIP_FONT_SIZE, right - x, scale);
+        let color = if view.focused { p.text } else { p.muted };
+        let band = band(grip, scale);
+        self.text(c, &label, GRIP_FONT_SIZE, x, right, band, scale, color);
+        let faint = mix(p.muted, background, 0.4);
+        icon_sdf(c, close, scale, faint, |x, y| cross(x, y, 0.55 * s));
+    }
+
+    /// `text` cut to fit `width` (physical pixels) at `size`: whole if it
+    /// fits, else its start and its end either side of "…", so a command
+    /// keeps its last arguments as well as its name.
+    fn cut_middle(&self, text: &str, size: f32, width: f32, scale: f64) -> String {
+        if self.text_width(text, size, scale) <= width {
+            return text.to_owned();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let cut = |n: usize| -> String {
+            let head = n.div_ceil(2);
+            let tail = n - head;
+            let mut s: String = chars[..head].iter().collect();
+            s.push('…');
+            s.extend(&chars[chars.len() - tail..]);
+            s
+        };
+        (1..chars.len())
+            .rev()
+            .map(cut)
+            .find(|s| self.text_width(s, size, scale) <= width)
+            // Not even a character either side: the start, cut as `text` cuts.
+            .unwrap_or_else(|| text.to_owned())
     }
 
     /// The buttons of a pane's bar, at `buttons`, over its `background`.
@@ -496,6 +604,13 @@ impl Painter {
         p: &Palette,
     ) {
         let s = scale as f32;
+        // Faint until the pointer is over the bar, so a bar that stays
+        // out over a running command doesn't shout.
+        let rest = if view.lit {
+            p.muted
+        } else {
+            mix(p.muted, background, 0.35)
+        };
         for (button, rect) in buttons {
             let enabled = match button {
                 BarButton::Restart => view.can_restart,
@@ -523,7 +638,7 @@ impl Painter {
             } else if hovered {
                 p.text
             } else {
-                p.muted
+                rest
             };
             match button {
                 BarButton::Restart | BarButton::Reload => {
@@ -551,8 +666,8 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        BAR_REVEAL, BarButton, BarButtons, BarHit, BarStatus, FOCUS_STRIP, PaneBarView,
-        UNZOOM_BUTTON, UNZOOM_MARGIN, focus_strip, focus_strip_rect, pane_bar_buttons,
+        BAR_REVEAL, BAR_SLIDE, BarButton, BarButtons, BarHit, BarStatus, FOCUS_STRIP, PANE_GRIP,
+        PaneBarView, UNZOOM_BUTTON, UNZOOM_MARGIN, focus_strip, focus_strip_rect, pane_bar_buttons,
         pane_bar_field, pane_bar_hit, pane_bar_rects, pane_bar_rects_shown, pointer_reveals,
         unzoom_button_rect,
     };
@@ -613,14 +728,54 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_bar_has_no_height_and_the_window_takes_it_all() {
+    fn a_hidden_bar_keeps_its_grip_and_the_window_takes_the_rest() {
         let pane = Rect::new((200, 50).into(), (600, 400).into());
         let (bar, client) = pane_bar_rects_shown(pane, false);
-        assert_eq!(bar, Rect::new((200, 50).into(), (600, 0).into()));
-        assert_eq!(client, pane);
-        // Even a pane too small for a bar.
+        assert_eq!(bar, Rect::new((200, 50).into(), (600, PANE_GRIP).into()));
+        assert_eq!(
+            client,
+            Rect::new((200, 50 + PANE_GRIP).into(), (600, 400 - PANE_GRIP).into())
+        );
+        // A pane too small for a grip keeps its window.
         let tiny = Rect::new((0, 0).into(), (300, 1).into());
         assert_eq!(pane_bar_rects_shown(tiny, false).1, tiny);
+    }
+
+    #[test]
+    fn a_bar_at_rest_hidden_shows_as_its_grip() {
+        let mut v = view(600);
+        v.slide = BAR_SLIDE;
+        assert_eq!(v.placement().1.h, PANE_GRIP);
+        assert!(v.is_grip());
+        assert_eq!(v.blinker(), None);
+        v.slide = 0;
+        assert!(!v.is_grip());
+        // A grip's close button is where the bar's is.
+        let pane = Rect::new((200, 50).into(), (600, 400).into());
+        let grip = pane_bar_rects_shown(pane, false).0;
+        let end = (200.0 + 600.0 - BAR_INSET as f64 - 4.0, 52.0).into();
+        assert_eq!(
+            pane_bar_hit(grip, BarButtons::None, None, end),
+            Some(BarHit::Button(BarButton::Close))
+        );
+        assert_eq!(
+            pane_bar_hit(grip, BarButtons::None, None, (300.0, 52.0).into()),
+            Some(BarHit::Label)
+        );
+    }
+
+    #[test]
+    fn a_cut_label_keeps_its_end() {
+        let painter = Painter::new();
+        let text = "npm run dev -- --port 3000 --host 0.0.0.0";
+        let full = painter.text_width(text, 12.0, 1.0);
+        assert_eq!(painter.cut_middle(text, 12.0, full + 1.0, 1.0), text);
+        if full > 0.0 {
+            let cut = painter.cut_middle(text, 12.0, full / 2.0, 1.0);
+            assert!(cut.starts_with("npm") && cut.ends_with("0.0"), "{cut}");
+            assert!(cut.contains('…'));
+            assert!(painter.text_width(&cut, 12.0, 1.0) <= full / 2.0);
+        }
     }
 
     #[test]
@@ -849,7 +1004,7 @@ mod tests {
                             can_back: i < 2,
                             lit: i != 3,
                             hover: Some(BarButton::Restart),
-                            slide: [0, 7, PANE_BAR_HEIGHT - 1, PANE_BAR_HEIGHT][i],
+                            slide: [0, 7, BAR_SLIDE, PANE_BAR_HEIGHT][i],
                             ..view(w)
                         };
                         let buffer = painter.pane_bar(&view, scale, theme.palette());
