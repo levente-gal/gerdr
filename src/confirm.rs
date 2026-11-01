@@ -88,6 +88,7 @@ fn close_question(card: &AgentView) -> (String, String) {
         AgentKey::Cursor(_) => {
             "It keeps running in Cursor; gerdr shows it again once you write to it"
         }
+        AgentKey::T3(_) => "It keeps running in T3 Code; gerdr shows it again once you write to it",
         AgentKey::Test(_) => "It is still running: closing its pane stops it",
         _ if card.status == crate::herdr::AgentStatus::Blocked => {
             "It waits for you in the middle of a run: closing its pane stops it"
@@ -197,6 +198,7 @@ impl Gerdr {
                 self.dismiss_test(pane_id);
             }
             AgentKey::Cursor(chat) => self.delete_cursor_chat(chat),
+            AgentKey::T3(thread) => self.delete_t3_thread(thread),
             AgentKey::Ci(_) => {}
         }
     }

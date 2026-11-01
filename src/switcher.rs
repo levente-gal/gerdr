@@ -98,6 +98,8 @@ pub enum Target {
     RepoPage(String),
     /// An app's own profile, to bring into gerdr's shared one of it.
     ImportProfile(profile_import::Source),
+    /// T3 Code's app, to show for workspace `.0` (see `Gerdr::open_t3`).
+    T3(usize),
 }
 
 impl Target {
@@ -114,6 +116,7 @@ impl Target {
             | Target::Shortcuts
             | Target::Inbox
             | Target::NewAgent(..)
+            | Target::T3(_)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -136,6 +139,7 @@ impl Target {
             | Target::Shortcuts
             | Target::Inbox
             | Target::NewAgent(..)
+            | Target::T3(_)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -720,6 +724,7 @@ fn frecency_key(
         Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
         Target::Agent(key) => format!("agent:{key}"),
         Target::NewAgent(_, command) => format!("agent-cli:{command}"),
+        Target::T3(_) => "t3".to_owned(),
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
         Target::App(command) | Target::Command(command) | Target::RepoPage(command) => {
@@ -908,11 +913,20 @@ impl Gerdr {
     }
 
     /// A row per installed agent CLI, starting it in workspace `w`,
-    /// naming it; none without it.
+    /// naming it, and one for T3 Code's app once T3 Code ran here; none
+    /// without the workspace.
     fn agent_entries(&self, w: usize) -> Vec<Item> {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
         };
+        let t3 = self.t3.home.is_some().then(|| {
+            Item::new(
+                ItemIcon::Command,
+                "T3 Code",
+                format!("its agents' threads, for {}", ws.name),
+                Target::T3(w),
+            )
+        });
         self.cli_agents
             .iter()
             .map(|agent| {
@@ -926,6 +940,7 @@ impl Gerdr {
                     Target::NewAgent(w, agent.command.clone()),
                 )
             })
+            .chain(t3)
             .collect()
     }
 
@@ -1134,6 +1149,7 @@ impl Gerdr {
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
             Target::NewAgent(w, command) => self.new_agent(w, &command),
+            Target::T3(w) => self.open_t3(w, None),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),

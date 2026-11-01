@@ -71,6 +71,7 @@ mod sidebar;
 mod switcher;
 mod syntax;
 mod system_theme;
+mod t3_agents;
 mod tab_strip;
 mod test_runs;
 mod text_field;
@@ -1290,6 +1291,8 @@ pub struct Gerdr {
     cursor_poke: Option<std::sync::mpsc::Sender<Vec<String>>>,
     /// Where Cursor's hooks reach this gerdr.
     cursor_socket: Option<PathBuf>,
+    /// What gerdr knows of T3 Code's threads (see `t3_agents`).
+    pub t3: t3_agents::T3,
     /// The programs whose apps keep running when gerdr quits (see `keep`).
     pub keep_apps: Vec<String>,
     /// The shown project's server of apps kept running, while gerdr shows
@@ -2724,6 +2727,7 @@ impl Gerdr {
             })
             .collect();
         watched.extend(self.cursor_watched());
+        watched.extend(self.t3_watched());
         watched.extend(self.test_watched());
         let news = agents::agent_news(
             &self.agent_statuses,
@@ -2819,13 +2823,15 @@ impl Gerdr {
         })
     }
 
-    /// Show agent `key`: herdr's in its pane, a Cursor chat in Cursor.
+    /// Show agent `key`: herdr's in its pane, a Cursor chat in Cursor, a T3
+    /// Code thread in its app.
     pub fn focus_agent(&mut self, key: &agents::AgentKey) {
         match key {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
             agents::AgentKey::Ci(link) => self.open_ci_link(link.clone()),
             agents::AgentKey::Test(pane_id) => self.focus_test_run(pane_id),
+            agents::AgentKey::T3(thread) => self.focus_t3_thread(thread),
         }
     }
 
@@ -2898,6 +2904,7 @@ impl Gerdr {
             .map(|(w, ws)| {
                 let mut views = self.herdr_cards(ws);
                 views.extend(self.cursor_cards(w));
+                views.extend(self.t3_cards(w));
                 views.extend(self.test_cards(ws));
                 if self.needs_you && w != self.active_workspace {
                     for view in &mut views {
@@ -4910,6 +4917,7 @@ impl Gerdr {
                     .iter()
                     .filter(|chat| self.cursor_chat_place(chat) == Some(w))
                     .map(|chat| chat.status)
+                    .chain(self.t3_statuses(w))
                     .chain(view.status)
                     .max_by_key(|s| chrome::urgency(*s));
                 if let Some(git) = self.git.get(&ws.dir) {
@@ -6110,6 +6118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_idle: Vec::new(),
         cursor_poke: None,
         cursor_socket: None,
+        t3: Default::default(),
         keep_apps,
         keeper: None,
         keep_warned: false,
@@ -6321,6 +6330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_git();
     state.watch_records();
     state.watch_cursor_agents();
+    state.watch_t3_agents();
     state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();

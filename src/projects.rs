@@ -52,6 +52,9 @@ pub struct Store {
     /// Which of Cursor's idle chats stay shown and which were deleted.
     #[serde(default, skip_serializing_if = "History::is_empty")]
     pub cursor_history: History,
+    /// Which of T3 Code's threads were hidden from gerdr.
+    #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
+    pub t3_hidden: crate::t3_agents::Hidden,
     /// The pull requests whose CI is watched, by repository.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ci_watched: crate::ci::Watched,
@@ -74,6 +77,8 @@ struct State {
     stop_picks: Option<Stops>,
     #[serde(default, skip_serializing_if = "History::is_empty")]
     cursor_history: History,
+    #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
+    t3_hidden: crate::t3_agents::Hidden,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
@@ -409,6 +414,7 @@ impl Store {
         self.quit_choice = state.quit_choice;
         self.stop_picks = state.stop_picks;
         self.cursor_history = state.cursor_history;
+        self.t3_hidden = state.t3_hidden;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
     }
@@ -420,6 +426,7 @@ impl Store {
             quit_choice: self.quit_choice,
             stop_picks: self.stop_picks,
             cursor_history: self.cursor_history.clone(),
+            t3_hidden: self.t3_hidden.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
         }
@@ -1514,6 +1521,7 @@ mod tests {
                 apps: false,
             }),
             cursor_history: History::default(),
+            t3_hidden: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
             books: Books::default(),

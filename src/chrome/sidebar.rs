@@ -45,6 +45,7 @@ use crate::cursor_agents::CursorChat;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
+use crate::t3_agents::T3Thread;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -469,6 +470,50 @@ impl AgentView {
             inbox: false,
             test: None,
             icon: AgentIcon::Cursor,
+        }
+    }
+
+    /// The view of T3 Code thread `thread`: its side chats and subagents
+    /// at work as its subagent lines.
+    pub fn t3(thread: &T3Thread) -> Self {
+        let row = &thread.row;
+        let field = |label: &str, value: String| AgentLine::Field(label.into(), value);
+        let mut lines = Vec::new();
+        let dir = row.paths().first().cloned();
+        if let Some(dir) = &dir {
+            lines.push(field(FOLDER, short_path(dir, None)));
+        }
+        if let Some(branch) = &row.branch {
+            lines.push(field("Branch", branch.clone()));
+        }
+        if row.worktree.is_some() {
+            lines.push(field("Worktree", "its own".into()));
+        }
+        lines.push(field("thread", row.id.clone()));
+        let subagents = thread
+            .children
+            .iter()
+            .map(|(child, _)| SubagentView {
+                key: Some(AgentKey::T3(child.id.clone())),
+                task: Some(tidy_title(&child.title))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "Working".into()),
+            })
+            .collect();
+        let agent = row.agent();
+        Self {
+            key: AgentKey::T3(row.id.clone()),
+            dir,
+            status: thread.status,
+            icon: AgentIcon::from_agent(&agent),
+            kind: format!("t3 {agent}"),
+            name: Some(tidy_title(&row.title)).filter(|n| !n.trim().is_empty()),
+            model: row.model.clone(),
+            lines,
+            closable: true,
+            subagents,
+            inbox: false,
+            test: None,
         }
     }
 

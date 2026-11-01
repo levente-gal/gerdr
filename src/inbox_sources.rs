@@ -19,6 +19,7 @@ use crate::{
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
     inbox_store::InboxFile,
     issues::{Issue, IssueSource, IssuesRead, IssuesState, TicketRepo},
+    t3_agents::T3Thread,
     test_runs::TestRun,
 };
 
@@ -43,6 +44,8 @@ pub struct Sources<'a> {
     pub herdr_agents: &'a [AgentInfo],
     /// Cursor's chats shown as cards (`Gerdr::cursor_chats`).
     pub cursor_chats: &'a [CursorChat],
+    /// T3 Code's threads shown as cards (`T3::threads`).
+    pub t3_threads: &'a [T3Thread],
     /// The test runs shown as cards (`Gerdr::test_runs`).
     pub test_runs: &'a [TestRun],
     /// Since when each agent has been as it is (`Gerdr::agent_since`).
@@ -145,13 +148,15 @@ impl<'a> Sources<'a> {
 }
 
 /// An agent card's fingerprint: its status and herdr's count of its
-/// state changes (a Cursor chat's last update, a test run's process), so
+/// state changes (a Cursor chat's or T3 Code thread's last update, a test
+/// run's process), so
 /// it changes whenever the agent moves on. `None` for what is not an agent
 /// (a CI card).
 pub fn agent_fingerprint(
     view: &AgentView,
     herdr_agents: &[AgentInfo],
     cursor_chats: &[CursorChat],
+    t3_threads: &[T3Thread],
     test_runs: &[TestRun],
 ) -> Option<String> {
     let status = status_label(view.status);
@@ -164,6 +169,11 @@ pub fn agent_fingerprint(
         AgentKey::Cursor(chat) => {
             let chat = cursor_chats.iter().find(|c| &c.row.id == chat);
             let updated = chat.map_or(0, |c| c.row.updated_ms);
+            Some(format!("{status}#{updated}"))
+        }
+        AgentKey::T3(thread) => {
+            let thread = t3_threads.iter().find(|t| &t.row.id == thread);
+            let updated = thread.map_or("", |t| t.row.updated.as_str());
             Some(format!("{status}#{updated}"))
         }
         AgentKey::Test(pane_id) => {
@@ -191,9 +201,13 @@ pub fn agent_items(src: &Sources) -> Vec<InboxItem> {
             if !listed.insert(view.key.clone()) {
                 continue;
             }
-            let Some(fingerprint) =
-                agent_fingerprint(view, src.herdr_agents, src.cursor_chats, src.test_runs)
-            else {
+            let Some(fingerprint) = agent_fingerprint(
+                view,
+                src.herdr_agents,
+                src.cursor_chats,
+                src.t3_threads,
+                src.test_runs,
+            ) else {
                 continue;
             };
             let pane = match &view.key {
@@ -681,6 +695,7 @@ mod tests {
                 agents: &self.agents,
                 herdr_agents: &self.herdr_agents,
                 cursor_chats: &self.cursor_chats,
+                t3_threads: &[],
                 test_runs: &[],
                 agent_since: &self.agent_since,
                 ci: &self.ci,
@@ -843,7 +858,7 @@ mod tests {
         let after = agent_items(&f.sources());
         assert_ne!(before[0].fingerprint, after[0].fingerprint);
         // The sidebar's check of a card agrees with the inbox's item.
-        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats, &[]);
+        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats, &[], &[]);
         assert_eq!(print.as_ref(), Some(&after[0].fingerprint));
     }
 

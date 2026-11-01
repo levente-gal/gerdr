@@ -1,6 +1,6 @@
 //! Agents from any source, as cards, switcher items and notifications see
-//! them: herdr's, running in its terminal panes, and Cursor's chats (see
-//! `cursor_agents`).
+//! them: herdr's, running in its terminal panes, Cursor's chats (see
+//! `cursor_agents`) and T3 Code's threads (see `t3_agents`).
 
 use std::{
     collections::HashMap,
@@ -19,6 +19,8 @@ pub enum AgentKey {
     Cursor(String),
     Ci(String),
     Test(String),
+    /// A T3 Code thread, by id.
+    T3(String),
 }
 
 /// What a Cursor key's text starts with; a herdr key is its bare pane id,
@@ -28,6 +30,8 @@ const CURSOR_PREFIX: &str = "cursor:";
 const CI_PREFIX: &str = "ci:";
 /// What a test run's key's text starts with.
 const TEST_PREFIX: &str = "test:";
+/// What a T3 Code thread's key's text starts with.
+const T3_PREFIX: &str = "t3:";
 
 impl fmt::Display for AgentKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -36,6 +40,7 @@ impl fmt::Display for AgentKey {
             AgentKey::Cursor(chat) => write!(f, "{CURSOR_PREFIX}{chat}"),
             AgentKey::Ci(link) => write!(f, "{CI_PREFIX}{link}"),
             AgentKey::Test(pane_id) => write!(f, "{TEST_PREFIX}{pane_id}"),
+            AgentKey::T3(thread) => write!(f, "{T3_PREFIX}{thread}"),
         }
     }
 }
@@ -48,6 +53,9 @@ impl AgentKey {
         }
         if let Some(pane_id) = text.strip_prefix(TEST_PREFIX) {
             return AgentKey::Test(pane_id.to_owned());
+        }
+        if let Some(thread) = text.strip_prefix(T3_PREFIX) {
+            return AgentKey::T3(thread.to_owned());
         }
         match text.strip_prefix(CURSOR_PREFIX) {
             Some(chat) => AgentKey::Cursor(chat.to_owned()),
