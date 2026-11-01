@@ -27,8 +27,8 @@ const TEXT_INSET: i32 = 8;
 /// The text's size, and a row's height.
 const MONO_SIZE: f32 = 13.0;
 const ROW: i32 = 18;
-/// How far bold text is drawn again to the right, logical pixels: the
-/// monospace font has no bold of its own here.
+/// How far bold text is drawn again to the right, logical pixels, when
+/// the monospace font has no bold face (see `Painter::has_mono_bold`).
 const BOLD_SHIFT: f32 = 0.6;
 /// How far dim text goes towards the ground.
 const DIM: f32 = 0.4;
@@ -622,9 +622,9 @@ impl Painter {
         c
     }
 
-    /// The text of `row` in the colours, bold and dim of its runs, each
-    /// run where its first character goes (`adv` apart), the rest in the
-    /// terminal's colour.
+    /// The text of `row` in the colours, bold (in the bold monospace
+    /// face) and dim of its runs, each run where its first character goes
+    /// (`adv` apart), the rest in the terminal's colour.
     fn styled_row(
         &self,
         c: &mut super::Canvas,
@@ -659,10 +659,18 @@ impl Painter {
             }
             let x = r.start as f32 * adv;
             let size = MONO_SIZE;
-            self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
-            if style.bold {
-                let x = x + BOLD_SHIFT * scale as f32;
-                self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+            match style.bold {
+                true if self.has_mono_bold() => {
+                    self.mono_bold_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                }
+                bold => {
+                    self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                    // No bold face: struck again a little to the right.
+                    if bold {
+                        let x = x + BOLD_SHIFT * scale as f32;
+                        self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                    }
+                }
             }
         }
     }

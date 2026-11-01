@@ -30,6 +30,9 @@ pub(super) struct Painter {
     /// The UI font in bold, for names that head a group (a repository's);
     /// `None` when there is none, and the UI font is used instead.
     pub(super) bold: Option<FontVec>,
+    /// The monospace font in bold, for terminal text drawn bold; `None`
+    /// when there is none (bold is then struck twice, see `mono_bold`).
+    pub(super) mono_bold: Option<FontVec>,
     /// Popup backgrounds drawn lately, the last used first: a popup drawn
     /// again, say as its list scrolls, starts from a copy.
     popups: RefCell<Vec<(PopupKey, Canvas)>>,
@@ -224,6 +227,26 @@ fn load_bold() -> Option<FontVec> {
 /// The weight bold text is drawn at, from a font with a weight axis.
 const BOLD_WEIGHT: f32 = 650.0;
 
+/// The monospace font in bold: its own file at a terminal's bold weight
+/// when it has a weight axis, else the bold face fontconfig picks, if
+/// that is another file than the regular one (else there is no bold).
+fn load_mono_bold() -> Option<FontVec> {
+    let regular = find_mono_font();
+    if let Some(mut font) = load_font(regular.clone())
+        && font.set_variation(b"wght", MONO_BOLD_WEIGHT)
+    {
+        return Some(font);
+    }
+    let bold = find_family("monospace:bold")?;
+    if Some(&bold) == regular.as_ref() {
+        return None;
+    }
+    load_font(Some(bold))
+}
+
+/// The weight terminal bold is drawn at, from a font with a weight axis.
+const MONO_BOLD_WEIGHT: f32 = 700.0;
+
 /// The font in the file at `path`, if it can be read.
 fn load_font(path: Option<String>) -> Option<FontVec> {
     let data = std::fs::read(path?).ok()?;
@@ -377,6 +400,54 @@ fn text_in(
     pen
 }
 
+/// Draw `text` in the monospace `font` as `text_in` does, the characters
+/// it lacks each in the font fontconfig picks for it. Returns where it
+/// ends.
+#[allow(clippy::too_many_arguments)]
+fn mono_in(
+    font: &FontVec,
+    c: &mut Canvas,
+    text: &str,
+    size: f32,
+    x: f32,
+    max_x: f32,
+    band: (i32, i32),
+    scale: f64,
+    color: Rgb,
+) -> f32 {
+    let lacks = |ch: char| !ch.is_whitespace() && font.glyph_id(ch).0 == 0;
+    let missing: Vec<char> = text.chars().filter(|&ch| lacks(ch)).collect();
+    if missing.is_empty() {
+        return text_in(font, c, text, size, x, max_x, band, scale, color);
+    }
+    // Runs the monospace font has, and the characters it lacks each in
+    // the font fontconfig picks for it.
+    let other: std::collections::HashMap<char, &FontVec> = missing
+        .iter()
+        .zip(fallbacks(&missing))
+        .filter_map(|(ch, f)| Some((*ch, f?)))
+        .collect();
+    let font_of = |ch: char| other.get(&ch).copied().unwrap_or(font);
+    let mut pen = x;
+    let mut rest = text;
+    while let Some(first) = rest.chars().next() {
+        let run_font = font_of(first);
+        let end = rest
+            .char_indices()
+            .find(|&(_, ch)| !std::ptr::eq(font_of(ch), run_font))
+            .map_or(rest.len(), |(i, _)| i);
+        let (run, after) = rest.split_at(end);
+        let width = width_in(run_font, run, size, scale);
+        if pen + width > max_x {
+            // What fits of it, with "…": the end.
+            return text_in(run_font, c, run, size, pen, max_x, band, scale, color);
+        }
+        pen = text_in(run_font, c, run, size, pen, f32::MAX, band, scale, color);
+        rest = after;
+    }
+    pen
+}
+
 impl Painter {
     pub(super) fn new() -> Self {
         let font = load_font(find_font());
@@ -391,6 +462,7 @@ impl Painter {
             font,
             mono,
             bold: load_bold(),
+            mono_bold: load_mono_bold(),
             popups: RefCell::default(),
         }
     }
@@ -470,37 +542,33 @@ impl Painter {
         let Some(font) = self.mono_font() else {
             return x;
         };
-        let lacks = |ch: char| !ch.is_whitespace() && font.glyph_id(ch).0 == 0;
-        let missing: Vec<char> = text.chars().filter(|&ch| lacks(ch)).collect();
-        if missing.is_empty() {
-            return text_in(font, c, text, size, x, max_x, band, scale, color);
+        mono_in(font, c, text, size, x, max_x, band, scale, color)
+    }
+
+    /// Whether the monospace font has a bold face of its own, which
+    /// `mono_bold_text` draws in.
+    pub(super) fn has_mono_bold(&self) -> bool {
+        self.mono_bold.is_some()
+    }
+
+    /// Draw `text` in the bold monospace font as `mono_text` does, else
+    /// (none found) in the monospace font. Returns where it ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn mono_bold_text(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        size: f32,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        color: Rgb,
+    ) -> f32 {
+        match &self.mono_bold {
+            Some(font) => mono_in(font, c, text, size, x, max_x, band, scale, color),
+            None => self.mono_text(c, text, size, x, max_x, band, scale, color),
         }
-        // Runs the monospace font has, and the characters it lacks each in
-        // the font fontconfig picks for it.
-        let other: std::collections::HashMap<char, &FontVec> = missing
-            .iter()
-            .zip(fallbacks(&missing))
-            .filter_map(|(ch, f)| Some((*ch, f?)))
-            .collect();
-        let font_of = |ch: char| other.get(&ch).copied().unwrap_or(font);
-        let mut pen = x;
-        let mut rest = text;
-        while let Some(first) = rest.chars().next() {
-            let run_font = font_of(first);
-            let end = rest
-                .char_indices()
-                .find(|&(_, ch)| !std::ptr::eq(font_of(ch), run_font))
-                .map_or(rest.len(), |(i, _)| i);
-            let (run, after) = rest.split_at(end);
-            let width = width_in(run_font, run, size, scale);
-            if pen + width > max_x {
-                // What fits of it, with "…": the end.
-                return text_in(run_font, c, run, size, pen, max_x, band, scale, color);
-            }
-            pen = text_in(run_font, c, run, size, pen, f32::MAX, band, scale, color);
-            rest = after;
-        }
-        pen
     }
 
     /// A checkbox at the left of `rect`, vertically centred: an outlined
@@ -1247,6 +1315,27 @@ mod tests {
         let p = Theme::Dark.palette();
         painter.mono_text(&mut c, "❯", 14.0, 4.0, 60.0, (0, 30), 1.0, p.text);
         assert!(c.px.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn bold_monospace_text_is_drawn_heavier_in_its_own_face() {
+        let painter = Painter::new();
+        if !painter.has_mono_bold() {
+            return;
+        }
+        let p = Theme::Dark.palette();
+        let ink = |bold: bool| {
+            let mut c = Canvas::new((200, 30).into());
+            let text = "Compiling gerdr";
+            match bold {
+                true => {
+                    painter.mono_bold_text(&mut c, text, 13.0, 4.0, 200.0, (0, 30), 1.0, p.text)
+                }
+                false => painter.mono_text(&mut c, text, 13.0, 4.0, 200.0, (0, 30), 1.0, p.text),
+            };
+            c.px.iter().map(|&b| b as u64).sum::<u64>()
+        };
+        assert!(ink(true) > ink(false));
     }
 
     #[test]
