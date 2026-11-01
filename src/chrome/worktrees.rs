@@ -4,7 +4,7 @@
 //! or hovered row, buttons to review, check out, merge and delete it.
 
 use super::{
-    BUTTON_RADIUS, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP,
+    ButtonStyle, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP,
     GIT_MARK_WIDTH, HELP_MARGIN, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, PADDING,
     POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, PROJECT_MENU_ROW, PROJECT_MENU_SECTION,
     Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW,
@@ -12,9 +12,10 @@ use super::{
     icon_sdf,
     inbox::scope_segments,
     layers::{Part, RowCache},
-    magnifier, measure, mix, phys, physical,
-    project_menu::{menu_mark, menu_query_text},
+    measure, mix, phys, physical,
+    project_menu::menu_mark,
     rect_px,
+    search::query_text,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
@@ -133,13 +134,23 @@ impl WorktreeButton {
         }
     }
 
-    /// How wide it is: its label, measured, and the room either side.
+    /// How wide it is: its label, measured as `Painter::button` draws
+    /// it, and the room either side. Narrower than a dialog's button
+    /// (`Painter::button_width`): four fit beside a worktree's name.
     fn width(self) -> i32 {
         let label = self.label();
-        let text = measure(label, SMALL_FONT_SIZE)
-            .unwrap_or(label.chars().count() as f32 * 7.0)
+        let text = measure(label, FONT_SIZE)
+            .unwrap_or(label.chars().count() as f32 * 8.0)
             .ceil() as i32;
         text + 2 * WORKTREE_BUTTON_PAD
+    }
+
+    /// How it looks: Delete in the error colour, as it loses the worktree.
+    fn style(self) -> ButtonStyle {
+        match self {
+            WorktreeButton::Delete => ButtonStyle::Destructive,
+            _ => ButtonStyle::Plain,
+        }
     }
 }
 
@@ -432,7 +443,7 @@ pub fn worktrees_field(view: &WorktreesView, size: Size<i32, Logical>, scale: f6
     FieldSpot {
         size: FONT_SIZE,
         area,
-        text: menu_query_text(area, scale),
+        text: query_text(area, scale),
         line: view.query.clone(),
     }
 }
@@ -495,28 +506,8 @@ impl Painter {
         self.scope_toggle(&mut c, &scope, view.all, hover, scale, p);
 
         let query = shift(layout.query);
-        let mark = Rectangle::new(
-            (
-                query.loc.x + PROJECT_MENU_PADDING + PADDING as i32,
-                query.loc.y,
-            )
-                .into(),
-            (MENU_MARK_WIDTH, query.size.h).into(),
-        );
-        icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
-            magnifier(x, y, s)
-        });
-        self.edit_line(
-            &mut c,
-            &view.query,
-            "Filter the worktrees…",
-            menu_query_text(query, scale),
-            band(query, scale),
-            true,
-            FONT_SIZE,
-            scale,
-            p,
-        );
+        let placeholder = "Filter the worktrees…";
+        self.query_field(&mut c, &view.query, placeholder, query, true, scale, p);
         divider(&mut c, px(query.loc.y + query.size.h) - border);
 
         if !view.empty.is_empty() {
@@ -585,7 +576,7 @@ impl Painter {
         let s = scale as f32;
         let row_band = band(rect, scale);
         let mark = menu_mark(rect);
-        let (x, y, w, h) = rect_px(rect, scale);
+        let (x, _, w, _) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let gap = (FIELD_GAP as f32 * s).round();
         let line = match entry {
@@ -606,15 +597,18 @@ impl Painter {
         };
 
         // The highlight stops short of the rows above and below.
-        let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = ROW_HIGHLIGHT_RADIUS * s;
+        let lit = Rectangle::new(
+            (rect.loc.x, rect.loc.y + 2).into(),
+            (rect.size.w, rect.size.h - 4).into(),
+        );
         let armed = matches!(line.state, LineState::Armed(_));
         if armed {
+            let (x, y, w, h) = rect_px(lit, scale);
+            let r = ROW_HIGHLIGHT_RADIUS * s;
             c.rounded(x, y, w, h, r, mix(p.elevated, p.warning, 0.15));
-        } else if selected {
-            c.rounded(x, y, w, h, r, p.selected);
-        } else if hover.is_some() {
-            c.rounded(x, y, w, h, r, p.element);
+        } else {
+            let hover = if hover.is_some() { 1.0 } else { 0.0 };
+            self.row_highlight(c, lit, (selected, hover), scale, p);
         }
 
         let mark_color = if line.tag == "main worktree" {
@@ -626,7 +620,8 @@ impl Painter {
         let mut end = right;
         for &(button, rect) in buttons {
             let hot = hover == Some(Some(button));
-            self.worktree_button(c, button, rect, hot, scale, p);
+            let label = button.label();
+            self.button(c, label, rect, (hot, false), button.style(), scale, p);
         }
         if let Some((_, first)) = buttons.first() {
             end = px(first.loc.x) as f32 - gap;
@@ -669,31 +664,6 @@ impl Painter {
                 p.placeholder,
             );
         }
-    }
-
-    /// `button` of a row in `rect`: its label on an outlined pill,
-    /// lighter under the pointer (`hot`); Delete's in the error colour.
-    fn worktree_button(
-        &self,
-        c: &mut Canvas,
-        button: WorktreeButton,
-        rect: Rect,
-        hot: bool,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let s = scale as f32;
-        let (x, y, w, h) = rect_px(rect, scale);
-        let b = ((scale.round() as i32).max(1)) as f32;
-        let r = BUTTON_RADIUS * s;
-        let fill = if hot { p.selected } else { p.element };
-        c.rounded(x, y, w, h, r, p.border);
-        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-        let color = match button {
-            WorktreeButton::Delete => p.error,
-            _ => p.text,
-        };
-        self.centered(c, button.label(), SMALL_FONT_SIZE, rect, scale, color);
     }
 }
 
@@ -1073,10 +1043,19 @@ mod tests {
     }
 
     #[test]
+    fn only_delete_is_destructive() {
+        use WorktreeButton::*;
+        assert_eq!(Delete.style(), ButtonStyle::Destructive);
+        for button in [Diff, Checkout, Merge] {
+            assert_eq!(button.style(), ButtonStyle::Plain, "{button:?}");
+        }
+    }
+
+    #[test]
     fn the_buttons_labels_fit() {
         use WorktreeButton::*;
         for button in [Diff, Checkout, Merge, Delete] {
-            let w = measure(button.label(), SMALL_FONT_SIZE).unwrap_or(0.0);
+            let w = measure(button.label(), FONT_SIZE).unwrap_or(0.0);
             assert!(w + 16.0 <= button.width() as f32, "{button:?}: {w}");
         }
     }

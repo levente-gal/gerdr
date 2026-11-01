@@ -190,7 +190,6 @@ impl Painter {
     /// ending in "…", like "Filter worktrees…"), with its caret when
     /// `focused`. Its text goes where `query_text` says.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // The popups take it up in wave 2.
     pub(super) fn query_field(
         &self,
         c: &mut Canvas,

@@ -11,11 +11,10 @@ use super::{
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
     FieldSpot, HELP_MARGIN, HELP_PADDING, KEY_FONT_SIZE, LABEL_FONT_SIZE, MENU_MARK_GAP,
     MENU_MARK_WIDTH, MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
-    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, STROKE, agent_icon, band, cross, dot_slot, folder, footer_height,
-    footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil,
-    phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, row_dot, segment,
-    status_dot, tray,
+    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE,
+    agent_icon, band, cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch,
+    hint_at, hint_strs, icon_sdf, measure, mix, pencil, phys, plus, rect_px, robot, rounded_rect,
+    row_dot, row_fill, search::query_text, segment, status_dot, tray,
 };
 use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
@@ -448,7 +447,7 @@ pub fn inbox_page(size: Size<i32, Logical>) -> usize {
 
 /// How wide a row's button is: its label and the room either side.
 fn row_button_width(button: &InboxButton) -> i32 {
-    extent(&button.label, SMALL_FONT_SIZE) + 2 * BUTTON_PAD
+    extent(&button.label, FONT_SIZE) + 2 * BUTTON_PAD
 }
 
 /// The first of `buttons` that fit at the right end of a row in `rect`,
@@ -625,7 +624,7 @@ fn compose_chip(compose: &InboxCompose, query: Rect) -> Rect {
 /// Where the text of the field `query` goes (physical pixels): after its
 /// mark, up to its end or, while composing, the chip.
 fn field_text(view: &InboxView, query: Rect, scale: f64) -> (f32, f32) {
-    let (x, end) = menu_query_text(query, scale);
+    let (x, end) = query_text(query, scale);
     match &view.compose {
         Some(compose) if !compose.tickets => {
             let chip = compose_chip(compose, query);
@@ -1245,10 +1244,10 @@ impl Painter {
         }
     }
 
-    /// The scope toggle of `segments` (see `scope_segments`): one outlined
-    /// track behind both, the scope shown (every workspace when `all`)
-    /// filled, the one under the pointer (`hover`) lighter. The inbox and
-    /// the worktrees popup draw it alike.
+    /// The scope toggle of `segments` (see `scope_segments`), as
+    /// `Painter::segmented` draws a toggle: the scope shown (every
+    /// workspace when `all`) filled, the one under the pointer (`hover`)
+    /// lit. The inbox and the worktrees popup draw it alike.
     pub(super) fn scope_toggle(
         &self,
         c: &mut Canvas,
@@ -1258,32 +1257,22 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        if let (Some((_, first)), Some((_, last))) = (segments.first(), segments.last()) {
-            let track = first.merge(*last);
-            let pad = SCOPE_TRACK_PAD;
-            let track = Rectangle::new(
-                (track.loc.x - pad, track.loc.y - pad).into(),
-                (track.size.w + 2 * pad, track.size.h + 2 * pad).into(),
-            );
-            self.inbox_pill(c, track, p.element, scale, p);
-        }
-        for &(segment, rect) in segments {
-            let on = segment == all;
-            let fill = if on {
-                Some(p.selected)
-            } else if hover == Some(segment) {
-                Some(mix(p.element, p.selected, 0.5))
-            } else {
-                None
-            };
-            if let Some(fill) = fill {
-                let (x, y, w, h) = rect_px(rect, scale);
-                c.rounded(x, y, w, h, (BUTTON_RADIUS - 2.0) * scale as f32, fill);
-            }
-            let label = if segment { "All" } else { "This workspace" };
-            let color = if on { p.text } else { p.muted };
-            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
-        }
+        let (Some((_, first)), Some((_, last))) = (segments.first(), segments.last()) else {
+            return;
+        };
+        let track = first.merge(*last);
+        let pad = SCOPE_TRACK_PAD;
+        let track = Rectangle::new(
+            (track.loc.x - pad, track.loc.y - pad).into(),
+            (track.size.w + 2 * pad, track.size.h + 2 * pad).into(),
+        );
+        let labelled: Vec<(&str, Rect)> = segments
+            .iter()
+            .map(|&(every, rect)| (if every { "All" } else { "This workspace" }, rect))
+            .collect();
+        let at = |scope: bool| segments.iter().position(|(s, _)| *s == scope);
+        let on = at(all).unwrap_or(0);
+        self.segmented(c, track, &labelled, on, hover.and_then(at), scale, p);
     }
 
     /// An outlined pill in `rect`, filled with `fill`.
@@ -1321,8 +1310,8 @@ impl Painter {
                 &compose.text
             }
             None => {
-                icon_sdf(c, mark, scale, p.placeholder, |x, y| magnifier(x, y, s));
-                &view.query
+                let placeholder = &view.placeholder;
+                return self.query_field(c, &view.query, placeholder, query, true, scale, p);
             }
         };
         self.edit_line(
@@ -1383,7 +1372,7 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let gap = (FIELD_GAP as f32 * s).round();
-        let (x, y, w, h) = rect_px(rect, scale);
+        let (x, y, w, _) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let text_x = px(rect.loc.x + BADGE_INSET + BADGE + BADGE_GAP) as f32;
         let line = match &key.row {
@@ -1464,18 +1453,13 @@ impl Painter {
         };
 
         // The highlight stops short of the rows above and below.
-        let (hy, hh) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = ROW_HIGHLIGHT_RADIUS * s;
-        let ground = if key.selected {
-            p.selected
-        } else if key.hovered {
-            p.element
-        } else {
-            p.elevated
-        };
-        if ground != p.elevated {
-            c.rounded(x, hy, w, hh, r, ground);
-        }
+        let lit = Rectangle::new(
+            (rect.loc.x, rect.loc.y + 2).into(),
+            (rect.size.w, rect.size.h - 4).into(),
+        );
+        let hover = if key.hovered { 1.0 } else { 0.0 };
+        self.row_highlight(c, lit, (key.selected, hover), scale, p);
+        let ground = row_fill(p, key.selected, hover).unwrap_or(p.elevated);
 
         // The title's line, and the subtitle's under it; without a
         // subtitle, the title across the row.
@@ -1515,9 +1499,7 @@ impl Painter {
         for (k, &button) in buttons.iter().enumerate() {
             let label = line.buttons.get(k).map_or("", |b| b.label.as_str());
             let hot = key.hot == Some(k);
-            let fill = if hot { p.selected } else { p.element };
-            self.inbox_pill(c, button, fill, scale, p);
-            self.centered(c, label, SMALL_FONT_SIZE, button, scale, p.text);
+            self.button(c, label, button, (hot, false), false, scale, p);
         }
         let end = match buttons.first() {
             Some(first) => px(first.loc.x) as f32 - gap,
@@ -1780,25 +1762,13 @@ impl Painter {
             let hot = view.hover == Some(InboxHit::DetailButton(k));
             // The first is what Enter does: in the accent.
             let primary = k == 0;
-            let (fill, label_color, key_color) = match (primary, hot) {
-                (true, false) => (p.accent, p.on_accent, mix(p.accent, p.on_accent, 0.8)),
-                (true, true) => (
-                    mix(p.accent, p.text, 0.12),
-                    p.on_accent,
-                    mix(p.accent, p.on_accent, 0.8),
-                ),
-                (false, hot) => (
-                    if hot { p.selected } else { p.element },
-                    p.text,
-                    p.placeholder,
-                ),
-            };
-            if primary {
-                let (x, y, w, h) = rect_px(button, scale);
-                c.rounded(x, y, w, h, BUTTON_RADIUS * s, fill);
+            let (label_color, key_color) = if primary {
+                (p.on_accent, mix(p.accent, p.on_accent, 0.8))
             } else {
-                self.inbox_pill(c, button, fill, scale, p);
-            }
+                (p.text, p.placeholder)
+            };
+            // The button's own look; its label and key go on it here.
+            self.button(c, "", button, (hot, false), primary, scale, p);
             let (x, right) = phys(button, scale);
             let button_band = band(button, scale);
             let pad = px(BUTTON_PAD) as f32;
@@ -2861,7 +2831,7 @@ mod tests {
         let l = inbox_layout(&v, size);
         assert_eq!(spot.area, l.query);
         assert_eq!(spot.line, Line::from("git"));
-        assert_eq!(spot.text, menu_query_text(l.query, 1.0));
+        assert_eq!(spot.text, query_text(l.query, 1.0));
         // While composing, the todo's text, ending before the chip.
         let c = compose(Some("backend"), false);
         let spot = inbox_field(&c, size, 2.0);
