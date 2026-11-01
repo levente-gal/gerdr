@@ -637,6 +637,7 @@ pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
         BarButton::CopyUrl => ("Copy URL", None),
         BarButton::Zoom => ("Zoom pane", Some(ZOOM_HELP)),
         BarButton::Unzoom => ("Unzoom pane", Some(ZOOM_HELP)),
+        BarButton::Close => ("Close pane", Some(CLOSE_PANE_HELP)),
     };
     let tip = Tooltip::new(text, rect);
     match what.and_then(|what| hint_for(help, what)) {
@@ -986,7 +987,7 @@ impl Gerdr {
     }
 
     /// The pane of the active tab whose bar is at `pos`, and what of it.
-    /// A hidden bar is not there to hit; an app's has no buttons.
+    /// A hidden bar is not there to hit; an app's has only its close button.
     pub fn pane_bar_at(&self, pos: Point<f64, Logical>) -> Option<(u32, BarHit)> {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
@@ -1090,6 +1091,7 @@ impl Gerdr {
             BarButton::CopyUrl => return self.copy_pane_url(id),
             BarButton::Scrollback => return self.open_scrollback(id),
             BarButton::Zoom | BarButton::Unzoom => return self.zoom_pane(id),
+            BarButton::Close => return self.close_pane(),
             BarButton::Restart | BarButton::Stop => {
                 let Some(pane_id) = self.tab().and_then(|tab| tab.herdr_pane(id)) else {
                     return;
