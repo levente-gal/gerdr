@@ -9,7 +9,10 @@
 //! it again. F1 lists every key it takes in place of the text.
 //!
 //! Lines are wrapped at the viewer's width (herdr joins those it wrapped),
-//! and a place in them is a character of a line (see `Spot`).
+//! and a place in them is a character of a line (see `Spot`). They are
+//! drawn in the colours, bold and dim the terminal drew them in, as far
+//! as herdr gives those: for the end of the scrollback only (see
+//! `set_styles`).
 //!
 //! `/` or Ctrl+F searches it: every place found is tinted, the one gone
 //! to more, Enter goes to the next (Shift+Enter, the one before), round
@@ -138,6 +141,26 @@ struct Find {
     shown: (usize, usize),
 }
 
+/// How the terminal drew some of the text: in a colour of its own (else
+/// the terminal's), bold, dim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Style {
+    pub fg: Option<Ink>,
+    pub bold: bool,
+    pub dim: bool,
+}
+
+/// A colour as the terminal names it: one of its 256 (the first 16 its
+/// theme's), or red, green and blue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Ink {
+    Index(u8),
+    Rgb([u8; 3]),
+}
+
+/// The runs of a line drawn other than plainly, by character of it.
+type Styled = Vec<(Range<usize>, Style)>;
+
 /// What a key or a click asks of gerdr.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -162,6 +185,9 @@ pub struct Scrollback {
     /// What the pane's bar calls it.
     pub label: String,
     lines: Vec<String>,
+    /// How each line was drawn, by index into `lines`: none, drawn
+    /// plainly, past those herdr gave colours for.
+    styles: Vec<Styled>,
     /// The lines wrapped at `cols`.
     rows: Vec<Row>,
     cols: usize,
@@ -201,6 +227,7 @@ impl Scrollback {
             pane_id,
             label,
             lines: split(text),
+            styles: Vec::new(),
             rows: Vec::new(),
             cols: 0,
             scroll: Scroll::default(),
@@ -238,6 +265,7 @@ impl Scrollback {
         let bottom = self.scroll.pos() >= max - 0.5;
         let top = self.rows.get(self.scroll.first()).map_or(0, |r| r.line);
         self.lines = split(text);
+        self.styles = Vec::new();
         self.rows = wrap(&self.lines, self.cols.max(1));
         let last = self.lines.len() - 1;
         if bottom {
@@ -261,6 +289,46 @@ impl Scrollback {
         self.edge_at = None;
         self.find_hits();
         self.fit(fit);
+    }
+
+    /// Draw the lines as `ansi` says the terminal drew them: the end of
+    /// the pane's output with the escape sequences that colour it (see
+    /// `parse_ansi`). Its lines are matched to these from the bottom up,
+    /// one going to a line with the same text; those it has none for, or
+    /// another text for, are drawn plainly.
+    pub fn set_styles(&mut self, ansi: &str) {
+        let mut styled = parse_ansi(ansi);
+        while styled.len() > 1 && styled.last().is_some_and(|(l, _)| l.trim().is_empty()) {
+            styled.pop();
+        }
+        self.styles = vec![Vec::new(); self.lines.len()];
+        let lines = &self.lines;
+        let same = |i: usize, j: usize| lines[i].trim_end() == styled[j].0.trim_end();
+        let (mut i, mut j) = (lines.len(), styled.len());
+        let mut pairs = Vec::new();
+        while i > 0 && j > 0 {
+            if same(i - 1, j - 1) {
+                pairs.push((i - 1, j - 1));
+                (i, j) = (i - 1, j - 1);
+            } else if j > 1 && same(i - 1, j - 2) {
+                // A line here it has no match for: past it.
+                j -= 1;
+            } else if i > 1 && same(i - 2, j - 1) {
+                i -= 1;
+            } else {
+                (i, j) = (i - 1, j - 1);
+            }
+        }
+        for (i, j) in pairs {
+            let len = self.lines[i].chars().count();
+            self.styles[i] = std::mem::take(&mut styled[j].1)
+                .into_iter()
+                .filter_map(|(r, style)| {
+                    let end = r.end.min(len);
+                    (r.start < end).then_some((r.start..end, style))
+                })
+                .collect();
+        }
     }
 
     /// Lay the list out for `fit`: wrapped again for another width, the
@@ -321,6 +389,24 @@ impl Scrollback {
         self.rows
             .get(i)
             .map_or("", |r| &self.lines[r.line][r.from..r.to])
+    }
+
+    /// How row `i` is drawn: the runs of it drawn other than plainly, by
+    /// character of the row.
+    pub fn row_styles(&self, i: usize) -> Styled {
+        let Some(row) = self.rows.get(i) else {
+            return Vec::new();
+        };
+        let Some(spans) = self.styles.get(row.line) else {
+            return Vec::new();
+        };
+        spans
+            .iter()
+            .filter_map(|(r, style)| {
+                let (a, b) = (r.start.max(row.start), r.end.min(row.end));
+                (a < b).then(|| (a - row.start..b - row.start, *style))
+            })
+            .collect()
     }
 
     /// What of row `i` is selected: from and to which of its characters,
@@ -1215,6 +1301,133 @@ impl Scrollback {
     }
 }
 
+/// The lines of `text`, with the escape sequences a terminal draws by,
+/// as they show: each line's text and the runs of it drawn other than
+/// plainly. Colours, bold and dim are kept, going on past a line's end
+/// as a terminal's do; other sequences are dropped, but a move of the
+/// cursor forward, which stands for blanks.
+fn parse_ansi(text: &str) -> Vec<(String, Styled)> {
+    let mut out = Vec::new();
+    let (mut line, mut runs, mut n) = (String::new(), Styled::new(), 0);
+    let mut style = Style::default();
+    let put = |c: char, line: &mut String, runs: &mut Styled, n: &mut usize, style: Style| {
+        line.push(c);
+        if style != Style::default() {
+            match runs.last_mut() {
+                Some((r, s)) if *s == style && r.end == *n => r.end += 1,
+                _ => runs.push((*n..*n + 1, style)),
+            }
+        }
+        *n += 1;
+    };
+    let mut chars = text.chars().peekable();
+    // A string sequence (OSC, DCS, ...) up to BEL or ESC \.
+    let skip_string = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+        while let Some(c) = chars.next() {
+            if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                break;
+            }
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => {
+                out.push((std::mem::take(&mut line), std::mem::take(&mut runs)));
+                n = 0;
+            }
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let mut end = None;
+                    for d in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&d) {
+                            end = Some(d);
+                            break;
+                        }
+                        params.push(d);
+                    }
+                    match end {
+                        Some('m') => sgr(&params, &mut style),
+                        Some('C') => {
+                            let by = params.parse::<usize>().unwrap_or(1).clamp(1, 1000);
+                            for _ in 0..by {
+                                put(' ', &mut line, &mut runs, &mut n, style);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
+                // A character set chosen: one more.
+                Some('(' | ')' | '*' | '+' | '#' | '%') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            c if c.is_control() && c != '\t' => {}
+            c => put(c, &mut line, &mut runs, &mut n, style),
+        }
+    }
+    out.push((line, runs));
+    out
+}
+
+/// Apply SGR parameters `params` (as in ESC [ `params` m) to `style`:
+/// colours of the text, bold and dim; the ground's colour and the rest
+/// passed over.
+fn sgr(params: &str, style: &mut Style) {
+    let params: Vec<&str> = params.split(';').collect();
+    let num = |i: usize| params.get(i).and_then(|p| p.parse::<u32>().ok());
+    let byte = |v: Option<u32>| v.unwrap_or(0).min(255) as u8;
+    let mut i = 0;
+    while i < params.len() {
+        // As 38:5:n or 38:2:r:g:b (a colour space first, perhaps).
+        if params[i].contains(':') {
+            let sub: Vec<Option<u32>> = params[i].split(':').map(|s| s.parse().ok()).collect();
+            if sub[0] == Some(38) {
+                style.fg = match (sub.get(1).copied().flatten(), sub.len()) {
+                    (Some(5), _) => Some(Ink::Index(byte(sub.get(2).copied().flatten()))),
+                    (Some(2), 6..) => Some(Ink::Rgb([byte(sub[3]), byte(sub[4]), byte(sub[5])])),
+                    (Some(2), 5) => Some(Ink::Rgb([byte(sub[2]), byte(sub[3]), byte(sub[4])])),
+                    _ => style.fg,
+                };
+            }
+            i += 1;
+            continue;
+        }
+        let code = if params[i].is_empty() {
+            Some(0)
+        } else {
+            num(i)
+        };
+        match code {
+            Some(0) => *style = Style::default(),
+            Some(1) => style.bold = true,
+            Some(2) => style.dim = true,
+            Some(22) => (style.bold, style.dim) = (false, false),
+            Some(c @ 30..=37) => style.fg = Some(Ink::Index((c - 30) as u8)),
+            Some(c @ 90..=97) => style.fg = Some(Ink::Index((c - 90 + 8) as u8)),
+            Some(39) => style.fg = None,
+            Some(c @ (38 | 48)) => {
+                let (ink, by) = match num(i + 1) {
+                    Some(5) => (Some(Ink::Index(byte(num(i + 2)))), 2),
+                    Some(2) => {
+                        let rgb = [byte(num(i + 2)), byte(num(i + 3)), byte(num(i + 4))];
+                        (Some(Ink::Rgb(rgb)), 4)
+                    }
+                    _ => (None, 0),
+                };
+                if c == 38 && ink.is_some() {
+                    style.fg = ink;
+                }
+                i += by;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
 /// The lines of `text` as herdr gives it, without the blank ones at its
 /// end (the rows under the prompt) but one.
 fn split(text: &str) -> Vec<String> {
@@ -1443,6 +1656,75 @@ mod tests {
             s.key(&none, Keysym::q, Keysym::q, now, f),
             Some(Outcome::Close)
         );
+    }
+
+    fn fg(ink: Ink) -> Style {
+        Style {
+            fg: Some(ink),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn escape_sequences_give_colours_bold_and_dim_and_the_rest_go() {
+        let red = fg(Ink::Index(1));
+        let bold = Style {
+            bold: true,
+            ..Default::default()
+        };
+        let lines = parse_ansi(
+            "\x1b[31merror\x1b[0m: \x1b[1mbad\x1b[22m\n\
+             \x1b]8;;file:///a\x1b\\a.rs\x1b]8;;\x07\x1b[2C\x1b[38;5;208mx\x1b[38;2;1;2;3my\r\n\
+             \x1b[38:2::4:5:6mz\x1b[39;48;5;3mw\x1b[1;2;92mv\x1b[mu\x1b(B",
+        );
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            ("error: bad".into(), vec![(0..5, red), (7..10, bold)])
+        );
+        // A link's sequences go; a move forward stands for blanks.
+        assert_eq!(lines[1].0, "a.rs  xy");
+        assert_eq!(
+            lines[1].1,
+            [(6..7, fg(Ink::Index(208))), (7..8, fg(Ink::Rgb([1, 2, 3])))]
+        );
+        // Colons, a colour space among them; the ground's colour passed
+        // over; a style going on past the line's end.
+        let bright = Style {
+            fg: Some(Ink::Index(10)),
+            bold: true,
+            dim: true,
+        };
+        assert_eq!(lines[2].0, "zwvu");
+        assert_eq!(
+            lines[2].1,
+            [(0..1, fg(Ink::Rgb([4, 5, 6]))), (2..3, bright)]
+        );
+        let on = parse_ansi("\x1b[33ma\nb\x1b[0m");
+        assert_eq!(on[1].1, [(0..1, fg(Ink::Index(3)))]);
+    }
+
+    #[test]
+    fn styles_go_to_the_lines_with_their_text_from_the_bottom_up() {
+        let mut s = viewer("old\nkept\nsame\nchanged\nlong line here\nlast", 5, 10);
+        let red = fg(Ink::Index(1));
+        // Only the end; a line it lacks; one that differs.
+        s.set_styles(
+            "\x1b[31msame\x1b[0m\nchanged \x1b[31mnot\x1b[0m\n\
+             \x1b[31mlong line\x1b[0m here\n\x1b[31mlast\x1b[0m\n\n",
+        );
+        let styled: Vec<bool> = s.styles.iter().map(|l| !l.is_empty()).collect();
+        assert_eq!(styled, [false, false, true, false, true, true]);
+        // Split by rows as the lines wrap ("long " / "line " / "here").
+        let first = s.rows.iter().position(|r| r.line == 4).unwrap();
+        assert_eq!(s.row_styles(first), [(0..5, red)]);
+        assert_eq!(s.row_styles(first + 1), [(0..4, red)]);
+        assert!(s.row_styles(first + 2).is_empty());
+        // Read again, plain until styled again.
+        s.reload("last", fit(5, 10));
+        assert!(s.row_styles(0).is_empty());
+        s.set_styles("\x1b[31mlast");
+        assert_eq!(s.row_styles(0), [(0..4, red)]);
     }
 
     #[test]

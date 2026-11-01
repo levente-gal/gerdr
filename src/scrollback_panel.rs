@@ -180,6 +180,7 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't read the pane's output: {err}"));
             }
         };
+        let styled = self.read_styled(&pane_id, &text);
         let label = self.pane_bar_content(&pane_id).label;
         self.switcher = None;
         self.project_menu = None;
@@ -191,6 +192,7 @@ impl Gerdr {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
         let mut viewer = Scrollback::new(id, pane_id, label, &text, from_bottom);
+        viewer.set_styles(&styled);
         if let Some(fit) = self.scrollback_fit_for(id) {
             viewer.fit(fit);
         }
@@ -216,14 +218,32 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't read the pane's output again: {err}"));
             }
         };
+        let styled = self.read_styled(&pane_id, &text);
         let Some((_, fit)) = self.scrollback_place() else {
             return;
         };
         if let Some(viewer) = self.scrollback.as_mut() {
             viewer.reload(&text, fit);
+            viewer.set_styles(&styled);
             let n = viewer.line_count();
             let s = if n == 1 { "" } else { "s" };
             self.show_success(format!("Snapshot read again: {n} line{s}"));
+        }
+    }
+
+    /// The end of pane `pane_id`'s output as its terminal drew it, as
+    /// many lines as `text` (all of it, read plainly) has at most, for the
+    /// viewer's colours: none, the text drawn plainly, when herdr can't
+    /// give it.
+    fn read_styled(&mut self, pane_id: &str, text: &str) -> String {
+        let lines = text.lines().count().max(1);
+        match self.herdr.as_mut().map(|h| h.pane_styled(pane_id, lines)) {
+            Some(Ok(styled)) => styled,
+            Some(Err(err)) => {
+                tracing::debug!("colours of the scrollback of {pane_id}: {err}");
+                String::new()
+            }
+            None => String::new(),
         }
     }
 
@@ -289,6 +309,7 @@ impl Gerdr {
                 found: viewer.row_found(i),
                 word: viewer.row_word(i),
                 caret: viewer.row_caret(i),
+                styles: viewer.row_styles(i),
             })
             .collect();
         let note = match viewer.selected_lines() {

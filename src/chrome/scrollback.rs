@@ -1,6 +1,7 @@
 //! The scrollback viewer over a terminal pane (see `crate::scrollback`):
 //! a title row, the pane's output in the monospace font on the terminal's
-//! own colours, and the key hints under it. Each row is a buffer of its
+//! own colours (in those it was drawn in, as far as known), and the key
+//! hints under it. Each row is a buffer of its
 //! own, so scrolling only moves them. The search (see `search`) goes in
 //! the title row, its ticks over the scrollbar. F1 lists the keys in
 //! place of the text.
@@ -13,7 +14,7 @@ use super::{
     SearchPart, band, field_text, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix,
     phys, physical, rect_px, search_spots,
 };
-use crate::scrollback::Fit;
+use crate::scrollback::{Fit, Ink, Style};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The title row's height, and the footer's under the list.
@@ -26,6 +27,11 @@ const TEXT_INSET: i32 = 8;
 /// The text's size, and a row's height.
 const MONO_SIZE: f32 = 13.0;
 const ROW: i32 = 18;
+/// How far bold text is drawn again to the right, logical pixels: the
+/// monospace font has no bold of its own here.
+const BOLD_SHIFT: f32 = 0.6;
+/// How far dim text goes towards the ground.
+const DIM: f32 = 0.4;
 /// The scrollbar at the list's right, the gap beside it, and its thumb's
 /// least height.
 const SCROLLBAR: i32 = 6;
@@ -88,6 +94,9 @@ pub struct ScrollbackRow {
     pub word: Option<Range<usize>>,
     /// The character of it the caret is on.
     pub caret: Option<usize>,
+    /// The runs of it the terminal drew other than plainly, by character
+    /// of it.
+    pub styles: Vec<(Range<usize>, Style)>,
 }
 
 /// Where the viewer's parts go, in output coordinates.
@@ -394,6 +403,24 @@ fn frame_view(view: &ScrollbackView) -> ScrollbackView {
     }
 }
 
+/// The colour `ink` names: the terminal's own for the first 16 of its
+/// 256, xterm's for the rest.
+fn ink_color(ink: Ink, p: &Palette) -> super::Rgb {
+    let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+    match ink {
+        Ink::Rgb(rgb) => rgb,
+        Ink::Index(i) if i < 16 => p.ansi[i as usize],
+        Ink::Index(i) if i < 232 => {
+            let i = i - 16;
+            [level(i / 36), level(i / 6 % 6), level(i % 6)]
+        }
+        Ink::Index(i) => {
+            let v = 8 + (i - 232) * 10;
+            [v, v, v]
+        }
+    }
+}
+
 /// The ground under the selection, on the terminal's background.
 fn selection_color(p: &Palette) -> [u8; 3] {
     mix(p.terminal_background, p.accent, 0.35)
@@ -564,16 +591,20 @@ impl Painter {
                 p,
             );
         }
-        self.mono_text(
-            &mut c,
-            &row.text,
-            MONO_SIZE,
-            0.0,
-            f32::MAX,
-            band(rect, scale),
-            scale,
-            p.terminal_foreground,
-        );
+        if row.styles.is_empty() {
+            self.mono_text(
+                &mut c,
+                &row.text,
+                MONO_SIZE,
+                0.0,
+                f32::MAX,
+                band(rect, scale),
+                scale,
+                p.terminal_foreground,
+            );
+        } else {
+            self.styled_row(&mut c, row, adv, band(rect, scale), scale, p);
+        }
         if let Some(word) = &row.word {
             let width = |t: &str| t.chars().count() as f32 * adv;
             let x = (0.0, c.w as f32);
@@ -589,6 +620,51 @@ impl Painter {
             );
         }
         c
+    }
+
+    /// The text of `row` in the colours, bold and dim of its runs, each
+    /// run where its first character goes (`adv` apart), the rest in the
+    /// terminal's colour.
+    fn styled_row(
+        &self,
+        c: &mut super::Canvas,
+        row: &ScrollbackRow,
+        adv: f32,
+        row_band: (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let chars: Vec<(usize, char)> = row.text.char_indices().collect();
+        let byte = |n: usize| chars.get(n).map_or(row.text.len(), |(b, _)| *b);
+        // The runs with those drawn plainly between them.
+        let mut runs = Vec::new();
+        let mut at = 0;
+        for (r, style) in &row.styles {
+            if r.start > at {
+                runs.push((at..r.start, Style::default()));
+            }
+            runs.push((r.clone(), *style));
+            at = r.end;
+        }
+        if at < chars.len() {
+            runs.push((at..chars.len(), Style::default()));
+        }
+        for (r, style) in runs {
+            let text = &row.text[byte(r.start)..byte(r.end)];
+            let mut color = style
+                .fg
+                .map_or(p.terminal_foreground, |ink| ink_color(ink, p));
+            if style.dim {
+                color = mix(color, p.terminal_background, DIM);
+            }
+            let x = r.start as f32 * adv;
+            let size = MONO_SIZE;
+            self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+            if style.bold {
+                let x = x + BOLD_SHIFT * scale as f32;
+                self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+            }
+        }
     }
 
     /// The scrollbar's thumb, of `size`.
@@ -936,6 +1012,15 @@ mod tests {
             "",
             "❯ ",
         ];
+        let ink = |fg: Ink, bold: bool, dim: bool| Style {
+            fg: Some(fg),
+            bold,
+            dim,
+        };
+        let dim = Style {
+            dim: true,
+            ..Default::default()
+        };
         let mut v = view(400, 120);
         v.rows = (0..30)
             .map(|i| ScrollbackRow {
@@ -952,6 +1037,17 @@ mod tests {
                 },
                 word: (i == 1).then_some(2..6),
                 caret: (i == 1).then_some(3),
+                styles: match i % lines.len() {
+                    0 => vec![
+                        (0..1, ink(Ink::Index(2), true, false)),
+                        (2..8, ink(Ink::Index(208), false, false)),
+                    ],
+                    1 => vec![(0..9, ink(Ink::Index(1), true, false))],
+                    2 | 4 => vec![(2..6, dim), (8..22, ink(Ink::Index(4), false, false))],
+                    6 => vec![(0..10, ink(Ink::Rgb([0xe0, 0x6c, 0x75]), true, false))],
+                    8 => vec![(0..1, ink(Ink::Index(13), false, true))],
+                    _ => Vec::new(),
+                },
             })
             .collect();
         v.part = 0.4;

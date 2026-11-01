@@ -1024,6 +1024,28 @@ impl Herdr {
         }
     }
 
+    /// The last `lines` lines of pane `pane_id`'s output as its terminal
+    /// draws them, with the escape sequences that colour them, the lines it
+    /// wrapped joined again. herdr reads the colours only from the end of
+    /// the scrollback (`pane.selection.read`, which reads all of it, gives
+    /// plain text only), so there may be fewer.
+    pub fn pane_styled(&mut self, pane_id: &str, lines: usize) -> Result<String, String> {
+        let mut result = self.call(
+            "pane.read",
+            json!({
+                "pane_id": pane_id,
+                "source": "recent_unwrapped",
+                "lines": lines.min(u32::MAX as usize),
+                "format": "ansi",
+                "strip_ansi": false,
+            }),
+        )?;
+        match result["read"]["text"].take() {
+            Value::String(text) => Ok(text),
+            _ => Err("pane.read: no text in the reply".into()),
+        }
+    }
+
     /// All that pane `pane_id` keeps of its output, oldest first, the lines
     /// it wrapped joined again; and how many rows up from the bottom its
     /// view stands. Read as a selection of every row, as `pane.read` gives
