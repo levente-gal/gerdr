@@ -99,6 +99,8 @@ pub const FOLD_FILES: usize = 200;
 
 /// How many of the branch menu's longest branches it is measured by.
 const WIDEST: usize = 3;
+/// Why the review can't be sent to an agent.
+const NO_AGENT: &str = "No agent runs in this workspace: start one, or copy the review";
 
 /// The panel, while open, and the batch running or last run.
 #[derive(Default)]
@@ -356,6 +358,9 @@ pub struct Panel {
     pub(crate) edited: HashSet<(PathBuf, String)>,
     /// The stash picked in the Stashes tab, by line (0 the newest).
     pub(crate) stash_pick: usize,
+    /// What the agent the review would be sent to is called; `None` while
+    /// none runs in its workspaces. Kept up by the host.
+    pub(crate) agent: Option<String>,
 }
 
 /// The branch picker's menu: where its lines stand, and the branch Enter
@@ -992,6 +997,12 @@ pub enum Outcome {
     RetryFailed,
     /// Put the review, as Markdown, on the clipboard: `count` comments.
     Copy {
+        text: String,
+        count: usize,
+    },
+    /// Send the review, as Markdown, to the agent of its workspace:
+    /// `count` comments.
+    SendReview {
         text: String,
         count: usize,
     },
@@ -2520,6 +2531,10 @@ impl Panel {
                 format!("{verb} stash@{{{n}}}")
             }
             B::DiscardFile => "discard changes…".into(),
+            B::SendReview => match &self.agent {
+                Some(agent) => format!("send to {agent}"),
+                None => "send to agent".into(),
+            },
             B::Fetch => match self.picked(items).len() {
                 0 => "fetch all".into(),
                 n => format!("fetch {n}"),
@@ -3443,6 +3458,17 @@ impl Panel {
                 (self.diff.copy_review(&dctx))
                     .map(from_diff)
                     .map_err(Why::other)
+            }
+            B::SendReview if self.agent.is_none() && !self.diff.review.is_empty() => {
+                Err(Why::other(NO_AGENT))
+            }
+            B::SendReview => {
+                diff_ctx!(self, ctx, dctx);
+                match self.diff.copy_review(&dctx).map(from_diff) {
+                    Ok(Outcome::Copy { text, count }) => Ok(Outcome::SendReview { text, count }),
+                    Ok(other) => Ok(other),
+                    Err(why) => Err(Why::other(why)),
+                }
             }
             B::ClearReview if self.diff.review.is_empty() => Err(Why::other(NO_REVIEW)),
             B::DropOutdated if self.diff.outdated_count() == 0 => {
@@ -4813,7 +4839,7 @@ impl Panel {
             }
         }
         if !self.diff.review.is_empty() {
-            buttons.extend([B::CopyReview, B::ClearReview]);
+            buttons.extend([B::CopyReview, B::SendReview, B::ClearReview]);
         }
         buttons.push(B::Help);
         buttons
@@ -7678,6 +7704,26 @@ mod tests {
                 .hints
                 .iter()
                 .any(|h| h.button == ReposButton::CopyReview)
+        );
+        // Sent to an agent only while one runs in the workspace.
+        let send = |panel: &Panel| {
+            let hints = panel.view("p", &ctx).hints;
+            let hint = hints.iter().find(|h| h.button == ReposButton::SendReview);
+            hint.map(|h| (h.label.clone(), h.disabled.clone()))
+        };
+        assert_eq!(
+            send(&panel),
+            Some(("send to agent".into(), Some(NO_AGENT.into())))
+        );
+        assert_eq!(panel.press(ReposButton::SendReview, &ctx), None);
+        panel.agent = Some("claude".into());
+        assert_eq!(send(&panel), Some(("send to claude".into(), None)));
+        assert_eq!(
+            panel.press(ReposButton::SendReview, &ctx),
+            Some(Outcome::SendReview {
+                text: text.clone(),
+                count: 1
+            })
         );
 
         // A line added above, it stays under b.
