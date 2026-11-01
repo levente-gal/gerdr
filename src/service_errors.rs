@@ -136,7 +136,34 @@ fn server_error_status(line: &str) -> bool {
 /// then the command.
 pub fn is_command_line(line: &str, command: &str) -> bool {
     let command = command.trim();
-    !command.is_empty() && line.trim_end().ends_with(command)
+    !command.is_empty() && line.trim_end().ends_with(command) && !is_job_notice(line, command)
+}
+
+/// What a shell says of a job it ran, before naming its command:
+/// `zsh: terminated  tail -f x`, `[1]+  Killed  tail -f x`,
+/// `bash: line 1: 42 Segmentation fault (core dumped) ./x`.
+const JOB_WORDS: [&str; 9] = [
+    "terminated",
+    "killed",
+    "segmentation fault",
+    "core dumped",
+    "aborted",
+    "hangup",
+    "quit",
+    "bus error",
+    "done",
+];
+
+/// Whether `line`, ending with `command`, is the shell telling how the job
+/// ended rather than its prompt with the command typed.
+fn is_job_notice(line: &str, command: &str) -> bool {
+    let line = line.trim_end();
+    let before = line[..line.len() - command.len()].trim().to_lowercase();
+    let shell = ["zsh:", "bash:", "sh:", "fish:", "dash:"]
+        .iter()
+        .any(|s| before.starts_with(s));
+    let job = before.starts_with('[') && before[1..].starts_with(|c: char| c.is_ascii_digit());
+    (shell || job) && JOB_WORDS.iter().any(|w| before.contains(w))
 }
 
 /// Read `text`, a pane's last lines, for the errors (as `patterns` has
@@ -566,6 +593,36 @@ next line";
         let s = scan(&p, "ERROR benign\nok", "", None, 20);
         assert!(s.errors.is_empty());
         assert!(s.dirty);
+    }
+
+    #[test]
+    fn a_shells_job_notice_is_no_command_line() {
+        let command = "tail -f /tmp/svc.log";
+        assert!(is_command_line("❯ tail -f /tmp/svc.log", command));
+        assert!(!is_command_line(
+            "zsh: terminated  tail -f /tmp/svc.log",
+            command
+        ));
+        assert!(!is_command_line(
+            "[1]+  Killed                  tail -f /tmp/svc.log",
+            command
+        ));
+        assert!(!is_command_line(
+            "bash: line 1:  42 Segmentation fault      (core dumped) tail -f /tmp/svc.log",
+            command
+        ));
+        let text = "/tmp\n❯ tail -f /tmp/svc.log\nserving\nERROR boom\nzsh: terminated  tail -f /tmp/svc.log\n/tmp 3s\n❯ ";
+        let e = ending(&Patterns::default(), text, command, 40);
+        assert_eq!(
+            e.lines,
+            [
+                "serving",
+                "ERROR boom",
+                "zsh: terminated  tail -f /tmp/svc.log"
+            ]
+        );
+        assert_eq!(e.error.unwrap().title, "ERROR boom");
+        assert!(!e.interrupted);
     }
 
     #[test]

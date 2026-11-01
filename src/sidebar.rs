@@ -578,7 +578,7 @@ impl Gerdr {
                     .iter()
                     .filter(|g| !g.seen)
                     .take(6)
-                    .map(|g| (self.pane_bar_content(&g.pane_id).label, g.title.clone()))
+                    .map(|g| (g.service.clone(), g.title.clone()))
                     .collect();
                 let tip = Tooltip::new(&text, layout.rows[i].chip?).fields(fields);
                 Some(tip.key("click to show the newest"))

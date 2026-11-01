@@ -211,7 +211,12 @@ impl Gerdr {
                     group: group.clone(),
                     workspace,
                     place,
-                    service: self.service_item_label(&group.project, &group.pane_id),
+                    // As it was called then; else as it is now.
+                    service: if group.service.is_empty() {
+                        self.service_item_label(&group.project, &group.pane_id)
+                    } else {
+                        group.service.clone()
+                    },
                 }
             })
             .collect();

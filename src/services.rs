@@ -30,7 +30,7 @@ use smithay::reexports::calloop::{
 
 use crate::{
     Gerdr, Tab, chrome,
-    config::{self, Services},
+    config::Services,
     herdr, inbox_store, project_lock,
     service_errors::ServiceError,
     service_watch::{self, Report, Service},
@@ -61,6 +61,9 @@ pub struct ErrorGroup {
     pub title: String,
     /// All of its last time, as printed; a stopped service's last lines.
     pub lines: Vec<String>,
+    /// What the service was called when it last came.
+    #[serde(default)]
+    pub service: String,
     pub count: u32,
     /// When it first and last came, in seconds since the epoch.
     pub first_secs: u64,
@@ -104,6 +107,16 @@ pub struct ServiceErrors {
     discovery: Option<RegistrationToken>,
 }
 
+impl ServiceErrors {
+    /// Watching nothing yet, with the `[services]` settings.
+    pub fn new(settings: Services) -> Self {
+        Self {
+            settings,
+            ..Self::default()
+        }
+    }
+}
+
 /// The key of pane `pane_id` of herdr session `session` among the saved
 /// anchors.
 fn anchor_key(session: &str, pane_id: &str) -> String {
@@ -116,10 +129,8 @@ fn command_label(command: &str) -> String {
 }
 
 impl Gerdr {
-    /// Read the `[services]` settings and start looking for the sessions
-    /// of the projects out of sight.
+    /// Start looking for the sessions of the projects out of sight.
     pub fn start_services(&mut self) {
-        self.service_errors.settings = config::load_services();
         let timer = Timer::immediate();
         let tick = |_, _: &mut (), state: &mut Gerdr| {
             state.discover_services();
@@ -342,7 +353,17 @@ impl Gerdr {
         for id in stale {
             self.drop_service_watcher(&id);
         }
-        let mut changed = false;
+        // Those of projects removed.
+        let before = self.projects.service_errors.len();
+        let store = &self.projects;
+        let kept: Vec<_> = store
+            .service_errors
+            .iter()
+            .filter(|g| store.project(&g.project).is_some())
+            .cloned()
+            .collect();
+        self.projects.service_errors = kept;
+        let mut changed = self.projects.service_errors.len() != before;
         for (id, running) in found {
             if Some(id.as_str()) == shown.as_deref() {
                 continue;
@@ -485,6 +506,7 @@ impl Gerdr {
                 fingerprint: fingerprint.clone(),
                 title: String::new(),
                 lines: Vec::new(),
+                service: String::new(),
                 count: 1,
                 first_secs: now,
                 last_secs: now,
@@ -493,6 +515,7 @@ impl Gerdr {
         };
         group.title = title.clone();
         group.lines = lines;
+        group.service = label.to_owned();
         group.last_secs = now;
         group.seen = false;
         let count = group.count;
@@ -580,9 +603,13 @@ impl Gerdr {
             self.service_errors.pending = None;
             return;
         }
-        if self.project.as_deref() != Some(project.as_str())
-            || self.herdr_pane_place(&pane_id).is_none()
-        {
+        // Its window up, not just the pane known.
+        let shown = self.workspaces.iter().flat_map(|ws| &ws.tabs).any(|tab| {
+            tab.panes
+                .iter()
+                .any(|p| p.herdr.as_ref().is_some_and(|h| h.pane_id == pane_id))
+        });
+        if self.project.as_deref() != Some(project.as_str()) || !shown {
             return;
         }
         self.show_service_error(&project, &pane_id, &fingerprint);
@@ -719,6 +746,7 @@ mod tests {
             fingerprint: STOPPED.into(),
             title: "Stopped: npm run dev".into(),
             lines: vec!["boom".into()],
+            service: "npm run dev".into(),
             count: 2,
             first_secs: 1,
             last_secs: 2,

@@ -6189,7 +6189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         order_pending: HashSet::new(),
         pane_leaders: HashMap::new(),
         last_commands: HashMap::new(),
-        service_errors: services::ServiceErrors::default(),
+        service_errors: services::ServiceErrors::new(config::load_services()),
         pane_jobs: HashMap::new(),
         pane_job_tx: None,
         pane_bar_hover: None,
