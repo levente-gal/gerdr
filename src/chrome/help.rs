@@ -42,6 +42,9 @@ pub enum HelpPress {
     Action(Action),
     /// Put the panel away.
     Close,
+    /// Nothing: the key doesn't work over what has the keys now (a
+    /// panel, the welcome screen). Its row is greyed out.
+    NotHere,
 }
 
 /// What the pointer is over in the help panel.
@@ -56,6 +59,9 @@ pub enum HelpHit {
     /// Inside the panel, on nothing to click.
     Panel,
 }
+
+/// How far the keys of a row that doesn't work here fade into the panel.
+const HELP_GREY_FADE: f32 = 0.55;
 
 /// The most columns the help panel splits into to fit the height it has.
 const HELP_MAX_COLUMNS: usize = 3;
@@ -132,6 +138,14 @@ impl Help {
                 .is_some_and(|first| first.is_some() && keys.iter().all(|k| k == first))
         })
     }
+
+    /// Whether none of row `row`'s keys work where the prefix was
+    /// pressed: it shows greyed out, and takes no click.
+    pub fn greyed(&self, row: usize) -> bool {
+        self.presses.get(row).is_some_and(|keys| {
+            !keys.is_empty() && keys.iter().all(|k| *k == Some(HelpPress::NotHere))
+        })
+    }
 }
 
 /// Where the help panel of `layout` goes in the app `area`: centred at
@@ -161,6 +175,9 @@ pub struct HelpLayout {
     /// into columns they don't fit the height there is. Then the last
     /// place says how many more there are.
     pub shown: usize,
+    /// Per row, whether it is greyed out (see `Help::greyed`): a panel
+    /// drawn for other rows greyed is another.
+    pub greyed: Vec<bool>,
 }
 
 impl HelpLayout {
@@ -178,6 +195,7 @@ impl HelpLayout {
 impl Painter {
     /// Size the help panel: two columns when they fit in `max_width`, else
     /// one, as tall as it needs.
+    #[cfg_attr(not(test), allow(dead_code))] // Tests only, once chrome uses `help_layout_within`.
     pub fn help_layout(&self, help: &Help, max_width: i32, pinned: bool, scale: f64) -> HelpLayout {
         self.help_layout_within(help, (max_width, i32::MAX).into(), pinned, scale)
     }
@@ -245,6 +263,7 @@ impl Painter {
             pinned,
             // The last place says how many more there are.
             shown: if shown < n { shown - 1 } else { n },
+            greyed: (0..n).map(|row| help.greyed(row)).collect(),
         };
         layout.size.h = layout.head() + layout.rows * HELP_ROW_HEIGHT + HELP_PADDING;
         layout
@@ -276,6 +295,9 @@ impl Painter {
         }
         let head = layout.head();
         for (i, (keys, _)) in help.rows.iter().enumerate().take(layout.shown) {
+            if help.greyed(i) {
+                continue;
+            }
             let (column, row) = (i as i32 / layout.rows, i as i32 % layout.rows);
             let x = origin.x + HELP_PADDING + column * (layout.column_width + HELP_COLUMN_GAP);
             let y = origin.y + head + row * HELP_ROW_HEIGHT;
@@ -294,7 +316,7 @@ impl Painter {
                 let cap = width(&keycap_text(key), KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32;
                 if presses
                     .and_then(|keys| keys.get(k))
-                    .is_some_and(|p| p.is_some())
+                    .is_some_and(|p| p.is_some_and(|p| p != HelpPress::NotHere))
                 {
                     let left = pen.floor() as i32 - HELP_KEY_PAD;
                     let right = (pen + cap).ceil() as i32 + HELP_KEY_PAD;
@@ -396,10 +418,21 @@ impl Painter {
         for (i, (keys, action)) in help.rows.iter().enumerate().take(layout.shown) {
             let (x, band) = place(i);
             let column_end = px(x + layout.column_width) as f32;
-            self.keycaps(&mut c, keys, px(x) as f32, band, scale, p);
+            let end = self.keycaps(&mut c, keys, px(x) as f32, band, scale, p);
+            // A row that doesn't work here: its keys faded into the
+            // panel, its words in the colour of what can't be used.
+            let greyed = help.greyed(i);
+            if greyed {
+                for py in band.0..band.0 + band.1 {
+                    for pxl in px(x)..end.ceil() as i32 {
+                        c.blend(pxl, py, p.elevated, HELP_GREY_FADE);
+                    }
+                }
+            }
+            let colour = if greyed { p.placeholder } else { p.text };
             let action_x = px(x + layout.key_width + HELP_KEY_GAP) as f32;
             self.text(
-                &mut c, action, FONT_SIZE, action_x, column_end, band, scale, p.text,
+                &mut c, action, FONT_SIZE, action_x, column_end, band, scale, colour,
             );
         }
         let more = help.rows.len() - layout.shown;
@@ -500,6 +533,39 @@ mod tests {
         assert_eq!(help.key_of(Action::NewTab, 0), Some("Ctrl+B C".into()));
         assert_eq!(help.key_of(Action::PrevTab, 0), Some("Ctrl+B Alt+J".into()));
         assert_eq!(help.key_of(Action::Quit, 0), None);
+    }
+
+    #[test]
+    fn a_greyed_row_takes_no_click_and_draws_another_panel() {
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        let quit = Some(HelpPress::Action(Action::Quit));
+        let mut help = Help {
+            prefix: "Ctrl+B".into(),
+            rows: vec![
+                ("c".into(), "new tab".into()),
+                ("n / p".into(), "next / previous tab".into()),
+                ("q".into(), "quit".into()),
+            ],
+            presses: vec![
+                vec![Some(HelpPress::NotHere)],
+                vec![Some(HelpPress::NotHere); 2],
+                vec![quit],
+            ],
+        };
+        assert!(help.greyed(0) && help.greyed(1) && !help.greyed(2));
+        let layout = painter.help_layout(&help, 800, false, 1.0);
+        assert_eq!(layout.greyed, [true, true, false]);
+        let spots = painter.help_spots(&help, &layout, (0, 0).into(), 1.0);
+        let hits: Vec<HelpHit> = spots.iter().map(|(hit, _)| *hit).collect();
+        assert_eq!(hits, [HelpHit::Row(2)]);
+        // The same rows working: the same size, but not the same panel.
+        help.presses[0] = vec![Some(HelpPress::Action(Action::NewTab))];
+        let working = painter.help_layout(&help, 800, false, 1.0);
+        assert_eq!(working.size, layout.size);
+        assert_ne!(working, layout);
     }
 
     #[test]

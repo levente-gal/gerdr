@@ -15,8 +15,9 @@
 //! "-" or "Down"; letters are the same in either case, so "Shift+X" needs its
 //! Shift; a character typed with Shift ("?", "!", "@", "{") is Shift and the
 //! key it is on in the keyboard's layout, and one the layout types only
-//! with AltGr, or on no key, is a mistake. Ctrl held from the prefix doesn't
-//! matter unless the key names it. Mistakes, a default key taken and an
+//! with AltGr, or on no key, is a mistake. Ctrl still held from the prefix
+//! doesn't count: a key with Ctrl in it takes pressing Ctrl again (see
+//! `input`). Mistakes, a default key taken and an
 //! action's old name are reported (see `problems`), and the defaults stand
 //! in for what they spoil.
 
@@ -57,6 +58,22 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("go-to-tab-8", Action::GotoTab(7), "Go to tab 8", "8"),
     ("go-to-tab-9", Action::GotoTab(8), "Go to tab 9", "9"),
     ("close-tab", Action::CloseTab, "Close tab", "Shift+X"),
+    // tmux's rename-window.
+    ("rename-tab", Action::RenameTab, "Rename tab…", ","),
+    // "<" and ">" on a US layout, by the key: some layouts have "<" on a
+    // key of its own as well, which a US keyboard lacks.
+    (
+        "move-tab-left",
+        Action::MoveTab(-1),
+        "Move tab left",
+        "Shift+comma",
+    ),
+    (
+        "move-tab-right",
+        Action::MoveTab(1),
+        "Move tab right",
+        "Shift+period",
+    ),
     // A folder of the project, opened as a Zed + terminal workspace.
     (
         "open-workspace",
@@ -81,6 +98,13 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         Action::NextWorkspace,
         "Go to the next workspace",
         "Down",
+    ),
+    // What a right click on its sidebar row offers.
+    (
+        "workspace-menu",
+        Action::WorkspaceMenu,
+        "Open the workspace's menu…",
+        "Shift+M",
     ),
     (
         "previous-workspace",
@@ -205,6 +229,8 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "Move pane to a new tab",
         "!",
     ),
+    // What a right click on its bar offers.
+    ("pane-menu", Action::PaneMenu, "Open the pane's menu…", "m"),
     (
         "next-pane",
         Action::CyclePane(1),
@@ -243,7 +269,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     (
         "toggle-restart",
         Action::ToggleRestart,
-        "Toggle restart after reboot",
+        "Toggle running again after a reboot",
         "Shift+S",
     ),
     (
@@ -316,12 +342,21 @@ const HELP_LINES: &[(&str, &[&str])] = &[
         ],
     ),
     ("Close tab", &["close-tab"]),
+    ("Rename tab…", &["rename-tab"]),
+    (
+        "Move tab left / right",
+        &["move-tab-left", "move-tab-right"],
+    ),
     ("Open a folder as a workspace…", &["open-workspace"]),
     ("Open a terminal workspace in home", &["new-terminal"]),
     ("Close workspace", &["close-workspace"]),
     (
         "Go to the next / previous workspace",
         &["next-workspace", "previous-workspace"],
+    ),
+    (
+        "Open the pane's / workspace's menu…",
+        &["pane-menu", "workspace-menu"],
     ),
     ("Split pane right / down", &["split-right", "split-down"]),
     ("Close pane", &["close-pane"]),
@@ -355,7 +390,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("Run an app in a new tab…", &["run-tab"]),
     ("Choose a project…", &["projects"]),
     ("Go to the last project", &["last-project"]),
-    ("Toggle restart after reboot", &["toggle-restart"]),
+    ("Toggle running again after a reboot", &["toggle-restart"]),
     (
         "Toggle python venv, pick one…",
         &["toggle-venv", "pick-venv"],
@@ -402,7 +437,14 @@ const OLD_LABELS: &[(&str, &str)] = &[
     ("run an app in a new tab", "Run an app in a new tab…"),
     ("projects", "Choose a project…"),
     ("last project", "Go to the last project"),
-    ("restart after reboot", "Toggle restart after reboot"),
+    (
+        "restart after reboot",
+        "Toggle running again after a reboot",
+    ),
+    (
+        "toggle restart after reboot",
+        "Toggle running again after a reboot",
+    ),
     ("python venv on / off", "Toggle python venv"),
     ("pick python venv", "Pick a python venv…"),
     (
@@ -586,7 +628,7 @@ pub fn hint_key(keys: &str) -> Option<(ModifiersState, Keysym)> {
 /// Characters typed with Shift on the key named after them, as on a US
 /// layout: what a key written as one of them is when the keyboard's
 /// layout can't be read.
-const SHIFTED: &[(&str, &str)] = &[("?", "/"), ("!", "1")];
+const SHIFTED: &[(&str, &str)] = &[("?", "/"), ("!", "1"), ("<", ","), (">", ".")];
 
 /// Whether `sym` types a character that sits on a key of a layout, to
 /// be found there: not a letter's case, a keypad key, space or a control.
@@ -775,6 +817,24 @@ pub struct Keymap {
     help: Arc<Help>,
 }
 
+/// Where the prefix is pressed: what its keys can run there.
+#[derive(Clone, Copy)]
+pub struct Reach<'a> {
+    /// Whether the action works there.
+    pub works: &'a dyn Fn(Action) -> bool,
+    /// Whether the prefix pressed again goes to the app: only with
+    /// nothing of gerdr's taking the keys.
+    pub to_app: bool,
+}
+
+impl Reach<'_> {
+    /// Over the apps, where every key works.
+    const APPS: Reach<'static> = Reach {
+        works: &|_| true,
+        to_app: true,
+    };
+}
+
 impl Default for Keymap {
     fn default() -> Self {
         Self::build(KeysConfig::default()).0
@@ -863,7 +923,7 @@ impl Keymap {
         }
         problems.extend(ctrl_clashes(prefix, &bindings));
 
-        let help = Arc::new(help(prefix, &bindings));
+        let help = Arc::new(help(prefix, &bindings, Reach::APPS));
         let bindings = bindings
             .into_iter()
             .map(|(chord, idx)| (chord, ACTIONS[idx].1))
@@ -907,6 +967,27 @@ impl Keymap {
     pub fn help(&self) -> Arc<Help> {
         self.help.clone()
     }
+
+    /// What the help panel lists while the prefix is armed at `reach`:
+    /// the keys that don't work there greyed out (`HelpPress::NotHere`).
+    pub fn help_at(&self, reach: Reach) -> Help {
+        let bindings: Vec<(Chord, usize)> = self
+            .bindings
+            .iter()
+            .filter_map(|(chord, action)| {
+                let idx = ACTIONS.iter().position(|(_, a, ..)| a == action)?;
+                Some((*chord, idx))
+            })
+            .collect();
+        help(self.prefix, &bindings, reach)
+    }
+}
+
+/// How the help panel names the key pressed with `mods` held, like
+/// "Shift+Q" or "?" (Shift and the slash key).
+#[allow(dead_code)] // input.rs takes it up in wave 2.
+pub fn chord_label(mods: &ModifiersState, sym: Keysym) -> String {
+    Chord::pressed(mods, sym).label()
 }
 
 /// What's wrong with `spec`, a single upper case letter with no
@@ -925,7 +1006,8 @@ fn upper_case_letter(spec: &str) -> Option<String> {
 
 /// Keys that run different actions only by whether Ctrl is held, after a
 /// prefix with Ctrl in it: Ctrl still held from the prefix picks the one
-/// with it, so which runs hangs on when Ctrl was let go.
+/// without it, and only pressing Ctrl again the one with it, which may
+/// surprise.
 fn ctrl_clashes(prefix: Chord, bindings: &[(Chord, usize)]) -> Vec<String> {
     if !prefix.mods.ctrl {
         return Vec::new();
@@ -943,13 +1025,14 @@ fn ctrl_clashes(prefix: Chord, bindings: &[(Chord, usize)]) -> Vec<String> {
             };
             let (_, other) = bindings.iter().find(|(c, i)| *c == plain && i != idx)?;
             Some(format!(
-                "`{}` (`{}`) and `{}` (`{}`) differ only by Ctrl, which may still be held \
-                 from the prefix `{}`: then `{}` runs",
+                "`{}` (`{}`) and `{}` (`{}`) differ only by Ctrl: Ctrl still held from \
+                 the prefix `{}` picks `{}`; press Ctrl again for `{}`",
                 chord.label(),
                 ACTIONS[*idx].0,
                 plain.label(),
                 ACTIONS[*other].0,
                 prefix.label(),
+                plain.label(),
                 chord.label()
             ))
         })
@@ -973,8 +1056,9 @@ fn shared_mods<'a>(keys: &[&'a str]) -> Vec<&'a str> {
     keys[..1].iter().copied().chain(rest).collect()
 }
 
-/// The help panel for these bindings, as (keys, label) lines.
-fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
+/// The help panel for these bindings pressed at `reach`, as (keys,
+/// label) lines.
+fn help(prefix: Chord, bindings: &[(Chord, usize)], reach: Reach) -> Help {
     let keys = |name: &str| -> Vec<String> {
         let idx = ACTIONS
             .iter()
@@ -986,10 +1070,19 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
             .map(|(chord, _)| chord.label())
             .collect()
     };
+    let action = |name: &str| {
+        ACTIONS
+            .iter()
+            .find(|(n, ..)| *n == name)
+            .map(|(_, a, ..)| *a)
+    };
     // What a click on a key of the action named `name` does.
     let press = |name: &str| {
-        let (_, action, ..) = ACTIONS.iter().find(|(n, ..)| *n == name)?;
-        Some(HelpPress::Action(*action))
+        let action = action(name)?;
+        Some(match (reach.works)(action) {
+            true => HelpPress::Action(action),
+            false => HelpPress::NotHere,
+        })
     };
     let (mut rows, mut presses) = (Vec::new(), Vec::new());
     for (label, names) in HELP_LINES {
@@ -1008,7 +1101,11 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
             }
         } else if names.len() > 4 {
             // A run, like the tab numbers: its ends, standing for them all.
-            presses.push(vec![None]);
+            let works = names
+                .iter()
+                .filter_map(|name| action(name))
+                .any(reach.works);
+            presses.push(vec![(!works).then_some(HelpPress::NotHere)]);
             rows.push((
                 format!("{}–{}", all[0][0], all[all.len() - 1][0]),
                 label.to_string(),
@@ -1021,7 +1118,7 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
     }
     let prefix = prefix.label();
     // The prefix goes to the app only as a key.
-    presses.push(vec![None]);
+    presses.push(vec![(!reach.to_app).then_some(HelpPress::NotHere)]);
     rows.push((prefix.clone(), format!("Send {prefix} to the app")));
     presses.push(vec![Some(HelpPress::Close)]);
     rows.push(("Esc".into(), "Cancel".into()));
@@ -1072,10 +1169,13 @@ mod tests {
                 "N / P: Go to the next / previous tab",
                 "1–9: Go to tab",
                 "Shift+X: Close tab",
+                ",: Rename tab…",
+                "< / >: Move tab left / right",
                 "Shift+N: Open a folder as a workspace…",
                 "Shift+T: Open a terminal workspace in home",
                 "Shift+D: Close workspace",
                 "Down / Up: Go to the next / previous workspace",
+                "M / Shift+M: Open the pane's / workspace's menu…",
                 "V / -: Split pane right / down",
                 "X: Close pane",
                 "A / S: Restart / stop the pane's command",
@@ -1093,7 +1193,7 @@ mod tests {
                 "Shift+R: Run an app in a new tab…",
                 "Shift+P: Choose a project…",
                 "Alt+P: Go to the last project",
-                "Shift+S: Toggle restart after reboot",
+                "Shift+S: Toggle running again after a reboot",
                 "Shift+V / Alt+V: Toggle python venv, pick one…",
                 "Shift+B: Run the project's start commands",
                 "W: Open worktrees",
@@ -1171,6 +1271,83 @@ mod tests {
             Some(Action::Shortcuts)
         );
         assert_eq!(keymap.action(&mods(false, false), Keysym::slash), None);
+    }
+
+    #[test]
+    fn tabs_and_menus_have_keys() {
+        let keymap = Keymap::default();
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::comma),
+            Some(Action::RenameTab)
+        );
+        // "<" and ">" are Shift and the comma and period keys.
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::comma),
+            Some(Action::MoveTab(-1))
+        );
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::period),
+            Some(Action::MoveTab(1))
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::m),
+            Some(Action::PaneMenu)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::m),
+            Some(Action::WorkspaceMenu)
+        );
+        // F2, the panels' rename key, can be added.
+        let (keymap, problems) = from_config("[keys]\nrename-tab = [\",\", \"F2\"]\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::F2),
+            Some(Action::RenameTab)
+        );
+    }
+
+    #[test]
+    fn what_does_not_work_where_the_prefix_is_pressed_is_greyed() {
+        use crate::chrome::HelpPress;
+        let keymap = Keymap::default();
+        let only_theme = |action| action == Action::ToggleTheme;
+        let help = keymap.help_at(super::Reach {
+            works: &only_theme,
+            to_app: false,
+        });
+        let row = |label: &str| {
+            help.rows
+                .iter()
+                .position(|(_, l)| l.starts_with(label))
+                .unwrap_or_else(|| panic!("no row {label}"))
+        };
+        assert!(!help.greyed(row("Toggle light / dark")));
+        assert_eq!(
+            help.presses[row("Toggle light / dark")],
+            [Some(HelpPress::Action(Action::ToggleTheme))]
+        );
+        assert!(help.greyed(row("Open a new tab")));
+        assert!(help.greyed(row("Go to tab")));
+        assert!(help.greyed(row("Send Ctrl+B")));
+        assert!(!help.greyed(row("Cancel")));
+        // The same rows, keys and labels as everywhere.
+        let all = keymap.help();
+        assert_eq!(help.rows, all.rows);
+        assert!((0..all.rows.len()).all(|i| !all.greyed(i)));
+    }
+
+    #[test]
+    fn a_pressed_key_is_named_as_the_help_names_it() {
+        let shift = mods(false, true);
+        assert_eq!(super::chord_label(&shift, Keysym::q), "Shift+Q");
+        assert_eq!(super::chord_label(&mods(true, false), Keysym::b), "Ctrl+B");
+        assert_eq!(
+            super::chord_label(&mods(false, false), Keysym::Escape),
+            "Esc"
+        );
+        if super::layout().is_some() {
+            assert_eq!(super::chord_label(&shift, Keysym::slash), "?");
+        }
     }
 
     #[test]
@@ -1271,10 +1448,15 @@ mod tests {
             problems[0].contains("`toggle-theme` has no key"),
             "{problems:?}"
         );
-        // After a Ctrl prefix, Ctrl+X and X apart hang on when Ctrl went up.
+        // After a Ctrl prefix, Ctrl still held picks X, and Ctrl+X takes
+        // pressing Ctrl again: said, as it may surprise.
         let (_, problems) = from_config("[keys]\nnew-tab = \"Ctrl+X\"\n");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("only by Ctrl"), "{problems:?}");
+        assert!(
+            problems[0].contains("picks `X`; press Ctrl again for `Ctrl+X`"),
+            "{problems:?}"
+        );
         let (_, problems) = from_config("[keys]\nprefix = \"Alt+B\"\nnew-tab = \"Ctrl+X\"\n");
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(Chord::parse("Delete").map(|c| c.label()), Ok("Del".into()));
