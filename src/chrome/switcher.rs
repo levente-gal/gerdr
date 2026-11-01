@@ -11,11 +11,12 @@ use super::Rgb;
 use super::layers::{Part, RowCache};
 use super::{
     AGENT_ICON, BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN,
-    HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
-    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app,
-    dot_slot, folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf,
-    mix, pencil, prompt, rect_px, row_dot, status_dot, tab, terminal,
+    HELP_PADDING, MENU_MARK_GAP, MENU_MARK_WIDTH, PADDING, PILL_HEIGHT, PILL_PADDING, POPUP_RADIUS,
+    Painter, Palette, ROW_HIGHLIGHT_RADIUS, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW,
+    SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
+    SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app, dot_slot, folder, folder_plus,
+    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, measure, mix,
+    pencil, prompt, rect_px, row_dot, status_dot, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -40,10 +41,13 @@ const PILL_GAP: i32 = 10;
 /// A category chip's height, and the gap between chips.
 const CHIP_HEIGHT: i32 = 24;
 const CHIP_GAP: i32 = 4;
-/// A chip's room per character of its label, and around the label: an
-/// estimate of the text's width, as the layout has no font to measure with.
-const CHIP_CHAR: i32 = 7;
+/// The room either side of a chip's label; and per character of it, a
+/// guess at its width when there is no font to measure it with.
 const CHIP_INSET: i32 = 12;
+const CHIP_CHAR: f32 = 7.0;
+/// How far a row's highlight stops short of the rows above and below, so
+/// neighbouring highlights don't touch.
+const ROW_HIGHLIGHT_INSET: i32 = 2;
 /// The row of chips: a chip and the gap under it.
 const CHIPS_ROW: i32 = CHIP_HEIGHT + SWITCHER_PADDING;
 
@@ -316,7 +320,11 @@ pub fn switcher_hint(
 fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
     let natural: Vec<i32> = labels
         .iter()
-        .map(|label| label.chars().count() as i32 * CHIP_CHAR + 2 * CHIP_INSET)
+        .map(|label| {
+            let text =
+                measure(label, SMALL_FONT_SIZE).unwrap_or(label.chars().count() as f32 * CHIP_CHAR);
+            text.ceil() as i32 + 2 * CHIP_INSET
+        })
         .collect();
     let gaps = CHIP_GAP * (labels.len() as i32 - 1).max(0);
     let room = (right - x - gaps).max(0);
@@ -438,11 +446,22 @@ fn parts(
     }
 }
 
-/// Where the text of the switcher's query, in its `input` rect, goes.
+/// Where the magnifier before the switcher's query, in its `input` rect,
+/// goes.
+fn switcher_mark(input: Rect) -> Rect {
+    Rectangle::new(
+        (input.loc.x + HELP_PADDING, input.loc.y).into(),
+        (MENU_MARK_WIDTH, input.size.h).into(),
+    )
+}
+
+/// Where the text of the switcher's query, in its `input` rect, goes:
+/// after its magnifier.
 pub(super) fn switcher_text(input: Rect, scale: f64) -> (f32, f32) {
     let px = |v: i32| (v as f64 * scale).round() as f32;
+    let mark = switcher_mark(input);
     (
-        px(input.loc.x + HELP_PADDING),
+        px(mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP),
         px(input.loc.x + input.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
     )
 }
@@ -504,11 +523,18 @@ impl Painter {
         p: &Palette,
     ) -> Canvas {
         let (panel, input) = (layout.panel, layout.input);
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
 
+        icon_sdf(
+            &mut c,
+            switcher_mark(input),
+            scale,
+            p.placeholder,
+            |x, y| magnifier(x, y, s),
+        );
         let band = (px(input.loc.y), px(input.size.h));
         self.edit_line(
             &mut c,
@@ -538,14 +564,11 @@ impl Painter {
 
         if empty {
             let slot = Rectangle::new(layout.list.loc, (layout.list.size.w, ROW_HEIGHT).into());
-            let band = (px(slot.loc.y), px(slot.size.h));
-            self.text(
+            self.centered(
                 &mut c,
                 "Nothing matches",
                 FONT_SIZE,
-                px(slot.loc.x) as f32 + PADDING * s,
-                px(input.loc.x + input.size.w - HELP_PADDING) as f32,
-                band,
+                slot,
                 scale,
                 p.placeholder,
             );
@@ -613,12 +636,14 @@ impl Painter {
             px(slot.size.h),
         );
         if let Some(fill) = fill {
+            // The highlight stops short of the rows above and below.
+            let inset = px(ROW_HIGHLIGHT_INSET);
             c.rounded(
                 x as f32,
-                y as f32,
+                (y + inset) as f32,
                 w as f32,
-                h as f32,
-                (MENU_RADIUS - 2.0) * s,
+                (h - 2 * inset) as f32,
+                ROW_HIGHLIGHT_RADIUS * s,
                 fill,
             );
         }

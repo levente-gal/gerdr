@@ -343,27 +343,32 @@ fn needs_look(git: &GitStatus) -> bool {
     git.dirty || git.ahead > 0 || git.behind > 0 || git.stashes > 0 || git.op.is_some()
 }
 
-/// What `git` needs a look for, in short: `3 changes, 2 to push`.
+/// What `git` needs a look for, in short, marked as the repositories
+/// panel's tree marks it: `3 changes ↑2 ↓1 · 1 stashed · merging`, the
+/// arrows before the commits to push and pull.
 fn git_summary(git: &GitStatus) -> String {
-    let count = |n: usize, word: &str, plural: &str| match n {
-        1 => format!("1 {word}"),
-        n => format!("{n} {plural}"),
-    };
-    let mut parts = Vec::new();
+    let mut marks = Vec::new();
     if git.dirty {
-        parts.push(count(git.changes.len().max(1), "change", "changes"));
+        marks.push(match git.changes.len().max(1) {
+            1 => "1 change".to_owned(),
+            n => format!("{n} changes"),
+        });
     }
     if git.ahead > 0 {
-        parts.push(format!("{} to push", git.ahead));
+        marks.push(format!("↑{}", git.ahead));
     }
     if git.behind > 0 {
-        parts.push(format!("{} to pull", git.behind));
+        marks.push(format!("↓{}", git.behind));
+    }
+    let mut parts = Vec::new();
+    if !marks.is_empty() {
+        parts.push(marks.join(" "));
     }
     if git.stashes > 0 {
-        parts.push(count(git.stashes as usize, "stash", "stashes"));
+        parts.push(format!("{} stashed", git.stashes));
     }
     parts.extend(git.op.map(op_label));
-    parts.join(", ")
+    parts.join(" · ")
 }
 
 /// What `op` is, as going on: `merging`, `rebasing 2/5`.
@@ -490,6 +495,50 @@ pub fn issue_items(src: &Sources) -> Vec<InboxItem> {
     items
 }
 
+/// A line per source of tickets that couldn't be read and has nothing
+/// read before to show: the project's repositories' GitHub issues, its
+/// ticket repositories' tickets, Linear's issues. It says why; going to it
+/// reads them again.
+pub fn unread_items(src: &Sources) -> Vec<InboxItem> {
+    let unread = |id: String, title: String, why: &String| InboxItem {
+        id: ItemId(id),
+        section: Section::Tickets,
+        fingerprint: why.clone(),
+        workspace: None,
+        title,
+        subtitle: why.clone(),
+        tone: Tone::Failed,
+        age: None,
+        target: Target::Refresh,
+        actions: TRIAGE.to_vec(),
+        detail: Detail::Unread { why: why.clone() },
+    };
+    let mut items = Vec::new();
+    let repos = src.github();
+    let tickets: HashSet<String> = src.tickets.iter().map(TicketRepo::key).collect();
+    for (key, read) in &src.issues.last.github {
+        let Err(why) = read else { continue };
+        if tickets.contains(key) || !repos.iter().any(|(k, ..)| k == key) {
+            continue;
+        }
+        let title = format!("Couldn't load the issues of {key}");
+        items.push(unread(format!("unread:gh:{key}"), title, why));
+    }
+    for repo in src.tickets {
+        let key = repo.key();
+        let read = src.issues.last.tickets.iter().find(|(k, _)| *k == key);
+        if let Some((_, Err(why))) = read {
+            let title = format!("Couldn't load the tickets of {key}");
+            items.push(unread(format!("unread:tickets:{key}"), title, why));
+        }
+    }
+    if let Some(Err(why)) = &src.issues.last.linear {
+        let title = "Couldn't load Linear's issues".to_owned();
+        items.push(unread("unread:linear".to_owned(), title, why));
+    }
+    items
+}
+
 /// The tickets assigned to the user in the project's ticket
 /// repositories, each repository's in the order read (its board's).
 pub fn ticket_items(src: &Sources) -> Vec<InboxItem> {
@@ -590,6 +639,7 @@ pub fn collect(src: &Sources) -> Vec<InboxItem> {
     let mut items = agent_items(src);
     items.extend(git_items(src));
     items.extend(ci_items(src));
+    items.extend(unread_items(src));
     items.extend(ticket_items(src));
     items.extend(issue_items(src));
     items.extend(todo_items(src));
@@ -902,6 +952,11 @@ mod tests {
             "{}",
             items[3].subtitle
         );
+        // Marked as the repositories panel marks them.
+        let ends = |i: usize, end: &str| assert!(items[i].subtitle.ends_with(end), "{end}");
+        ends(0, "↑2");
+        ends(1, "↓1");
+        ends(2, "1 stashed");
     }
 
     #[test]
@@ -1102,6 +1157,42 @@ mod tests {
             Target::Link("https://example.com/uuid".into())
         );
         assert_eq!(items[1].workspace, None);
+    }
+
+    #[test]
+    fn what_couldnt_be_read_says_why_instead_of_staying_empty() {
+        let mut f = Fixture::default();
+        f.workspace("a", "/r", Some(git("/r")));
+        f.ci.insert("/r".into(), repo(Vec::new()));
+        f.tickets = vec![TicketRepo {
+            repo: "o/t".into(),
+            project: None,
+        }];
+        f.issues.last = IssuesRead {
+            github: vec![
+                ("github.com/o/r".into(), Err("gh is not installed".into())),
+                // Not the project's: nothing about it.
+                ("github.com/o/other".into(), Err("HTTP 502".into())),
+            ],
+            tickets: vec![("github.com/o/t".into(), Err("HTTP 404".into()))],
+            linear: Some(Err("Linear: Bad key".into())),
+        };
+        let items = unread_items(&f.sources());
+        assert_eq!(
+            ids(&items),
+            [
+                "unread:gh:github.com/o/r",
+                "unread:tickets:github.com/o/t",
+                "unread:linear"
+            ]
+        );
+        assert_eq!(items[0].title, "Couldn't load the issues of github.com/o/r");
+        assert_eq!(items[0].subtitle, "gh is not installed");
+        assert!(items.iter().all(|i| i.section == Section::Tickets));
+        assert!(items.iter().all(|i| i.target == Target::Refresh));
+        // Read, they go.
+        f.issues.last = IssuesRead::default();
+        assert!(unread_items(&f.sources()).is_empty());
     }
 
     #[test]

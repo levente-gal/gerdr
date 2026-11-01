@@ -3,16 +3,16 @@
 //! repository the workspaces are in, a section per repository, to review,
 //! squash into the main worktree and delete, as agents leave them behind.
 //!
-//! Typing filters them by name, path and repository. Up/Down select, Enter
-//! (or Ctrl+D) shows its diff against the main worktree's branch in place
-//! of the popup, in the repositories panel's diff view (see
-//! `worktree_diff`); Esc there comes back. Ctrl+K checks its branch out
-//! in the main worktree, Ctrl+M squashes it in there (in a tab, for the
-//! commit message and any conflicts), Delete
-//! deletes it (twice when that loses changes or commits), Shift+Delete
-//! deletes the repository's merged ones, Ctrl+O opens a tab in it (Zed
-//! over a terminal), Ctrl+C copies its path, Esc clears the filter, then
-//! closes.
+//! Typing filters them by name, path and repository. Up/Down (or Ctrl+J
+//! and Ctrl+K) select, Enter (or Ctrl+D) shows its diff against the main
+//! worktree's branch in place of the popup, in the repositories panel's
+//! diff view (see `worktree_diff`); Esc there comes back. Ctrl+S checks
+//! its branch out in the main worktree (switches main to it), Ctrl+Shift+S
+//! squashes it into main (in a tab, for the commit message and any
+//! conflicts), Delete deletes it (twice when that loses changes or
+//! commits), Shift+Delete deletes the repository's merged ones, Ctrl+O
+//! opens a tab in it (Zed over a terminal), Ctrl+C copies its path,
+//! Ctrl+R reads Git again, Esc clears the filter, then closes.
 
 use std::{
     cmp::Reverse,
@@ -40,7 +40,7 @@ use crate::{
     paths,
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
-    toast::Level,
+    toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
 
@@ -169,6 +169,8 @@ pub enum Outcome {
     CleanUp(PathBuf),
     Open(PathBuf),
     Copy(PathBuf),
+    /// Read the repositories' Git status again.
+    Refresh,
 }
 
 /// What deleting worktrees came to: per worktree, its name and path, and
@@ -367,7 +369,7 @@ fn loses(wt: &Worktree) -> String {
     if !wt.merged && !wt.fresh {
         what.push("unmerged commits");
     }
-    format!("Delete again to delete, with {}", what.join(" and "))
+    format!("Press Del again to delete, with {}", what.join(" and "))
 }
 
 /// The merged worktrees of the repository whose main worktree is at
@@ -592,6 +594,14 @@ impl Popup {
                 let k = step(-1)?;
                 self.select(items, k, page);
             }
+            Keysym::j | Keysym::J if ctrl && !mods.shift => {
+                let k = step(1)?;
+                self.select(items, k, page);
+            }
+            Keysym::k | Keysym::K if ctrl && !mods.shift => {
+                let k = step(-1)?;
+                self.select(items, k, page);
+            }
             Keysym::Page_Down | Keysym::KP_Page_Down => {
                 let k = step(page.max(1) as isize)?;
                 self.select(items, k, page);
@@ -608,10 +618,14 @@ impl Popup {
                 return path(|wt| !wt.gone).map(Outcome::Diff);
             }
             Keysym::d | Keysym::D if ctrl => return path(|wt| !wt.gone).map(Outcome::Diff),
-            Keysym::k | Keysym::K if ctrl => return path(can_checkout).map(Outcome::Checkout),
-            Keysym::m | Keysym::M if ctrl => return path(can_merge).map(Outcome::Merge),
+            // Shift changes the symbol: match both cases.
+            Keysym::s | Keysym::S if ctrl && mods.shift => {
+                return path(can_merge).map(Outcome::Merge);
+            }
+            Keysym::s | Keysym::S if ctrl => return path(can_checkout).map(Outcome::Checkout),
             Keysym::o | Keysym::O if ctrl => return path(|wt| !wt.gone).map(Outcome::Open),
             Keysym::c | Keysym::C if ctrl => return path(|_| true).map(Outcome::Copy),
+            Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
             Keysym::Delete | Keysym::KP_Delete if !ctrl && !mods.shift => {
                 return self.delete(item?, armed);
             }
@@ -678,10 +692,14 @@ impl Popup {
                     ctrl: true,
                     ..ModifiersState::default()
                 };
+                let ctrl_shift = ModifiersState {
+                    shift: true,
+                    ..ctrl
+                };
                 let (mods, sym) = match button {
                     WorktreeButton::Diff => (ModifiersState::default(), Keysym::Return),
-                    WorktreeButton::Checkout => (ctrl, Keysym::k),
-                    WorktreeButton::Merge => (ctrl, Keysym::m),
+                    WorktreeButton::Checkout => (ctrl, Keysym::s),
+                    WorktreeButton::Merge => (ctrl_shift, Keysym::S),
                     WorktreeButton::Delete => (ModifiersState::default(), Keysym::Delete),
                 };
                 self.key(&mods, sym, items, page)
@@ -715,7 +733,7 @@ impl Popup {
                         && !wt.main
                         && done_with(wt)
                     {
-                        LineState::Armed("Shift+Delete again to delete the merged ones".into())
+                        LineState::Armed("Press Shift+Del again to delete the merged ones".into())
                     } else if wt.needs_attention() {
                         LineState::Attention
                     } else {
@@ -735,12 +753,13 @@ impl Popup {
         let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
         let mut hints = vec![
             hint("Enter", "diff"),
-            hint("Ctrl+K", "check out in main"),
-            hint("Ctrl+M", "squash merge"),
+            hint("Ctrl+S", "check out in main"),
+            hint("Ctrl+Shift+S", "squash into main"),
             hint("Del", "delete"),
             hint("Shift+Del", "delete merged"),
             hint("Ctrl+O", "open in a tab"),
             hint("Ctrl+C", "copy path"),
+            hint("Ctrl+R", "refresh"),
         ];
         if self.focus.is_some() {
             let scope = if self.all {
@@ -970,7 +989,8 @@ impl Gerdr {
         self.worktrees.popup.as_mut()?.key(mods, sym, &items, page)
     }
 
-    /// A left click while the worktrees popup is open: outside it closes it.
+    /// A left click while the worktrees popup is open: outside it closes it,
+    /// but on a toast presses that.
     pub fn worktrees_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.worktrees_view() else {
             return;
@@ -991,7 +1011,15 @@ impl Gerdr {
                 Some(popup) => popup.click(hit, &items, page),
                 None => None,
             },
-            None => Some(Outcome::Close),
+            None => match self.toast_press(pos) {
+                Some(hit) => {
+                    if let ToastHit::Action(action) = hit {
+                        self.menu_action(action);
+                    }
+                    None
+                }
+                None => Some(Outcome::Close),
+            },
         };
         if let Some(outcome) = outcome {
             self.apply_worktrees(outcome);
@@ -1008,18 +1036,36 @@ impl Gerdr {
             popup.calm(Instant::now());
             hit = popup.hover;
         }
-        // A row's marks say what they mean.
-        let Some(WorktreesHit::Entry(i)) = hit else {
-            return None;
+        // A row's buttons say what they do and their key, its marks what
+        // they mean.
+        let i = match hit? {
+            WorktreesHit::Button(i, button) => {
+                let (_, rect) = layout
+                    .entries
+                    .get(i)?
+                    .1
+                    .iter()
+                    .find(|(b, _)| *b == button)?;
+                let (text, key) = button.tip();
+                return Some(Tooltip::new(text, *rect).key(key));
+            }
+            WorktreesHit::Entry(i) => i,
+            _ => return None,
         };
         let WorktreeEntry::Worktree(line) = view.entries.get(i)? else {
             return None;
         };
         let (rect, buttons) = layout.entries.get(i)?;
-        chrome::worktree_marks(line, *rect, buttons)
+        let (r, text) = chrome::worktree_marks(line, *rect, buttons)
             .into_iter()
-            .find(|(r, _)| r.to_f64().contains(pos))
-            .map(|(r, text)| Tooltip::new(text, r))
+            .find(|(r, _)| r.to_f64().contains(pos))?;
+        let tip = Tooltip::new(text, r);
+        // Its diff shows the changes.
+        Some(if line.dirty && text == chrome::UNCOMMITTED {
+            tip.key("Enter")
+        } else {
+            tip
+        })
     }
 
     /// The wheel or the touchpad moved over the popup.
@@ -1130,6 +1176,7 @@ impl Gerdr {
                 self.copy_text(path.display().to_string());
                 self.toast("Copied the path".into(), Level::Info);
             }
+            Outcome::Refresh => self.refresh_git(),
         }
     }
 
@@ -1450,6 +1497,13 @@ mod tests {
         }
     }
 
+    fn ctrl_shift() -> ModifiersState {
+        ModifiersState {
+            shift: true,
+            ..ctrl()
+        }
+    }
+
     #[test]
     fn a_delete_losing_work_is_asked_twice() {
         let items = items();
@@ -1507,7 +1561,7 @@ mod tests {
         assert_eq!(press(&mut popup, Keysym::Delete, &items), None);
         assert_eq!(
             loses(&items[3].wt),
-            "Delete again to delete, with its changes"
+            "Press Del again to delete, with its changes"
         );
     }
 
@@ -1516,8 +1570,8 @@ mod tests {
         let items = items();
         let mut popup = Popup::default();
         popup.select(&items, 0, 10);
-        assert_eq!(popup.key(&ctrl(), Keysym::m, &items, 10), None);
-        assert_eq!(popup.key(&ctrl(), Keysym::k, &items, 10), None);
+        assert_eq!(popup.key(&ctrl_shift(), Keysym::S, &items, 10), None);
+        assert_eq!(popup.key(&ctrl(), Keysym::s, &items, 10), None);
         assert_eq!(
             press(&mut popup, Keysym::Return, &items),
             Some(Outcome::Diff("/src/r".into()))
@@ -1528,20 +1582,28 @@ mod tests {
         );
         // Letters alone are for the filter.
         assert_eq!(press(&mut popup, Keysym::d, &items), None);
-        press(&mut popup, Keysym::Down, &items);
+        // Ctrl+J and Ctrl+K move the selection.
+        popup.key(&ctrl(), Keysym::j, &items, 10);
+        popup.key(&ctrl(), Keysym::j, &items, 10);
+        popup.key(&ctrl(), Keysym::k, &items, 10);
+        assert_eq!(popup.selected(&items), Some(1));
         assert_eq!(
-            popup.key(&ctrl(), Keysym::m, &items, 10),
+            popup.key(&ctrl(), Keysym::r, &items, 10),
+            Some(Outcome::Refresh)
+        );
+        assert_eq!(
+            popup.key(&ctrl_shift(), Keysym::S, &items, 10),
             Some(Outcome::Merge("/src/r/.wt/wip".into()))
         );
         assert_eq!(
-            popup.key(&ctrl(), Keysym::k, &items, 10),
+            popup.key(&ctrl(), Keysym::s, &items, 10),
             Some(Outcome::Checkout("/src/r/.wt/wip".into()))
         );
         press(&mut popup, Keysym::End, &items);
-        assert_eq!(popup.key(&ctrl(), Keysym::m, &items, 10), None);
+        assert_eq!(popup.key(&ctrl_shift(), Keysym::S, &items, 10), None);
         // A merged one is checked out still.
         assert_eq!(
-            popup.key(&ctrl(), Keysym::k, &items, 10),
+            popup.key(&ctrl(), Keysym::s, &items, 10),
             Some(Outcome::Checkout("/src/r/.wt/done".into()))
         );
         assert_eq!(

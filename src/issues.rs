@@ -18,7 +18,47 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ci, config};
+use crate::{ci, config, problems};
+
+/// Where the problems reading the issues come from, for
+/// `problems::report`: GitHub's issues, the ticket repositories' tickets,
+/// their boards' order, and Linear's issues.
+pub const GITHUB_PROBLEMS: &str = "inbox:github";
+pub const TICKET_PROBLEMS: &str = "inbox:tickets";
+pub const BOARD_PROBLEMS: &str = "inbox:board";
+pub const LINEAR_PROBLEMS: &str = "inbox:linear";
+
+/// Keep `texts` as the problems of `source`, in place of what it had:
+/// none lets go of them all, as it works again. Nothing changes while they
+/// are the same.
+pub(crate) fn set_problems(source: &'static str, mut texts: Vec<String>) {
+    texts.dedup();
+    let kept: Vec<String> = problems::list()
+        .into_iter()
+        .filter(|p| p.source == source)
+        .map(|p| p.text)
+        .collect();
+    if kept == texts {
+        return;
+    }
+    problems::clear(source);
+    for text in texts {
+        problems::report(source, text);
+    }
+}
+
+/// What a board that couldn't be read for `slug`'s tickets says, as a
+/// problem: how to give the token the scope it needs, when that is why.
+fn board_problem(slug: &str, err: &str) -> String {
+    if err.contains("read:project") {
+        format!(
+            "The tickets of {slug} aren't in their board's order: the GitHub token lacks the \
+             read:project scope. Run gh auth refresh -s read:project."
+        )
+    } else {
+        format!("Couldn't read the board of {slug}'s tickets: {err}")
+    }
+}
 
 /// Where an issue comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -187,7 +227,9 @@ impl IssuesState {
 /// with `linear`'s key (none without one). Blocks until every read is
 /// done; they run side by side. A repository whose issues can't be read
 /// (`gh` missing or signed out) gets the error `gh` gave, and Linear's what
-/// it or `curl` said; nothing is logged but at debug level.
+/// it or `curl` said. Each goes to `problems::report` by its source too
+/// (see `GITHUB_PROBLEMS`), a board that couldn't be read as well; a
+/// source read without one lets go of its problems.
 pub fn read_all(
     github: Vec<GhRepo>,
     tickets: Vec<TicketRepo>,
@@ -203,18 +245,23 @@ pub fn read_all(
             .iter()
             .map(|repo| scope.spawn(move || read_tickets(repo)))
             .collect();
+        let (mut ticket_problems, mut board_problems) = (Vec::new(), Vec::new());
         let tickets = tickets
             .iter()
             .zip(ticket_reads)
             .map(|(repo, read)| {
                 let key = repo.key();
-                let read = joined(read);
+                let read = joined(read).map(|(tickets, board)| {
+                    board_problems.extend(board);
+                    tickets
+                });
                 if let Err(err) = &read {
-                    tracing::debug!("tickets of {key}: {err}");
+                    ticket_problems.push(format!("Couldn't read the tickets of {key}: {err}"));
                 }
                 (key, read)
             })
             .collect();
+        let mut github_problems = Vec::new();
         let github = github
             .iter()
             .zip(reads)
@@ -222,18 +269,20 @@ pub fn read_all(
                 let key = ci::key(&repo.host, &repo.slug);
                 let read = joined(read);
                 if let Err(err) = &read {
-                    tracing::debug!("issues of {key}: {err}");
+                    github_problems.push(format!("Couldn't read the issues of {key}: {err}"));
                 }
                 (key, read)
             })
             .collect();
-        let linear = linear.map(|read| {
-            let read = joined(read);
-            if let Err(err) = &read {
-                tracing::debug!("Linear issues: {err}");
-            }
-            read
-        });
+        let linear = linear.map(joined);
+        let linear_problems = match &linear {
+            Some(Err(err)) => vec![format!("Couldn't read Linear's issues: {err}")],
+            _ => Vec::new(),
+        };
+        set_problems(TICKET_PROBLEMS, ticket_problems);
+        set_problems(BOARD_PROBLEMS, board_problems);
+        set_problems(GITHUB_PROBLEMS, github_problems);
+        set_problems(LINEAR_PROBLEMS, linear_problems);
         IssuesRead {
             github,
             tickets,
@@ -329,8 +378,9 @@ fn gh_issues(host: &str, slug: &str, found: Vec<GhIssue>) -> Vec<Issue> {
 /// first as GitHub shows it, then by place in the column; those on no
 /// board after, the most recently changed first. Each one's `state` is its
 /// column's name. A board that can't be read (the token without the
-/// `read:project` scope) leaves them in that last order.
-fn read_tickets(repo: &TicketRepo) -> Result<Vec<Issue>, String> {
+/// `read:project` scope) leaves them in that last order, with the problem
+/// to say so.
+fn read_tickets(repo: &TicketRepo) -> Result<(Vec<Issue>, Option<String>), String> {
     let (host, slug) = repo.place()?;
     // `gh` is told the repository: it needs no checkout to run in.
     let gh = GhRepo {
@@ -339,12 +389,12 @@ fn read_tickets(repo: &TicketRepo) -> Result<Vec<Issue>, String> {
         slug,
     };
     let mut tickets = read_github(&gh)?;
-    let board = read_board(&gh, repo.project).unwrap_or_else(|err| {
-        tracing::debug!("board of {}: {err}", gh.slug);
-        None
-    });
+    let (board, problem) = match read_board(&gh, repo.project) {
+        Ok(board) => (board, None),
+        Err(err) => (None, Some(board_problem(&gh.slug, &err))),
+    };
     in_board_order(&mut tickets, board.as_ref());
-    Ok(tickets)
+    Ok((tickets, problem))
 }
 
 /// What a project's items are asked for: its Status column of each, the
@@ -860,6 +910,14 @@ mod tests {
         assert!(curl_config("key", "{\n}").is_err());
         // The whole body, query and all, quotes.
         assert!(curl_config("key", &linear_body(&["ENG".to_owned()])).is_ok());
+    }
+
+    #[test]
+    fn a_board_without_the_scope_says_how_to_get_it() {
+        let scope = "your token has not been granted the required scopes: ['read:project']";
+        assert!(board_problem("o/t", scope).contains("gh auth refresh -s read:project"));
+        let other = board_problem("o/t", "HTTP 502");
+        assert_eq!(other, "Couldn't read the board of o/t's tickets: HTTP 502");
     }
 
     #[test]
