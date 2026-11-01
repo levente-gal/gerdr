@@ -361,14 +361,13 @@ impl Gerdr {
                     .get(*w)
                     .into_iter()
                     .flatten()
-                    .filter_map(move |agent| {
-                        (agent.status == crate::herdr::AgentStatus::Blocked).then(|| {
-                            let who = agent.name.as_deref().unwrap_or(&agent.kind);
-                            MenuItem::new(
-                                &format!("{name}: {who}"),
-                                MenuAction::FocusAgent(agent.key.clone()),
-                            )
-                        })
+                    .filter(|agent| agent.status == crate::herdr::AgentStatus::Blocked)
+                    .map(move |agent| {
+                        let who = agent.name.as_deref().unwrap_or(&agent.kind);
+                        MenuItem::new(
+                            &format!("{name}: {who}"),
+                            MenuAction::FocusAgent(agent.key.clone()),
+                        )
                     })
             })
             .collect()
