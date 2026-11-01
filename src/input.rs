@@ -274,17 +274,16 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(None);
                         }
-                        // The menu takes its keys; any other closes it and
-                        // goes nowhere else, neither to a panel under it nor
-                        // to an app. Only the prefix goes on, to be armed or
-                        // to pick an action.
+                        // The menu takes every key (see `menu_key`): what
+                        // isn't one of its own closes it and goes nowhere
+                        // else, neither to a panel under it nor to an app.
+                        // Only the prefix, or the key after it, closes it and
+                        // goes on, to be armed or to pick an action.
                         if top == Some(overlay::Overlay::ContextMenu) {
-                            if state.menu_key(sym) {
-                                state.suppressed_keys.push(code);
-                                return FilterResult::Intercept(None);
-                            }
-                            state.close_menu();
-                            if !(state.prefix_armed || state.keymap.is_prefix(mods, sym)) {
+                            if state.prefix_armed || state.keymap.is_prefix(mods, sym) {
+                                state.close_menu();
+                            } else {
+                                state.menu_key(sym);
                                 state.suppressed_keys.push(code);
                                 return FilterResult::Intercept(None);
                             }
