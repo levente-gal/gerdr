@@ -74,10 +74,9 @@ const REPOS_FOLDER: i32 = 20;
 const BRANCH_ICON: i32 = 14;
 /// The room between the tree's toolbar's groups of buttons.
 const REPOS_TOOL_GAP: i32 = 12;
-/// The scrollbar at the right of the tree and of the detail: its width,
-/// and the shortest its thumb gets.
+/// The scrollbar at the right of the tree and of the detail: its width
+/// (its thumb's least height is every scrollbar's, see `Thumb::of`).
 const SCROLLBAR: i32 = 6;
-const SCROLLBAR_MIN: i32 = 24;
 /// A checkbox's clickable room, a repository's expander's, and a file's
 /// status letter column with the gap before it.
 const REPOS_CHECK: i32 = 28;
@@ -1416,49 +1415,26 @@ fn tree_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
     (track, layout.lines.len().min(whole))
 }
 
-/// Where the thumb of a scrollbar in `track` goes for a list of `total`
-/// rows showing `shown` of them from row `pos` (to the fraction): its top,
-/// in logical pixels to the fraction, and its height. None when they all
-/// fit.
-fn thumb_place(track: Rect, pos: f64, shown: usize, total: usize) -> Option<(f64, i32)> {
-    if total <= shown || shown == 0 {
-        return None;
-    }
-    let h = track.size.h as f64;
-    let thumb = (h * shown as f64 / total as f64)
-        .max((SCROLLBAR_MIN as f64).min(h))
-        .min(h)
-        .round();
-    let pos = pos.clamp(0.0, (total - shown) as f64);
-    let top = track.loc.y as f64 + (h - thumb) * pos / (total - shown) as f64;
-    Some((top, thumb as i32))
+/// The scrollbar in `track` of a list of `total` rows showing `shown` of
+/// them from row `pos` (to the fraction), as every scrollbar is placed
+/// (`Thumb::of`); none when they all fit.
+fn rows_thumb(track: Rect, pos: f64, shown: usize, total: usize) -> Option<super::Thumb> {
+    let bar = super::ListBar {
+        down: pos,
+        total: total as f64,
+    };
+    super::Thumb::of(track, shown as f64, bar)
 }
 
 /// The scrollbars of the tree and of the detail in `layout`, each where
 /// its list does not all show.
 pub fn repos_thumbs(view: &ReposView, layout: &ReposLayout) -> [Option<super::Thumb>; 2] {
-    let thumb = |(track, shown): (Rect, usize), pos: f64, total: usize| {
-        let (top, h) = thumb_place(track, pos, shown, total)?;
-        Some(super::Thumb {
-            track,
-            top,
-            h: h as f64,
-            last: (total - shown) as f64,
-        })
-    };
+    let (tree, shown) = tree_bar(view, layout);
+    let tree = rows_thumb(tree, view.first as f64 + view.part, shown, view.total);
     let detail = &view.detail;
-    [
-        thumb(
-            tree_bar(view, layout),
-            view.first as f64 + view.part,
-            view.total,
-        ),
-        thumb(
-            detail_bar(view, layout),
-            detail.first as f64 + detail.part,
-            detail.total,
-        ),
-    ]
+    let (track, shown) = detail_bar(view, layout);
+    let pos = detail.first as f64 + detail.part;
+    [tree, rows_thumb(track, pos, shown, detail.total)]
 }
 
 /// How wide the detail's rows are in a pane `w` wide: short of its
@@ -2437,23 +2413,12 @@ pub(super) fn scrollbar(
     scale: f64,
     p: &Palette,
 ) {
-    if total <= shown || shown == 0 {
+    let Some(t) = rows_thumb(track, first as f64, shown, total) else {
         return;
-    }
-    let s = scale as f32;
-    let (x, y, w, h) = rect_px(track, scale);
-    let min = (SCROLLBAR_MIN as f32 * s).min(h);
-    let thumb_h = (h * shown as f32 / total as f32).max(min).min(h);
-    let first = first.min(total - shown) as f32;
-    let thumb_y = y + ((h - thumb_h) * first / (total - shown) as f32).round();
-    c.rounded(
-        x,
-        thumb_y,
-        w,
-        thumb_h,
-        w / 2.0,
-        mix(p.elevated, p.muted, 0.45),
-    );
+    };
+    let (x, _, w, _) = rect_px(track, scale);
+    let (top, h) = ((t.top * scale).round() as f32, (t.h * scale).round() as f32);
+    c.rounded(x, top, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
 }
 
 /// The colour of a change's status letter (`git::Change::code`) in `p`.
@@ -2944,12 +2909,6 @@ impl Painter {
         x
     }
 
-    fn thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryRenderBuffer {
-        let mut c = Canvas::new(physical(size, scale));
-        let (w, h) = (c.w as f32, c.h as f32);
-        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
-        c.into_buffer(false)
-    }
     /// A tree line in its `(rect, checkbox, expander)` (buffer
     /// coordinates): its highlight, then a repository's or a file's line.
     fn tree_line(
@@ -5033,11 +4992,11 @@ impl ReposLayers {
             ));
             let (track, shown) = tree_bar(view, layout);
             let pos = view.first as f64 + view.part;
-            if let Some((top, h)) = thumb_place(track, pos, shown, view.total) {
-                let size = Size::from((SCROLLBAR, h));
+            if let Some(t) = rows_thumb(track, pos, shown, view.total) {
+                let size = Size::from((SCROLLBAR, t.h as i32));
                 let buffer =
-                    tree_thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
-                let at = Point::from((track.loc.x as f64, top));
+                    tree_thumb.get((size, theme, scale), |_| painter.bar_thumb(size, scale, p));
+                let at = Point::from((track.loc.x as f64, t.top));
                 over.push(super::Part::new(buffer, track.loc, size, 1.0).at(at));
             }
             let row_h = repos_row(view.density);
@@ -5096,10 +5055,10 @@ fn detail_parts(
         parts.push(Part::new(buffer, track.loc, track.size, 1.0));
     }
     let pos = detail.first as f64 + detail.part;
-    if let Some((top, h)) = thumb_place(track, pos, shown, detail.total) {
-        let size = Size::from((SCROLLBAR, h));
-        let buffer = thumb.get((size, theme, scale), |_| painter.thumb(size, scale, p));
-        let at = Point::from((track.loc.x as f64, top));
+    if let Some(t) = rows_thumb(track, pos, shown, detail.total) {
+        let size = Size::from((SCROLLBAR, t.h as i32));
+        let buffer = thumb.get((size, theme, scale), |_| painter.bar_thumb(size, scale, p));
+        let at = Point::from((track.loc.x as f64, t.top));
         parts.push(Part::new(buffer, track.loc, size, 1.0).at(at));
     }
     let list = layout.detail_list;

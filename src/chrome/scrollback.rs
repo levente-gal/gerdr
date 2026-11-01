@@ -32,11 +32,10 @@ const ROW: i32 = 18;
 const BOLD_SHIFT: f32 = 0.6;
 /// How far dim text goes towards the ground.
 const DIM: f32 = 0.4;
-/// The scrollbar at the list's right, the gap beside it, and its thumb's
-/// least height.
+/// The scrollbar at the list's right, and the gap beside it (its thumb's
+/// least height is every scrollbar's, see `Thumb::of`).
 const SCROLLBAR: i32 = 6;
 const SCROLLBAR_GAP: i32 = 4;
-const THUMB_MIN: i32 = 24;
 /// The title's room from the panel's sides.
 const TITLE_INSET: i32 = 14;
 /// The most the open search takes of the title row, its buttons too.
@@ -370,24 +369,12 @@ fn track(layout: &ScrollbackLayout) -> Rect {
 
 /// The scrollbar for `view`, while its text does not all show.
 pub fn scrollback_thumb(view: &ScrollbackView, layout: &ScrollbackLayout) -> Option<super::Thumb> {
-    let track = track(layout);
-    let page = (layout.text.size.h / ROW).max(1) as usize;
-    if view.total <= page || track.size.h <= 0 {
-        return None;
-    }
-    let h = track.size.h as f64;
-    let thumb_h = (h * page as f64 / view.total as f64)
-        .max((THUMB_MIN as f64).min(h))
-        .min(h)
-        .round();
-    let last = (view.total - page) as f64;
-    let pos = (view.first as f64 + view.part).min(last);
-    Some(super::Thumb {
-        track,
-        top: track.loc.y as f64 + (h - thumb_h) * pos / last,
-        h: thumb_h,
-        last,
-    })
+    let page = (layout.text.size.h / ROW).max(1);
+    let bar = super::ListBar {
+        down: view.first as f64 + view.part,
+        total: view.total as f64,
+    };
+    super::Thumb::of(track(layout), page as f64, bar)
 }
 
 /// What the frame is drawn from: the view without its rows and where they
