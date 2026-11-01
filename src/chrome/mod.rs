@@ -921,6 +921,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
             .chain(layout.prefix)
             .chain(layout.watch)
             .chain(layout.inbox)
+            .chain(layout.problems)
             .map(shift),
     );
     rects.push(shift(layout.toggle));

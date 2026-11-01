@@ -144,7 +144,6 @@ impl Gerdr {
     /// Fold every workspace by hand (`Some`: folded or not), or leave them
     /// all to fold while quiet (`None`); here and in their records, saved
     /// once. The sidebar header's menu offers it.
-    #[allow(dead_code)] // wave 2: run by core's `MenuAction::FoldAll` (menu.rs)
     pub(crate) fn fold_all(&mut self, folded: Option<bool>) {
         let mut changed = false;
         for w in 0..self.workspaces.len() {
@@ -831,6 +830,14 @@ impl Gerdr {
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
+            SidebarHit::Header => Some(MenuSpec {
+                anchor: at,
+                items: vec![
+                    MenuItem::new("Fold all workspaces", MenuAction::FoldAll(Some(true))),
+                    MenuItem::new("Unfold all workspaces", MenuAction::FoldAll(Some(false))),
+                    MenuItem::new("Fold each while quiet", MenuAction::FoldAll(None)),
+                ],
+            }),
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
                 let repo = self.ci_repo(i)?;
                 let (pulls, web) = (repo.pulls_url(), repo.web_url());

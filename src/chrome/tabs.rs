@@ -538,9 +538,7 @@ impl TabLayout {
 /// shown if not all fit, with the "+": see `tab_layout_at`, which takes
 /// in the active tab. Tests use it; the chrome lays a strip out with
 /// `TabStripView::layout`.
-// `#[cfg(test)]` once chrome/mod.rs lays its hit rects out with
-// `strip.layout(..)`, as it does after the wave-2 merge.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn tab_layout(
     count: usize,
     size: Size<i32, Logical>,

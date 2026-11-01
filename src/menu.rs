@@ -126,6 +126,9 @@ pub enum MenuAction {
     OpenLog,
     /// Show tab `t` of workspace `w`.
     SwitchTab(usize, usize),
+    /// Fold every workspace in the sidebar (`Some(true)`), unfold every
+    /// one (`Some(false)`), or leave each to fold while quiet (`None`).
+    FoldAll(Option<bool>),
 }
 
 /// One row of a menu.
@@ -378,6 +381,7 @@ impl Gerdr {
             MenuAction::AttachProject(id) => self.attach_project(&id),
             MenuAction::OpenSettings => self.open_settings(crate::launch::Place::Tab),
             MenuAction::OpenLog => self.open_log(crate::launch::Place::Tab),
+            MenuAction::FoldAll(folded) => self.fold_all(folded),
             MenuAction::SwitchTab(w, t) => {
                 self.switch_workspace(w);
                 self.switch_tab(t);
