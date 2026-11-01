@@ -857,6 +857,12 @@ impl Gerdr {
     /// a command runs there or is being stopped.
     pub fn running_in_pane(&self, id: u32) -> Option<String> {
         let pane = self.tab()?.panes.iter().find(|p| p.id == id)?;
+        self.running_in(pane)
+    }
+
+    /// What runs in `pane`, as its bar says it, if a command runs there
+    /// or is being stopped.
+    pub fn running_in(&self, pane: &Pane) -> Option<String> {
         let content = self.pane_bar_of(pane);
         matches!(content.status, BarStatus::Running | BarStatus::Working).then_some(content.label)
     }
