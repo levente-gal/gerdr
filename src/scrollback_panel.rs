@@ -234,10 +234,18 @@ impl Gerdr {
     /// The end of pane `pane_id`'s output as its terminal drew it, as
     /// many lines as `text` (all of it, read plainly) has at most, for the
     /// viewer's colours: none, the text drawn plainly, when herdr can't
-    /// give it.
+    /// give it. Refused that many, it is asked for the 1000 it is known
+    /// to give.
     fn read_styled(&mut self, pane_id: &str, text: &str) -> String {
         let lines = text.lines().count().max(1);
-        match self.herdr.as_mut().map(|h| h.pane_styled(pane_id, lines)) {
+        let read = self.herdr.as_mut().map(|h| {
+            h.pane_styled(pane_id, lines)
+                .or_else(|err| match lines > 1000 {
+                    true => h.pane_styled(pane_id, 1000),
+                    false => Err(err),
+                })
+        });
+        match read {
             Some(Ok(styled)) => styled,
             Some(Err(err)) => {
                 tracing::debug!("colours of the scrollback of {pane_id}: {err}");
