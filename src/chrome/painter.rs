@@ -4,8 +4,8 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SHADOW, TINY_FONT_SIZE, arrow,
-    check, coverage, cross, mix, segment,
+    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW,
+    SMALL_FONT_SIZE, TINY_FONT_SIZE, arrow, check, coverage, cross, mix, segment,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
@@ -124,6 +124,55 @@ pub(super) fn focus_ring(
     c.rounded(rx, ry, rw, rh, rr, color);
     let (gx, gy, gw, gh, gr) = grown(gap);
     c.rounded(gx, gy, gw, gh, gr, behind);
+}
+
+/// What a keycap for `key` says: the key's short name, "Del" for
+/// "Delete" ("Shift+Del"), so every panel names a key the same way.
+pub(super) fn keycap_text(key: &str) -> std::borrow::Cow<'_, str> {
+    match key.strip_suffix("Delete") {
+        Some(mods) if mods.is_empty() || mods.ends_with('+') => format!("{mods}Del").into(),
+        _ => key.into(),
+    }
+}
+
+/// Room either side of a button's label, and the narrowest a button is.
+const BUTTON_PADDING: i32 = 20;
+const BUTTON_MIN_WIDTH: i32 = 84;
+
+/// How a button looks (see `Painter::button`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Outlined, on the element colour.
+    #[default]
+    Plain,
+    /// Filled with the accent: the action a dialog is for.
+    Primary,
+    /// Filled with the error colour: an action that loses something.
+    /// Never the default of its dialog.
+    #[allow(dead_code)] // The dialogs take it up in wave 2.
+    Destructive,
+}
+
+impl From<bool> for ButtonStyle {
+    /// `true` for the primary button, `false` for a plain one.
+    fn from(primary: bool) -> Self {
+        if primary {
+            ButtonStyle::Primary
+        } else {
+            ButtonStyle::Plain
+        }
+    }
+}
+
+/// What a list row is lit with on a popup's ground: `selected` when it is
+/// the selected row, else `element` faded in from the ground as far as
+/// `hover` (0 to 1) says; `None` for a row neither selected nor hovered.
+pub(super) fn row_fill(p: &Palette, selected: bool, hover: f32) -> Option<Rgb> {
+    if selected {
+        return Some(p.selected);
+    }
+    let hover = hover.clamp(0.0, 1.0);
+    (hover > 0.0).then(|| mix(p.elevated, p.element, hover))
 }
 
 /// Pixel size of a buffer covering `size` logical pixels.
@@ -600,9 +649,11 @@ impl Painter {
         }
     }
 
-    /// A button in `rect` like the quit dialog's, labelled `label`: the
-    /// `primary` one in the accent. `(hovered, focused)` lightens it and
-    /// rings it.
+    /// A button in `rect` like the quit dialog's, labelled `label`, in
+    /// `style`: plain, the primary one in the accent, or a destructive
+    /// one in the error colour (`true` and `false` stand for primary and
+    /// plain). `(hovered, focused)` lightens it and rings it, the ring in
+    /// the button's own colour.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn button(
         &self,
@@ -610,31 +661,110 @@ impl Painter {
         label: &str,
         rect: Rect,
         (hovered, focused): (bool, bool),
-        primary: bool,
+        style: impl Into<ButtonStyle>,
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
         let (x, y, w, h) = rect_px(rect, scale);
         let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
+        let style = style.into();
         if focused {
-            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
-        }
-        let color = if primary {
-            let fill = if hovered {
-                mix(p.accent, p.text, 0.12)
-            } else {
-                p.accent
+            let ring = match style {
+                ButtonStyle::Destructive => p.error,
+                _ => p.accent,
             };
-            c.rounded(x, y, w, h, r, fill);
-            p.on_accent
-        } else {
-            let fill = if hovered { p.selected } else { p.element };
-            c.rounded(x, y, w, h, r, p.border);
-            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-            p.text
+            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, ring);
+        }
+        let color = match style {
+            ButtonStyle::Primary | ButtonStyle::Destructive => {
+                let base = match style {
+                    ButtonStyle::Destructive => p.error,
+                    _ => p.accent,
+                };
+                let fill = if hovered {
+                    mix(base, p.text, 0.12)
+                } else {
+                    base
+                };
+                c.rounded(x, y, w, h, r, fill);
+                p.on_accent
+            }
+            ButtonStyle::Plain => {
+                let fill = if hovered { p.selected } else { p.element };
+                c.rounded(x, y, w, h, r, p.border);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                p.text
+            }
         };
         self.centered(c, label, FONT_SIZE, rect, scale, color);
+    }
+
+    /// How wide a dialog button labelled `label` is (logical pixels): its
+    /// text with room either side, and never under `BUTTON_MIN_WIDTH`, so
+    /// no dialog keeps a table of widths that drift from its labels.
+    #[allow(dead_code)] // The dialogs take it up in wave 2.
+    pub(super) fn button_width(&self, label: &str) -> i32 {
+        let text = measure(label, FONT_SIZE).unwrap_or(label.chars().count() as f32 * 8.0);
+        (text.ceil() as i32 + 2 * BUTTON_PADDING).max(BUTTON_MIN_WIDTH)
+    }
+
+    /// A toggle between choices, like a popup's "This workspace / All"
+    /// scope: an outlined `track`, and on it a segment per (label, rect),
+    /// the one `on` filled in `selected` with its label in `text`, the one
+    /// under the pointer (`hover`) lit as a hovered row.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The worktrees popup and the inbox take it up in wave 2.
+    pub(super) fn segmented(
+        &self,
+        c: &mut Canvas,
+        track: Rect,
+        segments: &[(&str, Rect)],
+        on: usize,
+        hover: Option<usize>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(track, scale);
+        let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        for (i, &(label, rect)) in segments.iter().enumerate() {
+            let fill = if i == on {
+                Some(p.selected)
+            } else if hover == Some(i) {
+                Some(mix(p.element, p.selected, 0.5))
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * s, fill);
+            }
+            let color = if i == on { p.text } else { p.muted };
+            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+        }
+    }
+
+    /// The ground of a list row in `rect` (buffer coordinates): the
+    /// selected row in `selected`, a hovered one fading into `element`
+    /// as far as `hover` (0 to 1) says, rounded by
+    /// `ROW_HIGHLIGHT_RADIUS`; nothing for a row neither selected nor
+    /// hovered. Every list's rows are lit this one way.
+    pub(super) fn row_highlight(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        (selected, hover): (bool, f32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let Some(fill) = row_fill(p, selected, hover) else {
+            return;
+        };
+        let (x, y, w, h) = rect_px(rect, scale);
+        c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * scale as f32, fill);
     }
 
     /// `text` with the characters at `hits` (char positions) in the second
@@ -695,7 +825,7 @@ impl Painter {
         let sep = self.text_width("/", KEY_FONT_SIZE, scale) + 2.0 * CAP_GAP as f32 * scale as f32;
         let caps: Vec<f32> = keys
             .split(" / ")
-            .map(|k| self.text_width(k, KEY_FONT_SIZE, scale) + pad)
+            .map(|k| self.text_width(&keycap_text(k), KEY_FONT_SIZE, scale) + pad)
             .collect();
         caps.iter().sum::<f32>() + sep * (caps.len() - 1) as f32
     }
@@ -717,6 +847,7 @@ impl Painter {
         let band = (cap_y as i32, cap_h as i32);
         let mut pen = x;
         for (i, key) in keys.split(" / ").enumerate() {
+            let key = &*keycap_text(key);
             if i > 0 {
                 pen += CAP_GAP as f32 * s;
                 self.text(
@@ -1054,6 +1185,26 @@ mod tests {
         };
         assert!(end(&conflicted) > end(&dirty));
         assert_eq!(end(&merging), end(&conflicted));
+    }
+
+    #[test]
+    fn rows_are_lit_one_way_and_buttons_are_as_wide_as_their_labels() {
+        let p = crate::chrome::Theme::Dark.palette();
+        assert_eq!(super::row_fill(p, true, 0.0), Some(p.selected));
+        assert_eq!(super::row_fill(p, true, 1.0), Some(p.selected));
+        assert_eq!(super::row_fill(p, false, 1.0), Some(p.element));
+        assert_eq!(super::row_fill(p, false, 0.0), None);
+        assert_eq!(super::ButtonStyle::from(true), super::ButtonStyle::Primary);
+        assert_eq!(super::ButtonStyle::from(false), super::ButtonStyle::Plain);
+        assert_eq!(super::keycap_text("Delete"), "Del");
+        assert_eq!(super::keycap_text("Shift+Delete"), "Shift+Del");
+        assert_eq!(super::keycap_text("KP_Delete"), "KP_Delete");
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        assert_eq!(painter.button_width("Quit"), super::BUTTON_MIN_WIDTH);
+        assert!(painter.button_width("Open in new gerdr") > painter.button_width("Switch"));
     }
 
     #[test]

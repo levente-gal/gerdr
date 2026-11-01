@@ -7,9 +7,11 @@
 use std::ops::Range;
 
 use super::{
-    BUTTON_RADIUS, Canvas, FIELD_GAP, FONT_SIZE, Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE,
-    band, chevron_down, cross, field_text, icon_sdf, magnifier, mix, physical, rect_px,
+    BUTTON_RADIUS, CARET_WIDTH, Canvas, FIELD_GAP, FONT_SIZE, HELP_PADDING, MENU_MARK_GAP,
+    MENU_MARK_WIDTH, PADDING, PROJECT_MENU_PADDING, Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE,
+    band, chevron_down, cross, icon_sdf, magnifier, mix, physical, rect_px,
 };
+use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Rectangle, Size};
 
@@ -19,7 +21,8 @@ const SEARCH_GAP: i32 = 2;
 /// How much of the search's colour tints a place found, and the one gone
 /// to; how high a tick on the scrollbar is.
 const FOUND_TINT: f32 = 0.35;
-const FOUND_CURRENT_TINT: f32 = 0.75;
+/// Text on the place gone to still reads at 4.5:1 in the light look.
+const FOUND_CURRENT_TINT: f32 = 0.6;
 /// How much of the accent the caret's block is, on the ground.
 const CARET_TINT: f32 = 0.6;
 /// How much of the accent is in the ground under what is selected.
@@ -94,6 +97,54 @@ pub(super) fn search_spots(
     (parts, count)
 }
 
+/// Where the magnifier goes in a popup's query row `rect`: lined up with
+/// the marks of the rows under it.
+fn query_mark(rect: Rect) -> Rect {
+    let x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
+    Rectangle::new(
+        (x, rect.loc.y).into(),
+        (MENU_MARK_WIDTH, rect.size.h).into(),
+    )
+}
+
+/// Where the text of a popup's query row `rect` goes (physical pixels,
+/// from and up to): after the magnifier, as `Painter::query_field` draws
+/// it; for the field's `FieldSpot`.
+pub(super) fn query_text(rect: Rect, scale: f64) -> (f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    let mark = query_mark(rect);
+    (
+        px(mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP),
+        px(rect.loc.x + rect.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
+    )
+}
+
+/// The magnifier in a boxed search field `rect`, and the room it takes.
+fn search_mark(rect: Rect) -> Rect {
+    let x = rect.loc.x + PADDING as i32 / 2;
+    Rectangle::new(
+        (x, rect.loc.y).into(),
+        (MENU_MARK_WIDTH, rect.size.h).into(),
+    )
+}
+
+/// Where the text of the search's field `rect` goes (physical pixels,
+/// from and up to): after its magnifier, as `Painter::search_bar` draws
+/// it; for the field's `FieldSpot`.
+pub(super) fn search_field_text(rect: Rect, scale: f64) -> (f32, f32) {
+    let px = |v: i32| (v as f64 * scale).round() as f32;
+    let mark = search_mark(rect);
+    let (x, w) = (
+        px(rect.loc.x),
+        px(rect.loc.x + rect.size.w) - px(rect.loc.x),
+    );
+    let pad = PADDING * scale as f32;
+    (
+        px(mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP / 2),
+        x + w - pad - px(CARET_WIDTH + 1),
+    )
+}
+
 /// Those of the places `found` inside `range` (char indices), from its
 /// start.
 pub(super) fn found_within(
@@ -133,6 +184,40 @@ pub(super) fn found_split(
 }
 
 impl Painter {
+    /// A popup's query row `rect` (buffer coordinates), the one look every
+    /// list's filter has: a magnifier lined up with the rows' marks, then
+    /// `query`, or `placeholder` while it is empty (a short imperative
+    /// ending in "…", like "Filter worktrees…"), with its caret when
+    /// `focused`. Its text goes where `query_text` says.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The popups take it up in wave 2.
+    pub(super) fn query_field(
+        &self,
+        c: &mut Canvas,
+        query: &Line,
+        placeholder: &str,
+        rect: Rect,
+        focused: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        icon_sdf(c, query_mark(rect), scale, p.placeholder, |x, y| {
+            magnifier(x, y, s)
+        });
+        self.edit_line(
+            c,
+            query,
+            placeholder,
+            query_text(rect, scale),
+            band(rect, scale),
+            focused,
+            FONT_SIZE,
+            scale,
+            p,
+        );
+    }
+
     /// The search's `parts` (see `search_spots`): its button while `bar`
     /// is closed; open, its field, its buttons and, in `count`, how many
     /// it found. `hover` is the part under the pointer.
@@ -164,7 +249,11 @@ impl Painter {
                 };
                 c.rounded(x, y, w, h, r, edge);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                let (text_x, mut text_end) = field_text(rect, scale);
+                // The magnifier every query field starts with.
+                icon_sdf(c, search_mark(rect), scale, p.placeholder, |x, y| {
+                    magnifier(x, y, 0.9 * s)
+                });
+                let (text_x, mut text_end) = search_field_text(rect, scale);
                 // A whole word: a tag at the right end says so.
                 if bar.whole {
                     let tw = self.text_width(WHOLE_TAG, SMALL_FONT_SIZE, scale);
@@ -418,6 +507,24 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_text_starts_after_the_magnifier() {
+        let rect = Rect::new((100, 50).into(), (400, 32).into());
+        for (text, mark) in [
+            (query_text(rect, 1.0), query_mark(rect)),
+            (search_field_text(rect, 1.0), search_mark(rect)),
+        ] {
+            assert!(
+                text.0 >= (mark.loc.x + mark.size.w) as f32,
+                "{text:?} {mark:?}"
+            );
+            assert!(mark.loc.x > rect.loc.x && text.0 < text.1);
+            assert!(text.1 < (rect.loc.x + rect.size.w) as f32);
+        }
+        // At twice the scale, twice as far.
+        assert_eq!(query_text(rect, 2.0).0, 2.0 * query_text(rect, 1.0).0);
+    }
 
     #[test]
     fn text_splits_at_the_places_found() {

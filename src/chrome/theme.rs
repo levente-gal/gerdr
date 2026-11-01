@@ -123,6 +123,8 @@ pub(crate) struct Palette {
     pub(super) warning: Rgb,
     pub(super) error: Rgb,
     pub(super) shadow: f32,
+    /// How dark the scrim behind a modal dialog is, 0 to 1.
+    pub(super) scrim: f32,
     /// Code's colours in a diff: Zed's `syntax` of this look.
     pub(super) syntax: SyntaxColors,
     /// What Zed's terminal uses with this look: its background and
@@ -142,6 +144,8 @@ pub(crate) struct SyntaxColors {
     function: Rgb,
 }
 
+/// Zed's One Dark, its error and comment colours lightened so text in
+/// them reads at 4.5:1 on the panels.
 pub(super) const ONE_DARK: Palette = Palette {
     background: hex(0x3b414d),
     panel: hex(0x2f343e),
@@ -159,12 +163,13 @@ pub(super) const ONE_DARK: Palette = Palette {
     on_accent: hex(0x282c33),
     success: hex(0xa1c181),
     warning: hex(0xdec184),
-    error: hex(0xd07277),
+    error: hex(0xe08a8e),
     shadow: 0.45,
+    scrim: 0.40,
     syntax: SyntaxColors {
         keyword: hex(0xb477cf),
         string: hex(0xa1c181),
-        comment: hex(0x5d636f),
+        comment: hex(0x989eaa),
         constant: hex(0xbf956a),
         type_: hex(0x6eb4bf),
         function: hex(0x73ade9),
@@ -191,6 +196,8 @@ pub(super) const ONE_DARK: Palette = Palette {
     ],
 };
 
+/// Zed's One Light, its status colours and the accent darkened so text
+/// in them reads at 4.5:1 on the panels, and white on them as badges.
 pub(super) const ONE_LIGHT: Palette = Palette {
     background: hex(0xdcdcdd),
     panel: hex(0xebebec),
@@ -204,16 +211,17 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     text: hex(0x242529),
     muted: hex(0x58585a),
     placeholder: hex(0x646569),
-    accent: hex(0x5c78e2),
+    accent: hex(0x3f5ccc),
     on_accent: hex(0xfafafa),
-    success: hex(0x669f59),
-    warning: hex(0xa48819),
-    error: hex(0xd36151),
+    success: hex(0x3a7531),
+    warning: hex(0x725800),
+    error: hex(0xb03e30),
     shadow: 0.18,
+    scrim: 0.22,
     syntax: SyntaxColors {
         keyword: hex(0xa449ab),
         string: hex(0x649f57),
-        comment: hex(0xa2a3a7),
+        comment: hex(0x636569),
         constant: hex(0xad6e25),
         type_: hex(0x3882b7),
         function: hex(0x5b79e3),
@@ -340,6 +348,40 @@ mod tests {
                 );
             }
             assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent");
+        }
+    }
+
+    #[test]
+    fn status_colours_read_as_text_marks_and_badges() {
+        for (name, p) in [("One Dark", &ONE_DARK), ("One Light", &ONE_LIGHT)] {
+            let p: &Palette = p;
+            for (what, colour) in [
+                ("accent", p.accent),
+                ("success", p.success),
+                ("warning", p.warning),
+                ("error", p.error),
+                ("comment", p.syntax.comment),
+            ] {
+                // As text (a pill's word, a count, a diff's comment).
+                let ratio = contrast(colour, p.panel);
+                assert!(ratio >= 4.5, "{name}: {what} on panel is {ratio:.2}:1");
+                // As a dot on a hovered or selected row.
+                let ratio = contrast(colour, p.selected);
+                assert!(ratio >= 3.0, "{name}: {what} on selected is {ratio:.2}:1");
+            }
+            // A badge's count on its colour.
+            for (what, colour) in [
+                ("accent", p.accent),
+                ("warning", p.warning),
+                ("error", p.error),
+            ] {
+                let ratio = contrast(p.on_accent, colour);
+                assert!(ratio >= 4.5, "{name}: on_accent on {what} is {ratio:.2}:1");
+            }
+            // A status pill's word on its own tint of the panel.
+            let pill = super::mix(p.panel, p.warning, 0.12);
+            let ratio = contrast(p.warning, pill);
+            assert!(ratio >= 4.5, "{name}: warning pill is {ratio:.2}:1");
         }
     }
 

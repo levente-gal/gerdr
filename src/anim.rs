@@ -1,6 +1,8 @@
 //! Timing for the chrome's motion: a fade in or out over a short while,
 //! and the steps its value is quantized to so a cached buffer is drawn
-//! again only when the step changes.
+//! again only when the step changes. Every value here honours `motion()`:
+//! with `Reduced` the blinking, pulsing and spinning stand still, and
+//! with `Off` fades end as soon as they start too.
 
 use std::{
     sync::atomic::{AtomicU8, Ordering},
@@ -68,25 +70,37 @@ impl Fade {
     /// closed while still appearing fades out from where it got to.
     pub fn from_value(now: Instant, dur: Duration, rising: bool, value: f32) -> Self {
         let value = value.clamp(0.0, 1.0);
-        let done = if rising { value } else { 1.0 - value };
+        let done = unease(if rising { value } else { 1.0 - value });
         let start = now.checked_sub(dur.mul_f32(done)).unwrap_or(now);
         Self { start, dur, rising }
     }
 
-    /// Where the fade stands at `now`, from 0 to 1.
+    /// Where the fade stands at `now`, from 0 to 1, easing in and out.
     pub fn value(&self, now: Instant) -> f32 {
-        let t = if self.dur.is_zero() {
+        self.value_with(now, motion())
+    }
+
+    /// Where the fade stands at `now` with `motion`: at its end at once
+    /// when nothing moves.
+    pub fn value_with(&self, now: Instant, motion: Motion) -> f32 {
+        let t = if self.dur.is_zero() || motion == Motion::Off {
             1.0
         } else {
             (now.saturating_duration_since(self.start).as_secs_f32() / self.dur.as_secs_f32())
                 .clamp(0.0, 1.0)
         };
+        let t = ease(t);
         if self.rising { t } else { 1.0 - t }
     }
 
     /// Whether the fade has reached its end at `now`.
     pub fn done(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.start) >= self.dur
+        self.done_with(now, motion())
+    }
+
+    /// Whether the fade has reached its end at `now` with `motion`.
+    pub fn done_with(&self, now: Instant, motion: Motion) -> bool {
+        motion == Motion::Off || now.saturating_duration_since(self.start) >= self.dur
     }
 }
 
@@ -155,10 +169,29 @@ pub fn quantize(a: f32) -> u8 {
     (a.clamp(0.0, 1.0) * STEPS).round() as u8
 }
 
+/// How far a fade `t` (0 to 1) of the way through its time has got:
+/// slow at either end, quick in the middle (smoothstep).
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How far through its time a fade that has got to `v` is: `ease` the
+/// other way.
+fn unease(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    0.5 - ((1.0 - 2.0 * v).asin() / 3.0).sin()
+}
+
 /// Where a loop of `period` stands at `now`, from 0 to 1 and over again:
-/// for a spinner or a pulse.
+/// for a spinner. It stands still at 0 unless the chrome moves fully.
 pub fn phase(start: Instant, period: Duration, now: Instant) -> f32 {
-    if period.is_zero() {
+    phase_with(start, period, now, motion())
+}
+
+/// `phase` with `motion`.
+pub fn phase_with(start: Instant, period: Duration, now: Instant, motion: Motion) -> f32 {
+    if period.is_zero() || motion != Motion::Full {
         return 0.0;
     }
     let t = now.saturating_duration_since(start).as_secs_f32() / period.as_secs_f32();
@@ -166,21 +199,42 @@ pub fn phase(start: Instant, period: Duration, now: Instant) -> f32 {
 }
 
 /// How opaque a blinking dot is at `now`, counted from `epoch`: bright at
-/// the start of every `BLINK`, `BLINK_LOW` half-way, easing in between.
+/// the start of every `BLINK`, `BLINK_LOW` half-way, easing in between;
+/// bright and still unless the chrome moves fully.
 pub fn blink(epoch: Instant, now: Instant) -> f32 {
-    let wave = 0.5 + 0.5 * (std::f32::consts::TAU * phase(epoch, BLINK, now)).cos();
+    blink_with(epoch, now, motion())
+}
+
+/// `blink` with `motion`.
+pub fn blink_with(epoch: Instant, now: Instant, motion: Motion) -> f32 {
+    let wave = 0.5 + 0.5 * (std::f32::consts::TAU * phase_with(epoch, BLINK, now, motion)).cos();
     BLINK_LOW + (1.0 - BLINK_LOW) * wave
 }
 
+/// Where a pulse stands while it stands still: half-way, a steady tint.
+const PULSE_STILL: f32 = 0.5;
+
 /// Where a blocked agent's pulse stands at `now`: from 0 up to 1 and back
-/// down every `PULSE`, counted from `epoch`.
+/// down every `PULSE`, counted from `epoch`; still at `PULSE_STILL` unless
+/// the chrome moves fully.
 pub fn pulse(epoch: Instant, now: Instant) -> f32 {
-    1.0 - (2.0 * phase(epoch, PULSE, now) - 1.0).abs()
+    pulse_with(epoch, now, motion())
+}
+
+/// `pulse` with `motion`.
+pub fn pulse_with(epoch: Instant, now: Instant, motion: Motion) -> f32 {
+    if motion != Motion::Full {
+        return PULSE_STILL;
+    }
+    1.0 - (2.0 * phase_with(epoch, PULSE, now, motion) - 1.0).abs()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BLINK, BLINK_LOW, FAST, Fade, Hover, PULSE, blink, phase, pulse, quantize};
+    use super::{
+        BLINK, BLINK_LOW, FAST, Fade, Hover, Motion, PULSE, PULSE_STILL, blink, blink_with, ease,
+        phase, phase_with, pulse, pulse_with, quantize, unease,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -289,5 +343,37 @@ mod tests {
         assert!((phase(start, period, start + Duration::from_millis(250)) - 0.25).abs() < 0.001);
         assert!((phase(start, period, start + Duration::from_millis(1250)) - 0.25).abs() < 0.001);
         assert_eq!(phase(start, Duration::ZERO, start + period), 0.0);
+    }
+
+    #[test]
+    fn fades_ease_and_turn_around_on_the_curve() {
+        assert_eq!((ease(0.0), ease(1.0), ease(0.5)), (0.0, 1.0, 0.5));
+        // Slow at the ends, quick in the middle.
+        assert!(ease(0.1) < 0.1 && ease(0.9) > 0.9);
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            assert!((unease(ease(t)) - t).abs() < 1e-3, "{t}");
+        }
+    }
+
+    #[test]
+    fn without_motion_nothing_loops_and_fades_end_at_once() {
+        let epoch = Instant::now();
+        let later = epoch + BLINK / 2;
+        for motion in [Motion::Reduced, Motion::Off] {
+            assert_eq!(blink_with(epoch, later, motion), 1.0);
+            assert_eq!(pulse_with(epoch, epoch + PULSE / 4, motion), PULSE_STILL);
+            assert_eq!(phase_with(epoch, BLINK, later, motion), 0.0);
+        }
+        assert!(blink_with(epoch, later, Motion::Full) < 0.5);
+        // Reduced still fades; Off is at the end at once.
+        let up = Fade::new(epoch, FAST, true);
+        let mid = epoch + FAST / 2;
+        assert!(up.value_with(mid, Motion::Reduced) < 1.0);
+        assert!(!up.done_with(mid, Motion::Reduced));
+        assert_eq!(up.value_with(epoch, Motion::Off), 1.0);
+        assert!(up.done_with(epoch, Motion::Off));
+        let down = Fade::new(epoch, FAST, false);
+        assert_eq!(down.value_with(epoch, Motion::Off), 0.0);
     }
 }
