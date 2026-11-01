@@ -27,8 +27,6 @@
 //! `SidebarState`.
 
 use super::layers::{Part, RowCache};
-#[cfg(test)]
-use super::repos::scrollbar;
 use super::{
     AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
     Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
@@ -1862,17 +1860,16 @@ impl Painter {
         // The header over the rows scrolled under it.
         self.sidebar_head(&mut c, &SidebarHead::of(view), size.w, scale, p);
 
-        // Where the rows are scrolled to, when they do not all fit.
-        let shown = size.h - BAR_HEIGHT;
-        let total = shown + layout.max_scroll(size.h);
-        let first = layout.scroll.max(0) as usize;
-        scrollbar(
-            &mut c,
-            scroll_track(size),
-            (first, shown.max(0) as usize, total.max(0) as usize),
-            scale,
-            p,
-        );
+        // Where the rows are scrolled to, when they do not all fit: the
+        // thumb the chrome composes (see `SidebarLayers`).
+        if let Some(bar) = sidebar_thumb(&layout, size.w, size, state.scroll) {
+            let (x, _, w, _) = rect_px(bar.track, scale);
+            let (y, h) = (
+                (bar.top * scale).round() as f32,
+                (bar.h * scale).round() as f32,
+            );
+            c.rounded(x, y, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        }
         sidebar_edge(&mut c, scale, p);
         c.into_buffer(true)
     }
@@ -2963,25 +2960,14 @@ pub fn sidebar_thumb(
     output: Size<i32, Logical>,
     scroll: f64,
 ) -> Option<super::Thumb> {
-    let max = layout.max_scroll(output.h);
     let shown = output.h - BAR_HEIGHT;
     let track = scroll_track((width, output.h).into());
-    let room = track.size.h as f64;
-    if max <= 0 || shown <= 0 || room <= 0.0 {
-        return None;
-    }
-    let total = (shown + max) as f64;
-    let h = (room * shown as f64 / total)
-        .max((THUMB_MIN as f64).min(room))
-        .min(room)
-        .round();
-    let top = track.loc.y as f64 + (room - h) * scroll.clamp(0.0, max as f64) / max as f64;
-    Some(super::Thumb {
-        track,
-        top,
-        h,
-        last: max as f64,
-    })
+    let total = (shown + layout.max_scroll(output.h)) as f64;
+    let bar = super::ListBar {
+        down: scroll,
+        total,
+    };
+    super::Thumb::of(track, shown as f64, bar)
 }
 
 /// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
@@ -3018,8 +3004,6 @@ fn sidebar_edge(c: &mut Canvas, scale: f64, p: &Palette) {
 /// How far above its top a workspace's block buffer reaches: a name being
 /// renamed stands out of a compact header's band.
 const BLOCK_OVER: i32 = 2;
-/// The shortest the scrollbar's thumb gets, as in the repositories panel.
-const THUMB_MIN: i32 = 24;
 
 /// What a workspace's block is drawn from: its view and its agents',
 /// whether it is the active one, what moves in it, the name typed while
@@ -3129,19 +3113,6 @@ impl Painter {
         self.inbox_rows(&mut c, title, &rows, key.density, scale, p);
         c.into_buffer(true)
     }
-
-    /// The sidebar scrollbar's thumb, `size` big.
-    fn scroll_thumb(
-        &self,
-        size: Size<i32, Logical>,
-        scale: f64,
-        p: &Palette,
-    ) -> MemoryRenderBuffer {
-        let mut c = Canvas::new(physical(size, scale));
-        let (w, h) = (c.w as f32, c.h as f32);
-        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
-        c.into_buffer(false)
-    }
 }
 
 /// The sidebar as the chrome shows it: its frame (the header and what
@@ -3216,7 +3187,7 @@ impl SidebarLayers {
         if let Some(bar) = sidebar_thumb(&layout, width, output, scroll) {
             let thumb = (SCROLLBAR_WIDTH, bar.h as i32).into();
             let buffer = self.thumb.get((thumb, theme, scale), |(size, ..)| {
-                painter.scroll_thumb(*size, scale, theme.palette())
+                painter.bar_thumb(*size, scale, theme.palette())
             });
             let at = (bar.track.loc.x as f64, bar.top).into();
             parts.push(Part::new(buffer, bar.track.loc, thumb, 1.0).at(at));
