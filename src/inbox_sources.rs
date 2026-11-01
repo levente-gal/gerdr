@@ -343,27 +343,32 @@ fn needs_look(git: &GitStatus) -> bool {
     git.dirty || git.ahead > 0 || git.behind > 0 || git.stashes > 0 || git.op.is_some()
 }
 
-/// What `git` needs a look for, in short: `3 changes, 2 to push`.
+/// What `git` needs a look for, in short, marked as the repositories
+/// panel's tree marks it: `3 changes ↑2 ↓1 · 1 stashed · merging`, the
+/// arrows before the commits to push and pull.
 fn git_summary(git: &GitStatus) -> String {
-    let count = |n: usize, word: &str, plural: &str| match n {
-        1 => format!("1 {word}"),
-        n => format!("{n} {plural}"),
-    };
-    let mut parts = Vec::new();
+    let mut marks = Vec::new();
     if git.dirty {
-        parts.push(count(git.changes.len().max(1), "change", "changes"));
+        marks.push(match git.changes.len().max(1) {
+            1 => "1 change".to_owned(),
+            n => format!("{n} changes"),
+        });
     }
     if git.ahead > 0 {
-        parts.push(format!("{} to push", git.ahead));
+        marks.push(format!("↑{}", git.ahead));
     }
     if git.behind > 0 {
-        parts.push(format!("{} to pull", git.behind));
+        marks.push(format!("↓{}", git.behind));
+    }
+    let mut parts = Vec::new();
+    if !marks.is_empty() {
+        parts.push(marks.join(" "));
     }
     if git.stashes > 0 {
-        parts.push(count(git.stashes as usize, "stash", "stashes"));
+        parts.push(format!("{} stashed", git.stashes));
     }
     parts.extend(git.op.map(op_label));
-    parts.join(", ")
+    parts.join(" · ")
 }
 
 /// What `op` is, as going on: `merging`, `rebasing 2/5`.
@@ -902,6 +907,11 @@ mod tests {
             "{}",
             items[3].subtitle
         );
+        // Marked as the repositories panel marks them.
+        let ends = |i: usize, end: &str| assert!(items[i].subtitle.ends_with(end), "{end}");
+        ends(0, "↑2");
+        ends(1, "↓1");
+        ends(2, "1 stashed");
     }
 
     #[test]
