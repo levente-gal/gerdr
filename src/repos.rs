@@ -101,6 +101,11 @@ const WIDEST: usize = 3;
 pub struct Repos {
     pub(crate) panel: Option<Panel>,
     pub(crate) batch: Option<Batch>,
+    /// Batches still running that a later one over other repositories
+    /// took the panel's result bar from: told in a toast once done.
+    pub(crate) background: Vec<Batch>,
+    /// The flags that stop each batch running, by id.
+    pub(crate) stops: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Hands the batches' and checks' results to the event loop.
     pub(crate) done: Option<channel::Sender<RepoEvent>>,
     /// The id the next batch, check or detail read gets.
@@ -235,6 +240,9 @@ pub struct Ctx<'a> {
     pub cols: usize,
     /// How many lines a sheet shows at once (`chrome::repos_sheet_rows`).
     pub sheet_rows: usize,
+    /// Batches still running in the background: started before `batch`,
+    /// over other repositories.
+    pub background: &'a [Batch],
 }
 
 /// How the tree lists a repository's changed files: a line each with its
@@ -706,6 +714,11 @@ pub struct Batch {
     pub id: u64,
     pub kind: BatchKind,
     pub runs: Vec<RepoRun>,
+    /// When it started: how long it has run shows while it does.
+    pub started: SystemTime,
+    /// The user asked it to stop: its commands are killed, the rest not
+    /// run.
+    pub stopping: bool,
 }
 
 impl Batch {
@@ -753,7 +766,9 @@ impl Batch {
         if skipped > 0 {
             parts.push(format!("{skipped} skipped"));
         }
-        if going > 0 {
+        if going > 0 && self.stopping {
+            parts.push("stopping…".into());
+        } else if going > 0 {
             parts.push(format!("{going} of {} running", self.runs.len()));
         }
         let tone = if going > 0 {
@@ -771,6 +786,37 @@ impl Batch {
     pub fn run(&self, root: &Path) -> Option<&RepoRun> {
         self.runs.iter().find(|r| r.root == root)
     }
+
+    /// Whether it still runs in the repository at `root`.
+    pub fn runs_in(&self, root: &Path) -> bool {
+        self.run(root).is_some_and(|r| !r.state.over())
+    }
+}
+
+/// How long since `then`, at `now`, in words: `12s`, `2m 5s`.
+pub fn took(then: SystemTime, now: SystemTime) -> String {
+    let s = now.duration_since(then).map_or(0, |d| d.as_secs());
+    match s {
+        0..60 => format!("{s}s"),
+        _ => format!("{}m {}s", s / 60, s % 60),
+    }
+}
+
+/// Why a batch over the repositories at `roots` must wait, if one of them
+/// is in a batch still running: which, and where.
+pub fn busy<'a>(roots: impl IntoIterator<Item = &'a Path>, ctx: &Ctx) -> Option<String> {
+    let running = ctx.batch.into_iter().chain(ctx.background);
+    let batches: Vec<&Batch> = running.filter(|b| !b.finished()).collect();
+    roots.into_iter().find_map(|root| {
+        let batch = batches.iter().find(|b| b.runs_in(root))?;
+        let label = (ctx.items.iter())
+            .find(|i| i.root == root)
+            .map_or_else(|| root.display().to_string(), |i| i.label.clone());
+        let what = batch.kind.label().to_lowercase();
+        Some(format!(
+            "Wait for the {what} running in {label} (Alt+C stops it)"
+        ))
+    })
 }
 
 /// A repository in a batch.
@@ -785,6 +831,8 @@ pub struct RepoRun {
     pub state: RunState,
     /// Every command run in it, for the log.
     pub log: Vec<Ran>,
+    /// When it started running there.
+    pub since: Option<SystemTime>,
 }
 
 impl RepoRun {
@@ -949,6 +997,8 @@ pub enum Outcome {
     RedoCut(Option<(PathBuf, String)>),
     /// Read the repositories' status and diffs again.
     Refresh,
+    /// Stop the batches running: their commands killed, the rest not run.
+    Stop,
 }
 
 /// A tree line, by index: a repository of `Ctx::items`, a folder of its
@@ -1399,6 +1449,12 @@ const ACTIONS: &[Action] = {
             chord: alt(DELETE),
             key: "Alt+Del",
             what: "delete a local branch picked in the menu (asked first)",
+        },
+        Action {
+            button: B::Stop,
+            chord: alt(&[Keysym::c, Keysym::C]),
+            key: "Alt+C",
+            what: "stop the batches running: their git commands are killed",
         },
         Action {
             button: B::CopyReview,
@@ -2515,7 +2571,8 @@ impl Panel {
     fn branch_picker(&self, ctx: &Ctx) -> BranchPicker {
         let items = ctx.items;
         let targets = self.targets(items);
-        let running = ctx.batch.is_some_and(|b| !b.finished());
+        let roots = targets.iter().map(|&k| items[k].root.as_path());
+        let running = busy(roots, ctx).is_some();
         let branch = |k: usize| items[k].status.branch.as_deref();
         let (label, mixed) = if targets.is_empty() {
             ("No repository".to_owned(), true)
@@ -2617,14 +2674,12 @@ impl Panel {
     }
 
     /// Why the branch menu can't open, if it can't.
-    fn menu_blocked(&self, ctx: &Ctx) -> Option<&'static str> {
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            return Some("Wait for the batch to finish");
+    fn menu_blocked(&self, ctx: &Ctx) -> Option<String> {
+        let targets = self.targets(ctx.items);
+        if targets.is_empty() {
+            return Some("Select a repository first".into());
         }
-        if self.targets(ctx.items).is_empty() {
-            return Some("Select a repository first");
-        }
-        None
+        busy(targets.iter().map(|&k| ctx.items[k].root.as_path()), ctx)
     }
 
     /// What picking a branch in the menu does, while it is open.
@@ -2639,7 +2694,7 @@ impl Panel {
     /// branch they are on; else on the first.
     fn open_branch_menu(&mut self, action: MenuAction, ctx: &Ctx) {
         if let Some(why) = self.menu_blocked(ctx) {
-            self.error = Some(why.into());
+            self.error = Some(why);
             return;
         }
         let page = self.menu_page(ctx);
@@ -2823,10 +2878,6 @@ impl Panel {
             self.error = Some(format!("Not a branch name: {why}"));
             return None;
         }
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return None;
-        }
         let items = ctx.items;
         let jobs: Vec<Job> = self
             .targets(items)
@@ -2838,6 +2889,10 @@ impl Panel {
             .collect();
         if jobs.is_empty() {
             self.error = Some("Select a repository first".into());
+            return None;
+        }
+        if let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx) {
+            self.error = Some(why);
             return None;
         }
         self.branch_menu = None;
@@ -2868,10 +2923,6 @@ impl Panel {
             return self.delete_branch(k, ctx);
         }
         self.branch_menu = None;
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return None;
-        }
         let key = branch.names.join(" / ");
         let items = ctx.items;
         let jobs: Vec<Job> = self
@@ -2888,6 +2939,10 @@ impl Panel {
             .collect();
         if jobs.is_empty() {
             self.error = Some(format!("Already on {}", branch.label));
+            return None;
+        }
+        if let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx) {
+            self.error = Some(why);
             return None;
         }
         self.error = None;
@@ -2941,10 +2996,6 @@ impl Panel {
     /// repositories acted on have it, on a sheet over the menu.
     fn delete_branch(&mut self, k: usize, ctx: &Ctx) -> Option<Outcome> {
         let branch = self.shown_branches(ctx).into_iter().nth(k)?;
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return None;
-        }
         let jobs = match self.delete_jobs(&branch, ctx) {
             Ok(jobs) => jobs,
             Err(why) => {
@@ -2952,6 +3003,10 @@ impl Panel {
                 return None;
             }
         };
+        if let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx) {
+            self.error = Some(why);
+            return None;
+        }
         let menu = self.branch_menu.as_mut()?;
         menu.picked = k;
         self.error = None;
@@ -3005,26 +3060,22 @@ impl Panel {
     }
 
     /// Whether `button` can be done now and what it asks for, else why
-    /// not. It changes nothing: the footer asks it too.
+    /// not: a batch waits for those of its repositories in one still
+    /// running. It changes nothing: the footer asks it too.
     fn plan(&self, button: ReposButton, ctx: &Ctx) -> Result<Outcome, Why> {
+        let outcome = self.plan_free(button, ctx)?;
+        if let Outcome::Batch { jobs, .. } = &outcome
+            && let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx)
+        {
+            return Err(Why::Other(why));
+        }
+        Ok(outcome)
+    }
+
+    /// What `plan` says, but for the batches running.
+    fn plan_free(&self, button: ReposButton, ctx: &Ctx) -> Result<Outcome, Why> {
         use ReposButton as B;
         let items = ctx.items;
-        let local = matches!(
-            button,
-            B::OpenInZed
-                | B::RunInTerminal
-                | B::OpenWorkspace
-                | B::CopyReview
-                | B::ClearReview
-                | B::Comment
-                | B::SaveComment
-                | B::DiscardComment
-                | B::DeleteComment
-                | B::Refresh
-        );
-        if !local && ctx.batch.is_some_and(|b| !b.finished()) {
-            return Err(Why::other("Wait for the batch to finish"));
-        }
         if items.is_empty() {
             return Err(Why::other("No git repositories in this project"));
         }
@@ -3122,7 +3173,7 @@ impl Panel {
             // They open the branch menu (see `act`), when it can.
             B::MergeFrom | B::RebaseFrom => Err(Why::other(
                 self.menu_blocked(ctx)
-                    .unwrap_or("Pick the branch in the menu"),
+                    .unwrap_or_else(|| "Pick the branch in the menu".into()),
             )),
             B::OpenInZed => {
                 let (k, c) = self
@@ -3224,10 +3275,17 @@ impl Panel {
             },
             B::Help => Err(Why::other("Press F1 for the keys")),
             B::Refresh => Ok(Outcome::Refresh),
+            B::Stop => {
+                let running = ctx.batch.into_iter().chain(ctx.background);
+                match running.filter(|b| !b.finished()).count() {
+                    0 => Err(Why::other("No batch is running")),
+                    _ => Ok(Outcome::Stop),
+                }
+            }
             // It opens the branch menu (see `act`), when it can.
             B::DeleteBranchMenu => Err(Why::other(
                 self.menu_blocked(ctx)
-                    .unwrap_or("Pick the branch in the menu"),
+                    .unwrap_or_else(|| "Pick the branch in the menu".into()),
             )),
             B::CopyReview => {
                 diff_ctx!(self, ctx, dctx);
@@ -4064,8 +4122,8 @@ impl Panel {
             RepoMark::Ahead => BatchKind::Push { force: false },
             RepoMark::Behind => BatchKind::Pull(Pull::FastForward),
         };
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
+        if let Some(why) = busy([ctx.items[k].root.as_path()], ctx) {
+            self.error = Some(why);
             return None;
         }
         self.error = None;
@@ -4348,10 +4406,15 @@ impl Panel {
         }
         let Row::File(_, c, depth) = row else {
             let chip = self.chip(item, ctx.batch);
-            let run = ctx.batch.and_then(|b| b.run(&item.root));
-            let state = match run.map(|r| &r.state) {
-                Some(RunState::Running(what)) => LineState::Busy(what.clone()),
-                Some(RunState::Queued) => LineState::Busy("waiting…".into()),
+            // Running in the background, or in the batch shown.
+            let running = ctx.background.iter().find(|b| b.runs_in(&item.root));
+            let run = running.or(ctx.batch).and_then(|b| b.run(&item.root));
+            let state = match run.map(|r| (&r.state, r.since)) {
+                Some((RunState::Running(what), Some(since))) => {
+                    LineState::Busy(format!("{what} {}", took(since, ctx.now)))
+                }
+                Some((RunState::Running(what), None)) => LineState::Busy(what.clone()),
+                Some((RunState::Queued, _)) => LineState::Busy("waiting…".into()),
                 _ if chip
                     .as_ref()
                     .is_some_and(|c| matches!(c.tone, Tone::Error | Tone::Warning)) =>
@@ -4423,6 +4486,13 @@ impl Panel {
         let fetch_batch = ctx.batch.is_some_and(|b| {
             !b.finished() && matches!(b.kind, BatchKind::Fetch | BatchKind::Pull(_))
         });
+        let behind = ctx.background.iter().filter(|b| !b.finished()).count();
+        if behind > 0 {
+            parts.push(match behind {
+                1 => "1 more batch running".into(),
+                n => format!("{n} more batches running"),
+            });
+        }
         parts.push(if ctx.fetching || fetch_batch {
             "fetching…".into()
         } else {
@@ -4497,9 +4567,7 @@ impl Panel {
                     _ if button == ReposButton::ClearReview => {
                         self.diff.review.is_empty().then(|| NO_REVIEW.into())
                     }
-                    _ if menu_integrate(button).is_some() => {
-                        self.menu_blocked(ctx).map(String::from)
-                    }
+                    _ if menu_integrate(button).is_some() => self.menu_blocked(ctx),
                     Err(Why::Other(why)) => Some(why),
                     _ => None,
                 },
@@ -4803,8 +4871,15 @@ impl Panel {
         let end = (first + page + usize::from(part > 0.0)).min(rows.len());
         let shown = &rows[first..end];
         let result = ctx.batch.map(|batch| {
-            let (text, tone) = batch.summary();
+            let (mut text, tone) = batch.summary();
             let mut buttons = Vec::new();
+            // How long it has run, and a button to stop it.
+            if !batch.finished() {
+                text = format!("{text} · {}", took(batch.started, ctx.now));
+                if !batch.stopping {
+                    buttons.push(ReposButton::Stop);
+                }
+            }
             if undo_jobs(Some(batch)).is_ok() {
                 buttons.push(ReposButton::Undo);
             }
@@ -5088,6 +5163,7 @@ mod tests {
             tree_share: crate::chrome::REPOS_TREE_SHARE,
             cols: 40,
             sheet_rows: 12,
+            background: &[],
         }
     }
 
@@ -5210,6 +5286,7 @@ mod tests {
             after: None,
             state,
             log: Vec::new(),
+            since: None,
         }
     }
 
@@ -5221,7 +5298,13 @@ mod tests {
     }
 
     fn batch(kind: BatchKind, runs: Vec<RepoRun>) -> Batch {
-        Batch { id: 1, kind, runs }
+        Batch {
+            id: 1,
+            kind,
+            runs,
+            started: UNIX_EPOCH + Duration::from_secs(NOW),
+            stopping: false,
+        }
     }
 
     /// The repository lines of `view`.
@@ -5598,28 +5681,85 @@ mod tests {
         );
         let ctx = ctx(&items, Some(&b));
         let mut panel = Panel::new(&items);
+        // Where it runs, a batch waits; elsewhere, it goes ahead.
+        let waits = "Wait for the fetch running in herdr (Alt+C stops it)";
+        select(&mut panel, "herdr");
         for (m, sym) in [
             (ctrl(), Keysym::p),
             (ctrl(), Keysym::f),
             (ctrl_shift(), Keysym::M),
         ] {
             assert_eq!(press(&mut panel, m, sym, &ctx), None);
-            assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+            assert_eq!(panel.error.as_deref(), Some(waits));
         }
+        assert!(
+            panel
+                .view("p", &ctx)
+                .hints
+                .iter()
+                .find(|h| h.button == ReposButton::Push)
+                .is_some_and(|h| h.disabled.as_deref() == Some(waits))
+        );
+        select(&mut panel, "gerdr");
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::p, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: false },
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        // Alt+C stops it.
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::c, &ctx),
+            Some(Outcome::Stop)
+        );
         let view = panel.view("p", &ctx);
         let lines = repo_lines(&view);
         // herdr, with nothing to do, is under the heading, last.
         assert_eq!(lines[2].label, "herdr");
         assert_eq!(lines[2].state, LineState::Busy("fetching…".into()));
         assert_eq!(lines[0].chip.as_ref().map(|c| c.tone), Some(Tone::Success));
+        // How long it has run, and a button to stop it.
         let result = view.result.unwrap();
-        assert_eq!(result.text, "Fetch: 1 done · 1 of 2 running");
+        assert_eq!(result.text, "Fetch: 1 done · 1 of 2 running · 0s");
+        let buttons: Vec<ReposButton> = result.buttons.iter().map(|h| h.button).collect();
+        assert_eq!(buttons, [ReposButton::Stop]);
+        // A line running a while says for how long.
+        let mut long = b.clone();
+        long.runs[1].since = Some(UNIX_EPOCH + Duration::from_secs(NOW - 75));
+        let ctx = super::Ctx {
+            batch: Some(&long),
+            ..ctx
+        };
+        let view = panel.view("p", &ctx);
+        let busy = LineState::Busy("fetching… 1m 15s".into());
+        assert_eq!(repo_lines(&view)[2].state, busy);
+        // Stopping, it says so, and no button stops it again.
+        let mut stopping = long.clone();
+        stopping.stopping = true;
+        let ctx = super::Ctx {
+            batch: Some(&stopping),
+            ..ctx
+        };
+        let result = panel.view("p", &ctx).result.unwrap();
+        assert_eq!(result.text, "Fetch: 1 done · stopping… · 0s");
         assert!(result.buttons.is_empty());
-        assert!(
-            view.hints
-                .iter()
-                .find(|h| h.button == ReposButton::Push)
-                .is_some_and(|h| h.disabled.as_deref() == Some("Wait for the batch to finish"))
+        // In the background, its line is busy still and the header says
+        // so, the result bar another batch's.
+        let other = batch(
+            BatchKind::Push { force: false },
+            vec![run("gerdr", RunState::Done)],
+        );
+        let ctx = super::Ctx {
+            batch: Some(&other),
+            background: std::slice::from_ref(&b),
+            ..ctx
+        };
+        let view = panel.view("p", &ctx);
+        assert!(view.summary.contains("1 more batch running"));
+        assert_eq!(
+            repo_lines(&view)[2].state,
+            LineState::Busy("fetching…".into())
         );
     }
 
@@ -6602,8 +6742,8 @@ mod tests {
         // The next batch's chips show.
         let next = Batch {
             id: 2,
-            kind: BatchKind::Fetch,
             runs: runs.to_vec(),
+            ..batch(BatchKind::Fetch, Vec::new())
         };
         let ctx = super::Ctx {
             batch: Some(&next),
@@ -6655,17 +6795,20 @@ mod tests {
                 DiffTone::Plain
             ))
         );
-        // Not while a batch runs.
+        // Not while a batch runs there.
         let b = batch(
             BatchKind::Fetch,
-            vec![run("gerdr", RunState::Running("fetching…".into()))],
+            vec![run("herdr", RunState::Running("fetching…".into()))],
         );
         let ctx = super::Ctx {
             batch: Some(&b),
             ..ctx
         };
         assert_eq!(panel.click(ReposHit::Mark(6, RepoMark::Ahead), &ctx), None);
-        assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Wait for the fetch running in herdr (Alt+C stops it)")
+        );
     }
 
     #[test]
@@ -7917,7 +8060,10 @@ mod tests {
         assert!(!panel.view("p", &ctx).branch.enabled);
         press(&mut panel, ctrl(), Keysym::s, &ctx);
         assert!(panel.branch_menu.is_none());
-        assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Wait for the fetch running in gerdr (Alt+C stops it)")
+        );
         // With nothing selected, there is nothing to switch.
         let mut none_selected = Panel::new(&items);
         none_selected.selected = None;

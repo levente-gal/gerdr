@@ -8,7 +8,10 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -43,6 +46,10 @@ use crate::{
 const BATCH_THREADS: usize = 4;
 /// How many cuts made from the diff can be undone.
 const CUTS: usize = 100;
+
+/// A batch that took this long says it is done in a toast, panel open
+/// or not.
+const SAY_DONE_AFTER: Duration = Duration::from_secs(5);
 
 /// Opening the panel fetches the repositories last fetched longer ago.
 const FETCH_AGE: Duration = Duration::from_secs(5 * 60);
@@ -698,6 +705,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         if let Some(panel) = panel.as_mut() {
@@ -713,6 +721,7 @@ impl Gerdr {
                 tree_share,
                 cols,
                 sheet_rows,
+                background,
             };
             panel.refresh(&ctx);
         }
@@ -764,6 +773,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background: &self.repos.background,
         };
         let diffs = panel.diffs_wanted(&ctx);
         let key = panel
@@ -822,6 +832,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -836,6 +847,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
@@ -904,6 +916,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -918,6 +931,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         let mut drags = false;
         let outcome = panel.as_mut().and_then(|p| {
@@ -1012,6 +1026,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1026,6 +1041,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         let outcome = panel.as_mut().and_then(|p| p.press(button, &ctx));
         self.repos_detail();
@@ -1074,6 +1090,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1088,6 +1105,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         let Some(p) = panel.as_mut() else {
             return;
@@ -1247,6 +1265,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1261,6 +1280,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         let Some(panel) = panel.as_mut() else {
             return;
@@ -1290,6 +1310,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1304,6 +1325,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         if let Some(panel) = panel.as_mut() {
             panel.stand_at(pos, detail, &ctx);
@@ -1328,6 +1350,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1342,6 +1365,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background,
         };
         let Some(panel) = panel.as_mut() else {
             return false;
@@ -1372,6 +1396,7 @@ impl Gerdr {
             tree_share,
             cols,
             sheet_rows,
+            background: &self.repos.background,
         };
         let title = self
             .project
@@ -1394,6 +1419,7 @@ impl Gerdr {
             Outcome::Cut(edit) => self.repos_cut(edit),
             Outcome::Yank(edit) => self.repos_yank(edit),
             Outcome::Paste(put) => self.repos_paste(put),
+            Outcome::Stop => self.stop_batches(),
             Outcome::Refresh => {
                 self.refresh_git();
                 self.repos_read();
@@ -1789,8 +1815,16 @@ impl Gerdr {
         if jobs.is_empty() {
             return;
         }
-        if self.repos.batch.as_ref().is_some_and(|b| !b.finished()) {
-            return self.repos_refuse("Wait for the batch to finish");
+        // Only those repositories wait that a batch still runs in; the
+        // others go ahead, that batch going on in the background.
+        let running = (self.repos.batch.iter())
+            .chain(&self.repos.background)
+            .find(|b| jobs.iter().any(|j| b.runs_in(&j.root)));
+        if let Some(batch) = running {
+            let what = batch.kind.label().to_lowercase();
+            return self.repos_refuse(&format!(
+                "Wait for the {what} running there (Alt+C stops it)"
+            ));
         }
         let Some(tx) = self.repos_sender() else {
             return;
@@ -1831,6 +1865,7 @@ impl Gerdr {
                 after: None,
                 state: RunState::Queued,
                 log: Vec::new(),
+                since: None,
             });
         }
         if tasks.is_empty() {
@@ -1838,7 +1873,18 @@ impl Gerdr {
             return;
         }
         let threads = tasks.len().min(BATCH_THREADS);
-        self.repos.batch = Some(Batch { id, kind, runs });
+        if let Some(previous) = previous.filter(|b| !b.finished()) {
+            self.repos.background.push(previous);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        self.repos.stops.insert(id, stop.clone());
+        self.repos.batch = Some(Batch {
+            id,
+            kind,
+            runs,
+            started: SystemTime::now(),
+            stopping: false,
+        });
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.error = None;
         }
@@ -1847,7 +1893,7 @@ impl Gerdr {
             busy: Vec::new(),
         }));
         for _ in 0..threads {
-            let (queue, tx) = (queue.clone(), tx.clone());
+            let (queue, tx, stop) = (queue.clone(), tx.clone(), stop.clone());
             std::thread::spawn(move || {
                 while let Some(task) = Queue::next(&queue) {
                     let root = task.job.root.clone();
@@ -1858,17 +1904,41 @@ impl Gerdr {
                             what: what.to_owned(),
                         });
                     };
+                    // What its commands wait for is said too; stopped,
+                    // they are killed.
+                    let say = {
+                        let (tx, batch, root) = (tx.clone(), task.batch, root.clone());
+                        move |what: &str| {
+                            let _ = tx.send(RepoEvent::Step {
+                                batch,
+                                root: root.clone(),
+                                what: what.to_owned(),
+                            });
+                        }
+                    };
+                    git_ops::watch(Some(git_ops::Watch {
+                        stop: stop.clone(),
+                        say: Box::new(say),
+                    }));
                     // A fetch of the panel's own, or a check's, may run
                     // there still.
                     let key = task.common.clone().unwrap_or_else(|| root.clone());
                     let what = format!("the {}", task.kind.label().to_lowercase());
-                    let turn = Turn::try_take(&key, &what).unwrap_or_else(|holder| {
-                        step(&format!("waiting for {holder}"));
-                        Turn::take(&key, &what)
-                    });
-                    let before = git_ops::head(&root);
-                    let result = perform(&task, &step);
-                    let after = git_ops::head(&root);
+                    let turn = match Turn::try_take(&key, &what) {
+                        Ok(turn) => Some(turn),
+                        Err(holder) => {
+                            step(&format!("waiting for {holder}"));
+                            Turn::take_unless_stopped(&key, &what)
+                        }
+                    };
+                    let stopped = turn.is_none() || stop.load(AtomicOrdering::Relaxed);
+                    let before = (!stopped).then(|| git_ops::head(&root)).flatten();
+                    let result = match stopped {
+                        true => Err(blocked(git_ops::STOPPED)),
+                        false => perform(&task, &step),
+                    };
+                    let after = (!stopped).then(|| git_ops::head(&root)).flatten();
+                    git_ops::watch(None);
                     drop(turn);
                     Queue::done(&queue, &task);
                     let _ = tx.send(RepoEvent::Finished {
@@ -1892,10 +1962,42 @@ impl Gerdr {
         }
     }
 
-    /// A batch's run in the repository at `root`, while it is the batch.
+    /// A batch's run in the repository at `root`, while it is the batch
+    /// or runs in the background.
     fn batch_run_mut(&mut self, batch: u64, root: &Path) -> Option<&mut RepoRun> {
-        let current = self.repos.batch.as_mut().filter(|b| b.id == batch)?;
-        current.runs.iter_mut().find(|r| r.root == root)
+        let mut batches = self
+            .repos
+            .batch
+            .iter_mut()
+            .chain(&mut self.repos.background);
+        let found = batches.find(|b| b.id == batch)?;
+        found.runs.iter_mut().find(|r| r.root == root)
+    }
+
+    /// Stop every batch running: their commands killed, the rest not run.
+    fn stop_batches(&mut self) {
+        let running = (self.repos.batch.iter_mut())
+            .chain(&mut self.repos.background)
+            .filter(|b| !b.finished());
+        for batch in running {
+            batch.stopping = true;
+            if let Some(stop) = self.repos.stops.get(&batch.id) {
+                stop.store(true, AtomicOrdering::Relaxed);
+            }
+        }
+    }
+
+    /// A batch running in the background is done: told in a toast, as
+    /// the result bar shows another.
+    fn background_finished(&mut self, id: u64) {
+        let Some(at) = (self.repos.background.iter()).position(|b| b.id == id && b.finished())
+        else {
+            return;
+        };
+        let batch = self.repos.background.remove(at);
+        self.repos.stops.remove(&id);
+        let (summary, tone) = batch.summary();
+        self.toast(summary, level(tone));
     }
 
     /// A thread's news.
@@ -1904,6 +2006,7 @@ impl Gerdr {
             RepoEvent::Step { batch, root, what } => {
                 if let Some(run) = self.batch_run_mut(batch, &root) {
                     run.state = RunState::Running(what);
+                    run.since.get_or_insert_with(SystemTime::now);
                 }
             }
             RepoEvent::Finished {
@@ -1939,8 +2042,10 @@ impl Gerdr {
                     .as_ref()
                     .is_some_and(|b| b.id == batch && b.finished())
                 {
+                    self.repos.stops.remove(&batch);
                     self.batch_finished();
                 }
+                self.background_finished(batch);
                 self.refresh_git();
             }
             RepoEvent::Checked {
@@ -2009,6 +2114,7 @@ impl Gerdr {
                     same_branches,
                     top_branches,
                     fetches,
+                    background,
                     ..
                 } = &mut self.repos;
                 let ctx = Ctx {
@@ -2023,6 +2129,7 @@ impl Gerdr {
                     tree_share,
                     cols,
                     sheet_rows,
+                    background,
                 };
                 if let Some(panel) = panel.as_mut() {
                     panel.set_diffs(root, generation, files, &ctx);
@@ -2062,6 +2169,7 @@ impl Gerdr {
             .map(|r| r.root.clone())
             .collect();
         let (summary, tone) = batch.summary();
+        let batch_started = batch.started;
         match batch.kind {
             BatchKind::Commit { .. } if done => {
                 if let Some(panel) = self.repos.panel.as_mut() {
@@ -2075,7 +2183,12 @@ impl Gerdr {
             }
             _ => {}
         }
-        if self.repos.panel.is_none() {
+        // Told when the panel is closed, or took long enough that the
+        // result bar may not be looked at.
+        let long = SystemTime::now()
+            .duration_since(batch_started)
+            .is_ok_and(|d| d >= SAY_DONE_AFTER);
+        if self.repos.panel.is_none() || long {
             self.toast(summary, level(tone));
         }
     }

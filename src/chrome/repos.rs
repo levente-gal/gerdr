@@ -692,6 +692,8 @@ pub enum ReposButton {
     Refresh,
     /// The branch menu, to pick a local branch to delete.
     DeleteBranchMenu,
+    /// Stop the batches running.
+    Stop,
 }
 
 impl ReposButton {
@@ -740,6 +742,7 @@ impl ReposButton {
             ReposButton::Restore => "Restore",
             ReposButton::Refresh => "Refresh",
             ReposButton::DeleteBranchMenu => "Delete a branch…",
+            ReposButton::Stop => "Stop",
         }
     }
 }
