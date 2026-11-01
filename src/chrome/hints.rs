@@ -43,24 +43,49 @@ fn hint_extent((keys, action): (&str, &str)) -> f32 {
     keycaps_extent(keys) + HINT_KEY_GAP as f32 + extent(action, SMALL_FONT_SIZE)
 }
 
-/// Where `hints` go centred in the row `rect`, as (index into `hints`,
-/// rect): as many of the first as fit. Each reaches halfway to its
-/// neighbours, so a click between two lands on one of them.
-pub fn hint_spots(hints: &[(&str, &str)], rect: Rect) -> Vec<(usize, Rect)> {
+/// Whether a hint stays when not all fit: the way out ("Esc") and the
+/// key listing the rest ("F1"). The others give way from the end.
+fn essential((keys, _): (&str, &str)) -> bool {
+    keys.split(" / ").any(|key| key == "Esc" || key == "F1")
+}
+
+/// Which of `hints` fit in `room`, in order: all when they do, else
+/// the essential ones and as many of the first others as fit beside them.
+fn fitting(hints: &[(&str, &str)], room: f32) -> Vec<(usize, f32)> {
     let gap = HINT_GAP as f32;
-    let (mut widths, mut total) = (Vec::new(), -gap);
-    for hint in hints {
-        let w = hint_extent(*hint);
-        if total + gap + w > rect.size.w as f32 {
+    let widths: Vec<f32> = hints.iter().map(|hint| hint_extent(*hint)).collect();
+    let total = |kept: &[(usize, f32)]| kept.iter().map(|(_, w)| w + gap).sum::<f32>() - gap;
+    let all: Vec<(usize, f32)> = widths.iter().copied().enumerate().collect();
+    if total(&all) <= room {
+        return all;
+    }
+    let mut kept: Vec<(usize, f32)> = Vec::new();
+    for &(i, w) in all.iter().filter(|(i, _)| essential(hints[*i])) {
+        if total(&kept) + gap + w <= room || kept.is_empty() && w <= room {
+            kept.push((i, w));
+        }
+    }
+    for &(i, w) in all.iter().filter(|(i, _)| !essential(hints[*i])) {
+        let used = if kept.is_empty() { -gap } else { total(&kept) };
+        if used + gap + w > room {
             break;
         }
-        total += gap + w;
-        widths.push(w);
+        kept.push((i, w));
     }
+    kept.sort_by_key(|(i, _)| *i);
+    kept
+}
+
+/// Where `hints` go centred in the row `rect`, as (index into `hints`,
+/// rect): all that fit, and when not all do, Esc and F1 kept and the
+/// others dropped from the end. Each reaches halfway to its neighbours,
+/// so a click between two lands on one of them.
+pub fn hint_spots(hints: &[(&str, &str)], rect: Rect) -> Vec<(usize, Rect)> {
+    let gap = HINT_GAP as f32;
+    let kept = fitting(hints, rect.size.w as f32);
+    let total = kept.iter().map(|(_, w)| w + gap).sum::<f32>() - gap;
     let mut x = rect.loc.x as f32 + (rect.size.w as f32 - total.max(0.0)) / 2.0;
-    widths
-        .into_iter()
-        .enumerate()
+    kept.into_iter()
         .map(|(i, w)| {
             let left = (x - gap / 2.0).round() as i32;
             let right = (x + w + gap / 2.0).round() as i32;
@@ -210,6 +235,13 @@ mod tests {
         let narrow = hint_spots(&HINTS, rect(0, 0, 200, 24));
         assert!(!narrow.is_empty() && narrow.len() < HINTS.len());
         assert!(hint_spots(&HINTS, rect(0, 0, 10, 24)).is_empty());
+        // The way out stays, the first others beside it, in order.
+        let order: Vec<usize> = narrow.iter().map(|(i, _)| *i).collect();
+        assert_eq!(order.last(), Some(&7), "{order:?}");
+        assert_eq!(order[0], 0, "{order:?}");
+        for pair in narrow.windows(2) {
+            assert!(pair[0].1.loc.x < pair[1].1.loc.x);
+        }
     }
 
     #[test]
