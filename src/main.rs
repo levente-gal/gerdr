@@ -1384,6 +1384,9 @@ pub struct Gerdr {
     /// The projects whose sessions are being stopped, by id: not shown
     /// until they have.
     pub stopping: HashSet<String>,
+    /// The projects to forget once their sessions have stopped, by id (see
+    /// `Gerdr::forget_project`).
+    pub forget_after_stop: HashSet<String>,
     /// The project menu, while it is open.
     pub project_menu: Option<project_menu::ProjectMenu>,
     /// The pointer is over the sidebar header's project name.
@@ -3593,8 +3596,24 @@ impl Gerdr {
         }
     }
 
-    /// Close every pane of the workspace; it goes away once their windows do.
+    /// Close every pane of workspace `idx`; it goes away once their
+    /// windows do. One where something runs asks first (see
+    /// `Gerdr::ask_close_workspace`).
     pub fn close_workspace(&mut self, idx: usize) {
+        let Some(ws) = self.workspaces.get(idx) else {
+            return;
+        };
+        let panes = ws.tabs.iter().flat_map(|tab| &tab.panes);
+        let running: Vec<String> = panes.clone().filter_map(|p| self.running_in(p)).collect();
+        if running.is_empty() {
+            return self.close_workspace_now(idx);
+        }
+        let ids = panes.map(|p| p.id).collect();
+        self.ask_close_workspace(idx, ids, &running);
+    }
+
+    /// Close workspace `idx` without asking.
+    pub fn close_workspace_now(&mut self, idx: usize) {
         if let Some(ws) = self.workspaces.get(idx) {
             // Closed on purpose: once gone, it doesn't come back.
             self.closing_records.insert(ws.record.clone());
@@ -5090,7 +5109,7 @@ impl Gerdr {
                 self.show_notice(notice);
             }
             if stops.any() {
-                self.stop_project(&left, stops);
+                self.stop_project_now(&left, stops);
             }
             self.previous_project = Some(left);
         }
@@ -5391,9 +5410,10 @@ impl Gerdr {
     }
 
     /// Stop project `id`'s herdr session, off the event loop, and its apps
-    /// kept running (see `keep`), as far as `stops` says; not the shown
-    /// one. `project_stopped` takes it from there.
-    pub fn stop_project(&mut self, id: &str, stops: projects::Stops) {
+    /// kept running (see `keep`), as far as `stops` says, without asking
+    /// (`stop_project` asks); not the shown one. `project_stopped` takes it
+    /// from there.
+    pub fn stop_project_now(&mut self, id: &str, stops: projects::Stops) {
         if self.project.as_deref() == Some(id) {
             return tracing::warn!("not stopping project {id}: it is the one shown");
         }
@@ -5405,6 +5425,9 @@ impl Gerdr {
         }
         // Only its apps: the project runs on.
         if !stops.session || !self.stopping.insert(id.to_owned()) {
+            if self.forget_after_stop.remove(id) {
+                self.forget_project_now(id);
+            }
             return;
         }
         // Neither running nor stopped until it answers.
@@ -5445,13 +5468,15 @@ impl Gerdr {
     /// it did: then it counts as stopped, and the windows held for it close.
     fn project_stopped(&mut self, id: &str, stopped: bool) {
         self.stopping.remove(id);
+        let forget = self.forget_after_stop.remove(id);
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
         if !stopped {
             // Whether it still runs is found out again.
             self.check_running();
-            return self.show_notice(format!("Couldn't stop {name}"));
+            let kept = if forget { "; it is kept" } else { "" };
+            return self.show_error(format!("Couldn't stop {name}{kept}"));
         }
         self.running.insert(id.to_owned(), false);
         if let Some(project) = self.projects.project_mut(id) {
@@ -5463,8 +5488,12 @@ impl Gerdr {
         for window in self.held.get(id).into_iter().flatten() {
             window.toplevel().unwrap().send_close();
         }
+        if forget {
+            self.forget_project_now(id);
+            return self.show_success(format!("Stopped and forgot {name}"));
+        }
         self.refresh_project_menu();
-        self.show_notice(format!("Stopped {name}"));
+        self.show_success(format!("Stopped {name}"));
     }
 
     /// Show the project shown before this one, if it is still there.
@@ -5477,8 +5506,10 @@ impl Gerdr {
         }
     }
 
-    /// Forget project `id`; its herdr session stays. Not the shown one.
-    pub fn forget_project(&mut self, id: &str) {
+    /// Forget project `id` without asking (`forget_project` asks while it
+    /// runs). Not the shown one. The welcome screen and the project menu
+    /// show it gone.
+    pub fn forget_project_now(&mut self, id: &str) {
         if self.project.as_deref() == Some(id) {
             return tracing::warn!("not forgetting project {id}: it is the one shown");
         }
@@ -5491,6 +5522,10 @@ impl Gerdr {
         }
         self.projects.save();
         self.refresh_project_menu();
+        let rows = self.project_rows();
+        if let Some(welcome) = self.welcome.as_mut() {
+            welcome.set_projects(rows);
+        }
     }
 
     /// The projects for the welcome screen, most recently used first, by id;
@@ -6152,6 +6187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scrollback: None,
         thumb_drag: None,
         stopping: HashSet::new(),
+        forget_after_stop: HashSet::new(),
         project_menu: None,
         header_hover: false,
         previous_project: None,

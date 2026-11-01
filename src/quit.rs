@@ -277,7 +277,7 @@ impl Gerdr {
                     self.switch_now(switch, stops)
                 }
                 Outcome::NewGerdr => self.open_in_new_gerdr(switch),
-                Outcome::Cancel if switch.created => self.forget_project(&switch.id),
+                Outcome::Cancel if switch.created => self.forget_project_now(&switch.id),
                 Outcome::Cancel => {}
             };
         }

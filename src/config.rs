@@ -590,6 +590,7 @@ mod tests {
                 density: Density::Compact,
                 theme: Some(ThemeMode::Light),
                 needs_you: true,
+                motion: crate::anim::Motion::Full,
             }
         );
         assert!(problems.is_empty());

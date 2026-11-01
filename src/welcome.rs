@@ -87,7 +87,7 @@ impl Welcome {
 
     /// Replace the projects, keeping the query, and the selection on the
     /// same project if it is still there.
-    fn set_projects(&mut self, projects: Vec<(String, ProjectRow)>) {
+    pub fn set_projects(&mut self, projects: Vec<(String, ProjectRow)>) {
         let picked = self.picked().map(str::to_owned);
         let was = self.selected;
         self.projects = projects;
@@ -376,13 +376,8 @@ impl Gerdr {
                 self.welcome = None;
                 self.create_project(&name);
             }
-            Outcome::Forget(id) => {
-                self.forget_project(&id);
-                let rows = self.project_rows();
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.set_projects(rows);
-                }
-            }
+            // Asked first while it runs; the rows follow once it is gone.
+            Outcome::Forget(id) => self.forget_project(&id),
             Outcome::Closed => self.welcome = None,
         }
         // Gone, the client under the pointer gets it back.
