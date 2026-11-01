@@ -149,7 +149,6 @@ pub enum ButtonStyle {
     Primary,
     /// Filled with the error colour: an action that loses something.
     /// Never the default of its dialog.
-    #[allow(dead_code)] // The dialogs take it up in wave 2.
     Destructive,
 }
 
