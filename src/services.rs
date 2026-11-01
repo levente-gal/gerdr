@@ -4,12 +4,14 @@
 //! workspace in the sidebar until it is looked at. `service_watch` finds
 //! them; this keeps them and wires them into gerdr.
 
-use std::{path::PathBuf, sync::mpsc, time::Instant};
+use std::{collections::HashSet, path::PathBuf, sync::mpsc, time::Instant};
 
 use smithay::reexports::calloop::{RegistrationToken, channel};
 
 use crate::{
-    Gerdr, inbox_store,
+    Gerdr,
+    chrome::BarStatus,
+    inbox_store,
     service_errors::ServiceError,
     service_watch::{self, Report, Service},
 };
@@ -18,7 +20,10 @@ use crate::{
 /// `service:<pane id>|<fingerprint>`.
 pub const NOTIFY_PREFIX: &str = "service:";
 
-/// An error a service printed, and how many times since.
+/// The fingerprint of a service having stopped.
+const STOPPED: &str = "stopped";
+
+/// An error a service printed (or its stopping), and how many times since.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ErrorGroup {
     pub pane_id: String,
@@ -45,6 +50,8 @@ pub struct ServiceErrors {
     sent: Vec<Service>,
     /// The herdr session watched: what saved anchors are kept by.
     session: String,
+    /// The service panes whose command ran at the last round.
+    running: HashSet<String>,
     source: Option<RegistrationToken>,
 }
 
@@ -123,6 +130,7 @@ impl Gerdr {
         errors.watch = None;
         errors.sent.clear();
         errors.groups.clear();
+        errors.running.clear();
         if let Some(token) = errors.source.take() {
             self.loop_handle.remove(token);
         }
@@ -131,6 +139,10 @@ impl Gerdr {
     /// Tell the watcher which panes run services now: those that ran long
     /// enough, or that gerdr runs again (see `Remembered::long`).
     pub fn feed_services(&mut self) {
+        if self.service_errors.watch.is_none() {
+            return;
+        }
+        self.note_stopped_services();
         let Some(watch) = &self.service_errors.watch else {
             return;
         };
@@ -170,58 +182,97 @@ impl Gerdr {
         if report.errors.is_empty() {
             return;
         }
-        let now = Instant::now();
         let label = self.pane_bar_content(&report.pane_id).label;
         for error in report.errors {
-            let ServiceError {
-                fingerprint,
-                title,
-                lines,
-            } = error;
-            let groups = &mut self.service_errors.groups;
-            let count = match groups
-                .iter()
-                .position(|g| g.pane_id == report.pane_id && g.fingerprint == fingerprint)
-            {
-                Some(at) => {
-                    let mut group = groups.remove(at);
-                    group.count += 1;
-                    group.title = title.clone();
-                    group.lines = lines;
-                    group.last = now;
-                    group.seen = false;
-                    let count = group.count;
-                    groups.insert(0, group);
-                    count
-                }
-                None => {
-                    groups.insert(
-                        0,
-                        ErrorGroup {
-                            pane_id: report.pane_id.clone(),
-                            fingerprint: fingerprint.clone(),
-                            title: title.clone(),
-                            lines,
-                            count: 1,
-                            last: now,
-                            first_secs: inbox_store::now_secs(),
-                            seen: false,
-                        },
-                    );
-                    1
-                }
-            };
-            if let Some(notifier) = self.notifier.as_mut() {
-                let key = format!("{NOTIFY_PREFIX}{}|{fingerprint}", report.pane_id);
-                let body = match count {
-                    1 => title,
-                    n => format!("{title} (×{n})"),
-                };
-                notifier.send(&key, &format!("{label}: error"), &body);
-            }
+            self.add_service_error(&report.pane_id, &label, error);
         }
         // Saved with the errors: a restart takes up after them.
         self.projects.save();
+    }
+
+    /// Count `error` of herdr pane `pane_id` (service `label`) and tell of
+    /// it: the same one again counts on the last.
+    fn add_service_error(&mut self, pane_id: &str, label: &str, error: ServiceError) {
+        let ServiceError {
+            fingerprint,
+            title,
+            lines,
+        } = error;
+        let groups = &mut self.service_errors.groups;
+        let mut group = match groups
+            .iter()
+            .position(|g| g.pane_id == pane_id && g.fingerprint == fingerprint)
+        {
+            Some(at) => {
+                let mut group = groups.remove(at);
+                group.count += 1;
+                group
+            }
+            None => ErrorGroup {
+                pane_id: pane_id.to_owned(),
+                fingerprint: fingerprint.clone(),
+                title: String::new(),
+                lines: Vec::new(),
+                count: 1,
+                last: Instant::now(),
+                first_secs: inbox_store::now_secs(),
+                seen: false,
+            },
+        };
+        group.title = title.clone();
+        group.lines = lines;
+        group.last = Instant::now();
+        group.seen = false;
+        let count = group.count;
+        groups.insert(0, group);
+        if let Some(notifier) = self.notifier.as_mut() {
+            let key = format!("{NOTIFY_PREFIX}{pane_id}|{fingerprint}");
+            let body = match count {
+                1 => title,
+                n => format!("{title} (×{n})"),
+            };
+            notifier.send(&key, &format!("{label}: error"), &body);
+        }
+    }
+
+    /// Note the services that stopped since the last round, and forget
+    /// that they did once they run again. One gerdr stops or restarts
+    /// itself is no news.
+    fn note_stopped_services(&mut self) {
+        let services: Vec<String> = self
+            .last_commands
+            .iter()
+            .filter(|(_, r)| r.long)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for pane_id in services {
+            let content = self.pane_bar_content(&pane_id);
+            let running = content.status == BarStatus::Running;
+            let was = self.service_errors.running.contains(&pane_id);
+            if running {
+                self.service_errors.running.insert(pane_id.clone());
+                self.service_errors
+                    .groups
+                    .retain(|g| !(g.pane_id == pane_id && g.fingerprint == STOPPED));
+            } else if content.status == BarStatus::Exited {
+                self.service_errors.running.remove(&pane_id);
+                if was {
+                    let error = ServiceError {
+                        fingerprint: STOPPED.to_owned(),
+                        title: format!("Stopped: {}", content.label),
+                        lines: Vec::new(),
+                    };
+                    self.add_service_error(&pane_id, &content.label, error);
+                }
+            } else {
+                // Being restarted by gerdr.
+                self.service_errors.running.remove(&pane_id);
+            }
+        }
+        let live = &self.last_commands;
+        self.service_errors
+            .running
+            .retain(|id| live.contains_key(id));
     }
 
     /// Show the error `fingerprint` of herdr pane `pane_id`: its pane, its
@@ -236,7 +287,7 @@ impl Gerdr {
             return self.show_notice("That error is gone".into());
         };
         group.seen = true;
-        let first = group.lines.first().cloned().unwrap_or_default();
+        let first = group.lines.first().cloned();
         if !self.show_herdr_pane(pane_id) {
             return self.show_notice("Its pane isn't shown".into());
         }
@@ -245,7 +296,7 @@ impl Gerdr {
         };
         self.open_scrollback(id);
         let fit = self.scrollback_fit_for(id);
-        if let (Some(viewer), Some(fit)) = (self.scrollback.as_mut(), fit) {
+        if let (Some(viewer), Some(fit), Some(first)) = (self.scrollback.as_mut(), fit, first) {
             viewer.reveal_last(&first, fit);
         }
     }

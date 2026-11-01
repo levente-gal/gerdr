@@ -672,8 +672,10 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 field("Last", format!("{} ago", age_text(age)));
             }
             field("First", crate::projects::ago(now, *first));
-            block_title = Some("Output".to_owned());
-            block = lines.clone();
+            if !lines.is_empty() {
+                block_title = Some("Output".to_owned());
+                block = lines.clone();
+            }
         }
     }
     InboxDetailView {
