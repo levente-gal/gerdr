@@ -91,7 +91,7 @@ impl Gerdr {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
         self.scrollback = None;
-        self.inbox.panel = Some(Panel::new(focus));
+        self.inbox.open(focus);
         self.inbox_mark_seen();
         if self.issues_due(ISSUES_OPEN) {
             self.refresh_issues();
