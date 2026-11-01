@@ -5,7 +5,7 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, Canvas, FOOTER_PAD, FOOTER_ROW, HELP_PADDING, HINT_GAP,
     HINT_KEY_GAP, KEY_FONT_SIZE, Painter, Palette, Rect, SMALL_FONT_SIZE, band, footer_rows,
-    measure, rect_px,
+    keycap_text, measure, rect_px,
 };
 use smithay::utils::{Logical, Point, Rectangle};
 
@@ -33,7 +33,7 @@ fn keycaps_extent(keys: &str) -> f32 {
     let sep = extent("/", KEY_FONT_SIZE) + 2.0 * CAP_GAP as f32;
     let caps: Vec<f32> = keys
         .split(" / ")
-        .map(|k| extent(k, KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32)
+        .map(|k| extent(&keycap_text(k), KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32)
         .collect();
     caps.iter().sum::<f32>() + sep * (caps.len() - 1) as f32
 }
