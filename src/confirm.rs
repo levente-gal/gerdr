@@ -1,5 +1,5 @@
 //! A dialog asking to confirm something that can't be undone, such as
-//! closing an agent or a pane where something runs: a title, a line saying what it does, Cancel
+//! closing an agent, a pane or a tab where something runs: a title, a line saying what it does, Cancel
 //! and the button doing it.
 //!
 //! Left/Right and Tab move between the buttons, Enter presses the selected
@@ -21,11 +21,15 @@ const GO: usize = 1;
 
 /// What confirming does.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Then {
     /// Close the agent of this card (see `Gerdr::close_agent`).
     CloseAgent(AgentKey),
     /// Close this pane of the active tab (see `Gerdr::close_pane`).
     ClosePane(u32),
+    /// Close the tab of the active workspace holding these panes (see
+    /// `Gerdr::close_tab`), wherever it is by then.
+    CloseTab(Vec<u32>),
 }
 
 /// The confirm dialog's state, while it is open.
@@ -103,6 +107,20 @@ fn close_pane_question(what: &str) -> (String, String) {
     )
 }
 
+/// What a confirm dialog about closing the tab `tab`, where `running`
+/// runs, says: its title and the line under it.
+fn close_tab_question(tab: &str, running: &[String]) -> (String, String) {
+    let title = format!("Close the tab \u{201c}{tab}\u{201d}?");
+    let body = match running {
+        [what] => format!("\u{201c}{what}\u{201d} is still running: closing the tab stops it"),
+        _ => format!(
+            "{} commands are still running: closing the tab stops them",
+            running.len()
+        ),
+    };
+    (title, body)
+}
+
 impl Gerdr {
     /// The card of agent `key`, if one shows.
     fn agent_card(&self, key: &AgentKey) -> Option<AgentView> {
@@ -134,6 +152,19 @@ impl Gerdr {
     pub fn ask_close_pane(&mut self, id: u32, what: String) {
         let (title, body) = close_pane_question(&what);
         self.ask(title, body, "Close pane", Then::ClosePane(id));
+    }
+
+    /// Ask before closing tab `idx` of the active workspace, holding
+    /// `panes`, where `running` runs.
+    pub fn ask_close_tab(&mut self, idx: usize, panes: Vec<u32>, running: &[String]) {
+        let Some(ws) = self.workspace() else {
+            return;
+        };
+        let Some(view) = self.tab_views(ws).into_iter().nth(idx) else {
+            return;
+        };
+        let (title, body) = close_tab_question(&view.title, running);
+        self.ask(title, body, "Close tab", Then::CloseTab(panes));
     }
 
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
@@ -193,6 +224,16 @@ impl Gerdr {
                 }
             }
             Then::ClosePane(id) => self.close_pane_now(id),
+            Then::CloseTab(panes) => {
+                let tab = self.workspace().and_then(|ws| {
+                    ws.tabs
+                        .iter()
+                        .position(|tab| tab.panes.iter().any(|p| panes.contains(&p.id)))
+                });
+                if let Some(idx) = tab {
+                    self.close_tab_now(idx);
+                }
+            }
         }
     }
 
@@ -300,5 +341,18 @@ mod tests {
         let (title, body) = close_pane_question("npm run dev");
         assert_eq!(title, "Close \u{201c}npm run dev\u{201d}?");
         assert!(body.contains("its pane stops it"));
+    }
+
+    #[test]
+    fn the_tab_question_names_one_command_and_counts_more() {
+        let one = ["npm run dev".to_owned()];
+        let (title, body) = close_tab_question("web", &one);
+        assert_eq!(title, "Close the tab \u{201c}web\u{201d}?");
+        assert_eq!(
+            body,
+            "\u{201c}npm run dev\u{201d} is still running: closing the tab stops it"
+        );
+        let two = ["npm run dev".to_owned(), "claude".to_owned()];
+        assert!(close_tab_question("web", &two).1.starts_with("2 commands"));
     }
 }

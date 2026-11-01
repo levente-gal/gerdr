@@ -3812,7 +3812,25 @@ impl Gerdr {
     }
 
     /// Close every pane in the tab; the tab goes away once their windows do.
+    /// One where something runs asks first (see `Gerdr::ask_close_tab`).
     pub fn close_tab(&mut self, idx: usize) {
+        let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx)) else {
+            return;
+        };
+        let running: Vec<String> = tab
+            .panes
+            .iter()
+            .filter_map(|p| self.running_in(p))
+            .collect();
+        if running.is_empty() {
+            return self.close_tab_now(idx);
+        }
+        let panes = tab.panes.iter().map(|p| p.id).collect();
+        self.ask_close_tab(idx, panes, &running);
+    }
+
+    /// Close tab `idx` of the active workspace without asking.
+    pub fn close_tab_now(&mut self, idx: usize) {
         if let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx)) {
             self.close_panes(Self::closing(tab));
             self.drop_unstarted(self.active_workspace, idx);
