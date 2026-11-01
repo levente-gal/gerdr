@@ -155,13 +155,14 @@ pub fn spawn(id: String, hook: Hook, line: String, dir: PathBuf, tx: channel::Se
         .name(format!("project {}", hook.slug()))
         .spawn(move || {
             let log = log_file(&id, hook);
-            let result = run(&line, &dir, &log, hook.timeout());
+            // What failed says where all it wrote is, not only its last line.
+            let result = run(&line, &dir, &log, hook.timeout()).map_err(|err| {
+                let home = crate::home_dir();
+                let at = crate::paths::display(&log, home.as_deref(), 60);
+                format!("{err} \u{b7} all of it in {at}")
+            });
             if let Err(err) = &result {
-                tracing::warn!(
-                    "project {id}'s {} failed: {err} (see {})",
-                    hook.label(),
-                    log.display()
-                );
+                tracing::warn!("project {id}'s {} failed: {err}", hook.label());
             }
             let _ = tx.send((id, hook, result));
         });

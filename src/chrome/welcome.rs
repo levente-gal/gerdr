@@ -59,7 +59,7 @@ pub struct WelcomeView {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectRow {
     pub name: String,
-    /// "3 repos · ~/Work/aft".
+    /// "3 workspaces · ~/Work/aft".
     pub detail: String,
     /// "2h ago".
     pub ago: String,
@@ -566,7 +566,7 @@ mod tests {
     fn row(name: &str, running: Option<bool>, current: bool) -> ProjectRow {
         ProjectRow {
             name: name.into(),
-            detail: "3 repos · ~/Work/aft".into(),
+            detail: "3 workspaces · ~/Work/aft".into(),
             ago: "2h ago".into(),
             running,
             current,

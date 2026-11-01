@@ -1343,15 +1343,26 @@ pub fn ago(now: u64, then: u64) -> String {
     }
 }
 
-/// The notice on switching to project `new` from project `old`, which keeps
-/// running.
-pub fn switch_notice(new: &str, old: &str) -> String {
-    format!("Switched to {new} · {old} keeps running")
+/// The notice on switching to project `new` (just made, if `created`)
+/// from project `old`, which keeps running.
+pub fn switch_notice(new: &str, old: &str, created: bool) -> String {
+    format!("{} {new} · {old} keeps running", switched(created))
 }
 
-/// The notice after switching to project `new` from `old`, which stops.
-pub fn stop_notice(new: &str, old: &str) -> String {
-    format!("Switched to {new} · stopping {old}")
+/// The notice after switching to project `new` (just made, if `created`)
+/// from `old`, which stops.
+pub fn stop_notice(new: &str, old: &str, created: bool) -> String {
+    format!("{} {new} · stopping {old}", switched(created))
+}
+
+/// How a switch notice starts: one notice says both that the project was
+/// made and shown.
+fn switched(created: bool) -> &'static str {
+    if created {
+        "Created and switched to"
+    } else {
+        "Switched to"
+    }
 }
 
 /// The greeting for the local `hour` (0–23).
@@ -2578,7 +2589,7 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
     #[test]
     fn switching_says_the_old_project_keeps_running() {
         assert_eq!(
-            switch_notice("gerdr", "aft"),
+            switch_notice("gerdr", "aft", false),
             "Switched to gerdr · aft keeps running"
         );
     }

@@ -859,12 +859,12 @@ fn venv_notice(setting: &VenvSetting) -> String {
 }
 
 /// What the welcome screen says of a project with workspaces in `dirs`:
-/// "3 repos · ~/Work/aft", or "empty".
+/// "3 workspaces · ~/Work/aft", or "empty".
 fn project_detail(dirs: &[&Path], home: Option<&Path>) -> String {
     let count = match dirs.len() {
         0 => return "empty".into(),
-        1 => "1 repo".to_owned(),
-        n => format!("{n} repos"),
+        1 => "1 workspace".to_owned(),
+        n => format!("{n} workspaces"),
     };
     match common_dir(dirs).filter(|d| d.parent().is_some()) {
         Some(dir) => format!(
@@ -1399,6 +1399,9 @@ pub struct Gerdr {
     /// The projects to forget once their sessions have stopped, by id (see
     /// `Gerdr::forget_project`).
     pub forget_after_stop: HashSet<String>,
+    /// The project just made and being shown, by id: the switch's notice
+    /// says it was made.
+    pub just_created: Option<String>,
     /// The project menu, while it is open.
     pub project_menu: Option<project_menu::ProjectMenu>,
     /// The pointer is over the sidebar header's project name.
@@ -1735,7 +1738,9 @@ impl Gerdr {
             Err(err) => {
                 let program = cmd.get_program().to_string_lossy().into_owned();
                 let why = match err.kind() {
-                    std::io::ErrorKind::NotFound => format!("{program} isn't installed or not on PATH"),
+                    std::io::ErrorKind::NotFound => {
+                        format!("{program} isn't installed or not on PATH")
+                    }
                     _ => format!("{program} didn't start: {err}"),
                 };
                 self.report_problem("spawn", why);
@@ -3551,8 +3556,10 @@ impl Gerdr {
             .map(Path::to_path_buf)
             .or_else(home_dir);
         let title = match kind {
-            WorkspaceKind::Project => "Open project folder",
-            WorkspaceKind::Terminal | WorkspaceKind::Cursor => "Open terminal folder",
+            WorkspaceKind::Project => "Pick a folder to add to the project as a workspace",
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor => {
+                "Pick a folder to open a terminal workspace in"
+            }
         };
         self.pick_folder(title, start, PickFor::Workspace(kind));
     }
@@ -3561,7 +3568,7 @@ impl Gerdr {
     /// `start` (else the home folder).
     pub fn pick_folder_for_menu(&mut self, start: Option<PathBuf>) {
         let start = start.or_else(home_dir);
-        self.pick_folder("Choose the project's folder", start, PickFor::MenuFolder);
+        self.pick_folder("Pick the project's folder", start, PickFor::MenuFolder);
     }
 
     /// Ask zenity for a folder (on the host) under `title`, starting in
@@ -3595,9 +3602,10 @@ impl Gerdr {
                 "Can't ask for a folder: zenity isn't installed (install it, or type the path)"
                     .into(),
             ),
-            Err(err) => {
-                self.report_problem("zenity", format!("The folder picker (zenity) didn't start: {err}"))
-            }
+            Err(err) => self.report_problem(
+                "zenity",
+                format!("The folder picker (zenity) didn't start: {err}"),
+            ),
         }
     }
 
@@ -4068,15 +4076,17 @@ impl Gerdr {
             })
             .filter(|r| r.command.is_some());
         let summary = match record {
-            None => "Nothing running in this pane".to_owned(),
+            None => "Nothing runs in this pane".to_owned(),
             Some(record) => {
                 let command = record.command.clone().unwrap_or_default();
                 if let Some(i) = record.skip.iter().position(|c| *c == command) {
                     record.skip.remove(i);
-                    format!("Will restart `{command}` after reboot")
+                    format!("`{command}` runs again when the project comes back")
                 } else {
                     record.skip.push(command.clone());
-                    format!("Won't restart `{command}` after reboot")
+                    format!(
+                        "`{command}` won't run again when the project comes back · its tab shows \u{2298}"
+                    )
                 }
             }
         };
@@ -4126,7 +4136,7 @@ impl Gerdr {
                 _ => r.dir.clone(),
             });
         let purpose = PickFor::Venv { project, workspace };
-        self.pick_folder("Choose the workspace's Python venv", start, purpose);
+        self.pick_folder("Pick the workspace's Python venv", start, purpose);
     }
 
     /// zenity gave back `dir` for the venv of `project`'s `workspace`: the
@@ -4139,7 +4149,7 @@ impl Gerdr {
         };
         let Some(venv) = venv.filter(|venv| prepare::is_venv(venv)) else {
             let dir = tilde(&dir, home_dir().as_deref());
-            return self.show_notice(format!("Not a Python venv: {dir}"));
+            return self.show_warning(format!("Not a Python venv: {dir}"));
         };
         let Some(record) = self.projects.record_mut(project, workspace) else {
             return;
@@ -4155,8 +4165,16 @@ impl Gerdr {
     }
 
     /// Flip between light and dark, remembered for the next start.
+    /// Flip between the dark and the light look. Following the system's
+    /// stops then, and the toast says so.
     pub fn toggle_theme(&mut self) {
+        let was_system = self.theme_mode == ThemeMode::System;
         self.set_theme_mode(self.theme().toggled().into());
+        if was_system && let Some(toast) = self.toasts.back_mut() {
+            toast
+                .text
+                .push_str(" \u{b7} no longer following the system");
+        }
     }
 
     /// Use `mode`, remembered for the next start.
@@ -5159,12 +5177,14 @@ impl Gerdr {
                 .unwrap_or_default();
             let name = |id: &str| self.projects.project(id).map(|p| p.name.clone());
             if let (Some(new), Some(old)) = (name(id), name(&left)) {
+                let created = self.just_created.as_deref() == Some(id);
                 let notice = if stops.session {
-                    projects::stop_notice(&new, &old)
+                    projects::stop_notice(&new, &old, created)
                 } else {
-                    projects::switch_notice(&new, &old)
+                    projects::switch_notice(&new, &old, created)
                 };
-                self.show_notice(notice);
+                self.show_success(notice);
+                self.just_created = None;
             }
             if stops.any() {
                 self.stop_project_now(&left, stops);
@@ -5424,6 +5444,8 @@ impl Gerdr {
     /// Show project `id`, just made, opening `folder` in it as a workspace
     /// of `kind`, if given.
     fn enter_project_with(&mut self, id: &str, folder: Option<PathBuf>, kind: WorkspaceKind) {
+        // The switch's notice says it was made, if there is one.
+        self.just_created = Some(id.to_owned());
         self.enter_project(id, false, Vec::new());
         match (folder, kind) {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
@@ -5431,9 +5453,11 @@ impl Gerdr {
             (_, WorkspaceKind::Cursor) => self.open_cursor(None),
             (None, _) => {}
         }
-        // After the switch's notice, so it wins.
-        if let Some(name) = self.projects.project(id).map(|p| p.name.clone()) {
-            self.show_notice(format!("Created {name}"));
+        // No switch said so: nothing was shown before.
+        if self.just_created.take().is_some()
+            && let Some(name) = self.projects.project(id).map(|p| p.name.clone())
+        {
+            self.show_success(format!("Created {name}"));
         }
     }
 
@@ -5464,7 +5488,7 @@ impl Gerdr {
         project.after_stop = after;
         let name = project.name.clone();
         self.projects.save();
-        self.show_notice(format!("Saved {name}'s start and stop commands"));
+        self.show_success(format!("Saved {name}'s start and stop commands"));
     }
 
     /// Stop project `id`'s herdr session, off the event loop, and its apps
@@ -5700,7 +5724,9 @@ impl Gerdr {
             };
             problems::report(
                 "herdr",
-                format!("herdr isn't installed: install it and put it on PATH to run projects{skipped}"),
+                format!(
+                    "herdr isn't installed: install it and put it on PATH to run projects{skipped}"
+                ),
             );
             return self.open_welcome(false);
         }
@@ -5817,9 +5843,9 @@ impl Gerdr {
         };
         // After the switch's notice, so it wins.
         match result {
-            Err(err) => self.show_notice(format!("{name}'s {} failed: {err}", hook.label())),
+            Err(err) => self.show_error(format!("{name}'s {} failed: {err}", hook.label())),
             Ok(()) if hook == Hook::BeforeStart && !entered => {
-                self.show_notice(format!("{name}'s start commands are done"));
+                self.show_success(format!("{name}'s start commands are done"));
             }
             Ok(()) => {}
         }
@@ -6009,16 +6035,19 @@ fn extend_path() {
 /// desktop entry, stderr goes nowhere.
 fn init_logging() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-    let stderr = fmt::layer().with_writer(std::io::stderr).with_filter(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-    );
+    let stderr = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")));
     let file = launch::append_log(&log_path()).map(|file| {
         fmt::layer()
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(file))
             .with_filter(EnvFilter::new("warn,gerdr=info"))
     });
-    tracing_subscriber::registry().with(stderr).with(file).init();
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(file)
+        .init();
 }
 
 /// gerdr's own log: `gerdr.log` in its state folder.
@@ -6312,6 +6341,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thumb_drag: None,
         stopping: HashSet::new(),
         forget_after_stop: HashSet::new(),
+        just_created: None,
         project_menu: None,
         header_hover: false,
         previous_project: None,
@@ -6819,16 +6849,16 @@ mod tests {
             project_detail(&dirs, Some(home))
         };
         assert_eq!(detail(&[]), "empty");
-        assert_eq!(detail(&["/home/me/Work/aft"]), "1 repo · ~/Work/aft");
+        assert_eq!(detail(&["/home/me/Work/aft"]), "1 workspace · ~/Work/aft");
         let aft = [
             "/home/me/Work/aft/api",
             "/home/me/Work/aft/app",
             "/home/me/Work/aft/api/sub",
         ];
-        assert_eq!(detail(&aft), "3 repos · ~/Work/aft");
-        assert_eq!(detail(&["/home/me/a", "/home/me/b"]), "2 repos · ~");
-        assert_eq!(detail(&["/srv/a", "/opt/b"]), "2 repos");
-        assert_eq!(detail(&["/srv/a", "/srv/b"]), "2 repos · /srv");
+        assert_eq!(detail(&aft), "3 workspaces · ~/Work/aft");
+        assert_eq!(detail(&["/home/me/a", "/home/me/b"]), "2 workspaces · ~");
+        assert_eq!(detail(&["/srv/a", "/opt/b"]), "2 workspaces");
+        assert_eq!(detail(&["/srv/a", "/srv/b"]), "2 workspaces · /srv");
     }
 
     #[test]
