@@ -126,7 +126,7 @@ pub struct InboxView {
     pub hints: Vec<(String, String)>,
     /// What the list says when it is empty.
     pub empty: String,
-    /// Hidden (dismissed, snoozed) items are listed too (Ctrl+H).
+    /// Hidden (dismissed, snoozed) items are listed too (Alt+H).
     pub show_hidden: bool,
     /// The part of the first row scrolled past, 0 up to 1.
     pub part: f64,
@@ -175,7 +175,7 @@ pub struct InboxLine {
     pub tone: InboxTone,
     /// At the right: `5m`, `2h`, `3d`; empty when unknown.
     pub age: String,
-    /// Dismissed or snoozed, listed with Ctrl+H: muted.
+    /// Dismissed or snoozed, listed with Alt+H: muted.
     pub hidden: bool,
     /// What it can have done, shown on it when selected or hovered.
     pub buttons: Vec<InboxButton>,
@@ -226,7 +226,7 @@ pub enum InboxTone {
 
 /// A button on an item's row or in the detail: its label and the key that
 /// does the same (shown in tooltips and the detail), as `("Snooze",
-/// "Ctrl+S")`.
+/// "Ctrl+H")`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxButton {
     pub label: String,
@@ -1974,8 +1974,8 @@ mod tests {
             hidden: false,
             buttons: vec![
                 button("Go to", "Enter"),
-                button("Snooze", "Ctrl+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Dismiss", "Del"),
             ],
         })
     }
@@ -1992,9 +1992,9 @@ mod tests {
     fn detail_buttons() -> Vec<InboxButton> {
         vec![
             button("Go to", "Enter"),
-            button("Snooze 1h", "Ctrl+S"),
-            button("Until tomorrow", "Ctrl+Shift+S"),
-            button("Dismiss", "Delete"),
+            button("Snooze 1h", "Ctrl+H"),
+            button("Until tomorrow", "Ctrl+Shift+H"),
+            button("Dismiss", "Del"),
         ]
     }
 
@@ -2071,8 +2071,8 @@ mod tests {
             buttons: vec![
                 button("Open", "Enter"),
                 button("Copy link", "Ctrl+C"),
-                button("Snooze", "Ctrl+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Dismiss", "Del"),
             ],
         }
     }
@@ -2101,8 +2101,8 @@ mod tests {
             buttons: vec![
                 button("Open", "Enter"),
                 button("Copy link", "Ctrl+C"),
-                button("Snooze", "Ctrl+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Dismiss", "Del"),
             ],
         }
     }
@@ -2123,8 +2123,8 @@ mod tests {
             buttons: vec![
                 button("Go to", "Enter"),
                 button("Edit", "Ctrl+E"),
-                button("Done", "Delete"),
-                button("Delete", "Shift+Delete"),
+                button("Done", "Del"),
+                button("Delete", "Shift+Del"),
             ],
         }
     }
@@ -2190,10 +2190,10 @@ mod tests {
     fn hints() -> Vec<(String, String)> {
         [
             ("Enter", "go to"),
-            ("Delete", "dismiss"),
-            ("Ctrl+S", "snooze"),
+            ("Del", "dismiss"),
+            ("Ctrl+H", "snooze"),
             ("Ctrl+N", "new todo"),
-            ("Ctrl+H", "hidden"),
+            ("Alt+H", "hidden"),
             ("Up / Down", "select"),
             ("Esc", "close"),
         ]
@@ -2297,7 +2297,7 @@ mod tests {
             InboxRow::Item(InboxLine {
                 hidden: true,
                 subtitle: "frontend · dismissed".into(),
-                buttons: vec![button("Restore", "Delete"), button("Go to", "Enter")],
+                buttons: vec![button("Restore", "Del"), button("Go to", "Enter")],
                 ..match item("agent:p3", "aider", "", InboxTone::Done, "1d") {
                     InboxRow::Item(line) => line,
                     _ => unreachable!(),
@@ -2307,7 +2307,7 @@ mod tests {
             InboxRow::Item(InboxLine {
                 hidden: true,
                 subtitle: "#139 · snoozed until 09:00".into(),
-                buttons: vec![button("Restore", "Delete")],
+                buttons: vec![button("Restore", "Del")],
                 ..match item("ci:x", "Fix the CI cache", "", InboxTone::Failed, "2d") {
                     InboxRow::Item(line) => line,
                     _ => unreachable!(),
@@ -2331,7 +2331,7 @@ mod tests {
                 block_title: Some("Last output".into()),
                 block: vec!["All tests pass.".into()],
                 block_tail: true,
-                buttons: vec![button("Restore", "Delete"), button("Go to", "Enter")],
+                buttons: vec![button("Restore", "Del"), button("Go to", "Enter")],
             }),
             ..view()
         }

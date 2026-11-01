@@ -47,7 +47,7 @@ const TICK: Duration = Duration::from_secs(1);
 const PANE_FRESH: Duration = Duration::from_secs(2);
 /// How many of a pane's last lines are read.
 const PANE_LINES: usize = 40;
-/// How long Ctrl+S snoozes an item for, in seconds.
+/// How long Ctrl+H snoozes an item for, in seconds.
 const SNOOZE: u64 = 3600;
 /// How long a triage entry's `seen` may lag before opening the panel
 /// brings it up to date, in seconds: a write per open at most this often.

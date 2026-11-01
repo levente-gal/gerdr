@@ -18,8 +18,9 @@
 //! Enter would launch it.
 //!
 //! A row of category chips over the list, "All" first, narrows it to one
-//! section; Tab and Shift+Tab move along them. The key hints show in a
-//! footer.
+//! section; Tab and Shift+Tab move along them. Up/Down (or Ctrl+J and
+//! Ctrl+K) move the selection; Esc clears the query, then closes. The key
+//! hints show in a footer.
 
 use std::{
     cmp::Reverse,
@@ -467,8 +468,12 @@ impl Switcher {
         let ctrl = mods.ctrl;
         let page = self.shown().map_or(1, |(first, last)| last - first + 1) as isize;
         match sym {
+            // Esc clears the query first, then closes.
+            Keysym::Escape if !self.query.is_empty() => {
+                self.query.clear();
+                self.refilter();
+            }
             Keysym::Escape => return Outcome::Closed,
-            Keysym::c if ctrl => return Outcome::Closed,
             Keysym::Return | Keysym::KP_Enter => {
                 if let Some(target) = self.picked() {
                     let place = if mods.alt { Place::Tab } else { self.place };
@@ -477,14 +482,15 @@ impl Switcher {
             }
             Keysym::Up | Keysym::KP_Up => self.step(-1),
             Keysym::Down | Keysym::KP_Down => self.step(1),
+            Keysym::k if ctrl => self.step(-1),
+            Keysym::j if ctrl => self.step(1),
+            // Tab and Shift+Tab go along the category chips, both ways.
             Keysym::Tab | Keysym::ISO_Left_Tab if self.chips() => {
-                self.step_category(if mods.shift { -1 } else { 1 })
+                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+                self.step_category(if back { -1 } else { 1 })
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab => self.step(if mods.shift { -1 } else { 1 }),
-            Keysym::Page_Up => self.step(-page),
-            Keysym::Page_Down => self.step(page),
-            Keysym::p if ctrl => self.step(-1),
-            Keysym::n if ctrl => self.step(1),
+            Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-page),
+            Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page),
             _ => {}
         }
         Outcome::Open
@@ -654,7 +660,7 @@ impl Switcher {
         if self.chips() {
             hints.push(("Tab", "category"));
         }
-        hints.push(("Esc", "close"));
+        hints.push(("Esc", if self.query.is_empty() { "close" } else { "clear" }));
         hints
             .into_iter()
             .map(|(keys, what)| (keys.to_owned(), what.to_owned()))
@@ -1543,7 +1549,8 @@ mod tests {
             Item::new(ItemIcon::App, "x", "", Target::App("x".into())),
         ]);
         assert_eq!(switcher.view().category, 0);
-        // With one category there are no chips, and Tab walks the rows.
+        // With one category there are no chips, and Tab moves nothing:
+        // it never walks the rows.
         switcher.set_items(vec![item("a", "", 0), item("b", "", 1)]);
         let ctrl = ModifiersState {
             ctrl: true,
@@ -1554,7 +1561,7 @@ mod tests {
         assert!(view.categories.is_empty());
         assert!(view.hints.iter().all(|(k, _)| k != "Tab"));
         switcher.key(&none, Keysym::Tab, Keysym::Tab);
-        assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
+        assert_eq!(switcher.picked(), Some(&Target::Workspace(0)));
     }
 
     #[test]
@@ -1946,7 +1953,7 @@ mod tests {
     }
 
     #[test]
-    fn takes_a_paste_and_closes_on_ctrl_c() {
+    fn takes_a_paste_and_ctrl_c_never_closes() {
         let mut switcher = Switcher::new(Vec::new(), true, Place::Split);
         let ctrl = ModifiersState {
             ctrl: true,
@@ -1954,12 +1961,56 @@ mod tests {
         };
         assert!(matches!(
             switcher.key(&ctrl, Keysym::c, Keysym::c),
-            Outcome::Closed
+            Outcome::Open
         ));
         type_in(&mut switcher, "echo ");
         let none = ModifiersState::default();
         crate::text_field::pasting("a\tb\nc\n", |sym| switcher.key(&none, sym, sym));
         assert_eq!(&*switcher.query, "echo a b c");
+    }
+
+    #[test]
+    fn esc_clears_the_query_then_closes() {
+        let mut switcher = Switcher::new(
+            (0..3).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        let none = ModifiersState::default();
+        let esc = |s: &Switcher| s.hints().last().map(|(_, what)| what.clone());
+        type_in(&mut switcher, "ws1");
+        assert_eq!(esc(&switcher).as_deref(), Some("clear"));
+        assert!(matches!(
+            switcher.key(&none, Keysym::Escape, Keysym::Escape),
+            Outcome::Open
+        ));
+        assert!(switcher.query.is_empty());
+        assert_eq!(labels(&switcher).len(), 3);
+        assert_eq!(esc(&switcher).as_deref(), Some("close"));
+        assert!(matches!(
+            switcher.key(&none, Keysym::Escape, Keysym::Escape),
+            Outcome::Closed
+        ));
+    }
+
+    #[test]
+    fn ctrl_j_and_k_move_and_ctrl_n_and_p_do_not() {
+        let mut switcher = Switcher::new(
+            (0..3).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        switcher.key(&ctrl, Keysym::j, Keysym::j);
+        assert_eq!(switcher.view().selected, Some(1));
+        switcher.key(&ctrl, Keysym::n, Keysym::n);
+        switcher.key(&ctrl, Keysym::p, Keysym::p);
+        assert_eq!(switcher.view().selected, Some(1));
+        switcher.key(&ctrl, Keysym::k, Keysym::k);
+        assert_eq!(switcher.view().selected, Some(0));
     }
 
     #[test]

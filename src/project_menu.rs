@@ -4,11 +4,11 @@
 //! Typing filters the projects; under them, rows start a new project, named
 //! as typed or in a folder zoxide knows that matches. Enter opens the
 //! selected entry, Alt+1 to 9 a recent project, Ctrl+N the form for a new
-//! one, Ctrl+R renames the selected project in place, Ctrl+S stops its
-//! session, Delete twice forgets it. The form asks for the name, an
-//! optional folder (typed, picked from zoxide's, or browsed for) and what
-//! the folder opens as. Ctrl+E edits the selected project's start and stop
-//! commands. Esc backs out one step at a time.
+//! one, F2 renames the selected project in place, Ctrl+Q stops its
+//! session, Delete twice forgets it, Ctrl+R reads the projects again. The
+//! form asks for the name, an optional folder (typed, picked from zoxide's,
+//! or browsed for) and what the folder opens as. Ctrl+E edits the selected
+//! project's start and stop commands. Esc backs out one step at a time.
 
 use std::{
     cmp::Reverse,
@@ -176,6 +176,8 @@ pub enum Outcome {
     },
     /// Forget project `id`; not the shown one.
     Forget(String),
+    /// Read the projects, and which of them run, again.
+    Refresh,
     /// Ask zenity for the form's folder, starting in this one.
     Browse(Option<PathBuf>),
     /// Say this, keeping the menu as it is.
@@ -372,13 +374,16 @@ impl ProjectMenu {
             }
             Keysym::Return | Keysym::KP_Enter => return self.enter(self.selected),
             Keysym::n if ctrl => self.open_form(),
-            Keysym::r if ctrl => self.start_renaming(self.selected),
-            Keysym::s if ctrl => return self.stop(self.selected),
+            Keysym::F2 if !ctrl => self.start_renaming(self.selected),
+            Keysym::r if ctrl => return Some(Outcome::Refresh),
+            Keysym::q if ctrl => return self.stop(self.selected),
             Keysym::e if ctrl => return self.edit_settings(self.selected),
             Keysym::o if ctrl => return self.project_file(self.selected),
             Keysym::Delete | Keysym::KP_Delete => return self.forget(self.selected, armed),
             Keysym::Up | Keysym::KP_Up => self.step(-1),
             Keysym::Down | Keysym::KP_Down => self.step(1),
+            Keysym::k if ctrl => self.step(-1),
+            Keysym::j if ctrl => self.step(1),
             Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-page),
             Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page),
             Keysym::Home | Keysym::KP_Home => self.step(isize::MIN / 2),
@@ -1098,15 +1103,20 @@ impl ProjectMenu {
         let hints = if self.renaming.is_some() {
             hints(&[("Enter", "save"), ("Esc", "cancel")])
         } else {
+            let (del, esc) = match (&self.confirm_forget, self.query.is_empty()) {
+                (Some(_), _) => ("again to forget", "cancel"),
+                (None, true) => ("forget", "close"),
+                (None, false) => ("forget", "clear"),
+            };
             hints(&[
                 ("Enter", "open"),
                 ("Ctrl+N", "new"),
-                ("Ctrl+R", "rename"),
+                ("F2", "rename"),
                 ("Ctrl+E", "commands"),
                 ("Ctrl+O", "project file"),
-                ("Ctrl+S", "stop"),
-                ("Del", "forget"),
-                ("Esc", "close"),
+                ("Ctrl+Q", "stop"),
+                ("Del", del),
+                ("Esc", esc),
             ])
         };
         ProjectMenuView {
@@ -1396,6 +1406,11 @@ impl Gerdr {
             Outcome::Forget(id) => {
                 self.forget_project(&id);
                 self.refresh_project_menu();
+            }
+            Outcome::Refresh => {
+                self.refresh_project_menu();
+                self.check_running();
+                self.query_zoxide();
             }
             Outcome::Browse(start) => self.pick_folder_for_menu(start),
             Outcome::Notice(text) => self.show_notice(text),
@@ -1861,7 +1876,7 @@ mod tests {
     #[test]
     fn renaming_saves_cancels_and_ignores_an_empty_name() {
         let mut m = menu(&["gerdr", "blog"]);
-        chord(&mut m, ctrl(), Keysym::r);
+        press(&mut m, Keysym::F2);
         let renaming = |m: &ProjectMenu| {
             view(m).entries.iter().find_map(|e| match e {
                 MenuEntry::Project { renaming, .. } => renaming.clone(),
@@ -1882,13 +1897,13 @@ mod tests {
         );
         assert_eq!(renaming(&m), None);
 
-        chord(&mut m, ctrl(), Keysym::r);
+        press(&mut m, Keysym::F2);
         assert_eq!(press(&mut m, Keysym::Escape), None);
         assert_eq!(renaming(&m), None);
         // Esc took back the renaming only.
         assert_eq!(press(&mut m, Keysym::Escape), Some(Outcome::Closed));
 
-        chord(&mut m, ctrl(), Keysym::r);
+        press(&mut m, Keysym::F2);
         press(&mut m, Keysym::Right);
         press(&mut m, Keysym::BackSpace);
         assert_eq!(renaming(&m).as_deref(), Some("gerd"));
@@ -1898,7 +1913,7 @@ mod tests {
         assert_eq!(renaming(&m), None);
         // The shown project can be renamed too.
         press(&mut m, Keysym::Home);
-        chord(&mut m, ctrl(), Keysym::r);
+        press(&mut m, Keysym::F2);
         type_text(&mut m, "aft2");
         assert_eq!(
             press(&mut m, Keysym::Return),
@@ -1963,21 +1978,44 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_r_refreshes_and_esc_says_what_it_does() {
+        let mut m = menu(&["gerdr", "blog"]);
+        assert_eq!(chord(&mut m, ctrl(), Keysym::r), Some(Outcome::Refresh));
+        let esc = |m: &ProjectMenu| view(m).hints.last().cloned().map(|(_, what)| what);
+        assert_eq!(esc(&m).as_deref(), Some("close"));
+        type_text(&mut m, "bl");
+        assert_eq!(esc(&m).as_deref(), Some("clear"));
+        press(&mut m, Keysym::Escape);
+        assert_eq!(esc(&m).as_deref(), Some("close"));
+        press(&mut m, Keysym::Down);
+        press(&mut m, Keysym::Delete);
+        assert_eq!(esc(&m).as_deref(), Some("cancel"));
+        // Ctrl+N makes, it never moves the selection.
+        let before = selected(&m);
+        chord(&mut m, ctrl(), Keysym::p);
+        assert_eq!(selected(&m), before);
+        chord(&mut m, ctrl(), Keysym::j);
+        assert_ne!(selected(&m), before);
+        chord(&mut m, ctrl(), Keysym::k);
+        assert_eq!(selected(&m), before);
+    }
+
+    #[test]
     fn stop_is_only_for_other_projects_that_may_run() {
         let mut m = menu(&["gerdr", "blog"]);
         assert_eq!(
-            chord(&mut m, ctrl(), Keysym::s),
+            chord(&mut m, ctrl(), Keysym::q),
             Some(Outcome::Stop("gerdr".into()))
         );
         press(&mut m, Keysym::Home);
-        assert_eq!(chord(&mut m, ctrl(), Keysym::s), None);
+        assert_eq!(chord(&mut m, ctrl(), Keysym::q), None);
         let mut rows = vec![row("aft", true), row("gerdr", false), row("blog", false)];
         rows[2].1.running = Some(false);
         m.set_lists(rows, Vec::new(), HashSet::new());
         press(&mut m, Keysym::End);
         press(&mut m, Keysym::Up);
         assert_eq!(selected(&m), "blog");
-        assert_eq!(chord(&mut m, ctrl(), Keysym::s), None);
+        assert_eq!(chord(&mut m, ctrl(), Keysym::q), None);
     }
 
     #[test]
@@ -2418,7 +2456,7 @@ mod tests {
     #[test]
     fn renaming_to_a_name_in_use_keeps_the_field_open() {
         let mut m = menu(&["gerdr", "blog"]);
-        chord(&mut m, ctrl(), Keysym::r);
+        press(&mut m, Keysym::F2);
         type_text(&mut m, "BLOG");
         assert_eq!(
             press(&mut m, Keysym::Return),

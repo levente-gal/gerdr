@@ -145,9 +145,9 @@ impl RowButton {
         match self {
             RowButton::Settings => ("Start and stop commands", "Ctrl+E"),
             RowButton::ProjectFile => ("Edit the project file", "Ctrl+O"),
-            RowButton::Rename => ("Rename", "Ctrl+R"),
-            RowButton::Stop => ("Stop its session", "Ctrl+S"),
-            RowButton::Forget => ("Forget the project", "Delete"),
+            RowButton::Rename => ("Rename", "F2"),
+            RowButton::Stop => ("Stop its session", "Ctrl+Q"),
+            RowButton::Forget => ("Forget the project", "Del"),
         }
     }
 }
@@ -1626,9 +1626,9 @@ mod tests {
             hints: vec![
                 ("Enter".into(), "open".into()),
                 ("Ctrl+N".into(), "new".into()),
-                ("Ctrl+R".into(), "rename".into()),
+                ("F2".into(), "rename".into()),
                 ("Ctrl+E".into(), "commands".into()),
-                ("Ctrl+S".into(), "stop".into()),
+                ("Ctrl+Q".into(), "stop".into()),
                 ("Del".into(), "forget".into()),
                 ("Esc".into(), "close".into()),
             ],

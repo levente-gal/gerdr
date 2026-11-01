@@ -8,16 +8,16 @@
 //! board's order), then the GitHub and Linear issues assigned to the user,
 //! then gerdr's own todos.
 //!
-//! Typing filters the list. Up/Down select, Enter goes to the item,
-//! Delete dismisses it (until it changes), Ctrl+S snoozes it for an hour,
-//! Ctrl+Shift+S until tomorrow morning, Ctrl+H lists the hidden ones
-//! (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits one (Tab
-//! cycles the workspace it is linked to); Ctrl+T adds a ticket repository
-//! (`owner/repo`) to the shown project; Delete marks a todo done,
-//! Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C copies it,
-//! Ctrl+R reads the issues again. Tab lists the active workspace's items
-//! only, or every workspace's again. Esc clears the filter, then goes back
-//! from the hidden ones, then closes.
+//! Typing filters the list. Up/Down (or Ctrl+J and Ctrl+K) select, Enter
+//! goes to the item, Delete dismisses it (until it changes), Ctrl+H hides
+//! it for an hour, Ctrl+Shift+H until tomorrow morning, Alt+H lists the
+//! hidden ones (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits
+//! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
+//! repository (`owner/repo`) to the shown project; Delete marks a todo
+//! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
+//! copies it, Ctrl+R reads the issues again. Tab lists the active
+//! workspace's items only, or every workspace's again. Esc clears the
+//! filter, then goes back from the hidden ones, then closes.
 //!
 //! This module is the model: the items (built by `inbox_sources`), what
 //! of them shows (`visible`, `order`), and the panel's keys, clicks and
@@ -169,9 +169,9 @@ pub enum Target {
 pub enum ItemAction {
     /// Enter.
     GoTo,
-    /// For an hour: Ctrl+S.
+    /// For an hour: Ctrl+H.
     Snooze,
-    /// Until tomorrow morning: Ctrl+Shift+S.
+    /// Until tomorrow morning: Ctrl+Shift+H.
     SnoozeLong,
     /// Until it changes: Delete.
     Dismiss,
@@ -210,11 +210,11 @@ impl ItemAction {
     pub fn key(self) -> &'static str {
         match self {
             ItemAction::GoTo => "Enter",
-            ItemAction::Snooze => "Ctrl+S",
-            ItemAction::SnoozeLong => "Ctrl+Shift+S",
-            ItemAction::Dismiss | ItemAction::Restore | ItemAction::Done => "Delete",
+            ItemAction::Snooze => "Ctrl+H",
+            ItemAction::SnoozeLong => "Ctrl+Shift+H",
+            ItemAction::Dismiss | ItemAction::Restore | ItemAction::Done => "Del",
             ItemAction::Edit => "Ctrl+E",
-            ItemAction::Delete => "Shift+Delete",
+            ItemAction::Delete => "Shift+Del",
             ItemAction::OpenLink => "Ctrl+O",
             ItemAction::CopyLink => "Ctrl+C",
         }
@@ -401,7 +401,7 @@ fn urgency(item: &InboxItem) -> u8 {
     }
 }
 
-/// What can be done to `item` as listed: a hidden one (listed with Ctrl+H)
+/// What can be done to `item` as listed: a hidden one (listed with Alt+H)
 /// is restored rather than dismissed or snoozed again.
 fn actions(item: &InboxItem, hidden: bool) -> Vec<ItemAction> {
     use ItemAction as A;
@@ -653,8 +653,8 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
     use ItemAction as A;
     match action {
         A::GoTo => ("Enter", "go to"),
-        A::Snooze => ("Ctrl+S", "snooze 1h"),
-        A::SnoozeLong => ("Ctrl+Shift+S", "until tomorrow"),
+        A::Snooze => ("Ctrl+H", "snooze 1h"),
+        A::SnoozeLong => ("Ctrl+Shift+H", "until tomorrow"),
         A::Dismiss => ("Del", "dismiss"),
         A::Restore => ("Del", "restore"),
         A::Done => ("Del", "done"),
@@ -740,7 +740,7 @@ pub struct Panel {
     bounds: Cell<Bounds>,
     /// Every workspace's items, not just the active one's.
     all: bool,
-    /// Only the hidden items are listed (Ctrl+H).
+    /// Only the hidden items are listed (Alt+H).
     show_hidden: bool,
 }
 
@@ -843,7 +843,7 @@ impl Panel {
         }
     }
 
-    /// Whether the hidden items are listed (Ctrl+H).
+    /// Whether the hidden items are listed (Alt+H).
     pub fn show_hidden(&self) -> bool {
         self.show_hidden
     }
@@ -868,7 +868,7 @@ impl Panel {
     }
 
     /// What it lists of `list`: the items not hidden (or only those, with
-    /// Ctrl+H), of the scope, matching the query, the best matches first
+    /// Alt+H), of the scope, matching the query, the best matches first
     /// within each section; with every section's label.
     fn listed(&self, list: &Listing) -> Listed {
         let in_scope = |item: &InboxItem| {
@@ -1038,7 +1038,7 @@ impl Panel {
         }
     }
 
-    /// What it lists changed with the filter, the scope or Ctrl+H: the best
+    /// What it lists changed with the filter, the scope or Alt+H: the best
     /// match selected while there is a query, else the selection kept when
     /// still listed, else the first.
     fn refilter(&mut self, list: &Listing) {
@@ -1054,7 +1054,7 @@ impl Panel {
         }
     }
 
-    /// Do `action` to `item` (`hidden`: listed with Ctrl+H), if it can be
+    /// Do `action` to `item` (`hidden`: listed with Alt+H), if it can be
     /// done to it.
     fn act(&mut self, item: &InboxItem, action: ItemAction, list: &Listing) -> Option<Outcome> {
         if !actions(item, self.show_hidden).contains(&action) {
@@ -1193,6 +1193,12 @@ impl Panel {
             }
             Edit::Moved => return None,
         }
+        let alt_only = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
+        if alt_only && matches!(sym, Keysym::h | Keysym::H) {
+            self.show_hidden = !self.show_hidden;
+            self.refilter(list);
+            return None;
+        }
         if mods.alt || mods.logo {
             return None;
         }
@@ -1205,7 +1211,6 @@ impl Panel {
             Keysym::Escape if !self.query.is_empty() => self.query.clear(),
             Keysym::Escape if self.show_hidden => self.show_hidden = false,
             Keysym::Escape => return Some(Outcome::Close),
-            Keysym::h | Keysym::H if ctrl => self.show_hidden = !self.show_hidden,
             Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
             _ => {
                 let listed = self.listed(list);
@@ -1241,6 +1246,8 @@ impl Panel {
         let to = match sym {
             Keysym::Down | Keysym::KP_Down => step(1),
             Keysym::Up | Keysym::KP_Up => step(-1),
+            Keysym::j | Keysym::J if ctrl && !shift => step(1),
+            Keysym::k | Keysym::K if ctrl && !shift => step(-1),
             Keysym::Page_Down | Keysym::KP_Page_Down => step(by_page),
             Keysym::Page_Up | Keysym::KP_Page_Up => step(-by_page),
             Keysym::Home | Keysym::KP_Home => step(isize::MIN / 2),
@@ -1262,8 +1269,8 @@ impl Panel {
             }
             Keysym::Return | Keysym::KP_Enter if !ctrl => ItemAction::GoTo,
             // Shift changes the symbol: match both cases.
-            Keysym::s | Keysym::S if ctrl && shift => ItemAction::SnoozeLong,
-            Keysym::s | Keysym::S if ctrl => ItemAction::Snooze,
+            Keysym::h | Keysym::H if ctrl && shift => ItemAction::SnoozeLong,
+            Keysym::h | Keysym::H if ctrl => ItemAction::Snooze,
             Keysym::e | Keysym::E if ctrl => ItemAction::Edit,
             Keysym::o | Keysym::O if ctrl => ItemAction::OpenLink,
             Keysym::c | Keysym::C if ctrl => ItemAction::CopyLink,
@@ -1411,7 +1418,7 @@ impl Panel {
         hints.push(hint("Ctrl+N", "new todo"));
         hints.push(hint("Ctrl+T", "add ticket repo"));
         hints.push(hint(
-            "Ctrl+H",
+            "Alt+H",
             if self.show_hidden {
                 "back to the list"
             } else {
@@ -1635,6 +1642,14 @@ mod tests {
         panel.key(&mods(true, false), sym, sym, list)
     }
 
+    fn alt(panel: &mut Panel, sym: Keysym, list: &Listing) -> Option<Outcome> {
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        panel.key(&alt, sym, sym, list)
+    }
+
     fn type_text(panel: &mut Panel, text: &str, list: &Listing) {
         for c in text.chars() {
             let sym = Keysym::from_char(c);
@@ -1704,7 +1719,7 @@ mod tests {
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         assert_eq!(ids(&panel.view(&list)), ["a"]);
-        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
+        assert_eq!(alt(&mut panel, Keysym::h, &list), None);
         assert!(panel.show_hidden());
         let view = panel.view(&list);
         assert!(view.show_hidden);
@@ -1716,7 +1731,7 @@ mod tests {
         let labels: Vec<_> = line.buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(labels, ["Go to", "Restore"]);
         // Hidden already: no snoozing it again.
-        assert_eq!(ctrl(&mut panel, Keysym::s, &list), None);
+        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
         assert_eq!(
             press(&mut panel, Keysym::Delete, &list),
             Some(Outcome::Restore(ItemId("b".into())))
@@ -1734,7 +1749,7 @@ mod tests {
         // With nothing hidden, it says so.
         let none = BTreeMap::new();
         let list = listing(&items, &none, &names);
-        ctrl(&mut panel, Keysym::h, &list);
+        alt(&mut panel, Keysym::h, &list);
         let view = panel.view(&list);
         assert!(view.rows.is_empty());
         assert_eq!(view.empty, "Nothing hidden");
@@ -1813,7 +1828,7 @@ mod tests {
         assert_eq!(tab(&mut panel, true).as_deref(), Some("herdr"));
         // Keys for the list are the field's, or nothing.
         assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
-        assert_eq!(ctrl(&mut panel, Keysym::s, &list), None);
+        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
         assert!(panel.view(&list).compose.is_some());
         assert_eq!(
             press(&mut panel, Keysym::Return, &list),
@@ -2003,7 +2018,7 @@ mod tests {
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         let id = ItemId("gh:o/r#1".into());
-        assert_eq!(ctrl(&mut panel, Keysym::s, &list), None);
+        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
         assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
         assert_eq!(ctrl(&mut panel, Keysym::e, &list), None);
         assert_eq!(
@@ -2027,12 +2042,12 @@ mod tests {
             Some(Outcome::Act(todo.clone(), A::Delete))
         );
         assert_eq!(
-            ctrl(&mut panel, Keysym::s, &list),
+            ctrl(&mut panel, Keysym::h, &list),
             Some(Outcome::Act(todo.clone(), A::Snooze))
         );
         // Not allowed for this one.
         assert_eq!(
-            panel.key(&mods(true, true), Keysym::S, Keysym::S, &list),
+            panel.key(&mods(true, true), Keysym::H, Keysym::H, &list),
             None
         );
         assert_eq!(ctrl(&mut panel, Keysym::o, &list), None);
@@ -2050,7 +2065,7 @@ mod tests {
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         assert_eq!(
-            panel.key(&mods(true, true), Keysym::S, Keysym::S, &list),
+            panel.key(&mods(true, true), Keysym::H, Keysym::H, &list),
             Some(Outcome::Act(ItemId("a".into()), A::SnoozeLong))
         );
         assert_eq!(
