@@ -136,8 +136,30 @@ impl Gerdr {
     /// Fold workspace `w` by hand (`Some`), or leave it to fold while
     /// quiet (`None`); here and in its record.
     fn set_fold(&mut self, w: usize, folded: Option<bool>) {
+        if self.keep_fold(w, folded) {
+            self.projects.save();
+        }
+    }
+
+    /// Fold every workspace by hand (`Some`: folded or not), or leave them
+    /// all to fold while quiet (`None`); here and in their records, saved
+    /// once. The sidebar header's menu offers it.
+    #[allow(dead_code)] // wave 2: run by core's `MenuAction::FoldAll` (menu.rs)
+    pub(crate) fn fold_all(&mut self, folded: Option<bool>) {
+        let mut changed = false;
+        for w in 0..self.workspaces.len() {
+            changed |= self.keep_fold(w, folded);
+        }
+        if changed {
+            self.projects.save();
+        }
+    }
+
+    /// Fold workspace `w` as `set_fold` does, without saving: whether its
+    /// record changed.
+    fn keep_fold(&mut self, w: usize, folded: Option<bool>) -> bool {
         let Some(ws) = self.workspaces.get_mut(w) else {
-            return;
+            return false;
         };
         ws.folded = folded;
         let id = ws.record.clone();
@@ -146,8 +168,9 @@ impl Gerdr {
             && record.folded != folded
         {
             record.folded = folded;
-            self.projects.save();
+            return true;
         }
+        false
     }
 
     /// Move the sidebar's rows as `motion` has it, under the header.
