@@ -8,7 +8,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use std::time::Instant;
 
 use crate::{
-    Gerdr, Reorderable, Tab,
+    Action, Gerdr, Reorderable, Tab,
     chrome::{self, TabHit, TabLayout, TabStripView, TabView, ThemeMode},
     input::{BTN_LEFT, BTN_MIDDLE},
     layout::Dir,
@@ -183,7 +183,21 @@ pub fn more_tooltip(hidden: &[(usize, &str)]) -> String {
         .collect();
     let n = hidden.len();
     let tabs = if n == 1 { "tab" } else { "tabs" };
-    format!("{n} more {tabs}: {} · click for the next", names.join(", "))
+    format!(
+        "{n} more {tabs}: {} · click for the next, right-click for the list",
+        names.join(", ")
+    )
+}
+
+/// The menu of the "more tabs" chip: a row showing each of the `hidden`
+/// tabs (by index and title) of workspace `w`.
+pub fn hidden_tab_items(w: usize, hidden: &[(usize, &str)]) -> Vec<MenuItem> {
+    hidden
+        .iter()
+        .map(|(t, title)| {
+            MenuItem::new(&format!("{} {title}", t + 1), MenuAction::SwitchTab(w, *t))
+        })
+        .collect()
 }
 
 /// Which of `among` (in order) comes after `from`, round to the first:
@@ -202,13 +216,13 @@ pub fn tab_key(help: &crate::chrome::Help, t: usize) -> Option<String> {
     if t >= 9 {
         return None;
     }
-    // The help folds "1" to "9" into one range on one line.
-    let keys = help.key_for("go to tab", 0)?;
-    Some(if keys.contains('–') {
-        format!("{} {}", help.prefix, t + 1)
-    } else {
-        help.key_for("go to tab", t)?
-    })
+    if let Some(key) = help.key_of(Action::GotoTab(t), 0) {
+        return Some(key);
+    }
+    // The help folds "1" to "9" into one range on one line, standing for
+    // them all.
+    let folded = help.rows.iter().any(|(keys, _)| keys.contains('–'));
+    folded.then(|| format!("{} {}", help.prefix, t + 1))
 }
 
 impl Gerdr {
@@ -326,14 +340,14 @@ impl Gerdr {
     /// The keys the strip's menus and tooltips name, from the help.
     fn tab_key_hints(&self) -> KeyHints {
         let help = self.keymap.help();
-        let key = |label: &str, nth: usize| help.key_for(label, nth);
+        let key = |action: Action| help.key_of(action, 0);
         KeyHints {
-            new_tab: key("new tab", 0),
-            close_tab: key("close tab", 0),
-            split_right: key("split pane right / down", 0).or_else(|| key("split pane right", 0)),
-            split_down: key("split pane right / down", 1).or_else(|| key("split pane down", 0)),
-            run_tab: key("run an app in a new tab", 0),
-            zoom_pane: key("zoom pane to fill the tab, or unzoom", 0),
+            new_tab: key(Action::NewTab),
+            close_tab: key(Action::CloseTab),
+            split_right: key(Action::Split(Dir::Right)),
+            split_down: key(Action::Split(Dir::Down)),
+            run_tab: key(Action::RunTab),
+            zoom_pane: key(Action::ZoomPane),
         }
     }
 
@@ -499,15 +513,15 @@ impl Gerdr {
             }
             TabHit::Inbox => {
                 let tip = Tooltip::new(&inbox_tooltip(view.inbox?), anchor(layout.inbox?));
-                let key = self.keymap.help().key_for("inbox", 0);
+                let key = self.keymap.help().key_of(Action::Inbox, 0);
                 keyed(tip, &key)
             }
         })
     }
 
     /// The menu a right press at `pos` (window coordinates) in the tab
-    /// strip opens, if any: a tab's, or the "+" button's and the theme
-    /// switch's.
+    /// strip opens, if any: a tab's, the "+" button's, the theme switch's,
+    /// or the "more tabs" chip's list of the tabs it holds.
     pub(crate) fn tab_strip_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
         let view = self.tab_strip_view();
         let hit = self.tab_strip_hit_at(&view, pos)?;
@@ -543,7 +557,19 @@ impl Gerdr {
                 items: self.blocked_agent_items(),
             })
             .filter(|spec| !spec.items.is_empty()),
-            TabHit::More | TabHit::Prefix | TabHit::Watch | TabHit::Inbox => None,
+            TabHit::More => {
+                let hidden: Vec<(usize, &str)> = layout
+                    .hidden()
+                    .into_iter()
+                    .filter_map(|t| Some((t, view.tabs.get(t)?.title.as_str())))
+                    .collect();
+                Some(MenuSpec {
+                    anchor: anchor(layout.more?),
+                    items: hidden_tab_items(w, &hidden),
+                })
+                .filter(|spec| !spec.items.is_empty())
+            }
+            TabHit::Prefix | TabHit::Watch | TabHit::Inbox => None,
         }
     }
 }
@@ -551,8 +577,8 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyHints, inbox_tooltip, mode_tooltip, more_tooltip, next_after, next_mode,
-        overflow_tooltip, plus_menu_items, tab_key, tab_menu_items, theme_items,
+        KeyHints, hidden_tab_items, inbox_tooltip, mode_tooltip, more_tooltip, next_after,
+        next_mode, overflow_tooltip, plus_menu_items, tab_key, tab_menu_items, theme_items,
     };
     use crate::{chrome::ThemeMode, layout::Dir, menu::MenuAction};
 
@@ -677,12 +703,21 @@ mod tests {
         assert_eq!(next_after(&[], 2), None);
         assert_eq!(
             more_tooltip(&[(9, "vim"), (10, "logs")]),
-            "2 more tabs: 10 vim, 11 logs · click for the next"
+            "2 more tabs: 10 vim, 11 logs · click for the next, right-click for the list"
         );
         assert_eq!(
             more_tooltip(&[(3, "zsh")]),
-            "1 more tab: 4 zsh · click for the next"
+            "1 more tab: 4 zsh · click for the next, right-click for the list"
         );
+    }
+
+    #[test]
+    fn the_more_chip_lists_the_tabs_it_holds() {
+        let items = hidden_tab_items(2, &[(9, "vim"), (10, "logs")]);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["10 vim", "11 logs"]);
+        assert_eq!(items[1].action, MenuAction::SwitchTab(2, 10));
+        assert!(hidden_tab_items(0, &[]).is_empty());
     }
 
     #[test]
@@ -691,5 +726,17 @@ mod tests {
         assert_eq!(tab_key(&help, 0).as_deref(), Some("Ctrl+B 1"));
         assert_eq!(tab_key(&help, 8).as_deref(), Some("Ctrl+B 9"));
         assert_eq!(tab_key(&help, 9), None);
+        // Keys of their own, not folded into a range: each tab's.
+        let press = |t| Some(crate::chrome::HelpPress::Action(crate::Action::GotoTab(t)));
+        let own = crate::chrome::Help {
+            prefix: "Ctrl+A".into(),
+            rows: vec![
+                ("F1".into(), "Go to tab 1".into()),
+                ("F2".into(), "Go to tab 2".into()),
+            ],
+            presses: vec![vec![press(0)], vec![press(1)]],
+        };
+        assert_eq!(tab_key(&own, 1).as_deref(), Some("Ctrl+A F2"));
+        assert_eq!(tab_key(&own, 2), None);
     }
 }
