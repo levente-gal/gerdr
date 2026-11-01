@@ -27,12 +27,14 @@ pub fn next_mode(mode: ThemeMode) -> ThemeMode {
     }
 }
 
-/// What the inbox button's tooltip says while it counts `count` items.
+/// What the inbox button's tooltip says while it counts `count` items:
+/// items of every kind, not only the agents the sidebar's "Needs you"
+/// list shows, so it says so.
 pub fn inbox_tooltip(count: usize) -> String {
     match count {
         0 => "Inbox".to_owned(),
-        1 => "Inbox · 1 needs you".to_owned(),
-        n => format!("Inbox · {n} need you"),
+        1 => "Inbox · 1 item: agents, repos, pull requests, tickets".to_owned(),
+        n => format!("Inbox · {n} items: agents, repos, pull requests, tickets"),
     }
 }
 
@@ -558,8 +560,14 @@ mod tests {
     #[test]
     fn the_inbox_tooltip_says_how_many_need_the_user() {
         assert_eq!(inbox_tooltip(0), "Inbox");
-        assert_eq!(inbox_tooltip(1), "Inbox · 1 needs you");
-        assert_eq!(inbox_tooltip(3), "Inbox · 3 need you");
+        assert_eq!(
+            inbox_tooltip(1),
+            "Inbox · 1 item: agents, repos, pull requests, tickets"
+        );
+        assert_eq!(
+            inbox_tooltip(3),
+            "Inbox · 3 items: agents, repos, pull requests, tickets"
+        );
     }
 
     #[test]
