@@ -366,9 +366,10 @@ impl Chrome {
                         let (loc, size) = shadowed(layout.panel);
                         ((quit, output, theme, scale), loc, size)
                     });
-                    parts.extend(self.quit.part(quit, now, true, |(quit, output, ..)| {
+                    let part = self.quit.part(quit, now, true, |(quit, output, ..)| {
                         painter.quit_dialog(quit, *output, scale, theme.palette())
-                    }));
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 // The other dialogs cover all but the quit dialog.
                 Kind::Restart => {
@@ -377,12 +378,12 @@ impl Chrome {
                             shadowed(restart_layout(output, restart.rows.len()).panel);
                         ((restart, output, theme, scale), loc, size)
                     });
-                    parts.extend(
-                        self.restart
-                            .part(restart, now, true, |(restart, output, ..)| {
-                                painter.restart_dialog(restart, *output, scale, theme.palette())
-                            }),
-                    );
+                    let part = self
+                        .restart
+                        .part(restart, now, true, |(restart, output, ..)| {
+                            painter.restart_dialog(restart, *output, scale, theme.palette())
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 Kind::Checkout => {
                     let checkout = view.checkout.take().map(|checkout| {
@@ -390,26 +391,24 @@ impl Chrome {
                             shadowed(checkout_layout(output, checkout.rows.len()).panel);
                         ((checkout, output, theme, scale), loc, size)
                     });
-                    parts.extend(self.checkout.part(
-                        checkout,
-                        now,
-                        true,
-                        |(checkout, output, ..)| {
+                    let part = self
+                        .checkout
+                        .part(checkout, now, true, |(checkout, output, ..)| {
                             painter.checkout_dialog(checkout, *output, scale, theme.palette())
-                        },
-                    ));
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 Kind::Confirm => {
                     let confirm = view.confirm.take().map(|confirm| {
                         let (loc, size) = shadowed(confirm_layout(output).panel);
                         ((confirm, output, theme, scale), loc, size)
                     });
-                    parts.extend(
-                        self.confirm
-                            .part(confirm, now, true, |(confirm, output, ..)| {
-                                painter.confirm_dialog(confirm, *output, scale, theme.palette())
-                            }),
-                    );
+                    let part = self
+                        .confirm
+                        .part(confirm, now, true, |(confirm, output, ..)| {
+                            painter.confirm_dialog(confirm, *output, scale, theme.palette())
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 // The context menu, under its anchor: over the popups it
                 // may open on.
@@ -669,6 +668,16 @@ fn shadowed(panel: Rect) -> (Point<i32, Logical>, Size<i32, Logical>) {
         panel.loc - Point::from((SHADOW, SHADOW)),
         Size::from((panel.size.w + 2 * SHADOW, panel.size.h + 2 * SHADOW)),
     )
+}
+
+/// A modal dialog's `part`, if it shows, and the scrim dimming the
+/// `output` under it, fading in and out with it.
+fn scrimmed(part: Option<Part>, output: Size<i32, Logical>, p: &Palette) -> Vec<Part> {
+    let Some(part) = part else {
+        return Vec::new();
+    };
+    let dim = scrim(Rectangle::from_size(output), part.alpha, p);
+    vec![part, dim]
 }
 
 /// The blinking `dot` at each of `rects` (output coordinates), `alpha`
@@ -1040,4 +1049,28 @@ pub(super) fn inside(outer: Rect, inner: Rect) -> bool {
         && inner.loc.y >= outer.loc.y
         && inner.loc.x + inner.size.w <= outer.loc.x + outer.size.w
         && inner.loc.y + inner.size.h <= outer.loc.y + outer.size.h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dialog_dims_all_under_it_as_far_as_it_has_faded_in() {
+        let p = Theme::Dark.palette();
+        let output: Size<i32, Logical> = (1920, 1080).into();
+        let dialog = Part::new(
+            &MemoryRenderBuffer::default(),
+            (700, 400).into(),
+            (520, 280).into(),
+            0.5,
+        );
+        let parts = scrimmed(Some(dialog), output, p);
+        // The dialog in front, then the scrim over the whole output.
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].stretched && parts[1].stretched);
+        assert_eq!(parts[1].size, output);
+        assert_eq!(parts[1].alpha, p.scrim * 0.5);
+        assert!(scrimmed(None, output, p).is_empty());
+    }
 }
