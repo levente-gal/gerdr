@@ -45,6 +45,7 @@ mod launch;
 mod layout;
 mod menu;
 mod notify;
+mod overlay;
 mod pane_control;
 mod pane_drag;
 mod pane_moves;

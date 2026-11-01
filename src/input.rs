@@ -5,23 +5,28 @@
 //!
 //! Shortcuts follow herdr: press the prefix (Ctrl+B), release it, then one key
 //! (see `keys` for the defaults, and how to change them). The prefix twice
-//! sends it to the app; Esc or any other key cancels. While the prefix is
-//! armed, a help panel lists the keys. While the quit dialog, the welcome
-//! screen, the project menu or the switcher is open, every key, click and
-//! scroll goes to it; over the welcome screen and the project menu, the
-//! prefix still switches light/dark and quits, and over the project menu it
-//! also closes the menu again.
+//! sends it to the app; Esc cancels, and a key bound to nothing says so.
+//! While the prefix is armed, a help panel lists the keys.
+//!
+//! The popups, panels and dialogs stack in one order (see `overlay`): the
+//! one on top at the pointer takes the press, the hover and the cursor
+//! shape, and while a dialog, the welcome screen or a panel is open, every
+//! key, click and scroll goes to it. Over the welcome screen the prefix
+//! still switches light/dark and quits; over a panel it also opens the
+//! other panels and the help, and the key that opened the panel closes it.
 //!
 //! The sidebar header's project name opens the project menu, or the welcome
 //! screen while no project is shown. A click on a terminal pane's bar
 //! focuses the pane, and its buttons restart or stop what runs in it.
 //!
 //! A right press on a region opens its context menu, which then takes
-//! every press and key (the arrows walk it, Enter picks, Esc closes). A
-//! double click on a workspace row or a tab renames it: the keys go to
-//! the name until Enter keeps it or Esc drops it. Esc otherwise closes,
-//! in this order, the rename, the menu, the tooltip and the pinned help.
-//! The pointer is a hand over whatever can be clicked.
+//! every press and key (the arrows walk it, Enter picks, Esc closes; any
+//! other key closes it and goes nowhere). A double click on a workspace
+//! row or a tab renames it: the keys go to the name until Enter keeps it
+//! or Esc drops it. Esc otherwise takes down the tooltip and the pinned
+//! help and still reaches the app; a press off the pinned help closes it
+//! too. The pointer is a hand over whatever can be clicked, and an open
+//! hand over what can be dragged.
 
 use std::time::{Duration, Instant};
 
@@ -31,10 +36,13 @@ use smithay::{
         KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
-        keyboard::{FilterResult, Keycode, Keysym, ModifiersState},
+        keyboard::{FilterResult, Keycode, Keysym, ModifiersState, xkb},
         pointer::{AxisFrame, ButtonEvent, CursorIcon, MotionEvent},
     },
-    reexports::calloop::timer::{TimeoutAction, Timer},
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
@@ -45,7 +53,7 @@ use crate::{
     launch::Place,
     layout::Dir,
     menu::MenuAction,
-    project_menu, quit,
+    overlay, project_menu, quit,
     rename::RenameTarget,
     repos, restart, scrollback,
     switcher::Target,
@@ -109,6 +117,8 @@ enum Intercepted {
     Inbox(inbox::Outcome),
     /// The scrollback viewer asked for this.
     Scrollback(scrollback::Outcome),
+    /// The switcher's key, pressed after the prefix over it, closes it.
+    CloseSwitcher,
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -132,21 +142,70 @@ fn over_welcome(action: &Action) -> bool {
     matches!(action, Action::ToggleTheme | Action::Quit)
 }
 
-/// Whether `action`, picked with the prefix, works over the project menu:
-/// what acts on gerdr itself, and the key that opened the menu, to close it.
-/// The same goes over the worktrees popup and the repositories and inbox
-/// panels; the inbox's key opens it over the others, and closes it.
-fn over_project_menu(action: &Action) -> bool {
+/// Whether `action`, picked with the prefix, works over a panel: what acts
+/// on gerdr itself, the help, and the keys of the panels that open over
+/// the others (or in their place). The key that opened a panel closes it
+/// (see `Overlay::toggled_by`).
+fn over_panel(action: &Action) -> bool {
     matches!(
         action,
-        Action::ToggleTheme | Action::Quit | Action::Projects | Action::Inbox
+        Action::ToggleTheme
+            | Action::Quit
+            | Action::Shortcuts
+            | Action::Projects
+            | Action::Inbox
+            | Action::Repos
+            | Action::Worktrees
     )
 }
 
-/// Whether `action`, picked with the prefix, works over the scrollback
-/// viewer: as over the project menu, and the viewer's key, to close it.
-fn over_scrollback(action: &Action) -> bool {
-    over_project_menu(action) || *action == Action::Scrollback
+/// Whether `action`, picked with the prefix, works over open `over`.
+fn works_over(over: overlay::Overlay, action: &Action) -> bool {
+    match over {
+        overlay::Overlay::Welcome => over_welcome(action),
+        _ => over_panel(action),
+    }
+}
+
+/// What closes panel `over`, as its own Esc would.
+fn closing(over: overlay::Overlay) -> Option<Intercepted> {
+    use crate::overlay::Overlay as O;
+    Some(match over {
+        O::ProjectMenu => Intercepted::ProjectMenu(project_menu::Outcome::Closed),
+        O::Worktrees => Intercepted::Worktrees(worktrees::Outcome::Close),
+        O::Repos => Intercepted::Repos(repos::Outcome::Close),
+        O::Inbox => Intercepted::Inbox(inbox::Outcome::Close),
+        O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
+        O::Switcher => Intercepted::CloseSwitcher,
+        _ => return None,
+    })
+}
+
+/// How a notice names the key pressed with `mods` held, like "Shift+Q"
+/// (the help panel's way).
+fn key_name(mods: &ModifiersState, sym: Keysym) -> String {
+    let key = match sym {
+        Keysym::Escape => "Esc".to_owned(),
+        Keysym::Return => "Enter".to_owned(),
+        Keysym::space => "Space".to_owned(),
+        _ => match sym.key_char().filter(|c| !c.is_control()) {
+            Some(c) => c.to_uppercase().collect(),
+            None => xkb::keysym_get_name(sym),
+        },
+    };
+    let held = [
+        (mods.ctrl, "Ctrl+"),
+        (mods.alt, "Alt+"),
+        (mods.shift, "Shift+"),
+        (mods.logo, "Super+"),
+    ];
+    let mut name: String = held
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| *name)
+        .collect();
+    name.push_str(&key);
+    name
 }
 
 fn drag_cursor(drag: &Drag) -> CursorIcon {
@@ -192,49 +251,17 @@ impl Gerdr {
                         if sym.is_modifier_key() {
                             return FilterResult::Forward;
                         }
+                        let top = state.key_overlay();
                         // A key moves what an overlay shows from under
                         // its tooltip.
-                        let overlay = state.welcome.is_some()
-                            || state.restart.is_some()
-                            || state.checkout.is_some()
-                            || state.confirm.is_some()
-                            || state.project_menu.is_some()
-                            || state.worktrees.is_open()
-                            || state.repos.is_open()
-                            || state.inbox.is_open()
-                            || state.scrollback.is_some()
-                            || state.switcher.is_some();
-                        if overlay {
+                        if state.grabbing_overlay().is_some() {
                             state.tooltip.hide();
                         }
-                        if state.quit.is_some() {
+                        // A dialog takes every key.
+                        if let Some(dialog) = top.filter(|o| o.is_dialog()) {
                             state.suppressed_keys.push(code);
-                            let out = state.quit_key(mods, sym, handle.modified_sym());
-                            return FilterResult::Intercept(out.map(Intercepted::Quit));
-                        }
-                        if state.restart.is_some() {
-                            state.suppressed_keys.push(code);
-                            let out = state.restart_key(mods, sym);
-                            return FilterResult::Intercept(out.map(Intercepted::Restart));
-                        }
-                        if state.checkout.is_some() {
-                            state.suppressed_keys.push(code);
-                            let out = state.checkout_key(mods, sym);
-                            return FilterResult::Intercept(out.map(Intercepted::Checkout));
-                        }
-                        if state.confirm.is_some() {
-                            state.suppressed_keys.push(code);
-                            let out = state.confirm_key(mods, sym);
-                            return FilterResult::Intercept(out.map(Intercepted::Confirm));
-                        }
-                        // A menu over the repositories panel takes its
-                        // keys; any other closes it and goes on.
-                        if state.repos.is_open()
-                            && state.context_menu.is_some()
-                            && state.menu_key(sym)
-                        {
-                            state.suppressed_keys.push(code);
-                            return FilterResult::Intercept(None);
+                            let out = state.dialog_key(dialog, mods, sym, handle.modified_sym());
+                            return FilterResult::Intercept(out);
                         }
                         // A name being typed takes every key, repeating
                         // what its field takes while held.
@@ -246,6 +273,21 @@ impl Gerdr {
                             let took = text_field::took_key();
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(None);
+                        }
+                        // The menu takes its keys; any other closes it and
+                        // goes nowhere else, neither to a panel under it nor
+                        // to an app. Only the prefix goes on, to be armed or
+                        // to pick an action.
+                        if top == Some(overlay::Overlay::ContextMenu) {
+                            if state.menu_key(sym) {
+                                state.suppressed_keys.push(code);
+                                return FilterResult::Intercept(None);
+                            }
+                            state.close_menu();
+                            if !(state.prefix_armed || state.keymap.is_prefix(mods, sym)) {
+                                state.suppressed_keys.push(code);
+                                return FilterResult::Intercept(None);
+                            }
                         }
                         // A paste into an overlay's text field: the
                         // clipboard's text comes back as a key for it.
@@ -260,13 +302,18 @@ impl Gerdr {
                             state.paste_clipboard(overlay);
                             return FilterResult::Intercept(None);
                         }
-                        if state.welcome.is_some() {
+                        // The welcome screen and the panels take every key,
+                        // repeating what their fields take while held. The
+                        // prefix works there too, for what acts on gerdr
+                        // itself rather than on what is behind (see
+                        // `works_over`), and the key that opened a panel
+                        // closes it.
+                        if let Some(top) = state.key_overlay() {
                             state.suppressed_keys.push(code);
-                            // The prefix works there too, for what needs no project.
                             if state.prefix_armed {
                                 state.prefix_armed = false;
-                                let action = state.keymap.action(mods, sym).filter(over_welcome);
-                                return FilterResult::Intercept(action.map(Intercepted::Action));
+                                let out = state.prefix_key(Some(top), mods, sym);
+                                return FilterResult::Intercept(out);
                             }
                             if state.keymap.is_prefix(mods, sym) {
                                 state.prefix_armed = true;
@@ -274,118 +321,12 @@ impl Gerdr {
                             }
                             let typed = handle.modified_sym();
                             text_field::took_key();
-                            let out = state.welcome_key(mods, sym, typed);
+                            let out = state
+                                .text_overlay()
+                                .and_then(|into| state.overlay_key(into, mods, sym, typed));
                             let took = text_field::took_key();
                             state.repeat_key(code, *mods, sym, typed, took);
-                            return FilterResult::Intercept(out.map(Intercepted::Welcome));
-                        }
-                        if state.project_menu.is_some() {
-                            state.suppressed_keys.push(code);
-                            if state.prefix_armed {
-                                state.prefix_armed = false;
-                                let action =
-                                    state.keymap.action(mods, sym).filter(over_project_menu);
-                                return FilterResult::Intercept(action.map(Intercepted::Action));
-                            }
-                            if state.keymap.is_prefix(mods, sym) {
-                                state.prefix_armed = true;
-                                return FilterResult::Intercept(None);
-                            }
-                            let typed = handle.modified_sym();
-                            text_field::took_key();
-                            let out = state.project_menu_key(mods, sym, typed);
-                            let took = text_field::took_key();
-                            state.repeat_key(code, *mods, sym, typed, took);
-                            return FilterResult::Intercept(out.map(Intercepted::ProjectMenu));
-                        }
-                        if state.worktrees.is_open() {
-                            state.suppressed_keys.push(code);
-                            if state.prefix_armed {
-                                state.prefix_armed = false;
-                                let action =
-                                    state.keymap.action(mods, sym).filter(over_project_menu);
-                                return FilterResult::Intercept(action.map(Intercepted::Action));
-                            }
-                            if state.keymap.is_prefix(mods, sym) {
-                                state.prefix_armed = true;
-                                return FilterResult::Intercept(None);
-                            }
-                            let typed = handle.modified_sym();
-                            text_field::took_key();
-                            let out = state.worktrees_key(mods, sym, typed);
-                            let took = text_field::took_key();
-                            state.repeat_key(code, *mods, sym, typed, took);
-                            return FilterResult::Intercept(out.map(Intercepted::Worktrees));
-                        }
-                        if state.repos.is_open() {
-                            state.suppressed_keys.push(code);
-                            if state.prefix_armed {
-                                state.prefix_armed = false;
-                                let action =
-                                    state.keymap.action(mods, sym).filter(over_project_menu);
-                                return FilterResult::Intercept(action.map(Intercepted::Action));
-                            }
-                            if state.keymap.is_prefix(mods, sym) {
-                                state.prefix_armed = true;
-                                return FilterResult::Intercept(None);
-                            }
-                            let typed = handle.modified_sym();
-                            text_field::took_key();
-                            let out = state.repos_key(mods, sym, typed);
-                            let took = text_field::took_key();
-                            state.repeat_key(code, *mods, sym, typed, took);
-                            return FilterResult::Intercept(out.map(Intercepted::Repos));
-                        }
-                        if state.inbox.is_open() {
-                            state.suppressed_keys.push(code);
-                            if state.prefix_armed {
-                                state.prefix_armed = false;
-                                let action =
-                                    state.keymap.action(mods, sym).filter(over_project_menu);
-                                return FilterResult::Intercept(action.map(Intercepted::Action));
-                            }
-                            if state.keymap.is_prefix(mods, sym) {
-                                state.prefix_armed = true;
-                                return FilterResult::Intercept(None);
-                            }
-                            let typed = handle.modified_sym();
-                            text_field::took_key();
-                            let out = state.inbox_key(mods, sym, typed);
-                            let took = text_field::took_key();
-                            state.repeat_key(code, *mods, sym, typed, took);
-                            return FilterResult::Intercept(out.map(Intercepted::Inbox));
-                        }
-                        if state.scrollback.is_some() {
-                            state.suppressed_keys.push(code);
-                            if state.prefix_armed {
-                                state.prefix_armed = false;
-                                let action = state.keymap.action(mods, sym).filter(over_scrollback);
-                                return FilterResult::Intercept(action.map(Intercepted::Action));
-                            }
-                            if state.keymap.is_prefix(mods, sym) {
-                                state.prefix_armed = true;
-                                return FilterResult::Intercept(None);
-                            }
-                            let typed = handle.modified_sym();
-                            text_field::took_key();
-                            let out = state.scrollback_key(mods, sym, typed);
-                            let took = text_field::took_key();
-                            state.repeat_key(code, *mods, sym, typed, took);
-                            return FilterResult::Intercept(out.map(Intercepted::Scrollback));
-                        }
-                        if state.switcher.is_some() {
-                            state.suppressed_keys.push(code);
-                            let typed = handle.modified_sym();
-                            let picked = state.switcher_key(mods, sym, typed);
-                            state.repeat_key(code, *mods, sym, typed, true);
-                            return FilterResult::Intercept(
-                                picked.map(|(target, place)| Intercepted::Switch(target, place)),
-                            );
-                        }
-                        // The menu's keys; any other closes it and goes on.
-                        if state.context_menu.is_some() && state.menu_key(sym) {
-                            state.suppressed_keys.push(code);
-                            return FilterResult::Intercept(None);
+                            return FilterResult::Intercept(out);
                         }
                         if state.prefix_armed {
                             state.prefix_armed = false;
@@ -394,30 +335,19 @@ impl Gerdr {
                                 return FilterResult::Forward;
                             }
                             state.suppressed_keys.push(code);
-                            return FilterResult::Intercept(
-                                state.keymap.action(mods, sym).map(Intercepted::Action),
-                            );
+                            return FilterResult::Intercept(state.prefix_key(None, mods, sym));
                         }
                         if state.keymap.is_prefix(mods, sym) {
                             state.prefix_armed = true;
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
-                        // Esc takes down the tooltip (one still waiting
-                        // to show just goes, and the key goes on), then
-                        // the pinned help.
-                        if sym == Keysym::Escape && state.tooltip.is_up() {
-                            let shown = state.tooltip.view().is_some();
+                        // Esc takes down the tooltip and the pinned help,
+                        // and still goes on to the app: it may be what
+                        // leaves a mode there.
+                        if sym == Keysym::Escape {
                             state.tooltip.hide();
-                            if shown {
-                                state.suppressed_keys.push(code);
-                                return FilterResult::Intercept(None);
-                            }
-                        }
-                        if sym == Keysym::Escape && state.help_pinned {
                             state.help_pinned = false;
-                            state.suppressed_keys.push(code);
-                            return FilterResult::Intercept(None);
                         }
                         FilterResult::Forward
                     },
@@ -469,18 +399,7 @@ impl Gerdr {
                 // An overlay takes every release too, but one ending a press a
                 // client got before the overlay opened: that client is still
                 // grabbing the pointer until it sees the release.
-                if state == ButtonState::Released
-                    && (self.quit.is_some()
-                        || self.restart.is_some()
-                        || self.checkout.is_some()
-                        || self.confirm.is_some()
-                        || self.welcome.is_some()
-                        || self.project_menu.is_some()
-                        || self.worktrees.is_open()
-                        || self.repos.is_open()
-                        || self.inbox.is_open()
-                        || self.scrollback.is_some())
-                {
+                if state == ButtonState::Released && self.grabbing_overlay().is_some() {
                     if pointer.is_grabbed() {
                         pointer.button(
                             self,
@@ -535,45 +454,31 @@ impl Gerdr {
                 pointer.frame(self);
             }
             InputEvent::PointerAxis { event, .. } => {
-                // The wheel over an open context menu closes it, as a
-                // click outside would, and scrolls nothing.
-                if self.context_menu.is_some() {
-                    self.close_menu();
-                    return;
-                }
-                // Nothing scrolls behind an overlay; the open panel's list
-                // moves instead (see `scroll`).
                 let motion = self.scroll_motion::<I>(&event);
-                if self.project_menu.is_some()
-                    || self.switcher.is_some()
-                    || self.worktrees.is_open()
-                    || self.repos.is_open()
-                    || self.inbox.is_open()
-                    || self.scrollback.is_some()
-                {
-                    if let Some(motion) = motion {
-                        if self.project_menu.is_some() {
-                            self.project_menu_scroll(motion);
-                        } else if self.worktrees.is_open() {
-                            self.worktrees_scroll(motion);
-                        } else if self.repos.is_open() {
-                            self.repos_scroll(motion);
-                        } else if self.inbox.is_open() {
-                            self.inbox_scroll(motion);
-                        } else if self.scrollback.is_some() {
-                            self.scrollback_scroll(motion);
-                        } else {
-                            self.switcher_scroll(motion);
-                        }
+                let at = self.overlay_at(self.pointer);
+                // The wheel over an open context menu leaves it be; off
+                // it, the wheel closes it, as a press outside would, and
+                // scrolls nothing.
+                if at == Some(overlay::Overlay::ContextMenu) {
+                    let over_menu = self
+                        .context_menu
+                        .as_ref()
+                        .is_some_and(|menu| menu.layout().0.to_f64().contains(self.pointer));
+                    if !over_menu {
+                        self.close_menu();
                     }
                     return;
                 }
-                if self.quit.is_some()
-                    || self.restart.is_some()
-                    || self.checkout.is_some()
-                    || self.confirm.is_some()
-                    || self.welcome.is_some()
-                {
+                // Nothing scrolls behind an overlay; the open panel's list
+                // moves instead (see `scroll`), and over a dialog nothing.
+                if let Some(top) = self.grabbing_overlay() {
+                    if let Some(motion) = motion {
+                        self.overlay_scroll(top, motion);
+                    }
+                    return;
+                }
+                // Over a toast or the help panel, nothing moves.
+                if at.is_some() {
                     return;
                 }
                 // Over the sidebar, its rows scroll.
@@ -624,111 +529,14 @@ impl Gerdr {
             }
             self.commit_rename();
         }
-        // An overlay takes every press; only the left button does
-        // anything there.
-        if self.quit.is_some() {
-            if button == BTN_LEFT {
-                self.quit_click(location);
-            }
-            return true;
+        let hit = self.overlay_at(location);
+        // A press off the pinned help, on what is under it, closes it and
+        // goes on.
+        if self.help_pinned && hit.is_none_or(|o| overlay::Overlay::Help.is_above(o)) {
+            self.help_pinned = false;
         }
-        if self.restart.is_some() {
-            if button == BTN_LEFT {
-                self.restart_click(location);
-            }
-            return true;
-        }
-        if self.checkout.is_some() {
-            if button == BTN_LEFT {
-                self.checkout_click(location);
-            }
-            return true;
-        }
-        if self.confirm.is_some() {
-            if button == BTN_LEFT {
-                self.confirm_click(location);
-            }
-            return true;
-        }
-        if self.welcome.is_some() {
-            if button == BTN_LEFT {
-                self.welcome_click(location);
-                self.press_field(location);
-            }
-            return true;
-        }
-        if self.project_menu.is_some() {
-            if button == BTN_LEFT {
-                self.project_menu_click(location);
-                self.press_field(location);
-            }
-            return true;
-        }
-        if self.worktrees.is_open() {
-            if button == BTN_LEFT {
-                self.worktrees_click(location);
-                self.press_field(location);
-            }
-            return true;
-        }
-        if self.repos.is_open() {
-            if self.context_menu.is_some() {
-                self.menu_press(location);
-                return true;
-            }
-            match button {
-                BTN_LEFT => {
-                    self.repos_click(location);
-                    self.press_field(location);
-                }
-                BTN_RIGHT => self.repos_right_click(location),
-                _ => {}
-            }
-            return true;
-        }
-        if self.inbox.is_open() {
-            if button == BTN_LEFT {
-                self.inbox_click(location);
-                self.press_field(location);
-            }
-            return true;
-        }
-        if self.scrollback.is_some() {
-            if button == BTN_LEFT {
-                self.scrollback_click(location);
-                self.press_field(location);
-            }
-            return true;
-        }
-        if self.switcher.is_some() {
-            self.switcher_click(location);
-            if button == BTN_LEFT {
-                self.press_field(location);
-            }
-            return true;
-        }
-        if self.context_menu.is_some() {
-            self.menu_press(location);
-            return true;
-        }
-        // The help panel: a click on a key does what the key does after
-        // the prefix; it takes every other press on it too.
-        if let Some(hit) = self.help_hit(location) {
-            if button == BTN_LEFT
-                && let Some(press) = self.keymap.help().press(hit)
-            {
-                self.help_press(press, location);
-            }
-            return true;
-        }
-        // The toasts: a click on one dismisses it, on its button does
-        // what the button says.
-        if button == BTN_LEFT
-            && let Some(hit) = self.toast_press(location)
-        {
-            if let ToastHit::Action(action) = hit {
-                self.menu_action(action);
-            }
+        if let Some(hit) = hit {
+            self.overlay_press(hit, location, button);
             return true;
         }
         // The button floating over a zoomed pane unzooms it.
@@ -824,6 +632,172 @@ impl Gerdr {
         false
     }
 
+    /// `button` went down at `pos` on open `overlay`, the one on top
+    /// there, which takes it. Only the left button does anything there,
+    /// but on the repositories panel, where the right one opens a menu.
+    fn overlay_press(&mut self, overlay: overlay::Overlay, pos: Point<f64, Logical>, button: u32) {
+        use crate::overlay::Overlay as O;
+        match (overlay, button) {
+            // A press anywhere while the menu is open goes to it: off it,
+            // it closes the menu.
+            (O::ContextMenu, _) => return self.menu_press(pos),
+            (O::Repos, BTN_RIGHT) => return self.repos_right_click(pos),
+            (_, BTN_LEFT) => {}
+            _ => return,
+        }
+        match overlay {
+            O::Quit => _ = self.quit_click(pos),
+            O::Restart => _ = self.restart_click(pos),
+            O::Checkout => _ = self.checkout_click(pos),
+            O::Confirm => _ = self.confirm_click(pos),
+            // A click on a toast dismisses it, on its button does what the
+            // button says.
+            O::Toasts => {
+                if let Some(ToastHit::Action(action)) = self.toast_press(pos) {
+                    self.menu_action(action);
+                }
+            }
+            // A click on a key of the help does what the key does after
+            // the prefix.
+            O::Help => {
+                let press = self
+                    .help_hit(pos)
+                    .and_then(|hit| self.keymap.help().press(hit));
+                if let Some(press) = press {
+                    self.help_press(press, pos);
+                }
+            }
+            O::Welcome => _ = self.welcome_click(pos),
+            O::ProjectMenu => self.project_menu_click(pos),
+            O::Worktrees => self.worktrees_click(pos),
+            O::Repos => self.repos_click(pos),
+            O::Inbox => self.inbox_click(pos),
+            O::Scrollback => self.scrollback_click(pos),
+            O::Switcher => self.switcher_click(pos),
+            O::Tooltip | O::ContextMenu => {}
+        }
+        // A click on a field focuses it, and puts the caret there.
+        if overlay.grabs() && !overlay.is_dialog() {
+            self.press_field(pos);
+        }
+    }
+
+    /// Whether a control of open `overlay` is at `pos`: the pointer is a
+    /// hand over it.
+    fn overlay_control_at(&self, overlay: overlay::Overlay, pos: Point<f64, Logical>) -> bool {
+        use crate::overlay::Overlay as O;
+        let output = self.output_size();
+        let on = |rect: &chrome::Rect| rect.to_f64().contains(pos);
+        match overlay {
+            O::Quit => {
+                let quit = self.quit_layout();
+                quit.buttons.iter().chain(&quit.rows).any(on)
+            }
+            O::Restart => self.restart_controls().iter().any(on),
+            O::Checkout => self.checkout_controls().iter().any(on),
+            O::Confirm => self.confirm_controls().iter().any(on),
+            O::ContextMenu => self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.item_at(pos).is_some()),
+            O::Toasts => true,
+            O::Repos => self.repos_view().is_some_and(|view| {
+                let layout = chrome::repos_layout(&view, output);
+                let mut controls = layout
+                    .lines
+                    .iter()
+                    .map(|(line, ..)| *line)
+                    .chain(layout.buttons.iter().map(|(_, r)| *r))
+                    .chain(layout.detail_tabs.iter().map(|(_, r)| *r))
+                    .chain([layout.branch])
+                    .chain(layout.more)
+                    .chain(layout.branch_menu.iter().flat_map(|(_, rows)| rows.clone()));
+                controls.any(|r| on(&r))
+            }),
+            O::Inbox => self.inbox_view().is_some_and(|view| {
+                let layout = chrome::inbox_layout(&view, output);
+                let hit = chrome::inbox_hit(&view, &layout, pos);
+                !matches!(
+                    hit,
+                    None | Some(chrome::InboxHit::Panel | chrome::InboxHit::Query)
+                )
+            }),
+            O::Worktrees => self.worktrees_view().is_some_and(|view| {
+                let layout = chrome::worktrees_layout(&view, output);
+                layout.entries.iter().any(|(rect, _)| on(rect))
+            }),
+            O::Switcher => self.switcher_view().is_some_and(|switcher| {
+                let layout = chrome::switcher_geometry(&switcher, self.content_rect());
+                layout.rows.iter().chain(&layout.chips).any(on)
+            }),
+            // The help's keys light up by its own hover (see `help_hover`).
+            O::Tooltip | O::Welcome | O::Help | O::ProjectMenu | O::Scrollback => false,
+        }
+    }
+
+    /// The client surface the pointer at `pos` is over, if one has it:
+    /// none while an overlay takes the pointer there (see
+    /// `Gerdr::overlay_at`), nor over gerdr's own chrome. Off an open
+    /// context menu the client keeps it, though a press there closes the
+    /// menu.
+    fn pointer_client(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        match self.overlay_at(pos) {
+            Some(overlay::Overlay::ContextMenu) | None => self.pointer_target(pos),
+            Some(_) => None,
+        }
+    }
+
+    /// A key pressed while `dialog` is open, through its own key handling.
+    fn dialog_key(
+        &mut self,
+        dialog: overlay::Overlay,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Intercepted> {
+        use crate::overlay::Overlay as O;
+        match dialog {
+            O::Quit => self.quit_key(mods, sym, typed).map(Intercepted::Quit),
+            O::Restart => self.restart_key(mods, sym).map(Intercepted::Restart),
+            O::Checkout => self.checkout_key(mods, sym).map(Intercepted::Checkout),
+            O::Confirm => self.confirm_key(mods, sym).map(Intercepted::Confirm),
+            _ => None,
+        }
+    }
+
+    /// The key pressed after the prefix, over open `over` (or over the
+    /// apps): what it asks for, if it works there. Esc, and the prefix
+    /// again over an overlay, cancel; the key that opened `over` closes
+    /// it; any other key says why it does nothing.
+    fn prefix_key(
+        &mut self,
+        over: Option<overlay::Overlay>,
+        mods: &ModifiersState,
+        sym: Keysym,
+    ) -> Option<Intercepted> {
+        if sym == Keysym::Escape || self.keymap.is_prefix(mods, sym) {
+            return None;
+        }
+        let keys = format!("{} {}", self.keymap.help().prefix, key_name(mods, sym));
+        let Some(action) = self.keymap.action(mods, sym) else {
+            self.show_warning(format!("No shortcut on {keys}"));
+            return None;
+        };
+        let Some(over) = over else {
+            return Some(Intercepted::Action(action));
+        };
+        if over.toggled_by() == Some(action)
+            && let Some(close) = closing(over)
+        {
+            return Some(close);
+        }
+        if !works_over(over, &action) {
+            self.show_warning(format!("{keys} doesn't work over {}", over.name()));
+            return None;
+        }
+        Some(Intercepted::Action(action))
+    }
+
     /// The pane whose placeholder's button is at `pos`, and which button,
     /// if one is.
     fn placeholder_button_at(
@@ -857,104 +831,14 @@ impl Gerdr {
     /// click, or nothing. The regions' own layouts say where things are:
     /// `regions` holds the one under `pos` when it was worked out already.
     pub fn region_hit(&self, pos: Point<f64, Logical>, regions: &Regions) -> RegionHit {
-        let output = self.output_size();
         // Over an overlay, only its own controls count.
-        if self.quit.is_some() {
-            let quit = self.quit_layout();
-            let mut controls = quit.buttons.iter().chain(&quit.rows);
-            return if controls.any(|rect| rect.to_f64().contains(pos)) {
+        if let Some(overlay) = self.overlay_at(pos) {
+            return if self.overlay_control_at(overlay, pos) {
                 RegionHit::Control
             } else {
                 RegionHit::Nothing
             };
         }
-        if self.restart.is_some() {
-            let controls = self.restart_controls();
-            return if controls.iter().any(|rect| rect.to_f64().contains(pos)) {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        if self.checkout.is_some() {
-            let controls = self.checkout_controls();
-            return if controls.iter().any(|rect| rect.to_f64().contains(pos)) {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        if self.confirm.is_some() {
-            let controls = self.confirm_controls();
-            return if controls.iter().any(|rect| rect.to_f64().contains(pos)) {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        if self.welcome.is_some() || self.project_menu.is_some() {
-            return RegionHit::Nothing;
-        }
-        if let Some(view) = self.repos_view() {
-            if let Some(menu) = &self.context_menu {
-                return if menu.item_at(pos).is_some() {
-                    RegionHit::Control
-                } else {
-                    RegionHit::Nothing
-                };
-            }
-            let layout = chrome::repos_layout(&view, output);
-            let mut controls = layout
-                .lines
-                .iter()
-                .map(|(line, ..)| *line)
-                .chain(layout.buttons.iter().map(|(_, r)| *r))
-                .chain(layout.detail_tabs.iter().map(|(_, r)| *r))
-                .chain([layout.branch])
-                .chain(layout.more)
-                .chain(layout.branch_menu.iter().flat_map(|(_, rows)| rows.clone()));
-            return if controls.any(|r| r.to_f64().contains(pos)) {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        if let Some(view) = self.inbox_view() {
-            let layout = chrome::inbox_layout(&view, output);
-            let hit = chrome::inbox_hit(&view, &layout, pos);
-            return match hit {
-                None | Some(chrome::InboxHit::Panel | chrome::InboxHit::Query) => {
-                    RegionHit::Nothing
-                }
-                Some(_) => RegionHit::Control,
-            };
-        }
-        if let Some(view) = self.worktrees_view() {
-            let layout = chrome::worktrees_layout(&view, output);
-            let mut rows = layout.entries.iter();
-            return if rows.any(|(rect, _)| rect.to_f64().contains(pos)) {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        if let Some(switcher) = self.switcher_view() {
-            let layout = chrome::switcher_geometry(&switcher, self.content_rect());
-            let mut hits = layout.rows.iter().chain(&layout.chips);
-            return if hits.any(|rect| rect.to_f64().contains(pos)) {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        if let Some(menu) = &self.context_menu {
-            return if menu.item_at(pos).is_some() {
-                RegionHit::Control
-            } else {
-                RegionHit::Nothing
-            };
-        }
-        let inside = |rect: &chrome::Rect| rect.to_f64().contains(pos);
         // The sidebar: the header and its "+", the rows and the cards.
         if pos.x < self.sidebar_width as f64 {
             let hit = match &regions.sidebar {
@@ -981,17 +865,8 @@ impl Gerdr {
                 None => RegionHit::Nothing,
             };
         }
-        // Over the apps: the toasts, the pane bars' buttons, a placeholder's,
-        // the one unzooming a zoomed pane.
-        let views = self.toast_views();
-        let toasts = chrome::toast_layout(&views, self.toast_rect());
-        if toasts
-            .iter()
-            .zip(&views)
-            .any(|(toast, view)| !view.leaving && inside(&toast.panel))
-        {
-            return RegionHit::Control;
-        }
+        // Over the apps: the pane bars' buttons, a placeholder's, the one
+        // unzooming a zoomed pane.
         if matches!(self.pane_bar_at(pos), Some((_, BarHit::Button(_))))
             || self.placeholder_button_at(pos).is_some()
             || self.unzoom_button_at(pos).is_some()
@@ -1054,51 +929,20 @@ impl Gerdr {
         if self.thumb_drag.is_some() {
             self.drag_thumb(pos);
         }
-        // An overlay takes the hover from everything under it.
-        let overlay = self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-            || self.welcome.is_some()
-            || self.project_menu.is_some()
-            || self.worktrees.is_open()
-            || self.repos.is_open()
-            || self.inbox.is_open()
-            || self.scrollback.is_some();
-        // An overlay's icons have tooltips of their own.
-        let mut overlay_tip = None;
-        if self.quit.is_some() {
-            self.quit_hover(pos);
-        } else if self.restart.is_some() {
-            self.restart_hover(pos);
-        } else if self.checkout.is_some() {
-            self.checkout_hover(pos);
-        } else if self.confirm.is_some() {
-            self.confirm_hover(pos);
-        } else if self.welcome.is_some() {
-            overlay_tip = self.welcome_hover(pos);
-        } else if self.project_menu.is_some() {
-            overlay_tip = self.project_menu_hover(pos);
-        } else if self.worktrees.is_open() {
-            overlay_tip = self.worktrees_hover(pos);
-        } else if self.context_menu.is_some() {
-            self.menu_motion(pos);
-        } else if self.repos.is_open() {
-            overlay_tip = self.repos_hover(pos);
-        } else if self.inbox.is_open() {
-            overlay_tip = self.inbox_hover(pos);
-        } else if self.scrollback.is_some() {
-            overlay_tip = self.scrollback_hover(pos);
-        } else if self.switcher.is_some() {
-            overlay_tip = self.switcher_motion(pos);
-        }
-        // The help panel, behind all those.
-        let popup = overlay || self.switcher.is_some() || self.context_menu.is_some();
-        self.help_hover = if popup { None } else { self.help_hit(pos) };
+        // The overlay on top at the pointer takes the hover from
+        // everything under it; its icons have tooltips of their own.
+        let at = self.overlay_at(pos);
+        let overlay_tip = at.and_then(|overlay| self.overlay_hover(overlay, pos));
+        // The keys of the help panel light up under the pointer.
+        self.help_hover = if at == Some(overlay::Overlay::Help) {
+            self.help_hit(pos)
+        } else {
+            None
+        };
         // The region under the pointer lights up, with nothing open
         // over it, and may offer a tooltip. Its layout is worked
         // out once for the event.
-        let covered = popup || self.help_hover.is_some();
+        let covered = at.is_some();
         self.header_hover = false;
         let regions = self.regions_at(pos);
         // The strip of agents closes off the sidebar (see
@@ -1120,21 +964,31 @@ impl Gerdr {
         self.pane_bar_hover(free.then_some(pos));
         let offered = free || covered;
         self.offer_tooltip(tip.filter(|_| offered), Instant::now());
-        let under = self.pointer_target(pos);
+        let under = self.pointer_client(pos);
         // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
         if under.is_none() {
-            let over_field = (overlay || self.switcher.is_some())
+            let over_field = at.is_some_and(overlay::Overlay::grabs)
                 && self
                     .field_spot()
                     .is_some_and(|field| field.area.to_f64().contains(pos))
                 || self.on_scrollback_text(pos);
+            let hit = self.region_hit(pos, &regions);
+            // What can be held and dragged: a workspace row, a tab, a
+            // pane by its bar's label, a scrollbar's thumb.
+            let draggable = || {
+                matches!(hit, RegionHit::Workspace(_) | RegionHit::Tab(_))
+                    || !covered && matches!(self.pane_bar_at(pos), Some((_, BarHit::Label)))
+                    || self.on_thumb(pos)
+            };
             let icon = if over_field {
                 CursorIcon::Text
-            } else if self.reorder.is_some_and(|r| r.moving) {
+            } else if self.reorder.is_some_and(|r| r.moving) || self.thumb_drag.is_some() {
                 CursorIcon::Grabbing
             } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
                 drag_cursor(&drag)
-            } else if self.region_hit(pos, &regions) != RegionHit::Nothing
+            } else if draggable() {
+                CursorIcon::Grab
+            } else if hit != RegionHit::Nothing
                 || self.help_hover.is_some_and(|hit| hit != HelpHit::Panel)
             {
                 CursorIcon::Pointer
@@ -1163,7 +1017,7 @@ impl Gerdr {
     pub fn refresh_pointer_focus(&mut self) {
         let pointer = self.seat.get_pointer().unwrap();
         let location = pointer.current_location();
-        let under = self.pointer_target(location);
+        let under = self.pointer_client(location);
         let time = self.start_time.elapsed().as_millis() as u32;
         pointer.motion(
             self,
@@ -1192,32 +1046,26 @@ impl Gerdr {
             Intercepted::Repos(outcome) => self.apply_repos(outcome),
             Intercepted::Inbox(outcome) => self.apply_inbox(outcome),
             Intercepted::Scrollback(outcome) => self.apply_scrollback(outcome),
+            Intercepted::CloseSwitcher => {
+                self.switcher = None;
+                self.refresh_pointer_focus();
+            }
         }
     }
 
-    /// The overlay with text fields that has the keyboard, if any: the quit
-    /// dialog, on top, has none.
+    /// The overlay with text fields that has the keyboard, if any: the
+    /// one on top that grabs it. The dialogs have none.
     fn text_overlay(&self) -> Option<Overlay> {
-        if self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-        {
-            None
-        } else if self.welcome.is_some() {
-            Some(Overlay::Welcome)
-        } else if self.project_menu.is_some() {
-            Some(Overlay::ProjectMenu)
-        } else if self.worktrees.is_open() {
-            Some(Overlay::Worktrees)
-        } else if self.repos.is_open() {
-            Some(Overlay::Repos)
-        } else if self.inbox.is_open() {
-            Some(Overlay::Inbox)
-        } else if self.scrollback.is_some() {
-            Some(Overlay::Scrollback)
-        } else {
-            self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial))
+        use crate::overlay::Overlay as O;
+        match self.grabbing_overlay()? {
+            O::Welcome => Some(Overlay::Welcome),
+            O::ProjectMenu => Some(Overlay::ProjectMenu),
+            O::Worktrees => Some(Overlay::Worktrees),
+            O::Repos => Some(Overlay::Repos),
+            O::Inbox => Some(Overlay::Inbox),
+            O::Scrollback => Some(Overlay::Scrollback),
+            O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
+            _ => None,
         }
     }
 
@@ -1274,16 +1122,9 @@ impl Gerdr {
             self.apply_intercepted(out);
         }
         self.copy_from_field();
-        let _ = match self.text_overlay() {
-            Some(Overlay::Welcome) => self.welcome_hover(pos),
-            Some(Overlay::ProjectMenu) => self.project_menu_hover(pos),
-            Some(Overlay::Worktrees) => self.worktrees_hover(pos),
-            Some(Overlay::Repos) => self.repos_hover(pos),
-            Some(Overlay::Inbox) => self.inbox_hover(pos),
-            Some(Overlay::Scrollback) => self.scrollback_hover(pos),
-            Some(Overlay::Switcher(_)) => self.switcher_motion(pos),
-            None => None,
-        };
+        if let Some(overlay) = self.overlay_at(pos) {
+            let _ = self.overlay_hover(overlay, pos);
+        }
     }
 
     /// Where the text field with the keyboard is, in the overlay that has
@@ -1517,15 +1358,44 @@ mod tests {
     }
 
     #[test]
-    fn over_the_project_menu_the_prefix_acts_on_gerdr_and_closes_it() {
-        assert!(over_project_menu(&Action::ToggleTheme));
-        assert!(over_project_menu(&Action::Quit));
-        // The key that opened the menu closes it.
-        assert!(over_project_menu(&Action::Projects));
-        // The inbox opens over it, and its key closes the inbox again.
-        assert!(over_project_menu(&Action::Inbox));
-        assert!(!over_project_menu(&Action::LastProject));
-        assert!(!over_project_menu(&Action::NewTab));
-        assert!(!over_project_menu(&Action::Switcher));
+    fn over_a_panel_the_prefix_acts_on_gerdr_and_opens_the_other_panels() {
+        assert!(over_panel(&Action::ToggleTheme));
+        assert!(over_panel(&Action::Quit));
+        assert!(over_panel(&Action::Shortcuts));
+        // These open over the others, or in their place.
+        assert!(over_panel(&Action::Projects));
+        assert!(over_panel(&Action::Inbox));
+        assert!(over_panel(&Action::Repos));
+        assert!(over_panel(&Action::Worktrees));
+        assert!(!over_panel(&Action::LastProject));
+        assert!(!over_panel(&Action::NewTab));
+        assert!(!over_panel(&Action::Switcher));
+    }
+
+    #[test]
+    fn the_key_that_opened_a_panel_closes_it() {
+        use crate::overlay::Overlay as O;
+        for panel in O::ORDER.into_iter().filter(|o| o.is_panel()) {
+            assert!(panel.toggled_by().is_some(), "{panel:?}");
+            assert!(closing(panel).is_some(), "{panel:?}");
+        }
+        assert!(closing(O::Welcome).is_none());
+        // Over the welcome screen, only what needs no project.
+        assert!(works_over(O::Welcome, &Action::Quit));
+        assert!(!works_over(O::Welcome, &Action::Repos));
+        assert!(works_over(O::Switcher, &Action::Inbox));
+    }
+
+    #[test]
+    fn notices_name_keys_as_the_help_does() {
+        let none = ModifiersState::default();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(key_name(&none, Keysym::q), "Q");
+        assert_eq!(key_name(&shift, Keysym::q), "Shift+Q");
+        assert_eq!(key_name(&none, Keysym::Escape), "Esc");
+        assert_eq!(key_name(&none, Keysym::F5), "F5");
     }
 }
