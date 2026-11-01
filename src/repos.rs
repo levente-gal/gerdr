@@ -147,10 +147,13 @@ impl Repos {
         self.panel.is_some() || self.worktree.is_some()
     }
 
-    /// Close it for good, as when leaving the project.
+    /// Close it for good, as when leaving the project: the edits made
+    /// from the diff can't be undone after.
     pub fn close(&mut self) {
         self.panel = None;
         self.kept = None;
+        self.cuts.clear();
+        self.undone.clear();
         self.close_worktree();
     }
 
@@ -333,6 +336,9 @@ pub struct Panel {
     pub(crate) detail_stale: bool,
     /// The branch picker's menu, while open.
     pub(crate) branch_menu: Option<BranchMenu>,
+    /// The files edited from the diff since the panel opened, by (root,
+    /// path): marked in the tree, while `u` can undo it.
+    pub(crate) edited: HashSet<(PathBuf, String)>,
 }
 
 /// The branch picker's menu: where its lines stand, and the branch Enter
@@ -937,9 +943,10 @@ pub enum Outcome {
     Yank(FileEdit),
     /// Put what was yanked or deleted last in a file.
     Paste(Put),
-    /// Undo the last cut; do the last undone again.
-    UndoCut,
-    RedoCut,
+    /// Undo the last cut in the file (by root and path; with none, the
+    /// last anywhere); do the last undone there again.
+    UndoCut(Option<(PathBuf, String)>),
+    RedoCut(Option<(PathBuf, String)>),
     /// Read the repositories' status and diffs again.
     Refresh,
 }
@@ -1187,8 +1194,8 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
         D::Cut(edit) => Outcome::Cut(edit),
         D::Yank(edit) => Outcome::Yank(edit),
         D::Paste(put) => Outcome::Paste(put),
-        D::UndoCut => Outcome::UndoCut,
-        D::RedoCut => Outcome::RedoCut,
+        D::UndoCut(file) => Outcome::UndoCut(file),
+        D::RedoCut(file) => Outcome::RedoCut(file),
         D::Toggle { .. } | D::Clear => Outcome::Notice("Done in the panel"),
     }
 }
@@ -4356,7 +4363,12 @@ impl Panel {
         };
         let change = &status.changes[c];
         let diff = files.iter().find(|f| f.path == change.path);
+        let here = |root: &Path, path: &str| *root == item.root && path == change.path;
         TreeLine::File(FileLine {
+            edited: self.edited.iter().any(|(root, path)| here(root, path)),
+            comments: (self.diff.review.comments.iter())
+                .filter(|c| here(&c.root, &c.path))
+                .count(),
             check: if self.file_checked(item, change) {
                 Check::On
             } else {
@@ -8744,6 +8756,34 @@ mod tests {
     }
 
     #[test]
+    fn the_tree_marks_files_edited_from_the_diff_and_commented_on() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let file = |panel: &Panel| {
+            let view = panel.view("p", &ctx);
+            view.lines
+                .into_iter()
+                .find_map(|l| match l {
+                    TreeLine::File(f) if f.path == "src/git.rs" => Some(f),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(!file(&panel).edited && file(&panel).comments == 0);
+        panel.edited.insert((root("gerdr"), "src/git.rs".into()));
+        panel.diff.review.comments.push(crate::review::Comment {
+            root: root("gerdr"),
+            path: "src/git.rs".into(),
+            lines: vec![crate::review::Quoted::default()],
+            text: "why".into(),
+        });
+        let f = file(&panel);
+        assert!(f.edited);
+        assert_eq!(f.comments, 1);
+    }
+
+    #[test]
     fn vims_deletes_cut_the_file_at_the_caret() {
         use crate::diff_edit::{Cut, Spot};
         let items = items();
@@ -8906,9 +8946,10 @@ mod tests {
             keys(&mut panel, "p"),
             Some(Outcome::Notice("A removed line isn't in the file"))
         );
-        // `u` and `U` undo and do again.
-        assert_eq!(keys(&mut panel, "u"), Some(Outcome::UndoCut));
-        assert_eq!(keys(&mut panel, "U"), Some(Outcome::RedoCut));
+        // `u` and `U` undo and do again, in the file at the caret.
+        let here = Some((root("gerdr"), "src/a.rs".to_owned()));
+        assert_eq!(keys(&mut panel, "u"), Some(Outcome::UndoCut(here.clone())));
+        assert_eq!(keys(&mut panel, "U"), Some(Outcome::RedoCut(here)));
     }
 
     #[test]

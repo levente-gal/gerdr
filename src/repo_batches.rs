@@ -26,7 +26,7 @@ use crate::{
         TreeLine, TreeTool,
     },
     desktop,
-    diff_edit::{self, Done, FileEdit, Put},
+    diff_edit::{self, Cut, Done, FileEdit, Put},
     diff_view::Position,
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
@@ -450,6 +450,61 @@ pub(crate) fn repos_tip(changed: usize, stuck: usize) -> String {
     text
 }
 
+/// `n` lines, in words.
+fn lines(n: usize) -> String {
+    match n {
+        1 => "1 line".into(),
+        n => format!("{n} lines"),
+    }
+}
+
+/// What `edit` does to its file, as said once done: `Deleted 2 lines from
+/// src/a.rs:40`.
+fn cut_said(edit: &FileEdit) -> String {
+    let path = &edit.path;
+    match &edit.cut {
+        Cut::Lines(numbers) => {
+            let first = numbers.iter().min().copied().unwrap_or(edit.caret.line);
+            format!("Deleted {} from {path}:{first}", lines(numbers.len()))
+        }
+        Cut::Chars(from, to) if from.line == to.line => {
+            let n = to.col.saturating_sub(from.col);
+            let chars = if n == 1 { "char" } else { "chars" };
+            format!("Deleted {n} {chars} from {path}:{}", from.line)
+        }
+        Cut::Chars(from, to) => format!(
+            "Deleted from {path}:{} to line {}, joining them",
+            from.line, to.line
+        ),
+        Cut::Restore { drop, put } => {
+            let n = edit.cut.restored().unwrap_or(0);
+            let first = (drop.iter().copied())
+                .chain(put.iter().map(|(at, _)| *at))
+                .min()
+                .unwrap_or(edit.caret.line);
+            format!("Restored {} in {path}:{first}", lines(n))
+        }
+    }
+}
+
+/// What pasting `register` as `put` does, as said once done: `Pasted 2
+/// lines into src/a.rs:41`.
+fn paste_said(put: &Put, register: &diff_edit::Register) -> String {
+    let path = &put.path;
+    let line = match (register.lines, put.before) {
+        (true, false) => put.at.line + 1,
+        _ => put.at.line,
+    };
+    if register.lines {
+        let n = register.text.lines().count() * put.count.max(1);
+        format!("Pasted {} into {path}:{line}", lines(n))
+    } else {
+        let n = register.text.chars().count() * put.count.max(1);
+        let chars = if n == 1 { "char" } else { "chars" };
+        format!("Pasted {n} {chars} into {path}:{line}")
+    }
+}
+
 fn level(tone: Tone) -> Level {
     match tone {
         Tone::Success => Level::Success,
@@ -558,14 +613,17 @@ impl Gerdr {
         }
     }
 
-    /// Close the panel, kept as it is for opening again.
+    /// Close the panel, kept as it is for opening again; the edits made
+    /// from its diff can no longer be undone.
     fn close_repos(&mut self) {
         if self.repos.worktree.is_some() {
-            return self.close_worktree_diff();
+            self.close_worktree_diff();
+            return self.forget_edits();
         }
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
+        self.forget_edits();
         self.refresh_pointer_focus();
     }
 
@@ -1331,7 +1389,8 @@ impl Gerdr {
                 self.projects.repo_grouping = grouping;
                 self.projects.save();
             }
-            Outcome::Notice(text) => self.show_notice(text.into()),
+            // Why a key did nothing.
+            Outcome::Notice(text) => self.show_warning(text.into()),
             Outcome::Cut(edit) => self.repos_cut(edit),
             Outcome::Yank(edit) => self.repos_yank(edit),
             Outcome::Paste(put) => self.repos_paste(put),
@@ -1339,8 +1398,8 @@ impl Gerdr {
                 self.refresh_git();
                 self.repos_read();
             }
-            Outcome::UndoCut => self.repos_undo_cut(false),
-            Outcome::RedoCut => self.repos_undo_cut(true),
+            Outcome::UndoCut(file) => self.repos_undo_cut(false, file),
+            Outcome::RedoCut(file) => self.repos_undo_cut(true, file),
             Outcome::Batch { .. }
             | Outcome::Confirmed { .. }
             | Outcome::CreateBranch { .. }
@@ -1431,20 +1490,19 @@ impl Gerdr {
     }
 
     /// Cut `edit` out of its file, kept to paste, the caret to go where
-    /// the cut was once the diff is read again. A restore isn't kept to
-    /// paste: it says what it put back instead.
+    /// the cut was once the diff is read again; said, with where. A
+    /// restore isn't kept to paste.
     fn repos_cut(&mut self, edit: FileEdit) {
-        match (diff_edit::apply(&edit), edit.cut.restored()) {
-            (Ok((done, _)), Some(n)) => {
+        match diff_edit::apply(&edit) {
+            Ok((done, taken)) => {
+                if edit.cut.restored().is_none() {
+                    self.repos.register = taken;
+                }
+                let said = cut_said(&edit);
                 self.repos_edited(done);
-                let lines = if n == 1 { "line" } else { "lines" };
-                self.show_notice(format!("Restored {n} {lines} · u to undo"));
+                self.show_success(format!("{said} · u to undo"));
             }
-            (Ok((done, taken)), None) => {
-                self.repos.register = taken;
-                self.repos_edited(done);
-            }
-            (Err(why), _) => self.show_notice(why),
+            Err(why) => self.show_error(why),
         }
     }
 
@@ -1462,26 +1520,37 @@ impl Gerdr {
                 self.repos.register = taken;
                 self.show_notice(what);
             }
-            Err(why) => self.show_notice(why),
+            Err(why) => self.show_error(why),
         }
     }
 
-    /// Put what was yanked or deleted last in as `put` says.
+    /// Put what was yanked or deleted last in as `put` says; said, with
+    /// where.
     fn repos_paste(&mut self, put: Put) {
         match diff_edit::paste(&put, &self.repos.register) {
-            Ok(done) => self.repos_edited(done),
-            Err(why) => self.show_notice(why),
+            Ok(done) => {
+                let said = paste_said(&put, &self.repos.register);
+                self.repos_edited(done);
+                self.show_success(format!("{said} · u to undo"));
+            }
+            Err(why) => self.show_error(why),
         }
     }
 
-    /// A file was edited from the diff: undone with `u`, the caret to go
+    /// A file was edited from the diff: undone with `u` (its file's edits
+    /// done again with `U` no longer), marked in the tree, the caret to go
     /// where the edit left it once the diff is read again.
     fn repos_edited(&mut self, done: Done) {
         if let Some(diff) = self.repos.diff_mut() {
             diff.place_caret(done.root.clone(), done.path.clone(), done.then);
         }
         let root = done.root.clone();
-        self.repos.undone.clear();
+        let file = (done.root.clone(), done.path.clone());
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.edited.insert(file.clone());
+        }
+        let same = |d: &Done| d.root == file.0 && d.path == file.1;
+        self.repos.undone.retain(|d| !same(d));
         self.repos.cuts.push(done);
         if self.repos.cuts.len() > CUTS {
             self.repos.cuts.remove(0);
@@ -1503,20 +1572,26 @@ impl Gerdr {
         self.refresh_git();
     }
 
-    /// Undo the last cut, or (`again`) do the last undone again, unless
-    /// its file changed since.
-    fn repos_undo_cut(&mut self, again: bool) {
-        let done = match again {
-            true => self.repos.undone.pop(),
-            false => self.repos.cuts.pop(),
+    /// Undo the last cut in `file` (by root and path; with none, the last
+    /// anywhere), or (`again`) do the last undone there again, unless its
+    /// file changed since; said, with the file.
+    fn repos_undo_cut(&mut self, again: bool, file: Option<(PathBuf, String)>) {
+        let stack = match again {
+            true => &mut self.repos.undone,
+            false => &mut self.repos.cuts,
         };
-        let Some(done) = done else {
-            let none = if again {
-                "Nothing to do again"
-            } else {
-                "Nothing to undo"
+        let of = |d: &Done| {
+            file.as_ref()
+                .is_none_or(|(r, p)| d.root == *r && d.path == *p)
+        };
+        let at = stack.iter().rposition(of);
+        let Some(done) = at.map(|at| stack.remove(at)) else {
+            let what = if again { "do again" } else { "undo" };
+            let none = match &file {
+                Some((_, path)) => format!("Nothing to {what} in {path}"),
+                None => format!("Nothing to {what}"),
             };
-            return self.show_notice(none.into());
+            return self.show_warning(none);
         };
         match diff_edit::redo(&done, !again) {
             Ok(spot) => {
@@ -1524,13 +1599,32 @@ impl Gerdr {
                     diff.place_caret(done.root.clone(), done.path.clone(), spot);
                 }
                 let root = done.root.clone();
+                let said = match again {
+                    true => format!("Did the edit to {}:{} again", done.path, spot.line),
+                    false => format!("Undid the edit to {}:{}", done.path, spot.line),
+                };
                 match again {
                     true => self.repos.cuts.push(done),
                     false => self.repos.undone.push(done),
                 }
+                self.show_success(said);
                 self.repos_reread(&root);
             }
-            Err(why) => self.show_notice(why),
+            Err(why) => self.show_error(why),
+        }
+    }
+
+    /// The edits made from the diff can't be undone once it closes: they
+    /// are let go, and the tree's marks with them.
+    fn forget_edits(&mut self) {
+        let edits = self.repos.cuts.len();
+        self.repos.cuts.clear();
+        self.repos.undone.clear();
+        if let Some((_, panel)) = self.repos.kept.as_mut() {
+            panel.edited.clear();
+        }
+        if edits > 0 {
+            tracing::debug!("let go of {edits} edits made from the diff");
         }
     }
 
@@ -2182,6 +2276,50 @@ mod tests {
             dirty,
             ..GitStatus::default()
         }
+    }
+
+    #[test]
+    fn edits_from_the_diff_say_what_they_did_and_where() {
+        use crate::diff_edit::{Register, Spot};
+        let spot = |line, col| Spot { line, col };
+        let edit = |cut| FileEdit {
+            root: PathBuf::from("/r"),
+            path: "src/a.rs".into(),
+            cut,
+            shown: Vec::new(),
+            caret: spot(40, 0),
+        };
+        assert_eq!(
+            cut_said(&edit(Cut::Lines(vec![40, 41]))),
+            "Deleted 2 lines from src/a.rs:40"
+        );
+        assert_eq!(
+            cut_said(&edit(Cut::Chars(spot(7, 2), spot(7, 3)))),
+            "Deleted 1 char from src/a.rs:7"
+        );
+        let restore = Cut::Restore {
+            drop: vec![12],
+            put: vec![(10, vec!["a".into(), "b".into()])],
+        };
+        assert_eq!(cut_said(&edit(restore)), "Restored 3 lines in src/a.rs:10");
+        let put = Put {
+            root: PathBuf::from("/r"),
+            path: "src/a.rs".into(),
+            shown: Vec::new(),
+            at: spot(40, 0),
+            before: false,
+            count: 2,
+        };
+        let lines = Register {
+            text: "x\n".into(),
+            lines: true,
+        };
+        assert_eq!(paste_said(&put, &lines), "Pasted 2 lines into src/a.rs:41");
+        let chars = Register {
+            text: "ab".into(),
+            lines: false,
+        };
+        assert_eq!(paste_said(&put, &chars), "Pasted 4 chars into src/a.rs:40");
     }
 
     #[test]

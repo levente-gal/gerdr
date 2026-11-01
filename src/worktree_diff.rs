@@ -643,7 +643,7 @@ impl crate::Gerdr {
             .as_mut()
             .and_then(WorktreeDiff::take_error);
         if let Some(why) = error {
-            self.show_notice(why);
+            self.show_warning(why);
         }
         match done? {
             Done::Close => Some(crate::repos::Outcome::Close),

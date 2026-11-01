@@ -383,6 +383,11 @@ pub struct FileLine {
     /// it is read).
     pub added: usize,
     pub removed: usize,
+    /// It was edited from the diff since the panel opened (`u` undoes
+    /// it there).
+    pub edited: bool,
+    /// How many review comments are on it.
+    pub comments: usize,
 }
 
 /// A checkbox: a repository's is `Partial` when only some of its files are
@@ -2845,6 +2850,41 @@ impl Painter {
     }
 
     /// A scrollbar's thumb `size` big in a buffer of its own.
+    /// A small tag in `color` on a tint of it, its right edge at `right`
+    /// in `line_band`: where it starts, to go on left of it.
+    #[allow(clippy::too_many_arguments)]
+    fn tree_tag(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        right: f32,
+        line_band: (i32, i32),
+        color: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) -> f32 {
+        let s = scale as f32;
+        let pad = (CHIP_PAD as f32 * s / 2.0).round();
+        let w = self.mixed_width(text, SMALL_FONT_SIZE, scale) + 2.0 * pad;
+        let x = (right - w).round();
+        let (y, h) = line_band;
+        let th = (CHIP_HEIGHT as f32 * s * 0.8).round();
+        let ty = (y as f32 + (h as f32 - th) / 2.0).round();
+        c.rounded(x, ty, w, th, CHIP_RADIUS * s, mix(p.elevated, color, 0.18));
+        let ink = mix(color, p.text, 0.25);
+        self.mixed_text(
+            c,
+            text,
+            SMALL_FONT_SIZE,
+            x + pad,
+            right,
+            line_band,
+            scale,
+            ink,
+        );
+        x
+    }
+
     fn thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(size, scale));
         let (w, h) = (c.w as f32, c.h as f32);
@@ -3018,6 +3058,19 @@ impl Painter {
                 let counts = (file.added, file.removed);
                 let end =
                     self.diff_counts(c, None, counts, code_x - gap / 2.0, line_band, scale, p);
+                // Before the counts, what was done to it here: comments
+                // written on it, edits made from the diff.
+                let mut end = end;
+                if file.comments > 0 {
+                    let text = match file.comments {
+                        1 => "1 comment".to_owned(),
+                        n => format!("{n} comments"),
+                    };
+                    end = self.tree_tag(c, &text, end - gap, line_band, p.accent, scale, p);
+                }
+                if file.edited {
+                    end = self.tree_tag(c, "edited", end - gap, line_band, p.warning, scale, p);
+                }
                 let name = match file.code {
                     _ if file.conflicted => p.error,
                     'D' => p.muted,
@@ -5017,6 +5070,8 @@ mod tests {
             depth: 0,
             added: 0,
             removed: 0,
+            edited: false,
+            comments: 0,
         })
     }
 

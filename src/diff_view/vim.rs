@@ -8,8 +8,8 @@
 //! the diff is read again. `y` yanks as `d` deletes (`yy`, `yw`, `Y`, a
 //! selection) and copies it too; `p` puts what was yanked or deleted
 //! last after the caret (whole lines under its line), `P` before. `u`
-//! undoes the last cut, paste or restore (see `restore`), `U` or Ctrl+R
-//! does it again. `gg` and `G` go to the top and the end, `{` and `}` to
+//! undoes the last cut, paste or restore in the file at the caret (see
+//! `restore`), `U` or Ctrl+R does it again. `gg` and `G` go to the top and the end, `{` and `}` to
 //! the hunk before and after, Ctrl+U and Ctrl+D half a page up and down.
 
 use std::{
@@ -113,7 +113,7 @@ impl DiffView {
             let by = match sym {
                 Keysym::r | Keysym::R => {
                     self.pending = Pending::default();
-                    return Some(Some(Outcome::RedoCut));
+                    return Some(Some(Outcome::RedoCut(self.cursor_file())));
                 }
                 Keysym::d | Keysym::D => half,
                 Keysym::u | Keysym::U => -half,
@@ -219,8 +219,8 @@ impl DiffView {
             Keysym::X => self.cut_along(|col, _| col.saturating_sub(count)..col),
             Keysym::D => self.cut_along(|col, len| col..len),
             Keysym::R => self.restore_here(),
-            Keysym::u => Some(Outcome::UndoCut),
-            Keysym::U => Some(Outcome::RedoCut),
+            Keysym::u => Some(Outcome::UndoCut(self.cursor_file())),
+            Keysym::U => Some(Outcome::RedoCut(self.cursor_file())),
             // A count before a motion: the motion as many times.
             _ if count > 1 && motion(mods, sym) => {
                 for _ in 0..count {

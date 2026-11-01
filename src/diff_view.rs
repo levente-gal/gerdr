@@ -131,9 +131,10 @@ pub enum Outcome {
     Yank(FileEdit),
     /// Put what was yanked or deleted last in a file.
     Paste(Put),
-    /// Undo the last cut; do the last undone again.
-    UndoCut,
-    RedoCut,
+    /// Undo the last cut in the file at the caret (by root and path;
+    /// with none, the last anywhere); do the last undone there again.
+    UndoCut(Option<(PathBuf, String)>),
+    RedoCut(Option<(PathBuf, String)>),
     /// Ask whether to delete every review comment (`clear_sheet`), then
     /// `clear_review`.
     Clear,
@@ -680,6 +681,12 @@ impl DiffView {
         };
         let (_, file) = self.diff_file(k, f)?;
         Some(&file.hunks.get(h)?.lines.get(l)?.text)
+    }
+
+    /// The root and path of the file the cursor is in, if any: what `u`
+    /// undoes the edits of.
+    pub(crate) fn cursor_file(&self) -> Option<(PathBuf, String)> {
+        self.diff_path(self.cursor.as_ref()?.row)
     }
 
     /// The diff row the caret is on and the char of its line: on the
