@@ -149,8 +149,10 @@ pub enum ButtonStyle {
     Primary,
     /// Filled with the error colour: an action that loses something.
     /// Never the default of its dialog.
-    #[allow(dead_code)] // The dialogs take it up in wave 2.
     Destructive,
+    /// Outlined like a plain one, its label dimmed (still readable): one
+    /// that can't be pressed now. Hovering doesn't light it.
+    Off,
 }
 
 impl From<bool> for ButtonStyle {
@@ -162,6 +164,13 @@ impl From<bool> for ButtonStyle {
             ButtonStyle::Plain
         }
     }
+}
+
+/// How wide a button labelled `label` is (logical pixels), as
+/// `Painter::button_width` says; for layouts, which have no painter.
+pub(super) fn button_width(label: &str) -> i32 {
+    let text = measure(label, FONT_SIZE).unwrap_or(label.chars().count() as f32 * 8.0);
+    (text.ceil() as i32 + 2 * BUTTON_PADDING).max(BUTTON_MIN_WIDTH)
 }
 
 /// What a list row is lit with on a popup's ground: `selected` when it is
@@ -652,8 +661,8 @@ impl Painter {
     /// A button in `rect` like the quit dialog's, labelled `label`, in
     /// `style`: plain, the primary one in the accent, or a destructive
     /// one in the error colour (`true` and `false` stand for primary and
-    /// plain). `(hovered, focused)` lightens it and rings it, the ring in
-    /// the button's own colour.
+    /// plain), or dimmed while it can't be pressed. `(hovered, focused)`
+    /// lightens it and rings it, the ring in the button's own colour.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn button(
         &self,
@@ -669,6 +678,7 @@ impl Painter {
         let (x, y, w, h) = rect_px(rect, scale);
         let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
         let style = style.into();
+        let hovered = hovered && style != ButtonStyle::Off;
         if focused {
             let ring = match style {
                 ButtonStyle::Destructive => p.error,
@@ -690,11 +700,15 @@ impl Painter {
                 c.rounded(x, y, w, h, r, fill);
                 p.on_accent
             }
-            ButtonStyle::Plain => {
+            ButtonStyle::Plain | ButtonStyle::Off => {
                 let fill = if hovered { p.selected } else { p.element };
                 c.rounded(x, y, w, h, r, p.border);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                p.text
+                if style == ButtonStyle::Off {
+                    p.muted
+                } else {
+                    p.text
+                }
             }
         };
         self.centered(c, label, FONT_SIZE, rect, scale, color);
@@ -705,8 +719,7 @@ impl Painter {
     /// no dialog keeps a table of widths that drift from its labels.
     #[allow(dead_code)] // The dialogs take it up in wave 2.
     pub(super) fn button_width(&self, label: &str) -> i32 {
-        let text = measure(label, FONT_SIZE).unwrap_or(label.chars().count() as f32 * 8.0);
-        (text.ceil() as i32 + 2 * BUTTON_PADDING).max(BUTTON_MIN_WIDTH)
+        button_width(label)
     }
 
     /// A toggle between choices, like a popup's "This workspace / All"

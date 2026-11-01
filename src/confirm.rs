@@ -397,7 +397,7 @@ impl Gerdr {
         let Some(dialog) = self.confirm.as_mut() else {
             return false;
         };
-        let layout = chrome::confirm_layout(size);
+        let layout = chrome::confirm_dialog_layout(size, dialog.go);
         let outcome = match button_at(&layout, pos) {
             Some(button) => Some(dialog.press(button)),
             None if layout.panel.to_f64().contains(pos) => None,
@@ -413,7 +413,7 @@ impl Gerdr {
     pub fn confirm_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
         if let Some(dialog) = self.confirm.as_mut() {
-            dialog.hover = button_at(&chrome::confirm_layout(size), pos);
+            dialog.hover = button_at(&chrome::confirm_dialog_layout(size, dialog.go), pos);
         }
     }
 
@@ -421,7 +421,9 @@ impl Gerdr {
     /// pointer can press.
     pub fn confirm_controls(&self) -> Vec<chrome::Rect> {
         match &self.confirm {
-            Some(_) => chrome::confirm_layout(self.output_size()).buttons.to_vec(),
+            Some(dialog) => chrome::confirm_dialog_layout(self.output_size(), dialog.go)
+                .buttons
+                .to_vec(),
             None => Vec::new(),
         }
     }

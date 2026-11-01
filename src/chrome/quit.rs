@@ -1,10 +1,10 @@
 //! The quit dialog over everything; also asked when switching projects.
 
 use super::{
-    CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, DialogButton, FONT_SIZE, LABEL_FONT_SIZE,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_BUTTONS,
-    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, SWITCH_BUTTONS,
-    band, mix, phys, rect_px,
+    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE,
+    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
+    QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, dialog_buttons, mix, phys,
+    rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -86,12 +86,13 @@ pub fn quit_keys(switching: bool) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// The buttons' labels and widths.
-fn buttons(switching: bool) -> &'static [(&'static str, i32)] {
+/// The buttons' labels: Cancel, Quit; Cancel, Switch, Open in new gerdr
+/// when switching projects.
+fn buttons(switching: bool) -> &'static [&'static str] {
     if switching {
-        SWITCH_BUTTONS
+        &["Cancel", "Switch", "Open in new gerdr"]
     } else {
-        QUIT_BUTTONS
+        &["Cancel", "Quit"]
     }
 }
 
@@ -128,24 +129,7 @@ pub fn quit_layout(size: Size<i32, Logical>, rows: usize, switching: bool) -> Qu
             Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
         })
         .collect();
-    let labels = buttons(switching);
-    // Right-aligned, in order.
-    let total =
-        labels.iter().map(|(_, w)| w).sum::<i32>() + (labels.len() as i32 - 1) * QUIT_BUTTON_GAP;
-    let left = panel.loc.x + width - QUIT_PADDING - total;
-    let button_y = panel.loc.y + height - QUIT_PADDING - QUIT_BUTTON;
-    let buttons = (0..labels.len())
-        .map(|i| {
-            let before = labels[..i]
-                .iter()
-                .map(|(_, w)| w + QUIT_BUTTON_GAP)
-                .sum::<i32>();
-            Rectangle::new(
-                (left + before, button_y).into(),
-                (labels[i].1, QUIT_BUTTON).into(),
-            )
-        })
-        .collect();
+    let buttons = dialog_buttons(panel, buttons(switching));
     QuitLayout {
         panel,
         title,
@@ -276,19 +260,19 @@ impl Painter {
         let keys_end = first.loc.x - QUIT_BUTTON_GAP;
         self.dialog_keys(&mut c, quit_keys(switching), keys_row, keys_end, scale, p);
         let go = if view.stops_any() {
-            DialogButton::Destructive
+            ButtonStyle::Destructive
         } else {
-            DialogButton::Primary
+            ButtonStyle::Primary
         };
         let labels = buttons(switching);
-        for (i, (rect, (label, _))) in layout.buttons.iter().zip(labels).enumerate() {
-            let look = match i {
-                0 => DialogButton::Plain,
+        for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
+            let style = match i {
+                0 => ButtonStyle::Plain,
                 1 => go,
-                _ => DialogButton::Primary,
+                _ => ButtonStyle::Primary,
             };
             let state = (view.hover == Some(QuitHit::Button(i)), view.selected == i);
-            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
+            self.button(&mut c, label, shift(*rect), state, style, scale, p);
         }
         c.into_buffer(false)
     }

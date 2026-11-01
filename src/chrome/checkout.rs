@@ -3,13 +3,15 @@
 //! (see `crate::checkout`).
 
 use super::{
-    CHECKOUT_BUTTONS, DIALOG_WIDTH, DialogButton, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS,
-    Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING,
-    QUIT_TITLE, Rect, SHADOW, band, phys,
+    ButtonStyle, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette,
+    QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
+    band, dialog_buttons, phys,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+/// The buttons' labels: Cancel, Leave behind, Bring along.
+const BUTTONS: [&str; 3] = ["Cancel", "Leave behind", "Bring along"];
 /// The keys the dialog takes besides its buttons, said by them.
 const KEYS: [(&str, &str); 2] = [("B", "bring"), ("L", "leave")];
 /// A file's row, the gap between rows, and the room between the last and
@@ -99,23 +101,7 @@ pub fn checkout_layout(size: Size<i32, Logical>, rows: usize) -> CheckoutLayout 
             Rectangle::new((x, y).into(), (inner, ROW).into())
         })
         .collect();
-    // Right-aligned, in order.
-    let total = CHECKOUT_BUTTONS.iter().map(|(_, w)| w).sum::<i32>()
-        + (CHECKOUT_BUTTONS.len() as i32 - 1) * QUIT_BUTTON_GAP;
-    let left = panel.loc.x + width - QUIT_PADDING - total;
-    let button_y = panel.loc.y + height - QUIT_PADDING - QUIT_BUTTON;
-    let buttons = (0..CHECKOUT_BUTTONS.len())
-        .map(|i| {
-            let before = CHECKOUT_BUTTONS[..i]
-                .iter()
-                .map(|(_, w)| w + QUIT_BUTTON_GAP)
-                .sum::<i32>();
-            Rectangle::new(
-                (left + before, button_y).into(),
-                (CHECKOUT_BUTTONS[i].1, QUIT_BUTTON).into(),
-            )
-        })
-        .collect();
+    let buttons = dialog_buttons(panel, &BUTTONS);
     CheckoutLayout {
         panel,
         title,
@@ -275,15 +261,15 @@ impl Painter {
         let keys: &[(&str, &str)] = if view.can_bring { &KEYS } else { &KEYS[1..] };
         let keys_end = first.loc.x - QUIT_BUTTON_GAP;
         self.dialog_keys(&mut c, keys, keys_row, keys_end, scale, p);
-        let last = CHECKOUT_BUTTONS.len() - 1;
-        for (i, (rect, (label, _))) in layout.buttons.iter().zip(CHECKOUT_BUTTONS).enumerate() {
-            let look = match i {
-                _ if i < last => DialogButton::Plain,
-                _ if view.can_bring => DialogButton::Primary,
-                _ => DialogButton::Off,
+        let last = BUTTONS.len() - 1;
+        for (i, (rect, label)) in layout.buttons.iter().zip(BUTTONS).enumerate() {
+            let style = match i {
+                _ if i < last => ButtonStyle::Plain,
+                _ if view.can_bring => ButtonStyle::Primary,
+                _ => ButtonStyle::Off,
             };
             let state = (view.hover == Some(i), view.selected == i);
-            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
+            self.button(&mut c, label, shift(*rect), state, style, scale, p);
         }
         c.into_buffer(false)
     }

@@ -1,28 +1,33 @@
 //! The confirm dialog over everything: whether to do something that can't
-//! be undone (see `crate::confirm`). Also the look every modal dialog's
-//! buttons share (`DialogButton`), and the keys a dialog takes besides
-//! them, said at the left of its buttons (`Painter::dialog_keys`).
+//! be undone (see `crate::confirm`). Also where every modal dialog's
+//! buttons go (`dialog_buttons`, painted by `Painter::button`), and the
+//! keys a dialog takes besides them, said at the left of its buttons
+//! (`Painter::dialog_keys`).
 
 use super::{
-    BUTTON_RADIUS, Canvas, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter,
-    Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
-    Rect, SHADOW, band, focus_ring, hint_spots, mix, phys, rect_px,
+    ButtonStyle, Canvas, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette,
+    QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
+    band, button_width, hint_spots, phys,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-/// The widths of Cancel and of the button doing it.
-const BUTTONS: [i32; 2] = [84, 140];
-
-/// How a dialog's button looks: Cancel and the like plain, the action
-/// that only adds in the accent, one that stops or deletes in the error
-/// colour, one that can't be pressed now dimmed (still readable).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DialogButton {
-    Plain,
-    Primary,
-    Destructive,
-    Off,
+/// Where a modal dialog's buttons labelled `labels` go, in order: in the
+/// band `QUIT_PADDING` above `panel`'s bottom, right-aligned, each as wide
+/// as its label needs (`button_width`), `QUIT_BUTTON_GAP` apart.
+pub(super) fn dialog_buttons(panel: Rect, labels: &[&str]) -> Vec<Rect> {
+    let widths: Vec<i32> = labels.iter().map(|label| button_width(label)).collect();
+    let total = widths.iter().sum::<i32>() + (widths.len() as i32 - 1).max(0) * QUIT_BUTTON_GAP;
+    let y = panel.loc.y + panel.size.h - QUIT_PADDING - QUIT_BUTTON;
+    let mut x = panel.loc.x + panel.size.w - QUIT_PADDING - total;
+    widths
+        .into_iter()
+        .map(|w| {
+            let rect = Rectangle::new((x, y).into(), (w, QUIT_BUTTON).into());
+            x += w + QUIT_BUTTON_GAP;
+            rect
+        })
+        .collect()
 }
 
 /// What the confirm dialog shows.
@@ -48,8 +53,16 @@ pub struct ConfirmLayout {
     pub buttons: [Rect; 2],
 }
 
-/// Where the confirm dialog's parts go, centred on an output of `size`.
+/// Where the confirm dialog's parts go, centred on an output of `size`,
+/// its button doing it sized for a label as short as Cancel; the dialog
+/// itself is laid out by `confirm_dialog_layout`, for its label.
 pub fn confirm_layout(size: Size<i32, Logical>) -> ConfirmLayout {
+    confirm_dialog_layout(size, "")
+}
+
+/// Where the confirm dialog's parts go, centred on an output of `size`,
+/// its button doing it labelled `go`.
+pub fn confirm_dialog_layout(size: Size<i32, Logical>, go: &str) -> ConfirmLayout {
     let height =
         2 * QUIT_PADDING + QUIT_TITLE + QUIT_LINE_GAP + QUIT_BODY + 2 * QUIT_LINE_GAP + QUIT_BUTTON;
     let width = DIALOG_WIDTH.min(size.w);
@@ -66,84 +79,16 @@ pub fn confirm_layout(size: Size<i32, Logical>) -> ConfirmLayout {
     let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
     let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
     let body = Rectangle::new((x, body_y).into(), (inner, QUIT_BODY).into());
-    // Right-aligned, in order.
-    let total = BUTTONS.iter().sum::<i32>() + QUIT_BUTTON_GAP;
-    let left = panel.loc.x + width - QUIT_PADDING - total;
-    let button_y = panel.loc.y + height - QUIT_PADDING - QUIT_BUTTON;
-    let buttons = std::array::from_fn(|i| {
-        let before = BUTTONS[..i]
-            .iter()
-            .map(|w| w + QUIT_BUTTON_GAP)
-            .sum::<i32>();
-        Rectangle::new(
-            (left + before, button_y).into(),
-            (BUTTONS[i], QUIT_BUTTON).into(),
-        )
-    });
+    let buttons = dialog_buttons(panel, &["Cancel", go]);
     ConfirmLayout {
         panel,
         title,
         body,
-        buttons,
+        buttons: [buttons[0], buttons[1]],
     }
 }
 
 impl Painter {
-    /// A dialog's button labelled `label` in `rect` (buffer coordinates),
-    /// looking as `look` says; `hovered` lightens it, `focused` rings it
-    /// (in the error colour for a destructive one).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn dialog_button(
-        &self,
-        c: &mut Canvas,
-        label: &str,
-        rect: Rect,
-        look: DialogButton,
-        (hovered, focused): (bool, bool),
-        scale: f64,
-        p: &Palette,
-    ) {
-        let s = scale as f32;
-        let (x, y, w, h) = rect_px(rect, scale);
-        let (b, r) = ((scale.round() as f32).max(1.0), BUTTON_RADIUS * s);
-        let hovered = hovered && look != DialogButton::Off;
-        if focused {
-            let ring = if look == DialogButton::Destructive {
-                p.error
-            } else {
-                p.accent
-            };
-            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, ring);
-        }
-        let color = match look {
-            DialogButton::Primary | DialogButton::Destructive => {
-                let base = if look == DialogButton::Primary {
-                    p.accent
-                } else {
-                    p.error
-                };
-                let fill = if hovered {
-                    mix(base, p.text, 0.12)
-                } else {
-                    base
-                };
-                c.rounded(x, y, w, h, r, fill);
-                p.on_accent
-            }
-            DialogButton::Plain | DialogButton::Off => {
-                let fill = if hovered { p.selected } else { p.element };
-                c.rounded(x, y, w, h, r, p.border);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                if look == DialogButton::Off {
-                    p.muted
-                } else {
-                    p.text
-                }
-            }
-        };
-        self.centered(c, label, FONT_SIZE, rect, scale, color);
-    }
-
     /// The keys a dialog takes besides its buttons (`hints`, keycaps then
     /// what each does) from the left of `row` (buffer coordinates), the
     /// band its buttons sit in, up to `end`: as many as fit.
@@ -177,7 +122,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = confirm_layout(size);
+        let layout = confirm_dialog_layout(size, view.go);
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
@@ -197,13 +142,13 @@ impl Painter {
         }
 
         for (i, rect) in layout.buttons.iter().enumerate() {
-            let (label, look) = if i == 1 {
-                (view.go, DialogButton::Destructive)
+            let (label, style) = if i == 1 {
+                (view.go, ButtonStyle::Destructive)
             } else {
-                ("Cancel", DialogButton::Plain)
+                ("Cancel", ButtonStyle::Plain)
             };
             let state = (view.hover == Some(i), view.selected == i);
-            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
+            self.button(&mut c, label, shift(*rect), state, style, scale, p);
         }
         c.into_buffer(false)
     }
@@ -222,5 +167,39 @@ mod tests {
         }
         assert!(l.buttons[0].loc.y >= l.body.loc.y + l.body.size.h);
         assert!(l.buttons[0].loc.x + l.buttons[0].size.w < l.buttons[1].loc.x);
+    }
+
+    #[test]
+    fn dialog_buttons_end_at_the_right_padding_each_wide_enough_for_its_label() {
+        let panel = Rectangle::new((100, 50).into(), (DIALOG_WIDTH, 200).into());
+        let labels = ["Cancel", "Open in new gerdr"];
+        let rects = dialog_buttons(panel, &labels);
+        assert_eq!(rects.len(), 2);
+        let last = rects[1];
+        assert_eq!(
+            last.loc.x + last.size.w,
+            panel.loc.x + panel.size.w - QUIT_PADDING
+        );
+        assert_eq!(
+            last.loc.y + last.size.h,
+            panel.loc.y + panel.size.h - QUIT_PADDING
+        );
+        assert_eq!(
+            rects[0].loc.x + rects[0].size.w + QUIT_BUTTON_GAP,
+            last.loc.x
+        );
+        for (rect, label) in rects.iter().zip(labels) {
+            assert_eq!(rect.size.w, button_width(label));
+        }
+        assert!(dialog_buttons(panel, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_confirm_button_is_as_wide_as_its_label_needs() {
+        let size = (1920, 1080).into();
+        let long = confirm_dialog_layout(size, "Close pane and stop it");
+        let short = confirm_dialog_layout(size, "Close");
+        assert!(long.buttons[1].size.w > short.buttons[1].size.w);
+        assert_eq!(confirm_layout(size).panel, long.panel);
     }
 }

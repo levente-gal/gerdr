@@ -16,13 +16,13 @@
 //! Actions the footer has no room for go behind a "more" button.
 
 use super::{
-    BUTTON_RADIUS, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE, Density,
-    FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
-    HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
-    Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, SearchBar, SearchPart,
-    arrow, band, check, chevron_down, coverage, field_text, focus_ring, folder, found_split,
-    found_within, git_branch, icon_sdf, measure, measure_bold, measure_mono, mix, phys, physical,
-    plus, rect_px, rounded_rect, search_spots, segment, trash,
+    BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
+    Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
+    HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
+    MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE,
+    SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text, folder,
+    found_split, found_within, git_branch, icon_sdf, measure, measure_bold, measure_mono, mix,
+    phys, physical, plus, rect_px, rounded_rect, search_spots, segment, trash,
 };
 use std::ops::Range;
 
@@ -4778,37 +4778,13 @@ impl Painter {
             let hovered = view.hover == Some(ReposHit::Button(button));
             let rect = shift(rect);
             let focused = i == sheet.default;
-            if i == last && sheet.danger {
-                self.danger_button(c, button.label(), rect, (hovered, focused), scale, p);
-            } else {
-                let look = (hovered, focused);
-                self.button(c, button.label(), rect, look, i == last, scale, p);
-            }
+            let style = match i == last {
+                true if sheet.danger => ButtonStyle::Destructive,
+                true => ButtonStyle::Primary,
+                false => ButtonStyle::Plain,
+            };
+            self.button(c, button.label(), rect, (hovered, focused), style, scale, p);
         }
-    }
-
-    /// A button in `rect` like `Painter::button`'s primary one, but in the
-    /// error colour: it loses what can't be got back.
-    fn danger_button(
-        &self,
-        c: &mut Canvas,
-        label: &str,
-        rect: Rect,
-        (hovered, focused): (bool, bool),
-        scale: f64,
-        p: &Palette,
-    ) {
-        let (x, y, w, h) = rect_px(rect, scale);
-        if focused {
-            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.error);
-        }
-        let fill = if hovered {
-            mix(p.error, p.text, 0.12)
-        } else {
-            p.error
-        };
-        c.rounded(x, y, w, h, BUTTON_RADIUS * scale as f32, fill);
-        self.centered(c, label, FONT_SIZE, rect, scale, p.on_accent);
     }
 }
 

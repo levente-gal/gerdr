@@ -2,9 +2,10 @@
 //! restarting it runs again (see `crate::restart`).
 
 use super::{
-    CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, DialogButton, FONT_SIZE, LABEL_FONT_SIZE,
+    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE,
     POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, mix, phys, rect_px,
+    QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, dialog_buttons, mix, phys,
+    rect_px,
 };
 use crate::restart::more_rows;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -22,8 +23,8 @@ const ROW_INSET: i32 = 6;
 const PLACE_GAP: i32 = 12;
 /// The room kept above and below the dialog on a short output.
 const MARGIN: i32 = 40;
-/// Cancel, Restart: labels and widths.
-const BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Restart", 96)];
+/// The buttons' labels.
+const BUTTONS: [&str; 2] = ["Cancel", "Restart"];
 
 /// What the restart dialog shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,20 +102,8 @@ pub fn restart_layout(size: Size<i32, Logical>, rows: usize) -> RestartLayout {
             Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
         })
         .collect();
-    // Right-aligned, in order.
-    let total = BUTTONS.iter().map(|(_, w)| w).sum::<i32>() + QUIT_BUTTON_GAP;
-    let left = panel.loc.x + width - QUIT_PADDING - total;
-    let button_y = panel.loc.y + height - QUIT_PADDING - QUIT_BUTTON;
-    let buttons = std::array::from_fn(|i| {
-        let before = BUTTONS[..i]
-            .iter()
-            .map(|(_, w)| w + QUIT_BUTTON_GAP)
-            .sum::<i32>();
-        Rectangle::new(
-            (left + before, button_y).into(),
-            (BUTTONS[i].1, QUIT_BUTTON).into(),
-        )
-    });
+    let buttons = dialog_buttons(panel, &BUTTONS);
+    let buttons = [buttons[0], buttons[1]];
     RestartLayout {
         panel,
         title,
@@ -255,17 +244,17 @@ impl Painter {
                 self.dialog_keys(&mut c, &KEYS, row, end, scale, p);
             }
         }
-        for (i, (rect, (label, _))) in layout.buttons.iter().zip(BUTTONS).enumerate() {
-            let look = if i == 1 {
-                DialogButton::Primary
+        for (i, (rect, label)) in layout.buttons.iter().zip(BUTTONS).enumerate() {
+            let style = if i == 1 {
+                ButtonStyle::Primary
             } else {
-                DialogButton::Plain
+                ButtonStyle::Plain
             };
             let state = (
                 view.hover == Some(RestartHit::Button(i)),
                 view.selected == i,
             );
-            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
+            self.button(&mut c, label, shift(*rect), state, style, scale, p);
         }
         c.into_buffer(false)
     }
