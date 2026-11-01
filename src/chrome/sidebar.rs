@@ -27,8 +27,6 @@
 //! `SidebarState`.
 
 use super::layers::{Part, RowCache};
-#[cfg(test)]
-use super::repos::scrollbar;
 use super::{
     AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
     Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
@@ -135,8 +133,9 @@ const ACTIVE_TINT: f32 = 0.45;
 /// How strongly the active workspace's header buttons show at rest, as
 /// a fraction of their hovered look.
 const ACTIVE_BUTTONS: f32 = 0.45;
-/// How much of the warning colour a blocked agent's "blocked" pill has.
-const BLOCKED_PILL_TINT: f32 = 0.25;
+/// How much of the warning colour a blocked agent's "blocked" pill has,
+/// over the panel (see `blocked_pill`).
+const BLOCKED_PILL_TINT: f32 = 0.2;
 /// The hint an empty sidebar shows under its header, a line each, and
 /// how far under the header it starts.
 const EMPTY_HINT: [&str; 2] = [
@@ -1862,17 +1861,16 @@ impl Painter {
         // The header over the rows scrolled under it.
         self.sidebar_head(&mut c, &SidebarHead::of(view), size.w, scale, p);
 
-        // Where the rows are scrolled to, when they do not all fit.
-        let shown = size.h - BAR_HEIGHT;
-        let total = shown + layout.max_scroll(size.h);
-        let first = layout.scroll.max(0) as usize;
-        scrollbar(
-            &mut c,
-            scroll_track(size),
-            (first, shown.max(0) as usize, total.max(0) as usize),
-            scale,
-            p,
-        );
+        // Where the rows are scrolled to, when they do not all fit: the
+        // thumb the chrome composes (see `SidebarLayers`).
+        if let Some(bar) = sidebar_thumb(&layout, size.w, size, state.scroll) {
+            let (x, _, w, _) = rect_px(bar.track, scale);
+            let (y, h) = (
+                (bar.top * scale).round() as f32,
+                (bar.h * scale).round() as f32,
+            );
+            c.rounded(x, y, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        }
         sidebar_edge(&mut c, scale, p);
         c.into_buffer(true)
     }
@@ -2661,7 +2659,7 @@ impl Painter {
             let pill_h = px(PILL_HEIGHT) as f32;
             let pill_x = (right - pill_w).round();
             let pill_y = (line_band.0 as f32 + (line_band.1 as f32 - pill_h) / 2.0).round();
-            let pill_fill = mix(surface, p.warning, BLOCKED_PILL_TINT);
+            let pill_fill = blocked_pill(p);
             c.rounded(
                 pill_x,
                 pill_y,
@@ -2963,30 +2961,25 @@ pub fn sidebar_thumb(
     output: Size<i32, Logical>,
     scroll: f64,
 ) -> Option<super::Thumb> {
-    let max = layout.max_scroll(output.h);
     let shown = output.h - BAR_HEIGHT;
     let track = scroll_track((width, output.h).into());
-    let room = track.size.h as f64;
-    if max <= 0 || shown <= 0 || room <= 0.0 {
-        return None;
-    }
-    let total = (shown + max) as f64;
-    let h = (room * shown as f64 / total)
-        .max((THUMB_MIN as f64).min(room))
-        .min(room)
-        .round();
-    let top = track.loc.y as f64 + (room - h) * scroll.clamp(0.0, max as f64) / max as f64;
-    Some(super::Thumb {
-        track,
-        top,
-        h,
-        last: max as f64,
-    })
+    let total = (shown + layout.max_scroll(output.h)) as f64;
+    let bar = super::ListBar {
+        down: scroll,
+        total,
+    };
+    super::Thumb::of(track, shown as f64, bar)
 }
 
-/// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
-/// a count or label on a coloured pill keeps its contrast in both themes.
-fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+/// The fill of a blocked card's status pill: the warning colour over the
+/// panel, not over the card, so its label reads at 4.5:1 or more however
+/// lit the card is (hovered, open, pulsing), in both themes.
+fn blocked_pill(p: &Palette) -> Rgb {
+    mix(p.panel, p.warning, BLOCKED_PILL_TINT)
+}
+
+/// How far apart `a` and `b` are in WCAG contrast, 1 to 21.
+fn contrast(a: Rgb, b: Rgb) -> f32 {
     let luminance = |[r, g, b]: Rgb| {
         let lin = |v: u8| {
             let v = v as f32 / 255.0;
@@ -2998,11 +2991,14 @@ fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
         };
         0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
     };
-    let contrast = |a: Rgb| {
-        let (a, b) = (luminance(a), luminance(fill));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    };
-    if contrast(p.on_accent) >= contrast(p.text) {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
+/// a count or label on a coloured pill keeps its contrast in both themes.
+fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+    if contrast(p.on_accent, fill) >= contrast(p.text, fill) {
         p.on_accent
     } else {
         p.text
@@ -3018,8 +3014,6 @@ fn sidebar_edge(c: &mut Canvas, scale: f64, p: &Palette) {
 /// How far above its top a workspace's block buffer reaches: a name being
 /// renamed stands out of a compact header's band.
 const BLOCK_OVER: i32 = 2;
-/// The shortest the scrollbar's thumb gets, as in the repositories panel.
-const THUMB_MIN: i32 = 24;
 
 /// What a workspace's block is drawn from: its view and its agents',
 /// whether it is the active one, what moves in it, the name typed while
@@ -3129,19 +3123,6 @@ impl Painter {
         self.inbox_rows(&mut c, title, &rows, key.density, scale, p);
         c.into_buffer(true)
     }
-
-    /// The sidebar scrollbar's thumb, `size` big.
-    fn scroll_thumb(
-        &self,
-        size: Size<i32, Logical>,
-        scale: f64,
-        p: &Palette,
-    ) -> MemoryRenderBuffer {
-        let mut c = Canvas::new(physical(size, scale));
-        let (w, h) = (c.w as f32, c.h as f32);
-        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
-        c.into_buffer(false)
-    }
 }
 
 /// The sidebar as the chrome shows it: its frame (the header and what
@@ -3216,7 +3197,7 @@ impl SidebarLayers {
         if let Some(bar) = sidebar_thumb(&layout, width, output, scroll) {
             let thumb = (SCROLLBAR_WIDTH, bar.h as i32).into();
             let buffer = self.thumb.get((thumb, theme, scale), |(size, ..)| {
-                painter.scroll_thumb(*size, scale, theme.palette())
+                painter.bar_thumb(*size, scale, theme.palette())
             });
             let at = (bar.track.loc.x as f64, bar.top).into();
             parts.push(Part::new(buffer, bar.track.loc, thumb, 1.0).at(at));
@@ -3339,6 +3320,21 @@ impl SidebarLayers {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_blocked_pills_label_reads_at_4_5_to_1_in_both_themes() {
+        use super::{blocked_pill, contrast, ink_on, mix, pulse_alpha};
+        for theme in [crate::chrome::Theme::Dark, crate::chrome::Theme::Light] {
+            let p = theme.palette();
+            let pill = blocked_pill(p);
+            let ink = ink_on(pill, p);
+            // At rest and with the pulse at its strongest over it.
+            for fill in [pill, mix(pill, p.warning, pulse_alpha(1.0))] {
+                let ratio = contrast(ink, fill);
+                assert!(ratio >= 4.5, "{theme:?}: {ratio}");
+            }
+        }
+    }
+
     use super::{
         AGENT_ROW, AGENT_ROW_COMPACT, AGENT_SLOT, ATTENTION_BOTTOM, AgentIcon, AgentLine,
         AgentView, BLOCK_GAP, BRANCH_LINE, BRANCH_LINE_COMPACT, CARD_LINE, CHILD_GAP, CHILD_TEXT_X,
