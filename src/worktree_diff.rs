@@ -911,7 +911,7 @@ mod tests {
     #[test]
     fn its_keys_are_the_diffs_and_esc_closes_it() {
         let mut wd = read();
-        let mut key =
+        let key =
             |wd: &mut WorktreeDiff, mods: ModifiersState, sym: Keysym| wd.key(&mods, sym, sym, ENV);
         // Space checks nothing: there is nothing to check here.
         assert_eq!(key(&mut wd, none(), Keysym::Down), None);
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn clearing_its_review_asks_first() {
         let mut wd = read();
-        let mut key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
         for sym in [
             Keysym::Down,
             Keysym::Down,

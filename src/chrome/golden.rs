@@ -436,10 +436,10 @@ fn project_menu() -> ProjectMenuView {
         hints: vec![
             ("Enter".into(), "open".into()),
             ("Ctrl+N".into(), "new".into()),
-            ("Ctrl+R".into(), "rename".into()),
+            ("F2".into(), "rename".into()),
             ("Ctrl+E".into(), "commands".into()),
             ("Ctrl+O".into(), "project file".into()),
-            ("Ctrl+S".into(), "stop".into()),
+            ("Ctrl+Q".into(), "stop".into()),
             ("Del".into(), "forget".into()),
             ("Esc".into(), "close".into()),
         ],
@@ -550,14 +550,17 @@ fn inbox() -> InboxView {
             "1h",
         ),
         label(I::Repo, "Repos", 3, 1),
-        inbox_item(
-            "g1",
-            "gerdr",
-            "gerdr · main · 3 changes, ↑2",
-            I::Repo,
-            T::Attention,
-            "",
-        ),
+        {
+            let mut row = inbox_item("g1", "gerdr", "gerdr · main", I::Repo, T::Attention, "");
+            if let InboxRow::Item(line) = &mut row {
+                line.marks = Some(super::InboxMarks {
+                    dirty: true,
+                    ahead: 2,
+                    ..Default::default()
+                });
+            }
+            row
+        },
         inbox_item(
             "g2",
             "fix-scroll",
@@ -618,7 +621,7 @@ fn inbox() -> InboxView {
         ),
     ];
     if let InboxRow::Item(line) = &mut rows[1] {
-        line.buttons = vec![button("Snooze", "Ctrl+S"), button("Dismiss", "Delete")];
+        line.buttons = vec![button("Snooze", "Ctrl+H"), button("Dismiss", "Del")];
     }
     InboxView {
         project: Some("gerdr".into()),
@@ -650,9 +653,9 @@ fn inbox() -> InboxView {
             block_tail: true,
             buttons: vec![
                 button("Go to", "Enter"),
-                button("Snooze", "Ctrl+S"),
-                button("Tomorrow", "Ctrl+Shift+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Tomorrow", "Ctrl+Shift+H"),
+                button("Dismiss", "Del"),
             ],
         }),
         hints: vec![
@@ -746,59 +749,59 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0xe8b1959bc938f770, // sidebar
+        0x742820c5c927d818, // sidebar
         0x6f51308dd7cdce6c, // tab_strip
-        0x70666aa9cb6cb287, // pane_bar
+        0x5fee9efd7b4d90d0, // pane_bar
         0x866d59a70ebe252d, // help
-        0xeac2e664137d8223, // menu
-        0x1abd611161da9a5d, // switcher
+        0x378d0ffdb2449b77, // menu
+        0xfc09c643c2d57ae1, // switcher
         0xe4d55e0a322e116f, // welcome
-        0x39a556744c89a255, // quit
-        0xd5fbf9747a465bfc, // project_menu
+        0x56b2fabb54864c87, // quit
+        0x92a49c766cb37d1c, // project_menu
         0x8ee98ca10770cddc, // project_form
-        0xa135931fecb12b15, // toast
+        0xbd0d423ca3de12bd, // toast
     ],
     // Dark at 2
     [
-        0x38c5ddcf14f79f97, // sidebar
+        0x9ddccb37c80d489b, // sidebar
         0x16e4f5440b99562b, // tab_strip
-        0xfb035f375a8a1a32, // pane_bar
+        0x45306f6b0cd01731, // pane_bar
         0x56045b72862ed173, // help
-        0x1483bdc67e595289, // menu
-        0x256730c796797af7, // switcher
+        0xd724a365fa94d169, // menu
+        0x1a39f33e0a29f83b, // switcher
         0xc6a2b9324f6b7b75, // welcome
-        0xe9c8747e5c764143, // quit
-        0xde799af24ea3160e, // project_menu
+        0x4205477c855eafb1, // quit
+        0x68b0b29c55156a50, // project_menu
         0x8d221a9b0c1b93a2, // project_form
-        0x03fe8c8c1a28bb89, // toast
+        0x8a9a152ce2a17651, // toast
     ],
     // Light at 1
     [
-        0x15840963c4e44961, // sidebar
-        0x4a807baae40c759e, // tab_strip
-        0x665255172a350d93, // pane_bar
+        0x4833c6a51e833328, // sidebar
+        0x979ae0979da03949, // tab_strip
+        0x16f9e0cb60272263, // pane_bar
         0x8c0302567b35f0c3, // help
-        0x3276e8655270d746, // menu
-        0x8ebdb3ee4ddea3a3, // switcher
-        0x0bf38b649779155b, // welcome
-        0x9d538d4e1ed748f3, // quit
-        0xa0b64fb50d67fbc2, // project_menu
-        0x6c3fd3a9752c217d, // project_form
-        0x09527b9387445087, // toast
+        0xf82050c3b2848862, // menu
+        0x422064c274f92b90, // switcher
+        0x232afdce7d51101b, // welcome
+        0x53f1ae22c4d0706b, // quit
+        0xaf88a1744cdd63ab, // project_menu
+        0x60183ec03327c57f, // project_form
+        0x3023720e0af5627f, // toast
     ],
     // Light at 2
     [
-        0x2a0eceb7e43deab0, // sidebar
-        0x8ef3bfabf0e0d845, // tab_strip
-        0x97f1c4dce8d11f3a, // pane_bar
+        0xe9feefcbe02c7ed6, // sidebar
+        0x0f133010f45d3831, // tab_strip
+        0x1d9ebaa9665f8db5, // pane_bar
         0x22f444d49649f855, // help
-        0x129626ffb502a663, // menu
-        0xd9a115e473634844, // switcher
-        0x2408bfddb0031e83, // welcome
-        0x37d743dd24ddd24b, // quit
-        0xf7d02feda2f8909b, // project_menu
-        0xf77024bdb9b54f61, // project_form
-        0x3a08c772671fb90b, // toast
+        0xc17d1e64d3c77f97, // menu
+        0x77eb0acf1f4d4fd5, // switcher
+        0xc5b0dff47ac46d40, // welcome
+        0x63d86bf4462a3379, // quit
+        0xad9c7bc5aa554ff4, // project_menu
+        0xf75ddc7c5bea7b27, // project_form
+        0xd1410a8fb372b973, // toast
     ],
 ];
 
@@ -806,47 +809,47 @@ const GOLDEN: [[u64; 11]; 4] = [
 const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     // Dark at 1
     [
-        0xa2b92bfd04e8baf2, // full_menu
+        0x639ee0c7e0afc916, // full_menu
         0x833a9487b45a04b1, // help_pinned
-        0x1be09a92a642789d, // toast_action
-        0x08b20795a8acaa71, // tooltip
+        0xc6c3778480e13765, // toast_action
+        0x6960fb479b40da3d, // tooltip
         0xd5b2438c44e2d360, // placeholder
-        0x3f94e9f481ad4ddb, // placeholder_timed_out
+        0x0b01f4540b304877, // placeholder_timed_out
         0x7a426c6be23d66a6, // spinner
         0x5f7da883de161583, // blink_dot
     ],
     // Dark at 2
     [
-        0xc4863a27ee827b7f, // full_menu
+        0x642484e32b14644f, // full_menu
         0xa52ac88120332539, // help_pinned
-        0xc1ea1c0802cb326e, // toast_action
-        0x78986509fec8138c, // tooltip
+        0xbe46498ec5ce75b6, // toast_action
+        0xad169f115b70c54c, // tooltip
         0x94bf628b2c8d8e61, // placeholder
-        0x914e6acce8dc1bda, // placeholder_timed_out
+        0x430bc916e7ac895b, // placeholder_timed_out
         0x2f28c94a7002e520, // spinner
         0x3938d7cb530659b5, // blink_dot
     ],
     // Light at 1
     [
-        0x3bc1ce012f5b7d01, // full_menu
+        0x33da81c85d2c4485, // full_menu
         0x50daf004ca030b63, // help_pinned
-        0x0482566dca739991, // toast_action
-        0x59892211d7643278, // tooltip
+        0x3b334e05c8789bd9, // toast_action
+        0x46ec14c3018cfa90, // tooltip
         0x848913a059883552, // placeholder
-        0x8bb8ef097eeae24a, // placeholder_timed_out
-        0x4345ed79149d747b, // spinner
-        0xbda6ff535efdbed2, // blink_dot
+        0xe7444f2e3fd03c3f, // placeholder_timed_out
+        0x6cb91debc8d3c473, // spinner
+        0x55c89cc3e0120adb, // blink_dot
     ],
     // Light at 2
     [
-        0x3ab6da8086162a68, // full_menu
+        0x7d8b5365601ae144, // full_menu
         0x357c8c2ee4c38806, // help_pinned
-        0xc47e8d329efbe42a, // toast_action
-        0xc0b4132b818d96b8, // tooltip
+        0xeb0197cd8185dc12, // toast_action
+        0x647ba732cdd8bd58, // tooltip
         0x9bc50d6953da1fd5, // placeholder
-        0xb6a46ef59a601576, // placeholder_timed_out
-        0x883035c0209e314f, // spinner
-        0x1207ad7c8929fa6d, // blink_dot
+        0x2a2964b70d0b1b41, // placeholder_timed_out
+        0x5ad35f5c0797002e, // spinner
+        0x349f0f6edf45454d, // blink_dot
     ],
 ];
 

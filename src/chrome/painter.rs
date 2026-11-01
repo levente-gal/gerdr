@@ -785,7 +785,7 @@ impl Painter {
     /// How wide a dialog button labelled `label` is (logical pixels): its
     /// text with room either side, and never under `BUTTON_MIN_WIDTH`, so
     /// no dialog keeps a table of widths that drift from its labels.
-    #[allow(dead_code)] // The dialogs take it up in wave 2.
+    #[cfg(test)]
     pub(super) fn button_width(&self, label: &str) -> i32 {
         button_width(label)
     }

@@ -21,6 +21,7 @@ pub enum Bar {
     Scrollback,
     ReposTree,
     ReposDetail,
+    Welcome,
 }
 
 /// A scrollbar's thumb held with the left button: which, and how far
@@ -42,6 +43,7 @@ impl Gerdr {
             Some(Overlay::Inbox) => &[Bar::Inbox],
             Some(Overlay::Scrollback) => &[Bar::Scrollback],
             Some(Overlay::Switcher) => &[Bar::Switcher],
+            Some(Overlay::Welcome) => &[Bar::Welcome],
             Some(_) => &[],
             None => &[Bar::Sidebar],
         };
@@ -57,6 +59,7 @@ impl Gerdr {
     fn thumb(&self, bar: Bar) -> Option<Thumb> {
         let size = self.output_size();
         match bar {
+            Bar::Welcome => self.welcome_thumb(),
             Bar::Sidebar => chrome::sidebar_thumb(
                 &self.sidebar_layout(),
                 self.sidebar_width,
@@ -146,6 +149,7 @@ impl Gerdr {
             Bar::Scrollback => self.scrollback_scroll_to(at),
             Bar::ReposTree => self.repos_scroll_to(at, false),
             Bar::ReposDetail => self.repos_scroll_to(at, true),
+            Bar::Welcome => self.welcome_scroll_to(at),
         }
     }
 }
