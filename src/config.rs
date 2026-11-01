@@ -90,6 +90,9 @@ struct Config {
     agents: BTreeMap<String, String>,
 }
 
+/// How a problem of the `[keys]` table starts.
+const KEYS_PROBLEM: &str = "[keys] ";
+
 /// The tables the file may have.
 const TABLES: [&str; 7] = ["keys", "apps", "ui", "git", "keep", "inbox", "agents"];
 
@@ -326,8 +329,9 @@ pub fn load() -> Settings {
     };
     let (keymap, apps, ui, git, inbox, found, keep, agents) = from_text(&text);
     problems.extend(found);
+    // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
-    for problem in &problems {
+    for problem in problems.iter().filter(|p| !p.starts_with(KEYS_PROBLEM)) {
         crate::problems::report("config", format!("Settings: {problem}"));
     }
     let linear = inbox.linear(std::env::var("LINEAR_API_KEY").ok());
@@ -367,7 +371,11 @@ pub fn from_text(
     let mut problems = Vec::new();
     let config = Config::read(text, &mut problems);
     let (keymap, keys_problems) = Keymap::new(config.keys);
-    problems.extend(keys_problems.into_iter().map(|p| format!("[keys] {p}")));
+    problems.extend(
+        keys_problems
+            .into_iter()
+            .map(|p| format!("{KEYS_PROBLEM}{p}")),
+    );
     let mut apps = Vec::new();
     for (name, command) in config.apps {
         match command.trim() {

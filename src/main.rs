@@ -1402,6 +1402,9 @@ pub struct Gerdr {
     /// The project just made and being shown, by id: the switch's notice
     /// says it was made.
     pub just_created: Option<String>,
+    /// A project to show although another gerdr has it open, by id (see
+    /// `Gerdr::attach_project`).
+    pub attach_once: Option<String>,
     /// The project menu, while it is open.
     pub project_menu: Option<project_menu::ProjectMenu>,
     /// The pointer is over the sidebar header's project name.
@@ -4040,7 +4043,12 @@ impl Gerdr {
                     self.move_pane_to_tab(id, None);
                 }
             }
+            // Their key closes them again, as the inbox's does.
+            Action::Worktrees if self.worktrees.is_open() => {
+                self.apply_worktrees(worktrees::Outcome::Close)
+            }
             Action::Worktrees => self.open_worktrees(None),
+            Action::Repos if self.repos.is_open() => self.apply_repos(repos::Outcome::Close),
             Action::Repos => self.open_repos(),
             Action::Inbox if self.inbox.is_open() => self.close_inbox(),
             Action::Inbox => self.open_inbox(None),
@@ -4915,6 +4923,7 @@ impl Gerdr {
             || self.repos.is_open()
             || self.inbox.is_open()
             || self.scrollback.is_some()
+            || self.switcher.is_some()
         {
             return None;
         }
@@ -5201,6 +5210,7 @@ impl Gerdr {
     /// shown here: never when started with `--attach`.
     fn open_elsewhere(&self, id: &str) -> bool {
         !self.attach
+            && self.attach_once.as_deref() != Some(id)
             && self.project.as_deref() != Some(id)
             && self
                 .project_lock
@@ -5209,11 +5219,18 @@ impl Gerdr {
             && project_lock::dir().is_some_and(|dir| project_lock::is_open_elsewhere(&dir, id))
     }
 
+    /// Show project `id` here although another gerdr has it open, as
+    /// `--attach` does for every project: the refusal's "Join here".
+    pub fn attach_project(&mut self, id: &str) {
+        self.attach_once = Some(id.to_owned());
+        self.switch_project(id);
+    }
+
     /// Say that project `id` isn't shown because another gerdr has it
     /// open: on the welcome screen when nothing is shown, else in a toast.
     fn refuse_open(&mut self, id: &str) {
         let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
-        let why = format!("{name} is open in another gerdr — pick another, or start with --attach");
+        let why = format!("{name} is open in another gerdr: pick another, or join it here");
         if self.project.is_some() {
             return self.toast(why, Level::Warning);
         }
@@ -6342,6 +6359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stopping: HashSet::new(),
         forget_after_stop: HashSet::new(),
         just_created: None,
+        attach_once: None,
         project_menu: None,
         header_hover: false,
         previous_project: None,
