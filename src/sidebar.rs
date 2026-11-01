@@ -581,7 +581,8 @@ impl Gerdr {
             SidebarHit::Restart(i) => {
                 let rect = layout.rows.get(i)?.restart?;
                 // Each command, where it runs, whether it has exited, and
-                // whether the user chose to leave it alone.
+                // whether the user chose to leave it alone: status words
+                // in sentence case, as every tooltip has them.
                 let home = home_dir();
                 let choices = self.restart_choices(i);
                 let fields: Vec<_> = self
@@ -592,13 +593,13 @@ impl Gerdr {
                             paths::display(dir, home.as_deref(), 40)
                         });
                         if self.pane_bar_content(&pane_id).status == BarStatus::Exited {
-                            place = format!("exited · {place}");
+                            place = format!("Exited · {place}");
                         }
                         if choices
                             .iter()
                             .any(|ch| ch.command == c.command && !ch.restart)
                         {
-                            place = format!("skipped · {place}");
+                            place = format!("Skipped · {place}");
                         }
                         (chrome::command_line(&c.command).unwrap_or(c.command), place)
                     })
