@@ -299,7 +299,11 @@ impl DiffView {
         else {
             return;
         };
-        if hit.within != Within::Path && self.folded.remove(&(hit.root.clone(), hit.path.clone())) {
+        // In a folded file, or past the lines a long one shows: shown.
+        let key = (hit.root.clone(), hit.path.clone());
+        let hidden = hit.within != Within::Path
+            && (self.folded.remove(&key) | (hit.row.is_none() && self.whole.insert(key)));
+        if hidden {
             self.build_rows(ctx.sections, self.diff_anchor());
         }
         let row = self

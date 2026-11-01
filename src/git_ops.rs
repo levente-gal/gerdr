@@ -15,7 +15,11 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Condvar, Mutex, mpsc},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -32,6 +36,8 @@ pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long to wait between looks at whether a command has finished, at most.
 const POLL: Duration = Duration::from_millis(20);
+/// How long a command stopped by the user has to end before it is killed.
+const STOP_GRACE: Duration = Duration::from_secs(1);
 /// How long a command's output may still take to arrive once it has ended:
 /// something it left running (a detached `gc`) may hold the pipe open.
 const GRACE: Duration = Duration::from_secs(2);
@@ -162,7 +168,49 @@ struct Output {
     stderr: String,
     /// It was killed after this long.
     timed_out: Option<Duration>,
+    /// It was stopped, asked to by the user (`Watch::stop`).
+    stopped: bool,
 }
+
+/// What a thread running commands for a batch is watched by: a flag the
+/// user sets to stop it (its commands killed, those after not run), and
+/// where to say what it waits for (a lock held, to try again).
+pub struct Watch {
+    pub stop: Arc<AtomicBool>,
+    pub say: Box<dyn Fn(&str)>,
+}
+
+thread_local! {
+    /// The watch over the commands this thread runs, if any.
+    static WATCH: std::cell::RefCell<Option<Watch>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Watch the commands this thread runs from now on with `watch`; `None`
+/// to stop.
+pub fn watch(watch: Option<Watch>) {
+    WATCH.with(|w| *w.borrow_mut() = watch);
+}
+
+/// Whether this thread's commands were asked to stop.
+fn stopping() -> bool {
+    WATCH.with(|w| {
+        w.borrow()
+            .as_ref()
+            .is_some_and(|w| w.stop.load(AtomicOrdering::Relaxed))
+    })
+}
+
+/// Say `what` this thread waits for, to its watch.
+fn say(what: &str) {
+    WATCH.with(|w| {
+        if let Some(w) = w.borrow().as_ref() {
+            (w.say)(what);
+        }
+    });
+}
+
+/// Why a step wasn't done: the user stopped the batch.
+pub const STOPPED: &str = "stopped";
 
 #[cfg(test)]
 thread_local! {
@@ -249,34 +297,38 @@ fn exec(dir: &Path, args: &[&str], reach: Reach) -> Output {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE");
-    let finish =
-        |stdout: String, stderr: String, code: Option<i32>, timed_out: Option<Duration>| {
-            let mut output = stdout.clone();
-            if !output.is_empty() && !output.ends_with('\n') && !stderr.is_empty() {
+    let finish = |stdout: String,
+                  stderr: String,
+                  code: Option<i32>,
+                  timed_out: Option<Duration>,
+                  stopped: bool| {
+        let mut output = stdout.clone();
+        if !output.is_empty() && !output.ends_with('\n') && !stderr.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&stderr);
+        if let Some(after) = timed_out {
+            if !output.is_empty() && !output.ends_with('\n') {
                 output.push('\n');
             }
-            output.push_str(&stderr);
-            if let Some(after) = timed_out {
-                if !output.is_empty() && !output.ends_with('\n') {
-                    output.push('\n');
-                }
-                output.push_str(&format!("(killed after {} s)\n", after.as_secs_f32()));
-            }
-            Output {
-                ran: Ran {
-                    command: line(args),
-                    output,
-                    ok: code == Some(0),
-                },
-                code,
-                stdout,
-                stderr,
-                timed_out,
-            }
-        };
+            output.push_str(&format!("(killed after {} s)\n", after.as_secs_f32()));
+        }
+        Output {
+            ran: Ran {
+                command: line(args),
+                output,
+                ok: code == Some(0),
+            },
+            code,
+            stdout,
+            stderr,
+            timed_out,
+            stopped,
+        }
+    };
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(err) => return finish(String::new(), format!("git: {err}\n"), None, None),
+        Err(err) => return finish(String::new(), format!("git: {err}\n"), None, None, false),
     };
     let stdout = Drain::new(child.stdout.take());
     let stderr = Drain::new(child.stderr.take());
@@ -288,24 +340,42 @@ fn exec(dir: &Path, args: &[&str], reach: Reach) -> Output {
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
         let _ = child.wait();
     };
-    let (code, timed_out) = loop {
+    // Stopped by the user: asked to end first, so that git lets go of its
+    // locks, then killed after a while.
+    let stop = |child: &mut std::process::Child| {
+        // Safety: signals the process group it leads.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+        let until = Instant::now() + STOP_GRACE;
+        while Instant::now() < until {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
+        kill(child);
+    };
+    let (code, timed_out, stopped) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break (status.code(), None),
+            Ok(Some(status)) => break (status.code(), None, false),
+            Ok(None) if stopping() => {
+                stop(&mut child);
+                break (None, None, true);
+            }
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(pause);
                 pause = (pause * 2).min(POLL);
             }
             Ok(None) => {
                 kill(&mut child);
-                break (None, Some(timeout));
+                break (None, Some(timeout), false);
             }
             Err(_) => {
                 kill(&mut child);
-                break (None, None);
+                break (None, None, false);
             }
         }
     };
-    finish(stdout.finish(), stderr.finish(), code, timed_out)
+    finish(stdout.finish(), stderr.finish(), code, timed_out, stopped)
 }
 
 /// A pipe read to its end on a thread of its own, so that a command never
@@ -377,6 +447,21 @@ impl Turn {
         }
         turns.push((key.to_owned(), what.to_owned()));
         Ok(Self(key.to_owned()))
+    }
+
+    /// The turn of `key` for `what`, waiting for it while this thread's
+    /// commands aren't stopped (`Watch`); `None` once they are.
+    pub fn take_unless_stopped(key: &Path, what: &str) -> Option<Self> {
+        let mut turns = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+        while turns.iter().any(|(k, _)| k == key) {
+            if stopping() {
+                return None;
+            }
+            let wait = TURN_OVER.wait_timeout(turns, POLL * 5);
+            turns = wait.unwrap_or_else(|e| e.into_inner()).0;
+        }
+        turns.push((key.to_owned(), what.to_owned()));
+        Some(Self(key.to_owned()))
     }
 
     /// The turn of `key` for `what`, waiting for it.
@@ -649,18 +734,27 @@ impl<'a> Op<'a> {
     /// Run `args`, again a few times while it finds a lock held, when
     /// running it again is safe; every try is logged.
     fn exec(&mut self, args: &[&str], reach: Reach) -> Result<String, Failed> {
-        let mut waits = LOCK_RETRIES.iter();
+        let mut waits = LOCK_RETRIES.iter().enumerate();
         loop {
+            // Stopped: what is left of it isn't run.
+            if stopping() {
+                return Err(self.blocked(STOPPED));
+            }
             let out = exec(self.dir, args, reach);
             self.log.push(out.ran.clone());
             if out.ran.ok {
                 return Ok(out.stdout);
             }
             let locked = out.timed_out.is_none()
+                && !out.stopped
                 && classify(&out.stderr, &out.stdout) == Failure::Locked
                 && retryable(args);
             match waits.next() {
-                Some(&wait) if locked => std::thread::sleep(wait),
+                Some((n, &wait)) if locked => {
+                    let tries = LOCK_RETRIES.len() + 1;
+                    say(&format!("locked: trying again ({} of {tries})…", n + 2));
+                    std::thread::sleep(wait);
+                }
                 _ => return Err(self.failed(&out)),
             }
         }
@@ -668,6 +762,9 @@ impl<'a> Op<'a> {
 
     /// The failure `out` tells of, with the log so far.
     fn failed(&mut self, out: &Output) -> Failed {
+        if out.stopped {
+            return self.blocked(STOPPED);
+        }
         let log = std::mem::take(&mut self.log);
         if let Some(after) = out.timed_out {
             let why = format!("timed out after {} s", after.as_secs_f32());
@@ -1453,6 +1550,27 @@ pub fn stash_list(dir: &Path) -> String {
     list
 }
 
+/// Throw away the uncommitted changes to `paths` (from the worktree's top
+/// folder): a file HEAD has goes back to it, index and all; one it
+/// hasn't (untracked, or only added) is deleted, a folder of them too.
+pub fn discard(dir: &Path, paths: &[String]) -> OpResult {
+    let top = top(dir);
+    let mut op = Op::new(&top);
+    for path in paths {
+        let path = path.trim_end_matches('/');
+        let in_head = query(&top, &["cat-file", "-e", &format!("HEAD:{path}")]).is_some();
+        if in_head {
+            let restore = ["--literal-pathspecs", "restore", "--source=HEAD"];
+            op.run(&[&restore[..], &["--staged", "--worktree", "--", path]].concat())?;
+        } else {
+            let rm = ["--literal-pathspecs", "rm", "-r", "-q", "--cached"];
+            op.run(&[&rm[..], &["--ignore-unmatch", "--", path]].concat())?;
+            op.run(&["--literal-pathspecs", "clean", "-f", "-d", "-q", "--", path])?;
+        }
+    }
+    op.done()
+}
+
 /// Stash the uncommitted changes, untracked files too.
 pub fn stash_push(dir: &Path) -> OpResult {
     let mut op = Op::new(dir);
@@ -1460,17 +1578,18 @@ pub fn stash_push(dir: &Path) -> OpResult {
     op.done()
 }
 
-/// Bring the newest stash back and drop it; a conflict keeps the stash.
-pub fn stash_pop(dir: &Path) -> OpResult {
+/// Bring stash `n` (0 the newest) back and drop it; a conflict keeps the
+/// stash.
+pub fn stash_pop(dir: &Path, n: usize) -> OpResult {
     let mut op = Op::new(dir);
-    op.run(&["stash", "pop"])?;
+    op.run(&["stash", "pop", &format!("stash@{{{n}}}")])?;
     op.done()
 }
 
-/// Drop the newest stash.
-pub fn stash_drop(dir: &Path) -> OpResult {
+/// Drop stash `n` (0 the newest).
+pub fn stash_drop(dir: &Path, n: usize) -> OpResult {
     let mut op = Op::new(dir);
-    op.run(&["stash", "drop"])?;
+    op.run(&["stash", "drop", &format!("stash@{{{n}}}")])?;
     op.done()
 }
 
@@ -1798,7 +1917,7 @@ mod tests {
         assert_eq!(failed.log.len(), 1 + LOCK_RETRIES.len());
         assert!(failed.log.iter().all(|r| !r.ok));
         // Not a stash pop: it may have stopped half-way.
-        let failed = stash_pop(&fx.repo).unwrap_err();
+        let failed = stash_pop(&fx.repo, 0).unwrap_err();
         assert_eq!(failed.log.len(), 1);
         std::fs::remove_file(fx.repo.join(".git/index.lock")).unwrap();
         commit_paths(&fx.repo, &["a".into()], "m").unwrap();
@@ -2532,7 +2651,7 @@ mod tests {
         write(dir, "big", &big);
         let d = repo_diff(dir, &[change("big", None, '?')]);
         assert_eq!(d[0].added, 6000);
-        assert_eq!(d[0].notes, ["… 4000 more lines"]);
+        assert_eq!(d[0].hunks[0].lines.len(), 6000);
 
         // A new file's code is coloured as its own language.
         write(dir, "new.rs", "fn main() {}\n");
@@ -2734,6 +2853,28 @@ mod tests {
     }
 
     #[test]
+    fn discarding_puts_files_back_as_head_has_them_and_deletes_new_ones() {
+        let fx = Fx::local();
+        let dir = &fx.repo;
+        commit(dir, "kept", "kept");
+        write(dir, "a", "changed");
+        git(dir, &["add", "a"]);
+        write(dir, "a", "changed again");
+        write(dir, "kept", "changed too");
+        write(dir, "new/one", "1");
+        write(dir, "added", "x");
+        git(dir, &["add", "added"]);
+        let paths = ["a", "new/", "added"].map(String::from);
+        discard(dir, &paths).unwrap();
+        assert_eq!(read(dir, "a"), "first");
+        assert!(!dir.join("new").exists() && !dir.join("added").exists());
+        // Only those asked for.
+        assert_eq!(read(dir, "kept"), "changed too");
+        let status = git(dir, &["status", "--porcelain"]);
+        assert_eq!(status.trim(), "M kept");
+    }
+
+    #[test]
     fn a_hung_hook_is_killed() {
         let fx = Fx::local();
         let hook = fx.script("hooks/pre-commit", "sleep 30");
@@ -2750,6 +2891,41 @@ mod tests {
         assert!(!failed.log.last().unwrap().ok);
         // The commit never happened.
         assert_eq!(git(&fx.repo, &["log", "-1", "--format=%s"]).trim(), "first");
+    }
+
+    #[test]
+    fn a_stopped_command_is_killed_and_what_is_left_not_run() {
+        let fx = Fx::local();
+        let hook = fx.script("hooks/pre-commit", "sleep 30");
+        let hooks = hook.parent().unwrap().to_str().unwrap();
+        git(&fx.repo, &["config", "core.hooksPath", hooks]);
+        write(&fx.repo, "a", "changed");
+        let stop = Arc::new(AtomicBool::new(false));
+        let said = Arc::new(Mutex::new(Vec::<String>::new()));
+        let heard = said.clone();
+        watch(Some(Watch {
+            stop: stop.clone(),
+            say: Box::new(move |what| heard.lock().unwrap().push(what.into())),
+        }));
+        let stopper = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                stop.store(true, AtomicOrdering::Relaxed);
+            })
+        };
+        let started = Instant::now();
+        let failed = commit_paths(&fx.repo, &["a".into()], "hung").unwrap_err();
+        stopper.join().unwrap();
+        assert_eq!(failed.failure, Failure::Blocked(STOPPED.into()));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // Stopped already: nothing more runs.
+        let failed = commit_paths(&fx.repo, &["a".into()], "again").unwrap_err();
+        assert_eq!(failed.failure, Failure::Blocked(STOPPED.into()));
+        assert!(failed.log.is_empty());
+        watch(None);
+        assert_eq!(git(&fx.repo, &["log", "-1", "--format=%s"]).trim(), "first");
+        assert!(said.lock().unwrap().is_empty());
     }
 
     #[test]

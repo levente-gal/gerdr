@@ -8,8 +8,9 @@
 //! the diff is read again. `y` yanks as `d` deletes (`yy`, `yw`, `Y`, a
 //! selection) and copies it too; `p` puts what was yanked or deleted
 //! last after the caret (whole lines under its line), `P` before. `u`
-//! undoes the last cut, paste or restore (see `restore`), `U` does it
-//! again.
+//! undoes the last cut, paste or restore in the file at the caret (see
+//! `restore`), `U` or Ctrl+R does it again. `gg` and `G` go to the top and the end, `{` and `}` to
+//! the hunk before and after, Ctrl+U and Ctrl+D half a page up and down.
 
 use std::{
     ops::Range,
@@ -104,6 +105,27 @@ impl DiffView {
         typed: Keysym,
         ctx: &Ctx,
     ) -> Option<Option<Outcome>> {
+        // Ctrl+R does again, as vim's does; Ctrl+D and Ctrl+U go half a
+        // page down and up.
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
+        if only_ctrl {
+            let half = (ctx.page.max(2) / 2) as i64;
+            let by = match sym {
+                Keysym::r | Keysym::R => {
+                    self.pending = Pending::default();
+                    return Some(Some(Outcome::RedoCut(self.cursor_file())));
+                }
+                Keysym::d | Keysym::D => half,
+                Keysym::u | Keysym::U => -half,
+                _ => 0,
+            };
+            if by != 0 {
+                self.pending = Pending::default();
+                let lines = self.visual == Some(Visual::Lines);
+                self.move_cursor(by, lines, ctx);
+                return Some(None);
+            }
+        }
         if mods.ctrl || mods.alt || mods.logo {
             return None;
         }
@@ -122,14 +144,22 @@ impl DiffView {
             };
             return Some(None);
         }
-        // `g` Space: as Zed's, the code at the caret in Zed; `g` and
-        // anything else, nothing.
+        // `g` Space: as Zed's, the code at the caret in Zed; `gg` the
+        // top; `g` and anything else says what `g` takes.
         if pending.go {
-            if sym != Keysym::space || mods.shift {
-                return Some(None);
-            }
-            let r = self.open_target(ctx.page.max(1));
-            return Some(r.and_then(|r| self.open_diff_row(r)));
+            return Some(match (sym, typed) {
+                (Keysym::space, _) if !mods.shift => {
+                    let r = self.open_target(ctx.page.max(1));
+                    r.and_then(|r| self.open_diff_row(r))
+                }
+                (_, Keysym::g) => {
+                    self.cursor_to(0, ctx);
+                    None
+                }
+                _ => Some(Outcome::Notice(
+                    "After g: Space opens in Zed, g goes to the top",
+                )),
+            });
         }
         let count = pending.count.max(1);
         if let Some(op) = pending.op {
@@ -167,6 +197,19 @@ impl DiffView {
                 };
                 None
             }
+            Keysym::G => {
+                self.cursor_to(self.rows.len().saturating_sub(1), ctx);
+                None
+            }
+            Keysym::braceright | Keysym::braceleft => {
+                let down = typed == Keysym::braceright;
+                for _ in 0..count {
+                    if let Some(to) = self.next_hunk(down) {
+                        self.cursor_to(to, ctx);
+                    }
+                }
+                None
+            }
             Keysym::Y => Op::Yank.of(self.delete_motion(Keysym::y, Keysym::y, Keysym::y, count)),
             Keysym::p | Keysym::P => {
                 self.leave_visual();
@@ -176,8 +219,8 @@ impl DiffView {
             Keysym::X => self.cut_along(|col, _| col.saturating_sub(count)..col),
             Keysym::D => self.cut_along(|col, len| col..len),
             Keysym::R => self.restore_here(),
-            Keysym::u => Some(Outcome::UndoCut),
-            Keysym::U => Some(Outcome::RedoCut),
+            Keysym::u => Some(Outcome::UndoCut(self.cursor_file())),
+            Keysym::U => Some(Outcome::RedoCut(self.cursor_file())),
             // A count before a motion: the motion as many times.
             _ if count > 1 && motion(mods, sym) => {
                 for _ in 0..count {
@@ -188,6 +231,38 @@ impl DiffView {
             _ => return None,
         };
         Some(outcome)
+    }
+
+    /// The cursor on diff row `to` (the nearest it stops on), as a move
+    /// takes it there: by lines in visual mode, reaching its range.
+    fn cursor_to(&mut self, to: usize, ctx: &Ctx) {
+        let n = self.rows.len();
+        if n == 0 {
+            return;
+        }
+        // The first move puts the cursor on the first row in view.
+        if self.cursor.is_none() {
+            self.move_cursor(1, false, ctx);
+        }
+        let Some(row) = self.cursor.as_ref().map(|c| c.row) else {
+            return;
+        };
+        let by = to.min(n - 1) as i64 - row as i64;
+        if by != 0 {
+            let lines = self.visual == Some(Visual::Lines);
+            self.move_cursor(by, lines, ctx);
+        }
+    }
+
+    /// The header of the hunk (or file) after the cursor's row, `down`,
+    /// else the one before.
+    fn next_hunk(&self, down: bool) -> Option<usize> {
+        let at = self.cursor.as_ref().map_or(0, |c| c.row);
+        let head = |r: &usize| matches!(self.rows[*r], DiffRow::Hunk(..) | DiffRow::File(..));
+        match down {
+            true => (at + 1..self.rows.len()).find(head),
+            false => (0..at).rev().find(head),
+        }
     }
 
     /// Visual mode on (by lines when `lines`, else by chars) from the
@@ -520,6 +595,14 @@ impl DiffView {
     pub(super) fn hold_key(&mut self, key: Key) -> bool {
         let (_, sym, _) = key;
         if sym == Keysym::Escape || !self.waiting() {
+            // Held too long, the file not read again: said, not lost
+            // unseen.
+            if !self.queued.is_empty() && sym != Keysym::Escape {
+                let n = self.queued.len();
+                let keys = if n == 1 { "key" } else { "keys" };
+                let why = format!("{n} {keys} typed while the file was read again were dropped");
+                self.signals.error = Some(Some(why));
+            }
             self.queued.clear();
             return false;
         }
@@ -590,8 +673,12 @@ impl DiffView {
     /// What the title says while a command is typed or visual mode is on.
     pub(crate) fn mode_title(&self) -> Option<String> {
         let mode = match self.visual {
-            Some(Visual::Chars { .. }) => "-- VISUAL -- d delete · y yank · R restore · Esc stop",
-            Some(Visual::Lines) => "-- VISUAL LINE -- d delete · y yank · R restore · Esc stop",
+            Some(Visual::Chars { .. }) => {
+                "-- VISUAL -- d delete · y yank · Shift+R restore · Esc stop"
+            }
+            Some(Visual::Lines) => {
+                "-- VISUAL LINE -- d delete · y yank · Shift+R restore · Esc stop"
+            }
             None => "",
         };
         let Pending { count, op, go } = self.pending;

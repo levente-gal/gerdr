@@ -20,9 +20,9 @@ use super::{
     FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING,
     HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState, MENU_RADIUS, PADDING,
     Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, SearchBar, SearchPart,
-    arrow, band, check, chevron_down, coverage, field_text, folder, found_split, found_within,
-    git_branch, icon_sdf, measure, measure_bold, measure_mono, mix, phys, physical, plus, rect_px,
-    rounded_rect, search_spots, segment, trash,
+    arrow, band, check, chevron_down, coverage, field_text, focus_ring, folder, found_split,
+    found_within, git_branch, icon_sdf, measure, measure_bold, measure_mono, mix, phys, physical,
+    plus, rect_px, rounded_rect, search_spots, segment, trash,
 };
 use std::ops::Range;
 
@@ -383,6 +383,11 @@ pub struct FileLine {
     /// it is read).
     pub added: usize,
     pub removed: usize,
+    /// It was edited from the diff since the panel opened (`u` undoes
+    /// it there).
+    pub edited: bool,
+    /// How many review comments are on it.
+    pub comments: usize,
 }
 
 /// A checkbox: a repository's is `Partial` when only some of its files are
@@ -496,6 +501,13 @@ pub struct DetailView {
     /// Where the places found are on the scrollbar: shares of all the
     /// rows from the top, each with whether it is the one gone to.
     pub ticks: Vec<(f64, bool)>,
+    /// How many digits the line numbers before the diff's lines take: as
+    /// many as the widest in view; 0 for no numbers.
+    pub gutter: usize,
+    /// A row of `rows` (the caret's) whose line is shown from a char on,
+    /// to keep the caret in view: the row and how many chars are left
+    /// off its start (its ranges already moved by as many).
+    pub skipped: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -609,9 +621,14 @@ pub struct SheetView {
     /// Per repository: its name, what was found (`clean`, `conflicts:
     /// a.rs, b.rs`, `blocked: detached HEAD`) and its colour.
     pub lines: Vec<(String, String, Tone)>,
+    /// Cancel (or what backs out) on the left, what goes ahead on the
+    /// right.
     pub buttons: Vec<ReposButton>,
-    /// The button Enter presses, by index into `buttons`.
+    /// The button Enter presses, by index into `buttons`: ringed.
     pub default: usize,
+    /// The button on the right loses what can't be got back: it is in
+    /// the error colour, not the accent.
+    pub danger: bool,
 }
 
 /// Everything the panel can be asked to do with a click.
@@ -671,6 +688,17 @@ pub enum ReposButton {
     DeleteComment,
     /// The change at the diff's cursor, or a hunk, put back as it was.
     Restore,
+    /// Read the repositories' status and diffs again.
+    Refresh,
+    /// The branch menu, to pick a local branch to delete.
+    DeleteBranchMenu,
+    /// Stop the batches running.
+    Stop,
+    /// Throw away the selected file's or folder's changes (asked first).
+    DiscardFile,
+    /// Delete the review comments on lines no longer in the diff (asked
+    /// first).
+    DropOutdated,
 }
 
 impl ReposButton {
@@ -683,8 +711,8 @@ impl ReposButton {
             ReposButton::ForcePush => "Force push",
             ReposButton::Fetch => "Fetch",
             ReposButton::Pull => "Pull",
-            ReposButton::Merge => "Merge base",
-            ReposButton::Rebase => "Rebase on base",
+            ReposButton::Merge => "Merge default branch in",
+            ReposButton::Rebase => "Rebase onto default branch",
             ReposButton::MergeFrom => "Merge from…",
             ReposButton::RebaseFrom => "Rebase onto…",
             ReposButton::OpenInZed => "Open in Zed",
@@ -717,6 +745,11 @@ impl ReposButton {
             ReposButton::DiscardComment => "Discard",
             ReposButton::DeleteComment => "Delete",
             ReposButton::Restore => "Restore",
+            ReposButton::Refresh => "Refresh",
+            ReposButton::DeleteBranchMenu => "Delete a branch…",
+            ReposButton::Stop => "Stop",
+            ReposButton::DiscardFile => "Discard changes",
+            ReposButton::DropOutdated => "Drop outdated",
         }
     }
 }
@@ -1214,6 +1247,21 @@ pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) 
     (tree.max(1) as usize, detail.max(1) as usize)
 }
 
+/// How many lines a sheet over the panel shows at once on an output of
+/// `size`, with the error line, the result bar and the footer all there
+/// (as `repos_page`); with the diff alone across the panel when
+/// `diff_only`.
+pub fn repos_sheet_rows(size: Size<i32, Logical>, diff_only: bool) -> usize {
+    let panel = panel_rect(size);
+    let bottom = match diff_only {
+        true => footer_h(REPOS_FOOTER_ROWS),
+        false => REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS),
+    };
+    let middle = panel.size.h - REPOS_HEADER - bottom;
+    let fixed = 2 * SHEET_PAD + SHEET_TITLE + 2 * SHEET_GAP + SHEET_BUTTON;
+    ((middle - 2 * REPOS_PAD - fixed) / SHEET_LINE).max(1) as usize
+}
+
 /// How many characters of the monospace font a review comment's row of
 /// the diff holds, on an output of `size` with the tree's share `share`.
 pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
@@ -1222,9 +1270,10 @@ pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
 }
 
 /// How many diff rows the panel shows at once with the diff alone across
-/// it (`ReposView::diff_only`), on an output of `size`.
+/// it (`ReposView::diff_only`), on an output of `size`: with the footer's
+/// rows all there, as `repos_page`.
 pub fn diff_only_page(size: Size<i32, Logical>, density: Density) -> usize {
-    let middle = panel_rect(size).size.h - REPOS_HEADER;
+    let middle = panel_rect(size).size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
     let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
     detail.max(1) as usize
 }
@@ -1233,6 +1282,32 @@ pub fn diff_only_page(size: Size<i32, Logical>, density: Density) -> usize {
 /// across the panel, on an output of `size`.
 pub fn diff_only_cols(size: Size<i32, Logical>) -> usize {
     detail_cols(panel_rect(size).size.w)
+}
+
+/// The room between the line numbers before a diff line, and between
+/// them and its text.
+const GUTTER_GAP: i32 = 6;
+
+/// How wide the line numbers before the diff's lines are, logical pixels,
+/// with `digits` digits each (old, then new): none for none.
+fn gutter_width(digits: usize) -> i32 {
+    if digits == 0 {
+        return 0;
+    }
+    let advance = measure_mono("0", SMALL_FONT_SIZE)
+        .filter(|a| *a > 0.0)
+        .unwrap_or(SMALL_FONT_SIZE * 0.6);
+    (2.0 * digits as f32 * advance).ceil() as i32 + 2 * GUTTER_GAP
+}
+
+/// How many chars of a diff line fit on its row past numbers of `digits`
+/// digits, where a comment's row holds `cols` (`repos_detail_cols`).
+pub fn diff_line_room(cols: usize, digits: usize) -> usize {
+    let advance = measure_mono("0", REPOS_MONO_SIZE)
+        .filter(|a| *a > 0.0)
+        .unwrap_or(REPOS_MONO_SIZE * 0.6);
+    let px = cols as f32 * advance + COMMENT_INDENT as f32 - gutter_width(digits) as f32;
+    ((px / advance).floor() as usize).max(8)
 }
 
 /// How many characters a review comment's row holds in a detail pane
@@ -1432,6 +1507,10 @@ struct DetailLook {
     caret: Option<usize>,
     /// The word at the caret on it (`DetailView::word`).
     word: Option<Range<usize>>,
+    /// The digits of the line numbers before a line (`DetailView::gutter`).
+    gutter: usize,
+    /// Its line is shown from a char on (`DetailView::skipped`).
+    skipped: bool,
 }
 
 /// Row `i` of `view`'s detail, as drawn.
@@ -1468,6 +1547,8 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
         word: (view.detail.word.as_ref())
             .filter(|(j, _)| *j == i)
             .map(|(_, word)| word.clone()),
+        gutter: view.detail.gutter,
+        skipped: view.detail.skipped.is_some_and(|(j, _)| j == i),
     }
 }
 
@@ -1634,12 +1715,14 @@ fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
     let row_h = repos_row(view.density);
     let line_h = repos_detail_line(view.density);
 
-    // From the bottom up: the footer, the result bar, the error, the field.
-    let (rows, overflow) = match only {
-        true => (Vec::new(), Vec::new()),
-        false => hint_rows(&view.hints, inner_w),
+    // From the bottom up: the footer, the result bar, the error, the field;
+    // the diff alone has a footer only, while it has actions.
+    let (rows, overflow) = hint_rows(&view.hints, inner_w);
+    let footer_height = if only && view.hints.is_empty() {
+        0
+    } else {
+        footer_h(rows.len())
     };
-    let footer_height = if only { 0 } else { footer_h(rows.len()) };
     let footer_y = bottom_edge - footer_height;
     let footer = Rectangle::new((x, footer_y).into(), (w, footer_height).into());
     let mut y = footer_y;
@@ -2268,9 +2351,15 @@ pub fn repos_diff_char(
     let DetailRow::Line(_) = view.detail.rows.get(i)? else {
         return None;
     };
-    let x = pos.x - (layout.detail_rows.get(i)?.loc.x + DIFF_INSET) as f64;
+    let start = layout.detail_rows.get(i)?.loc.x + DIFF_INSET + gutter_width(view.detail.gutter);
+    let x = pos.x - start as f64;
     let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
-    (x >= 0.0).then(|| (i, (x / advance).floor() as usize))
+    // A row shown from a char on: chars of the line, not of the row.
+    let skip = match view.detail.skipped {
+        Some((j, skip)) if j == i => skip,
+        _ => 0,
+    };
+    (x >= 0.0).then(|| (i, (x / advance).floor() as usize + skip))
 }
 
 /// The panel's field, for the caret and selection, on an output of `size`.
@@ -2691,16 +2780,19 @@ impl Painter {
         let bar = view.detail.search.as_ref();
         self.search_bar(&mut c, bar, &search, count, hover, scale, p);
 
-        // The field, what went wrong, the result bar and the footer.
-        if only {
+        // The field, what went wrong, the result bar and the footer; the
+        // diff alone has the footer only, while it has actions.
+        if only && view.hints.is_empty() {
             return c;
         }
-        let field = shift(layout.field);
-        across(
-            &mut c,
-            px(field.loc.y - (REPOS_FIELD_ROW - REPOS_FIELD) / 2) - border,
-        );
-        self.repos_field_box(&mut c, view, field, scale, p);
+        if !only {
+            let field = shift(layout.field);
+            across(
+                &mut c,
+                px(field.loc.y - (REPOS_FIELD_ROW - REPOS_FIELD) / 2) - border,
+            );
+            self.repos_field_box(&mut c, view, field, scale, p);
+        }
         if let (Some(error), Some(rect)) = (&view.error, parts.error) {
             let rect = shift(rect);
             let (x, right) = phys(rect, scale);
@@ -2813,6 +2905,41 @@ impl Painter {
     }
 
     /// A scrollbar's thumb `size` big in a buffer of its own.
+    /// A small tag in `color` on a tint of it, its right edge at `right`
+    /// in `line_band`: where it starts, to go on left of it.
+    #[allow(clippy::too_many_arguments)]
+    fn tree_tag(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        right: f32,
+        line_band: (i32, i32),
+        color: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) -> f32 {
+        let s = scale as f32;
+        let pad = (CHIP_PAD as f32 * s / 2.0).round();
+        let w = self.mixed_width(text, SMALL_FONT_SIZE, scale) + 2.0 * pad;
+        let x = (right - w).round();
+        let (y, h) = line_band;
+        let th = (CHIP_HEIGHT as f32 * s * 0.8).round();
+        let ty = (y as f32 + (h as f32 - th) / 2.0).round();
+        c.rounded(x, ty, w, th, CHIP_RADIUS * s, mix(p.elevated, color, 0.18));
+        let ink = mix(color, p.text, 0.25);
+        self.mixed_text(
+            c,
+            text,
+            SMALL_FONT_SIZE,
+            x + pad,
+            right,
+            line_band,
+            scale,
+            ink,
+        );
+        x
+    }
+
     fn thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(size, scale));
         let (w, h) = (c.w as f32, c.h as f32);
@@ -2986,6 +3113,19 @@ impl Painter {
                 let counts = (file.added, file.removed);
                 let end =
                     self.diff_counts(c, None, counts, code_x - gap / 2.0, line_band, scale, p);
+                // Before the counts, what was done to it here: comments
+                // written on it, edits made from the diff.
+                let mut end = end;
+                if file.comments > 0 {
+                    let text = match file.comments {
+                        1 => "1 comment".to_owned(),
+                        n => format!("{n} comments"),
+                    };
+                    end = self.tree_tag(c, &text, end - gap, line_band, p.accent, scale, p);
+                }
+                if file.edited {
+                    end = self.tree_tag(c, "edited", end - gap, line_band, p.warning, scale, p);
+                }
                 let name = match file.code {
                     _ if file.conflicted => p.error,
                     'D' => p.muted,
@@ -3679,7 +3819,9 @@ impl Painter {
                     LineKind::Removed => Some(p.error),
                     LineKind::Context => None,
                 };
-                let tx = bx + inset;
+                // After the line numbers (where it was, where it is).
+                let gutter = px(gutter_width(look.gutter)) as f32;
+                let tx = bx + inset + gutter;
                 let lighten = |color: Rgb| match lit {
                     Some(amount) => mix(color, p.selected, amount),
                     None => color,
@@ -3773,6 +3915,62 @@ impl Painter {
                 if let Some(word) = &look.word {
                     let text = &line.text;
                     self.word_underline(c, text, word, (tx, bend), row_band, width, scale, p);
+                }
+                // The numbers: where it was (none for an added line), where
+                // it is (none for a removed one), right-aligned in theirs.
+                if look.gutter > 0 {
+                    let col = (gutter - 2.0 * px(GUTTER_GAP) as f32) / 2.0;
+                    let x0 = bx + inset;
+                    let numbers = [
+                        (line.kind != LineKind::Added).then_some(line.old),
+                        (line.kind != LineKind::Removed).then_some(line.number),
+                    ];
+                    for (k, n) in numbers.into_iter().enumerate() {
+                        let Some(n) = n.filter(|&n| n > 0) else {
+                            continue;
+                        };
+                        let text = n.to_string();
+                        let w = self.mono_width(&text, SMALL_FONT_SIZE, scale);
+                        let right = x0 + (k as f32 + 1.0) * col + k as f32 * px(GUTTER_GAP) as f32;
+                        let color = p.placeholder;
+                        let x = (right - w).round();
+                        self.mono_text(
+                            c,
+                            &text,
+                            SMALL_FONT_SIZE,
+                            x,
+                            right + 1.0,
+                            row_band,
+                            scale,
+                            color,
+                        );
+                    }
+                }
+                // Cut at the row's end, or shown from a char on: marked.
+                let mark_w = (self.mono_width("›", REPOS_MONO_SIZE, scale)).ceil();
+                let ground = match tone {
+                    Some(tone) => lighten(mix(p.elevated, tone, DIFF_TINT)),
+                    None if lit.is_some() => lighten(p.elevated),
+                    None => p.elevated,
+                };
+                if tx + width(&line.text) > bend {
+                    let x = bend - mark_w;
+                    c.fill(x as i32, y, mark_w as i32 + 1, h, ground);
+                    self.mono_text(
+                        c,
+                        "›",
+                        REPOS_MONO_SIZE,
+                        x,
+                        f32::MAX,
+                        row_band,
+                        scale,
+                        p.muted,
+                    );
+                }
+                if look.skipped {
+                    let x = tx - mark_w;
+                    c.fill(x as i32, y, mark_w as i32, h, ground);
+                    self.mono_text(c, "‹", REPOS_MONO_SIZE, x, tx, row_band, scale, p.muted);
                 }
             }
             DetailRow::Note(text) => {
@@ -4572,19 +4770,45 @@ impl Painter {
                 tone_color(*tone, p),
             );
         }
+        // The button going ahead, on the right, filled; the one Enter
+        // presses ringed.
+        let last = sheet.buttons.len().saturating_sub(1);
         for &(i, rect) in &parts.sheet_buttons {
             let button = sheet.buttons[i];
             let hovered = view.hover == Some(ReposHit::Button(button));
-            self.button(
-                c,
-                button.label(),
-                shift(rect),
-                (hovered, false),
-                i == sheet.default,
-                scale,
-                p,
-            );
+            let rect = shift(rect);
+            let focused = i == sheet.default;
+            if i == last && sheet.danger {
+                self.danger_button(c, button.label(), rect, (hovered, focused), scale, p);
+            } else {
+                let look = (hovered, focused);
+                self.button(c, button.label(), rect, look, i == last, scale, p);
+            }
         }
+    }
+
+    /// A button in `rect` like `Painter::button`'s primary one, but in the
+    /// error colour: it loses what can't be got back.
+    fn danger_button(
+        &self,
+        c: &mut Canvas,
+        label: &str,
+        rect: Rect,
+        (hovered, focused): (bool, bool),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (x, y, w, h) = rect_px(rect, scale);
+        if focused {
+            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.error);
+        }
+        let fill = if hovered {
+            mix(p.error, p.text, 0.12)
+        } else {
+            p.error
+        };
+        c.rounded(x, y, w, h, BUTTON_RADIUS * scale as f32, fill);
+        self.centered(c, label, FONT_SIZE, rect, scale, p.on_accent);
     }
 }
 
@@ -4959,6 +5183,8 @@ mod tests {
             depth: 0,
             added: 0,
             removed: 0,
+            edited: false,
+            comments: 0,
         })
     }
 
@@ -4991,6 +5217,7 @@ mod tests {
             text: text.into(),
             raw: None,
             number: 1,
+            old: 1,
             words: words.to_vec(),
             syntax: crate::syntax::lang("x.rs")
                 .map(|lang| crate::syntax::highlight(lang, text, &mut Default::default()))
@@ -5104,7 +5331,7 @@ mod tests {
                 hint(MergeFrom, "Alt+M", None),
                 hint(RebaseFrom, "Alt+Shift+M", None),
                 hint(OpenInZed, "Ctrl+E", None),
-                hint(MarkResolved, "Ctrl+R", None),
+                hint(MarkResolved, "Alt+D", None),
                 hint(Continue, "Ctrl+G", None),
                 hint(Abort, "Ctrl+Shift+Del", None),
                 hint(Stash, "Alt+S", None),
@@ -5211,6 +5438,7 @@ mod tests {
                 first: 3,
                 total: 40,
                 focused: true,
+                gutter: 3,
                 ..DetailView::default()
             },
             sheet: None,
@@ -5338,8 +5566,9 @@ mod tests {
                         Tone::Warning,
                     ),
                 ],
-                buttons: vec![All, CleanOnly, Cancel],
+                buttons: vec![Cancel, CleanOnly, All],
                 default: 1,
+                danger: false,
             }),
             hover: Some(ReposHit::Button(CleanOnly)),
             ..full()
@@ -5651,7 +5880,11 @@ mod tests {
             title: "Worktree · feat/x".into(),
             summary: "2 commits on main".into(),
             lines: Vec::new(),
-            hints: Vec::new(),
+            hints: vec![
+                hint(ReposButton::Comment, "c", None),
+                hint(ReposButton::Help, "F1", None),
+                hint(ReposButton::Close, "Esc", None),
+            ],
             result: None,
             error: None,
             diff_only: true,
@@ -5666,15 +5899,20 @@ mod tests {
             let view = diff_only();
             let l = repos_layout(&view, size);
             let hit = |r: Rect| repos_hit(&l, centre(r));
-            // No tree, picker, tabs, field or footer: the diff across it.
+            // No tree, picker, tabs or field: the diff across it, over
+            // the footer's actions.
             assert_eq!(l.detail.loc.x, l.panel.loc.x);
             assert_eq!(l.detail.size.w, l.panel.size.w);
+            assert_eq!(l.detail.loc.y + l.detail.size.h, l.footer.loc.y);
             assert_eq!(
-                l.detail.loc.y + l.detail.size.h,
+                l.footer.loc.y + l.footer.size.h,
                 l.panel.loc.y + l.panel.size.h
             );
             assert!(l.tree_tools.is_empty() && l.detail_tabs.is_empty());
-            assert!(l.buttons.is_empty() && l.more.is_none());
+            assert_eq!(l.buttons.len(), 3);
+            for (b, r) in &l.buttons {
+                assert_eq!(hit(*r), Some(ReposHit::Button(*b)));
+            }
             for r in [l.branch, l.field, l.splitter, l.tree] {
                 assert!(r.size.w == 0 || r.size.h == 0, "{r:?}");
             }
@@ -6098,13 +6336,24 @@ mod tests {
             .expect("a line");
         let rect = layout.detail_rows[i];
         let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
-        let x0 = (rect.loc.x + DIFF_INSET) as f64;
+        // Its text starts after the line numbers.
+        let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter)) as f64;
         let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
         let at = |x: f64| repos_diff_char(&view, size, (x, y).into());
         assert_eq!(at(x0 + 0.5 * advance), Some((i, 0)));
         assert_eq!(at(x0 + 3.5 * advance), Some((i, 3)));
         // Left of its text, or on a row that is no line: none.
         assert_eq!(at(x0 - 2.0), None);
+        // On a row shown from a char on, the char of its line.
+        let skipped = ReposView {
+            detail: DetailView {
+                skipped: Some((i, 10)),
+                ..view.detail.clone()
+            },
+            ..view.clone()
+        };
+        let pos = (x0 + 0.5 * advance, y);
+        assert_eq!(repos_diff_char(&skipped, size, pos.into()), Some((i, 10)));
         let head = view
             .detail
             .rows
@@ -6465,8 +6714,9 @@ mod tests {
                             "src/git.rs: 2 comments".into(),
                             Tone::Warning,
                         )],
-                        buttons: vec![ReposButton::ClearReview, ReposButton::Cancel],
+                        buttons: vec![ReposButton::Cancel, ReposButton::ClearReview],
                         default: 0,
+                        danger: true,
                     }),
                     ..diff_only()
                 },
@@ -6510,8 +6760,9 @@ mod tests {
                                 Tone::Warning,
                             ),
                         ],
-                        buttons: vec![ReposButton::ForcePush, ReposButton::Cancel],
+                        buttons: vec![ReposButton::Cancel, ReposButton::ForcePush],
                         default: 0,
+                        danger: true,
                     }),
                     ..full()
                 },
@@ -6529,6 +6780,7 @@ mod tests {
                         ],
                         buttons: vec![ReposButton::Close],
                         default: 0,
+                        danger: false,
                     }),
                     ..full()
                 },

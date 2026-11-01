@@ -26,7 +26,7 @@ use crate::{
         Check, Density, DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone,
         Hint, ReposButton, ReposHit, RowMark, Tone,
     },
-    diff::{FileDiff, LineKind},
+    diff::{FILE_LINES, FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
     find,
     git::Change,
@@ -41,7 +41,7 @@ mod vim;
 
 use search::DiffSearch;
 
-pub const NO_REVIEW: &str = "No review comments: in the diff, press C on a line";
+pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line";
 
 /// A checkout the diff shows, as its host lends it.
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +51,9 @@ pub struct Section<'a> {
     /// What its header calls it.
     pub label: &'a str,
     pub branch: Option<&'a str>,
+    /// The commit checked out, for the review copied to say what it was
+    /// written against.
+    pub head: Option<&'a str>,
     /// Its changed files: none, and it isn't shown.
     pub changes: &'a [Change],
 }
@@ -131,12 +134,16 @@ pub enum Outcome {
     Yank(FileEdit),
     /// Put what was yanked or deleted last in a file.
     Paste(Put),
-    /// Undo the last cut; do the last undone again.
-    UndoCut,
-    RedoCut,
+    /// Undo the last cut in the file at the caret (by root and path;
+    /// with none, the last anywhere); do the last undone there again.
+    UndoCut(Option<(PathBuf, String)>),
+    RedoCut(Option<(PathBuf, String)>),
     /// Ask whether to delete every review comment (`clear_sheet`), then
     /// `clear_review`.
     Clear,
+    /// Ask whether to delete those on lines no longer in the diff, then
+    /// `drop_outdated`.
+    ClearOutdated,
 }
 
 /// Where in a file Zed opens it: a line (from 1) and, on one in the file
@@ -189,6 +196,8 @@ pub struct DiffView {
     pub(crate) reads: u64,
     /// Files folded, by (root, path).
     pub(crate) folded: HashSet<(PathBuf, String)>,
+    /// Long files shown whole, past `diff::FILE_LINES`, by (root, path).
+    pub(crate) whole: HashSet<(PathBuf, String)>,
     /// Rows it can be scrolled past its end: a file folded near it keeps
     /// its header where it was. Scrolling back takes them away.
     pub(crate) slack: usize,
@@ -223,6 +232,9 @@ pub struct DiffView {
     pub(crate) visual: Option<vim::Visual>,
     /// What is typed of a vim command so far.
     pending: vim::Pending,
+    /// The comment (by index into `review.comments`) a first Del armed:
+    /// the next deletes it.
+    delete_armed: Option<usize>,
     /// Where the caret goes once the diff is read again after a cut, and
     /// the keys typed meanwhile, held till then.
     caret_after: Option<vim::CaretAfter>,
@@ -279,6 +291,9 @@ pub(crate) enum DiffRow {
     Hunk(usize, usize, usize),
     Line(usize, usize, usize, usize),
     Note(usize, usize, usize),
+    /// After the first `diff::FILE_LINES` lines of a long file: how many
+    /// more there are, Enter or a click showing them.
+    More(usize, usize),
     /// Row `i` of comment `c` (by index into `review.comments`), in file
     /// `at` (as `file`), or with the comments whose lines are gone.
     Comment {
@@ -309,7 +324,8 @@ impl DiffRow {
             DiffRow::File(k, f)
             | DiffRow::Hunk(k, f, _)
             | DiffRow::Line(k, f, _, _)
-            | DiffRow::Note(k, f, _) => Some((k, f)),
+            | DiffRow::Note(k, f, _)
+            | DiffRow::More(k, f) => Some((k, f)),
             DiffRow::Comment { at, .. }
             | DiffRow::Editor { at, .. }
             | DiffRow::EditorHint { at } => at,
@@ -396,17 +412,10 @@ pub fn move_to(scroll: &mut Scroll, pos: f64) {
     }
 }
 
-/// The key a diff button is pressed with, as its chip says.
+/// The key a diff button is pressed with, as its chip says: the panel's
+/// one table of keys has it (`repos::key_name`).
 fn key_name(button: ReposButton) -> &'static str {
-    use ReposButton as B;
-    match button {
-        B::CopyReview => "Ctrl+Shift+C",
-        B::Comment => "C",
-        B::Restore => "R",
-        B::SaveComment => "Enter",
-        B::DiscardComment => "Esc",
-        _ => "",
-    }
+    crate::repos::key_name(button)
 }
 
 /// What the checkout at `root` is called: its section's label, else its
@@ -421,6 +430,31 @@ fn label_of(root: &Path, ctx: &Ctx) -> String {
         },
         |i| i.label.to_owned(),
     )
+}
+
+/// How many chars past the caret show before a long line's row ends.
+const CARET_ROOM: usize = 6;
+
+/// `line` shown from char `skip` on: its text, its words' and colours'
+/// ranges moved by as many, those before it gone.
+fn skip_chars(line: &mut crate::diff::Line, skip: usize) {
+    let byte = line
+        .text
+        .char_indices()
+        .nth(skip)
+        .map_or(line.text.len(), |(b, _)| b);
+    line.text.drain(..byte);
+    let shift = |r: &Range<usize>| r.start.saturating_sub(skip)..r.end.saturating_sub(skip);
+    line.words = line
+        .words
+        .iter()
+        .map(shift)
+        .filter(|r| !r.is_empty())
+        .collect();
+    line.syntax = (line.syntax.iter())
+        .map(|(r, kind)| (shift(r), *kind))
+        .filter(|(r, _)| !r.is_empty())
+        .collect();
 }
 
 /// Whether `sym` with `mods` is Ctrl+Shift+C, copying the review.
@@ -531,9 +565,20 @@ impl DiffView {
                     continue;
                 }
                 let at = Some((k, f));
-                for (h, hunk) in file.hunks.iter().enumerate() {
+                // A long file's first lines, till asked for them all.
+                let whole = self.whole.contains(&key);
+                let total: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+                let mut shown = 0;
+                'hunks: for (h, hunk) in file.hunks.iter().enumerate() {
+                    if !whole && shown >= FILE_LINES {
+                        break;
+                    }
                     rows.push(DiffRow::Hunk(k, f, h));
                     for l in 0..hunk.lines.len() {
+                        if !whole && shown >= FILE_LINES {
+                            break 'hunks;
+                        }
+                        shown += 1;
                         rows.push(DiffRow::Line(k, f, h, l));
                         for &c in under.get(&(h, l)).into_iter().flatten() {
                             self.push_comment(&mut rows, at, c);
@@ -542,6 +587,9 @@ impl DiffView {
                             self.push_editor(&mut rows, at);
                         }
                     }
+                }
+                if !whole && total > FILE_LINES {
+                    rows.push(DiffRow::More(k, f));
                 }
                 rows.extend((0..file.notes.len()).map(|n| DiffRow::Note(k, f, n)));
             }
@@ -684,6 +732,12 @@ impl DiffView {
         };
         let (_, file) = self.diff_file(k, f)?;
         Some(&file.hunks.get(h)?.lines.get(l)?.text)
+    }
+
+    /// The root and path of the file the cursor is in, if any: what `u`
+    /// undoes the edits of.
+    pub(crate) fn cursor_file(&self) -> Option<(PathBuf, String)> {
+        self.diff_path(self.cursor.as_ref()?.row)
     }
 
     /// The diff row the caret is on and the char of its line: on the
@@ -972,7 +1026,8 @@ impl DiffView {
     }
 
     /// Delete the comment the cursor is on, the cursor going to the row
-    /// over it.
+    /// over it: the first press arms it (and says so), the second, with
+    /// the cursor still on it, deletes it.
     fn delete_comment(&mut self, ctx: &Ctx) {
         let Some(cursor) = &self.cursor else {
             return;
@@ -980,6 +1035,14 @@ impl DiffView {
         let Some(c) = self.comment_at(cursor.row) else {
             return;
         };
+        if self.delete_armed != Some(c) {
+            self.delete_armed = Some(c);
+            let why = "Press Del again to delete the comment";
+            self.signals.error = Some(Some(why.into()));
+            return;
+        }
+        self.delete_armed = None;
+        self.signals.error = Some(None);
         let first = self.find_row(&RowKey::Comment(c)).unwrap_or(cursor.row);
         let above = self.cursor_stop(first.saturating_sub(1), -1);
         self.set_cursor(above, None);
@@ -1023,8 +1086,9 @@ impl DiffView {
     }
 
     /// A key while a comment is being written, which takes them all: Enter
-    /// (or Ctrl+Enter) keeps it, Shift+Enter breaks the line, Esc drops
-    /// it; Ctrl+Shift+C copies the review still.
+    /// (or Ctrl+Enter) keeps it, and so does Esc (a draft is never thrown
+    /// away by it: the Discard button does that), Shift+Enter breaks the
+    /// line; Ctrl+Shift+C copies the review still.
     fn editor_key(
         &mut self,
         mods: &ModifiersState,
@@ -1040,12 +1104,7 @@ impl DiffView {
             return self.copy(ctx);
         }
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
-        if sym == Keysym::Escape && plain {
-            self.editing = None;
-            self.build_rows(ctx.sections, self.diff_anchor());
-            return None;
-        }
-        if enter && (plain || only_ctrl) {
+        if enter && (plain || only_ctrl) || sym == Keysym::Escape && plain {
             self.save_comment(ctx);
             return None;
         }
@@ -1142,7 +1201,18 @@ impl DiffView {
             return Err(NO_REVIEW);
         }
         let order: Vec<PathBuf> = ctx.sections.iter().map(|i| i.root.to_path_buf()).collect();
-        let label = |root: &Path| label_of(root, ctx);
+        // Each repository with the branch and commit the review is of.
+        let label = |root: &Path| {
+            let label = label_of(root, ctx);
+            let section = ctx.sections.iter().find(|s| s.root == root);
+            let oid = section.and_then(|s| s.head).map(|o| &o[..o.len().min(7)]);
+            match (section.and_then(|s| s.branch), oid) {
+                (Some(branch), Some(oid)) => format!("{label} · {branch} at {oid}"),
+                (Some(branch), None) => format!("{label} · {branch}"),
+                (None, Some(oid)) => format!("{label} · detached at {oid}"),
+                (None, None) => label,
+            }
+        };
         let comments = &self.review.comments;
         let outdated = |c: &Comment| {
             let at = comments.iter().position(|x| std::ptr::eq(x, c));
@@ -1412,6 +1482,13 @@ impl DiffView {
                 DetailRow::Line(file.hunks[h].lines[l].clone())
             }
             (DiffRow::Note(_, _, n), Some((_, file))) => DetailRow::Note(file.notes[n].clone()),
+            (DiffRow::More(..), Some((_, file))) => {
+                let total: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+                let more = total.saturating_sub(FILE_LINES);
+                DetailRow::Note(format!(
+                    "… {more} more lines · Enter or a click shows them all"
+                ))
+            }
             (DiffRow::Comment { c, i, .. }, _) => {
                 let (Some(comment), Some(wrap)) =
                     (self.review.comments.get(c), self.comment_wraps.get(c))
@@ -1443,7 +1520,7 @@ impl DiffView {
                 }
             }
             (DiffRow::EditorHint { .. }, _) => {
-                DetailRow::Note("Shift+Enter breaks the line".into())
+                DetailRow::Note("Shift+Enter breaks the line · Enter or Esc keeps it".into())
             }
             (DiffRow::Outdated(None), _) => DetailRow::Hunk {
                 context: "Comments on lines no longer in the diff".into(),
@@ -1566,20 +1643,27 @@ impl DiffView {
             key: String::new(),
             disabled: None,
         };
-        vec![
-            hint(ReposButton::CopyReview, label),
-            hint(
-                ReposButton::ClearReview,
-                ReposButton::ClearReview.label().into(),
-            ),
-        ]
+        let mut buttons = vec![hint(ReposButton::CopyReview, label)];
+        // Those on lines gone (after a commit, say) dropped on their own.
+        if !self.outdated.is_empty() {
+            let label = format!("Drop {} outdated", self.outdated.len());
+            buttons.push(hint(ReposButton::DropOutdated, label));
+        }
+        buttons.push(hint(
+            ReposButton::ClearReview,
+            ReposButton::ClearReview.label().into(),
+        ));
+        buttons
     }
 
-    /// What the sheet asking whether to delete the review says: its title,
-    /// and a line per file with comments.
-    pub fn clear_sheet(&self, ctx: &Ctx) -> (String, Vec<(String, String, Tone)>) {
+    /// What the sheet asking whether to delete the review (only those on
+    /// lines gone, when `outdated`) says: its title, and a line per file
+    /// with comments.
+    pub fn clear_sheet(&self, ctx: &Ctx, outdated: bool) -> (String, Vec<(String, String, Tone)>) {
         let mut files: BTreeMap<(String, &str), usize> = BTreeMap::new();
-        for c in &self.review.comments {
+        let taken = (self.review.comments.iter().enumerate())
+            .filter(|(c, _)| !outdated || self.outdated.contains(c));
+        for (_, c) in taken {
             *files
                 .entry((label_of(&c.root, ctx), c.path.as_str()))
                 .or_default() += 1;
@@ -1588,9 +1672,47 @@ impl DiffView {
             .into_iter()
             .map(|((repo, path), n)| (repo, format!("{path}: {}", comments(n)), Tone::Warning))
             .collect();
-        let n = self.review.comments.len();
-        let title = format!("Delete the review's {} for good?", comments(n));
+        let title = match outdated {
+            true => format!(
+                "Delete the {} on lines no longer in the diff?",
+                comments(self.outdated.len())
+            ),
+            false => {
+                let n = self.review.comments.len();
+                format!("Delete the review's {} for good?", comments(n))
+            }
+        };
         (title, lines)
+    }
+
+    /// How many review comments are on lines no longer in the diff.
+    pub fn outdated_count(&self) -> usize {
+        self.outdated.len()
+    }
+
+    /// Delete the review comments on lines no longer in the diff (and the
+    /// edit of one of them).
+    pub fn drop_outdated(&mut self, sections: &[Section]) {
+        let gone = std::mem::take(&mut self.outdated);
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| e.at.is_some_and(|c| gone.contains(&c)))
+        {
+            self.editing = None;
+        }
+        let mut c = 0;
+        self.review.comments.retain(|_| {
+            c += 1;
+            !gone.contains(&(c - 1))
+        });
+        // The comment being edited is one up for each dropped before it.
+        if let Some(Editing { at: Some(at), .. }) = &mut self.editing {
+            *at -= gone.iter().filter(|&&g| g < *at).count();
+        }
+        self.review_dirty = true;
+        self.cursor = None;
+        self.rebuild(sections);
     }
 
     /// The diff row shown as row `i` of the detail pane.
@@ -1650,6 +1772,20 @@ impl DiffView {
         if let Some(head) = self.header_row(&root, Some(&path)) {
             self.show_at(head, at, page);
         }
+    }
+
+    /// Show the long file whose last row shown is diff row `r` whole;
+    /// whether it was that row.
+    fn show_whole(&mut self, r: usize, ctx: &Ctx) -> bool {
+        if !matches!(self.rows.get(r), Some(DiffRow::More(..))) {
+            return false;
+        }
+        let Some(key) = self.diff_path(r) else {
+            return false;
+        };
+        self.whole.insert(key);
+        self.build_rows(ctx.sections, self.diff_anchor());
+        true
     }
 
     /// Scroll the diff to the next file's header (`by` 1) or the one
@@ -1782,7 +1918,11 @@ impl DiffView {
         let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
         let alt = mods.alt && !(mods.ctrl || mods.logo || mods.shift);
         let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+        let only_ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
         let by = match sym {
+            // Ctrl+J and Ctrl+K move as Down and Up do, in every list.
+            Keysym::j | Keysym::J if only_ctrl => 1,
+            Keysym::k | Keysym::K if only_ctrl => -1,
             _ if !(plain || shift) => 0,
             Keysym::Down | Keysym::KP_Down => 1,
             Keysym::Up | Keysym::KP_Up => -1,
@@ -1817,10 +1957,16 @@ impl DiffView {
             }
             Keysym::Return | Keysym::KP_Enter if plain => {
                 let r = self.open_target(page)?;
+                if self.show_whole(r, ctx) {
+                    return Some(None);
+                }
                 return Some(self.open_diff_row(r));
             }
             Keysym::c if plain => self.comment_here(ctx),
-            Keysym::Delete | Keysym::KP_Delete if plain => self.delete_comment(ctx),
+            Keysym::Delete | Keysym::KP_Delete if plain => {
+                self.delete_comment(ctx);
+                return Some(None);
+            }
             _ => return None,
         }
         Some(None)
@@ -1896,6 +2042,7 @@ impl DiffView {
         };
         self.diffs.retain(|root, _| dirty(root));
         self.folded.retain(|(root, path)| changed(root, path));
+        self.whole.retain(|(root, path)| changed(root, path));
         self.forget_caret(|root| !dirty(root));
         self.reads += 1;
         self.build_rows(items, anchor);
@@ -1954,18 +2101,54 @@ impl DiffView {
             let i = shown.iter().position(|&s| s == r)?;
             matches!(rows.get(i)?, DetailRow::Line(_)).then_some((i, col))
         });
-        let word = caret.and_then(|(i, col)| match rows.get(i)? {
+        let mut word = caret.and_then(|(i, col)| match rows.get(i)? {
             DetailRow::Line(line) => Some((i, find::word_at(&line.text, col)?)),
             _ => None,
+        });
+        // The line numbers, as wide as the widest in view.
+        let widest = rows
+            .iter()
+            .filter_map(|row| match row {
+                DetailRow::Line(line) => Some(line.number.max(line.old)),
+                _ => None,
+            })
+            .max();
+        let gutter = widest.map_or(0, |n| n.to_string().len().max(2));
+        // The caret's line too long for the row: shown from a char on that
+        // keeps the caret in view, a few chars from the edge.
+        let mut chosen = self.chosen(&shown);
+        let mut caret = caret;
+        let room = crate::chrome::diff_line_room(ctx.cols, gutter);
+        let skipped = caret.and_then(|(i, col)| {
+            let skip = (col + CARET_ROOM).checked_sub(room).filter(|&n| n > 0)?;
+            let DetailRow::Line(line) = &mut rows[i] else {
+                return None;
+            };
+            skip_chars(line, skip);
+            let shift = |r: &mut Range<usize>| {
+                *r = r.start.saturating_sub(skip)..r.end.saturating_sub(skip);
+            };
+            found[i].iter_mut().for_each(|(r, _)| shift(r));
+            chosen
+                .iter_mut()
+                .filter(|(j, _)| *j == i)
+                .for_each(|(_, r)| shift(r));
+            word.iter_mut()
+                .filter(|(j, _)| *j == i)
+                .for_each(|(_, r)| shift(r));
+            caret = Some((i, col - skip));
+            Some((i, skip))
         });
         DetailView {
             tab: DetailTab::Diff,
             title: self.title(ctx),
             search: self.search_bar(ctx),
             found,
-            chosen: self.chosen(&shown),
+            chosen,
             caret,
             word,
+            gutter,
+            skipped,
             ticks: self.search_ticks(),
             rows,
             sticky: sticky.is_some(),
@@ -2000,18 +2183,23 @@ impl DiffView {
             return None;
         }
         self.rewrap(ctx);
+        // Any key but Del lets an armed comment be.
+        if !matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
+            self.delete_armed = None;
+        }
         if self.search_has_keys(ctx) {
             return Some(self.search_key(mods, sym, typed, ctx));
         }
+        // Ctrl+Shift+F from anywhere; Ctrl+F with the diff's keys.
+        let in_diff = ctx.keys == Keys::Diff;
         if mods.ctrl
-            && mods.shift
+            && (mods.shift || in_diff)
             && !(mods.alt || mods.logo)
             && matches!(sym, Keysym::f | Keysym::F)
         {
             self.open_search(ctx);
             return Some(None);
         }
-        let in_diff = ctx.keys == Keys::Diff;
         if self.editing.is_some() && in_diff {
             return Some(self.editor_key(mods, sym, typed, ctx));
         }
@@ -2074,6 +2262,9 @@ impl DiffView {
         if hit == ReposHit::Button(ReposButton::ClearReview) {
             return Some(Some(Outcome::Clear));
         }
+        if hit == ReposHit::Button(ReposButton::DropOutdated) {
+            return Some(Some(Outcome::ClearOutdated));
+        }
         // A hunk's header puts the hunk back; the cursor's row, the change
         // there or the lines selected.
         if let ReposHit::DiffRestore(i) = hit {
@@ -2130,10 +2321,12 @@ impl DiffView {
                         c.col = col;
                     }
                     self.select_diff_row(r, ctx);
-                    // On a comment, it is edited.
+                    // On a comment, it is edited; on a long file's last
+                    // row shown, the rest show.
                     if let Some(c) = self.comment_at(r) {
                         self.edit_comment(c, ctx);
                     }
+                    self.show_whole(r, ctx);
                 }
                 Some(None)
             }
