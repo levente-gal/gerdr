@@ -5,8 +5,8 @@
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
     PANE_BAR_HEIGHT, Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band,
-    centred_dot, chevron_side, copy, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark,
-    stop, text_lines, zoom_corners,
+    centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow,
+    status_mark, stop, text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -103,10 +103,16 @@ pub fn unzoom_button_rect(pane: Rect) -> Option<Rect> {
 
 /// Where the buttons of a bar with `kind`'s sit, left to right: those
 /// leading it at its start (see `BarButtons::leading`), the rest at its
-/// right end; last the zoom button, if `zoom` (see `zoom_button`).
+/// right end; then the zoom button, if `zoom` (see `zoom_button`); last
+/// the close button, on every bar.
 pub fn pane_bar_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<(BarButton, Rect)> {
     let (leading, trailing) = kind.buttons().split_at(kind.leading());
-    let trailing: Vec<_> = trailing.iter().copied().chain(zoom_button(zoom)).collect();
+    let trailing: Vec<_> = trailing
+        .iter()
+        .copied()
+        .chain(zoom_button(zoom))
+        .chain([BarButton::Close])
+        .collect();
     let step = BAR_BUTTON + BAR_BUTTON_GAP;
     let at = |x: i32| Rectangle::new((x, bar.loc.y).into(), (BAR_BUTTON, bar.size.h).into());
     let left = bar.loc.x + BAR_INSET;
@@ -196,6 +202,8 @@ pub enum BarButton {
     Zoom,
     /// Give the tab's other panes their places back.
     Unzoom,
+    /// Close the pane.
+    Close,
 }
 
 /// Which buttons a pane's bar has, by what the pane shows.
@@ -498,7 +506,8 @@ impl Painter {
                 | BarButton::Reload
                 | BarButton::CopyUrl
                 | BarButton::Zoom
-                | BarButton::Unzoom => true,
+                | BarButton::Unzoom
+                | BarButton::Close => true,
             };
             let hovered = enabled && view.hover == Some(button);
             if hovered {
@@ -533,6 +542,7 @@ impl Painter {
                     let unzoom = button == BarButton::Unzoom;
                     icon_sdf(c, rect, scale, color, |x, y| zoom_corners(unzoom, x, y, s))
                 }
+                BarButton::Close => icon_sdf(c, rect, scale, color, |x, y| cross(x, y, 0.8 * s)),
             }
         }
     }
@@ -685,10 +695,12 @@ mod tests {
                 Some(BarHit::Label)
             );
         }
-        // Copy sits at the end, or just before the zoom button.
+        // Copy sits just before the close button, which ends the bar.
         let buttons = pane_bar_buttons(bar, BarButtons::Web, None);
-        let (_, copy) = buttons.last().unwrap();
-        assert_eq!(copy.loc.x + copy.size.w, 200 + 600 - BAR_INSET);
+        let order: Vec<_> = buttons[3..].iter().map(|(b, _)| *b).collect();
+        assert_eq!(order, [BarButton::CopyUrl, BarButton::Close]);
+        let (_, close) = buttons.last().unwrap();
+        assert_eq!(close.loc.x + close.size.w, 200 + 600 - BAR_INSET);
         assert_eq!(pane_bar_field(bar, BarButtons::Terminal, None), None);
         let narrow = Rect::new((0, 0).into(), (120, PANE_BAR_HEIGHT).into());
         assert_eq!(pane_bar_field(narrow, BarButtons::Web, Some(false)), None);
@@ -704,13 +716,16 @@ mod tests {
         {
             let buttons = pane_bar_buttons(bar, kind, zoom);
             let order: Vec<_> = buttons.iter().map(|(b, _)| *b).collect();
-            // The zoom button comes last, at the bar's end.
+            // The zoom button, then the close button at the bar's end.
             let zoom_button = if zoom == Some(true) {
                 BarButton::Unzoom
             } else {
                 BarButton::Zoom
             };
-            assert_eq!(order, [kind.buttons(), &[zoom_button]].concat());
+            assert_eq!(
+                order,
+                [kind.buttons(), &[zoom_button, BarButton::Close]].concat()
+            );
             assert!(kind.leading() < order.len());
             let (_, last) = buttons.last().unwrap();
             assert_eq!(last.loc.x + last.size.w, 200 + 600 - BAR_INSET);
@@ -723,12 +738,18 @@ mod tests {
                     .all(|(_, r)| r.loc.y == 50 && r.size.h == PANE_BAR_HEIGHT)
             );
         }
-        assert!(pane_bar_buttons(bar, BarButtons::None, None).is_empty());
-        let order: Vec<_> = pane_bar_buttons(bar, BarButtons::Terminal, None)
-            .into_iter()
-            .map(|(b, _)| b)
-            .collect();
-        assert_eq!(order, BarButtons::Terminal.buttons());
+        // A pane alone in its tab has no zoom button; every pane can close.
+        let order = |kind| -> Vec<_> {
+            pane_bar_buttons(bar, kind, None)
+                .into_iter()
+                .map(|(b, _)| b)
+                .collect()
+        };
+        assert_eq!(order(BarButtons::None), [BarButton::Close]);
+        assert_eq!(
+            order(BarButtons::Terminal),
+            [BarButtons::Terminal.buttons(), &[BarButton::Close]].concat()
+        );
     }
 
     #[test]
@@ -742,11 +763,12 @@ mod tests {
                         pane_bar_hit(bar, kind, zoom, centre),
                         Some(BarHit::Button(button))
                     );
-                    // A bar without buttons has only its label there.
-                    assert_eq!(
-                        pane_bar_hit(bar, BarButtons::None, None, centre),
-                        Some(BarHit::Label)
-                    );
+                    // An app's bar has only its close button, at the end.
+                    let app = match button {
+                        BarButton::Close => BarHit::Button(BarButton::Close),
+                        _ => BarHit::Label,
+                    };
+                    assert_eq!(pane_bar_hit(bar, BarButtons::None, None, centre), Some(app));
                 }
             }
         }
