@@ -1528,7 +1528,8 @@ impl Gerdr {
     }
 
     /// Move the project menu's list on to `now` if it moves on its own; whether it
-    /// still moves (see `Scroll::moving`).
+    /// still moves (see `Scroll::moving`). Run before every frame, it also
+    /// fits the list to the output as it is now, resized or not.
     pub fn project_menu_scroll_tick(&mut self, now: Instant) -> bool {
         if self.project_menu.is_none() {
             return false;

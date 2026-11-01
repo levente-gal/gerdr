@@ -509,7 +509,7 @@ impl Painter {
         self.edit_line(
             &mut c,
             &view.query,
-            "Filter worktrees…",
+            "Filter the worktrees…",
             menu_query_text(query, scale),
             band(query, scale),
             true,

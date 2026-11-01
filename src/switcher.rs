@@ -615,7 +615,7 @@ impl Switcher {
         let hint = match (self.run, self.place) {
             (true, Place::Split) => "Command to run in a split…",
             (true, Place::Tab) => "Command to run in a new tab…",
-            (false, _) => "Workspace, tab, agent, project, app, folder or command…",
+            (false, _) => "Go to a workspace, tab, agent, project, app, folder or command…",
         };
         let categories: Vec<&'static str> = if self.chips() {
             std::iter::once("All")
@@ -1094,7 +1094,8 @@ impl Gerdr {
     }
 
     /// Move the switcher's list on to `now` if it moves on its own; whether it
-    /// still moves (see `Scroll::moving`).
+    /// still moves (see `Scroll::moving`). Run before every frame, it also
+    /// fits the list to the output as it is now, resized or not.
     pub fn switcher_scroll_tick(&mut self, now: Instant) -> bool {
         if self.switcher.is_none() {
             return false;
