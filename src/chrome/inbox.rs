@@ -17,6 +17,7 @@ use super::{
     phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, row_dot, segment,
     status_dot, tray,
 };
+use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -179,6 +180,21 @@ pub struct InboxLine {
     pub hidden: bool,
     /// What it can have done, shown on it when selected or hovered.
     pub buttons: Vec<InboxButton>,
+    /// A repository's or worktree's Git marks, after its subtitle.
+    pub marks: Option<InboxMarks>,
+}
+
+/// A repository's Git marks on its inbox line, as the repositories
+/// panel's tree marks it: a cross for an operation stopped half-way or a
+/// conflict, a dot for changes, arrows with the commits to push and pull,
+/// then how many stashes it has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InboxMarks {
+    pub stopped: bool,
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    pub stashes: u32,
 }
 
 /// What an item's mark (and its detail's title mark) shows, and a
@@ -1543,15 +1559,58 @@ impl Painter {
             title_color,
         );
         if let Some(st) = subtitle_rect {
-            self.any_text(
+            let st_band = band(st, scale);
+            let after = self.any_text(
                 c,
                 &line.subtitle,
                 SMALL_FONT_SIZE,
                 text_x,
                 end,
-                band(st, scale),
+                st_band,
                 scale,
                 subtitle_color,
+            );
+            if let Some(marks) = &line.marks {
+                self.inbox_marks(c, marks, after, end, st_band, scale, p);
+            }
+        }
+    }
+
+    /// `marks` from `x` to at most `max_x` (physical pixels) in the band
+    /// `(top, height)`: as `git_marks` draws a branch's, then the stash
+    /// count as the repositories panel says it.
+    #[allow(clippy::too_many_arguments)]
+    fn inbox_marks(
+        &self,
+        c: &mut Canvas,
+        marks: &InboxMarks,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let git = GitStatus {
+            dirty: marks.dirty,
+            ahead: marks.ahead,
+            behind: marks.behind,
+            // Any operation: it only says one stopped.
+            op: marks.stopped.then_some(InProgress::Merge),
+            ..GitStatus::default()
+        };
+        let after = self.git_marks(c, &git, x, max_x, band, scale, p);
+        if marks.stashes > 0 {
+            let gap = (FIELD_GAP as f32 * scale as f32).round();
+            let note = format!("{} stashed", marks.stashes);
+            self.text(
+                c,
+                &note,
+                SMALL_FONT_SIZE,
+                after + gap,
+                max_x,
+                band,
+                scale,
+                p.placeholder,
             );
         }
     }
@@ -1975,6 +2034,7 @@ mod tests {
                 button("Snooze", "Ctrl+H"),
                 button("Dismiss", "Del"),
             ],
+            marks: None,
         })
     }
 

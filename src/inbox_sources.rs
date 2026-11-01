@@ -258,13 +258,18 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             |n| n.to_string_lossy().into(),
         );
         let branch = git.branch.clone().unwrap_or_else(|| "detached HEAD".into());
+        // The rest it needs a look for is marked after (see `Detail::Git`).
+        let mut subtitle = format!("{} · {branch}", view.name);
+        if let Some(op) = git.op {
+            subtitle = format!("{subtitle} · {}", op_label(op));
+        }
         items.push(InboxItem {
             id: ItemId(format!("git:{}", root.display())),
             section: Section::Repos,
             fingerprint: git_fingerprint(git),
             workspace: Some(w),
             title: folder,
-            subtitle: format!("{} · {branch} · {}", view.name, git_summary(git)),
+            subtitle,
             tone: Tone::Attention,
             age: None,
             target: Target::Workspace(w),
@@ -272,6 +277,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             detail: Detail::Git {
                 branch: git.branch.clone(),
                 upstream: git.upstream.clone(),
+                dirty: git.dirty,
                 ahead: git.ahead,
                 behind: git.behind,
                 stashes: git.stashes,
@@ -301,10 +307,10 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
     }
     for (wt, shared) in worktrees {
         let w = src.pick(&shared);
-        let why = match (wt.attention_tag(), wt.dirty) {
-            (Some(tag), true) => format!("{tag}, changes"),
-            (Some(tag), false) => tag.to_owned(),
-            (None, _) => "changes".to_owned(),
+        // Its changes are marked after (see `Detail::Git`).
+        let subtitle = match wt.attention_tag() {
+            Some(tag) => format!("{} · worktree · {tag}", src.name(w)),
+            None => format!("{} · worktree", src.name(w)),
         };
         items.push(InboxItem {
             id: ItemId(format!("worktree:{}", wt.path.display())),
@@ -317,7 +323,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             ),
             workspace: Some(w),
             title: wt.name(),
-            subtitle: format!("{} · worktree · {why}", src.name(w)),
+            subtitle,
             tone: Tone::Attention,
             age: None,
             target: Target::Worktree(wt.path.clone()),
@@ -325,6 +331,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             detail: Detail::Git {
                 branch: wt.branch.clone(),
                 upstream: None,
+                dirty: wt.dirty,
                 ahead: 0,
                 behind: 0,
                 stashes: 0,
@@ -341,34 +348,6 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
 /// to push or pull, stashes, or an operation stopped half-way.
 fn needs_look(git: &GitStatus) -> bool {
     git.dirty || git.ahead > 0 || git.behind > 0 || git.stashes > 0 || git.op.is_some()
-}
-
-/// What `git` needs a look for, in short, marked as the repositories
-/// panel's tree marks it: `3 changes ↑2 ↓1 · 1 stashed · merging`, the
-/// arrows before the commits to push and pull.
-fn git_summary(git: &GitStatus) -> String {
-    let mut marks = Vec::new();
-    if git.dirty {
-        marks.push(match git.changes.len().max(1) {
-            1 => "1 change".to_owned(),
-            n => format!("{n} changes"),
-        });
-    }
-    if git.ahead > 0 {
-        marks.push(format!("↑{}", git.ahead));
-    }
-    if git.behind > 0 {
-        marks.push(format!("↓{}", git.behind));
-    }
-    let mut parts = Vec::new();
-    if !marks.is_empty() {
-        parts.push(marks.join(" "));
-    }
-    if git.stashes > 0 {
-        parts.push(format!("{} stashed", git.stashes));
-    }
-    parts.extend(git.op.map(op_label));
-    parts.join(" · ")
 }
 
 /// What `op` is, as going on: `merging`, `rebasing 2/5`.
@@ -967,11 +946,14 @@ mod tests {
             "{}",
             items[3].subtitle
         );
-        // Marked as the repositories panel marks them.
-        let ends = |i: usize, end: &str| assert!(items[i].subtitle.ends_with(end), "{end}");
-        ends(0, "↑2");
-        ends(1, "↓1");
-        ends(2, "1 stashed");
+        // Marked as the repositories panel marks them, not in words.
+        assert!(!items[0].subtitle.contains('↑'), "{}", items[0].subtitle);
+        let marks = |i: usize| items[i].marks().unwrap();
+        assert_eq!(marks(0).ahead, 2);
+        assert_eq!(marks(1).behind, 1);
+        assert_eq!(marks(2).stashes, 1);
+        assert!(marks(3).stopped);
+        assert!(!marks(0).stopped && !marks(0).dirty);
     }
 
     #[test]

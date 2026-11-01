@@ -145,6 +145,29 @@ impl InboxItem {
             Detail::Unread { .. } => I::Failed,
         }
     }
+
+    /// A repository's or worktree's Git marks, for its line.
+    pub fn marks(&self) -> Option<chrome::InboxMarks> {
+        let Detail::Git {
+            dirty,
+            ahead,
+            behind,
+            stashes,
+            op,
+            changes,
+            ..
+        } = &self.detail
+        else {
+            return None;
+        };
+        Some(chrome::InboxMarks {
+            stopped: op.is_some() || changes.iter().any(|(code, _)| *code == 'U'),
+            dirty: *dirty,
+            ahead: *ahead,
+            behind: *behind,
+            stashes: *stashes,
+        })
+    }
 }
 
 /// Where going to an item leads.
@@ -250,6 +273,8 @@ pub enum Detail {
     Git {
         branch: Option<String>,
         upstream: Option<String>,
+        /// Some file is changed, staged or untracked.
+        dirty: bool,
         ahead: u32,
         behind: u32,
         stashes: u32,
@@ -536,6 +561,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         Detail::Git {
             branch,
             upstream,
+            dirty: _,
             ahead,
             behind,
             stashes,
@@ -1559,6 +1585,7 @@ impl Panel {
                         age: item.age.map(age_text).unwrap_or_default(),
                         hidden: self.show_hidden,
                         buttons,
+                        marks: item.marks(),
                     })
                 }
             })
@@ -2531,6 +2558,7 @@ mod tests {
         git.detail = Detail::Git {
             branch: Some("main".into()),
             upstream: None,
+            dirty: true,
             ahead: 2,
             behind: 0,
             stashes: 0,

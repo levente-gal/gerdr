@@ -503,6 +503,7 @@ fn inbox_item(
         age: age.into(),
         hidden: false,
         buttons: Vec::new(),
+        marks: None,
     })
 }
 
