@@ -96,16 +96,17 @@ use std::{
 };
 
 use chrome::{
-    AgentView, BarButton, Chrome, ChromeView, Density, HelpHit, HelpPress, PlaceholderView,
+    AgentView, BarButton, Chrome, ChromeView, Density, Help, HelpHit, HelpPress, PlaceholderView,
     SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
 };
 use frecency::Frecency;
 use hooks::Hook;
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
-use menu::{ContextMenu, MenuAction};
+use menu::{ContextMenu, MenuAction, MenuSpec};
+use overlay::Overlay;
 use paths::tilde;
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
-use rename::Rename;
+use rename::{Rename, RenameTarget};
 use smithay::{
     backend::{
         egl::EGLDevice,
@@ -167,6 +168,9 @@ const REORDER_START: f64 = 4.0;
 /// Smallest pane size a divider drag leaves, and the app area width the
 /// sidebar always leaves.
 const MIN_PANE: i32 = 80;
+/// How far right of a pane's bar or a sidebar row's start the menu its
+/// key opens goes.
+const MENU_KEY_INDENT: i32 = 8;
 const REAP_INTERVAL: Duration = Duration::from_millis(500);
 /// How often the agent cards are refreshed from herdr, for what changes
 /// without an event (terminal titles).
@@ -1041,6 +1045,10 @@ pub enum Action {
     /// workspace.
     NewAgent,
     CloseTab,
+    /// Name the active tab: a field on it takes the name.
+    RenameTab,
+    /// Move the active tab a place right (1) or left (-1).
+    MoveTab(isize),
     NextTab,
     PrevTab,
     GotoTab(usize),
@@ -1050,6 +1058,9 @@ pub enum Action {
     CloseWorkspace,
     NextWorkspace,
     PrevWorkspace,
+    /// Open the active workspace's menu, as a right click on its sidebar
+    /// row does, to go through with the arrow keys.
+    WorkspaceMenu,
     /// Split the focused pane and open a terminal in the new half.
     Split(Dir),
     /// Close the focused pane.
@@ -1097,6 +1108,9 @@ pub enum Action {
     PaneToNewTab,
     /// Zoom the focused pane to fill its tab, or unzoom it.
     ZoomPane,
+    /// Open the focused pane's menu, as a right click on its bar does, to
+    /// go through with the arrow keys.
+    PaneMenu,
     /// Open the worktrees popup, to review, check out, merge and delete the
     /// repositories' worktrees.
     Worktrees,
@@ -1517,10 +1531,11 @@ pub struct Gerdr {
 impl Gerdr {
     /// Something went wrong that the user must fix (a tool missing, a file
     /// unreadable): kept in the problems list under `source` (and so in the
-    /// log), and said in an error toast.
+    /// log), and said in an error toast that opens the log.
     pub fn report_problem(&mut self, source: &'static str, text: String) {
         problems::report(source, text.clone());
-        self.show_error(text);
+        let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
+        self.toast_with(text, Level::Error, Some(open_log));
     }
 
     pub fn output_size(&self) -> Size<i32, Logical> {
@@ -3938,12 +3953,28 @@ impl Gerdr {
             })
     }
 
+    /// The help as the panel shows it now: the keys that don't work over
+    /// what has the keys (a panel, the welcome screen, a dialog) greyed
+    /// out. A menu open closes on the key, so what is under it decides.
+    fn shown_help(&self) -> Arc<Help> {
+        let over = self
+            .open_overlays()
+            .find(|o| o.takes_keys() && *o != Overlay::ContextMenu);
+        let Some(over) = over else {
+            return self.keymap.help();
+        };
+        Arc::new(self.keymap.help_at(keys::Reach {
+            works: &|action| prefix_works(over, action),
+            to_app: false,
+        }))
+    }
+
     /// What `pos` is over in the help panel, while it shows.
     pub fn help_hit(&self, pos: Point<f64, Logical>) -> Option<HelpHit> {
         if !(self.prefix_armed || self.help_pinned) {
             return None;
         }
-        let help = self.keymap.help();
+        let help = self.shown_help();
         let (area, scale) = (self.content_rect(), self.scale());
         self.chrome
             .help_hit(&help, self.help_pinned, area, scale, pos)
@@ -3958,6 +3989,7 @@ impl Gerdr {
         match press {
             HelpPress::Action(action) => self.run_action(action),
             HelpPress::Close => self.help_pinned = false,
+            HelpPress::NotHere => {}
         }
         let time = self.start_time.elapsed().as_millis() as u32;
         self.pointer_moved(pos, time);
@@ -3983,6 +4015,8 @@ impl Gerdr {
             Action::NewTab => self.new_tab(),
             Action::NewAgent => self.open_agent_picker(self.active_workspace),
             Action::CloseTab => self.close_tab(tab),
+            Action::RenameTab if tabs > 0 => self.start_rename(RenameTarget::Tab(ws, tab)),
+            Action::MoveTab(step) => self.move_tab(step),
             Action::NextTab if tabs > 0 => self.switch_tab((tab + 1) % tabs),
             Action::PrevTab if tabs > 0 => self.switch_tab((tab + tabs - 1) % tabs),
             Action::GotoTab(idx) => self.switch_tab(idx),
@@ -3991,6 +4025,8 @@ impl Gerdr {
             Action::CloseWorkspace => self.close_workspace(ws),
             Action::NextWorkspace if wss > 0 => self.switch_workspace((ws + 1) % wss),
             Action::PrevWorkspace if wss > 0 => self.switch_workspace((ws + wss - 1) % wss),
+            Action::WorkspaceMenu => self.open_workspace_menu(),
+            Action::PaneMenu => self.open_pane_menu(),
             Action::Split(dir) => self.split_pane(dir),
             Action::ClosePane => self.close_pane(),
             Action::FocusSide(side) => {
@@ -4045,15 +4081,17 @@ impl Gerdr {
                 }
             }
             // Their key closes them again, as the inbox's does.
-            Action::Worktrees if self.worktrees.is_open() => {
+            Action::Worktrees if self.is_open(Overlay::Worktrees) => {
                 self.apply_worktrees(worktrees::Outcome::Close)
             }
             Action::Worktrees => self.open_worktrees(None),
-            Action::Repos if self.repos.is_open() => self.apply_repos(repos::Outcome::Close),
+            Action::Repos if self.is_open(Overlay::Repos) => {
+                self.apply_repos(repos::Outcome::Close)
+            }
             Action::Repos => self.open_repos(),
-            Action::Inbox if self.inbox.is_open() => self.close_inbox(),
+            Action::Inbox if self.is_open(Overlay::Inbox) => self.close_inbox(),
             Action::Inbox => self.open_inbox(None),
-            Action::Scrollback if self.scrollback.is_some() => self.close_scrollback(),
+            Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
@@ -4090,17 +4128,90 @@ impl Gerdr {
                 let command = record.command.clone().unwrap_or_default();
                 if let Some(i) = record.skip.iter().position(|c| *c == command) {
                     record.skip.remove(i);
-                    format!("`{command}` runs again when the project comes back")
+                    format!("`{command}` runs again after a reboot")
                 } else {
                     record.skip.push(command.clone());
                     format!(
-                        "`{command}` won't run again when the project comes back · its tab shows \u{2298}"
+                        "`{command}` won't run again after a reboot · its tab shows \u{2298}"
                     )
                 }
             }
         };
         self.projects.save();
         self.toast(summary, Level::Info);
+    }
+
+    /// Move the active tab `step` places along the strip (right for
+    /// positive), as dragging it does; at either end it stays.
+    fn move_tab(&mut self, step: isize) {
+        let Some(ws) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        let to = ws.active_tab.saturating_add_signed(step);
+        if to == ws.active_tab || to >= ws.tabs.len() {
+            return;
+        }
+        move_item(&mut ws.tabs, &mut ws.active_tab, to);
+        self.reorder_herdr(Reorderable::Tab);
+    }
+
+    /// Open `spec` as from the keys: its first item picked, for the
+    /// arrow keys and Enter to go on from.
+    fn open_menu_by_key(&mut self, spec: MenuSpec) {
+        self.open_menu(spec);
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.step_to_end(false);
+        }
+    }
+
+    /// Open the focused pane's menu (see `pane_bar_menu`) under its bar.
+    fn open_pane_menu(&mut self) {
+        let Some(tab) = self.tab() else { return };
+        let Some(id) = tab.focused_id() else { return };
+        let Some((_, rect)) = tab
+            .shown_rects(self.content_rect())
+            .into_iter()
+            .find(|(pane, _)| *pane == id)
+        else {
+            return;
+        };
+        let bar = chrome::pane_bar_rects(rect).0;
+        // At the bar's left end, clear of its buttons; on its grip too
+        // while the bar is hidden.
+        let on = Point::from((bar.loc.x as f64 + 4.0, bar.loc.y as f64 + 1.0));
+        if let Some(mut spec) = self.pane_bar_menu(on) {
+            spec.anchor = Rectangle::new(
+                (bar.loc.x + MENU_KEY_INDENT, bar.loc.y).into(),
+                (0, bar.size.h).into(),
+            );
+            self.open_menu_by_key(spec);
+        }
+    }
+
+    /// Open the active workspace's menu (see `sidebar_menu`) under its
+    /// sidebar row, scrolled into view first.
+    fn open_workspace_menu(&mut self) {
+        let w = self.active_workspace;
+        let height = self.output_size().h;
+        let scroll = self.sidebar_scroll.pos().round() as i32;
+        let to = self.sidebar_layout().showing(w, scroll, height);
+        if to != scroll {
+            self.sidebar_scroll.jump(to as f64);
+        }
+        let Some(title) = self.sidebar_layout().rows.get(w).map(|row| row.title) else {
+            return;
+        };
+        let on = Point::from((
+            title.loc.x as f64 + 1.0,
+            title.loc.y as f64 + title.size.h as f64 / 2.0,
+        ));
+        if let Some(mut spec) = self.sidebar_menu(on) {
+            spec.anchor = Rectangle::new(
+                (title.loc.x + MENU_KEY_INDENT, title.loc.y).into(),
+                (0, title.size.h).into(),
+            );
+            self.open_menu_by_key(spec);
+        }
     }
 
     /// The shown project and the active workspace's record: whose shells a
@@ -4914,18 +5025,7 @@ impl Gerdr {
             .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
         let reordering = self.reorder.is_some_and(|r| r.moving);
         // These take every click.
-        if self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-            || self.welcome.is_some()
-            || self.project_menu.is_some()
-            || self.worktrees.is_open()
-            || self.repos.is_open()
-            || self.inbox.is_open()
-            || self.scrollback.is_some()
-            || self.switcher.is_some()
-        {
+        if self.grabbing_overlay().is_some() {
             return None;
         }
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
@@ -5233,7 +5333,9 @@ impl Gerdr {
         let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
         let why = format!("{name} is open in another gerdr: pick another, or join it here");
         if self.project.is_some() {
-            return self.toast(why, Level::Warning);
+            let join = ("Join here".to_owned(), MenuAction::AttachProject(id.to_owned()));
+            let text = format!("{name} is open in another gerdr");
+            return self.toast_with(text, Level::Warning, Some(join));
         }
         if self.welcome.is_none() {
             self.open_welcome(false);
@@ -5942,7 +6044,7 @@ impl Gerdr {
             context_menu: self.context_menu.as_ref().map(ContextMenu::view),
             tooltip: self.tooltip.view(),
             switcher: self.switcher_view(),
-            prefix: (self.prefix_armed || self.help_pinned).then(|| self.keymap.help()),
+            prefix: (self.prefix_armed || self.help_pinned).then(|| self.shown_help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             restart: self.restart_view(),
@@ -5962,6 +6064,32 @@ impl Gerdr {
             size: self.output_size(),
             scale: self.scale(),
         }
+    }
+}
+
+/// Whether `action`, picked with the prefix, works while `over` has the
+/// keys: as `input` decides it. A dialog takes every key; the welcome
+/// screen only what acts on gerdr itself; a panel that and the keys of
+/// the panels, its own closing it again.
+fn prefix_works(over: Overlay, action: Action) -> bool {
+    if over.is_dialog() {
+        return false;
+    }
+    if over.toggled_by() == Some(action) {
+        return true;
+    }
+    match over {
+        Overlay::Welcome => matches!(action, Action::ToggleTheme | Action::Quit),
+        _ => matches!(
+            action,
+            Action::ToggleTheme
+                | Action::Quit
+                | Action::Shortcuts
+                | Action::Projects
+                | Action::Inbox
+                | Action::Repos
+                | Action::Worktrees
+        ),
     }
 }
 
@@ -6569,6 +6697,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_prefix_works_over_a_panel_as_input_has_it() {
+        // Over a panel: gerdr's own keys, the panels' keys, and its own
+        // key closing it.
+        assert!(prefix_works(Overlay::Repos, Action::Repos));
+        assert!(prefix_works(Overlay::Repos, Action::Inbox));
+        assert!(prefix_works(Overlay::Repos, Action::Quit));
+        assert!(!prefix_works(Overlay::Repos, Action::NewTab));
+        assert!(prefix_works(Overlay::Switcher, Action::Switcher));
+        assert!(!prefix_works(Overlay::Switcher, Action::PaneMenu));
+        // Over the welcome screen less, over a dialog nothing.
+        assert!(prefix_works(Overlay::Welcome, Action::ToggleTheme));
+        assert!(!prefix_works(Overlay::Welcome, Action::Repos));
+        assert!(!prefix_works(Overlay::Quit, Action::Quit));
+    }
 
     /// A tab laid out 1 | (2 over 3), with no windows.
     fn three_panes() -> Tab {

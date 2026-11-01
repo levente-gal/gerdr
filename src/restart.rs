@@ -8,6 +8,13 @@
 //! command comes, restarting runs the chosen ones without asking. The
 //! workspace's menu opens the dialog anyway, to change them.
 //!
+//! Not the same choice as a pane's command running again after a reboot
+//! (prefix Shift+S, kept in the pane's record as `skip`): that one is a
+//! pane's, made for when its terminal comes back without the user there,
+//! and asks nothing. Taking one for the other would stop a command coming
+//! back after a reboot because it was left out of one restart, or the
+//! other way round, so they stay apart.
+//!
 //! Up/Down (PgUp/PgDn, Home/End) move between the rows, scrolling them
 //! when more than fit, Space checks the one under the cursor, Left/Right
 //! and Tab move between the buttons, Enter presses the selected one
