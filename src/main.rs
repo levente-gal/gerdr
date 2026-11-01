@@ -67,6 +67,9 @@ mod scrollback;
 mod scrollback_panel;
 mod scrollbars;
 mod scrolling;
+mod service_errors;
+mod service_watch;
+mod services;
 mod sidebar;
 mod switcher;
 mod syntax;
@@ -1428,6 +1431,8 @@ pub struct Gerdr {
     /// The last command run in each herdr pane, by pane id, to run again
     /// from its bar.
     pub last_commands: HashMap<String, pane_control::Remembered>,
+    /// The errors the services print (see `services`).
+    pub service_errors: services::ServiceErrors,
     /// The panes being stopped or restarted, by herdr pane id.
     pub pane_jobs: HashMap<String, pane_control::Job>,
     /// Where those jobs report; `None` until set up.
@@ -2011,8 +2016,11 @@ impl Gerdr {
         }
         self.refresh_agents();
         // The events' source goes last: it removes itself when the server goes.
-        let tabs = self.watch_herdr_tabs(socket);
+        let tabs = self.watch_herdr_tabs(socket.clone());
         self.herdr_sources.extend(tabs);
+        let fresh = start != herdr::Start::Attached;
+        let services = self.watch_services(socket, session, fresh);
+        self.herdr_sources.extend(services);
         let sub = match subscribed {
             Ok(sub) => sub,
             Err(err) => {
@@ -2043,6 +2051,7 @@ impl Gerdr {
                     state.agents.clear();
                     state.notify_agents();
                     state.herdr_tabs.clear();
+                    state.stop_service_watch();
                     // Closed as it went down: they come back with it.
                     state.closed_workspaces.clear();
                     // This source is the last one and removes itself.
@@ -2133,6 +2142,7 @@ impl Gerdr {
             herdr::Event::Created { workspace_id } => self.sync_herdr_workspace(&workspace_id),
             // Its window closes by itself when the attach ends.
             herdr::Event::PaneGone { pane_id } => {
+                self.forget_service_pane(&pane_id);
                 self.forget_herdr_pane(&pane_id);
             }
             herdr::Event::PaneMoved {
@@ -2231,6 +2241,7 @@ impl Gerdr {
             {
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                state.feed_services();
                 state.track_tests();
                 for id in state.projects.take_conflicts() {
                     let name = state
@@ -2789,6 +2800,11 @@ impl Gerdr {
             match notifier.dispatch() {
                 Ok(clicked) => {
                     for key in clicked {
+                        if let Some(key) = key.strip_prefix(services::NOTIFY_PREFIX) {
+                            state.service_notification_clicked(key);
+                            state.backend.window().focus_window();
+                            continue;
+                        }
                         state.focus_agent(&agents::AgentKey::parse(&key));
                         state.backend.window().focus_window();
                     }
@@ -2808,7 +2824,7 @@ impl Gerdr {
     }
 
     /// The workspace and tab herdr pane `pane_id` is in.
-    fn herdr_pane_place(&self, pane_id: &str) -> Option<(usize, usize)> {
+    pub(crate) fn herdr_pane_place(&self, pane_id: &str) -> Option<(usize, usize)> {
         self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             Some((
                 w,
@@ -4895,6 +4911,10 @@ impl Gerdr {
                 }
                 view.ci = self.ci_view(ws);
                 view.restart = !self.workspace_restarts(w).is_empty();
+                let panes = ws.tabs.iter().flat_map(Tab::herdr_panes);
+                view.errors = self
+                    .service_errors
+                    .unseen_in(panes.map(|p| p.pane_id.as_str()));
                 if self.agent_strip == Some(w) {
                     view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
                 }
@@ -5178,6 +5198,7 @@ impl Gerdr {
         self.tabs_changed = None;
         self.pane_leaders.clear();
         self.last_commands.clear();
+        self.stop_service_watch();
         self.pane_jobs.clear();
         self.pane_bar_hover = None;
         self.closed_workspaces.clear();
@@ -6167,6 +6188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         order_pending: HashSet::new(),
         pane_leaders: HashMap::new(),
         last_commands: HashMap::new(),
+        service_errors: services::ServiceErrors::default(),
         pane_jobs: HashMap::new(),
         pane_job_tx: None,
         pane_bar_hover: None,

@@ -191,6 +191,16 @@ impl Gerdr {
     ) -> Vec<InboxItem> {
         let dirs: Vec<_> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
         let records: Vec<_> = self.workspaces.iter().map(|ws| ws.record.clone()).collect();
+        let service_errors: Vec<_> = self
+            .service_errors
+            .groups
+            .iter()
+            .map(|group| inbox_sources::ServiceItem {
+                group: group.clone(),
+                workspace: self.herdr_pane_place(&group.pane_id).map(|(w, _)| w),
+                service: self.pane_bar_content(&group.pane_id).label,
+            })
+            .collect();
         inbox_sources::collect(&Sources {
             workspaces,
             dirs: &dirs,
@@ -206,6 +216,7 @@ impl Gerdr {
             tickets: self.ticket_repos(),
             store: self.inbox_file(),
             pane_text: &self.inbox.pane_text,
+            service_errors: &service_errors,
             now: Instant::now(),
             now_secs: inbox_store::now_secs(),
         })
@@ -457,6 +468,9 @@ impl Gerdr {
                     ),
                     _ => (None, "Dismissed until it changes"),
                 };
+                if let Target::ServiceError { pane_id, .. } = &item.target {
+                    self.see_service_errors(pane_id);
+                }
                 let Some(file) = self.inbox_file_mut() else {
                     return;
                 };
@@ -551,6 +565,10 @@ impl Gerdr {
                     self.switch_workspace(w);
                 }
             }
+            Target::ServiceError {
+                pane_id,
+                fingerprint,
+            } => self.show_service_error(&pane_id, &fingerprint),
         }
     }
 

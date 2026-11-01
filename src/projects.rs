@@ -58,6 +58,10 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// Where reading each service's output for errors left off, by
+    /// `<herdr session>|<pane id>` (see `service_watch`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_anchors: BTreeMap<String, crate::service_errors::Anchor>,
     #[serde(skip)]
     books: Books,
 }
@@ -78,6 +82,8 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    service_anchors: BTreeMap<String, crate::service_errors::Anchor>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -411,6 +417,7 @@ impl Store {
         self.cursor_history = state.cursor_history;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.service_anchors = state.service_anchors;
     }
 
     fn state(&self) -> State {
@@ -422,6 +429,7 @@ impl Store {
             cursor_history: self.cursor_history.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            service_anchors: self.service_anchors.clone(),
         }
     }
 
@@ -1516,6 +1524,7 @@ mod tests {
             cursor_history: History::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            service_anchors: BTreeMap::new(),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

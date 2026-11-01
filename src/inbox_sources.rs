@@ -19,6 +19,7 @@ use crate::{
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
     inbox_store::InboxFile,
     issues::{Issue, IssueSource, IssuesRead, IssuesState, TicketRepo},
+    services::ErrorGroup,
     test_runs::TestRun,
 };
 
@@ -56,9 +57,21 @@ pub struct Sources<'a> {
     pub store: Option<&'a InboxFile>,
     /// Agent panes' last lines, by herdr pane id.
     pub pane_text: &'a HashMap<String, PaneText>,
+    /// The services' errors, the newest first.
+    pub service_errors: &'a [ServiceItem],
     pub now: Instant,
     /// Now, in seconds since the epoch.
     pub now_secs: u64,
+}
+
+/// A service's error, with what the inbox says of where it is.
+#[derive(Clone, Debug)]
+pub struct ServiceItem {
+    pub group: ErrorGroup,
+    /// The workspace its pane is in, by index.
+    pub workspace: Option<usize>,
+    /// What its pane's bar calls the service.
+    pub service: String,
 }
 
 /// What every item but a todo can have done to it.
@@ -585,9 +598,48 @@ pub fn todo_items(src: &Sources) -> Vec<InboxItem> {
     .collect()
 }
 
+/// The services' errors, each with how many times it came.
+pub fn service_items(src: &Sources) -> Vec<InboxItem> {
+    src.service_errors
+        .iter()
+        .map(|item| {
+            let group = &item.group;
+            let workspace = item.workspace.map(|w| src.name(w)).unwrap_or_default();
+            let times = match group.count {
+                1 => String::new(),
+                n => format!(" · ×{n}"),
+            };
+            InboxItem {
+                id: ItemId(format!("service:{}|{}", group.pane_id, group.fingerprint)),
+                section: Section::Services,
+                // Back from a dismissal when it comes again.
+                fingerprint: group.count.to_string(),
+                workspace: item.workspace,
+                title: group.title.clone(),
+                subtitle: format!("{workspace} · {}{times}", item.service),
+                tone: Tone::Failed,
+                age: Some(src.now.saturating_duration_since(group.last)),
+                target: Target::ServiceError {
+                    pane_id: group.pane_id.clone(),
+                    fingerprint: group.fingerprint.clone(),
+                },
+                actions: TRIAGE.to_vec(),
+                detail: Detail::Service {
+                    service: item.service.clone(),
+                    workspace,
+                    count: group.count,
+                    first: group.first_secs,
+                    lines: group.lines.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
 /// Every item, each once.
 pub fn collect(src: &Sources) -> Vec<InboxItem> {
     let mut items = agent_items(src);
+    items.extend(service_items(src));
     items.extend(git_items(src));
     items.extend(ci_items(src));
     items.extend(ticket_items(src));
@@ -688,6 +740,7 @@ mod tests {
                 tickets: &self.tickets,
                 store: self.store.as_ref(),
                 pane_text: &self.pane_text,
+                service_errors: &[],
                 now: Instant::now(),
                 now_secs: 1_000_000,
             }
