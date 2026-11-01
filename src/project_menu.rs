@@ -1380,14 +1380,10 @@ impl Gerdr {
                 self.project_menu = None;
                 self.create_project_with(&name, folder, kind);
             }
-            Outcome::Rename(id, name) => {
-                self.rename_project(&id, &name);
-                self.refresh_project_menu();
-            }
-            Outcome::Stop(id) => {
-                self.stop_project(&id, crate::projects::Stops::ALL);
-                self.refresh_project_menu();
-            }
+            // Each lists the projects again once done: a rename at once,
+            // a stop or forget once it is (after its question, if asked).
+            Outcome::Rename(id, name) => self.rename_project(&id, &name),
+            Outcome::Stop(id) => self.stop_project(&id, crate::projects::Stops::ALL),
             Outcome::Settings(id) => {
                 let found = self.projects.project(&id).map(|p| {
                     let dir = hooks::project_dir(p);
@@ -1414,10 +1410,7 @@ impl Gerdr {
                     self.run_start_commands(&id);
                 }
             }
-            Outcome::Forget(id) => {
-                self.forget_project(&id);
-                self.refresh_project_menu();
-            }
+            Outcome::Forget(id) => self.forget_project(&id),
             Outcome::Refresh => {
                 self.refresh_project_menu();
                 self.check_running();
@@ -1428,7 +1421,9 @@ impl Gerdr {
             Outcome::Closed => self.project_menu = None,
         }
         // Gone, the client under the pointer gets it back.
-        self.refresh_pointer_focus();
+        if self.project_menu.is_none() {
+            self.refresh_pointer_focus();
+        }
     }
 
     /// A left click while the project menu is open: outside it closes it,
