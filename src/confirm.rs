@@ -1,5 +1,5 @@
 //! A dialog asking to confirm something that can't be undone, such as
-//! closing an agent that runs: a title, a line saying what it does, Cancel
+//! closing an agent or a pane where something runs: a title, a line saying what it does, Cancel
 //! and the button doing it.
 //!
 //! Left/Right and Tab move between the buttons, Enter presses the selected
@@ -24,6 +24,8 @@ const GO: usize = 1;
 pub enum Then {
     /// Close the agent of this card (see `Gerdr::close_agent`).
     CloseAgent(AgentKey),
+    /// Close this pane of the active tab (see `Gerdr::close_pane`).
+    ClosePane(u32),
 }
 
 /// The confirm dialog's state, while it is open.
@@ -91,6 +93,16 @@ fn close_question(card: &AgentView) -> (String, String) {
     (title, body.to_owned())
 }
 
+/// What a confirm dialog about closing a pane where `what` runs says: its
+/// title and the line under it.
+fn close_pane_question(what: &str) -> (String, String) {
+    let title = format!("Close \u{201c}{what}\u{201d}?");
+    (
+        title,
+        "It is still running: closing its pane stops it".to_owned(),
+    )
+}
+
 impl Gerdr {
     /// The card of agent `key`, if one shows.
     fn agent_card(&self, key: &AgentKey) -> Option<AgentView> {
@@ -110,12 +122,29 @@ impl Gerdr {
             return self.close_agent_now(&card);
         }
         let (title, body) = close_question(&card);
+        self.ask(
+            title,
+            body,
+            card.close_label(),
+            Then::CloseAgent(key.clone()),
+        );
+    }
+
+    /// Ask before closing pane `id` of the active tab, where `what` runs.
+    pub fn ask_close_pane(&mut self, id: u32, what: String) {
+        let (title, body) = close_pane_question(&what);
+        self.ask(title, body, "Close pane", Then::ClosePane(id));
+    }
+
+    /// Open the confirm dialog: `title`, `body` under it, and the `go`
+    /// button doing `then`.
+    fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
         self.context_menu = None;
         self.confirm = Some(ConfirmDialog {
             title,
             body,
-            go: card.close_label(),
-            then: Then::CloseAgent(key.clone()),
+            go,
+            then,
             selected: GO,
             hover: None,
         });
@@ -163,6 +192,7 @@ impl Gerdr {
                     self.close_agent_now(&card);
                 }
             }
+            Then::ClosePane(id) => self.close_pane_now(id),
         }
     }
 
@@ -267,5 +297,8 @@ mod tests {
         assert!(body.contains("its pane stops it"));
         card.key = AgentKey::Cursor("c1".into());
         assert!(close_question(&card).1.contains("keeps running in Cursor"));
+        let (title, body) = close_pane_question("npm run dev");
+        assert_eq!(title, "Close \u{201c}npm run dev\u{201d}?");
+        assert!(body.contains("its pane stops it"));
     }
 }
