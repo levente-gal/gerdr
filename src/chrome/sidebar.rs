@@ -133,8 +133,9 @@ const ACTIVE_TINT: f32 = 0.45;
 /// How strongly the active workspace's header buttons show at rest, as
 /// a fraction of their hovered look.
 const ACTIVE_BUTTONS: f32 = 0.45;
-/// How much of the warning colour a blocked agent's "blocked" pill has.
-const BLOCKED_PILL_TINT: f32 = 0.25;
+/// How much of the warning colour a blocked agent's "blocked" pill has,
+/// over the panel (see `blocked_pill`).
+const BLOCKED_PILL_TINT: f32 = 0.2;
 /// The hint an empty sidebar shows under its header, a line each, and
 /// how far under the header it starts.
 const EMPTY_HINT: [&str; 2] = [
@@ -2658,7 +2659,7 @@ impl Painter {
             let pill_h = px(PILL_HEIGHT) as f32;
             let pill_x = (right - pill_w).round();
             let pill_y = (line_band.0 as f32 + (line_band.1 as f32 - pill_h) / 2.0).round();
-            let pill_fill = mix(surface, p.warning, BLOCKED_PILL_TINT);
+            let pill_fill = blocked_pill(p);
             c.rounded(
                 pill_x,
                 pill_y,
@@ -2970,9 +2971,15 @@ pub fn sidebar_thumb(
     super::Thumb::of(track, shown as f64, bar)
 }
 
-/// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
-/// a count or label on a coloured pill keeps its contrast in both themes.
-fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+/// The fill of a blocked card's status pill: the warning colour over the
+/// panel, not over the card, so its label reads at 4.5:1 or more however
+/// lit the card is (hovered, open, pulsing), in both themes.
+fn blocked_pill(p: &Palette) -> Rgb {
+    mix(p.panel, p.warning, BLOCKED_PILL_TINT)
+}
+
+/// How far apart `a` and `b` are in WCAG contrast, 1 to 21.
+fn contrast(a: Rgb, b: Rgb) -> f32 {
     let luminance = |[r, g, b]: Rgb| {
         let lin = |v: u8| {
             let v = v as f32 / 255.0;
@@ -2984,11 +2991,14 @@ fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
         };
         0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
     };
-    let contrast = |a: Rgb| {
-        let (a, b) = (luminance(a), luminance(fill));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    };
-    if contrast(p.on_accent) >= contrast(p.text) {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
+/// a count or label on a coloured pill keeps its contrast in both themes.
+fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+    if contrast(p.on_accent, fill) >= contrast(p.text, fill) {
         p.on_accent
     } else {
         p.text
@@ -3310,6 +3320,21 @@ impl SidebarLayers {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_blocked_pills_label_reads_at_4_5_to_1_in_both_themes() {
+        use super::{blocked_pill, contrast, ink_on, mix, pulse_alpha};
+        for theme in [crate::chrome::Theme::Dark, crate::chrome::Theme::Light] {
+            let p = theme.palette();
+            let pill = blocked_pill(p);
+            let ink = ink_on(pill, p);
+            // At rest and with the pulse at its strongest over it.
+            for fill in [pill, mix(pill, p.warning, pulse_alpha(1.0))] {
+                let ratio = contrast(ink, fill);
+                assert!(ratio >= 4.5, "{theme:?}: {ratio}");
+            }
+        }
+    }
+
     use super::{
         AGENT_ROW, AGENT_ROW_COMPACT, AGENT_SLOT, ATTENTION_BOTTOM, AgentIcon, AgentLine,
         AgentView, BLOCK_GAP, BRANCH_LINE, BRANCH_LINE_COMPACT, CARD_LINE, CHILD_GAP, CHILD_TEXT_X,
