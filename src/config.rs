@@ -74,6 +74,8 @@ use crate::{
     home_dir,
     keys::{Keymap, KeysConfig},
     launch::App,
+    menu::MenuAction,
+    toast::Level,
 };
 
 /// The file's tables, as written; each read on its own (see `read`).
@@ -620,22 +622,24 @@ impl Gerdr {
     }
 
     /// Say what is wrong with the config file, `problems`, in an error
-    /// toast; once `reloaded`, that it was read again, either way.
+    /// toast with a button opening it; once `reloaded`, that it was read
+    /// again, either way.
     pub fn settings_problems(&mut self, problems: &[String], reloaded: bool) {
         let read = if reloaded {
             "Settings reloaded"
         } else {
             "Settings"
         };
-        match problems {
-            [] if reloaded => self.show_success(read.into()),
-            [] => {}
-            [one] => self.show_error(format!("{read}: {one}")),
-            [first, rest @ ..] => self.show_error(format!(
-                "{read}: {first} \u{b7} {} more in the log",
-                rest.len()
-            )),
-        }
+        let text = match problems {
+            [] if reloaded => return self.show_success(read.into()),
+            [] => return,
+            [one] => format!("{read}: {one}"),
+            [first, rest @ ..] => {
+                format!("{read}: {first} \u{b7} {} more in the log", rest.len())
+            }
+        };
+        let open = ("Open settings".to_owned(), MenuAction::OpenSettings);
+        self.toast_with(text, Level::Error, Some(open));
     }
 }
 

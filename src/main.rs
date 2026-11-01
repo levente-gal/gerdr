@@ -1531,10 +1531,11 @@ pub struct Gerdr {
 impl Gerdr {
     /// Something went wrong that the user must fix (a tool missing, a file
     /// unreadable): kept in the problems list under `source` (and so in the
-    /// log), and said in an error toast.
+    /// log), and said in an error toast that opens the log.
     pub fn report_problem(&mut self, source: &'static str, text: String) {
         problems::report(source, text.clone());
-        self.show_error(text);
+        let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
+        self.toast_with(text, Level::Error, Some(open_log));
     }
 
     pub fn output_size(&self) -> Size<i32, Logical> {
@@ -5332,7 +5333,9 @@ impl Gerdr {
         let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
         let why = format!("{name} is open in another gerdr: pick another, or join it here");
         if self.project.is_some() {
-            return self.toast(why, Level::Warning);
+            let join = ("Join here".to_owned(), MenuAction::AttachProject(id.to_owned()));
+            let text = format!("{name} is open in another gerdr");
+            return self.toast_with(text, Level::Warning, Some(join));
         }
         if self.welcome.is_none() {
             self.open_welcome(false);
