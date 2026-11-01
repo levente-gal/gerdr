@@ -388,6 +388,9 @@ impl Gerdr {
                 None
             }
             None if layout.panel.to_f64().contains(pos) => None,
+            // A project made for the switch isn't lost to a stray click:
+            // only Cancel or Esc lets it go.
+            None if dialog.switch.as_ref().is_some_and(|s| s.created) => None,
             None => Some(Outcome::Cancel),
         };
         if let Some(outcome) = outcome {
@@ -420,18 +423,25 @@ impl Gerdr {
                 .project(id)
                 .map_or_else(|| id.to_owned(), |p| p.name.clone())
         };
+        // Where asking comes back, once it isn't asked on closing the window.
+        let ask_again = self
+            .action_keys(crate::Action::Quit)
+            .map_or_else(String::new, |keys| format!("{keys} asks again"));
         let rows = dialog
             .rows()
             .into_iter()
             .map(|check| {
                 let (label, detail) = match check {
-                    Check::Session => ("Terminals and agents".into(), "herdr session"),
-                    Check::Apps => (dialog.apps.join(", "), "kept running"),
-                    Check::DontAsk => ("Don't ask again".into(), ""),
+                    Check::Session => (
+                        "Terminals and agents".into(),
+                        "the project's session".into(),
+                    ),
+                    Check::Apps => (dialog.apps.join(", "), "kept running".into()),
+                    Check::DontAsk => ("Don't ask again".into(), ask_again.clone()),
                 };
                 QuitRow {
                     label,
-                    detail: detail.into(),
+                    detail,
                     checked: dialog.checked(check),
                 }
             })

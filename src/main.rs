@@ -3868,6 +3868,22 @@ impl Gerdr {
         }
     }
 
+    /// The keys pressing `action` after the prefix, as the help panel
+    /// says them ("Ctrl+B Shift+Q"), if any do.
+    pub fn action_keys(&self, action: Action) -> Option<String> {
+        let help = self.keymap.help();
+        help.rows
+            .iter()
+            .zip(&help.presses)
+            .find_map(|((keys, _), presses)| {
+                let at = presses
+                    .iter()
+                    .position(|press| *press == Some(HelpPress::Action(action)))?;
+                let key = keys.split(" / ").nth(at)?;
+                Some(format!("{} {key}", help.prefix))
+            })
+    }
+
     /// What `pos` is over in the help panel, while it shows.
     pub fn help_hit(&self, pos: Point<f64, Logical>) -> Option<HelpHit> {
         if !(self.prefix_armed || self.help_pinned) {
