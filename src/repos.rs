@@ -74,8 +74,8 @@ use crate::{
     chrome::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, CleanLine,
         Density, DetailLine, DetailRow, DetailTab, DetailView, DiffTone, DirLine, FileLine, Hint,
-        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, SheetView,
-        Tone, TreeLine, TreeTool,
+        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, RowMark,
+        SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
     diff_edit::{FileEdit, Put},
@@ -347,6 +347,8 @@ pub struct Panel {
     /// The files edited from the diff since the panel opened, by (root,
     /// path): marked in the tree, while `u` can undo it.
     pub(crate) edited: HashSet<(PathBuf, String)>,
+    /// The stash picked in the Stashes tab, by line (0 the newest).
+    pub(crate) stash_pick: usize,
 }
 
 /// The branch picker's menu: where its lines stand, and the branch Enter
@@ -575,10 +577,12 @@ pub enum BatchKind {
     Undo,
     /// Stash the uncommitted changes, untracked files too.
     Stash,
-    /// Bring the newest stash back, and drop it.
-    StashPop,
-    /// Drop the newest stash.
-    StashDrop,
+    /// Bring stash `n` (0 the newest) back, and drop it.
+    StashPop(usize),
+    /// Drop stash `n` (0 the newest).
+    StashDrop(usize),
+    /// Throw away the uncommitted changes to the job's files.
+    Discard,
 }
 
 impl BatchKind {
@@ -609,8 +613,9 @@ impl BatchKind {
             BatchKind::Abort => "Abort",
             BatchKind::Undo => "Undo",
             BatchKind::Stash => "Stash",
-            BatchKind::StashPop => "Pop stash",
-            BatchKind::StashDrop => "Drop stash",
+            BatchKind::StashPop(_) => "Pop stash",
+            BatchKind::StashDrop(_) => "Drop stash",
+            BatchKind::Discard => "Discard changes",
         }
         .into()
     }
@@ -640,8 +645,9 @@ impl BatchKind {
             BatchKind::Abort => "aborted",
             BatchKind::Undo => "undone",
             BatchKind::Stash => "stashed",
-            BatchKind::StashPop => "popped",
-            BatchKind::StashDrop => "dropped",
+            BatchKind::StashPop(_) => "popped",
+            BatchKind::StashDrop(_) => "dropped",
+            BatchKind::Discard => "discarded",
         }
     }
 
@@ -654,7 +660,8 @@ impl BatchKind {
                 | BatchKind::Abort
                 | BatchKind::Undo
                 | BatchKind::DeleteBranch { .. }
-                | BatchKind::StashDrop
+                | BatchKind::StashDrop(_)
+                | BatchKind::Discard
         )
     }
 
@@ -1513,6 +1520,14 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
         "on a file, open it in Zed; on a repository or folder, fold it",
     ),
     ("Typing", "in the tree, starts the commit message"),
+    (
+        "Del",
+        "in the tree, discard a file's or folder's changes (asked first)",
+    ),
+    (
+        "Up / Down, Enter, Del",
+        "in the Stashes tab, pick a stash, pop it, drop it (asked first)",
+    ),
     ("Alt+F", "list the files by folder, or flat"),
     ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
     (
@@ -1627,6 +1642,7 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
         B::Comment => "c",
         B::Restore => "Shift+R",
         B::SaveComment => "Enter",
+        B::DiscardFile => "Del",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
         _ => "",
@@ -1660,7 +1676,8 @@ fn confirm_button(kind: &BatchKind) -> ReposButton {
         BatchKind::Abort => ReposButton::Abort,
         BatchKind::Undo => ReposButton::Undo,
         BatchKind::DeleteBranch { .. } => ReposButton::DeleteBranch,
-        BatchKind::StashDrop => ReposButton::StashDrop,
+        BatchKind::StashDrop(_) => ReposButton::StashDrop,
+        BatchKind::Discard => ReposButton::DiscardFile,
         _ => ReposButton::Cancel,
     }
 }
@@ -2396,6 +2413,44 @@ impl Panel {
             .unwrap_or_default()
     }
 
+    /// The stash of `item` a pop or drop takes: the one picked in the
+    /// Stashes tab while it shows, else the newest.
+    fn stash_at(&self, item: &RepoItem) -> usize {
+        match self.tab() {
+            DetailTab::Stashes => self
+                .stash_pick
+                .min(item.status.stashes.saturating_sub(1) as usize),
+            _ => 0,
+        }
+    }
+
+    /// The repository and the files a discard throws the changes of away:
+    /// the selected file (both paths of a rename), or every file under
+    /// the selected folder; else why none.
+    fn discard_files(&self, items: &[RepoItem]) -> Result<(usize, Vec<String>), Why> {
+        let pick = "Select a file or folder to discard its changes";
+        let k = (self.selected_item(items))
+            .and_then(|item| items.iter().position(|i| i.root == item.root))
+            .ok_or_else(|| Why::other(pick))?;
+        let changes = &items[k].status.changes;
+        let taken: Vec<&Change> = match &self.selected {
+            Some(Selected::File(_, path)) => changes.iter().filter(|c| c.path == *path).collect(),
+            Some(Selected::Dir(_, dir)) => {
+                changes.iter().filter(|c| in_dir(&c.path, dir)).collect()
+            }
+            _ => return Err(Why::other(pick)),
+        };
+        let files: Vec<String> = taken
+            .into_iter()
+            .flat_map(|c| [Some(c.path.clone()), c.orig.clone()])
+            .flatten()
+            .collect();
+        if files.is_empty() {
+            return Err(Why::other(pick));
+        }
+        Ok((k, files))
+    }
+
     /// What `button` says in the footer: a merge or rebase names the
     /// branch it brings in, the default one, and the branch it changes,
     /// the one checked out (`Merge main into feat/x`, `Rebase feat/x onto
@@ -2419,6 +2474,12 @@ impl Panel {
             B::Pull => over("pull", targets),
             B::Commit => over("commit", committing),
             B::CommitPush => over("commit and push", committing.max(self.picked(items).len())),
+            B::StashPop | B::StashDrop if self.tab() == DetailTab::Stashes => {
+                let verb = if button == B::StashPop { "pop" } else { "drop" };
+                let n = self.selected_item(items).map_or(0, |i| self.stash_at(i));
+                format!("{verb} stash@{{{n}}}")
+            }
+            B::DiscardFile => "discard changes…".into(),
             B::Fetch => match self.picked(items).len() {
                 0 => "fetch all".into(),
                 n => format!("fetch {n}"),
@@ -3256,12 +3317,27 @@ impl Panel {
                 if item.status.stashes == 0 {
                     return Err(Why::other(format!("No stash in {}", item.label)));
                 }
+                // The one picked in the Stashes tab, else the newest.
+                let n = self.stash_at(item);
                 let kind = match button {
-                    B::StashPop => BatchKind::StashPop,
-                    _ => BatchKind::StashDrop,
+                    B::StashPop => BatchKind::StashPop(n),
+                    _ => BatchKind::StashDrop(n),
                 };
                 let k = items.iter().position(|i| i.root == item.root);
                 run(kind, k.into_iter().collect())
+            }
+            B::DiscardFile => {
+                let (k, files) = self.discard_files(items)?;
+                if in_conflict(&items[k]) {
+                    return Err(Why::other("Resolve the conflicts, or abort, first"));
+                }
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Discard,
+                    jobs: vec![Job {
+                        root: items[k].root.clone(),
+                        files,
+                    }],
+                })
             }
             B::RunInTerminal => match (selected, failure) {
                 (Some(item), Some(Failure::Auth | Failure::Timeout | Failure::Other)) => {
@@ -3367,7 +3443,22 @@ impl Panel {
                             .unwrap_or(names.first().map_or("", String::as_str));
                         format!("delete the local branch {name}")
                     }
-                    BatchKind::StashDrop => "drop its newest stash for good".into(),
+                    BatchKind::StashDrop(n) => format!("drop stash@{{{n}}} for good"),
+                    BatchKind::Discard => {
+                        let n = job.files.len();
+                        let files = if n == 1 { "1 file" } else { "files" };
+                        let shown = job.files.iter().take(3).cloned().collect::<Vec<_>>();
+                        let more = n.saturating_sub(3);
+                        let rest = if more > 0 {
+                            format!(" and {more} more")
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "throw away the changes to {files}: {}{rest}",
+                            shown.join(", ")
+                        )
+                    }
                     _ => kind.label().to_lowercase(),
                 };
                 (label, what, Tone::Warning)
@@ -3571,6 +3662,14 @@ impl Panel {
         self.sheet_press(button, ctx)
     }
 
+    /// Pick stash `n` in the Stashes tab, scrolled to show it on a page
+    /// of `page`.
+    fn pick_stash(&mut self, n: usize, page: usize) {
+        self.stash_pick = n;
+        let pos = showing(self.detail_scroll.pos(), (n, n), page);
+        move_to(&mut self.detail_scroll, pos);
+    }
+
     /// Show the detail's `tab`; the diff where the selection is.
     fn set_tab(&mut self, tab: DetailTab) {
         if self.tab() != tab {
@@ -3751,6 +3850,33 @@ impl Panel {
             };
             return None;
         }
+        // In the stashes, the arrows pick one: Enter pops it, Del drops
+        // it (asked first).
+        if self.focus == Focus::Detail && self.tab() == DetailTab::Stashes && plain && !mods.shift {
+            let count = self
+                .selected_item(ctx.items)
+                .map_or(0, |i| i.status.stashes as usize);
+            let last = count.saturating_sub(1);
+            match sym {
+                Keysym::Down | Keysym::KP_Down => {
+                    self.pick_stash((self.stash_pick + 1).min(last), ctx.page.1)
+                }
+                Keysym::Up | Keysym::KP_Up => {
+                    self.pick_stash(self.stash_pick.saturating_sub(1), ctx.page.1)
+                }
+                Keysym::Return | Keysym::KP_Enter => return self.act(ReposButton::StashPop, ctx),
+                Keysym::Delete | Keysym::KP_Delete => {
+                    return self.act(ReposButton::StashDrop, ctx);
+                }
+                _ => {}
+            }
+            if matches!(
+                sym,
+                Keysym::Down | Keysym::KP_Down | Keysym::Up | Keysym::KP_Up
+            ) {
+                return None;
+            }
+        }
         // The arrows, the pages, Home and End scroll the log.
         if self.focus == Focus::Detail && !in_diff && plain && !mods.shift {
             let page = ctx.page.1.max(1) as i64;
@@ -3865,6 +3991,10 @@ impl Panel {
                     return self.fold_line(row, ctx);
                 }
             }
+            // A file's or folder's changes thrown away, asked first.
+            Keysym::Delete | Keysym::KP_Delete if plain && !mods.shift => {
+                return self.act(ReposButton::DiscardFile, ctx);
+            }
             _ => {
                 let printable = typed.key_char().is_some_and(|c| !c.is_control());
                 if sym == text_field::PASTE || (plain && printable) {
@@ -3915,7 +4045,9 @@ impl Panel {
         }
         // The diff's parts act on it; a click elsewhere takes the
         // keyboard from its search and keeps the comment being written.
-        {
+        // The log's or stashes' rows are no diff's.
+        let other_rows = self.tab() != DetailTab::Diff && matches!(hit, ReposHit::DiffRow(_));
+        if !other_rows {
             diff_ctx!(self, ctx, dctx);
             if let Some(outcome) = self.diff.click(hit, &dctx) {
                 return self.diff_done(outcome, ctx);
@@ -3973,6 +4105,16 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
+            ReposHit::DiffRow(i) if self.tab() == DetailTab::Stashes => {
+                self.focus = Focus::Detail;
+                let (first, _) = standing(&self.detail_scroll, usize::MAX, ctx.page.1);
+                let count = self
+                    .selected_item(items)
+                    .map_or(0, |i| i.status.stashes as usize);
+                if first + i < count {
+                    self.stash_pick = first + i;
+                }
+            }
             ReposHit::DiffRow(_)
             | ReposHit::DiffCheck(_)
             | ReposHit::DiffFold(_)
@@ -4541,6 +4683,14 @@ impl Panel {
                 B::MergeFrom,
                 B::RebaseFrom,
             ]);
+            // A file opened in Zed; its or a folder's changes thrown away,
+            // asked first.
+            if matches!(self.selected, Some(Selected::File(..))) {
+                buttons.push(B::OpenInZed);
+            }
+            if matches!(self.selected, Some(Selected::File(..) | Selected::Dir(..))) {
+                buttons.push(B::DiscardFile);
+            }
             // The stashes of the selected repository: made while it has
             // changes, brought back or dropped while it has some.
             if let Some(item) = selected {
@@ -4668,6 +4818,7 @@ impl Panel {
         };
         let lines = self.detail_lines(ctx);
         let total = lines.len();
+        let stashes = ctx.items[k].status.stashes;
         // Scrolled part of a line, the pane shows one more under it.
         let (first, part) = standing(&self.detail_scroll, total, page);
         DetailView {
@@ -4680,7 +4831,18 @@ impl Panel {
                 .map(DetailRow::Text)
                 .collect(),
             sticky: false,
-            marks: Vec::new(),
+            // The stash picked, lit as the diff's cursor is.
+            marks: match tab {
+                DetailTab::Stashes => (first..first + page + usize::from(part > 0.0))
+                    .map(|r| RowMark {
+                        selected: r == self.stash_pick && focused && stashes > 0,
+                        top: true,
+                        bottom: true,
+                        noted: false,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
             title_buttons: Vec::new(),
             row_buttons: Vec::new(),
             part,
@@ -4799,7 +4961,13 @@ impl Panel {
                     BatchKind::DeleteBranch { names, .. } => {
                         format!("Delete the branch {}", names.join(" / "))
                     }
-                    BatchKind::StashDrop => "Drop the newest stash".into(),
+                    BatchKind::StashDrop(0) => "Drop the newest stash".into(),
+                    BatchKind::StashDrop(n) => format!("Drop stash@{{{n}}}"),
+                    BatchKind::Discard => {
+                        let n: usize = jobs.iter().map(|j| j.files.len()).sum();
+                        let files = if n == 1 { "1 file" } else { "files" };
+                        format!("Discard the changes to {files}")
+                    }
                     BatchKind::Undo => format!(
                         "Undo {}",
                         ctx.batch
@@ -4950,6 +5118,7 @@ impl Panel {
         }
         if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
             self.detail_scroll.jump(0.0);
+            self.stash_pick = 0;
         }
         self.detail = Some((key, text));
         self.detail_stale = false;
@@ -5982,7 +6151,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, mods(false, true, true), Keysym::S, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashPop,
+                kind: BatchKind::StashPop(0),
                 jobs: jobs(&["gerdr"])
             })
         );
@@ -5997,7 +6166,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashDrop,
+                kind: BatchKind::StashDrop(0),
                 jobs: jobs(&["gerdr"])
             })
         );
@@ -6016,6 +6185,93 @@ mod tests {
         );
         assert_eq!(press(&mut panel, alt(), Keysym::s, &ctx), None);
         assert_eq!(panel.error.as_deref(), Some("Nothing to stash in herdr"));
+    }
+
+    #[test]
+    fn del_discards_a_files_changes_after_a_sheet_asks() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        // On a repository: nothing to pick.
+        assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        assert!(panel.sheet.is_none());
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Select a file or folder to discard its changes")
+        );
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        let hints: Vec<ReposButton> = panel
+            .view("p", &ctx)
+            .hints
+            .iter()
+            .map(|h| h.button)
+            .collect();
+        assert!(
+            hints.contains(&ReposButton::OpenInZed) && hints.contains(&ReposButton::DiscardFile)
+        );
+        assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(
+            sheet.title,
+            "Discard the changes to 1 file in 1 repository?"
+        );
+        assert!(sheet.danger && sheet.default == 0);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Discard,
+                jobs: vec![job("gerdr", &["src/git.rs"])],
+            })
+        );
+        // A rename takes both its paths.
+        select_file(&mut panel, "zed", "new.rs");
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Discard,
+                jobs: vec![job("zed", &["new.rs", "old.rs"])],
+            })
+        );
+    }
+
+    #[test]
+    fn a_stash_is_picked_in_its_tab_to_pop_or_drop() {
+        let mut items = items();
+        items[0].status.stashes = 3;
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, alt(), Keysym::_3, &ctx);
+        let key = panel.detail_wanted(&ctx).unwrap();
+        panel.set_detail(key, "stash@{0} · a\nstash@{1} · b\nstash@{2} · c".into());
+        panel.focus = Focus::Detail;
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        let view = panel.view("p", &ctx);
+        assert!(view.detail.marks[2].selected);
+        let pop = view
+            .hints
+            .iter()
+            .find(|h| h.button == ReposButton::StashPop)
+            .unwrap();
+        assert_eq!(pop.label, "pop stash@{2}");
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::StashPop(2),
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(sheet.title, "Drop stash@{1} in 1 repository?");
     }
 
     #[test]

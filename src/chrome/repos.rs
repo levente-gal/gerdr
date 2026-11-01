@@ -694,6 +694,8 @@ pub enum ReposButton {
     DeleteBranchMenu,
     /// Stop the batches running.
     Stop,
+    /// Throw away the selected file's or folder's changes (asked first).
+    DiscardFile,
 }
 
 impl ReposButton {
@@ -743,6 +745,7 @@ impl ReposButton {
             ReposButton::Refresh => "Refresh",
             ReposButton::DeleteBranchMenu => "Delete a branch…",
             ReposButton::Stop => "Stop",
+            ReposButton::DiscardFile => "Discard changes",
         }
     }
 }

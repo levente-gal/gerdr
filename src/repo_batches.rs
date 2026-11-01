@@ -264,13 +264,17 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("stashing…");
             git_ops::stash_push(dir)
         }
-        BatchKind::StashPop => {
+        BatchKind::StashPop(n) => {
             step("popping the stash…");
-            git_ops::stash_pop(dir)
+            git_ops::stash_pop(dir, *n)
         }
-        BatchKind::StashDrop => {
+        BatchKind::StashDrop(n) => {
             step("dropping the stash…");
-            git_ops::stash_drop(dir)
+            git_ops::stash_drop(dir, *n)
+        }
+        BatchKind::Discard => {
+            step("discarding…");
+            git_ops::discard(dir, &task.job.files)
         }
     }
 }
@@ -1007,8 +1011,20 @@ impl Gerdr {
         let path = view
             .selected
             .and_then(|_| self.repos.panel.as_ref()?.selected_path());
-        let hints: Vec<&Hint> = view.hints.iter().collect();
-        let spec = repos_menu_spec(&hints, path, anchor);
+        // On a file or folder, what acts on it first, then its path.
+        let on_file =
+            |h: &&Hint| matches!(h.button, ReposButton::OpenInZed | ReposButton::DiscardFile);
+        let file: bool = line.is_some() && view.hints.iter().any(|h| on_file(&h));
+        let spec = if file {
+            let (first, rest): (Vec<&Hint>, Vec<&Hint>) = view.hints.iter().partition(on_file);
+            let mut spec = repos_menu_spec(&first, path, anchor);
+            spec.items
+                .extend(repos_menu_spec(&rest, None, anchor).items);
+            spec
+        } else {
+            let hints: Vec<&Hint> = view.hints.iter().collect();
+            repos_menu_spec(&hints, path, anchor)
+        };
         self.open_menu(spec);
     }
 

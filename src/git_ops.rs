@@ -1550,6 +1550,27 @@ pub fn stash_list(dir: &Path) -> String {
     list
 }
 
+/// Throw away the uncommitted changes to `paths` (from the worktree's top
+/// folder): a file HEAD has goes back to it, index and all; one it
+/// hasn't (untracked, or only added) is deleted, a folder of them too.
+pub fn discard(dir: &Path, paths: &[String]) -> OpResult {
+    let top = top(dir);
+    let mut op = Op::new(&top);
+    for path in paths {
+        let path = path.trim_end_matches('/');
+        let in_head = query(&top, &["cat-file", "-e", &format!("HEAD:{path}")]).is_some();
+        if in_head {
+            let restore = ["--literal-pathspecs", "restore", "--source=HEAD"];
+            op.run(&[&restore[..], &["--staged", "--worktree", "--", path]].concat())?;
+        } else {
+            let rm = ["--literal-pathspecs", "rm", "-r", "-q", "--cached"];
+            op.run(&[&rm[..], &["--ignore-unmatch", "--", path]].concat())?;
+            op.run(&["--literal-pathspecs", "clean", "-f", "-d", "-q", "--", path])?;
+        }
+    }
+    op.done()
+}
+
 /// Stash the uncommitted changes, untracked files too.
 pub fn stash_push(dir: &Path) -> OpResult {
     let mut op = Op::new(dir);
@@ -1557,17 +1578,18 @@ pub fn stash_push(dir: &Path) -> OpResult {
     op.done()
 }
 
-/// Bring the newest stash back and drop it; a conflict keeps the stash.
-pub fn stash_pop(dir: &Path) -> OpResult {
+/// Bring stash `n` (0 the newest) back and drop it; a conflict keeps the
+/// stash.
+pub fn stash_pop(dir: &Path, n: usize) -> OpResult {
     let mut op = Op::new(dir);
-    op.run(&["stash", "pop"])?;
+    op.run(&["stash", "pop", &format!("stash@{{{n}}}")])?;
     op.done()
 }
 
-/// Drop the newest stash.
-pub fn stash_drop(dir: &Path) -> OpResult {
+/// Drop stash `n` (0 the newest).
+pub fn stash_drop(dir: &Path, n: usize) -> OpResult {
     let mut op = Op::new(dir);
-    op.run(&["stash", "drop"])?;
+    op.run(&["stash", "drop", &format!("stash@{{{n}}}")])?;
     op.done()
 }
 
@@ -1895,7 +1917,7 @@ mod tests {
         assert_eq!(failed.log.len(), 1 + LOCK_RETRIES.len());
         assert!(failed.log.iter().all(|r| !r.ok));
         // Not a stash pop: it may have stopped half-way.
-        let failed = stash_pop(&fx.repo).unwrap_err();
+        let failed = stash_pop(&fx.repo, 0).unwrap_err();
         assert_eq!(failed.log.len(), 1);
         std::fs::remove_file(fx.repo.join(".git/index.lock")).unwrap();
         commit_paths(&fx.repo, &["a".into()], "m").unwrap();
@@ -2828,6 +2850,28 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+
+    #[test]
+    fn discarding_puts_files_back_as_head_has_them_and_deletes_new_ones() {
+        let fx = Fx::local();
+        let dir = &fx.repo;
+        commit(dir, "kept", "kept");
+        write(dir, "a", "changed");
+        git(dir, &["add", "a"]);
+        write(dir, "a", "changed again");
+        write(dir, "kept", "changed too");
+        write(dir, "new/one", "1");
+        write(dir, "added", "x");
+        git(dir, &["add", "added"]);
+        let paths = ["a", "new/", "added"].map(String::from);
+        discard(dir, &paths).unwrap();
+        assert_eq!(read(dir, "a"), "first");
+        assert!(!dir.join("new").exists() && !dir.join("added").exists());
+        // Only those asked for.
+        assert_eq!(read(dir, "kept"), "changed too");
+        let status = git(dir, &["status", "--porcelain"]);
+        assert_eq!(status.trim(), "M kept");
     }
 
     #[test]
