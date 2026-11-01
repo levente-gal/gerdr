@@ -16,6 +16,10 @@ or a look, take it from here; when a rule has to change, change it here.
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
 | Ctrl+R | Refresh / reload. |
 | F2 | Rename. |
+| Ctrl+S | Switch to / check out a branch (repos, worktrees). |
+| Ctrl+Shift+S | Squash a worktree into main. |
+| Ctrl+Q | Stop a project's session (project menu). |
+| Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
 | Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
@@ -55,6 +59,8 @@ the label ("Merge main into branch", "Squash into main").
   picker), not when a panel opens.
 - Help labels start with a verb ("Open inbox", "Close tab").
 - Toast and status text has no full stop; form errors are sentences.
+- Status words: lowercase where drawn inline (bars, pills), sentence case in
+  tooltips.
 
 ## Look
 
