@@ -16,6 +16,7 @@
 //! density = "compact"   # or "comfortable", the default
 //! theme = "light"       # or "dark" or "system"; else the last choice
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
+//! motion = "reduced"    # or "off": no blinking dots or pulses; "full", the default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -58,6 +59,7 @@ use std::{
 use serde::Deserialize;
 
 use crate::{
+    anim::Motion,
     chrome::{Density, ThemeMode},
     home_dir,
     keys::{Keymap, KeysConfig},
@@ -85,6 +87,7 @@ struct UiConfig {
     density: Option<String>,
     theme: Option<String>,
     needs_you: Option<bool>,
+    motion: Option<String>,
 }
 
 /// The `[git]` table, as written.
@@ -186,6 +189,8 @@ pub struct Ui {
     /// Whether the sidebar gathers the blocked and done agents of the
     /// other workspaces in a "Needs you" list at its top.
     pub needs_you: bool,
+    /// How much the chrome moves (see `anim::Motion`).
+    pub motion: Motion,
 }
 
 impl Default for Ui {
@@ -194,6 +199,7 @@ impl Default for Ui {
             density: Density::default(),
             theme: None,
             needs_you: true,
+            motion: Motion::Full,
         }
     }
 }
@@ -270,6 +276,12 @@ pub fn from_text(
         None | Some("comfortable") => {}
         Some("compact") => ui.density = Density::Compact,
         Some(other) => problems.push(format!("unknown density `{other}`")),
+    }
+    match config.ui.motion.as_deref().map(str::trim) {
+        None | Some("full") => {}
+        Some("reduced") => ui.motion = Motion::Reduced,
+        Some("off") => ui.motion = Motion::Off,
+        Some(other) => problems.push(format!("unknown motion `{other}`")),
     }
     if let Some(theme) = config.ui.theme.as_deref() {
         match ThemeMode::from_name(theme) {
@@ -374,6 +386,7 @@ const TEMPLATE: &str = "\
 # [ui]
 # density = \"compact\"   # or \"comfortable\", the default
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
+# motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
 #
 # [git]
 # # Branch names that are one branch across repositories, in the

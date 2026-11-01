@@ -50,6 +50,7 @@ mod pane_drag;
 mod pane_moves;
 mod paths;
 mod prepare;
+mod problems;
 mod profile_import;
 mod project_list;
 mod project_lock;
@@ -6029,6 +6030,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zed_data = launch::zed_data_dir(&home, &instance_dir);
 
     let (keymap, apps, ui, git_config, linear, keep_apps, agent_config) = config::load();
+    anim::set_motion(ui.motion);
     let saved_theme = std::fs::read_to_string(theme_file())
         .ok()
         .and_then(|s| ThemeMode::from_name(&s));

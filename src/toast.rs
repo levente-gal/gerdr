@@ -152,6 +152,21 @@ impl Gerdr {
         self.toast(text, Level::Info);
     }
 
+    /// Show what went well.
+    pub fn show_success(&mut self, text: String) {
+        self.toast(text, Level::Success);
+    }
+
+    /// Show what needs a look but didn't fail.
+    pub fn show_warning(&mut self, text: String) {
+        self.toast(text, Level::Warning);
+    }
+
+    /// Show what failed.
+    pub fn show_error(&mut self, text: String) {
+        self.toast(text, Level::Error);
+    }
+
     /// Let go of the toasts that went and had `LEAVE_TIME` to fade by `now`.
     pub fn expire_toasts(&mut self, now: Instant) {
         self.toasts.retain(|toast| now < toast.until + LEAVE_TIME);

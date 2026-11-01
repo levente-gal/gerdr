@@ -2,7 +2,38 @@
 //! and the steps its value is quantized to so a cached buffer is drawn
 //! again only when the step changes.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicU8, Ordering},
+    time::{Duration, Instant},
+};
+
+/// How much the chrome moves, from `[ui] motion`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// Fades, blinking dots and pulses.
+    #[default]
+    Full,
+    /// Fades, but no blinking or pulsing.
+    Reduced,
+    /// Nothing moves.
+    Off,
+}
+
+static MOTION: AtomicU8 = AtomicU8::new(0);
+
+/// Set how much the chrome moves, for every `motion()` after.
+pub fn set_motion(motion: Motion) {
+    MOTION.store(motion as u8, Ordering::Relaxed);
+}
+
+/// How much the chrome moves.
+pub fn motion() -> Motion {
+    match MOTION.load(Ordering::Relaxed) {
+        1 => Motion::Reduced,
+        2 => Motion::Off,
+        _ => Motion::Full,
+    }
+}
 
 /// How long a popup, tooltip or hover fades in or out.
 pub const FAST: Duration = Duration::from_millis(120);

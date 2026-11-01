@@ -171,6 +171,12 @@ pub(super) const CHECKOUT_BUTTONS: &[(&str, i32)] =
     &[("Cancel", 84), ("Leave behind", 112), ("Bring along", 108)];
 pub(super) const BUTTON_RADIUS: f32 = 6.0;
 
+/// Shared look tokens: every popup's corner, every list row's highlight
+/// corner, and every modal dialog's width.
+pub(super) const POPUP_RADIUS: f32 = 8.0;
+pub(super) const ROW_HIGHLIGHT_RADIUS: f32 = 4.0;
+pub(super) const DIALOG_WIDTH: i32 = 560;
+
 /// The sidebar header's project name: the gap between it and its chevron,
 /// and the room after the chevron inside the highlight.
 pub(super) const HEADER_NAME_GAP: i32 = 2;
