@@ -258,13 +258,18 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             |n| n.to_string_lossy().into(),
         );
         let branch = git.branch.clone().unwrap_or_else(|| "detached HEAD".into());
+        // The rest it needs a look for is marked after (see `Detail::Git`).
+        let mut subtitle = format!("{} · {branch}", view.name);
+        if let Some(op) = git.op {
+            subtitle = format!("{subtitle} · {}", op_label(op));
+        }
         items.push(InboxItem {
             id: ItemId(format!("git:{}", root.display())),
             section: Section::Repos,
             fingerprint: git_fingerprint(git),
             workspace: Some(w),
             title: folder,
-            subtitle: format!("{} · {branch} · {}", view.name, git_summary(git)),
+            subtitle,
             tone: Tone::Attention,
             age: None,
             target: Target::Workspace(w),
@@ -272,6 +277,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             detail: Detail::Git {
                 branch: git.branch.clone(),
                 upstream: git.upstream.clone(),
+                dirty: git.dirty,
                 ahead: git.ahead,
                 behind: git.behind,
                 stashes: git.stashes,
@@ -301,10 +307,10 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
     }
     for (wt, shared) in worktrees {
         let w = src.pick(&shared);
-        let why = match (wt.attention_tag(), wt.dirty) {
-            (Some(tag), true) => format!("{tag}, changes"),
-            (Some(tag), false) => tag.to_owned(),
-            (None, _) => "changes".to_owned(),
+        // Its changes are marked after (see `Detail::Git`).
+        let subtitle = match wt.attention_tag() {
+            Some(tag) => format!("{} · worktree · {tag}", src.name(w)),
+            None => format!("{} · worktree", src.name(w)),
         };
         items.push(InboxItem {
             id: ItemId(format!("worktree:{}", wt.path.display())),
@@ -317,7 +323,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             ),
             workspace: Some(w),
             title: wt.name(),
-            subtitle: format!("{} · worktree · {why}", src.name(w)),
+            subtitle,
             tone: Tone::Attention,
             age: None,
             target: Target::Worktree(wt.path.clone()),
@@ -325,6 +331,7 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
             detail: Detail::Git {
                 branch: wt.branch.clone(),
                 upstream: None,
+                dirty: wt.dirty,
                 ahead: 0,
                 behind: 0,
                 stashes: 0,
@@ -341,34 +348,6 @@ pub fn git_items(src: &Sources) -> Vec<InboxItem> {
 /// to push or pull, stashes, or an operation stopped half-way.
 fn needs_look(git: &GitStatus) -> bool {
     git.dirty || git.ahead > 0 || git.behind > 0 || git.stashes > 0 || git.op.is_some()
-}
-
-/// What `git` needs a look for, in short, marked as the repositories
-/// panel's tree marks it: `3 changes ↑2 ↓1 · 1 stashed · merging`, the
-/// arrows before the commits to push and pull.
-fn git_summary(git: &GitStatus) -> String {
-    let mut marks = Vec::new();
-    if git.dirty {
-        marks.push(match git.changes.len().max(1) {
-            1 => "1 change".to_owned(),
-            n => format!("{n} changes"),
-        });
-    }
-    if git.ahead > 0 {
-        marks.push(format!("↑{}", git.ahead));
-    }
-    if git.behind > 0 {
-        marks.push(format!("↓{}", git.behind));
-    }
-    let mut parts = Vec::new();
-    if !marks.is_empty() {
-        parts.push(marks.join(" "));
-    }
-    if git.stashes > 0 {
-        parts.push(format!("{} stashed", git.stashes));
-    }
-    parts.extend(git.op.map(op_label));
-    parts.join(" · ")
 }
 
 /// What `op` is, as going on: `merging`, `rebasing 2/5`.
@@ -412,7 +391,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// The failed CI rows and the pull requests asking for review: what keeps
 /// a GitHub card from being quiet (`CiView::quiet`). A pull request's go
-/// under Pull requests, a branch's under Repos.
+/// under Pull requests, a branch's under Repos. A repository whose CI
+/// couldn't be read says so under Pull requests.
 pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
     let mut items = Vec::new();
     for (key, repo, shared) in src.github() {
@@ -459,6 +439,11 @@ pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
                 },
             });
         }
+        if let Some(why) = &repo.error {
+            let title = format!("Couldn't load the pull requests of {key}");
+            let id = format!("unread:ci:{key}");
+            items.push(unread_item(id, Section::PullRequests, title, why));
+        }
     }
     items
 }
@@ -495,24 +480,32 @@ pub fn issue_items(src: &Sources) -> Vec<InboxItem> {
     items
 }
 
+/// A line in `section` saying `title` couldn't be read, and `why`; going
+/// to it reads it again.
+fn unread_item(id: String, section: Section, title: String, why: &str) -> InboxItem {
+    InboxItem {
+        id: ItemId(id),
+        section,
+        fingerprint: why.to_owned(),
+        workspace: None,
+        title,
+        subtitle: why.to_owned(),
+        tone: Tone::Failed,
+        age: None,
+        target: Target::Refresh,
+        actions: TRIAGE.to_vec(),
+        detail: Detail::Unread {
+            why: why.to_owned(),
+        },
+    }
+}
+
 /// A line per source of tickets that couldn't be read and has nothing
 /// read before to show: the project's repositories' GitHub issues, its
 /// ticket repositories' tickets, Linear's issues. It says why; going to it
 /// reads them again.
 pub fn unread_items(src: &Sources) -> Vec<InboxItem> {
-    let unread = |id: String, title: String, why: &String| InboxItem {
-        id: ItemId(id),
-        section: Section::Tickets,
-        fingerprint: why.clone(),
-        workspace: None,
-        title,
-        subtitle: why.clone(),
-        tone: Tone::Failed,
-        age: None,
-        target: Target::Refresh,
-        actions: TRIAGE.to_vec(),
-        detail: Detail::Unread { why: why.clone() },
-    };
+    let unread = |id, title, why: &String| unread_item(id, Section::Tickets, title, why);
     let mut items = Vec::new();
     let repos = src.github();
     let tickets: HashSet<String> = src.tickets.iter().map(TicketRepo::key).collect();
@@ -827,6 +820,7 @@ mod tests {
             rows,
             other_prs: 0,
             closed: Vec::new(),
+            error: None,
         }
     }
 
@@ -952,11 +946,14 @@ mod tests {
             "{}",
             items[3].subtitle
         );
-        // Marked as the repositories panel marks them.
-        let ends = |i: usize, end: &str| assert!(items[i].subtitle.ends_with(end), "{end}");
-        ends(0, "↑2");
-        ends(1, "↓1");
-        ends(2, "1 stashed");
+        // Marked as the repositories panel marks them, not in words.
+        assert!(!items[0].subtitle.contains('↑'), "{}", items[0].subtitle);
+        let marks = |i: usize| items[i].marks().unwrap();
+        assert_eq!(marks(0).ahead, 2);
+        assert_eq!(marks(1).behind, 1);
+        assert_eq!(marks(2).stashes, 1);
+        assert!(marks(3).stopped);
+        assert!(!marks(0).stopped && !marks(0).dirty);
     }
 
     #[test]
@@ -1193,6 +1190,31 @@ mod tests {
         // Read, they go.
         f.issues.last = IssuesRead::default();
         assert!(unread_items(&f.sources()).is_empty());
+    }
+
+    #[test]
+    fn ci_that_couldnt_be_read_says_why_under_pull_requests() {
+        let mut f = Fixture::default();
+        f.workspace("a", "/r", Some(git("/r")));
+        f.ci.insert(
+            "/r".into(),
+            RepoCi {
+                error: Some("gh: not signed in".into()),
+                ..repo(Vec::new())
+            },
+        );
+        let items = ci_items(&f.sources());
+        assert_eq!(ids(&items), ["unread:ci:github.com/o/r"]);
+        assert_eq!(
+            items[0].title,
+            "Couldn't load the pull requests of github.com/o/r"
+        );
+        assert_eq!(items[0].subtitle, "gh: not signed in");
+        assert_eq!(items[0].section, Section::PullRequests);
+        assert_eq!(items[0].target, Target::Refresh);
+        // Read again, it goes.
+        f.ci.insert("/r".into(), repo(Vec::new()));
+        assert!(ci_items(&f.sources()).is_empty());
     }
 
     #[test]

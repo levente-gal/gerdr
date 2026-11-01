@@ -3,17 +3,17 @@
 
 use super::layers::{Part, RowCache};
 use super::{
-    BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, CARET_WIDTH, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
-    FIELD_GAP, FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING,
-    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE,
-    MENU_MARK_GAP, MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
+    BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT, FIELD_GAP,
+    FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING, FORM_ROW,
+    FieldSpot, HELP_MARGIN, KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE, MENU_MARK_GAP,
+    MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
     PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
     PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow,
     QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
     ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, ROW_INSET, Rect, SETTINGS_BUTTONS,
     SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross, field_text, file,
-    focus_ring, folder, footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil,
-    phys, plus, rect_px, stop,
+    focus_ring, folder, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, phys, plus,
+    rect_px, search::query_text, stop,
 };
 use crate::WorkspaceKind;
 use crate::project_list::RowTops;
@@ -669,17 +669,6 @@ pub fn project_menu_hit(
     Some(MenuHit::Panel)
 }
 
-/// Where the text of the project menu's query field in `rect` goes, after
-/// its magnifier.
-pub(super) fn menu_query_text(rect: Rect, scale: f64) -> (f32, f32) {
-    let px = |v: i32| (v as f64 * scale).round() as f32;
-    let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
-    (
-        px(mark_x + MENU_MARK_WIDTH + MENU_MARK_GAP),
-        px(rect.loc.x + rect.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
-    )
-}
-
 /// The field a project menu entry in `rect` turns into while its project is
 /// renamed: over the name, up to the row's `buttons` if it shows them.
 pub(super) fn rename_field(rect: Rect, buttons: &[(RowButton, Rect)]) -> Rect {
@@ -737,7 +726,7 @@ pub fn project_menu_field(
         Some(FieldSpot {
             size: FONT_SIZE,
             area: layout.query,
-            text: menu_query_text(layout.query, scale),
+            text: query_text(layout.query, scale),
             line: view.query.clone(),
         })
     })
@@ -878,7 +867,8 @@ impl Painter {
                 }
             }
             (None, None) => {
-                self.menu_query(&mut c, &view.query, !renaming, query, scale, p);
+                let placeholder = "Find or name a project…";
+                self.query_field(&mut c, &view.query, placeholder, query, !renaming, scale, p);
                 if empty {
                     let first = Rectangle::new(
                         (
@@ -939,40 +929,6 @@ impl Painter {
         c.into_buffer(true)
     }
 
-    /// The project menu's query field in `rect`: a magnifier, then `query`
-    /// (or what to type) with a caret after it when `focused`.
-    pub(super) fn menu_query(
-        &self,
-        c: &mut Canvas,
-        query: &Line,
-        focused: bool,
-        rect: Rect,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let s = scale as f32;
-        // Lined up with the marks and labels of the rows below.
-        let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
-        let mark = Rectangle::new(
-            (mark_x, rect.loc.y).into(),
-            (MENU_MARK_WIDTH, rect.size.h).into(),
-        );
-        icon_sdf(c, mark, scale, p.placeholder, |x, y| magnifier(x, y, s));
-        let query_band = band(rect, scale);
-        let placeholder = "Find or name a project…";
-        self.edit_line(
-            c,
-            query,
-            placeholder,
-            menu_query_text(rect, scale),
-            query_band,
-            focused,
-            FONT_SIZE,
-            scale,
-            p,
-        );
-    }
-
     /// `entry` of the project menu in `rect` (buffer coordinates), looking
     /// as `look` says, with the row `buttons` it shows under the pointer.
     #[allow(clippy::too_many_arguments)]
@@ -992,7 +948,7 @@ impl Painter {
         let mark = menu_mark(rect);
         let label_lx = mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP;
         let label_x = px(label_lx) as f32;
-        let (x, y, w, h) = rect_px(rect, scale);
+        let (x, _, w, _) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let gap = (FIELD_GAP as f32 * s).round();
         if let MenuEntry::Section(label) = entry {
@@ -1010,8 +966,10 @@ impl Painter {
         }
 
         // The highlight stops short of the rows above and below.
-        let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = ROW_HIGHLIGHT_RADIUS * s;
+        let lit = Rectangle::new(
+            (rect.loc.x, rect.loc.y + 2).into(),
+            (rect.size.w, rect.size.h - 4).into(),
+        );
         let confirm = matches!(
             entry,
             MenuEntry::Project {
@@ -1020,13 +978,17 @@ impl Painter {
             }
         );
         if confirm {
+            let (x, y, w, h) = rect_px(lit, scale);
+            let r = ROW_HIGHLIGHT_RADIUS * s;
             c.rounded(x, y, w, h, r, mix(p.elevated, p.warning, 0.15));
-        } else if look.selected {
-            c.rounded(x, y, w, h, r, p.selected);
-        } else if look.hovered {
+        } else {
             // Fading in to the one hover colour.
-            let t = look.hover_alpha as f32 / 16.0;
-            c.rounded(x, y, w, h, r, mix(p.elevated, p.element, t));
+            let hover = if look.hovered {
+                look.hover_alpha as f32 / 16.0
+            } else {
+                0.0
+            };
+            self.row_highlight(c, lit, (look.selected, hover), scale, p);
         }
 
         // A keycap at the right end of the row; returns where it starts.

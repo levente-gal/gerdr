@@ -91,7 +91,7 @@ impl Gerdr {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
         self.scrollback = None;
-        self.inbox.panel = Some(Panel::new(focus));
+        self.inbox.open(focus);
         self.inbox_mark_seen();
         if self.issues_due(ISSUES_OPEN) {
             self.refresh_issues();
@@ -418,7 +418,10 @@ impl Gerdr {
                 workspace,
             } => self.save_todo(id, text, workspace),
             Outcome::AddTickets(repo) => self.add_tickets(repo),
-            Outcome::Refresh => self.refresh_issues(),
+            Outcome::Refresh => {
+                self.refresh_issues();
+                self.refresh_ci();
+            }
             Outcome::Notice(text) => self.show_notice(text),
             Outcome::Restore(id) => {
                 if let Some(project) = self.project.clone() {

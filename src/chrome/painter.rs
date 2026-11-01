@@ -149,7 +149,6 @@ pub enum ButtonStyle {
     Primary,
     /// Filled with the error colour: an action that loses something.
     /// Never the default of its dialog.
-    #[allow(dead_code)] // The dialogs take it up in wave 2.
     Destructive,
 }
 
@@ -714,7 +713,6 @@ impl Painter {
     /// the one `on` filled in `selected` with its label in `text`, the one
     /// under the pointer (`hover`) lit as a hovered row.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // The worktrees popup and the inbox take it up in wave 2.
     pub(super) fn segmented(
         &self,
         c: &mut Canvas,

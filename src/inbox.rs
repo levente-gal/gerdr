@@ -15,7 +15,7 @@
 //! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
 //! repository (`owner/repo`) to the shown project; Delete marks a todo
 //! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
-//! copies it, Ctrl+R reads the issues again. Tab lists the active
+//! copies it, Ctrl+R reads the issues and the CI again. Tab lists the active
 //! workspace's items only, or every workspace's again. Esc clears the
 //! filter, then goes back from the hidden ones, then closes.
 //!
@@ -145,6 +145,29 @@ impl InboxItem {
             Detail::Unread { .. } => I::Failed,
         }
     }
+
+    /// A repository's or worktree's Git marks, for its line.
+    pub fn marks(&self) -> Option<chrome::InboxMarks> {
+        let Detail::Git {
+            dirty,
+            ahead,
+            behind,
+            stashes,
+            op,
+            changes,
+            ..
+        } = &self.detail
+        else {
+            return None;
+        };
+        Some(chrome::InboxMarks {
+            stopped: op.is_some() || changes.iter().any(|(code, _)| *code == 'U'),
+            dirty: *dirty,
+            ahead: *ahead,
+            behind: *behind,
+            stashes: *stashes,
+        })
+    }
 }
 
 /// Where going to an item leads.
@@ -163,8 +186,8 @@ pub enum Target {
     Link(String),
     /// Edit the todo (its workspace, if linked, is switched to).
     Todo(TodoId),
-    /// Read the issues again, the panel left open: an item saying they
-    /// couldn't be.
+    /// Read the issues and the CI again, the panel left open: an item
+    /// saying they couldn't be.
     Refresh,
 }
 
@@ -250,6 +273,8 @@ pub enum Detail {
     Git {
         branch: Option<String>,
         upstream: Option<String>,
+        /// Some file is changed, staged or untracked.
+        dirty: bool,
         ahead: u32,
         behind: u32,
         stashes: u32,
@@ -311,7 +336,7 @@ pub enum Outcome {
     /// Add this repository (`owner/repo` or `host/owner/repo`) to the
     /// shown project's ticket repositories.
     AddTickets(String),
-    /// Read the issues again.
+    /// Read the issues and the CI again.
     Refresh,
     /// List the dismissed or snoozed item again.
     Restore(ItemId),
@@ -536,6 +561,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         Detail::Git {
             branch,
             upstream,
+            dirty: _,
             ahead,
             behind,
             stashes,
@@ -704,6 +730,9 @@ pub struct Inbox {
     pub store: Option<(String, InboxFile)>,
     /// Agent panes' last lines, by herdr pane id.
     pub pane_text: HashMap<String, PaneText>,
+    /// What was being written when the panel closed, for it to take up
+    /// again (see `Panel::drafts`).
+    pub drafts: Vec<Compose>,
     /// The panes whose text is being read.
     pub pending: HashSet<String>,
     /// Hands a pane's text (pane id, its text or why not) to the event loop
@@ -716,8 +745,21 @@ impl Inbox {
         self.panel.is_some()
     }
 
+    /// Open the panel on `focus`'s first item, else the first; what was
+    /// being written when it last closed is taken up again by writing it.
+    pub fn open(&mut self, focus: Option<Section>) {
+        let drafts = std::mem::take(&mut self.drafts);
+        self.panel = Some(Panel {
+            drafts,
+            ..Panel::new(focus)
+        });
+    }
+
+    /// Close the panel, keeping what was being written.
     pub fn close(&mut self) {
-        self.panel = None;
+        if let Some(panel) = self.panel.take() {
+            self.drafts = panel.into_drafts();
+        }
     }
 
     /// The field with the keyboard (the filter, or the todo being
@@ -736,6 +778,10 @@ pub struct Panel {
     /// The todo (Ctrl+N, Ctrl+E) or ticket repository (Ctrl+T) being
     /// written, while one is.
     compose: Option<Compose>,
+    /// What Esc stepped back from writing, not empty: a new todo, a ticket
+    /// repository, a todo edited (by id), at most one of each. Writing the
+    /// same again takes it up; saving it lets it go.
+    drafts: Vec<Compose>,
     hover: Option<InboxHit>,
     /// The section to select the first item of, on opening.
     focus: Option<Section>,
@@ -762,6 +808,7 @@ impl Default for Panel {
         Panel {
             query: TextField::default(),
             compose: None,
+            drafts: Vec::new(),
             hover: None,
             focus: None,
             selected: None,
@@ -783,7 +830,7 @@ impl Default for Panel {
 
 /// A todo, or a ticket repository, being written.
 #[derive(Debug)]
-struct Compose {
+pub struct Compose {
     text: TextField,
     /// A ticket repository to add, not a todo: no id, no workspace.
     tickets: bool,
@@ -791,6 +838,14 @@ struct Compose {
     id: Option<TodoId>,
     /// The workspace it is linked to, by index into `Listing::workspaces`.
     workspace: Option<usize>,
+}
+
+impl Compose {
+    /// Whether it writes the same as `other`: both a new todo, both a
+    /// ticket repository, or both todo `id` edited.
+    fn same(&self, other: &Compose) -> bool {
+        self.tickets == other.tickets && self.id == other.id
+    }
 }
 
 /// A row of the list: a section's label, or an item by index.
@@ -1096,7 +1151,7 @@ impl Panel {
     /// active one.
     fn write(&mut self, item: Option<&InboxItem>, list: &Listing) {
         let workspace = item.and_then(|i| i.workspace).or(list.active);
-        self.compose = Some(Compose {
+        self.start(Compose {
             text: TextField::default(),
             tickets: false,
             id: None,
@@ -1106,12 +1161,41 @@ impl Panel {
 
     /// Write a ticket repository to add.
     fn write_tickets(&mut self) {
-        self.compose = Some(Compose {
+        self.start(Compose {
             text: TextField::default(),
             tickets: true,
             id: None,
             workspace: None,
         });
+    }
+
+    /// Start writing `fresh`, or the draft Esc kept of the same (see
+    /// `drafts`) in its place.
+    fn start(&mut self, fresh: Compose) {
+        let kept = self.drafts.iter().position(|d| d.same(&fresh));
+        self.compose = Some(match kept {
+            Some(at) => self.drafts.remove(at),
+            None => fresh,
+        });
+    }
+
+    /// Step back from writing: what was written is kept as a draft (in
+    /// place of one of the same), unless it is empty.
+    fn set_aside(&mut self) {
+        let Some(compose) = self.compose.take() else {
+            return;
+        };
+        self.drafts.retain(|d| !d.same(&compose));
+        if !compose.text.trim().is_empty() {
+            self.drafts.push(compose);
+        }
+    }
+
+    /// What is being written, and the drafts: what the panel keeps once
+    /// closed (see `Inbox::close`).
+    fn into_drafts(mut self) -> Vec<Compose> {
+        self.set_aside();
+        self.drafts
     }
 
     /// Edit todo `item`'s text and workspace.
@@ -1127,7 +1211,7 @@ impl Panel {
             Detail::Todo { text, .. } => text.clone(),
             _ => item.title.clone(),
         };
-        self.compose = Some(Compose {
+        self.start(Compose {
             text: text.into(),
             tickets: false,
             id: Some(id),
@@ -1138,7 +1222,8 @@ impl Panel {
     /// A key while a todo or ticket repository is being written: the
     /// field takes what edits it; Enter saves (an empty one is dropped; a
     /// repository not written as one is said so, and kept to fix), Esc
-    /// drops it, Tab and Shift+Tab cycle the workspace a todo is linked to.
+    /// steps back keeping it as a draft (see `drafts`), Tab and Shift+Tab
+    /// cycle the workspace a todo is linked to.
     fn compose_key(
         &mut self,
         mods: &ModifiersState,
@@ -1151,7 +1236,7 @@ impl Panel {
             return None;
         }
         match sym {
-            Keysym::Escape => self.compose = None,
+            Keysym::Escape => self.set_aside(),
             Keysym::Return | Keysym::KP_Enter if !mods.ctrl => {
                 let compose = self.compose.take()?;
                 let text = compose.text.trim().to_owned();
@@ -1401,7 +1486,7 @@ impl Panel {
             if !compose.tickets && !list.workspaces.is_empty() {
                 hints.push(hint("Tab", "link a workspace"));
             }
-            hints.push(hint("Esc", "cancel"));
+            hints.push(hint("Esc", "back"));
             return hints;
         }
         use ItemAction as A;
@@ -1500,6 +1585,7 @@ impl Panel {
                         age: item.age.map(age_text).unwrap_or_default(),
                         hidden: self.show_hidden,
                         buttons,
+                        marks: item.marks(),
                     })
                 }
             })
@@ -1862,6 +1948,44 @@ mod tests {
         assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
         assert!(panel.view(&list).compose.is_none());
         assert_eq!(&**panel.field_mut(), "");
+    }
+
+    #[test]
+    fn esc_keeps_the_draft_to_take_up_again() {
+        let items = vec![item("a", Section::Repos, Some(1))];
+        let triage = BTreeMap::new();
+        let names = vec!["gerdr".to_owned(), "herdr".to_owned()];
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::default();
+        ctrl(&mut panel, Keysym::n, &list);
+        type_text(&mut panel, "half a thought", &list);
+        assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
+        assert!(panel.view(&list).compose.is_none());
+        // A ticket repository is another draft.
+        ctrl(&mut panel, Keysym::t, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().text, "");
+        type_text(&mut panel, "o/t", &list);
+        press(&mut panel, Keysym::Escape, &list);
+        // Writing a todo again takes it up, where it was linked.
+        ctrl(&mut panel, Keysym::n, &list);
+        let compose = panel.view(&list).compose.unwrap();
+        assert_eq!(compose.text, "half a thought");
+        assert_eq!(compose.workspace.as_deref(), Some("herdr"));
+        // Saved, it is gone.
+        press(&mut panel, Keysym::Return, &list);
+        ctrl(&mut panel, Keysym::n, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().text, "");
+        press(&mut panel, Keysym::Escape, &list);
+        // The panel closed and opened again keeps the ticket repository.
+        let mut inbox = Inbox {
+            panel: Some(panel),
+            ..Inbox::default()
+        };
+        inbox.close();
+        inbox.open(None);
+        let panel = inbox.panel.as_mut().unwrap();
+        ctrl(panel, Keysym::t, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().text, "o/t");
     }
 
     #[test]
@@ -2434,6 +2558,7 @@ mod tests {
         git.detail = Detail::Git {
             branch: Some("main".into()),
             upstream: None,
+            dirty: true,
             ahead: 2,
             behind: 0,
             stashes: 0,

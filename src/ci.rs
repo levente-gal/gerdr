@@ -113,6 +113,9 @@ pub struct RepoCi {
     pub other_prs: usize,
     /// Watched pull requests found merged or closed: no longer watched.
     pub closed: Vec<u64>,
+    /// Why the last read of it failed: what it shows is what was read
+    /// before (nothing, when it never was). `None` once it reads again.
+    pub error: Option<String>,
 }
 
 impl RepoCi {
@@ -277,7 +280,7 @@ fn open_pulls(root: &Path, host: &str, slug: &str) -> Result<usize, String> {
     Ok(reply.data.repository.pull_requests.total_count)
 }
 
-/// Where the problems reading the CI come from, for `problems::report`.
+/// Where the problems reading the CI come from, for `problems::set`.
 pub const CI_PROBLEMS: &str = "ci:github";
 
 /// What `read` of the CI came to, as problems: a repository GitHub hosts
@@ -301,7 +304,7 @@ fn ci_problems(read: &[(PathBuf, Result<RepoCi, String>)]) -> Vec<String> {
 const NOT_GITHUB: &str = "not a GitHub repository";
 
 /// `fetch` each of `roots` off the event loop, side by side, and `send`
-/// what came of each. What couldn't be read goes to `problems::report`
+/// what came of each. What couldn't be read goes to `problems::set`
 /// (see `CI_PROBLEMS`); a round read whole lets go of it.
 pub fn read_all(
     roots: Vec<PathBuf>,
@@ -325,7 +328,7 @@ pub fn read_all(
                 .collect();
             reads.into_iter().map(joined).collect::<Vec<_>>()
         });
-        crate::issues::set_problems(CI_PROBLEMS, ci_problems(&read));
+        crate::problems::set(CI_PROBLEMS, ci_problems(&read));
         send(read)
     });
 }
@@ -764,7 +767,38 @@ fn repo_ci(
         rows,
         other_prs,
         closed,
+        error: None,
     }
+}
+
+/// What is kept of the CI of the repository at `root` once a read of it
+/// failed with `err`: what was read before (`old`), else only where it
+/// is; either with why. `None` for a repository GitHub doesn't host,
+/// which has no CI to read.
+pub fn unread(root: &Path, old: Option<RepoCi>, err: String) -> Option<RepoCi> {
+    if err == NOT_GITHUB {
+        return None;
+    }
+    let mut repo = match old {
+        Some(old) => old,
+        None => {
+            let (host, slug) = crate::git::web_url(root)
+                .as_deref()
+                .and_then(github_repository)?;
+            RepoCi {
+                slug,
+                host,
+                rows: Vec::new(),
+                other_prs: 0,
+                closed: Vec::new(),
+                error: None,
+            }
+        }
+    };
+    // Those were taken in when they were read.
+    repo.closed.clear();
+    repo.error = Some(err);
+    Some(repo)
 }
 
 /// The branches a card shows when they ran: the long-lived ones, the
@@ -1506,6 +1540,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_failed_read_keeps_what_was_read_with_why() {
+        let old = RepoCi {
+            closed: vec![3],
+            ..repo(Vec::new())
+        };
+        let kept = unread(Path::new("/nowhere"), Some(old), "HTTP 502".into()).unwrap();
+        assert_eq!(kept.error.as_deref(), Some("HTTP 502"));
+        assert_eq!(kept.slug, "o/r");
+        assert!(kept.closed.is_empty());
+        // Not GitHub's: no CI, nothing to say.
+        let none = unread(
+            Path::new("/nowhere"),
+            Some(repo(Vec::new())),
+            NOT_GITHUB.into(),
+        );
+        assert_eq!(none, None);
+    }
+
     fn repo(rows: Vec<CiRow>) -> RepoCi {
         RepoCi {
             slug: "o/r".into(),
@@ -1513,6 +1566,7 @@ mod tests {
             rows,
             other_prs: 0,
             closed: Vec::new(),
+            error: None,
         }
     }
 
