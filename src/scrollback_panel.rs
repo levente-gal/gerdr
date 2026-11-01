@@ -26,37 +26,109 @@ const MIN_HEIGHT: i32 = 240;
 /// How far the viewer stands in from its pane's edges, so its own show.
 const INSET: i32 = 4;
 
+/// Every key the viewer takes, and the pointer's ways, as F1 lists them.
+const KEYS: &[(&str, &str)] = &[
+    ("Arrows / H J K L", "Move the caret"),
+    (
+        "W / B / E",
+        "Go to the next word, the word before, the word's end",
+    ),
+    (
+        "0 / ^ / $",
+        "Go to the line's start, its first character, its end",
+    ),
+    ("G / Home", "Go to the top"),
+    ("Shift+G / End", "Go to the bottom"),
+    ("PgUp / PgDn", "Go a page up or down"),
+    ("Space", "Go a page down"),
+    ("Ctrl+U / Ctrl+D", "Go half a page up or down"),
+    ("Shift+Arrows", "Select as the caret goes"),
+    (
+        "V / Shift+V",
+        "Select from the caret, by characters or by lines",
+    ),
+    ("Ctrl+A", "Select all"),
+    ("Y / Ctrl+C", "Copy the selection"),
+    ("Enter", "Copy the selection and close"),
+    ("/ / Ctrl+F", "Find"),
+    (
+        "Enter / Shift+Enter",
+        "Go to the next place found, or the one before",
+    ),
+    (
+        "N / Shift+N",
+        "Go to the next place or the one before, from the text",
+    ),
+    (
+        "F3 / Shift+F3",
+        "Go to the next place or the one before, from either",
+    ),
+    (
+        "* / #",
+        "Find the selection or the word at the caret, on or back",
+    ),
+    ("Tab / Shift+Tab", "Move between the search and the text"),
+    ("Ctrl+R", "Read the pane's output again"),
+    (
+        "Drag / Shift+Click",
+        "Select with the pointer, or reach the selection there",
+    ),
+    ("Double Click / Triple Click", "Select a word, or a line"),
+    ("Esc", "Clear the selection or the search, then close"),
+    ("Q", "Close"),
+    ("F1", "List these keys"),
+];
+
 /// The viewer's key hints, each a key it takes and what it does: the
 /// search's while it is open, and while its field has the keyboard only
-/// those; `v`'s while it is on.
+/// those; `v`'s while it is on; the selection's while there is one. Esc
+/// says what it does now (see `Scrollback::key`). F1 and Esc are the
+/// last two, kept when the footer is too narrow for all.
 fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
+    let selected = viewer.has_selection();
     let hints: &[(&str, &str)] = match viewer.find_bar() {
+        _ if viewer.keys_open() => &[("Esc", "close keys")],
         Some(bar) if bar.focused => &[
             ("Enter", "next"),
             ("Shift+Enter", "previous"),
             ("Tab", "to the text"),
-            ("Esc", "close search"),
+            ("F1", "keys"),
+            (
+                "Esc",
+                if viewer.find_empty() {
+                    "close search"
+                } else {
+                    "clear"
+                },
+            ),
         ],
         Some(_) => &[
-            ("n", "next"),
+            ("N", "next"),
             ("Shift+N", "previous"),
             ("Ctrl+C", "copy"),
-            ("/", "find"),
-            ("Esc", "close search"),
+            ("Tab", "to the search"),
+            ("F1", "keys"),
+            ("Esc", if selected { "clear" } else { "close search" }),
         ],
         None if viewer.selecting() => &[
-            ("y", "copy"),
+            ("Y", "copy"),
             ("Enter", "copy and close"),
-            ("v", "stop selecting"),
+            ("F1", "keys"),
             ("Esc", "stop selecting"),
         ],
-        None => &[
+        None if selected => &[
             ("Ctrl+C", "copy"),
             ("Enter", "copy and close"),
-            ("v", "select"),
+            ("Q", "close"),
+            ("F1", "keys"),
+            ("Esc", "clear"),
+        ],
+        None => &[
+            ("V", "select"),
             ("/", "find"),
-            ("*", "find word"),
-            ("Esc", "close"),
+            ("Ctrl+R", "reload"),
+            ("F1", "keys"),
+            ("Esc / Q", "close"),
         ],
     };
     hints
@@ -164,7 +236,8 @@ impl Gerdr {
 
     /// Where the viewer over pane `id` goes: over the pane in the active
     /// tab, its bar too, or over the app area when the pane is too small
-    /// to read in; `None` while the pane doesn't show.
+    /// to read in (or, while they are listed, to list its keys in);
+    /// `None` while the pane doesn't show.
     fn scrollback_panel_for(&self, id: u32) -> Option<Rect> {
         let area = self.content_rect();
         let (_, rect) = self
@@ -172,11 +245,14 @@ impl Gerdr {
             .shown_rects(area)
             .into_iter()
             .find(|(pane, _)| *pane == id)?;
-        let room = if rect.size.w < MIN_WIDTH || rect.size.h < MIN_HEIGHT {
-            area
-        } else {
-            rect
-        };
+        let keys = self.scrollback.as_ref().is_some_and(Scrollback::keys_open);
+        let small = rect.size.w < MIN_WIDTH || rect.size.h < MIN_HEIGHT;
+        let room =
+            if small || (keys && !chrome::scrollback_keys_fit(inset(rect, INSET), KEYS.len())) {
+                area
+            } else {
+                rect
+            };
         Some(inset(room, INSET))
     }
 
@@ -196,6 +272,16 @@ impl Gerdr {
         let (panel, _) = self.scrollback_place()?;
         let first = viewer.first();
         let end = (first + chrome::scrollback_shown(panel)).min(viewer.row_count());
+        // The keys listed show in place of the text.
+        let (end, keys) = match viewer.keys_open() {
+            true => (
+                first,
+                KEYS.iter()
+                    .map(|(k, w)| (k.to_string(), w.to_string()))
+                    .collect(),
+            ),
+            false => (end, Vec::new()),
+        };
         let rows = (first..end)
             .map(|i| ScrollbackRow {
                 text: viewer.row_text(i).to_owned(),
@@ -219,11 +305,20 @@ impl Gerdr {
             first,
             part: viewer.part(),
             overscroll: viewer.overscroll(),
-            total: viewer.row_count(),
+            total: if keys.is_empty() {
+                viewer.row_count()
+            } else {
+                0
+            },
             hints: hints(viewer),
             hover: viewer.hover,
             search: viewer.find_bar(),
-            ticks: viewer.find_ticks(),
+            ticks: if keys.is_empty() {
+                viewer.find_ticks()
+            } else {
+                Vec::new()
+            },
+            keys,
         })
     }
 
@@ -243,8 +338,10 @@ impl Gerdr {
             _ => None,
         };
         let others = mods.ctrl || mods.alt || mods.logo;
+        let viewer = self.scrollback.as_ref()?;
         if let Some(back) = star.filter(|_| !others)
-            && !self.scrollback.as_ref()?.find_focused()
+            && !viewer.find_focused()
+            && !viewer.keys_open()
         {
             if !self.scrollback.as_mut()?.star(back, fit) {
                 self.show_notice("No word at the caret: move it to one, or select text".into());
@@ -288,6 +385,14 @@ impl Gerdr {
         };
         let layout = chrome::scrollback_layout(view.panel, &view.hints);
         let hit = chrome::scrollback_hit(&view, &layout, pos);
+        // The keys listed, a click on the viewer but on a hint puts the
+        // text back.
+        if !view.keys.is_empty() && matches!(hit, Some(h) if !matches!(h, ScrollbackHit::Hint(_))) {
+            if let Some(viewer) = self.scrollback.as_mut() {
+                viewer.show_keys(false);
+            }
+            return;
+        }
         if !matches!(hit, Some(ScrollbackHit::Search(_)))
             && let Some(viewer) = self.scrollback.as_mut()
         {
@@ -326,9 +431,11 @@ impl Gerdr {
                     viewer.caret_to(row, under);
                 }
             }
-            // A key hint: its key, pressed.
+            // A key hint: its key (the first of a choice), pressed.
             Some(ScrollbackHit::Hint(i)) => {
-                self.press_hint(Overlay::Scrollback, &view.hints[i].0, pos);
+                let keys = &view.hints[i].0;
+                let key = keys.split(" / ").next().unwrap_or(keys);
+                self.press_hint(Overlay::Scrollback, key, pos);
             }
             Some(ScrollbackHit::Panel) => {}
             None => match self.toast_press(pos) {
@@ -396,17 +503,21 @@ impl Gerdr {
     /// cursor.
     pub fn on_scrollback_text(&self, pos: Point<f64, Logical>) -> bool {
         self.scrollback_view().is_some_and(|view| {
+            if !view.keys.is_empty() {
+                return false;
+            }
             let layout = chrome::scrollback_layout(view.panel, &view.hints);
             chrome::scrollback_hit(&view, &layout, pos) == Some(ScrollbackHit::Text)
         })
     }
 
-    /// The wheel or the touchpad moved the viewer's text.
+    /// The wheel or the touchpad moved the viewer's text, unless its keys
+    /// are listed over it.
     pub fn scrollback_scroll(&mut self, motion: Motion) {
         let Some((_, fit)) = self.scrollback_place() else {
             return;
         };
-        if let Some(viewer) = self.scrollback.as_mut() {
+        if let Some(viewer) = self.scrollback.as_mut().filter(|v| !v.keys_open()) {
             viewer.scroll(motion, Instant::now(), fit);
         }
     }

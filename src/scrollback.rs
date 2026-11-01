@@ -6,7 +6,7 @@
 //! or with the wheel turned while the button is held.
 //!
 //! It is a snapshot: what the pane had as it opened, until Ctrl+R reads
-//! it again.
+//! it again. F1 lists every key it takes in place of the text.
 //!
 //! Lines are wrapped at the viewer's width (herdr joins those it wrapped),
 //! and a place in them is a character of a line (see `Spot`).
@@ -185,6 +185,8 @@ pub struct Scrollback {
     /// `v` (by characters) or `V` (by lines) is on: the selection goes
     /// with the caret.
     visual: Option<Grain>,
+    /// The keys it takes are listed in place of the text (F1).
+    keys: bool,
     /// The last press on the text: when, where, and how many came in a
     /// row, for double and triple clicks.
     pub clicks: Option<(Instant, Point<f64, Logical>, u8)>,
@@ -211,8 +213,19 @@ impl Scrollback {
             caret: Spot::default(),
             want: None,
             visual: None,
+            keys: false,
             clicks: None,
         }
+    }
+
+    /// Whether the keys it takes are listed (F1).
+    pub fn keys_open(&self) -> bool {
+        self.keys
+    }
+
+    /// List the keys it takes, or stop.
+    pub fn show_keys(&mut self, on: bool) {
+        self.keys = on;
     }
 
     /// Show `text`, the pane's output read again, in place of what it
@@ -647,6 +660,22 @@ impl Scrollback {
         now: Instant,
         fit: Fit,
     ) -> Option<Outcome> {
+        let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+        // The keys listed take only those that close them.
+        if self.keys {
+            let closes = matches!(
+                sym,
+                Keysym::Escape | Keysym::F1 | Keysym::q | Keysym::Return | Keysym::KP_Enter
+            );
+            if closes && bare {
+                self.keys = false;
+            }
+            return None;
+        }
+        if sym == Keysym::F1 && bare {
+            self.keys = true;
+            return None;
+        }
         if self.find_key(mods, sym, typed, fit) {
             return None;
         }
@@ -1414,6 +1443,36 @@ mod tests {
             s.key(&none, Keysym::q, Keysym::q, now, f),
             Some(Outcome::Close)
         );
+    }
+
+    #[test]
+    fn f1_lists_the_keys_until_esc_f1_q_or_enter_and_takes_no_other() {
+        let mut s = viewer("one two\nthree", 80, 10);
+        let none = ModifiersState::default();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let f = fit(80, 10);
+        let caret = |s: &Scrollback| (s.caret.line, s.caret.ch);
+        let before = caret(&s);
+        for close in [Keysym::Escape, Keysym::F1, Keysym::q, Keysym::Return] {
+            assert_eq!(s.key(&none, Keysym::F1, Keysym::F1, now, f), None);
+            assert!(s.keys_open());
+            assert_eq!(s.key(&none, Keysym::k, Keysym::k, now, f), None);
+            assert_eq!(s.key(&ctrl, Keysym::a, Keysym::a, now, f), None);
+            type_in(&mut s, "/", f);
+            assert!(s.keys_open() && caret(&s) == before);
+            assert!(!s.has_selection() && s.find_bar().is_none());
+            // Closing them leaves the viewer open.
+            assert_eq!(s.key(&none, close, close, now, f), None);
+            assert!(!s.keys_open());
+        }
+        // From the search's field too.
+        type_in(&mut s, "/", f);
+        s.key(&none, Keysym::F1, Keysym::F1, now, f);
+        assert!(s.keys_open() && s.find_empty());
     }
 
     #[test]

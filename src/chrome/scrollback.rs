@@ -2,14 +2,16 @@
 //! a title row, the pane's output in the monospace font on the terminal's
 //! own colours, and the key hints under it. Each row is a buffer of its
 //! own, so scrolling only moves them. The search (see `search`) goes in
-//! the title row, its ticks over the scrollbar.
+//! the title row, its ticks over the scrollbar. F1 lists the keys in
+//! place of the text.
 
 use std::ops::Range;
 
 use super::{
-    FIELD_GAP, FONT_SIZE, FieldSpot, HELP_RADIUS, Painter, Palette, ROW_BUTTON, Rect, SHADOW,
-    SMALL_FONT_SIZE, SearchBar, SearchPart, band, field_text, footer_hint_spots, hint_at,
-    hint_strs, layers::Part, measure, measure_mono, mix, phys, physical, rect_px, search_spots,
+    FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
+    HINT_KEY_GAP, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE, SearchBar,
+    SearchPart, band, field_text, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix,
+    phys, physical, rect_px, search_spots,
 };
 use crate::scrollback::Fit;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -33,6 +35,13 @@ const THUMB_MIN: i32 = 24;
 const TITLE_INSET: i32 = 14;
 /// The most the open search takes of the title row, its buttons too.
 const SEARCH_MAX: i32 = 520;
+/// The keys listed (F1): a row's height, the heading's over them, the
+/// room for a row's keycaps before what it does, and the least width of
+/// a column of them.
+const KEYS_ROW: i32 = 26;
+const KEYS_HEADING: i32 = 34;
+const KEYS_CAPS: i32 = 190;
+const KEYS_COLUMN: i32 = 480;
 
 /// What the scrollback viewer shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +68,9 @@ pub struct ScrollbackView {
     /// Where the places it found are on the scrollbar: shares of all the
     /// rows from the top, each with whether it is the one gone to.
     pub ticks: Vec<(f64, bool)>,
+    /// Every key it takes and what it does, listed in place of the text
+    /// while not empty (F1).
+    pub keys: Vec<(String, String)>,
 }
 
 /// A row of the viewer's text.
@@ -131,7 +143,7 @@ pub fn scrollback_layout(panel: Rect, hints: &[(String, String)]) -> ScrollbackL
         (panel.loc.x, list.loc.y + list.size.h).into(),
         (panel.size.w, FOOTER).into(),
     );
-    let hints = footer_hint_spots(&hint_strs(hints), footer);
+    let hints = footer_spots(&hint_strs(hints), footer);
     ScrollbackLayout {
         panel,
         title,
@@ -140,6 +152,62 @@ pub fn scrollback_layout(panel: Rect, hints: &[(String, String)]) -> ScrollbackL
         footer,
         hints,
     }
+}
+
+/// Where `hints` go in the footer's one row: all that fit; else, the
+/// last two (the keys and Esc) kept, as many before them as fit.
+fn footer_spots(hints: &[(&str, &str)], footer: Rect) -> Vec<(usize, Rect)> {
+    let row = Rectangle::new(
+        (footer.loc.x + HELP_PADDING, footer.loc.y + FOOTER_PAD).into(),
+        ((footer.size.w - 2 * HELP_PADDING).max(0), FOOTER_ROW).into(),
+    );
+    let mut keep: Vec<usize> = (0..hints.len()).collect();
+    loop {
+        let shown: Vec<(&str, &str)> = keep.iter().map(|&i| hints[i]).collect();
+        let spots = hint_spots(&shown, row);
+        if spots.len() == keep.len() || keep.len() <= 2 {
+            return spots.into_iter().map(|(j, r)| (keep[j], r)).collect();
+        }
+        keep.remove(keep.len() - 3);
+    }
+}
+
+/// Where the keys listed go in the list of a viewer laid out as
+/// `layout`, `n` of them: the heading over them, and each row, down as
+/// many columns side by side as they need.
+pub fn scrollback_keys_spots(layout: &ScrollbackLayout, n: usize) -> (Rect, Vec<Rect>) {
+    let list = layout.list;
+    let inset = TITLE_INSET - PAD;
+    let heading = Rectangle::new(
+        (list.loc.x + inset, list.loc.y + PAD).into(),
+        ((list.size.w - 2 * inset).max(1), KEYS_HEADING).into(),
+    );
+    let top = heading.loc.y + KEYS_HEADING;
+    let per_column = ((list.loc.y + list.size.h - PAD - top) / KEYS_ROW).max(1) as usize;
+    let columns = n.div_ceil(per_column).max(1);
+    let w = heading.size.w / columns as i32;
+    let rows = (0..n)
+        .map(|i| {
+            let (column, row) = (i / per_column, i % per_column);
+            Rectangle::new(
+                (
+                    heading.loc.x + column as i32 * w,
+                    top + row as i32 * KEYS_ROW,
+                )
+                    .into(),
+                (w, KEYS_ROW).into(),
+            )
+        })
+        .collect();
+    (heading, rows)
+}
+
+/// Whether `n` keys listed fit in a viewer at `panel`, each column as
+/// wide as `KEYS_COLUMN` at least.
+pub fn scrollback_keys_fit(panel: Rect, n: usize) -> bool {
+    let layout = scrollback_layout(panel, &[]);
+    let (_, rows) = scrollback_keys_spots(&layout, n);
+    rows.first().is_none_or(|r| r.size.w >= KEYS_COLUMN)
 }
 
 /// How the text fits in a viewer at `panel`.
@@ -218,9 +286,13 @@ pub fn scrollback_hit(
     if let Some(&(part, _)) = search.iter().find(|(_, r)| r.to_f64().contains(pos)) {
         return Some(ScrollbackHit::Search(part));
     }
-    let hints = hint_strs(&view.hints);
-    Some(match hint_at(&hints, &layout.hints, pos) {
-        Some(i) => ScrollbackHit::Hint(i),
+    // A choice of keys too ("Esc / Q"): a click presses the first.
+    let hint = layout
+        .hints
+        .iter()
+        .find(|(_, spot)| spot.to_f64().contains(pos));
+    Some(match hint {
+        Some(&(i, _)) => ScrollbackHit::Hint(i),
         None => ScrollbackHit::Panel,
     })
 }
@@ -390,7 +462,11 @@ impl Painter {
         );
 
         let (x, y, w, h) = rect_px(shift(layout.list), scale);
-        c.rounded(x, y, w, h, 4.0 * s, p.terminal_background);
+        if view.keys.is_empty() {
+            c.rounded(x, y, w, h, 4.0 * s, p.terminal_background);
+        } else {
+            self.scrollback_keys(&mut c, view, &layout, by, scale, p);
+        }
 
         let hints = hint_strs(&view.hints);
         let spots: Vec<(usize, Rect)> = layout.hints.iter().map(|(i, r)| (*i, shift(*r))).collect();
@@ -400,6 +476,38 @@ impl Painter {
         };
         self.hints(&mut c, &hints, &spots, hover, scale, p);
         c
+    }
+
+    /// The keys listed in place of the text, on the panel's own ground:
+    /// a heading, then each key's keycaps and what it does. `by` moves
+    /// the layout onto the frame's buffer.
+    fn scrollback_keys(
+        &self,
+        c: &mut super::Canvas,
+        view: &ScrollbackView,
+        layout: &ScrollbackLayout,
+        by: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let shift = |r: Rect| Rectangle::new(r.loc + by, r.size);
+        let s = scale as f32;
+        let (heading, rows) = scrollback_keys_spots(layout, view.keys.len());
+        let heading = shift(heading);
+        let (left, right) = phys(heading, scale);
+        let text = "Keys in the scrollback viewer";
+        let heading_band = band(heading, scale);
+        self.text(c, text, FONT_SIZE, left, right, heading_band, scale, p.text);
+        let (caps, gap) = (KEYS_CAPS as f32 * s, HINT_KEY_GAP as f32 * s);
+        for ((keys, what), rect) in view.keys.iter().zip(rows) {
+            let rect = shift(rect);
+            let (left, right) = phys(rect, scale);
+            let row_band = band(rect, scale);
+            let end = self.keycaps(c, keys, left, row_band, scale, p);
+            let x = (left + caps).max(end + gap);
+            let end = right - gap;
+            self.text(c, what, SMALL_FONT_SIZE, x, end, row_band, scale, p.text);
+        }
     }
 
     /// A row of the text, `w` wide: on the terminal's background, the
@@ -650,6 +758,7 @@ mod tests {
             hover: None,
             search: None,
             ticks: Vec::new(),
+            keys: Vec::new(),
         }
     }
 
@@ -699,6 +808,68 @@ mod tests {
             Some(ScrollbackHit::Panel)
         );
         assert_eq!(scrollback_hit(&v, &layout, (10.0, 10.0).into()), None);
+    }
+
+    #[test]
+    fn a_narrow_footer_keeps_its_last_two_hints_and_a_choice_is_a_hint_too() {
+        let mut v = view(500, 0);
+        v.hints = [
+            ("Ctrl+C", "copy"),
+            ("Enter", "copy and close"),
+            ("Q", "close"),
+            ("F1", "keys"),
+            ("Esc / Q", "close"),
+        ]
+        .iter()
+        .map(|(k, w)| (k.to_string(), w.to_string()))
+        .collect();
+        let wide = scrollback_layout(v.panel, &v.hints);
+        let order = |l: &ScrollbackLayout| l.hints.iter().map(|(i, _)| *i).collect::<Vec<_>>();
+        assert_eq!(order(&wide), [0, 1, 2, 3, 4]);
+        let narrow = Rectangle::new(v.panel.loc, (300, 400).into());
+        let layout = scrollback_layout(narrow, &v.hints);
+        let shown = order(&layout);
+        assert!(shown.len() < 5 && shown.ends_with(&[3, 4]), "{shown:?}");
+        assert!(shown.is_sorted());
+        // All in the footer's one row.
+        let footer = layout.footer;
+        assert!(
+            layout.hints.iter().all(|(_, r)| footer.contains(r.loc)
+                && r.loc.y + r.size.h <= footer.loc.y + footer.size.h)
+        );
+        let (i, spot) = *wide.hints.last().unwrap();
+        let centre = spot.to_f64().loc + Point::from((spot.size.w as f64 / 2.0, 4.0));
+        assert_eq!(
+            scrollback_hit(&v, &wide, centre),
+            Some(ScrollbackHit::Hint(i))
+        );
+    }
+
+    #[test]
+    fn the_keys_go_down_columns_side_by_side_and_need_room() {
+        let big = Rectangle::new((0, 0).into(), (1400, 900).into());
+        let layout = scrollback_layout(big, &[]);
+        let (heading, rows) = scrollback_keys_spots(&layout, 25);
+        assert_eq!(rows.len(), 25);
+        assert_eq!(
+            rows[0].loc,
+            (heading.loc.x, heading.loc.y + KEYS_HEADING).into()
+        );
+        for r in &rows {
+            assert!(layout.list.contains(r.loc));
+            assert!(r.loc.y + r.size.h <= layout.list.loc.y + layout.list.size.h);
+        }
+        // Down a column first.
+        assert_eq!(rows[1].loc.x, rows[0].loc.x);
+        assert!(scrollback_keys_fit(big, 25));
+        // Short, they take more columns, too narrow in a small viewer.
+        let short = Rectangle::new((0, 0).into(), (1600, 400).into());
+        let (_, rows) = scrollback_keys_spots(&scrollback_layout(short, &[]), 25);
+        let columns: std::collections::BTreeSet<i32> = rows.iter().map(|r| r.loc.x).collect();
+        assert!(columns.len() > 1);
+        assert!(scrollback_keys_fit(short, 25));
+        let small = Rectangle::new((0, 0).into(), (600, 300).into());
+        assert!(!scrollback_keys_fit(small, 25));
     }
 
     #[test]
@@ -798,14 +969,37 @@ mod tests {
             whole: true,
         });
         v.ticks = vec![(0.1, false), (0.32, true), (0.33, false), (0.8, false)];
-        for (theme, scale) in [
-            (Theme::Dark, 1.0),
-            (Theme::Light, 1.0),
-            (Theme::Dark, 2.0),
-            (Theme::Light, 2.0),
+        // The keys listed, in place of the text.
+        let keys = ScrollbackView {
+            panel: Rectangle::new((100, 50).into(), (1100, 480).into()),
+            rows: Vec::new(),
+            ticks: Vec::new(),
+            total: 0,
+            search: None,
+            keys: [
+                ("Arrows / H J K L", "Move the caret"),
+                ("Ctrl+U / Ctrl+D", "Go half a page up or down"),
+                ("/ / Ctrl+F", "Find"),
+                ("Double Click / Triple Click", "Select a word, or a line"),
+                ("Esc", "Clear the selection or the search, then close"),
+            ]
+            .repeat(5)
+            .iter()
+            .map(|(k, w)| (k.to_string(), w.to_string()))
+            .collect(),
+            ..v.clone()
+        };
+        for (view, name, theme, scale) in [
+            (&v, "scrollback", Theme::Dark, 1.0),
+            (&v, "scrollback", Theme::Light, 1.0),
+            (&v, "scrollback", Theme::Dark, 2.0),
+            (&v, "scrollback", Theme::Light, 2.0),
+            (&keys, "scrollback_keys", Theme::Dark, 1.0),
+            (&keys, "scrollback_keys", Theme::Light, 2.0),
         ] {
+            let v = view;
             let w = ((v.panel.size.w + 2 * SHADOW) as f64 * scale).round() as usize;
-            let mut buffer = painter.scrollback(&v, scale, theme.palette());
+            let mut buffer = painter.scrollback(v, scale, theme.palette());
             let mut out = Vec::new();
             let _ = buffer.render().draw(|mem| {
                 let h = mem.len() / 4 / w;
@@ -819,7 +1013,7 @@ mod tests {
                 }
                 Ok::<_, ()>(Vec::new())
             });
-            let file = format!("scrollback_{}_{scale}.ppm", theme.name());
+            let file = format!("{name}_{}_{scale}.ppm", theme.name());
             let _ = std::fs::write(dir.join(file), out);
         }
     }
