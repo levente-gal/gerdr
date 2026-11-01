@@ -2018,9 +2018,10 @@ impl Gerdr {
         // The events' source goes last: it removes itself when the server goes.
         let tabs = self.watch_herdr_tabs(socket.clone());
         self.herdr_sources.extend(tabs);
-        let fresh = start != herdr::Start::Attached;
-        let services = self.watch_services(socket, session, fresh);
-        self.herdr_sources.extend(services);
+        if let Some(project) = self.project.clone() {
+            let fresh = start != herdr::Start::Attached;
+            self.watch_project_services(&project, socket, fresh);
+        }
         let sub = match subscribed {
             Ok(sub) => sub,
             Err(err) => {
@@ -2051,7 +2052,7 @@ impl Gerdr {
                     state.agents.clear();
                     state.notify_agents();
                     state.herdr_tabs.clear();
-                    state.stop_service_watch();
+                    state.services_server_gone();
                     // Closed as it went down: they come back with it.
                     state.closed_workspaces.clear();
                     // This source is the last one and removes itself.
@@ -4911,10 +4912,11 @@ impl Gerdr {
                 }
                 view.ci = self.ci_view(ws);
                 view.restart = !self.workspace_restarts(w).is_empty();
-                let panes = ws.tabs.iter().flat_map(Tab::herdr_panes);
                 view.errors = self
-                    .service_errors
-                    .unseen_in(panes.map(|p| p.pane_id.as_str()));
+                    .workspace_service_errors(w)
+                    .iter()
+                    .filter(|g| !g.seen)
+                    .count();
                 if self.agent_strip == Some(w) {
                     view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
                 }
@@ -5198,7 +5200,6 @@ impl Gerdr {
         self.tabs_changed = None;
         self.pane_leaders.clear();
         self.last_commands.clear();
-        self.stop_service_watch();
         self.pane_jobs.clear();
         self.pane_bar_hover = None;
         self.closed_workspaces.clear();
@@ -6348,6 +6349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_ci();
     state.watch_issues();
     state.connect_notifier();
+    state.start_services();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
     state.watch_profile_imports();

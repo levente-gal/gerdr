@@ -170,6 +170,7 @@ pub enum Target {
     /// A service's error, in its pane's output
     /// (`Gerdr::show_service_error`).
     ServiceError {
+        project: String,
         pane_id: String,
         fingerprint: String,
     },
@@ -293,12 +294,14 @@ pub enum Detail {
         workspace: Option<String>,
         created: u64,
     },
-    /// An error a service printed.
+    /// An error a service printed, or its stopping.
     Service {
         /// What its pane's bar calls the service.
         service: String,
-        /// Its workspace's name.
-        workspace: String,
+        /// Its workspace's name; its project's, for another project's.
+        place: String,
+        /// Whether it is the service having stopped.
+        stopped: bool,
         /// How many times it came.
         count: u32,
         /// When it first came, in seconds since the epoch.
@@ -660,20 +663,22 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         }
         Detail::Service {
             service,
-            workspace,
+            place,
+            stopped,
             count,
             first,
             lines,
         } => {
             field("Service", service.clone());
-            field("Workspace", workspace.clone());
+            field("In", place.clone());
             field("Times", count.to_string());
             if let Some(age) = item.age {
                 field("Last", format!("{} ago", age_text(age)));
             }
             field("First", crate::projects::ago(now, *first));
             if !lines.is_empty() {
-                block_title = Some("Output".to_owned());
+                let title = if *stopped { "Last output" } else { "Output" };
+                block_title = Some(title.to_owned());
                 block = lines.clone();
             }
         }

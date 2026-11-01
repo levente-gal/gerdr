@@ -419,6 +419,10 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
+                        // What it interrupts stopped on purpose.
+                        if mods.ctrl && matches!(sym, Keysym::c | Keysym::C | Keysym::backslash) {
+                            state.note_interrupt();
+                        }
                         FilterResult::Forward
                     },
                 );

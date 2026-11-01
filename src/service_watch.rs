@@ -1,5 +1,6 @@
-//! Watching the services' panes for errors, on a thread of its own so
-//! reading their output never holds up the compositor.
+//! Watching the services' panes of a herdr session for errors, and for
+//! their command stopping, on a thread of its own so reading their output
+//! never holds up the compositor.
 //!
 //! Each service pane gets a herdr connection of its own ringing when an
 //! error line comes into its last `WINDOW` lines (`pane.output_matched`).
@@ -12,6 +13,11 @@
 //! herdr matches the shell's line of the command too. A pane is watched
 //! only once its command's line has left the window (read every `POLL`
 //! until then), and that line is never taken for an error.
+//!
+//! Every `POLL` the thread also asks what runs in each pane: its command
+//! gone back to the shell is a service stopped (herdr has no exit status
+//! to tell a crash from a Ctrl+C: gerdr tells them apart by the keys it
+//! sent), and back again, running.
 
 use std::{
     collections::HashMap,
@@ -23,14 +29,18 @@ use std::{
 
 use crate::{
     herdr::{Herdr, OutputWatch},
-    service_errors::{self, Anchor, ServiceError},
+    projects::{self, Foreground},
+    service_errors::{self, Anchor, Patterns, ServiceError},
 };
 
 /// How many of a pane's last lines herdr watches for errors.
 pub const WINDOW: usize = 20;
 /// How many lines a read takes: all `recent` gives.
 const READ_LINES: usize = 1000;
-/// How often a pane herdr can't ring for is read.
+/// How many of its last lines a service stopped keeps.
+pub const STOP_LINES: usize = 40;
+/// How often a pane herdr can't ring for is read, and every pane is
+/// asked what runs in it.
 const POLL: Duration = Duration::from_secs(5);
 /// How long before a connection that failed is opened again.
 const RETRY: Duration = Duration::from_secs(10);
@@ -45,14 +55,27 @@ pub struct Service {
     pub command: String,
 }
 
-/// What a read of a service's pane found.
-#[derive(Clone, Debug)]
-pub struct Report {
-    pub pane_id: String,
-    /// The new errors, in order.
-    pub errors: Vec<ServiceError>,
-    /// Where the read left off.
-    pub anchor: Anchor,
+/// What the thread found in a service's pane.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Report {
+    /// A read moved on: the new errors in it (in order), and where it left
+    /// off.
+    Read {
+        pane_id: String,
+        errors: Vec<ServiceError>,
+        anchor: Anchor,
+    },
+    /// Its command went back to the shell, leaving these last lines, the
+    /// last error among them if any; `interrupted` by a Ctrl+C the
+    /// terminal echoed.
+    Stopped {
+        pane_id: String,
+        lines: Vec<String>,
+        error: Option<ServiceError>,
+        interrupted: bool,
+    },
+    /// Its command runs again.
+    Started { pane_id: String },
 }
 
 struct Watch {
@@ -67,14 +90,20 @@ struct Watch {
     read: bool,
     /// Whether the last read saw the command's line in the window.
     command_shown: bool,
+    /// Whether its command ran when last asked; `None` before.
+    running: Option<bool>,
+    /// When it is next asked what runs in it.
+    next_check: Instant,
 }
 
 /// Watch the services sent on the returned sender (the whole list, each
-/// time it changes) of the herdr server on `socket`, starting from where
-/// the last gerdr left off (`anchors`), and hand each read that moved on
-/// to `send`. Stops once `send` returns false or the sender is dropped.
+/// time it changes) of the herdr server on `socket` for lines `patterns`
+/// takes for errors, starting from where the last gerdr left off
+/// (`anchors`), and hand what it finds to `send`. Stops once `send`
+/// returns false or the sender is dropped.
 pub fn spawn(
     socket: PathBuf,
+    patterns: Patterns,
     anchors: HashMap<String, Anchor>,
     mut send: impl FnMut(Report) -> bool + Send + 'static,
 ) -> mpsc::Sender<Vec<Service>> {
@@ -93,23 +122,26 @@ pub fn spawn(
             }
             let rung = wait(&mut watches, TICK);
             let now = Instant::now();
-            let due: Vec<String> = watches
-                .iter()
-                .filter(|(id, w)| rung.contains(id) || w.next_read.is_some_and(|at| at <= now))
-                .map(|(id, _)| id.clone())
-                .collect();
-            for pane_id in due {
+            let ids: Vec<String> = watches.keys().cloned().collect();
+            for pane_id in ids {
                 let Some(watch) = watches.get_mut(&pane_id) else {
                     continue;
                 };
-                if let Some(report) = read(&mut herdr, &pane_id, watch, now)
-                    && !send(report)
-                {
-                    return;
+                let mut reports = Vec::new();
+                if rung.contains(&pane_id) || watch.next_read.is_some_and(|at| at <= now) {
+                    reports.extend(read(&mut herdr, &patterns, &pane_id, watch, now));
+                }
+                if watch.next_check <= now {
+                    reports.extend(check(&mut herdr, &patterns, &pane_id, watch, now));
+                }
+                for report in reports {
+                    if !send(report) {
+                        return;
+                    }
                 }
             }
             for (pane_id, watch) in &mut watches {
-                open_doorbell(&herdr, pane_id, watch, now);
+                open_doorbell(&herdr, &patterns, pane_id, watch, now);
             }
         }
     });
@@ -124,6 +156,7 @@ fn update(
     list: Vec<Service>,
 ) {
     watches.retain(|id, _| list.iter().any(|s| s.pane_id == *id));
+    let now = Instant::now();
     for service in list {
         match watches.get_mut(&service.pane_id) {
             Some(watch) => watch.command = service.command,
@@ -135,10 +168,12 @@ fn update(
                         command: service.command,
                         anchor,
                         doorbell: None,
-                        next_read: Some(Instant::now()),
+                        next_read: Some(now),
                         retry_at: None,
                         read: false,
                         command_shown: true,
+                        running: None,
+                        next_check: now,
                     },
                 );
             }
@@ -193,7 +228,13 @@ fn wait(watches: &mut HashMap<String, Watch>, timeout: Duration) -> Vec<String> 
 
 /// Read pane `pane_id`'s last lines for errors past its anchor. The first
 /// read with no anchor saved takes what is there as seen.
-fn read(herdr: &mut Herdr, pane_id: &str, watch: &mut Watch, now: Instant) -> Option<Report> {
+fn read(
+    herdr: &mut Herdr,
+    patterns: &Patterns,
+    pane_id: &str,
+    watch: &mut Watch,
+    now: Instant,
+) -> Option<Report> {
     let text = match herdr.pane_read(pane_id, "recent_unwrapped", READ_LINES) {
         Ok(text) => text,
         Err(err) => {
@@ -202,7 +243,23 @@ fn read(herdr: &mut Herdr, pane_id: &str, watch: &mut Watch, now: Instant) -> Op
             return None;
         }
     };
-    let scan = service_errors::scan(&text, &watch.command, watch.anchor.as_ref(), WINDOW);
+    read_text(patterns, &text, pane_id, watch, now)
+}
+
+fn read_text(
+    patterns: &Patterns,
+    text: &str,
+    pane_id: &str,
+    watch: &mut Watch,
+    now: Instant,
+) -> Option<Report> {
+    let scan = service_errors::scan(
+        patterns,
+        text,
+        &watch.command,
+        watch.anchor.as_ref(),
+        WINDOW,
+    );
     let first = !watch.read;
     watch.read = true;
     watch.command_shown = scan.command_shown;
@@ -215,16 +272,72 @@ fn read(herdr: &mut Herdr, pane_id: &str, watch: &mut Watch, now: Instant) -> Op
     let fresh = first && watch.anchor.is_none();
     watch.anchor = Some(anchor);
     let errors = if fresh { Vec::new() } else { scan.errors };
-    (moved || !errors.is_empty()).then(|| Report {
+    (moved || !errors.is_empty()).then(|| Report::Read {
         pane_id: pane_id.to_owned(),
         errors,
         anchor,
     })
 }
 
+/// Ask what runs in pane `pane_id`: its command gone (back to the shell,
+/// or another in its place) since last asked is a service stopped (its errors read first, and its
+/// last lines kept), back again one started.
+fn check(
+    herdr: &mut Herdr,
+    patterns: &Patterns,
+    pane_id: &str,
+    watch: &mut Watch,
+    now: Instant,
+) -> Vec<Report> {
+    watch.next_check = now + POLL;
+    let running = match herdr.process_info(pane_id) {
+        // Its own command, not another typed in after it stopped; one
+        // whose command line can't be read back (gunicorn's title) counts.
+        Ok(info) => match projects::foreground_command(&info, None) {
+            Some(Foreground::Idle | Foreground::Untracked { denied: true, .. }) => false,
+            Some(Foreground::Busy { captured, .. }) => captured.command == watch.command,
+            Some(Foreground::Untracked { denied: false, .. }) => true,
+            None => return Vec::new(),
+        },
+        Err(err) => {
+            tracing::debug!("asking what runs in {pane_id}: {err}");
+            return Vec::new();
+        }
+    };
+    let was = watch.running.replace(running);
+    match (was, running) {
+        (Some(true), false) => {
+            let text = herdr
+                .pane_read(pane_id, "recent_unwrapped", READ_LINES)
+                .unwrap_or_default();
+            let mut reports: Vec<Report> = read_text(patterns, &text, pane_id, watch, now)
+                .into_iter()
+                .collect();
+            let ending = service_errors::ending(patterns, &text, &watch.command, STOP_LINES);
+            reports.push(Report::Stopped {
+                pane_id: pane_id.to_owned(),
+                lines: ending.lines,
+                error: ending.error,
+                interrupted: ending.interrupted,
+            });
+            reports
+        }
+        (Some(false), true) => vec![Report::Started {
+            pane_id: pane_id.to_owned(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
 /// Open pane `pane_id`'s doorbell if it has none, once its command's line
 /// has left the window (so herdr's first ring isn't the command).
-fn open_doorbell(herdr: &Herdr, pane_id: &str, watch: &mut Watch, now: Instant) {
+fn open_doorbell(
+    herdr: &Herdr,
+    patterns: &Patterns,
+    pane_id: &str,
+    watch: &mut Watch,
+    now: Instant,
+) {
     if watch.doorbell.is_some()
         || !watch.read
         || watch.command_shown
@@ -232,7 +345,7 @@ fn open_doorbell(herdr: &Herdr, pane_id: &str, watch: &mut Watch, now: Instant) 
     {
         return;
     }
-    match herdr.watch_output(pane_id, WINDOW, service_errors::HERDR_PATTERN) {
+    match herdr.watch_output(pane_id, WINDOW, patterns.herdr()) {
         Ok(doorbell) => {
             tracing::debug!("watching {pane_id} for errors");
             watch.doorbell = Some(doorbell);
@@ -249,6 +362,35 @@ fn open_doorbell(herdr: &Herdr, pane_id: &str, watch: &mut Watch, now: Instant) 
 mod tests {
     use super::*;
 
+    /// What arrives on `rx` within `wait`, up to the first report `stop`
+    /// takes.
+    fn until(
+        rx: &mpsc::Receiver<Report>,
+        wait: Duration,
+        stop: impl Fn(&Report) -> bool,
+    ) -> Option<Report> {
+        let until = Instant::now() + wait;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(r) if stop(&r) => return Some(r),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        None
+    }
+
+    fn titles(report: Option<Report>) -> Vec<String> {
+        match report {
+            Some(Report::Read { errors, .. }) => errors.into_iter().map(|e| e.title).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn has_errors(r: &Report) -> bool {
+        matches!(r, Report::Read { errors, .. } if !errors.is_empty())
+    }
+
     /// Against a scratch herdr server: `GERDR_PROBE_SOCKET` its socket,
     /// `GERDR_PROBE_PANE` a pane of it at a shell prompt.
     #[test]
@@ -257,58 +399,57 @@ mod tests {
         let socket = PathBuf::from(std::env::var("GERDR_PROBE_SOCKET").unwrap());
         let pane = std::env::var("GERDR_PROBE_PANE").unwrap();
         let mut herdr = Herdr::on_socket(socket.clone());
-        let command = "printf 'started\\n'; sleep 1000";
+        herdr.send_line(&pane, "printf 'start%s\\n' ed").unwrap();
+        let command = "sleep 1000";
         herdr.send_line(&pane, command).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         let (tx, rx) = mpsc::channel();
-        let feed = spawn(socket, HashMap::new(), move |r| tx.send(r).is_ok());
+        let feed = spawn(socket, Patterns::default(), HashMap::new(), move |r| {
+            tx.send(r).is_ok()
+        });
         feed.send(vec![Service {
             pane_id: pane.clone(),
             command: command.into(),
         }])
         .unwrap();
-        let errors = |rx: &mpsc::Receiver<Report>, wait: Duration| {
-            let until = Instant::now() + wait;
-            let mut found = Vec::new();
-            while let Some(left) = until.checked_duration_since(Instant::now()) {
-                match rx.recv_timeout(left) {
-                    Ok(r) if !r.errors.is_empty() => {
-                        found.extend(r.errors.into_iter().map(|e| e.title));
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-            found
-        };
         // The first read takes what is there as seen.
-        assert!(errors(&rx, Duration::from_secs(2)).is_empty());
-        let stop = |herdr: &mut Herdr| herdr.send_keys(&pane, &["ctrl+c"]).unwrap();
-        stop(&mut herdr);
+        assert!(until(&rx, Duration::from_secs(2), has_errors).is_none());
+        // Stopping it is told.
+        herdr.send_keys(&pane, &["ctrl+c"]).unwrap();
+        let stopped = until(&rx, Duration::from_secs(7), |r| {
+            matches!(r, Report::Stopped { .. })
+        });
+        eprintln!("stopped: {stopped:?}");
+        // The terminal echoed the Ctrl+C: stopped on purpose.
+        assert!(matches!(
+            stopped,
+            Some(Report::Stopped {
+                interrupted: true,
+                ..
+            })
+        ));
         // 30 clean lines push the command's line out of the window.
         herdr
             .send_line(&pane, "for i in $(seq 30); do echo clean $i; done")
             .unwrap();
-        assert!(errors(&rx, Duration::from_secs(7)).is_empty());
+        assert!(until(&rx, Duration::from_secs(7), has_errors).is_none());
         // The doorbell rings at once.
         let at = Instant::now();
         herdr.send_line(&pane, "printf 'E%sOR one\\n' RR").unwrap();
-        let found = errors(&rx, Duration::from_secs(2));
+        let found = titles(until(&rx, Duration::from_secs(2), has_errors));
         eprintln!("one: {found:?} after {:?}", at.elapsed());
         assert_eq!(found, ["ERROR one"]);
-        assert!(at.elapsed() < Duration::from_secs(2), "rung, not polled");
         // Another while the window holds the first: read by the poll.
         let at = Instant::now();
         herdr.send_line(&pane, "printf 'E%sOR two\\n' RR").unwrap();
-        let found = errors(&rx, Duration::from_secs(7));
+        let found = titles(until(&rx, Duration::from_secs(7), has_errors));
         eprintln!("two: {found:?} after {:?}", at.elapsed());
         assert_eq!(found, ["ERROR two"]);
         // Clear, then a traceback.
         herdr
             .send_line(&pane, "for i in $(seq 30); do echo clean $i; done")
             .unwrap();
-        let _ = errors(&rx, Duration::from_secs(7));
+        let _ = until(&rx, Duration::from_secs(7), has_errors);
         let at = Instant::now();
         herdr
             .send_line(
@@ -316,9 +457,37 @@ mod tests {
                 "printf 'Trace%s (most recent call last):\\n  File \"a.py\", line 1, in f\\nValueError: bad\\n' back",
             )
             .unwrap();
-        let found = errors(&rx, Duration::from_secs(7));
+        let found = titles(until(&rx, Duration::from_secs(7), has_errors));
         eprintln!("traceback: {found:?} after {:?}", at.elapsed());
         assert_eq!(found, ["ValueError: bad"]);
         assert!(at.elapsed() < Duration::from_secs(2), "rung, not polled");
+        // Running again is told.
+        herdr.send_line(&pane, "sleep 1000").unwrap();
+        let started = until(&rx, Duration::from_secs(7), |r| {
+            matches!(r, Report::Started { .. })
+        });
+        assert!(started.is_some());
+        herdr.send_keys(&pane, &["ctrl+c"]).unwrap();
+        // One that ends by itself, its error printed: not on purpose.
+        feed.send(vec![Service {
+            pane_id: pane.clone(),
+            command: "sleep 6".into(),
+        }])
+        .unwrap();
+        herdr
+            .send_line(&pane, "printf 'E%sOR crashing\\n' RR; sleep 6")
+            .unwrap();
+        let stopped = until(&rx, Duration::from_secs(20), |r| {
+            matches!(r, Report::Stopped { .. })
+        });
+        eprintln!("crashed: {stopped:?}");
+        let Some(Report::Stopped {
+            interrupted, error, ..
+        }) = stopped
+        else {
+            panic!("no stop");
+        };
+        assert!(!interrupted);
+        assert_eq!(error.unwrap().title, "ERROR crashing");
     }
 }

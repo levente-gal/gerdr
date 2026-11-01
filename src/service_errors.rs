@@ -3,25 +3,83 @@
 //! same error again, and where reading left off. Pure: `service_watch`
 //! feeds it the panes' text.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-/// The regex herdr's `pane.output_matched` rings on: the same lines
-/// `is_error` takes for errors.
-pub const HERDR_PATTERN: &str = r#"Traceback \(most recent call last\)|panicked at|Internal Server Error| raised unexpected|Unhandled (exception|rejection)|UnhandledPromiseRejection|\b(ERROR|CRITICAL|FATAL)\b|" 5[0-9][0-9] "#;
-
-/// What starts an error, anywhere in a line.
-const MARKS: [&str; 7] = [
-    "Traceback (most recent call last)",
-    "panicked at",
-    "Internal Server Error",
-    " raised unexpected",
-    "Unhandled exception",
-    "Unhandled rejection",
-    "UnhandledPromiseRejection",
+/// The lines taken for errors unless the config says otherwise, as
+/// regexes: tracebacks, panics, Django's and celery's errors, unhandled
+/// exceptions, the log levels of errors, access logs' 5xx answers.
+pub const DEFAULT_ERRORS: [&str; 8] = [
+    r"Traceback \(most recent call last\)",
+    r"panicked at",
+    r"Internal Server Error",
+    r" raised unexpected",
+    r"Unhandled (exception|rejection)",
+    r"UnhandledPromiseRejection",
+    r"\b(ERROR|CRITICAL|FATAL)\b",
+    r#"" 5[0-9][0-9] "#,
 ];
 
-/// Log levels that start an error, as whole words.
-const LEVELS: [&str; 3] = ["ERROR", "CRITICAL", "FATAL"];
+/// Which lines are errors: one matching an error pattern but none of the
+/// ones ignored.
+#[derive(Clone, Debug)]
+pub struct Patterns {
+    errors: Regex,
+    ignore: Option<Regex>,
+    /// `errors` as one regex, for herdr to ring on.
+    herdr: String,
+}
+
+impl Default for Patterns {
+    fn default() -> Self {
+        let errors: Vec<String> = DEFAULT_ERRORS.iter().map(|p| (*p).to_owned()).collect();
+        Self::new(&errors, &[]).expect("the default patterns are valid")
+    }
+}
+
+impl Patterns {
+    /// Lines matching any of `errors` and none of `ignore` (regexes);
+    /// `Err` names one that isn't a regex.
+    pub fn new(errors: &[String], ignore: &[String]) -> Result<Self, String> {
+        let join = |patterns: &[String]| -> Result<Option<Regex>, String> {
+            for p in patterns {
+                Regex::new(p).map_err(|err| format!("`{p}` is no regex: {err}"))?;
+            }
+            if patterns.is_empty() {
+                return Ok(None);
+            }
+            let joined = patterns
+                .iter()
+                .map(|p| format!("(?:{p})"))
+                .collect::<Vec<_>>()
+                .join("|");
+            Regex::new(&joined).map(Some).map_err(|err| err.to_string())
+        };
+        let Some(errors) = join(errors)? else {
+            return Err("no error patterns".into());
+        };
+        Ok(Self {
+            herdr: errors.as_str().to_owned(),
+            errors,
+            ignore: join(ignore)?,
+        })
+    }
+
+    /// Whether `line` starts an error.
+    pub fn is_error(&self, line: &str) -> bool {
+        self.errors.is_match(line) && !self.ignore.as_ref().is_some_and(|i| i.is_match(line))
+    }
+
+    /// Whether herdr rings on `line`: it knows nothing of the ignored ones.
+    fn rings(&self, line: &str) -> bool {
+        self.errors.is_match(line)
+    }
+
+    /// The regex herdr's `pane.output_matched` rings on.
+    pub fn herdr(&self) -> &str {
+        &self.herdr
+    }
+}
 
 /// The most lines an error keeps.
 const MAX_LINES: usize = 200;
@@ -58,29 +116,12 @@ pub struct Scan {
     pub errors: Vec<ServiceError>,
     /// Where this read leaves off; `None` for no output.
     pub anchor: Option<Anchor>,
-    /// Whether an error line (or the command, should it look like one) is
-    /// among the last `window` lines: herdr won't ring again until none is.
+    /// Whether a line herdr rings on (the command's too, should it look like
+    /// an error) is among the last `window` lines: herdr won't ring again
+    /// until none is.
     pub dirty: bool,
     /// Whether the command's line is among the last `window` lines.
     pub command_shown: bool,
-}
-
-/// Whether `line` starts an error.
-pub fn is_error(line: &str) -> bool {
-    MARKS.iter().any(|m| line.contains(m))
-        || LEVELS.iter().any(|w| has_word(line, w))
-        || server_error_status(line)
-}
-
-/// Whether `word` is in `line` as a whole word.
-fn has_word(line: &str, word: &str) -> bool {
-    let bytes = line.as_bytes();
-    let word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    line.match_indices(word).any(|(at, _)| {
-        let before = at.checked_sub(1).map(|i| bytes[i]);
-        let after = bytes.get(at + word.len()).copied();
-        !before.is_some_and(word_char) && !after.is_some_and(word_char)
-    })
 }
 
 /// Whether `line` is an access log's line of a 5xx answer: `" 500 `.
@@ -98,10 +139,16 @@ pub fn is_command_line(line: &str, command: &str) -> bool {
     !command.is_empty() && line.trim_end().ends_with(command)
 }
 
-/// Read `text`, a pane's last lines, for the errors after `anchor` (all
-/// of them without one), leaving out the line of `command`. `window` is
-/// how many lines herdr watches.
-pub fn scan(text: &str, command: &str, anchor: Option<&Anchor>, window: usize) -> Scan {
+/// Read `text`, a pane's last lines, for the errors (as `patterns` has
+/// them) after `anchor` (all of them without one), leaving out the line
+/// of `command`. `window` is how many lines herdr watches.
+pub fn scan(
+    patterns: &Patterns,
+    text: &str,
+    command: &str,
+    anchor: Option<&Anchor>,
+    window: usize,
+) -> Scan {
     let lines = split(text);
     let n = lines.len();
     if n == 0 {
@@ -116,11 +163,11 @@ pub fn scan(text: &str, command: &str, anchor: Option<&Anchor>, window: usize) -
     for line in &lines[tail_from..] {
         let command_line = is_command_line(line, command);
         scan.command_shown |= command_line;
-        scan.dirty |= is_error(line);
+        scan.dirty |= patterns.rings(line);
     }
     let mut i = 0;
     while i < n {
-        if !is_error(lines[i]) || is_command_line(lines[i], command) {
+        if !patterns.is_error(lines[i]) || is_command_line(lines[i], command) {
             i += 1;
             continue;
         }
@@ -132,6 +179,57 @@ pub fn scan(text: &str, command: &str, anchor: Option<&Anchor>, window: usize) -
         i = end;
     }
     scan
+}
+
+/// How a service's run ended, from its pane's text once its command
+/// went back to the shell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ending {
+    /// The last of what it printed (from its command's line on, when that
+    /// is still there), up to `n` lines; the shell's prompt after it
+    /// aside.
+    pub lines: Vec<String>,
+    /// The last error it printed.
+    pub error: Option<ServiceError>,
+    /// Whether the terminal echoed a Ctrl+C (`^C`) in it: stopped on
+    /// purpose, from wherever it was typed.
+    pub interrupted: bool,
+}
+
+/// How the run of `command` ended, as `text` (its pane's last lines)
+/// shows it, keeping up to `n` lines.
+pub fn ending(patterns: &Patterns, text: &str, command: &str, n: usize) -> Ending {
+    let lines = split(text);
+    // The last line of its command: what came after is its own.
+    let from = lines
+        .iter()
+        .rposition(|l| is_command_line(l, command))
+        .map_or(0, |i| i + 1);
+    let run = &lines[from..];
+    let run_text = run.join("\n");
+    let interrupted = run.iter().any(|l| l.trim_end().ends_with("^C"));
+    let error = scan(patterns, &run_text, command, None, 0).errors.pop();
+    // The prompt it went back to is the shell's, not the service's: its
+    // last line, and a line before it beginning as the one before the
+    // command's does (a prompt of two lines, its first one's end changing:
+    // the time the last command took).
+    let mut end = run.len().saturating_sub(1);
+    let first = (from >= 2)
+        .then(|| lines[from - 2].split_whitespace().next())
+        .flatten()
+        .unwrap_or("");
+    if !first.is_empty() && end > 0 && run[end - 1].starts_with(first) {
+        end -= 1;
+    }
+    let kept = &run[..end];
+    Ending {
+        lines: kept[kept.len().saturating_sub(n)..]
+            .iter()
+            .map(|l| (*l).to_owned())
+            .collect(),
+        error,
+        interrupted,
+    }
 }
 
 /// `text`'s lines, without the blank ones at its end.
@@ -307,6 +405,8 @@ ValueError: bad
 
     #[test]
     fn matches_error_lines() {
+        let p = Patterns::default();
+        let is_error = |l: &str| p.is_error(l);
         assert!(is_error(
             "[2026-11-01 10:00:00,000: ERROR/MainProcess] Task t raised unexpected: X"
         ));
@@ -320,7 +420,13 @@ ValueError: bad
 
     #[test]
     fn django_crash_is_one_error() {
-        let scan = scan(DJANGO, "python manage.py runserver", None, 20);
+        let scan = scan(
+            &Patterns::default(),
+            DJANGO,
+            "python manage.py runserver",
+            None,
+            20,
+        );
         assert_eq!(scan.errors.len(), 1, "{:?}", scan.errors);
         let e = &scan.errors[0];
         assert_eq!(e.title, "ValueError: bad");
@@ -331,12 +437,24 @@ ValueError: bad
 
     #[test]
     fn same_error_same_fingerprint() {
-        let a = scan(DJANGO, "", None, 20);
+        let a = scan(&Patterns::default(), DJANGO, "", None, 20);
         let other = DJANGO.replace("10:00:01", "11:22:33");
-        let b = scan(&other, "", None, 20);
+        let b = scan(&Patterns::default(), &other, "", None, 20);
         assert_eq!(a.errors[0].fingerprint, b.errors[0].fingerprint);
-        let c = scan("[10:00:01] ERROR job 17 failed", "", None, 20);
-        let d = scan("[11:12:13] ERROR job 99 failed", "", None, 20);
+        let c = scan(
+            &Patterns::default(),
+            "[10:00:01] ERROR job 17 failed",
+            "",
+            None,
+            20,
+        );
+        let d = scan(
+            &Patterns::default(),
+            "[11:12:13] ERROR job 99 failed",
+            "",
+            None,
+            20,
+        );
         assert_eq!(c.errors[0].fingerprint, d.errors[0].fingerprint);
         assert_ne!(a.errors[0].fingerprint, c.errors[0].fingerprint);
     }
@@ -344,7 +462,13 @@ ValueError: bad
     #[test]
     fn command_line_is_no_error() {
         let text = "❯ celery -A app worker --loglevel=ERROR\nstarted\n";
-        let scan = scan(text, "celery -A app worker --loglevel=ERROR", None, 20);
+        let scan = scan(
+            &Patterns::default(),
+            text,
+            "celery -A app worker --loglevel=ERROR",
+            None,
+            20,
+        );
         assert!(scan.errors.is_empty());
         assert!(scan.command_shown);
         // herdr still sees it.
@@ -354,40 +478,46 @@ ValueError: bad
     #[test]
     fn reads_on_from_the_anchor() {
         let first = "a\nb\nERROR one\nc\nd";
-        let s1 = scan(first, "", None, 20);
+        let s1 = scan(&Patterns::default(), first, "", None, 20);
         assert_eq!(s1.errors.len(), 1);
         let second = format!("{first}\ne\nERROR two\nf");
-        let s2 = scan(&second, "", s1.anchor.as_ref(), 20);
+        let s2 = scan(&Patterns::default(), &second, "", s1.anchor.as_ref(), 20);
         assert_eq!(s2.errors.len(), 1);
         assert_eq!(s2.errors[0].title, "ERROR two");
-        let s3 = scan(&second, "", s2.anchor.as_ref(), 20);
+        let s3 = scan(&Patterns::default(), &second, "", s2.anchor.as_ref(), 20);
         assert!(s3.errors.is_empty());
     }
 
     #[test]
     fn last_line_grown_is_read_again() {
         let first = "a\nb\nc\nd\nERR";
-        let s1 = scan(first, "", None, 20);
+        let s1 = scan(&Patterns::default(), first, "", None, 20);
         assert!(s1.errors.is_empty());
         let second = "a\nb\nc\nd\nERROR boom\nx";
-        let s2 = scan(second, "", s1.anchor.as_ref(), 20);
+        let s2 = scan(&Patterns::default(), second, "", s1.anchor.as_ref(), 20);
         assert_eq!(s2.errors.len(), 1);
     }
 
     #[test]
     fn anchor_scrolled_away_reads_all() {
-        let s1 = scan("x1\nx2\nx3\nx4", "", None, 20);
-        let s2 = scan("y1\nERROR new\ny2", "", s1.anchor.as_ref(), 20);
+        let s1 = scan(&Patterns::default(), "x1\nx2\nx3\nx4", "", None, 20);
+        let s2 = scan(
+            &Patterns::default(),
+            "y1\nERROR new\ny2",
+            "",
+            s1.anchor.as_ref(),
+            20,
+        );
         assert_eq!(s2.errors.len(), 1);
     }
 
     #[test]
     fn traceback_begun_before_anchor_is_not_read_again() {
         let first = "Internal Server Error: /x";
-        let s1 = scan(first, "", None, 20);
+        let s1 = scan(&Patterns::default(), first, "", None, 20);
         assert_eq!(s1.errors.len(), 1);
         let second = "Internal Server Error: /x\nTraceback (most recent call last):\n  File \"a\", line 1\nKeyError: 'k'";
-        let s2 = scan(second, "", s1.anchor.as_ref(), 20);
+        let s2 = scan(&Patterns::default(), second, "", s1.anchor.as_ref(), 20);
         assert!(s2.errors.is_empty(), "{:?}", s2.errors);
     }
 
@@ -404,7 +534,7 @@ Traceback (most recent call last):
   File \"b\", line 2, in g
 RuntimeError: wrapped
 next line";
-        let s = scan(text, "", None, 20);
+        let s = scan(&Patterns::default(), text, "", None, 20);
         assert_eq!(s.errors.len(), 1, "{:?}", s.errors);
         assert_eq!(s.errors[0].title, "RuntimeError: wrapped");
     }
@@ -415,16 +545,44 @@ next line";
         for i in 0..25 {
             text.push_str(&format!("line {i}\n"));
         }
-        let s = scan(&text, "", None, 20);
+        let s = scan(&Patterns::default(), &text, "", None, 20);
         assert!(!s.dirty);
     }
 
     #[test]
-    fn herdr_pattern_names_the_same_marks() {
-        for mark in MARKS.iter().chain(LEVELS.iter()) {
-            let plain = mark.trim().replace('(', r"\(").replace(')', r"\)");
-            let first = plain.split(' ').next().unwrap();
-            assert!(HERDR_PATTERN.contains(first), "{mark}");
-        }
+    fn config_patterns() {
+        let p = Patterns::new(&["level=error".into()], &["harmless".into()]).unwrap();
+        assert!(p.is_error("ts level=error msg=x"));
+        assert!(!p.is_error("ts level=error harmless"));
+        assert!(!p.is_error("ERROR plain"));
+        assert!(Patterns::new(&["(".into()], &[]).is_err());
+        assert!(Patterns::new(&[], &[]).is_err());
+        assert_eq!(p.herdr(), "(?:level=error)");
+    }
+
+    #[test]
+    fn ignored_lines_still_ring() {
+        let p = Patterns::new(&["ERROR".into()], &["benign".into()]).unwrap();
+        let s = scan(&p, "ERROR benign\nok", "", None, 20);
+        assert!(s.errors.is_empty());
+        assert!(s.dirty);
+    }
+
+    #[test]
+    fn ending_reads_the_run_only() {
+        let text =
+            "mise ERROR shell noise\n/tmp\n❯ npm run dev\nlistening\nERROR boom\ndone\n/tmp\n❯ ";
+        let e = ending(&Patterns::default(), text, "npm run dev", 40);
+        assert_eq!(e.error.unwrap().title, "ERROR boom");
+        assert!(!e.interrupted);
+        assert_eq!(e.lines, ["listening", "ERROR boom", "done"]);
+        let text = "❯ npm run dev\nlistening\n^C\n/tmp\n❯ ";
+        let e = ending(&Patterns::default(), text, "npm run dev", 40);
+        assert!(e.interrupted);
+        assert!(e.error.is_none());
+        // A prompt of two lines, its first one changing.
+        let text = "~/app 1s\n$ npm run dev\nlistening\nbye\n~/app 9s\n$ ";
+        let e = ending(&Patterns::default(), text, "npm run dev", 40);
+        assert_eq!(e.lines, ["listening", "bye"]);
     }
 }

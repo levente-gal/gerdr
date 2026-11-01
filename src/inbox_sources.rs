@@ -68,8 +68,11 @@ pub struct Sources<'a> {
 #[derive(Clone, Debug)]
 pub struct ServiceItem {
     pub group: ErrorGroup,
-    /// The workspace its pane is in, by index.
+    /// The workspace its pane is in, by index: none for another
+    /// project's.
     pub workspace: Option<usize>,
+    /// Its workspace's name, else its project's.
+    pub place: String,
     /// What its pane's bar calls the service.
     pub service: String,
 }
@@ -598,35 +601,42 @@ pub fn todo_items(src: &Sources) -> Vec<InboxItem> {
     .collect()
 }
 
-/// The services' errors, each with how many times it came.
+/// The services' errors, each with how many times it came, and the
+/// services stopped.
 pub fn service_items(src: &Sources) -> Vec<InboxItem> {
     src.service_errors
         .iter()
         .map(|item| {
             let group = &item.group;
-            let workspace = item.workspace.map(|w| src.name(w)).unwrap_or_default();
             let times = match group.count {
                 1 => String::new(),
                 n => format!(" · ×{n}"),
             };
             InboxItem {
-                id: ItemId(format!("service:{}|{}", group.pane_id, group.fingerprint)),
+                id: ItemId(format!(
+                    "service:{}|{}|{}",
+                    group.project, group.pane_id, group.fingerprint
+                )),
                 section: Section::Services,
                 // Back from a dismissal when it comes again.
                 fingerprint: group.count.to_string(),
                 workspace: item.workspace,
                 title: group.title.clone(),
-                subtitle: format!("{workspace} · {}{times}", item.service),
+                subtitle: format!("{} · {}{times}", item.place, item.service),
                 tone: Tone::Failed,
-                age: Some(src.now.saturating_duration_since(group.last)),
+                age: Some(Duration::from_secs(
+                    src.now_secs.saturating_sub(group.last_secs),
+                )),
                 target: Target::ServiceError {
+                    project: group.project.clone(),
                     pane_id: group.pane_id.clone(),
                     fingerprint: group.fingerprint.clone(),
                 },
                 actions: TRIAGE.to_vec(),
                 detail: Detail::Service {
                     service: item.service.clone(),
-                    workspace,
+                    place: item.place.clone(),
+                    stopped: group.is_stop(),
                     count: group.count,
                     first: group.first_secs,
                     lines: group.lines.clone(),

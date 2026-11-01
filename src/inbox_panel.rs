@@ -192,13 +192,27 @@ impl Gerdr {
         let dirs: Vec<_> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
         let records: Vec<_> = self.workspaces.iter().map(|ws| ws.record.clone()).collect();
         let service_errors: Vec<_> = self
+            .projects
             .service_errors
-            .groups
             .iter()
-            .map(|group| inbox_sources::ServiceItem {
-                group: group.clone(),
-                workspace: self.herdr_pane_place(&group.pane_id).map(|(w, _)| w),
-                service: self.pane_bar_content(&group.pane_id).label,
+            .map(|group| {
+                let shown = self.project.as_deref() == Some(group.project.as_str());
+                let workspace = shown
+                    .then(|| self.herdr_pane_place(&group.pane_id).map(|(w, _)| w))
+                    .flatten();
+                let place = match workspace {
+                    Some(w) => self.workspaces[w].name.clone(),
+                    None => self
+                        .projects
+                        .project(&group.project)
+                        .map_or_else(|| group.project.clone(), |p| p.name.clone()),
+                };
+                inbox_sources::ServiceItem {
+                    group: group.clone(),
+                    workspace,
+                    place,
+                    service: self.service_item_label(&group.project, &group.pane_id),
+                }
             })
             .collect();
         inbox_sources::collect(&Sources {
@@ -468,8 +482,13 @@ impl Gerdr {
                     ),
                     _ => (None, "Dismissed until it changes"),
                 };
-                if let Target::ServiceError { pane_id, .. } = &item.target {
-                    self.see_service_errors(pane_id);
+                if let Target::ServiceError {
+                    project,
+                    pane_id,
+                    fingerprint,
+                } = &item.target
+                {
+                    self.see_service_error(project, pane_id, fingerprint);
                 }
                 let Some(file) = self.inbox_file_mut() else {
                     return;
@@ -566,9 +585,10 @@ impl Gerdr {
                 }
             }
             Target::ServiceError {
+                project,
                 pane_id,
                 fingerprint,
-            } => self.show_service_error(&pane_id, &fingerprint),
+            } => self.show_service_error(&project, &pane_id, &fingerprint),
         }
     }
 

@@ -436,6 +436,10 @@ impl Gerdr {
                 let dir = picked.or_else(|| self.workspaces.get(i).map(|ws| ws.dir.clone()));
                 self.open_worktrees(dir);
             }
+            // Its count of errors: the newest one not looked at.
+            (SidebarHit::Chip(i), BTN_LEFT) if self.chip_shows_errors(i) => {
+                self.show_workspace_service_error(i);
+            }
             (SidebarHit::Row(i) | SidebarHit::Name(i) | SidebarHit::Chip(i), BTN_LEFT) => {
                 self.switch_workspace(i);
                 self.hold(Reorderable::Workspace);
@@ -447,6 +451,17 @@ impl Gerdr {
             }
             _ => {}
         }
+    }
+
+    /// Whether workspace `i`'s header chip counts its services' errors
+    /// (see `WorkspaceView::errors`): it has some not looked at, and no
+    /// blocked agent, whose count goes first.
+    fn chip_shows_errors(&self, i: usize) -> bool {
+        let blocked = self
+            .agent_views()
+            .get(i)
+            .is_some_and(|cards| chrome::blocked_count(cards) > 0);
+        !blocked && self.workspace_service_errors(i).iter().any(|g| !g.seen)
     }
 
     /// The pointer moved to `pos` with nothing open over the sidebar, laid
@@ -551,6 +566,22 @@ impl Gerdr {
                 };
                 let tip = Tooltip::new(&text, rect).fields(fields);
                 Some(tip.key("right click to choose which"))
+            }
+            SidebarHit::Chip(i) if self.chip_shows_errors(i) => {
+                let errors = self.workspace_service_errors(i);
+                let unseen = errors.iter().filter(|g| !g.seen).count();
+                let text = match unseen {
+                    1 => "1 service error".to_owned(),
+                    n => format!("{n} service errors"),
+                };
+                let fields = errors
+                    .iter()
+                    .filter(|g| !g.seen)
+                    .take(6)
+                    .map(|g| (self.pane_bar_content(&g.pane_id).label, g.title.clone()))
+                    .collect();
+                let tip = Tooltip::new(&text, layout.rows[i].chip?).fields(fields);
+                Some(tip.key("click to show the newest"))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
