@@ -15,7 +15,7 @@ use crate::{
     input::{MULTI_CLICK, MULTI_CLICK_SLOP, Overlay},
     scroll::Motion,
     scrollback::{Fit, Outcome, Scrollback},
-    toast::{Level, ToastHit},
+    toast::ToastHit,
     tooltip::Tooltip,
 };
 
@@ -105,7 +105,7 @@ impl Gerdr {
             Ok(read) => read,
             Err(err) => {
                 tracing::warn!("scrollback of {pane_id}: {err}");
-                return self.show_notice(format!("Couldn't read the pane's output: {err}"));
+                return self.show_error(format!("Couldn't read the pane's output: {err}"));
             }
         };
         let label = self.pane_bar_content(&pane_id).label;
@@ -235,13 +235,15 @@ impl Gerdr {
             Outcome::Copy { text, lines, close } => {
                 self.copy_text(text);
                 let s = if lines == 1 { "" } else { "s" };
-                self.toast(format!("Copied {lines} line{s}"), Level::Info);
+                self.show_success(format!("Copied {lines} line{s}"));
                 if close {
                     self.close_scrollback();
                 }
             }
             Outcome::NothingSelected => {
-                self.show_notice("Nothing selected: drag over the text first".into());
+                self.show_notice(
+                    "Nothing selected: drag over the text, or press V and move the caret".into(),
+                );
             }
         }
     }
