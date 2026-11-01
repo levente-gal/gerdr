@@ -4060,8 +4060,32 @@ mod tests {
         use crate::chrome::Theme;
         let dark = Theme::Dark.palette();
         let light = Theme::Light.palette();
-        assert_eq!(super::ink_on(dark.warning, dark), dark.on_accent);
-        assert_eq!(super::ink_on(light.warning, light), light.text);
+        // Whichever ink it takes reads on the warning pill: the label is
+        // small text, so it needs 4.5:1.
+        let luminance = |[r, g, b]: super::Rgb| {
+            let lin = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        };
+        let contrast = |a: super::Rgb, b: super::Rgb| {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        for p in [dark, light] {
+            let ink = super::ink_on(p.warning, p);
+            assert!([p.on_accent, p.text].contains(&ink));
+            assert!(
+                contrast(ink, p.warning) >= 4.5,
+                "{}",
+                contrast(ink, p.warning)
+            );
+        }
         // An empty sidebar draws its hint, in both themes.
         let painter = crate::chrome::Painter::new();
         for p in [dark, light] {
