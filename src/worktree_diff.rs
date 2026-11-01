@@ -57,8 +57,9 @@ pub struct WorktreeDiff {
     pub clearing: Option<usize>,
 }
 
-/// The buttons of the sheet asking whether to delete the review.
-const CLEAR_BUTTONS: [ReposButton; 2] = [ReposButton::ClearReview, ReposButton::Cancel];
+/// The buttons of the sheet asking whether to delete the review: Cancel,
+/// which Enter presses first, on the left.
+const CLEAR_BUTTONS: [ReposButton; 2] = [ReposButton::Cancel, ReposButton::ClearReview];
 
 /// What the diff's views and keys need of the chrome.
 #[derive(Clone, Copy, Debug)]
@@ -281,6 +282,7 @@ impl WorktreeDiff {
             lines,
             buttons: CLEAR_BUTTONS.to_vec(),
             default: choice.min(CLEAR_BUTTONS.len() - 1),
+            danger: true,
         })
     }
 
@@ -944,9 +946,13 @@ mod tests {
         assert_eq!(sheet.lines[0].1, "a.rs: 1 comment");
         assert_eq!(key(&mut wd, Keysym::Escape), None);
         assert!(wd.sheet(ENV).is_none() && wd.diff.review.comments.len() == 1);
-        // Enter deletes it, to be saved.
+        // Enter cancels first; on Clear review it deletes it, to be saved.
+        wd.click(clear, ENV);
+        assert_eq!(key(&mut wd, Keysym::Return), None);
+        assert!(wd.sheet(ENV).is_none() && wd.diff.review.comments.len() == 1);
         wd.click(clear, ENV);
         wd.diff.review_dirty = false;
+        assert_eq!(key(&mut wd, Keysym::Right), None);
         assert_eq!(key(&mut wd, Keysym::Return), None);
         assert!(wd.sheet(ENV).is_none() && wd.diff.review.is_empty());
         assert!(wd.diff.review_dirty);

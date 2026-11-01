@@ -472,12 +472,13 @@ fn name_in<'a>(status: &GitStatus, names: &'a [String]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// A question over the panel.
+/// A question over the panel. Each keeps the button Enter presses, by
+/// index into `sheet_buttons`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sheet {
     /// Before `kind` over `jobs`, which can't be taken back: what it does
-    /// to each repository, and the button Enter presses: 0 does it, 1
-    /// cancels.
+    /// to each repository, and the button Enter presses: 0 cancels, 1
+    /// does it.
     Confirm {
         kind: BatchKind,
         jobs: Vec<Job>,
@@ -493,7 +494,7 @@ pub enum Sheet {
         kind: BatchKind,
         jobs: Vec<Job>,
         verdicts: Vec<(PathBuf, Verdict)>,
-        /// The button Enter presses: 0 All, 1 Clean only, 2 Cancel.
+        /// The button Enter presses: 0 Cancel, 1 Clean only, 2 All.
         choice: usize,
     },
     /// These repositories' branches and upstreams both moved: rebase,
@@ -1316,31 +1317,44 @@ fn confirm_button(kind: &BatchKind) -> ReposButton {
     }
 }
 
-/// The buttons `sheet` has, in order.
+/// The buttons `sheet` has, in order: what backs out on the left, what
+/// goes ahead on the right.
 fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
     match sheet {
         Sheet::Preflight { .. } => vec![
-            ReposButton::All,
-            ReposButton::CleanOnly,
             ReposButton::Cancel,
+            ReposButton::CleanOnly,
+            ReposButton::All,
         ],
         Sheet::Diverged { .. } => vec![
-            ReposButton::PullRebase,
-            ReposButton::PullMerge,
             ReposButton::SkipDiverged,
+            ReposButton::PullMerge,
+            ReposButton::PullRebase,
         ],
-        Sheet::Confirm { kind, .. } => vec![confirm_button(kind), ReposButton::Cancel],
+        Sheet::Confirm { kind, .. } => vec![ReposButton::Cancel, confirm_button(kind)],
         Sheet::Help { .. } => vec![ReposButton::Close],
-        Sheet::ClearReview { .. } => vec![ReposButton::ClearReview, ReposButton::Cancel],
+        Sheet::ClearReview { .. } => vec![ReposButton::Cancel, ReposButton::ClearReview],
         // Created where missing only when some are.
         Sheet::Exists { jobs, have, .. } => {
-            let mut buttons = vec![ReposButton::SwitchExisting];
+            let mut buttons = vec![ReposButton::EditName];
             if !missing(jobs, have).is_empty() {
                 buttons.push(ReposButton::CreateMissing);
             }
-            buttons.push(ReposButton::EditName);
+            buttons.push(ReposButton::SwitchExisting);
             buttons
         }
+    }
+}
+
+/// Whether the button on the right of `sheet` loses what can't be got
+/// back (a force push, a branch or stash dropped, the review deleted):
+/// it is painted in the error colour, and Enter means Cancel until the
+/// user moves to it.
+fn sheet_danger(sheet: &Sheet) -> bool {
+    match sheet {
+        Sheet::Confirm { .. } | Sheet::ClearReview { .. } => true,
+        Sheet::Preflight { kind, .. } => matches!(kind, BatchKind::DeleteBranch { .. }),
+        Sheet::Help { .. } | Sheet::Diverged { .. } | Sheet::Exists { .. } => false,
     }
 }
 
@@ -3024,7 +3038,7 @@ impl Panel {
     }
 
     /// Ask on a sheet before `kind` over `jobs`, which can't be taken
-    /// back; Enter does it.
+    /// back; Enter cancels until the user moves to the button doing it.
     fn confirm(&mut self, kind: BatchKind, jobs: Vec<Job>, ctx: &Ctx) {
         let lines = self.confirm_lines(&kind, &jobs, ctx);
         self.sheet = Some(Sheet::Confirm {
@@ -4470,6 +4484,7 @@ impl Panel {
             lines,
             default: choice.min(buttons.len().saturating_sub(1)),
             buttons,
+            danger: sheet_danger(sheet),
         })
     }
 
@@ -4561,7 +4576,7 @@ impl Panel {
     }
 
     /// Ask about what the check before `kind` found: Enter runs only the
-    /// clean ones when some would conflict, else all.
+    /// clean ones when some would conflict (or lose commits), else all.
     pub fn ask_preflight(
         &mut self,
         kind: BatchKind,
@@ -4576,7 +4591,7 @@ impl Panel {
             kind,
             jobs,
             verdicts,
-            choice: usize::from(conflicts),
+            choice: if conflicts { 1 } else { 2 },
         });
     }
 
@@ -4584,23 +4599,19 @@ impl Panel {
     /// which those in `have` have already: Enter edits the name.
     pub fn ask_exists(&mut self, name: String, jobs: Vec<Job>, have: Vec<(PathBuf, Found)>) {
         self.branch_menu = None;
-        let mut sheet = Sheet::Exists {
+        self.sheet = Some(Sheet::Exists {
             name,
             jobs,
             have,
             choice: 0,
-        };
-        let edit = sheet_buttons(&sheet).len() - 1;
-        if let Sheet::Exists { choice, .. } = &mut sheet {
-            *choice = edit;
-        }
-        self.sheet = Some(sheet);
+        });
     }
 
-    /// Ask which way to pull the repositories at `roots`, which diverged.
+    /// Ask which way to pull the repositories at `roots`, which diverged:
+    /// Enter rebases.
     pub fn ask_diverged(&mut self, roots: Vec<PathBuf>) {
         self.branch_menu = None;
-        self.sheet = Some(Sheet::Diverged { roots, choice: 0 });
+        self.sheet = Some(Sheet::Diverged { roots, choice: 2 });
     }
 
     /// A batch using the field's text (a commit) went through: empty it
@@ -5336,10 +5347,17 @@ mod tests {
                 Tone::Warning
             )]
         );
-        assert_eq!(sheet.buttons, [ReposButton::ForcePush, ReposButton::Cancel]);
+        // Cancel on the left, the push in the error colour on the right;
+        // Enter cancels until the push is moved to.
+        assert_eq!(sheet.buttons, [ReposButton::Cancel, ReposButton::ForcePush]);
         assert_eq!(sheet.default, 0);
-        // The panel's keys wait; Enter does it.
+        assert!(sheet.danger);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        press(&mut panel, ctrl_shift(), Keysym::P, &ctx);
+        // The panel's keys wait; Right, then Enter does it.
         assert_eq!(press(&mut panel, ctrl(), Keysym::p, &ctx), None);
+        assert_eq!(press(&mut panel, none(), Keysym::Right, &ctx), None);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5380,6 +5398,7 @@ mod tests {
                 Tone::Warning
             )
         );
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5427,6 +5446,7 @@ mod tests {
             (ReposButton::Undo, "Alt+Z")
         );
         assert_eq!(buttons[0].label, "undo");
+        press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5506,6 +5526,7 @@ mod tests {
         );
         let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
         assert_eq!(sheet.title, "Drop the newest stash in 1 repository?");
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5642,9 +5663,9 @@ mod tests {
             })
         );
         assert!(panel.sheet.is_none());
-        // All drops only the blocked.
+        // All, on the right, drops only the blocked.
         ask(&mut panel);
-        press(&mut panel, none(), Keysym::Left, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Confirmed {
@@ -5652,9 +5673,9 @@ mod tests {
                 jobs: jobs(&["gerdr", "herdr"])
             })
         );
-        // Cancel, by Tab round to it or by Esc.
+        // Cancel, on the left, or Esc.
         ask(&mut panel);
-        press(&mut panel, none(), Keysym::Tab, &ctx);
+        press(&mut panel, none(), Keysym::Left, &ctx);
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());
         ask(&mut panel);
@@ -5674,12 +5695,14 @@ mod tests {
         assert_eq!(
             sheet.buttons,
             [
-                ReposButton::PullRebase,
+                ReposButton::SkipDiverged,
                 ReposButton::PullMerge,
-                ReposButton::SkipDiverged
+                ReposButton::PullRebase
             ]
         );
-        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(sheet.default, 2);
+        assert!(!sheet.danger);
+        press(&mut panel, none(), Keysym::Left, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Confirmed {
@@ -6830,6 +6853,11 @@ mod tests {
         panel.press(ReposButton::ClearReview, &ctx);
         assert!(matches!(panel.sheet, Some(Sheet::ClearReview { .. })));
         assert_eq!(panel.diff.review.comments.len(), 1);
+        // Enter cancels first; on Clear review, it deletes them.
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(panel.diff.review.comments.len(), 1);
+        panel.press(ReposButton::ClearReview, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert!(panel.sheet.is_none() && panel.diff.review.is_empty());
     }
@@ -7394,12 +7422,13 @@ mod tests {
         );
         assert_eq!(
             sheet.buttons,
-            [ReposButton::DeleteBranch, ReposButton::Cancel]
+            [ReposButton::Cancel, ReposButton::DeleteBranch]
         );
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.sheet.is_none() && panel.branch_menu.is_some());
         // Those on it go too: the check tells why they are left out.
         assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -7755,13 +7784,13 @@ mod tests {
         assert_eq!(
             sheet.buttons,
             [
-                ReposButton::SwitchExisting,
+                ReposButton::EditName,
                 ReposButton::CreateMissing,
-                ReposButton::EditName
+                ReposButton::SwitchExisting
             ]
         );
         // Enter edits the name: back in the menu, to create it again.
-        assert_eq!(sheet.default, 2);
+        assert_eq!(sheet.default, 0);
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
@@ -7802,7 +7831,7 @@ mod tests {
         assert_eq!(sheet.title, "feat/x exists in all of them: switch to it?");
         assert_eq!(
             sheet.buttons,
-            [ReposButton::SwitchExisting, ReposButton::EditName]
+            [ReposButton::EditName, ReposButton::SwitchExisting]
         );
     }
 
