@@ -696,6 +696,9 @@ pub enum ReposButton {
     Stop,
     /// Throw away the selected file's or folder's changes (asked first).
     DiscardFile,
+    /// Delete the review comments on lines no longer in the diff (asked
+    /// first).
+    DropOutdated,
 }
 
 impl ReposButton {
@@ -746,6 +749,7 @@ impl ReposButton {
             ReposButton::DeleteBranchMenu => "Delete a branch…",
             ReposButton::Stop => "Stop",
             ReposButton::DiscardFile => "Discard changes",
+            ReposButton::DropOutdated => "Drop outdated",
         }
     }
 }

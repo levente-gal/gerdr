@@ -51,6 +51,9 @@ pub struct Section<'a> {
     /// What its header calls it.
     pub label: &'a str,
     pub branch: Option<&'a str>,
+    /// The commit checked out, for the review copied to say what it was
+    /// written against.
+    pub head: Option<&'a str>,
     /// Its changed files: none, and it isn't shown.
     pub changes: &'a [Change],
 }
@@ -138,6 +141,9 @@ pub enum Outcome {
     /// Ask whether to delete every review comment (`clear_sheet`), then
     /// `clear_review`.
     Clear,
+    /// Ask whether to delete those on lines no longer in the diff, then
+    /// `drop_outdated`.
+    ClearOutdated,
 }
 
 /// Where in a file Zed opens it: a line (from 1) and, on one in the file
@@ -1195,7 +1201,18 @@ impl DiffView {
             return Err(NO_REVIEW);
         }
         let order: Vec<PathBuf> = ctx.sections.iter().map(|i| i.root.to_path_buf()).collect();
-        let label = |root: &Path| label_of(root, ctx);
+        // Each repository with the branch and commit the review is of.
+        let label = |root: &Path| {
+            let label = label_of(root, ctx);
+            let section = ctx.sections.iter().find(|s| s.root == root);
+            let oid = section.and_then(|s| s.head).map(|o| &o[..o.len().min(7)]);
+            match (section.and_then(|s| s.branch), oid) {
+                (Some(branch), Some(oid)) => format!("{label} · {branch} at {oid}"),
+                (Some(branch), None) => format!("{label} · {branch}"),
+                (None, Some(oid)) => format!("{label} · detached at {oid}"),
+                (None, None) => label,
+            }
+        };
         let comments = &self.review.comments;
         let outdated = |c: &Comment| {
             let at = comments.iter().position(|x| std::ptr::eq(x, c));
@@ -1626,20 +1643,27 @@ impl DiffView {
             key: String::new(),
             disabled: None,
         };
-        vec![
-            hint(ReposButton::CopyReview, label),
-            hint(
-                ReposButton::ClearReview,
-                ReposButton::ClearReview.label().into(),
-            ),
-        ]
+        let mut buttons = vec![hint(ReposButton::CopyReview, label)];
+        // Those on lines gone (after a commit, say) dropped on their own.
+        if !self.outdated.is_empty() {
+            let label = format!("Drop {} outdated", self.outdated.len());
+            buttons.push(hint(ReposButton::DropOutdated, label));
+        }
+        buttons.push(hint(
+            ReposButton::ClearReview,
+            ReposButton::ClearReview.label().into(),
+        ));
+        buttons
     }
 
-    /// What the sheet asking whether to delete the review says: its title,
-    /// and a line per file with comments.
-    pub fn clear_sheet(&self, ctx: &Ctx) -> (String, Vec<(String, String, Tone)>) {
+    /// What the sheet asking whether to delete the review (only those on
+    /// lines gone, when `outdated`) says: its title, and a line per file
+    /// with comments.
+    pub fn clear_sheet(&self, ctx: &Ctx, outdated: bool) -> (String, Vec<(String, String, Tone)>) {
         let mut files: BTreeMap<(String, &str), usize> = BTreeMap::new();
-        for c in &self.review.comments {
+        let taken = (self.review.comments.iter().enumerate())
+            .filter(|(c, _)| !outdated || self.outdated.contains(c));
+        for (_, c) in taken {
             *files
                 .entry((label_of(&c.root, ctx), c.path.as_str()))
                 .or_default() += 1;
@@ -1648,9 +1672,47 @@ impl DiffView {
             .into_iter()
             .map(|((repo, path), n)| (repo, format!("{path}: {}", comments(n)), Tone::Warning))
             .collect();
-        let n = self.review.comments.len();
-        let title = format!("Delete the review's {} for good?", comments(n));
+        let title = match outdated {
+            true => format!(
+                "Delete the {} on lines no longer in the diff?",
+                comments(self.outdated.len())
+            ),
+            false => {
+                let n = self.review.comments.len();
+                format!("Delete the review's {} for good?", comments(n))
+            }
+        };
         (title, lines)
+    }
+
+    /// How many review comments are on lines no longer in the diff.
+    pub fn outdated_count(&self) -> usize {
+        self.outdated.len()
+    }
+
+    /// Delete the review comments on lines no longer in the diff (and the
+    /// edit of one of them).
+    pub fn drop_outdated(&mut self, sections: &[Section]) {
+        let gone = std::mem::take(&mut self.outdated);
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| e.at.is_some_and(|c| gone.contains(&c)))
+        {
+            self.editing = None;
+        }
+        let mut c = 0;
+        self.review.comments.retain(|_| {
+            c += 1;
+            !gone.contains(&(c - 1))
+        });
+        // The comment being edited is one up for each dropped before it.
+        if let Some(Editing { at: Some(at), .. }) = &mut self.editing {
+            *at -= gone.iter().filter(|&&g| g < *at).count();
+        }
+        self.review_dirty = true;
+        self.cursor = None;
+        self.rebuild(sections);
     }
 
     /// The diff row shown as row `i` of the detail pane.
@@ -2199,6 +2261,9 @@ impl DiffView {
         }
         if hit == ReposHit::Button(ReposButton::ClearReview) {
             return Some(Some(Outcome::Clear));
+        }
+        if hit == ReposHit::Button(ReposButton::DropOutdated) {
+            return Some(Some(Outcome::ClearOutdated));
         }
         // A hunk's header puts the hunk back; the cursor's row, the change
         // there or the lines selected.

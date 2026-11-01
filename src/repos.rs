@@ -506,8 +506,9 @@ pub enum Sheet {
     },
     /// The panel's keys, from line `top` on.
     Help { choice: usize, top: usize },
-    /// Before dropping the review's comments.
-    ClearReview { choice: usize },
+    /// Before dropping the review's comments; only those on lines no
+    /// longer in the diff when `outdated`.
+    ClearReview { choice: usize, outdated: bool },
     /// What the check before `kind` found, per repository in `jobs`.
     Preflight {
         kind: BatchKind,
@@ -1194,6 +1195,7 @@ fn sections(items: &[RepoItem]) -> Vec<Section<'_>> {
             root: &i.root,
             label: &i.label,
             branch: i.status.branch.as_deref(),
+            head: i.status.head.as_deref(),
             changes: &i.status.changes,
         })
         .collect()
@@ -1253,7 +1255,7 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
         D::Paste(put) => Outcome::Paste(put),
         D::UndoCut(file) => Outcome::UndoCut(file),
         D::RedoCut(file) => Outcome::RedoCut(file),
-        D::Toggle { .. } | D::Clear => Outcome::Notice("Done in the panel"),
+        D::Toggle { .. } | D::Clear | D::ClearOutdated => Outcome::Notice("Done in the panel"),
     }
 }
 
@@ -1698,7 +1700,14 @@ fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
         ],
         Sheet::Confirm { kind, .. } => vec![ReposButton::Cancel, confirm_button(kind)],
         Sheet::Help { .. } => vec![ReposButton::Close],
-        Sheet::ClearReview { .. } => vec![ReposButton::Cancel, ReposButton::ClearReview],
+        Sheet::ClearReview {
+            outdated: false, ..
+        } => {
+            vec![ReposButton::Cancel, ReposButton::ClearReview]
+        }
+        Sheet::ClearReview { outdated: true, .. } => {
+            vec![ReposButton::Cancel, ReposButton::DropOutdated]
+        }
         // Created where missing only when some are.
         Sheet::Exists { jobs, have, .. } => {
             let mut buttons = vec![ReposButton::EditName];
@@ -3370,7 +3379,10 @@ impl Panel {
                     .map_err(Why::other)
             }
             B::ClearReview if self.diff.review.is_empty() => Err(Why::other(NO_REVIEW)),
-            B::ClearReview => Err(Why::other("Asked on a sheet")),
+            B::DropOutdated if self.diff.outdated_count() == 0 => {
+                Err(Why::other("No comment is on lines no longer in the diff"))
+            }
+            B::ClearReview | B::DropOutdated => Err(Why::other("Asked on a sheet")),
             B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment | B::Restore => {
                 Err(Why::other("Done on the diff"))
             }
@@ -3497,7 +3509,23 @@ impl Panel {
             } else {
                 self.error = None;
                 self.branch_menu = None;
-                self.sheet = Some(Sheet::ClearReview { choice: 0 });
+                self.sheet = Some(Sheet::ClearReview {
+                    choice: 0,
+                    outdated: false,
+                });
+            }
+            return None;
+        }
+        if button == ReposButton::DropOutdated {
+            if self.diff.outdated_count() == 0 {
+                self.error = Some("No comment is on lines no longer in the diff".into());
+            } else {
+                self.error = None;
+                self.branch_menu = None;
+                self.sheet = Some(Sheet::ClearReview {
+                    choice: 0,
+                    outdated: true,
+                });
             }
             return None;
         }
@@ -3579,6 +3607,10 @@ impl Panel {
             (Sheet::Help { .. }, _) => None,
             (Sheet::ClearReview { .. }, B::ClearReview) => {
                 self.diff.clear_review(&sections(ctx.items));
+                None
+            }
+            (Sheet::ClearReview { .. }, B::DropOutdated) => {
+                self.diff.drop_outdated(&sections(ctx.items));
                 None
             }
             (Sheet::Diverged { roots, .. }, B::PullRebase | B::PullMerge) => {
@@ -3736,6 +3768,7 @@ impl Panel {
                 None
             }
             diff_view::Outcome::Clear => self.act(ReposButton::ClearReview, ctx),
+            diff_view::Outcome::ClearOutdated => self.act(ReposButton::DropOutdated, ctx),
             outcome => Some(from_diff(outcome)),
         }
     }
@@ -5007,9 +5040,9 @@ impl Panel {
                 };
                 (title, lines, *choice)
             }
-            Sheet::ClearReview { choice } => {
+            Sheet::ClearReview { choice, outdated } => {
                 diff_ctx!(self, ctx, dctx);
-                let (title, lines) = self.diff.clear_sheet(&dctx);
+                let (title, lines) = self.diff.clear_sheet(&dctx, *outdated);
                 (title, lines, *choice)
             }
             Sheet::Help { choice, top } => {
@@ -7491,6 +7524,28 @@ mod tests {
             panic!("not copied");
         };
         assert!(text.contains("`src/git.rs:1-2` (the code changed since)"));
+        // It says the branch it was written on.
+        assert!(text.contains("## gerdr · main"), "{text}");
+        // Those on lines gone can be dropped on their own, asked first.
+        let title: Vec<String> = (panel.view("p", &ctx).detail.title_buttons.iter())
+            .map(|h| h.label.clone())
+            .collect();
+        assert_eq!(title, ["Copy 1 comment", "Drop 1 outdated", "Clear review"]);
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::DropOutdated), &ctx),
+            None
+        );
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(
+            sheet.title,
+            "Delete the 1 comment on lines no longer in the diff?"
+        );
+        assert_eq!(
+            sheet.buttons,
+            [ReposButton::Cancel, ReposButton::DropOutdated]
+        );
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert_eq!(panel.diff.review.comments.len(), 1);
 
         // Delete on it arms it, saying so; again deletes it.
         panel.diff.review_dirty = false;

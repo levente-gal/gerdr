@@ -55,13 +55,21 @@ pub struct WorktreeDiff {
     /// The sheet asking whether to delete the review, while open: the
     /// button Enter presses, by index into `CLEAR_BUTTONS`.
     pub clearing: Option<usize>,
+    /// That sheet deletes only the comments on lines no longer in the diff.
+    pub clearing_outdated: bool,
     /// The keys sheet (F1), while open: the line it is scrolled to.
     pub help: Option<usize>,
 }
 
-/// The buttons of the sheet asking whether to delete the review: Cancel,
-/// which Enter presses first, on the left.
-const CLEAR_BUTTONS: [ReposButton; 2] = [ReposButton::Cancel, ReposButton::ClearReview];
+/// The buttons of the sheet asking whether to delete the review (only the
+/// comments on lines gone, when `outdated`): Cancel, which Enter presses
+/// first, on the left.
+fn clear_buttons(outdated: bool) -> [ReposButton; 2] {
+    match outdated {
+        true => [ReposButton::Cancel, ReposButton::DropOutdated],
+        false => [ReposButton::Cancel, ReposButton::ClearReview],
+    }
+}
 
 /// What the diff's views and keys need of the chrome.
 #[derive(Clone, Copy, Debug)]
@@ -124,6 +132,7 @@ impl WorktreeDiff {
             root,
             label,
             branch: branch.as_deref(),
+            head: None,
             changes: &since.changes,
         }];
         f(diff, &ctx(&sections, env, &lead, empty))
@@ -135,6 +144,7 @@ impl WorktreeDiff {
             root: &self.root,
             label: &self.label,
             branch: self.branch.as_deref(),
+            head: None,
             changes: &self.since.changes,
         }]
     }
@@ -221,8 +231,9 @@ impl WorktreeDiff {
         typed: Keysym,
         env: Env,
     ) -> Option<Done> {
+        let buttons = clear_buttons(self.clearing_outdated);
         if let Some(choice) = self.clearing.as_mut() {
-            let button = sheet_step(choice, &CLEAR_BUTTONS, mods, sym)?;
+            let button = sheet_step(choice, &buttons, mods, sym)?;
             self.sheet_press(button, env);
             return None;
         }
@@ -309,12 +320,18 @@ impl WorktreeDiff {
     /// Answer the sheet asking whether to delete the review: it closes,
     /// the review deleted when `button` says so.
     fn sheet_press(&mut self, button: ReposButton, env: Env) {
-        if !CLEAR_BUTTONS.contains(&button) {
+        if !clear_buttons(self.clearing_outdated).contains(&button) {
             return;
         }
         self.clearing = None;
-        if button == ReposButton::ClearReview {
-            self.with_diff(env, |diff, ctx| diff.clear_review(ctx.sections));
+        match button {
+            ReposButton::ClearReview => {
+                self.with_diff(env, |diff, ctx| diff.clear_review(ctx.sections));
+            }
+            ReposButton::DropOutdated => {
+                self.with_diff(env, |diff, ctx| diff.drop_outdated(ctx.sections));
+            }
+            _ => {}
         }
     }
 
@@ -324,6 +341,12 @@ impl WorktreeDiff {
         match done {
             Some(Done::Diff(diff_view::Outcome::Clear)) => {
                 self.clearing = Some(0);
+                self.clearing_outdated = false;
+                None
+            }
+            Some(Done::Diff(diff_view::Outcome::ClearOutdated)) => {
+                self.clearing = Some(0);
+                self.clearing_outdated = true;
                 None
             }
             done => done,
@@ -347,14 +370,16 @@ impl WorktreeDiff {
         let choice = self.clearing?;
         let sections = self.sections();
         let lead = self.lead();
+        let outdated = self.clearing_outdated;
         let (title, lines) = self
             .diff
-            .clear_sheet(&ctx(&sections, env, &lead, self.empty()));
+            .clear_sheet(&ctx(&sections, env, &lead, self.empty()), outdated);
+        let buttons = clear_buttons(outdated);
         Some(SheetView {
             title,
             lines,
-            buttons: CLEAR_BUTTONS.to_vec(),
-            default: choice.min(CLEAR_BUTTONS.len() - 1),
+            buttons: buttons.to_vec(),
+            default: choice.min(buttons.len() - 1),
             danger: true,
         })
     }
