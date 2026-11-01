@@ -35,6 +35,7 @@ use crate::{
     project_list::{self, PATH_CHARS, RowTops},
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, Line, TextField},
+    toast::ToastHit,
     tooltip::Tooltip,
 };
 
@@ -1324,11 +1325,16 @@ fn hints(hints: &[(&str, &str)]) -> Vec<(String, String)> {
 impl Gerdr {
     /// Open the project menu, and find out which projects' sessions run.
     pub fn open_project_menu(&mut self) {
+        // One popup at a time: it doesn't open over another.
         self.switcher = None;
         self.inbox.close();
         self.scrollback = None;
+        self.worktrees.close();
+        self.repos.close();
         self.stop_key_repeat();
         self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
         self.project_menu = Some(ProjectMenu::new(home_dir()));
         self.refresh_project_menu();
         self.check_running();
@@ -1425,7 +1431,8 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// A left click while the project menu is open.
+    /// A left click while the project menu is open: outside it closes it,
+    /// but on a toast presses that.
     pub fn project_menu_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.project_menu_view() else {
             return;
@@ -1439,7 +1446,15 @@ impl Gerdr {
                 Some(menu) => menu.click(hit),
                 None => None,
             },
-            None => Some(Outcome::Closed),
+            None => match self.toast_press(pos) {
+                Some(hit) => {
+                    if let ToastHit::Action(action) = hit {
+                        self.menu_action(action);
+                    }
+                    None
+                }
+                None => Some(Outcome::Closed),
+            },
         };
         if let Some(outcome) = outcome {
             self.apply_project_menu(outcome);

@@ -356,6 +356,9 @@ fn button_rects(buttons: &[WorktreeButton], rect: Rect) -> Vec<(WorktreeButton, 
     rects
 }
 
+/// What a worktree's dirty dot says.
+pub const UNCOMMITTED: &str = "Changes not committed";
+
 /// The marks on worktree row `rect`, its `buttons` at its right, showing
 /// `line`: its branch icon, then its dirty dot (where the painter puts it
 /// after the name, a gap either side to aim at), with what each says.
@@ -382,7 +385,7 @@ pub fn worktree_marks(
         let w = 2 * GIT_MARK_GAP + GIT_MARK_WIDTH;
         if x + w <= end + GIT_MARK_GAP {
             let dot = Rectangle::new((x, rect.loc.y).into(), (w, rect.size.h).into());
-            marks.push((dot, "Changes not committed"));
+            marks.push((dot, UNCOMMITTED));
         }
     }
     marks

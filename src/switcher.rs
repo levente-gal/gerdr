@@ -53,7 +53,7 @@ use crate::{
     projects::Project,
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
-    toast::Level,
+    toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
 
@@ -745,6 +745,15 @@ fn frecency_key(
     })
 }
 
+/// `what` a key hint does, as a tooltip says it: with a capital.
+fn sentence(what: &str) -> String {
+    let mut chars = what.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// The other projects than `current`, the most recently used first, and a
 /// row for the project menu (the welcome screen while no project is shown).
 fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
@@ -799,11 +808,24 @@ fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
 }
 
 impl Gerdr {
-    /// Open the switcher, and ask zoxide for its folders again meanwhile.
-    pub fn open_switcher(&mut self) {
+    /// Close what the switcher opens in place of, as the other popups do
+    /// when they open: one popup at a time, no key repeating into it, no
+    /// menu or tooltip left over it.
+    fn make_room_for_switcher(&mut self) {
         self.project_menu = None;
         self.inbox.close();
         self.scrollback = None;
+        self.worktrees.close();
+        self.repos.close();
+        self.stop_key_repeat();
+        self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+    }
+
+    /// Open the switcher, and ask zoxide for its folders again meanwhile.
+    pub fn open_switcher(&mut self) {
+        self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.switcher_items(), false, Place::Split);
         switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
@@ -819,9 +841,7 @@ impl Gerdr {
             self.toast("No agent CLI found on PATH".into(), Level::Info);
             return;
         }
-        self.project_menu = None;
-        self.inbox.close();
-        self.scrollback = None;
+        self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
         switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
@@ -830,9 +850,7 @@ impl Gerdr {
     /// Open the switcher as the run prompt, for a command to launch in
     /// `place`, and look for installed apps again meanwhile.
     pub fn open_run_prompt(&mut self, place: Place) {
-        self.project_menu = None;
-        self.inbox.close();
-        self.scrollback = None;
+        self.make_room_for_switcher();
         // The commands run before there was frecency start it off, once.
         let history: Vec<String> = launch::history()
             .iter()
@@ -981,6 +999,20 @@ impl Gerdr {
             switcher.chip_hover = chip;
             switcher.hint_hover = hint;
         }
+        // A chip says what it narrows the list to, a key hint what it
+        // does; Tab steps through the chips.
+        if let Some(i) = chip {
+            let text = match view.categories.get(i)? {
+                &"All" => "Show every section".to_owned(),
+                label => format!("Show only {label}"),
+            };
+            return Some(Tooltip::new(&text, layout.chips[i]).key("Tab"));
+        }
+        if let Some(i) = hint {
+            let (keys, what) = view.hints.get(i)?;
+            let (_, spot) = layout.hints.iter().find(|(h, _)| *h == i)?;
+            return Some(Tooltip::new(&sentence(what), *spot).key(keys));
+        }
         // An agent's mark says how it is doing.
         let i = hover?;
         let ItemIcon::Agent(_, status) = view.rows.get(i)?.icon else {
@@ -1077,7 +1109,8 @@ impl Gerdr {
 
     /// A button pressed while the switcher is open: on a row it switches to
     /// that row's target, on a category chip it shows that category,
-    /// outside the panel it closes the switcher.
+    /// outside the panel it closes the switcher, but on a toast presses
+    /// that.
     pub fn switcher_click(&mut self, pos: Point<f64, Logical>) {
         // A key hint: its key, pressed.
         if let Some(view) = self.switcher_view() {
@@ -1109,7 +1142,15 @@ impl Gerdr {
                 }
             }
             None if layout.panel.to_f64().contains(pos) => self.switcher = Some(switcher),
-            None => {}
+            // A toast takes the click, and the switcher stays.
+            None => {
+                if let Some(hit) = self.toast_press(pos) {
+                    self.switcher = Some(switcher);
+                    if let ToastHit::Action(action) = hit {
+                        self.menu_action(action);
+                    }
+                }
+            }
         }
     }
 
@@ -1132,11 +1173,9 @@ impl Gerdr {
             }
             Target::Agent(key) => self.focus_agent(&key),
             Target::Project(id) => self.switch_project(&id),
-            Target::Welcome if self.project.is_some() => {
-                if self.project_menu.is_none() {
-                    self.toggle_project_menu();
-                }
-            }
+            // What Shift+P opens: the project menu while a project is
+            // shown, else the welcome screen.
+            Target::Welcome if self.project.is_some() => self.open_project_menu(),
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),

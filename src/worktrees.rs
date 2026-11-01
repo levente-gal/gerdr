@@ -40,7 +40,7 @@ use crate::{
     paths,
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
-    toast::Level,
+    toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
 
@@ -989,7 +989,8 @@ impl Gerdr {
         self.worktrees.popup.as_mut()?.key(mods, sym, &items, page)
     }
 
-    /// A left click while the worktrees popup is open: outside it closes it.
+    /// A left click while the worktrees popup is open: outside it closes it,
+    /// but on a toast presses that.
     pub fn worktrees_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.worktrees_view() else {
             return;
@@ -1010,7 +1011,15 @@ impl Gerdr {
                 Some(popup) => popup.click(hit, &items, page),
                 None => None,
             },
-            None => Some(Outcome::Close),
+            None => match self.toast_press(pos) {
+                Some(hit) => {
+                    if let ToastHit::Action(action) = hit {
+                        self.menu_action(action);
+                    }
+                    None
+                }
+                None => Some(Outcome::Close),
+            },
         };
         if let Some(outcome) = outcome {
             self.apply_worktrees(outcome);
@@ -1027,18 +1036,36 @@ impl Gerdr {
             popup.calm(Instant::now());
             hit = popup.hover;
         }
-        // A row's marks say what they mean.
-        let Some(WorktreesHit::Entry(i)) = hit else {
-            return None;
+        // A row's buttons say what they do and their key, its marks what
+        // they mean.
+        let i = match hit? {
+            WorktreesHit::Button(i, button) => {
+                let (_, rect) = layout
+                    .entries
+                    .get(i)?
+                    .1
+                    .iter()
+                    .find(|(b, _)| *b == button)?;
+                let (text, key) = button.tip();
+                return Some(Tooltip::new(text, *rect).key(key));
+            }
+            WorktreesHit::Entry(i) => i,
+            _ => return None,
         };
         let WorktreeEntry::Worktree(line) = view.entries.get(i)? else {
             return None;
         };
         let (rect, buttons) = layout.entries.get(i)?;
-        chrome::worktree_marks(line, *rect, buttons)
+        let (r, text) = chrome::worktree_marks(line, *rect, buttons)
             .into_iter()
-            .find(|(r, _)| r.to_f64().contains(pos))
-            .map(|(r, text)| Tooltip::new(text, r))
+            .find(|(r, _)| r.to_f64().contains(pos))?;
+        let tip = Tooltip::new(text, r);
+        // Its diff shows the changes.
+        Some(if line.dirty && text == chrome::UNCOMMITTED {
+            tip.key("Enter")
+        } else {
+            tip
+        })
     }
 
     /// The wheel or the touchpad moved over the popup.
