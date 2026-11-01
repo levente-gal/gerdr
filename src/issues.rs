@@ -21,31 +21,12 @@ use serde::{Deserialize, Serialize};
 use crate::{ci, config, problems};
 
 /// Where the problems reading the issues come from, for
-/// `problems::report`: GitHub's issues, the ticket repositories' tickets,
+/// `problems::set`: GitHub's issues, the ticket repositories' tickets,
 /// their boards' order, and Linear's issues.
 pub const GITHUB_PROBLEMS: &str = "inbox:github";
 pub const TICKET_PROBLEMS: &str = "inbox:tickets";
 pub const BOARD_PROBLEMS: &str = "inbox:board";
 pub const LINEAR_PROBLEMS: &str = "inbox:linear";
-
-/// Keep `texts` as the problems of `source`, in place of what it had:
-/// none lets go of them all, as it works again. Nothing changes while they
-/// are the same.
-pub(crate) fn set_problems(source: &'static str, mut texts: Vec<String>) {
-    texts.dedup();
-    let kept: Vec<String> = problems::list()
-        .into_iter()
-        .filter(|p| p.source == source)
-        .map(|p| p.text)
-        .collect();
-    if kept == texts {
-        return;
-    }
-    problems::clear(source);
-    for text in texts {
-        problems::report(source, text);
-    }
-}
 
 /// What a board that couldn't be read for `slug`'s tickets says, as a
 /// problem: how to give the token the scope it needs, when that is why.
@@ -227,7 +208,7 @@ impl IssuesState {
 /// with `linear`'s key (none without one). Blocks until every read is
 /// done; they run side by side. A repository whose issues can't be read
 /// (`gh` missing or signed out) gets the error `gh` gave, and Linear's what
-/// it or `curl` said. Each goes to `problems::report` by its source too
+/// it or `curl` said. Each goes to `problems::set` by its source too
 /// (see `GITHUB_PROBLEMS`), a board that couldn't be read as well; a
 /// source read without one lets go of its problems.
 pub fn read_all(
@@ -279,10 +260,12 @@ pub fn read_all(
             Some(Err(err)) => vec![format!("Couldn't read Linear's issues: {err}")],
             _ => Vec::new(),
         };
-        set_problems(TICKET_PROBLEMS, ticket_problems);
-        set_problems(BOARD_PROBLEMS, board_problems);
-        set_problems(GITHUB_PROBLEMS, github_problems);
-        set_problems(LINEAR_PROBLEMS, linear_problems);
+        // Two ticket repositories of one board say the same.
+        board_problems.dedup();
+        problems::set(TICKET_PROBLEMS, ticket_problems);
+        problems::set(BOARD_PROBLEMS, board_problems);
+        problems::set(GITHUB_PROBLEMS, github_problems);
+        problems::set(LINEAR_PROBLEMS, linear_problems);
         IssuesRead {
             github,
             tickets,

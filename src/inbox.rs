@@ -15,7 +15,7 @@
 //! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
 //! repository (`owner/repo`) to the shown project; Delete marks a todo
 //! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
-//! copies it, Ctrl+R reads the issues again. Tab lists the active
+//! copies it, Ctrl+R reads the issues and the CI again. Tab lists the active
 //! workspace's items only, or every workspace's again. Esc clears the
 //! filter, then goes back from the hidden ones, then closes.
 //!
@@ -163,8 +163,8 @@ pub enum Target {
     Link(String),
     /// Edit the todo (its workspace, if linked, is switched to).
     Todo(TodoId),
-    /// Read the issues again, the panel left open: an item saying they
-    /// couldn't be.
+    /// Read the issues and the CI again, the panel left open: an item
+    /// saying they couldn't be.
     Refresh,
 }
 
@@ -311,7 +311,7 @@ pub enum Outcome {
     /// Add this repository (`owner/repo` or `host/owner/repo`) to the
     /// shown project's ticket repositories.
     AddTickets(String),
-    /// Read the issues again.
+    /// Read the issues and the CI again.
     Refresh,
     /// List the dismissed or snoozed item again.
     Restore(ItemId),

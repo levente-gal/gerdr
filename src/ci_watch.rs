@@ -112,7 +112,8 @@ impl Gerdr {
     }
 
     /// Take a round's CI in. A repository that couldn't be read keeps what
-    /// was last read of it, unless it isn't asked about any more. Watched
+    /// was last read of it, with why (see `ci::unread`), unless it isn't
+    /// asked about any more. Watched
     /// pull requests found closed are watched no more. Rows that finished
     /// are notified of.
     fn ci_read(&mut self, read: CiRead) {
@@ -128,8 +129,8 @@ impl Gerdr {
                 }
                 Err(err) => {
                     tracing::debug!("ci of {}: {err}", root.display());
-                    if let Some(old) = self.ci.remove(&root) {
-                        ci.insert(root, old);
+                    if let Some(repo) = ci::unread(&root, self.ci.remove(&root), err) {
+                        ci.insert(root, repo);
                     }
                 }
             }

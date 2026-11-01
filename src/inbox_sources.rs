@@ -412,7 +412,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// The failed CI rows and the pull requests asking for review: what keeps
 /// a GitHub card from being quiet (`CiView::quiet`). A pull request's go
-/// under Pull requests, a branch's under Repos.
+/// under Pull requests, a branch's under Repos. A repository whose CI
+/// couldn't be read says so under Pull requests.
 pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
     let mut items = Vec::new();
     for (key, repo, shared) in src.github() {
@@ -459,6 +460,11 @@ pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
                 },
             });
         }
+        if let Some(why) = &repo.error {
+            let title = format!("Couldn't load the pull requests of {key}");
+            let id = format!("unread:ci:{key}");
+            items.push(unread_item(id, Section::PullRequests, title, why));
+        }
     }
     items
 }
@@ -495,24 +501,32 @@ pub fn issue_items(src: &Sources) -> Vec<InboxItem> {
     items
 }
 
+/// A line in `section` saying `title` couldn't be read, and `why`; going
+/// to it reads it again.
+fn unread_item(id: String, section: Section, title: String, why: &str) -> InboxItem {
+    InboxItem {
+        id: ItemId(id),
+        section,
+        fingerprint: why.to_owned(),
+        workspace: None,
+        title,
+        subtitle: why.to_owned(),
+        tone: Tone::Failed,
+        age: None,
+        target: Target::Refresh,
+        actions: TRIAGE.to_vec(),
+        detail: Detail::Unread {
+            why: why.to_owned(),
+        },
+    }
+}
+
 /// A line per source of tickets that couldn't be read and has nothing
 /// read before to show: the project's repositories' GitHub issues, its
 /// ticket repositories' tickets, Linear's issues. It says why; going to it
 /// reads them again.
 pub fn unread_items(src: &Sources) -> Vec<InboxItem> {
-    let unread = |id: String, title: String, why: &String| InboxItem {
-        id: ItemId(id),
-        section: Section::Tickets,
-        fingerprint: why.clone(),
-        workspace: None,
-        title,
-        subtitle: why.clone(),
-        tone: Tone::Failed,
-        age: None,
-        target: Target::Refresh,
-        actions: TRIAGE.to_vec(),
-        detail: Detail::Unread { why: why.clone() },
-    };
+    let unread = |id, title, why: &String| unread_item(id, Section::Tickets, title, why);
     let mut items = Vec::new();
     let repos = src.github();
     let tickets: HashSet<String> = src.tickets.iter().map(TicketRepo::key).collect();
@@ -827,6 +841,7 @@ mod tests {
             rows,
             other_prs: 0,
             closed: Vec::new(),
+            error: None,
         }
     }
 
@@ -1193,6 +1208,31 @@ mod tests {
         // Read, they go.
         f.issues.last = IssuesRead::default();
         assert!(unread_items(&f.sources()).is_empty());
+    }
+
+    #[test]
+    fn ci_that_couldnt_be_read_says_why_under_pull_requests() {
+        let mut f = Fixture::default();
+        f.workspace("a", "/r", Some(git("/r")));
+        f.ci.insert(
+            "/r".into(),
+            RepoCi {
+                error: Some("gh: not signed in".into()),
+                ..repo(Vec::new())
+            },
+        );
+        let items = ci_items(&f.sources());
+        assert_eq!(ids(&items), ["unread:ci:github.com/o/r"]);
+        assert_eq!(
+            items[0].title,
+            "Couldn't load the pull requests of github.com/o/r"
+        );
+        assert_eq!(items[0].subtitle, "gh: not signed in");
+        assert_eq!(items[0].section, Section::PullRequests);
+        assert_eq!(items[0].target, Target::Refresh);
+        // Read again, it goes.
+        f.ci.insert("/r".into(), repo(Vec::new()));
+        assert!(ci_items(&f.sources()).is_empty());
     }
 
     #[test]

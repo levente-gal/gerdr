@@ -418,7 +418,10 @@ impl Gerdr {
                 workspace,
             } => self.save_todo(id, text, workspace),
             Outcome::AddTickets(repo) => self.add_tickets(repo),
-            Outcome::Refresh => self.refresh_issues(),
+            Outcome::Refresh => {
+                self.refresh_issues();
+                self.refresh_ci();
+            }
             Outcome::Notice(text) => self.show_notice(text),
             Outcome::Restore(id) => {
                 if let Some(project) = self.project.clone() {
