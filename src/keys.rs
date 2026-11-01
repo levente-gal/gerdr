@@ -13,9 +13,12 @@
 //! except a default key that a configured action took. A key is modifiers
 //! (Ctrl, Alt, Shift, Super) and a key name joined by "+", as in "Shift+Tab",
 //! "-" or "Down"; letters are the same in either case, so "Shift+X" needs its
-//! Shift; "?" and "!" are Shift and the "/" or "1" key. Ctrl held from the
-//! prefix doesn't matter unless the key names it. Mistakes are logged, and
-//! the defaults stand in for what they spoil.
+//! Shift; a character typed with Shift ("?", "!", "@", "{") is Shift and the
+//! key it is on in the keyboard's layout, and one the layout types only
+//! with AltGr, or on no key, is a mistake. Ctrl held from the prefix doesn't
+//! matter unless the key names it. Mistakes, a default key taken and an
+//! action's old name are reported (see `problems`), and the defaults stand
+//! in for what they spoil.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -31,234 +34,275 @@ use crate::{
 const DEFAULT_PREFIX: &str = "Ctrl+B";
 
 /// Every action as (name in the config, action, what the help panel calls
-/// it, default key).
+/// it, default key). A label starts with a verb; it ends in "…" when more
+/// input follows (a dialog or a picker), not when a panel opens; a toggle
+/// says so.
 const ACTIONS: &[(&str, Action, &str, &str)] = &[
-    ("new-tab", Action::NewTab, "new tab", "c"),
-    ("new-agent", Action::NewAgent, "new agent", "Shift+A"),
-    ("next-tab", Action::NextTab, "next tab", "n"),
-    ("previous-tab", Action::PrevTab, "previous tab", "p"),
-    ("go-to-tab-1", Action::GotoTab(0), "go to tab 1", "1"),
-    ("go-to-tab-2", Action::GotoTab(1), "go to tab 2", "2"),
-    ("go-to-tab-3", Action::GotoTab(2), "go to tab 3", "3"),
-    ("go-to-tab-4", Action::GotoTab(3), "go to tab 4", "4"),
-    ("go-to-tab-5", Action::GotoTab(4), "go to tab 5", "5"),
-    ("go-to-tab-6", Action::GotoTab(5), "go to tab 6", "6"),
-    ("go-to-tab-7", Action::GotoTab(6), "go to tab 7", "7"),
-    ("go-to-tab-8", Action::GotoTab(7), "go to tab 8", "8"),
-    ("go-to-tab-9", Action::GotoTab(8), "go to tab 9", "9"),
-    ("close-tab", Action::CloseTab, "close tab", "Shift+X"),
+    ("new-tab", Action::NewTab, "Open a new tab", "c"),
+    ("new-agent", Action::NewAgent, "Start an agent…", "Shift+A"),
+    ("next-tab", Action::NextTab, "Go to the next tab", "n"),
     (
-        "open-project",
+        "previous-tab",
+        Action::PrevTab,
+        "Go to the previous tab",
+        "p",
+    ),
+    ("go-to-tab-1", Action::GotoTab(0), "Go to tab 1", "1"),
+    ("go-to-tab-2", Action::GotoTab(1), "Go to tab 2", "2"),
+    ("go-to-tab-3", Action::GotoTab(2), "Go to tab 3", "3"),
+    ("go-to-tab-4", Action::GotoTab(3), "Go to tab 4", "4"),
+    ("go-to-tab-5", Action::GotoTab(4), "Go to tab 5", "5"),
+    ("go-to-tab-6", Action::GotoTab(5), "Go to tab 6", "6"),
+    ("go-to-tab-7", Action::GotoTab(6), "Go to tab 7", "7"),
+    ("go-to-tab-8", Action::GotoTab(7), "Go to tab 8", "8"),
+    ("go-to-tab-9", Action::GotoTab(8), "Go to tab 9", "9"),
+    ("close-tab", Action::CloseTab, "Close tab", "Shift+X"),
+    // A folder of the project, opened as a Zed + terminal workspace.
+    (
+        "open-workspace",
         Action::NewProject,
-        "open project",
+        "Open a folder as a workspace…",
         "Shift+N",
     ),
     (
         "new-terminal",
         Action::NewTerminal,
-        "terminal workspace in home",
+        "Open a terminal workspace in home",
         "Shift+T",
     ),
     (
         "close-workspace",
         Action::CloseWorkspace,
-        "close workspace",
+        "Close workspace",
         "Shift+D",
     ),
     (
         "next-workspace",
         Action::NextWorkspace,
-        "next workspace",
+        "Go to the next workspace",
         "Down",
     ),
     (
         "previous-workspace",
         Action::PrevWorkspace,
-        "previous workspace",
+        "Go to the previous workspace",
         "Up",
     ),
     (
         "split-right",
         Action::Split(Dir::Right),
-        "split pane right",
+        "Split pane right",
         "v",
     ),
     (
         "split-down",
         Action::Split(Dir::Down),
-        "split pane down",
+        "Split pane down",
         "-",
     ),
-    ("close-pane", Action::ClosePane, "close pane", "x"),
+    ("close-pane", Action::ClosePane, "Close pane", "x"),
     (
         "restart-pane",
         Action::RestartPane,
-        "restart the pane's command",
+        "Restart the pane's command",
         "a",
     ),
     (
         "stop-pane",
         Action::StopPane,
-        "stop the pane's command",
+        "Stop the pane's command",
         "s",
     ),
     (
         "focus-left",
         Action::FocusSide(Side::Left),
-        "focus pane left",
+        "Focus pane left",
         "h",
     ),
     (
         "focus-down",
         Action::FocusSide(Side::Down),
-        "focus pane down",
+        "Focus pane down",
         "j",
     ),
     (
         "focus-up",
         Action::FocusSide(Side::Up),
-        "focus pane up",
+        "Focus pane up",
         "k",
     ),
     (
         "focus-right",
         Action::FocusSide(Side::Right),
-        "focus pane right",
+        "Focus pane right",
         "l",
     ),
     (
         "move-left",
         Action::MovePane(Side::Left),
-        "move pane left",
+        "Move pane left",
         "Shift+H",
     ),
     (
         "move-down",
         Action::MovePane(Side::Down),
-        "move pane down",
+        "Move pane down",
         "Shift+J",
     ),
     (
         "move-up",
         Action::MovePane(Side::Up),
-        "move pane up",
+        "Move pane up",
         "Shift+K",
     ),
     (
         "move-right",
         Action::MovePane(Side::Right),
-        "move pane right",
+        "Move pane right",
         "Shift+L",
     ),
     (
         "swap-left",
         Action::SwapPane(Side::Left),
-        "swap pane left",
+        "Swap pane left",
         "Alt+H",
     ),
     (
         "swap-down",
         Action::SwapPane(Side::Down),
-        "swap pane down",
+        "Swap pane down",
         "Alt+J",
     ),
     (
         "swap-up",
         Action::SwapPane(Side::Up),
-        "swap pane up",
+        "Swap pane up",
         "Alt+K",
     ),
     (
         "swap-right",
         Action::SwapPane(Side::Right),
-        "swap pane right",
+        "Swap pane right",
         "Alt+L",
     ),
     (
         "flip-pane",
         Action::FlipPane,
-        "flip the pane's split",
+        "Flip the pane's split",
         "Space",
     ),
     // herdr's and tmux's zoom.
-    ("zoom-pane", Action::ZoomPane, "zoom pane", "z"),
+    (
+        "zoom-pane",
+        Action::ZoomPane,
+        "Zoom pane to fill the tab, or unzoom",
+        "z",
+    ),
     // tmux's break-pane.
     (
         "pane-to-new-tab",
         Action::PaneToNewTab,
-        "move pane to a new tab",
+        "Move pane to a new tab",
         "!",
     ),
-    ("next-pane", Action::CyclePane(1), "next pane", "Tab"),
+    (
+        "next-pane",
+        Action::CyclePane(1),
+        "Go to the next pane",
+        "Tab",
+    ),
     (
         "previous-pane",
         Action::CyclePane(-1),
-        "previous pane",
+        "Go to the previous pane",
         "Shift+Tab",
     ),
+    // Light or dark for good: it no longer follows the system's choice.
     (
         "toggle-theme",
         Action::ToggleTheme,
-        "light / dark theme",
+        "Toggle light / dark theme (not system)",
         "t",
     ),
-    ("shortcuts", Action::Shortcuts, "keep this help open", "?"),
-    ("switcher", Action::Switcher, "find and switch", "f"),
-    ("run", Action::Run, "run an app in a split", "r"),
+    ("shortcuts", Action::Shortcuts, "Keep this help open", "?"),
+    ("switcher", Action::Switcher, "Find and switch…", "f"),
+    ("run", Action::Run, "Run an app in a split…", "r"),
     (
         "run-tab",
         Action::RunTab,
-        "run an app in a new tab",
+        "Run an app in a new tab…",
         "Shift+R",
     ),
-    ("projects", Action::Projects, "projects", "Shift+P"),
-    ("last-project", Action::LastProject, "last project", "Alt+P"),
+    ("projects", Action::Projects, "Choose a project…", "Shift+P"),
+    (
+        "last-project",
+        Action::LastProject,
+        "Go to the last project",
+        "Alt+P",
+    ),
     (
         "toggle-restart",
         Action::ToggleRestart,
-        "restart after reboot",
+        "Toggle restart after reboot",
         "Shift+S",
     ),
     (
         "toggle-venv",
         Action::ToggleVenv,
-        "python venv on / off",
+        "Toggle python venv",
         "Shift+V",
     ),
-    ("pick-venv", Action::PickVenv, "pick python venv", "Alt+V"),
+    (
+        "pick-venv",
+        Action::PickVenv,
+        "Pick a python venv…",
+        "Alt+V",
+    ),
     (
         "run-start-commands",
         Action::RunStartCommands,
-        "run the project's start commands",
+        "Run the project's start commands",
         "Shift+B",
     ),
-    ("worktrees", Action::Worktrees, "worktrees", "w"),
-    ("repos", Action::Repos, "repositories", "g"),
-    ("inbox", Action::Inbox, "inbox", "i"),
+    ("worktrees", Action::Worktrees, "Open worktrees", "w"),
+    ("repos", Action::Repos, "Open repositories", "g"),
+    ("inbox", Action::Inbox, "Open inbox", "i"),
     // tmux's copy-mode.
     (
         "scrollback",
         Action::Scrollback,
-        "select and copy the scrollback",
+        "Select and copy the scrollback",
         "[",
     ),
     (
         "reload-projects",
         Action::ReloadProjects,
-        "reload the project file",
+        "Reload the project files",
         "Alt+R",
     ),
-    ("quit", Action::Quit, "quit…", "Shift+Q"),
+    ("quit", Action::Quit, "Quit…", "Shift+Q"),
+];
+
+/// Names actions went by before, and what they are called now: still
+/// read, with a word that they were renamed.
+const OLD_NAMES: &[(&str, &str)] = &[
+    // While it started only Cursor's agent.
+    ("new-cursor-agent", "new-agent"),
+    // It opens a folder of the project as a workspace, not a project.
+    ("open-project", "open-workspace"),
 ];
 
 /// The help panel's lines, in order: actions that share a line when each
 /// has exactly one key (else each gets its own), under one label.
 const HELP_LINES: &[(&str, &[&str])] = &[
-    ("new tab", &["new-tab"]),
-    ("new agent", &["new-agent"]),
-    ("next / previous tab", &["next-tab", "previous-tab"]),
+    ("Open a new tab", &["new-tab"]),
+    ("Start an agent…", &["new-agent"]),
     (
-        "go to tab",
+        "Go to the next / previous tab",
+        &["next-tab", "previous-tab"],
+    ),
+    (
+        "Go to tab",
         &[
             "go-to-tab-1",
             "go-to-tab-2",
@@ -271,53 +315,115 @@ const HELP_LINES: &[(&str, &[&str])] = &[
             "go-to-tab-9",
         ],
     ),
-    ("close tab", &["close-tab"]),
-    ("open project", &["open-project"]),
-    ("terminal workspace in home", &["new-terminal"]),
-    ("close workspace", &["close-workspace"]),
+    ("Close tab", &["close-tab"]),
+    ("Open a folder as a workspace…", &["open-workspace"]),
+    ("Open a terminal workspace in home", &["new-terminal"]),
+    ("Close workspace", &["close-workspace"]),
     (
-        "next / previous workspace",
+        "Go to the next / previous workspace",
         &["next-workspace", "previous-workspace"],
     ),
-    ("split pane right / down", &["split-right", "split-down"]),
-    ("close pane", &["close-pane"]),
+    ("Split pane right / down", &["split-right", "split-down"]),
+    ("Close pane", &["close-pane"]),
     (
-        "restart / stop the pane's command",
+        "Restart / stop the pane's command",
         &["restart-pane", "stop-pane"],
     ),
     (
-        "focus pane left / down / up / right",
+        "Focus pane left / down / up / right",
         &["focus-left", "focus-down", "focus-up", "focus-right"],
     ),
     (
-        "move pane left / down / up / right",
+        "Move pane left / down / up / right",
         &["move-left", "move-down", "move-up", "move-right"],
     ),
     (
-        "swap pane left / down / up / right",
+        "Swap pane left / down / up / right",
         &["swap-left", "swap-down", "swap-up", "swap-right"],
     ),
-    ("flip the pane's split", &["flip-pane"]),
-    ("zoom pane to fill the tab, or unzoom", &["zoom-pane"]),
-    ("move pane to a new tab", &["pane-to-new-tab"]),
-    ("next / previous pane", &["next-pane", "previous-pane"]),
-    ("light / dark theme", &["toggle-theme"]),
-    ("keep this help open", &["shortcuts"]),
-    ("find and switch", &["switcher"]),
-    ("run an app in a split", &["run"]),
-    ("run an app in a new tab", &["run-tab"]),
-    ("projects", &["projects"]),
-    ("last project", &["last-project"]),
-    ("restart after reboot", &["toggle-restart"]),
-    ("python venv on / off, pick", &["toggle-venv", "pick-venv"]),
-    ("run the project's start commands", &["run-start-commands"]),
-    ("worktrees", &["worktrees"]),
-    ("repositories", &["repos"]),
-    ("inbox", &["inbox"]),
-    ("select and copy the scrollback", &["scrollback"]),
-    ("reload the project file", &["reload-projects"]),
-    ("quit…", &["quit"]),
+    ("Flip the pane's split", &["flip-pane"]),
+    ("Zoom pane to fill the tab, or unzoom", &["zoom-pane"]),
+    ("Move pane to a new tab", &["pane-to-new-tab"]),
+    (
+        "Go to the next / previous pane",
+        &["next-pane", "previous-pane"],
+    ),
+    ("Toggle light / dark theme (not system)", &["toggle-theme"]),
+    ("Keep this help open", &["shortcuts"]),
+    ("Find and switch…", &["switcher"]),
+    ("Run an app in a split…", &["run"]),
+    ("Run an app in a new tab…", &["run-tab"]),
+    ("Choose a project…", &["projects"]),
+    ("Go to the last project", &["last-project"]),
+    ("Toggle restart after reboot", &["toggle-restart"]),
+    (
+        "Toggle python venv, pick one…",
+        &["toggle-venv", "pick-venv"],
+    ),
+    ("Run the project's start commands", &["run-start-commands"]),
+    ("Open worktrees", &["worktrees"]),
+    ("Open repositories", &["repos"]),
+    ("Open inbox", &["inbox"]),
+    ("Select and copy the scrollback", &["scrollback"]),
+    ("Reload the project files", &["reload-projects"]),
+    ("Quit…", &["quit"]),
 ];
+
+/// What the help panel called its lines before they started with a verb,
+/// and what it calls them now, so a lookup by the old label still finds
+/// the key (see `Help::key_for`).
+const OLD_LABELS: &[(&str, &str)] = &[
+    ("new tab", "Open a new tab"),
+    ("new agent", "Start an agent…"),
+    ("next tab", "Go to the next tab"),
+    ("previous tab", "Go to the previous tab"),
+    ("next / previous tab", "Go to the next / previous tab"),
+    ("go to tab", "Go to tab"),
+    ("open project", "Open a folder as a workspace…"),
+    (
+        "terminal workspace in home",
+        "Open a terminal workspace in home",
+    ),
+    ("next workspace", "Go to the next workspace"),
+    ("previous workspace", "Go to the previous workspace"),
+    (
+        "next / previous workspace",
+        "Go to the next / previous workspace",
+    ),
+    ("next pane", "Go to the next pane"),
+    ("previous pane", "Go to the previous pane"),
+    ("next / previous pane", "Go to the next / previous pane"),
+    (
+        "light / dark theme",
+        "Toggle light / dark theme (not system)",
+    ),
+    ("find and switch", "Find and switch…"),
+    ("run an app in a split", "Run an app in a split…"),
+    ("run an app in a new tab", "Run an app in a new tab…"),
+    ("projects", "Choose a project…"),
+    ("last project", "Go to the last project"),
+    ("restart after reboot", "Toggle restart after reboot"),
+    ("python venv on / off", "Toggle python venv"),
+    ("pick python venv", "Pick a python venv…"),
+    (
+        "python venv on / off, pick",
+        "Toggle python venv, pick one…",
+    ),
+    ("worktrees", "Open worktrees"),
+    ("repositories", "Open repositories"),
+    ("inbox", "Open inbox"),
+    ("reload the project file", "Reload the project files"),
+    ("quit…", "Quit…"),
+];
+
+/// The help panel's label for what it used to call `label`; any other
+/// label as it is. Case does not matter.
+pub fn help_label(label: &str) -> &str {
+    OLD_LABELS
+        .iter()
+        .find(|(old, _)| old.eq_ignore_ascii_case(label))
+        .map_or(label, |(_, new)| new)
+}
 
 /// The modifiers a key needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -353,8 +459,24 @@ impl Chord {
         Self { mods, sym }
     }
 
-    /// Read a key as written in the config, like "Ctrl+Shift+X".
+    /// Read a key as written in the config, like "Ctrl+Shift+X": a
+    /// character typed with Shift ("@", "?") is matched as Shift and the
+    /// key it is on in the keyboard's layout. One the layout types on no
+    /// key, or only with AltGr, is a mistake.
     fn parse(spec: &str) -> Result<Self, String> {
+        Self::parse_in(spec, layout(), true)
+    }
+
+    /// Read a key gerdr itself names (a default, a hint's): a character
+    /// the layout has no key for is taken as on a US layout.
+    fn parse_lenient(spec: &str) -> Result<Self, String> {
+        Self::parse_in(spec, layout(), false)
+    }
+
+    /// Read `spec` against `layout` (none when the layout can't be read:
+    /// then as on a US layout); `strict` turns a character it has no key
+    /// for into a mistake.
+    fn parse_in(spec: &str, layout: Option<&Layout>, strict: bool) -> Result<Self, String> {
         let spec = spec.trim();
         // "+" is a key too: "+" or "Ctrl++".
         let (mods_spec, key) = match spec.strip_suffix("++") {
@@ -375,8 +497,23 @@ impl Chord {
         }
         let key = key.trim();
         let sym = key_sym(key).ok_or_else(|| format!("unknown key `{key}` in `{spec}`"))?;
-        // "?" is Shift and the slash key: the key's own symbol is matched.
-        // Its xkb name, "question", is the same key.
+        if types_char(sym) {
+            match layout.map(|layout| layout.typing(sym)) {
+                Some(Some((base, shift))) => {
+                    mods.shift |= shift;
+                    return Ok(Self { mods, sym: base });
+                }
+                Some(None) if strict => {
+                    return Err(format!(
+                        "no key types `{key}` (in `{spec}`) without AltGr on this keyboard \
+                         layout; name the key it is on instead"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        // As on a US layout: "?" is Shift and the slash key. Its xkb
+        // name, "question", is the same key.
         let shifted = SHIFTED
             .iter()
             .find(|(c, _)| key_sym(c) == Some(sym))
@@ -390,6 +527,13 @@ impl Chord {
 
     /// The key as the help panel shows it, like "Shift+X".
     fn label(&self) -> String {
+        self.label_in(layout())
+    }
+
+    /// The key as the help panel shows it with `layout`: Shift and a key
+    /// typing a character other than its own upper case is that
+    /// character ("Shift+/" is "?").
+    fn label_in(&self, layout: Option<&Layout>) -> String {
         let Mods {
             ctrl,
             alt,
@@ -397,12 +541,15 @@ impl Chord {
             logo,
         } = self.mods;
         let key = key_label(self.sym);
-        // Shift and the slash key is "?".
-        let shifted = SHIFTED
-            .iter()
-            .find(|(_, base)| key_sym(base) == Some(self.sym));
-        let (key, shift) = match shifted {
-            Some((c, _)) if shift => ((*c).to_owned(), false),
+        let typed = match layout {
+            Some(layout) => layout.shifted(self.sym).map(char_label),
+            None => SHIFTED
+                .iter()
+                .find(|(_, base)| key_sym(base) == Some(self.sym))
+                .map(|(c, _)| (*c).to_owned()),
+        };
+        let (key, shift) = match typed {
+            Some(c) if shift && c != key => (c, false),
             _ => (key, shift),
         };
         let mods = [
@@ -425,7 +572,7 @@ impl Chord {
 /// its modifiers and the key's own symbol. `None` for anything else, like
 /// keys to choose from ("Up / Down").
 pub fn hint_key(keys: &str) -> Option<(ModifiersState, Keysym)> {
-    let Chord { mods, sym } = Chord::parse(keys).ok()?;
+    let Chord { mods, sym } = Chord::parse_lenient(keys).ok()?;
     let mods = ModifiersState {
         ctrl: mods.ctrl,
         alt: mods.alt,
@@ -436,10 +583,125 @@ pub fn hint_key(keys: &str) -> Option<(ModifiersState, Keysym)> {
     Some((mods, sym))
 }
 
-/// Characters typed with Shift on the key named after them: written
-/// as themselves (or their xkb names) in the config and as themselves in
-/// the help, matched as Shift and the key, as on a US layout.
+/// Characters typed with Shift on the key named after them, as on a US
+/// layout: what a key written as one of them is when the keyboard's
+/// layout can't be read.
 const SHIFTED: &[(&str, &str)] = &[("?", "/"), ("!", "1")];
+
+/// Whether `sym` types a character that sits on a key of a layout, to
+/// be found there: not a letter's case, a keypad key, space or a control.
+fn types_char(sym: Keysym) -> bool {
+    !sym.is_keypad_key()
+        && sym
+            .key_char()
+            .is_some_and(|c| !c.is_control() && !c.is_whitespace())
+}
+
+/// What the keyboard's layout types: per key and layout, the key's own
+/// symbol (as gerdr is handed it on a press, see `Chord::pressed`) and
+/// what it types with Shift.
+#[derive(Debug, Default)]
+struct Layout {
+    keys: Vec<(Keysym, Keysym)>,
+}
+
+impl Layout {
+    /// The layout xkb compiles from `layout` (and the environment's
+    /// `XKB_DEFAULT_*` when `env`), as the seat's keyboard does with no
+    /// names; `None` without xkb's data.
+    fn compile(layout: &str, env: bool) -> Option<Self> {
+        let flags = match env {
+            true => xkb::CONTEXT_NO_FLAGS,
+            false => xkb::CONTEXT_NO_ENVIRONMENT_NAMES,
+        };
+        let context = xkb::Context::new(flags);
+        let keymap = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            layout,
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )?;
+        let shift = 1 << keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
+        let mut codes = Vec::new();
+        keymap.key_for_each(|_, code| codes.push(code));
+        let layouts = keymap.num_layouts();
+        // The key's own symbol in `group`; one typing something other than
+        // ASCII is taken from another group typing ASCII there, as the
+        // seat does for a key pressed.
+        let own = |code, group| -> Option<Keysym> {
+            let sym = *keymap.key_get_syms_by_level(code, group, 0).first()?;
+            if sym.key_char().is_none_or(|c| c.is_ascii()) {
+                return Some(sym);
+            }
+            let ascii = (0..layouts).filter(|g| *g != group).find_map(|g| {
+                let other = *keymap.key_get_syms_by_level(code, g, 0).first()?;
+                other
+                    .key_char()
+                    .is_some_and(|c| c.is_ascii() && !c.is_ascii_control())
+                    .then_some(other)
+            });
+            Some(ascii.unwrap_or(sym))
+        };
+        let mut keys = Vec::new();
+        for group in 0..layouts {
+            let mut state = xkb::State::new(&keymap);
+            state.update_mask(shift, 0, 0, 0, 0, group);
+            for &code in &codes {
+                if let Some(sym) = own(code, group) {
+                    keys.push((sym, state.key_get_one_sym(code)));
+                }
+            }
+        }
+        Some(Self { keys })
+    }
+
+    /// The key typing `sym`, and whether it takes Shift: on a key of its
+    /// own first, else with Shift.
+    fn typing(&self, sym: Keysym) -> Option<(Keysym, bool)> {
+        let lower = key_sym(&char_label(sym).to_lowercase()).unwrap_or(sym);
+        self.keys
+            .iter()
+            .find(|(own, _)| *own == sym || *own == lower)
+            .map(|(own, _)| (*own, false))
+            .or_else(|| {
+                self.keys
+                    .iter()
+                    .find(|(_, shifted)| *shifted == sym)
+                    .map(|(own, _)| (*own, true))
+            })
+    }
+
+    /// What Shift and the key `own` type, when it is a character other
+    /// than the key's own in upper case: "?" for the slash key.
+    fn shifted(&self, own: Keysym) -> Option<Keysym> {
+        let (_, shifted) = self.keys.iter().find(|(o, _)| *o == own)?;
+        let upper = char_label(own);
+        (types_char(*shifted) && char_label(*shifted) != upper).then_some(*shifted)
+    }
+}
+
+/// The keyboard's layout, as the seat's keyboard compiles it; `None`
+/// when xkb can't (no data installed). Tests read a US layout.
+fn layout() -> Option<&'static Layout> {
+    static LAYOUT: std::sync::OnceLock<Option<Layout>> = std::sync::OnceLock::new();
+    LAYOUT
+        .get_or_init(|| match cfg!(test) {
+            true => Layout::compile("us", false),
+            false => Layout::compile("", true),
+        })
+        .as_ref()
+}
+
+/// How a key that types a character is shown: the character, upper case.
+fn char_label(sym: Keysym) -> String {
+    match sym.key_char() {
+        Some(c) => c.to_uppercase().collect(),
+        None => key_label(sym),
+    }
+}
 
 /// The symbol for a key name: a character, or an xkb name like "Down" or
 /// "F12" in any case.
@@ -464,12 +726,13 @@ fn key_sym(name: &str) -> Option<Keysym> {
 }
 
 /// How the help panel names a key: what it types (letters upper case), else
-/// its xkb name.
+/// its xkb name, short where every panel shortens it ("Esc", "Del").
 fn key_label(sym: Keysym) -> String {
     match sym {
         Keysym::Escape => return "Esc".into(),
         Keysym::Return => return "Enter".into(),
         Keysym::space => return "Space".into(),
+        Keysym::Delete => return "Del".into(),
         _ => {}
     }
     match char::from_u32(xkb::keysym_to_utf32(sym))
@@ -514,15 +777,27 @@ pub struct Keymap {
 
 impl Default for Keymap {
     fn default() -> Self {
-        Self::new(KeysConfig::default()).0
+        Self::build(KeysConfig::default()).0
     }
 }
 
 impl Keymap {
-    /// The keymap `config` describes, and what's wrong with it.
+    /// The keymap `config` describes, and what's wrong with it. What's
+    /// wrong is also kept in `problems` (as "keys"), in place of what an
+    /// earlier config had wrong.
     pub fn new(config: KeysConfig) -> (Self, Vec<String>) {
+        let (keymap, problems) = Self::build(config);
+        crate::problems::clear("keys");
+        for problem in &problems {
+            crate::problems::report("keys", problem.clone());
+        }
+        (keymap, problems)
+    }
+
+    /// The keymap `config` describes, and what's wrong with it.
+    fn build(config: KeysConfig) -> (Self, Vec<String>) {
         let mut problems = Vec::new();
-        let default_prefix = Chord::parse(DEFAULT_PREFIX).expect("default prefix");
+        let default_prefix = Chord::parse_lenient(DEFAULT_PREFIX).expect("default prefix");
         let prefix = config
             .prefix
             .map_or(Ok(default_prefix), |spec| Chord::parse(&spec))
@@ -535,37 +810,58 @@ impl Keymap {
         let mut bindings: Vec<(Chord, usize)> = Vec::new();
         let mut configured = vec![false; ACTIONS.len()];
         for (name, keys) in config.actions {
-            // Its name while it started only Cursor's agent.
-            let name = match name.as_str() {
-                "new-cursor-agent" => "new-agent".to_owned(),
-                _ => name,
+            let name = match OLD_NAMES.iter().find(|(old, _)| *old == name) {
+                Some((old, new)) => {
+                    problems.push(format!("`{old}` is now called `{new}`; it still works"));
+                    (*new).to_owned()
+                }
+                None => name,
             };
             let Some(idx) = ACTIONS.iter().position(|(n, ..)| *n == name) else {
                 problems.push(format!("unknown action `{name}`"));
                 continue;
             };
-            configured[idx] = true;
             let keys = match keys {
                 Keys::One(key) => vec![key],
                 Keys::Many(keys) => keys,
             };
+            // No keys at all is meant; keys that are all mistakes leave
+            // the default standing in.
+            configured[idx] |= keys.is_empty();
             for spec in keys {
+                if let Some(problem) = upper_case_letter(&spec) {
+                    problems.push(problem);
+                }
                 match Chord::parse(&spec) {
-                    Ok(chord) => match bindings.iter().find(|(c, _)| *c == chord) {
-                        Some((_, other)) => problems
-                            .push(format!("`{spec}` is already for `{}`", ACTIONS[*other].0)),
-                        None => bindings.push((chord, idx)),
-                    },
+                    Ok(chord) => {
+                        configured[idx] = true;
+                        match bindings.iter().find(|(c, _)| *c == chord) {
+                            Some((_, other)) => problems
+                                .push(format!("`{spec}` is already for `{}`", ACTIONS[*other].0)),
+                            None => bindings.push((chord, idx)),
+                        }
+                    }
                     Err(err) => problems.push(err),
                 }
             }
         }
-        for (idx, (_, _, _, spec)) in ACTIONS.iter().enumerate() {
-            let chord = Chord::parse(spec).expect("default key");
-            if !configured[idx] && !bindings.iter().any(|(c, _)| *c == chord) {
-                bindings.push((chord, idx));
+        for (idx, (name, _, _, spec)) in ACTIONS.iter().enumerate() {
+            let chord = Chord::parse_lenient(spec).expect("default key");
+            if configured[idx] {
+                continue;
+            }
+            match bindings.iter().find(|(c, _)| *c == chord) {
+                // Its default went to another action: say so, or it just
+                // drops out of the help.
+                Some((_, other)) => problems.push(format!(
+                    "`{name}` has no key: its default `{}` is now for `{}`",
+                    chord.label(),
+                    ACTIONS[*other].0
+                )),
+                None => bindings.push((chord, idx)),
             }
         }
+        problems.extend(ctrl_clashes(prefix, &bindings));
 
         let help = Arc::new(help(prefix, &bindings));
         let bindings = bindings
@@ -611,6 +907,53 @@ impl Keymap {
     pub fn help(&self) -> Arc<Help> {
         self.help.clone()
     }
+}
+
+/// What's wrong with `spec`, a single upper case letter with no
+/// modifiers: it is the letter's key without Shift, which it may not
+/// look like.
+fn upper_case_letter(spec: &str) -> Option<String> {
+    let mut chars = spec.trim().chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_uppercase() => Some(format!(
+            "`{c}` is the {} key without Shift; write `Shift+{c}` if Shift is meant",
+            c.to_lowercase()
+        )),
+        _ => None,
+    }
+}
+
+/// Keys that run different actions only by whether Ctrl is held, after a
+/// prefix with Ctrl in it: Ctrl still held from the prefix picks the one
+/// with it, so which runs hangs on when Ctrl was let go.
+fn ctrl_clashes(prefix: Chord, bindings: &[(Chord, usize)]) -> Vec<String> {
+    if !prefix.mods.ctrl {
+        return Vec::new();
+    }
+    bindings
+        .iter()
+        .filter(|(chord, _)| chord.mods.ctrl)
+        .filter_map(|(chord, idx)| {
+            let plain = Chord {
+                mods: Mods {
+                    ctrl: false,
+                    ..chord.mods
+                },
+                ..*chord
+            };
+            let (_, other) = bindings.iter().find(|(c, i)| *c == plain && i != idx)?;
+            Some(format!(
+                "`{}` (`{}`) and `{}` (`{}`) differ only by Ctrl, which may still be held \
+                 from the prefix `{}`: then `{}` runs",
+                chord.label(),
+                ACTIONS[*idx].0,
+                plain.label(),
+                ACTIONS[*other].0,
+                prefix.label(),
+                chord.label()
+            ))
+        })
+        .collect()
 }
 
 /// `keys` with the modifiers they all have written on the first only, as in
@@ -679,9 +1022,9 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)]) -> Help {
     let prefix = prefix.label();
     // The prefix goes to the app only as a key.
     presses.push(vec![None]);
-    rows.push((prefix.clone(), format!("send {prefix} to the app")));
+    rows.push((prefix.clone(), format!("Send {prefix} to the app")));
     presses.push(vec![Some(HelpPress::Close)]);
-    rows.push(("Esc".into(), "cancel".into()));
+    rows.push(("Esc".into(), "Cancel".into()));
     Help {
         prefix,
         rows,
@@ -724,43 +1067,43 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "C: new tab",
-                "Shift+A: new agent",
-                "N / P: next / previous tab",
-                "1–9: go to tab",
-                "Shift+X: close tab",
-                "Shift+N: open project",
-                "Shift+T: terminal workspace in home",
-                "Shift+D: close workspace",
-                "Down / Up: next / previous workspace",
-                "V / -: split pane right / down",
-                "X: close pane",
-                "A / S: restart / stop the pane's command",
-                "H / J / K / L: focus pane left / down / up / right",
-                "Shift+H / J / K / L: move pane left / down / up / right",
-                "Alt+H / J / K / L: swap pane left / down / up / right",
-                "Space: flip the pane's split",
-                "Z: zoom pane to fill the tab, or unzoom",
-                "!: move pane to a new tab",
-                "Tab / Shift+Tab: next / previous pane",
-                "T: light / dark theme",
-                "?: keep this help open",
-                "F: find and switch",
-                "R: run an app in a split",
-                "Shift+R: run an app in a new tab",
-                "Shift+P: projects",
-                "Alt+P: last project",
-                "Shift+S: restart after reboot",
-                "Shift+V / Alt+V: python venv on / off, pick",
-                "Shift+B: run the project's start commands",
-                "W: worktrees",
-                "G: repositories",
-                "I: inbox",
-                "[: select and copy the scrollback",
-                "Alt+R: reload the project file",
-                "Shift+Q: quit…",
-                "Ctrl+B: send Ctrl+B to the app",
-                "Esc: cancel",
+                "C: Open a new tab",
+                "Shift+A: Start an agent…",
+                "N / P: Go to the next / previous tab",
+                "1–9: Go to tab",
+                "Shift+X: Close tab",
+                "Shift+N: Open a folder as a workspace…",
+                "Shift+T: Open a terminal workspace in home",
+                "Shift+D: Close workspace",
+                "Down / Up: Go to the next / previous workspace",
+                "V / -: Split pane right / down",
+                "X: Close pane",
+                "A / S: Restart / stop the pane's command",
+                "H / J / K / L: Focus pane left / down / up / right",
+                "Shift+H / J / K / L: Move pane left / down / up / right",
+                "Alt+H / J / K / L: Swap pane left / down / up / right",
+                "Space: Flip the pane's split",
+                "Z: Zoom pane to fill the tab, or unzoom",
+                "!: Move pane to a new tab",
+                "Tab / Shift+Tab: Go to the next / previous pane",
+                "T: Toggle light / dark theme (not system)",
+                "?: Keep this help open",
+                "F: Find and switch…",
+                "R: Run an app in a split…",
+                "Shift+R: Run an app in a new tab…",
+                "Shift+P: Choose a project…",
+                "Alt+P: Go to the last project",
+                "Shift+S: Toggle restart after reboot",
+                "Shift+V / Alt+V: Toggle python venv, pick one…",
+                "Shift+B: Run the project's start commands",
+                "W: Open worktrees",
+                "G: Open repositories",
+                "I: Open inbox",
+                "[: Select and copy the scrollback",
+                "Alt+R: Reload the project files",
+                "Shift+Q: Quit…",
+                "Ctrl+B: Send Ctrl+B to the app",
+                "Esc: Cancel",
             ]
         );
     }
@@ -831,13 +1174,110 @@ mod tests {
     }
 
     #[test]
-    fn the_old_cursor_agent_name_binds_the_agent_picker() {
-        let (keymap, problems) = from_config("[keys]\nnew-cursor-agent = \"g\"\n");
+    fn old_names_still_bind_and_say_they_were_renamed() {
+        let (keymap, problems) =
+            from_config("[keys]\nnew-cursor-agent = \"Alt+G\"\nopen-project = \"o\"\n");
+        let alt = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(keymap.action(&alt, Keysym::g), Some(Action::NewAgent));
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::o),
+            Some(Action::NewProject)
+        );
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("`new-agent`"), "{problems:?}");
+        assert!(problems[1].contains("`open-workspace`"), "{problems:?}");
+    }
+
+    #[test]
+    fn shifted_characters_follow_the_layout() {
+        // US: "@" is Shift and 2, "{" Shift and [, and back again.
+        if super::layout().is_none() {
+            return;
+        }
+        let (keymap, problems) =
+            from_config("[keys]\nscrollback = \"@\"\nzoom-pane = \"braceleft\"\n");
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(
-            keymap.action(&mods(false, false), Keysym::g),
-            Some(Action::NewAgent)
+            keymap.action(&mods(false, true), Keysym::_2),
+            Some(Action::Scrollback)
         );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::_2),
+            Some(Action::GotoTab(1))
+        );
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::bracketleft),
+            Some(Action::ZoomPane)
+        );
+        assert_eq!(Chord::parse("Shift+2").map(|c| c.label()), Ok("@".into()));
+        assert_eq!(
+            Chord::parse("Shift+minus").map(|c| c.label()),
+            Ok("_".into())
+        );
+        assert_eq!(
+            Chord::parse("Shift+H").map(|c| c.label()),
+            Ok("Shift+H".into())
+        );
+        assert_eq!(
+            Chord::parse("Shift+Tab").map(|c| c.label()),
+            Ok("Shift+Tab".into())
+        );
+        // Nothing types "é" without AltGr: a mistake, not a key never pressed.
+        let (keymap, problems) = from_config("[keys]\nscrollback = \"é\"\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("AltGr"), "{problems:?}");
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::bracketleft),
+            Some(Action::Scrollback)
+        );
+    }
+
+    #[test]
+    fn a_layout_puts_shifted_characters_where_it_has_them() {
+        // On a German layout "?" is Shift and the ß key, "/" Shift and 7,
+        // and "[" only with AltGr.
+        let Some(de) = super::Layout::compile("de", false) else {
+            return;
+        };
+        let parse = |spec: &str| Chord::parse_in(spec, Some(&de), true);
+        let question = parse("?").unwrap();
+        assert_eq!((question.mods.shift, question.sym), (true, Keysym::ssharp));
+        assert_eq!(question.label_in(Some(&de)), "?");
+        let slash = parse("/").unwrap();
+        assert_eq!((slash.mods.shift, slash.sym), (true, Keysym::_7));
+        assert!(parse("[").is_err());
+        // A default gerdr names is kept as on a US layout instead.
+        let lenient = Chord::parse_in("[", Some(&de), false).unwrap();
+        assert_eq!(lenient.sym, Keysym::bracketleft);
+    }
+
+    #[test]
+    fn what_may_surprise_is_reported() {
+        // An upper case letter is still the plain key.
+        let (keymap, problems) = from_config("[keys]\nnew-tab = \"Y\"\n");
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::y),
+            Some(Action::NewTab)
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("Shift+Y"), "{problems:?}");
+        // Taking another action's default leaves that one without a key.
+        let (_, problems) = from_config("[keys]\nnew-tab = \"t\"\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("`toggle-theme` has no key"),
+            "{problems:?}"
+        );
+        // After a Ctrl prefix, Ctrl+X and X apart hang on when Ctrl went up.
+        let (_, problems) = from_config("[keys]\nnew-tab = \"Ctrl+X\"\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("only by Ctrl"), "{problems:?}");
+        let (_, problems) = from_config("[keys]\nprefix = \"Alt+B\"\nnew-tab = \"Ctrl+X\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(Chord::parse("Delete").map(|c| c.label()), Ok("Del".into()));
     }
 
     #[test]
@@ -932,7 +1372,7 @@ mod tests {
     fn default_keys_are_all_different() {
         let chords: Vec<Chord> = ACTIONS
             .iter()
-            .map(|(_, _, _, spec)| Chord::parse(spec).expect("default key"))
+            .map(|(_, _, _, spec)| Chord::parse_lenient(spec).expect("default key"))
             .collect();
         for (i, chord) in chords.iter().enumerate() {
             assert!(
@@ -947,7 +1387,8 @@ mod tests {
     fn config_rebinds() {
         let config = "[keys]\nprefix = \"Ctrl+Space\"\nnew-tab = \"t\"\nclose-pane = []\nsplit-down = [\"Shift+minus\", \"s\"]\n";
         let (keymap, problems) = from_config(config);
-        assert!(problems.is_empty(), "{problems:?}");
+        // The theme's and stop's keys were taken.
+        assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(keymap.is_prefix(&mods(true, false), Keysym::space));
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::t),
@@ -962,17 +1403,13 @@ mod tests {
             Some(Action::Split(Dir::Down))
         );
         let help = keymap.help();
+        let shift_minus = Chord::parse("Shift+minus").unwrap().label();
         assert!(
             help.rows
-                .contains(&("Shift+- / S".into(), "split pane down".into()))
+                .contains(&(format!("{shift_minus} / S"), "Split pane down".into()))
         );
-        assert!(help.rows.contains(&("V".into(), "split pane right".into())));
-        assert!(
-            !help
-                .rows
-                .iter()
-                .any(|(_, label)| label == "light / dark theme")
-        );
+        assert!(help.rows.contains(&("V".into(), "Split pane right".into())));
+        assert!(!help.rows.iter().any(|(_, label)| label.contains("theme")));
         assert_eq!(help.rows[help.rows.len() - 2].0, "Ctrl+Space");
     }
 
@@ -981,7 +1418,8 @@ mod tests {
         let (keymap, problems) = from_config(
             "[keys]\nprefix = \"Hyper+B\"\nfly = \"f\"\nnew-tab = [\"Ctrl+\", \"n\"]\n",
         );
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        // Three mistakes, and next-tab lost its n to new-tab.
+        assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(keymap.is_prefix(&mods(true, false), Keysym::b));
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::n),
