@@ -7797,6 +7797,13 @@ mod tests {
             text.contains("### `src/git.rs` (the whole file)\n\nsplit it\n"),
             "{text}"
         );
+        // The diff's search finds what comments say too.
+        panel.focus = Focus::Detail;
+        panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
+        type_text(&mut panel, "split", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 1");
+        assert_eq!(cursor_row(&panel), Some(header + 1));
+        assert_eq!(panel.diff.found_on(header + 1), vec![(0..5, true)]);
     }
 
     #[test]

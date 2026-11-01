@@ -3969,6 +3969,10 @@ impl Painter {
                     h,
                     mix(p.elevated, p.accent, 0.7),
                 );
+                // What the search found in it, tinted on the card.
+                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let found = &look.found;
+                self.found_tints(c, text, found, (tx, bend), row_band, width, fill, scale, p);
                 self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, p.text);
             }
             DetailRow::Editor {
