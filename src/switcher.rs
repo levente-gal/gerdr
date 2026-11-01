@@ -1201,13 +1201,20 @@ impl Gerdr {
     /// Open the config file, made first when there is none: in the active
     /// workspace's Zed, shown, when it has one; else with `xdg-open`, in
     /// `place`.
-    fn open_settings(&mut self, place: Place) {
+    pub(crate) fn open_settings(&mut self, place: Place) {
         let path = crate::config::config_file();
         if let Err(err) = crate::config::ensure_file(&path) {
             let path = tilde(&path, home_dir().as_deref());
             return self.toast(format!("Can't make {path}: {err}"), Level::Error);
         }
         self.open_in_zed(&path, place, "the settings file");
+    }
+
+    /// Open gerdr's log file (see `crate::log_path`), as the settings file
+    /// is opened.
+    pub(crate) fn open_log(&mut self, place: Place) {
+        let path = crate::log_path();
+        self.open_in_zed(&path, place, "the log file");
     }
 
     /// Open project `id`'s file in a new Zed window, in a new tab of the

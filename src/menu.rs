@@ -117,6 +117,15 @@ pub enum MenuAction {
     },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
+    /// Join project `id`, open in another gerdr, here (see
+    /// `Gerdr::attach_project`).
+    AttachProject(String),
+    /// Open the settings file, in a tab.
+    OpenSettings,
+    /// Open gerdr's log file, in a tab.
+    OpenLog,
+    /// Show tab `t` of workspace `w`.
+    SwitchTab(usize, usize),
 }
 
 /// One row of a menu.
@@ -366,6 +375,13 @@ impl Gerdr {
             MenuAction::FocusAgent(key) => self.focus_agent(&key),
             MenuAction::CloseAgent(key) => self.close_agent(&key),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
+            MenuAction::AttachProject(id) => self.attach_project(&id),
+            MenuAction::OpenSettings => self.open_settings(crate::launch::Place::Tab),
+            MenuAction::OpenLog => self.open_log(crate::launch::Place::Tab),
+            MenuAction::SwitchTab(w, t) => {
+                self.switch_workspace(w);
+                self.switch_tab(t);
+            }
             MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),

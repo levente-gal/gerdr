@@ -25,7 +25,10 @@ pub fn report(source: &'static str, text: impl Into<String>) {
     let text = text.into();
     tracing::warn!("{source}: {text}");
     let mut problems = PROBLEMS.lock().unwrap_or_else(|e| e.into_inner());
-    if problems.iter().any(|p| p.source == source && p.text == text) {
+    if problems
+        .iter()
+        .any(|p| p.source == source && p.text == text)
+    {
         return;
     }
     problems.push(Problem { source, text });
@@ -40,6 +43,28 @@ pub fn clear(source: &'static str) {
     if problems.len() != before {
         GENERATION.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Make `texts` the problems from `source`, in place of the ones it had:
+/// none when it works again.
+pub fn set(source: &'static str, texts: Vec<String>) {
+    let mut problems = PROBLEMS.lock().unwrap_or_else(|e| e.into_inner());
+    let had: Vec<&String> = problems
+        .iter()
+        .filter(|p| p.source == source)
+        .map(|p| &p.text)
+        .collect();
+    if had.len() == texts.len() && had.iter().zip(&texts).all(|(a, b)| *a == b) {
+        return;
+    }
+    for text in &texts {
+        if !had.contains(&text) {
+            tracing::warn!("{source}: {text}");
+        }
+    }
+    problems.retain(|p| p.source != source);
+    problems.extend(texts.into_iter().map(|text| Problem { source, text }));
+    GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The problems kept, oldest first.
