@@ -488,11 +488,16 @@ impl BarState {
     }
 
     /// Start showing or hiding at `now`, going on from wherever a fade
-    /// under way had got to.
+    /// under way had got to; at once while nothing is to move (see
+    /// `anim::motion`).
     fn flip(&mut self, visible: bool, now: Instant) {
         let from = self.alpha(now);
         self.visible = visible;
-        self.fade = Some(Fade::from_value(now, anim::SLOW, visible, from));
+        let dur = match anim::motion() {
+            anim::Motion::Off => Duration::ZERO,
+            anim::Motion::Full | anim::Motion::Reduced => anim::SLOW,
+        };
+        self.fade = Some(Fade::from_value(now, dur, visible, from));
     }
 }
 
