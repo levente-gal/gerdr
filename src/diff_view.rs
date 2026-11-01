@@ -542,6 +542,21 @@ impl DiffView {
             };
             for (f, file) in files.iter().enumerate() {
                 rows.push(DiffRow::File(k, f));
+                // The comments on the whole file, under its header, folded
+                // or not; and one being written on it.
+                let on_file = |root: &Path, path: &str| root == item.root && path == file.path;
+                for (c, comment) in comments.iter().enumerate() {
+                    if comment.lines.is_empty() && on_file(&comment.root, &comment.path) {
+                        placed.insert(c);
+                        self.push_comment(&mut rows, Some((k, f)), c);
+                    }
+                }
+                let new_on_file = self.editing.as_ref().is_some_and(|e| {
+                    e.at.is_none() && e.lines.is_empty() && on_file(&e.root, &e.path)
+                });
+                if new_on_file {
+                    self.push_editor(&mut rows, Some((k, f)));
+                }
                 // The file's comments, by the line they go under.
                 let mut under: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
                 for (c, comment) in comments.iter().enumerate() {
@@ -953,8 +968,8 @@ impl DiffView {
         Some((root.to_path_buf(), file.path.clone(), lines))
     }
 
-    /// Write a comment on the lines of the cursor's range (C), or edit the
-    /// comment the cursor is on.
+    /// Write a comment on the lines of the cursor's range (C), or on the
+    /// whole file from its header, or edit the comment the cursor is on.
     fn comment_here(&mut self, ctx: &Ctx) {
         if let Some(c) = self
             .cursor
@@ -963,9 +978,15 @@ impl DiffView {
         {
             return self.edit_comment(c, ctx);
         }
-        let Some((root, path, lines)) = self.cursor_lines().filter(|(_, _, l)| !l.is_empty())
+        // On a file's header alone, a comment on the whole file.
+        let on_header = self.cursor.as_ref().is_some_and(|cur| {
+            cur.row == cur.from && matches!(self.rows.get(cur.row), Some(DiffRow::File(..)))
+        });
+        let Some((root, path, lines)) = self
+            .cursor_lines()
+            .filter(|(_, _, l)| !l.is_empty() || on_header)
         else {
-            let why = "Move the diff's cursor to a line to comment on it";
+            let why = "Move the diff's cursor to a line or a file's header to comment on it";
             self.signals.error = Some(Some(why.into()));
             return;
         };

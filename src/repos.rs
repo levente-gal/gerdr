@@ -1568,7 +1568,7 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("Alt+Up / Down", "in the diff, the file before or after"),
     (
         "c / Del Del",
-        "in the diff, comment on the lines (or edit the comment); delete it",
+        "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it",
     ),
     (
         "Enter / Shift+Enter",
@@ -7761,6 +7761,42 @@ mod tests {
         );
         assert_eq!(press(&mut panel, ctrl_shift(), Keysym::C, &ctx), None);
         assert_eq!(panel.error.as_deref(), Some(NO_REVIEW));
+    }
+
+    #[test]
+    fn a_comment_on_a_file_header_is_on_the_whole_file() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 30);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        let header = panel
+            .diff
+            .rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::File(..)))
+            .expect("a file's header");
+        panel.diff.set_cursor(header, None);
+        press(&mut panel, none(), Keysym::c, &ctx);
+        assert!(panel.diff.editing.is_some(), "{:?}", panel.error);
+        type_text(&mut panel, "split it", &ctx);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        let comment = &panel.diff.review.comments[0];
+        assert!(comment.lines.is_empty());
+        assert_eq!(comment.text, "split it");
+        // Shown under the header, before the file's hunks.
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[header + 1], "> split it");
+        assert_eq!(panel.diff.outdated_count(), 0);
+        let Some(Outcome::Copy { text, .. }) = press(&mut panel, ctrl_shift(), Keysym::C, &ctx)
+        else {
+            panic!("not copied");
+        };
+        assert!(
+            text.contains("### `src/git.rs` (the whole file)\n\nsplit it\n"),
+            "{text}"
+        );
     }
 
     #[test]
