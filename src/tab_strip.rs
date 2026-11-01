@@ -1,5 +1,5 @@
 //! Input to the tab strip: presses on the tabs, the "+" button, the
-//! overflow chip, the inbox button and the theme switch; the pointer moving over them
+//! overflow chip, the inbox and problems buttons and the theme switch; the pointer moving over them
 //! (hover and tooltips); and their right-click menus (see `chrome::tabs`
 //! for what the strip shows).
 
@@ -36,6 +36,78 @@ pub fn inbox_tooltip(count: usize) -> String {
         1 => "Inbox · 1 item: agents, repos, pull requests, tickets".to_owned(),
         n => format!("Inbox · {n} items: agents, repos, pull requests, tickets"),
     }
+}
+
+/// What the problems button's tooltip says while it counts `count`.
+pub fn problems_tooltip(count: usize) -> String {
+    match count {
+        1 => "1 problem · click for what and where to fix it".to_owned(),
+        n => format!("{n} problems · click for what and where to fix them"),
+    }
+}
+
+/// How many characters of a problem's text a line of its menu holds.
+const PROBLEM_LINE: usize = 30;
+/// How many lines of its menu a problem takes at most.
+const PROBLEM_LINES: usize = 3;
+
+/// `text` in lines of at most `width` characters, broken between words
+/// (a longer word is cut), at most `most` of them: the last one ends in
+/// "…" when the text goes on.
+pub fn wrap_lines(text: &str, width: usize, most: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let used = line.chars().count();
+            let room = if used == 0 {
+                width
+            } else {
+                width.saturating_sub(used + 1)
+            };
+            if word.len() <= room {
+                if used > 0 {
+                    line.push(' ');
+                }
+                line.extend(word.iter());
+                break;
+            }
+            if used == 0 {
+                // Longer than a whole line: as much of it as fits.
+                let rest = word.split_off(width.max(1));
+                lines.push(word.into_iter().collect());
+                word = rest;
+            } else {
+                lines.push(std::mem::take(&mut line));
+            }
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.len() > most {
+        lines.truncate(most);
+        if let Some(last) = lines.last_mut() {
+            let kept: String = last.chars().take(width.saturating_sub(1)).collect();
+            *last = format!("{kept}\u{2026}");
+        }
+    }
+    lines
+}
+
+/// The problems button's menu: each of `problems`, in lines that can't be
+/// picked, then where to fix them, the settings file and the log (named
+/// by the file names `settings` and `log`, at the right).
+pub fn problems_menu_items(problems: &[&str], settings: &str, log: &str) -> Vec<MenuItem> {
+    let mut items: Vec<MenuItem> = problems
+        .iter()
+        .flat_map(|text| wrap_lines(text, PROBLEM_LINE, PROBLEM_LINES))
+        .map(|line| MenuItem::new(&line, MenuAction::OpenLog).enabled(false))
+        .collect();
+    items.push(MenuItem::new("Open settings", MenuAction::OpenSettings).hint(settings));
+    items.push(MenuItem::new("Open log", MenuAction::OpenLog).hint(log));
+    items
 }
 
 /// What the theme switch's tooltip says of `mode`, the look it gives
@@ -272,6 +344,7 @@ impl Gerdr {
             elsewhere,
             watch: self.focused_pull_request().map(|(_, _, watched)| watched),
             inbox: Some(inbox),
+            problems: Some(crate::problems::list().len()).filter(|n| *n > 0),
             plus: self.workspace().is_some(),
         };
         view.hover = self.tab_hover.over();
@@ -351,6 +424,22 @@ impl Gerdr {
         }
     }
 
+    /// The problems button's menu, at `anchor` (window coordinates): the
+    /// problems kept now, and where to fix them.
+    fn problems_menu(&self, anchor: Rectangle<i32, Logical>) -> MenuSpec {
+        let problems = crate::problems::list();
+        let texts: Vec<&str> = problems.iter().map(|p| p.text.as_str()).collect();
+        let name = |path: std::path::PathBuf| {
+            path.file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        };
+        let (settings, log) = (name(crate::config::config_file()), name(crate::log_path()));
+        MenuSpec {
+            anchor,
+            items: problems_menu_items(&texts, &settings, &log),
+        }
+    }
+
     /// The names of the workspaces not shown whose agent is blocked.
     fn blocked_elsewhere(&self) -> Vec<(usize, String)> {
         self.workspace_views()
@@ -393,8 +482,8 @@ impl Gerdr {
     /// button can be dragged to another place. "+" opens a terminal in a
     /// new tab, the "more tabs" chip shows the next tab that doesn't fit,
     /// the overflow chip switches to the next workspace that needs input,
-    /// the inbox button opens the inbox, and the switch at the right end
-    /// cycles the theme mode.
+    /// the inbox button opens the inbox, the problems button lists them,
+    /// and the switch at the right end cycles the theme mode.
     pub(crate) fn tab_strip_press(&mut self, x: i32, y: i32, button: u32) {
         let view = self.tab_strip_view();
         let size = self.tab_strip_rect().size;
@@ -433,6 +522,13 @@ impl Gerdr {
             (BTN_LEFT, Some(TabHit::Plus)) => self.new_tab(),
             (BTN_LEFT, Some(TabHit::Watch)) => self.toggle_watch(),
             (BTN_LEFT, Some(TabHit::Inbox)) => self.open_inbox(None),
+            (BTN_LEFT, Some(TabHit::Problems)) => {
+                let strip = self.tab_strip_rect();
+                if let Some(mut anchor) = self.tab_strip_layout(&view).problems {
+                    anchor.loc += strip.loc;
+                    self.open_menu(self.problems_menu(anchor));
+                }
+            }
             _ => {}
         }
     }
@@ -511,6 +607,9 @@ impl Gerdr {
                 };
                 Tooltip::new(&text, anchor(layout.watch?))
             }
+            TabHit::Problems => {
+                Tooltip::new(&problems_tooltip(view.problems?), anchor(layout.problems?))
+            }
             TabHit::Inbox => {
                 let tip = Tooltip::new(&inbox_tooltip(view.inbox?), anchor(layout.inbox?));
                 let key = self.keymap.help().key_of(Action::Inbox, 0);
@@ -521,7 +620,8 @@ impl Gerdr {
 
     /// The menu a right press at `pos` (window coordinates) in the tab
     /// strip opens, if any: a tab's, the "+" button's, the theme switch's,
-    /// or the "more tabs" chip's list of the tabs it holds.
+    /// the "more tabs" chip's list of the tabs it holds, or the problems
+    /// button's (as a left press opens it).
     pub(crate) fn tab_strip_menu(&self, pos: Point<f64, Logical>) -> Option<MenuSpec> {
         let view = self.tab_strip_view();
         let hit = self.tab_strip_hit_at(&view, pos)?;
@@ -569,6 +669,7 @@ impl Gerdr {
                 })
                 .filter(|spec| !spec.items.is_empty())
             }
+            TabHit::Problems => Some(self.problems_menu(anchor(layout.problems?))),
             TabHit::Prefix | TabHit::Watch | TabHit::Inbox => None,
         }
     }
@@ -578,7 +679,8 @@ impl Gerdr {
 mod tests {
     use super::{
         KeyHints, hidden_tab_items, inbox_tooltip, mode_tooltip, more_tooltip, next_after,
-        next_mode, overflow_tooltip, plus_menu_items, tab_key, tab_menu_items, theme_items,
+        next_mode, overflow_tooltip, plus_menu_items, problems_menu_items, problems_tooltip,
+        tab_key, tab_menu_items, theme_items, wrap_lines,
     };
     use crate::{chrome::ThemeMode, layout::Dir, menu::MenuAction};
 
@@ -709,6 +811,44 @@ mod tests {
             more_tooltip(&[(3, "zsh")]),
             "1 more tab: 4 zsh · click for the next, right-click for the list"
         );
+    }
+
+    #[test]
+    fn problem_texts_wrap_between_words_and_end_in_an_ellipsis() {
+        assert_eq!(
+            wrap_lines("Settings: line 4 has an unknown key", 16, 3),
+            ["Settings: line 4", "has an unknown", "key"]
+        );
+        assert_eq!(
+            wrap_lines("one two three four", 9, 2),
+            ["one two", "three\u{2026}"]
+        );
+        // A word longer than a line is cut.
+        assert_eq!(
+            wrap_lines("~/.config/gerdr/x", 8, 3),
+            ["~/.confi", "g/gerdr/", "x"]
+        );
+        assert!(wrap_lines("  ", 8, 3).is_empty());
+    }
+
+    #[test]
+    fn the_problems_menu_lists_them_then_where_to_fix_them() {
+        let items = problems_menu_items(&["herdr isn't installed"], "config.toml", "gerdr.log");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["herdr isn't installed", "Open settings", "Open log"]
+        );
+        assert!(!items[0].enabled);
+        assert_eq!(items[1].action, MenuAction::OpenSettings);
+        assert_eq!(items[1].hint.as_deref(), Some("config.toml"));
+        assert_eq!(items[2].action, MenuAction::OpenLog);
+        assert!(items[1].enabled && items[2].enabled);
+        assert_eq!(
+            problems_tooltip(1),
+            "1 problem · click for what and where to fix it"
+        );
+        assert!(problems_tooltip(3).starts_with("3 problems"));
     }
 
     #[test]

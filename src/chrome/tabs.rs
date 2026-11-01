@@ -334,6 +334,8 @@ pub enum TabHit {
     Watch,
     /// The inbox button.
     Inbox,
+    /// The button listing what went wrong (see `crate::problems`).
+    Problems,
 }
 
 /// Everything the tab strip is drawn from.
@@ -360,6 +362,9 @@ pub struct TabStripView {
     /// How many items the inbox button counts, its badge; `None` hides the
     /// button.
     pub inbox: Option<usize>,
+    /// How many problems the problems button counts; `None` hides it (there
+    /// are none).
+    pub problems: Option<usize>,
     /// A workspace is shown, so the "+" can open a tab in it, even with
     /// no tabs left.
     pub plus: bool,
@@ -380,6 +385,7 @@ impl TabStripView {
             elsewhere: (0, 0),
             watch: None,
             inbox: None,
+            problems: None,
             plus: true,
         }
     }
@@ -396,6 +402,7 @@ impl TabStripView {
             self.overflow(),
             self.watch.is_some(),
             self.inbox.is_some(),
+            self.problems.is_some(),
         )
     }
 
@@ -471,6 +478,8 @@ pub struct TabLayout {
     pub watch: Option<Rect>,
     /// The inbox button, when shown.
     pub inbox: Option<Rect>,
+    /// The problems button, left of the inbox button, when shown.
+    pub problems: Option<Rect>,
     pub toggle: Rect,
 }
 
@@ -490,6 +499,9 @@ impl TabLayout {
         }
         if self.inbox.as_ref().is_some_and(inside) {
             return Some(TabHit::Inbox);
+        }
+        if self.problems.as_ref().is_some_and(inside) {
+            return Some(TabHit::Problems);
         }
         if self.overflow.as_ref().is_some_and(inside) {
             return Some(TabHit::Overflow);
@@ -533,13 +545,14 @@ pub fn tab_layout(
     watch: bool,
     inbox: bool,
 ) -> TabLayout {
-    tab_layout_at(count, 0, true, size, prefix, overflow, watch, inbox)
+    tab_layout_at(count, 0, true, size, prefix, overflow, watch, inbox, false)
 }
 
 /// The layout of a strip of `size` holding `count` tabs, `active` among
 /// them, with the "+" when `plus`, the PREFIX badge when `prefix`, the
-/// overflow chip when `overflow`, the watch button when `watch` and the
-/// inbox button, by the switch, when `inbox`. The chips, the buttons and
+/// overflow chip when `overflow`, the watch button when `watch`, the
+/// inbox button, by the switch, when `inbox` and the problems button left
+/// of it when `problems`. The chips, the buttons and
 /// the switch keep the right end, the PREFIX badge's room kept whether it
 /// shows or not, so it moves nothing; the tabs share what is left of the
 /// "+", at most `TAB_MAX_WIDTH` each. Past `TAB_MIN_WIDTH` each, those
@@ -555,12 +568,17 @@ pub fn tab_layout_at(
     overflow: bool,
     watch: bool,
     inbox: bool,
+    problems: bool,
 ) -> TabLayout {
     let (width, height) = (size.w, size.h);
     let top = (height - PILL) / 2;
     let toggle = Rectangle::new((width - EDGE - PILL, top).into(), (PILL, PILL).into());
     let mut right = toggle.loc.x;
     let inbox = inbox.then(|| {
+        right -= CHIP_GAP + PILL;
+        Rectangle::new((right, top).into(), (PILL, PILL).into())
+    });
+    let problems = problems.then(|| {
         right -= CHIP_GAP + PILL;
         Rectangle::new((right, top).into(), (PILL, PILL).into())
     });
@@ -639,6 +657,7 @@ pub fn tab_layout_at(
         prefix,
         watch,
         inbox,
+        problems,
         toggle,
     }
 }
@@ -684,6 +703,15 @@ fn ellipsis(x: f32, y: f32, s: f32) -> f32 {
         .into_iter()
         .map(|cx: f32| (x - cx * s).hypot(y) - 1.4 * s)
         .fold(f32::MAX, f32::min)
+}
+
+/// Signed distance to a "!" in a ring centred on the origin: something
+/// went wrong.
+fn alert(x: f32, y: f32, s: f32) -> f32 {
+    let ring = (x.hypot(y) - 7.0 * s).abs() - STROKE * s;
+    let bar = segment(x, y, 0.0, -3.6 * s, 0.0, 0.8 * s) - 1.1 * s;
+    let dot = x.hypot(y - 3.4 * s) - 1.2 * s;
+    ring.min(bar).min(dot)
 }
 
 /// The theme mode's icon, as the switch shows it.
@@ -927,6 +955,11 @@ impl Painter {
             self.inbox_button(&mut c, button, count, lit(TabHit::Inbox), alpha, scale, p);
         }
 
+        if let (Some(button), Some(count)) = (layout.problems, view.problems) {
+            let lit = lit(TabHit::Problems);
+            self.problems_button(&mut c, button, count, lit, alpha, scale, p);
+        }
+
         if let Some(badge) = layout.prefix {
             let (bx, by, bw, bh) = super::rect_px(badge, scale);
             c.rounded(bx, by, bw, bh, bh / 2.0, p.accent);
@@ -1029,6 +1062,30 @@ impl Painter {
             return;
         }
         let colors = (p.tab_bar, p.accent, p.on_accent);
+        self.count_badge(c, rect, count, 99, BADGE_OUT, colors, scale);
+    }
+
+    /// The problems button at `rect`: a "!" in a ring in the warning
+    /// colour, lit while `lit` (fading in by `alpha`), with a badge saying
+    /// how many there are (`count`) on its top right corner.
+    #[allow(clippy::too_many_arguments)]
+    fn problems_button(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        count: usize,
+        lit: bool,
+        alpha: f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        if lit {
+            let fill = mix(p.tab_bar, p.element, alpha);
+            self.pill(c, rect, PILL_RADIUS, fill, scale);
+        }
+        icon_sdf(c, rect, scale, p.warning, |x, y| alert(x, y, s));
+        let colors = (p.tab_bar, p.warning, p.on_accent);
         self.count_badge(c, rect, count, 99, BADGE_OUT, colors, scale);
     }
 
@@ -1455,7 +1512,7 @@ mod tests {
         let (x, y) = (none.plus.loc.x + 2, none.plus.loc.y + 2);
         assert_eq!(none.hit(x, y), Some(TabHit::Plus));
         assert_eq!(none.hit(size.w - EDGE - 2, 10), Some(TabHit::Toggle));
-        let bare = tab_layout_at(0, 0, false, size, false, false, false, false);
+        let bare = tab_layout_at(0, 0, false, size, false, false, false, false, false);
         assert_eq!(bare.hit(x, y), None);
     }
 
@@ -1463,7 +1520,7 @@ mod tests {
     fn tabs_that_dont_fit_go_behind_the_more_chip_but_the_active_one() {
         let size = (400, 36).into();
         for active in [0, 1, 7, 19] {
-            let l = tab_layout_at(20, active, true, size, false, false, false, false);
+            let l = tab_layout_at(20, active, true, size, false, false, false, false, false);
             let shown: Vec<usize> = (0..20).filter(|&i| l.tabs[i].size.w > 0).collect();
             assert!(!shown.is_empty() && shown.contains(&active), "{active}");
             assert_eq!(l.hidden().len(), 20 - shown.len());
@@ -1660,6 +1717,28 @@ mod tests {
         assert_eq!(l.hit(x, watch.loc.y - 1), None);
         let (x, y) = mid(l.overflow.unwrap());
         assert_eq!(l.hit(x, y), Some(TabHit::Overflow));
+    }
+
+    #[test]
+    fn the_problems_button_sits_left_of_the_inbox_while_there_are_some() {
+        let painter = Painter::new();
+        let size = strip(Density::Comfortable);
+        let mut view = TabStripView::plain(vec![TabView::default(); 3], 0, false, ThemeMode::Dark);
+        view.inbox = Some(0);
+        assert_eq!(view.layout(size).problems, None);
+        view.problems = Some(2);
+        let l = view.layout(size);
+        let (button, inbox) = (l.problems.expect("a problems button"), l.inbox.unwrap());
+        assert_eq!(button.size, (PILL, PILL).into());
+        assert_eq!(button.loc.x + PILL + CHIP_GAP, inbox.loc.x);
+        let mid = (button.loc.x + PILL / 2, button.loc.y + PILL / 2);
+        assert_eq!(l.hit(mid.0, mid.1), Some(TabHit::Problems));
+        // The "!" in the warning colour, in both looks, at its bar.
+        for theme in [Theme::Dark, Theme::Light] {
+            let buffer = painter.tab_strip_view(&view, theme, size, 2.0);
+            let at = pixel(buffer, 2 * size.w, 2 * mid.0, 2 * mid.1 - 4);
+            assert_eq!(at, theme.palette().warning, "{theme:?}");
+        }
     }
 
     #[test]
