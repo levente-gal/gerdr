@@ -1,18 +1,29 @@
 //! The confirm dialog over everything: whether to do something that can't
-//! be undone (see `crate::confirm`).
+//! be undone (see `crate::confirm`). Also the look every modal dialog's
+//! buttons share (`DialogButton`), and the keys a dialog takes besides
+//! them, said at the left of its buttons (`Painter::dialog_keys`).
 
 use super::{
-    BUTTON_RADIUS, FONT_SIZE, HELP_RADIUS, LABEL_FONT_SIZE, Painter, Palette, QUIT_BODY,
-    QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW, band,
-    focus_ring, mix, phys, rect_px,
+    BUTTON_RADIUS, Canvas, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter,
+    Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
+    Rect, SHADOW, band, focus_ring, hint_spots, mix, phys, rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-/// The dialog's width.
-const CONFIRM_WIDTH: i32 = 560;
 /// The widths of Cancel and of the button doing it.
 const BUTTONS: [i32; 2] = [84, 140];
+
+/// How a dialog's button looks: Cancel and the like plain, the action
+/// that only adds in the accent, one that stops or deletes in the error
+/// colour, one that can't be pressed now dimmed (still readable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DialogButton {
+    Plain,
+    Primary,
+    Destructive,
+    Off,
+}
 
 /// What the confirm dialog shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,7 +52,7 @@ pub struct ConfirmLayout {
 pub fn confirm_layout(size: Size<i32, Logical>) -> ConfirmLayout {
     let height =
         2 * QUIT_PADDING + QUIT_TITLE + QUIT_LINE_GAP + QUIT_BODY + 2 * QUIT_LINE_GAP + QUIT_BUTTON;
-    let width = CONFIRM_WIDTH.min(size.w);
+    let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
             ((size.w - width) / 2).max(0),
@@ -78,6 +89,84 @@ pub fn confirm_layout(size: Size<i32, Logical>) -> ConfirmLayout {
 }
 
 impl Painter {
+    /// A dialog's button labelled `label` in `rect` (buffer coordinates),
+    /// looking as `look` says; `hovered` lightens it, `focused` rings it
+    /// (in the error colour for a destructive one).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn dialog_button(
+        &self,
+        c: &mut Canvas,
+        label: &str,
+        rect: Rect,
+        look: DialogButton,
+        (hovered, focused): (bool, bool),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let (b, r) = ((scale.round() as f32).max(1.0), BUTTON_RADIUS * s);
+        let hovered = hovered && look != DialogButton::Off;
+        if focused {
+            let ring = if look == DialogButton::Destructive {
+                p.error
+            } else {
+                p.accent
+            };
+            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, ring);
+        }
+        let color = match look {
+            DialogButton::Primary | DialogButton::Destructive => {
+                let base = if look == DialogButton::Primary {
+                    p.accent
+                } else {
+                    p.error
+                };
+                let fill = if hovered {
+                    mix(base, p.text, 0.12)
+                } else {
+                    base
+                };
+                c.rounded(x, y, w, h, r, fill);
+                p.on_accent
+            }
+            DialogButton::Plain | DialogButton::Off => {
+                let fill = if hovered { p.selected } else { p.element };
+                c.rounded(x, y, w, h, r, p.border);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                if look == DialogButton::Off {
+                    p.muted
+                } else {
+                    p.text
+                }
+            }
+        };
+        self.centered(c, label, FONT_SIZE, rect, scale, color);
+    }
+
+    /// The keys a dialog takes besides its buttons (`hints`, keycaps then
+    /// what each does) from the left of `row` (buffer coordinates), the
+    /// band its buttons sit in, up to `end`: as many as fit.
+    pub(super) fn dialog_keys(
+        &self,
+        c: &mut Canvas,
+        hints: &[(&str, &str)],
+        row: Rect,
+        end: i32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let room = Rectangle::new(row.loc, ((end - row.loc.x).max(0), row.size.h).into());
+        let mut spots = hint_spots(hints, room);
+        // Centred by `hint_spots`; moved to the left edge, as the
+        // dialog's text is.
+        let shift = spots.first().map_or(0, |(_, spot)| spot.loc.x - row.loc.x);
+        for (_, spot) in &mut spots {
+            spot.loc.x -= shift;
+        }
+        self.hints(c, hints, &spots, None, scale, p);
+    }
+
     /// The confirm dialog for an output of `size`, inside a margin of
     /// `SHADOW` holding its drop shadow: its title, what it does, and
     /// Cancel and the button doing it, in the error colour.
@@ -90,9 +179,7 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = confirm_layout(size);
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
         let shift = |r: Rect| {
             Rectangle::new(
@@ -109,30 +196,14 @@ impl Painter {
             self.text(&mut c, text, font, x, end, band(rect, scale), scale, color);
         }
 
-        let r = BUTTON_RADIUS * s;
-        let b = px(1).max(1) as f32;
         for (i, rect) in layout.buttons.iter().enumerate() {
-            let rect = shift(*rect);
-            let (x, y, w, h) = rect_px(rect, scale);
-            let hovered = view.hover == Some(i);
-            if view.selected == i {
-                focus_ring(&mut c, rect, BUTTON_RADIUS, p.elevated, scale, p.error);
-            }
-            let (label, color) = if i == 1 {
-                let fill = if hovered {
-                    mix(p.error, p.text, 0.12)
-                } else {
-                    p.error
-                };
-                c.rounded(x, y, w, h, r, fill);
-                (view.go, p.on_accent)
+            let (label, look) = if i == 1 {
+                (view.go, DialogButton::Destructive)
             } else {
-                let fill = if hovered { p.selected } else { p.element };
-                c.rounded(x, y, w, h, r, p.border);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                ("Cancel", p.text)
+                ("Cancel", DialogButton::Plain)
             };
-            self.centered(&mut c, label, FONT_SIZE, rect, scale, color);
+            let state = (view.hover == Some(i), view.selected == i);
+            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
         }
         c.into_buffer(false)
     }

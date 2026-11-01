@@ -1,10 +1,10 @@
 //! The quit dialog over everything; also asked when switching projects.
 
 use super::{
-    BUTTON_RADIUS, CHECKBOX_GAP, CHECKBOX_ROW, Check, FONT_SIZE, HELP_RADIUS, LABEL_FONT_SIZE,
-    Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_BUTTONS, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, QUIT_WIDTH, Rect, SHADOW, SWITCH_BUTTONS, band, focus_ring, mix,
-    phys, rect_px,
+    CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, DialogButton, FONT_SIZE, LABEL_FONT_SIZE,
+    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_BUTTONS,
+    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, SWITCH_BUTTONS,
+    band, mix, phys, rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -64,6 +64,28 @@ pub struct QuitLayout {
     pub buttons: Vec<Rect>,
 }
 
+impl QuitView {
+    /// Whether going on stops something: a row other than "Don't ask
+    /// again" is checked. Then its button is painted as destructive.
+    pub fn stops_any(&self) -> bool {
+        let stops = if self.switch_to.is_some() {
+            &self.rows[..]
+        } else {
+            &self.rows[..self.rows.len().saturating_sub(1)]
+        };
+        stops.iter().any(|row| row.checked)
+    }
+}
+
+/// The keys the quit dialog takes besides its buttons, said by them.
+pub fn quit_keys(switching: bool) -> &'static [(&'static str, &'static str)] {
+    if switching {
+        &[("S", "switch"), ("N", "new gerdr")]
+    } else {
+        &[("Q", "quit"), ("Space", "check")]
+    }
+}
+
 /// The buttons' labels and widths.
 fn buttons(switching: bool) -> &'static [(&'static str, i32)] {
     if switching {
@@ -85,7 +107,7 @@ pub fn quit_layout(size: Size<i32, Logical>, rows: usize, switching: bool) -> Qu
         - ROW_GAP
         + ROWS_END
         + QUIT_BUTTON;
-    let width = QUIT_WIDTH.min(size.w);
+    let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
             ((size.w - width) / 2).max(0),
@@ -148,8 +170,7 @@ impl Painter {
         let switching = view.switch_to.is_some();
         let layout = quit_layout(size, view.rows.len(), switching);
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
-        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
         let shift = |r: Rect| {
@@ -179,12 +200,12 @@ impl Painter {
         let (body_x, body_end) = phys(body, scale);
         let body_text = if switching {
             format!(
-                "Switch stops what is checked of \u{201c}{}\u{201d}.",
+                "Switching stops what is checked of \u{201c}{}\u{201d}",
                 view.project
             )
         } else {
             format!(
-                "Stop what is checked of \u{201c}{}\u{201d}; the rest keeps running.",
+                "Stop what is checked of \u{201c}{}\u{201d}; the rest keeps running",
                 view.project
             )
         };
@@ -201,7 +222,7 @@ impl Painter {
 
         // A row per checkbox: lit under the keyboard's cursor or the
         // pointer, its box, the label, then its detail.
-        let r = BUTTON_RADIUS * s;
+        let r = ROW_HIGHLIGHT_RADIUS * s;
         for (i, (rect, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
             let rect = shift(*rect);
             let hovered = view.hover == Some(QuitHit::Row(i));
@@ -243,32 +264,31 @@ impl Painter {
             );
         }
 
-        // The buttons; the last, the default, in the accent.
-        let b = px(1).max(1) as f32;
+        // The keys besides the buttons, at their left; then the buttons:
+        // Quit or Switch in the error colour while it stops something,
+        // else in the accent; Open in new gerdr, which stops nothing, in
+        // the accent.
+        let first = shift(layout.buttons[0]);
+        let keys_row = Rectangle::new(
+            (shift(layout.body).loc.x, first.loc.y).into(),
+            (0, first.size.h).into(),
+        );
+        let keys_end = first.loc.x - QUIT_BUTTON_GAP;
+        self.dialog_keys(&mut c, quit_keys(switching), keys_row, keys_end, scale, p);
+        let go = if view.stops_any() {
+            DialogButton::Destructive
+        } else {
+            DialogButton::Primary
+        };
         let labels = buttons(switching);
-        let last = labels.len() - 1;
         for (i, (rect, (label, _))) in layout.buttons.iter().zip(labels).enumerate() {
-            let rect = shift(*rect);
-            let (x, y, w, h) = rect_px(rect, scale);
-            let hovered = view.hover == Some(QuitHit::Button(i));
-            if view.selected == i {
-                focus_ring(&mut c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
-            }
-            let color = if i == last {
-                let fill = if hovered {
-                    mix(p.accent, p.text, 0.12)
-                } else {
-                    p.accent
-                };
-                c.rounded(x, y, w, h, r, fill);
-                p.on_accent
-            } else {
-                let fill = if hovered { p.selected } else { p.element };
-                c.rounded(x, y, w, h, r, p.border);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                p.text
+            let look = match i {
+                0 => DialogButton::Plain,
+                1 => go,
+                _ => DialogButton::Primary,
             };
-            self.centered(&mut c, label, FONT_SIZE, rect, scale, color);
+            let state = (view.hover == Some(QuitHit::Button(i)), view.selected == i);
+            self.dialog_button(&mut c, label, shift(*rect), look, state, scale, p);
         }
         c.into_buffer(false)
     }

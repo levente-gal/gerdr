@@ -149,7 +149,10 @@ fn stop_question(name: &str, session: bool, apps: &[String]) -> (String, String)
     let title = format!("Stop \u{201c}{name}\u{201d}?");
     let body = match (session, apps) {
         (true, []) => "Its terminals and agents stop".to_owned(),
-        (true, apps) => format!("Its terminals and agents stop, and {} closes", apps.join(", ")),
+        (true, apps) => format!(
+            "Its terminals and agents stop, and {} closes",
+            apps.join(", ")
+        ),
         (false, apps) => format!("{} closes", apps.join(", ")),
     };
     (title, body)

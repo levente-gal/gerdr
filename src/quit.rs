@@ -5,12 +5,16 @@
 //! without asking; the quit action (prefix, Shift+Q) asks again regardless.
 //!
 //! Switching to another project asks the same of the one shown, or to keep
-//! it running and open the other in a new gerdr (the default).
+//! it running and open the other in a new gerdr.
+//!
+//! Quit (Switch) is selected when it stops nothing; when it stops what is
+//! checked it is painted in the error colour and Cancel is selected
+//! instead, so Enter never stops a session by a slip.
 //!
 //! Up/Down move between the checkboxes and Space checks one; Left/Right
 //! and Tab move between the buttons, Enter presses the selected one, Q
 //! presses Quit (N and S, Open in new gerdr and Switch, when switching),
-//! Esc cancels.
+//! Esc cancels. The dialog says these keys by its buttons.
 
 use std::{os::unix::process::CommandExt, path::PathBuf, process::Stdio};
 
@@ -27,6 +31,8 @@ use crate::{
     toast::Level,
 };
 
+/// Cancel, the first.
+const CANCEL: usize = 0;
 /// Quit, or Switch when switching.
 const GO: usize = 1;
 /// Open in new gerdr, when switching.
@@ -63,10 +69,11 @@ pub struct QuitDialog {
 }
 
 impl QuitDialog {
-    /// Asking to quit, with `stops` checked: Quit selected.
+    /// Asking to quit, with `stops` checked: Quit selected unless it
+    /// stops something, Cancel then.
     fn quitting(stops: Stops, apps: Vec<String>, dont_ask: bool) -> Self {
         Self {
-            selected: GO,
+            selected: if stops.any() { CANCEL } else { GO },
             stops,
             dont_ask,
             apps,
@@ -76,11 +83,10 @@ impl QuitDialog {
         }
     }
 
-    /// Asking about `switch`, with `stops` checked: Open in new gerdr
-    /// selected, as the safe choice.
+    /// Asking about `switch`, with `stops` checked: Switch selected,
+    /// what was asked for, unless it stops something, Cancel then.
     fn switching(stops: Stops, apps: Vec<String>, switch: Switch) -> Self {
         Self {
-            selected: NEW_GERDR,
             switch: Some(switch),
             ..Self::quitting(stops, apps, false)
         }
@@ -483,11 +489,23 @@ mod tests {
             apps: false,
         };
         let mut dialog = QuitDialog::quitting(stops, cursor(), false);
+        // It stops the session: Enter cancels, Q quits.
+        assert_eq!(dialog.selected, CANCEL);
+        assert_eq!(press(&mut dialog, Keysym::Return), Some(Outcome::Cancel));
+        assert_eq!(
+            press(&mut dialog, Keysym::q),
+            Some(Outcome::Go {
+                stops,
+                remember: false
+            })
+        );
+        // Stopping nothing, Enter quits.
+        let mut dialog = QuitDialog::quitting(Stops::default(), cursor(), false);
         assert_eq!(dialog.selected, GO);
         assert_eq!(
             press(&mut dialog, Keysym::Return),
             Some(Outcome::Go {
-                stops,
+                stops: Stops::default(),
                 remember: false
             })
         );
@@ -554,7 +572,15 @@ mod tests {
             apps: true,
         };
         let mut dialog = QuitDialog::switching(stops, cursor(), switch());
-        assert_eq!(press(&mut dialog, Keysym::Return), Some(Outcome::NewGerdr));
+        assert_eq!(press(&mut dialog, Keysym::Return), Some(Outcome::Cancel));
+        let mut calm = QuitDialog::switching(Stops::default(), cursor(), switch());
+        assert_eq!(
+            press(&mut calm, Keysym::Return),
+            Some(Outcome::Go {
+                stops: Stops::default(),
+                remember: false
+            })
+        );
         assert_eq!(press(&mut dialog, Keysym::q), None);
         assert_eq!(press(&mut dialog, Keysym::n), Some(Outcome::NewGerdr));
         assert_eq!(
@@ -565,7 +591,7 @@ mod tests {
             })
         );
         press(&mut dialog, Keysym::Tab);
-        assert_eq!(dialog.selected, 0);
+        assert_eq!(dialog.selected, GO);
     }
 
     #[test]
