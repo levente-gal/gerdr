@@ -316,9 +316,10 @@ pub struct Panel {
     pub(crate) grouping: Grouping,
     /// Folders folded, by (root, path).
     pub(crate) folded_dirs: HashSet<(PathBuf, String)>,
-    /// The repositories that had something to do since the panel opened:
+    /// The repositories that had something to do while a batch ran:
     /// they stay with the others, under no `Clean` heading, so that a
-    /// line doesn't jump there as a batch commits and pushes it.
+    /// line doesn't jump there as a batch commits and pushes it. Those
+    /// with nothing left to do go there once no batch runs.
     pub(crate) stirred: HashSet<PathBuf>,
     /// The batch chips clicked away, by (batch id, root): the next batch
     /// shows its own.
@@ -1948,7 +1949,7 @@ impl Panel {
     /// unfolded unless they have `FOLD_FILES` or more, the first selected.
     pub fn new(items: &[RepoItem]) -> Panel {
         let mut panel = Panel::default();
-        panel.stir(items);
+        panel.stir(items, false);
         let first = panel.rows(items).first().and_then(|r| r.item());
         panel.selected = first.map(|k| Selected::Repo(items[k].root.clone()));
         panel.diff.rebuild(&sections(items));
@@ -2051,14 +2052,19 @@ impl Panel {
             && status.branch.is_some()
     }
 
-    /// Whether `item` goes under the `Clean` heading: it has had nothing
-    /// to do since the panel opened.
+    /// Whether `item` goes under the `Clean` heading: it has nothing to
+    /// do, and had nothing while the batch running now ran.
     fn is_clean(&self, item: &RepoItem) -> bool {
         Panel::quiet(item) && !self.stirred.contains(&item.root)
     }
 
-    /// Remember the repositories of `items` with something to do.
-    fn stir(&mut self, items: &[RepoItem]) {
+    /// Remember the repositories of `items` with something to do; with no
+    /// batch `running`, forget those with nothing left to do, so that
+    /// they go under the `Clean` heading.
+    fn stir(&mut self, items: &[RepoItem], running: bool) {
+        if !running {
+            self.stirred.clear();
+        }
         let busy = items.iter().filter(|i| !Panel::quiet(i));
         self.stirred.extend(busy.map(|i| i.root.clone()));
     }
@@ -3118,7 +3124,7 @@ impl Panel {
         self.checked_repos.retain(|r| roots.contains(r.as_path()));
         self.unfolded.retain(|r| roots.contains(r.as_path()));
         self.folded.retain(|r| roots.contains(r.as_path()));
-        self.stir(items);
+        self.stir(items, ctx.batch.is_some_and(|b| !b.finished()));
         self.checked_files.retain(|(root, path)| {
             items
                 .iter()
@@ -6556,11 +6562,20 @@ mod tests {
         assert_eq!(tree(&panel, &ctx).last().unwrap(), "Clean · 1");
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert_eq!(tree(&panel, &ctx).last().unwrap(), "herdr");
-        // Committed and pushed, zed stays where it was.
+        // Committed and pushed while the batch runs on, zed stays where
+        // it was.
         let mut done = items.clone();
         done[2].status.changes.clear();
+        let running = batch(
+            BatchKind::Commit {
+                msg: "m".into(),
+                push: true,
+            },
+            vec![run("zed", RunState::Done), run("gerdr", RunState::Queued)],
+        );
         let ctx = super::Ctx {
             items: &done,
+            batch: Some(&running),
             ..ctx
         };
         panel.refresh(&ctx);
@@ -6573,6 +6588,20 @@ mod tests {
                 "zed",
                 "Clean · 1",
                 "herdr"
+            ]
+        );
+        // The batch over, zed goes under the heading.
+        let ctx = super::Ctx { batch: None, ..ctx };
+        panel.refresh(&ctx);
+        assert_eq!(
+            tree(&panel, &ctx),
+            [
+                "gerdr",
+                "src/git.rs",
+                "notes.md",
+                "Clean · 2",
+                "herdr",
+                "zed"
             ]
         );
         // With nothing to do anywhere, there is no heading.
