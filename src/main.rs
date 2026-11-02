@@ -30,6 +30,8 @@ mod feature;
 mod features;
 mod feature_agents;
 mod feature_build;
+mod feature_diff;
+mod feature_review;
 mod doc_review;
 mod frecency;
 mod find;

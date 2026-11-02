@@ -859,6 +859,8 @@ mod tests {
             runs: Default::default(),
             setup: None,
             verify: None,
+            review: None,
+            viewed: Default::default(),
             history: Vec::new(),
         }
     }

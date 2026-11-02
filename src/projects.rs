@@ -330,6 +330,10 @@ pub struct Workflow {
     /// `feature::verify::TIMEOUT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_timeout: Option<u64>,
+    /// Let AI review run with the same agent as Build; by default gerdr
+    /// refuses, as a model reviewing its own code misses what it missed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_same_reviewer: bool,
 }
 
 impl Workflow {
@@ -341,6 +345,7 @@ impl Workflow {
             && self.setup.is_empty()
             && self.verify.is_empty()
             && self.verify_timeout.is_none()
+            && !self.allow_same_reviewer
     }
 }
 

@@ -1401,7 +1401,7 @@ impl Gerdr {
 
     /// Mark bound stage `stage` of feature `slug` done once its code is
     /// read off the thread (see `feature_read`).
-    fn read_and_tick(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn read_and_tick(&mut self, project: &str, slug: &str, stage: Stage) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -1639,6 +1639,8 @@ impl Gerdr {
             runs: Default::default(),
             setup: None,
             verify: None,
+            review: None,
+            viewed: Default::default(),
         };
         self.features
             .all
@@ -2892,6 +2894,8 @@ pub(crate) mod tests {
             runs: Default::default(),
             setup: None,
             verify: None,
+            review: None,
+            viewed: Default::default(),
         }
     }
 
