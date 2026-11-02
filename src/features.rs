@@ -85,8 +85,9 @@ pub struct Features {
     done: Option<channel::Sender<Done>>,
 }
 
-/// How often the patch watch looks: the feature shown is probed this
-/// often, the others every `WATCH_EVERY`.
+/// How often the patch watch looks: the feature shown, and one whose
+/// squash is under way, are probed this often, the others every
+/// `WATCH_EVERY`.
 const PANEL_EVERY: Duration = Duration::from_secs(5);
 const WATCH_EVERY: Duration = Duration::from_secs(30);
 
@@ -656,6 +657,18 @@ fn watched(feature: &Feature) -> bool {
         && (feature.marks.keys().any(|s| s.bound()) || feature.shipping.squash_at.is_some())
 }
 
+/// How often the patch watch probes watched `feature` while the panel
+/// shows another: as often as the one shown while its squash is under
+/// way, as the user waits on it in its tab (and the panel closed to show
+/// that tab), else every `WATCH_EVERY`.
+fn watch_every(feature: &Feature) -> Duration {
+    if feature.shipping.squash_at.is_some() {
+        PANEL_EVERY
+    } else {
+        WATCH_EVERY
+    }
+}
+
 /// The label of what removes `feature`'s worktrees: abandoning it while
 /// open, removing them once done.
 pub fn remove_label(feature: &Feature) -> &'static str {
@@ -1013,7 +1026,8 @@ impl Gerdr {
     // ------------------------------------------------------ patch watch
 
     /// Start the patch watch, once: every `PANEL_EVERY` it probes the
-    /// feature shown, and the watched ones not probed for `WATCH_EVERY`.
+    /// feature shown, and the watched ones not probed for as long as
+    /// `watch_every` says.
     fn watch_features(&mut self) {
         if self.features.watching {
             return;
@@ -1037,7 +1051,7 @@ impl Gerdr {
         }
         for (project, all) in &self.features.all {
             for feature in all.iter().filter(|f| watched(f)) {
-                due.push((project.clone(), feature.slug.clone(), WATCH_EVERY));
+                due.push((project.clone(), feature.slug.clone(), watch_every(feature)));
             }
         }
         let now = Instant::now();
@@ -2906,6 +2920,11 @@ pub(crate) mod tests {
         let mut squashing = feature("c", vec![repo("api", true)], 1);
         squashing.shipping.squash_at = Some(1);
         assert!(watched(&squashing));
+        assert_eq!(watch_every(&squashing), PANEL_EVERY);
+        assert_eq!(
+            watch_every(&feature("b", vec![repo("api", true)], 3)),
+            WATCH_EVERY
+        );
         let mut done = feature("d", vec![repo("api", true)], 8);
         done.status = Status::Done;
         assert!(!watched(&done));
