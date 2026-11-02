@@ -959,7 +959,7 @@ impl Gerdr {
             Item::new(
                 ItemIcon::Command,
                 "T3 Code",
-                format!("its agents' threads, for {}", ws.name),
+                format!("its agents' threads, in {}", ws.name),
                 Target::T3(w),
             )
         });

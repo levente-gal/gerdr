@@ -554,8 +554,8 @@ impl Gerdr {
         let summary = match (stop, elsewhere) {
             (true, None) => format!("{label} stopped"),
             (true, Some(name)) => format!("{name} · {label} stopped"),
-            (false, None) => format!("{label}: error"),
-            (false, Some(name)) => format!("{name} · {label}: error"),
+            (false, None) => format!("{label} printed an error"),
+            (false, Some(name)) => format!("{name} · {label} printed an error"),
         };
         let body = match (said, count) {
             (Some(said), _) => said,
