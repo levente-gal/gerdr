@@ -1868,11 +1868,11 @@ mod tests {
         assert!(is_cli_agent(&cli));
         let alias = args(&format!("agent {versions}/index.js --model sonnet"));
         assert!(is_cli_agent(&alias));
-        let worker = args(&format!(
+        let worker = args(
             "/home/u/p/agent-cli/.local/bin/cursor-agent --use-system-ca \
              /home/u/p/agent-cli/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/index.js \
-             --endpoint https://api2.cursor.sh worker start --worker-dir /home/u/w"
-        ));
+             --endpoint https://api2.cursor.sh worker start --worker-dir /home/u/w",
+        );
         assert!(!is_cli_agent(&worker));
         assert!(!is_cli_agent(&args(
             "/usr/share/cursor/cursor --type=utility"
