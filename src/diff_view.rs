@@ -1087,6 +1087,24 @@ impl DiffView {
         self.follow_editor(ctx);
     }
 
+    /// Whether a finding's dismissal is being written with no reason yet.
+    fn reason_missing(&self) -> bool {
+        self.editing
+            .as_ref()
+            .is_some_and(|e| e.dismiss.is_some() && e.field.trim().is_empty())
+    }
+
+    /// Enter, Save or Dismiss in the editor: keep what is written, as
+    /// `save_comment` does; a dismissal with no reason stays open to be
+    /// written, or what is typed next would go to the diff as keys.
+    fn submit_comment(&mut self, ctx: &Ctx) {
+        if self.reason_missing() {
+            self.signals.error = Some(Some(NO_REASON.into()));
+            return;
+        }
+        self.save_comment(ctx);
+    }
+
     /// Keep the comment being written: a comment written before, emptied,
     /// is deleted.
     fn save_comment(&mut self, ctx: &Ctx) {
@@ -1346,8 +1364,19 @@ impl DiffView {
             return self.copy(ctx);
         }
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
-        if enter && (plain || only_ctrl) || sym == Keysym::Escape && plain {
-            self.save_comment(ctx);
+        if enter && (plain || only_ctrl) {
+            self.submit_comment(ctx);
+            return None;
+        }
+        if sym == Keysym::Escape && plain {
+            // Esc with no reason keeps the finding, as the editor says:
+            // nothing to warn about.
+            if self.reason_missing() {
+                self.editing = None;
+                self.build_rows(ctx.sections, self.diff_anchor());
+            } else {
+                self.save_comment(ctx);
+            }
             return None;
         }
         let field = &mut self.editing.as_mut()?.field;
@@ -1377,7 +1406,7 @@ impl DiffView {
                 self.signals.focus = true;
                 self.comment_here(ctx);
             }
-            B::SaveComment => self.save_comment(ctx),
+            B::SaveComment => self.submit_comment(ctx),
             B::DiscardComment => {
                 self.editing = None;
                 self.build_rows(ctx.sections, self.diff_anchor());
@@ -2632,7 +2661,7 @@ impl DiffView {
         if hit == ReposHit::Button(ReposButton::DismissFinding) {
             self.signals.focus = true;
             match self.editing.as_ref().is_some_and(|e| e.dismiss.is_some()) {
-                true => self.save_comment(ctx),
+                true => self.submit_comment(ctx),
                 false => {
                     self.dismiss_finding(ctx);
                 }
