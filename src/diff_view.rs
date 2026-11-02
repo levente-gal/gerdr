@@ -154,7 +154,7 @@ pub enum Outcome {
 impl Outcome {
     /// Whether it changes a file, or takes from one as it is (a yank):
     /// neither fits a diff that isn't the files as they are.
-    fn edits(&self) -> bool {
+    pub(crate) fn edits(&self) -> bool {
         matches!(
             self,
             Outcome::Cut(_)
