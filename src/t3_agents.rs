@@ -23,7 +23,7 @@
 //! `Hidden`); one closed while it runs, until that run is over.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -167,7 +167,8 @@ pub fn origin_of(url: &str) -> Option<&str> {
 }
 
 /// Whether web link `url` is T3 Code's app of `server`: on this machine,
-/// at its port.
+/// at its port. A workspace's app is at a host of its own under
+/// `localhost` (see `app_host`).
 pub fn is_app(url: &str, server: &Server) -> bool {
     let Some((host, port)) = site(url) else {
         return false;
@@ -175,8 +176,44 @@ pub fn is_app(url: &str, server: &Server) -> bool {
     let local = matches!(
         host.as_str(),
         "localhost" | "127.0.0.1" | "[::1]" | "0.0.0.0"
-    );
+    ) || host.ends_with(".localhost");
     local && Some(port) == server.port()
+}
+
+/// The host a workspace in folder `dir` shows T3 Code's app at: a name of
+/// its own under `localhost`, which browsers take to this machine. Each
+/// host has its own storage and sign-in in the browser, so each
+/// workspace's app keeps its own project filter (see `Gerdr::scope_t3`);
+/// workspaces in one folder share one.
+pub fn app_host(dir: &Path) -> String {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut label = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            label.push(c);
+        } else if !label.is_empty() && !label.ends_with('-') {
+            label.push('-');
+        }
+    }
+    let label = label.trim_end_matches('-');
+    let label = label.get(..label.len().min(50)).unwrap_or(label);
+    let label = label.trim_end_matches('-');
+    if label.is_empty() {
+        "root.localhost".to_owned()
+    } else {
+        format!("{label}.localhost")
+    }
+}
+
+/// `link` at `origin` in place of its own.
+fn at_origin(link: &str, origin: &str) -> String {
+    match origin_of(link) {
+        Some(own) => format!("{origin}{}", &link[own.len()..]),
+        None => link.to_owned(),
+    }
 }
 
 /// The thread a link of T3 Code's app shows, if it shows one: its path is
@@ -810,6 +847,67 @@ fn pairing_link(home: &Path, server: &Server) -> Result<String, String> {
     }
 }
 
+/// Whether T3 Code at `home` has a project at folder `dir`; `None` when
+/// its database can't say.
+fn has_project(home: &Path, dir: &Path) -> Option<bool> {
+    use rusqlite::OpenFlags;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(home.join(DB), flags).ok()?;
+    let found = conn.query_row(
+        "SELECT 1 FROM projection_projects WHERE workspace_root = ?1 AND deleted_at IS NULL",
+        [dir.to_string_lossy()],
+        |_| Ok(()),
+    );
+    match found {
+        Ok(()) => Some(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Some(false),
+        Err(err) => {
+            tracing::warn!("t3 code: looking for project {}: {err}", dir.display());
+            None
+        }
+    }
+}
+
+/// Add folder `dir` as a T3 Code project of `server` (by `t3 project add`).
+/// How long `t3 project add` may take.
+const ADD_PROJECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn add_project(home: &Path, server: &Server, dir: &Path) -> Result<(), String> {
+    let binary = t3_binary(home, server).ok_or_else(|| "no t3 command found".to_owned())?;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(&binary)
+        .args(["project", "add", "--base-dir"])
+        .arg(home)
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("{}: {err}", binary.display()))?;
+    // It only talks to the server on this machine: one stuck is stopped.
+    let until = Instant::now() + ADD_PROJECT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("no answer in {}s", ADD_PROJECT_TIMEOUT.as_secs()));
+            }
+            Err(err) => return Err(err.to_string()),
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut err = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut err);
+    }
+    Err(err.lines().last().unwrap_or("failed").trim().to_owned())
+}
+
 /// `text` without terminal escape sequences.
 fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -847,6 +945,17 @@ pub struct T3 {
     pending: Option<String>,
     /// Whether a pairing link is being asked for.
     pairing: bool,
+    /// The web panes the extension was told the folders of, for T3 Code's
+    /// project filter (see `Gerdr::scope_t3`).
+    scoped: HashSet<u32>,
+    /// The folders looked at for T3 Code projects, once each.
+    checked: HashSet<PathBuf>,
+    /// Why the app didn't take its project filter, each told once (see
+    /// `Gerdr::t3_unscoped`).
+    unscoped: HashSet<String>,
+    /// The T3 Code version whose app last didn't take its project filter,
+    /// and why: the footer shows it while that version runs.
+    pub unscoped_in: Option<(Option<String>, String)>,
     /// When each web pane last landed on T3 Code's sign-in page and was
     /// sent a pairing link: once in a while only, should one not take.
     /// How many links it was sent since it last got past the sign-in page.
@@ -1109,6 +1218,145 @@ impl crate::Gerdr {
         (i < found.len()).then(|| found.swap_remove(i))
     }
 
+    /// The pane of workspace `w` showing T3 Code's app (its tab, leaf and
+    /// the link it shows).
+    fn t3_pane_in(&self, w: usize) -> Option<(usize, u32, String)> {
+        let server = self.t3.server.as_ref()?;
+        let ws = self.workspaces.get(w)?;
+        ws.tabs.iter().enumerate().find_map(|(t, tab)| {
+            tab.panes.iter().find_map(|pane| {
+                let url = pane.app_command.as_deref().unwrap_or_default();
+                (crate::is_web_link(url) && is_app(url, server))
+                    .then(|| (t, pane.id, url.to_owned()))
+            })
+        })
+    }
+
+    /// The origin workspace `w` shows T3 Code's app of `server` at (see
+    /// `app_host`).
+    fn t3_origin(&self, w: usize, server: &Server) -> String {
+        match (self.workspaces.get(w), site(&server.origin)) {
+            (Some(ws), Some((_, port))) => format!("http://{}:{port}", app_host(&ws.dir)),
+            _ => server.origin.clone(),
+        }
+    }
+
+    /// The folders whose T3 Code projects workspace `w`'s app shows: its
+    /// own, with every project in it, so a workspace at a parent folder
+    /// shows all the repositories under it.
+    fn t3_scope(&self, w: usize) -> Vec<PathBuf> {
+        self.workspaces
+            .get(w)
+            .map(|ws| vec![ws.dir.clone()])
+            .unwrap_or_default()
+    }
+
+    /// Keep web pane `pane`, showing T3 Code's app, to its workspace's
+    /// projects: told to the extension once per pane, which applies it
+    /// at each load.
+    fn scope_t3(&mut self, pane: u32) {
+        if self.t3.scoped.contains(&pane) {
+            return;
+        }
+        let Some(w) = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == pane)))
+        else {
+            return;
+        };
+        let dirs = self.t3_scope(w);
+        if self.scope_web_pane(pane, &dirs) {
+            self.t3.scoped.insert(pane);
+        }
+    }
+
+    /// T3 Code's app in web pane `pane` didn't take its project filter,
+    /// for `reason` (see the extension's `scopeT3`): logged in full, for
+    /// whoever fixes gerdr for the T3 Code version that changed it, and
+    /// told once per reason.
+    pub fn t3_unscoped(&mut self, pane: u32, reason: &str, detail: &str) {
+        let version = self.t3.server.as_ref().and_then(|s| s.version.as_deref());
+        let version = version.unwrap_or("unknown");
+        let place = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == pane)));
+        let name = place.map_or_else(|| "this workspace".to_owned(), |ws| ws.name.clone());
+        let where_ = format!("web pane {pane} ({name}), T3 Code {version}");
+        // No project in the folder: T3 Code works, the folder isn't one
+        // of its projects.
+        if reason == "no-match" {
+            tracing::warn!("t3 code: project filter not set in {where_}: {detail}");
+            if self.t3.unscoped.insert(reason.to_owned()) {
+                let text =
+                    format!("T3 Code shows all projects in {name}: none of them is in its folder");
+                self.toast(text, crate::toast::Level::Warning);
+            }
+            return;
+        }
+        tracing::error!(
+            "t3 code: project filter not set in {where_}: {reason}: {detail}. \
+             gerdr sets it in assets/web-extension/worker.js `scopeT3`, which reads the app's \
+             React tree and its localStorage, neither of them T3 Code's API: this T3 Code \
+             version likely changed them"
+        );
+        let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
+        self.t3.unscoped_in = Some((running, reason.to_owned()));
+        crate::problems::report(
+            "t3 code",
+            format!(
+                "T3 Code {version} doesn't take gerdr's project filter ({reason}): see the log"
+            ),
+        );
+        if !self.t3.unscoped.insert(reason.to_owned()) {
+            return;
+        }
+        let text = format!(
+            "T3 Code shows all projects in {name}: gerdr can't set its project filter \
+             in T3 Code {version}"
+        );
+        let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+        self.toast_with(text, crate::toast::Level::Error, Some(open_log));
+    }
+
+    /// Add workspace `w`'s folder as a T3 Code project when it is a
+    /// repository T3 Code doesn't know yet (off the event loop; once per
+    /// folder): its app can only show, and start, threads of projects.
+    fn add_t3_project(&mut self, w: usize, server: &Server) {
+        let (Some(home), Some(ws)) = (self.t3.home.clone(), self.workspaces.get(w)) else {
+            return;
+        };
+        let dir = ws.dir.clone();
+        if !dir.join(".git").exists() || Some(dir.as_path()) == crate::home_dir().as_deref() {
+            return;
+        }
+        if !self.t3.checked.insert(dir.clone()) {
+            return;
+        }
+        use smithay::reexports::calloop::channel;
+        let (tx, rx) = channel::channel::<String>();
+        let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
+            if let channel::Event::Msg(text) = event {
+                let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+                state.toast_with(text, crate::toast::Level::Error, Some(open_log));
+            }
+        });
+        if let Err(err) = inserted {
+            return tracing::warn!("t3 code: {err}");
+        }
+        let server = server.clone();
+        std::thread::spawn(move || {
+            if has_project(&home, &dir) == Some(false)
+                && let Err(err) = add_project(&home, &server, &dir)
+            {
+                tracing::warn!("t3 code: adding {}: {err}", dir.display());
+                let name = dir.file_name().unwrap_or_default().to_string_lossy();
+                let _ = tx.send(format!("Couldn't add {name} to T3 Code's projects: {err}"));
+            }
+        });
+    }
+
     /// Show T3 Code thread `id` in the app's pane.
     pub fn focus_t3_thread(&mut self, id: &str) {
         let w = self
@@ -1135,10 +1383,20 @@ impl crate::Gerdr {
             Some(id) => server.thread_link(origin, id),
             None => format!("{origin}/"),
         };
-        if let Some((pw, t, pane, url)) = self.t3_pane() {
-            let origin = origin_of(&url).unwrap_or(&server.origin).to_owned();
-            self.show_leaf(pw, t, pane);
-            let target = link(&origin);
+        let w = w.min(self.workspaces.len().saturating_sub(1));
+        self.add_t3_project(w, &server);
+        let own = self.t3_origin(w, &server);
+        if let Some((t, pane, url)) = self.t3_pane_in(w) {
+            self.show_leaf(w, t, pane);
+            // One at another host (opened before workspaces had their
+            // own) moves to the workspace's: its filter is its own there.
+            let moves = origin_of(&url) != Some(own.as_str());
+            if moves && thread.is_none() {
+                let target = at_origin(&url, &own);
+                self.navigate_web_pane(pane, &target);
+                return;
+            }
+            let target = link(&own);
             if thread.is_some() && url != target && !self.navigate_web_pane(pane, &target) {
                 // Without gerdr's extension in its browser it can't be
                 // told where to go: a tab of its own then.
@@ -1149,29 +1407,19 @@ impl crate::Gerdr {
         if w != self.active_workspace && w < self.workspaces.len() {
             self.switch_workspace(w);
         }
-        let marker = self.t3_paired_marker(&server);
-        // At the host the browser signed in at: `t3 pair` may name
-        // another than the server's own.
-        let paired = marker
-            .as_ref()
-            .and_then(|m| std::fs::read_to_string(m).ok())
-            .map(|origin| origin.trim().to_owned());
-        if let Some(origin) = paired {
-            let origin = if origin.is_empty() {
-                server.origin.clone()
-            } else {
-                origin
-            };
+        let origin = own;
+        let marker = self.t3_paired_marker(&origin);
+        if marker.as_ref().is_some_and(|m| m.exists()) {
             return self.launch(&link(&origin), crate::launch::Place::Tab);
         }
-        let then = link(&server.origin);
-        self.pair_t3(server, Some(then), marker, None);
+        let then = link(&origin);
+        self.pair_t3(server, origin, Some(then), marker, None);
     }
 
-    /// Where gerdr notes that the project's browser was signed in to
-    /// `server`, and at which origin.
-    fn t3_paired_marker(&self, server: &Server) -> Option<PathBuf> {
-        let (host, port) = site(&server.origin)?;
+    /// Where gerdr notes that the project's browser was signed in to T3
+    /// Code's app at `origin`.
+    fn t3_paired_marker(&self, origin: &str) -> Option<PathBuf> {
+        let (host, port) = site(origin)?;
         let host: String = host
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
@@ -1179,12 +1427,14 @@ impl crate::Gerdr {
         Some(self.instance_dir.join(format!("t3-paired-{host}-{port}")))
     }
 
-    /// Sign the project's browser in to `server` by a one-time link (off
-    /// the event loop: `t3 pair` takes a moment), then show `then`. The
-    /// link opens in web pane `pane` when given, else in a new tab.
+    /// Sign the project's browser in to `server`'s app at `origin` by a
+    /// one-time link (off the event loop: `t3 pair` takes a moment), then
+    /// show `then`. The link opens in web pane `pane` when given, else in
+    /// a new tab.
     fn pair_t3(
         &mut self,
         server: Server,
+        origin: String,
         then: Option<String>,
         marker: Option<PathBuf>,
         pane: Option<u32>,
@@ -1204,9 +1454,10 @@ impl crate::Gerdr {
             state.t3.pairing = false;
             match result {
                 Ok(pairing) => {
-                    let origin = origin_of(&pairing).unwrap_or_default();
+                    // At the app's host: `t3 pair` names its own.
+                    let pairing = at_origin(&pairing, &origin);
                     if let Some(marker) = &marker
-                        && let Err(err) = std::fs::write(marker, origin)
+                        && let Err(err) = std::fs::write(marker, &origin)
                     {
                         tracing::warn!("{}: {err}", marker.display());
                     }
@@ -1269,8 +1520,9 @@ impl crate::Gerdr {
                 Pairing::Send => {
                     self.t3.paired_panes.insert(pane, (now, tries + 1));
                     let server = server.clone();
-                    let marker = self.t3_paired_marker(&server);
-                    self.pair_t3(server, None, marker, Some(pane));
+                    let origin = origin.to_owned();
+                    let marker = self.t3_paired_marker(&origin);
+                    self.pair_t3(server, origin, None, marker, Some(pane));
                 }
                 Pairing::GiveUp => {
                     self.t3.paired_panes.insert(pane, (now, tries + 1));
@@ -1287,6 +1539,7 @@ impl crate::Gerdr {
         // Past the sign-in page: signed in, so a later sign-out tries again.
         if !path.starts_with("/pair") {
             self.t3.paired_panes.remove(&pane);
+            self.scope_t3(pane);
         }
         if self.t3.pending.is_none() || path.starts_with("/pair") {
             return;
@@ -1496,6 +1749,9 @@ mod tests {
         assert!(is_app("http://127.0.0.1:3773/pair#token=x", &server));
         assert!(!is_app("http://localhost:3000/", &server));
         assert!(!is_app("https://example.com:3773/", &server));
+        assert!(is_app("http://services-api.localhost:3773/", &server));
+        assert!(!is_app("http://services-api.localhost:3000/", &server));
+        assert!(!is_app("http://localhost.example.com:3773/", &server));
         assert_eq!(origin_of(&link), Some("http://localhost:3773"));
     }
 
@@ -1676,5 +1932,27 @@ mod tests {
             eprintln!("{} {:?} {:?} {}", row.id, row.run, row.status(), row.title);
         }
         assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn each_folder_has_a_host_of_its_own() {
+        use super::app_host;
+        let host = |dir: &str| app_host(std::path::Path::new(dir));
+        assert_eq!(host("/w/ao-app/services-api"), "services-api.localhost");
+        assert_eq!(host("/w/ao-app/aft_backend"), "aft-backend.localhost");
+        assert_eq!(host("/w/ao-app"), "ao-app.localhost");
+        assert_eq!(host("/home/Me/My Repo!"), "my-repo.localhost");
+        assert_eq!(host("/"), "root.localhost");
+        assert_eq!(host("/w/__"), "root.localhost");
+        assert!(host(&format!("/w/{}", "a".repeat(80))).len() <= 50 + ".localhost".len());
+    }
+
+    #[test]
+    fn a_link_moves_to_another_origin() {
+        use super::at_origin;
+        let link = "http://localhost:3773/pair#token=abc";
+        let moved = at_origin(link, "http://api.localhost:3773");
+        assert_eq!(moved, "http://api.localhost:3773/pair#token=abc");
+        assert_eq!(at_origin("not a link", "http://a:1"), "not a link");
     }
 }

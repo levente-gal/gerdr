@@ -76,16 +76,38 @@ enum FromBrowser {
     },
     /// The pane's tab closed.
     Closed { pane: String },
+    /// T3 Code's app in the pane's tab didn't take its project filter
+    /// (see `Gerdr::t3_unscoped`): what went wrong, as a short word, and
+    /// what the page showed.
+    Unscoped {
+        pane: String,
+        reason: String,
+        detail: String,
+    },
 }
 
 /// What gerdr asks the extension to do with a pane's tab.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ToBrowser<'a> {
-    Navigate { pane: String, url: &'a str },
-    Back { pane: String },
-    Forward { pane: String },
-    Reload { pane: String },
+    Navigate {
+        pane: String,
+        url: &'a str,
+    },
+    Back {
+        pane: String,
+    },
+    Forward {
+        pane: String,
+    },
+    Reload {
+        pane: String,
+    },
+    /// Keep T3 Code's app in the pane's tab to the projects under `dirs`.
+    Scope {
+        pane: String,
+        dirs: Vec<String>,
+    },
 }
 
 /// A step a web pane's tab takes through its history, or again where it is.
@@ -394,6 +416,18 @@ impl Gerdr {
                 }
             }
             Event::Message(
+                _,
+                FromBrowser::Unscoped {
+                    pane,
+                    reason,
+                    detail,
+                },
+            ) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.t3_unscoped(pane, &reason, &detail);
+                }
+            }
+            Event::Message(
                 id,
                 FromBrowser::Page {
                     pane,
@@ -454,6 +488,19 @@ impl Gerdr {
             self.set_web_page(pane, url.to_owned());
         }
         sent
+    }
+
+    /// Keep T3 Code's app in `pane`'s tab to the projects under `dirs`, if
+    /// the extension follows it; whether it was asked to.
+    pub fn scope_web_pane(&mut self, pane: u32, dirs: &[PathBuf]) -> bool {
+        let message = ToBrowser::Scope {
+            pane: pane_token(pane),
+            dirs: dirs
+                .iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect(),
+        };
+        self.send_to_browser(pane, &message)
     }
 
     /// Take `pane`'s tab a `step`, if the extension follows it; whether it
@@ -553,6 +600,18 @@ mod tests {
                 url: "https://a.b".into(),
                 back: Some(true),
                 forward: None,
+            }
+        );
+        let unscoped: FromBrowser = serde_json::from_str(
+            r#"{"type":"unscoped","pane":"1.2","reason":"no-groups","detail":"d"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unscoped,
+            FromBrowser::Unscoped {
+                pane: "1.2".into(),
+                reason: "no-groups".into(),
+                detail: "d".into(),
             }
         );
         let message = serde_json::to_string(&ToBrowser::Navigate {
