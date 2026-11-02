@@ -119,7 +119,7 @@ function tabOf(pane) {
 // loads again once it changed, once per page session. Runs in the page.
 //
 // None of that is T3 Code's API: a version that changes it is told of,
-// as null where the filter is set, else `{ reason, detail }` (see
+// as `{ ok: true }` where the filter is set, else `{ reason, detail }` (see
 // gerdr's `t3_unscoped`). The page loading again ends it unanswered, as
 // does a page asked for the same folders already (undefined).
 function scopeT3(dirs) {
@@ -236,8 +236,8 @@ function scopeT3(dirs) {
       if (same(now, wanted)) {
         // Set: the app shows those projects only, unless it no longer
         // reads the filter from there.
-        if (seen.all.filter((g) => !g.isScratch).length === wanted.length) return done(null);
-        if (seen.lists.some((l) => same(l, wanted))) return done(null);
+        if (seen.all.filter((g) => !g.isScratch).length === wanted.length) return done({ ok: true });
+        if (seen.lists.some((l) => same(l, wanted))) return done({ ok: true });
         if (++looks < LOOKS) return void setTimeout(look, EVERY);
         return fail("ignored", `filter ${JSON.stringify(wanted)} stored, but no project list shows only those; lists: ${JSON.stringify(seen.lists).slice(0, 400)}`);
       }
@@ -250,7 +250,7 @@ function scopeT3(dirs) {
         if (Date.now() - (set.at || 0) < FRESH) {
           return fail("overwritten", `filter ${JSON.stringify(wanted)} stored and the page loaded again, but it reads ${JSON.stringify(now)}`);
         }
-        return done(null);
+        return done({ ok: true });
       }
       sessionStorage.setItem(mark, JSON.stringify({ keys: wanted, at: Date.now() }));
       state.sidebarProjectScopeKeys = wanted;
@@ -280,7 +280,7 @@ async function scope(tab) {
   }
   const pane = panes[tab];
   if (pane === undefined) return;
-  if (result === null) send({ type: "scoped", pane });
+  if (result?.ok) send({ type: "scoped", pane });
   else if (result?.reason) send({ type: "unscoped", pane, reason: result.reason, detail: result.detail });
 }
 
