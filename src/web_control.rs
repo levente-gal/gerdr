@@ -76,6 +76,14 @@ enum FromBrowser {
     },
     /// The pane's tab closed.
     Closed { pane: String },
+    /// T3 Code's app in the pane's tab didn't take its project filter
+    /// (see `Gerdr::t3_unscoped`): what went wrong, as a short word, and
+    /// what the page showed.
+    Unscoped {
+        pane: String,
+        reason: String,
+        detail: String,
+    },
 }
 
 /// What gerdr asks the extension to do with a pane's tab.
@@ -408,6 +416,18 @@ impl Gerdr {
                 }
             }
             Event::Message(
+                _,
+                FromBrowser::Unscoped {
+                    pane,
+                    reason,
+                    detail,
+                },
+            ) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.t3_unscoped(pane, &reason, &detail);
+                }
+            }
+            Event::Message(
                 id,
                 FromBrowser::Page {
                     pane,
@@ -580,6 +600,18 @@ mod tests {
                 url: "https://a.b".into(),
                 back: Some(true),
                 forward: None,
+            }
+        );
+        let unscoped: FromBrowser = serde_json::from_str(
+            r#"{"type":"unscoped","pane":"1.2","reason":"no-groups","detail":"d"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unscoped,
+            FromBrowser::Unscoped {
+                pane: "1.2".into(),
+                reason: "no-groups".into(),
+                detail: "d".into(),
             }
         );
         let message = serde_json::to_string(&ToBrowser::Navigate {

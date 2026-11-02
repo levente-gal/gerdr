@@ -927,6 +927,9 @@ pub struct T3 {
     scoped: HashSet<u32>,
     /// The folders looked at for T3 Code projects, once each.
     checked: HashSet<PathBuf>,
+    /// Why the app didn't take its project filter, each told once (see
+    /// `Gerdr::t3_unscoped`).
+    unscoped: HashSet<String>,
     /// When each web pane last landed on T3 Code's sign-in page and was
     /// sent a pairing link: once in a while only, should one not take.
     /// How many links it was sent since it last got past the sign-in page.
@@ -1240,6 +1243,47 @@ impl crate::Gerdr {
         if self.scope_web_pane(pane, &dirs) {
             self.t3.scoped.insert(pane);
         }
+    }
+
+    /// T3 Code's app in web pane `pane` didn't take its project filter,
+    /// for `reason` (see the extension's `scopeT3`): logged in full, for
+    /// whoever fixes gerdr for the T3 Code version that changed it, and
+    /// told once per reason.
+    pub fn t3_unscoped(&mut self, pane: u32, reason: &str, detail: &str) {
+        let version = self.t3.server.as_ref().and_then(|s| s.version.as_deref());
+        let version = version.unwrap_or("unknown");
+        let place = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == pane)));
+        let name = place.map_or_else(|| "this workspace".to_owned(), |ws| ws.name.clone());
+        let where_ = format!("web pane {pane} ({name}), T3 Code {version}");
+        // No project in the folder: T3 Code works, the folder isn't one
+        // of its projects.
+        if reason == "no-match" {
+            tracing::warn!("t3 code: project filter not set in {where_}: {detail}");
+            if self.t3.unscoped.insert(reason.to_owned()) {
+                let text =
+                    format!("T3 Code shows all projects in {name}: none of them is in its folder");
+                self.toast(text, crate::toast::Level::Warning);
+            }
+            return;
+        }
+        tracing::error!(
+            "t3 code: project filter not set in {where_}: {reason}: {detail}. \
+             gerdr sets it in assets/web-extension/worker.js `scopeT3`, which reads the app's \
+             React tree and its localStorage, neither of them T3 Code's API: this T3 Code \
+             version likely changed them"
+        );
+        if !self.t3.unscoped.insert(reason.to_owned()) {
+            return;
+        }
+        let text = format!(
+            "T3 Code shows all projects in {name}: gerdr can't set its project filter \
+             in T3 Code {version}"
+        );
+        let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+        self.toast_with(text, crate::toast::Level::Error, Some(open_log));
     }
 
     /// Add workspace `w`'s folder as a T3 Code project when it is a

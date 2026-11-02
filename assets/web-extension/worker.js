@@ -116,8 +116,12 @@ function tabOf(pane) {
 // keys are read from the app's own project groups, found in React's tree
 // by their fields. The app reads the filter as it starts, so the page
 // loads again once it changed, once per page session. Runs in the page.
+//
+// None of that is T3 Code's API: a version that changes it is told of,
+// as null where the filter is set, else `{ reason, detail }` (see
+// gerdr's `t3_unscoped`). The page loading again ends it unanswered.
 function scopeT3(dirs) {
-  if (window.__gerdrScope === JSON.stringify(dirs)) return;
+  if (window.__gerdrScope === JSON.stringify(dirs)) return null;
   window.__gerdrScope = JSON.stringify(dirs);
   const trim = (path) => path.replace(/\/+$/, "") || "/";
   const want = dirs.map(trim);
@@ -125,17 +129,25 @@ function scopeT3(dirs) {
   const isGroup = (g) =>
     g && typeof g === "object" && typeof g.projectKey === "string" && Array.isArray(g.memberProjects);
   const isGroups = (v) => Array.isArray(v) && v.length > 0 && v.every(isGroup);
-  // Every list of project groups in the tree, merged: one may be the
-  // sidebar's, filtered already.
-  function groups() {
+  // The React tree's root fiber, if the page has one.
+  function root() {
     const host = document.getElementById("root") || document.body?.firstElementChild;
     const key = host && Object.keys(host).find((k) => k.startsWith("__reactContainer$"));
-    if (!key) return null;
+    return key ? host[key] : null;
+  }
+  // Every list of project groups in the tree: merged by key (one may be
+  // the sidebar's, filtered already), and each list's keys.
+  function groups() {
+    const top = root();
+    if (!top) return null;
     const found = new Map();
+    const lists = [];
     const take = (v) => {
-      if (isGroups(v)) for (const g of v) found.set(g.projectKey, g);
+      if (!isGroups(v)) return;
+      for (const g of v) found.set(g.projectKey, g);
+      lists.push(v.filter((g) => !g.isScratch).map((g) => g.projectKey).sort());
     };
-    const stack = [host[key]];
+    const stack = [top];
     for (let seen = 0; stack.length && seen < 500000; seen++) {
       const fiber = stack.pop();
       const props = fiber.memoizedProps;
@@ -150,13 +162,13 @@ function scopeT3(dirs) {
       if (fiber.sibling) stack.push(fiber.sibling);
       if (fiber.child) stack.push(fiber.child);
     }
-    return found.size ? [...found.values()] : null;
+    return found.size ? { all: [...found.values()], lists } : null;
   }
+  const roots = (g) => g.memberProjects.map((p) => p.workspaceRoot).filter((r) => typeof r === "string").map(trim);
   // The groups with a project in one of the folders; else those holding
   // one of them, the nearest.
   function keys(all) {
     const real = all.filter((g) => !g.isScratch);
-    const roots = (g) => g.memberProjects.map((p) => p.workspaceRoot).filter((r) => typeof r === "string").map(trim);
     const under = real.filter((g) => roots(g).some((r) => want.some((d) => inside(r, d))));
     if (under.length) return under.map((g) => g.projectKey).sort();
     let best = [], depth = -1;
@@ -173,40 +185,81 @@ function scopeT3(dirs) {
     Object.keys(localStorage)
       .filter((k) => /^t3code:ui-state:v\d+$/.test(k))
       .sort((a, b) => Number(b.split(":v")[1]) - Number(a.split(":v")[1]))[0] || "t3code:ui-state:v1";
-  let looks = 0;
-  function look() {
-    const all = groups();
-    const wanted = all ? keys(all) : [];
-    if (!wanted.length) {
-      // Not loaded yet, or the project not added yet.
-      if (++looks < 120) setTimeout(look, 500);
-      return;
-    }
-    let state = {};
+  const read = () => {
     try {
-      state = JSON.parse(localStorage.getItem(name) || "{}") || {};
-    } catch {}
-    const now = [...(state.sidebarProjectScopeKeys || [])].sort();
-    if (JSON.stringify(now) === JSON.stringify(wanted)) return;
-    const mark = "gerdr-t3-scope";
-    if (sessionStorage.getItem(mark) === JSON.stringify(wanted)) return;
-    sessionStorage.setItem(mark, JSON.stringify(wanted));
-    state.sidebarProjectScopeKeys = wanted;
-    state.sidebarProjectScopeKey = wanted.length === 1 ? wanted[0] : null;
-    localStorage.setItem(name, JSON.stringify(state));
-    location.reload();
-  }
-  look();
+      return JSON.parse(localStorage.getItem(name) || "{}") || {};
+    } catch {
+      return {};
+    }
+  };
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const mark = "gerdr-t3-scope";
+  // How long the app may take to start, and to show the projects; how
+  // long ago a filter set and loaded again counts as just set.
+  const LOOKS = 120, EVERY = 500, FRESH = 15000;
+  return new Promise((done) => {
+    let looks = 0;
+    const fail = (reason, detail) => done({ reason, detail: `${detail} (page ${location.href}, folders ${want.join(", ")}, storage ${name})` });
+    function look() {
+      const seen = groups();
+      const wanted = seen ? keys(seen.all) : [];
+      if (!wanted.length) {
+        // Not loaded yet, or the project not added yet.
+        if (++looks < LOOKS) return void setTimeout(look, EVERY);
+        if (!root()) return fail("no-react", "no React root (__reactContainer$) on #root");
+        if (!seen) return fail("no-groups", "no arrays of {projectKey, memberProjects} in React's tree");
+        const all = seen.all.filter((g) => !g.isScratch);
+        if (all.length && all.every((g) => !roots(g).length)) {
+          return fail("no-roots", `groups have no memberProjects[].workspaceRoot: ${JSON.stringify(all[0]).slice(0, 400)}`);
+        }
+        return fail("no-match", `no project at or around the folders; roots: ${all.flatMap(roots).join(", ") || "none"}`);
+      }
+      const state = read();
+      const now = [...(state.sidebarProjectScopeKeys || [])].sort();
+      if (same(now, wanted)) {
+        // Set: the app shows those projects only, unless it no longer
+        // reads the filter from there.
+        if (seen.all.filter((g) => !g.isScratch).length === wanted.length) return done(null);
+        if (seen.lists.some((l) => same(l, wanted))) return done(null);
+        if (++looks < LOOKS) return void setTimeout(look, EVERY);
+        return fail("ignored", `filter ${JSON.stringify(wanted)} stored, but no project list shows only those; lists: ${JSON.stringify(seen.lists).slice(0, 400)}`);
+      }
+      let set = {};
+      try {
+        set = JSON.parse(sessionStorage.getItem(mark) || "{}") || {};
+      } catch {}
+      if (same(set.keys, wanted)) {
+        // Set before: changed since by the app as it started, or by hand.
+        if (Date.now() - (set.at || 0) < FRESH) {
+          return fail("overwritten", `filter ${JSON.stringify(wanted)} stored and the page loaded again, but it reads ${JSON.stringify(now)}`);
+        }
+        return done(null);
+      }
+      sessionStorage.setItem(mark, JSON.stringify({ keys: wanted, at: Date.now() }));
+      state.sidebarProjectScopeKeys = wanted;
+      state.sidebarProjectScopeKey = wanted.length === 1 ? wanted[0] : null;
+      localStorage.setItem(name, JSON.stringify(state));
+      location.reload();
+    }
+    look();
+  });
 }
 
+// Apply `tab`'s folders to its T3 Code app; a version that doesn't take
+// them is told to gerdr.
 async function scope(tab) {
   const dirs = scopes[tab];
   if (!dirs) return;
+  let failed;
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: scopeT3, args: [dirs] });
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: scopeT3, args: [dirs] });
+    failed = frame?.result;
   } catch {
-    // Not a page the extension reaches.
+    // Not a page the extension reaches, or one that loaded again.
+    return;
   }
+  const pane = panes[tab];
+  if (failed && pane !== undefined) send({ type: "unscoped", pane, reason: failed.reason, detail: failed.detail });
 }
 
 async function command(message) {
