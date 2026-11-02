@@ -73,10 +73,11 @@ enum SetupFirst {
     Run,
 }
 
-/// Whether a Build agent starting (`fresh`: Ctrl+R) waits for the setup:
-/// `has_commands` whether the project gives the feature any, `setup` where
-/// it stands, `running` whether it runs now. One never run, or cut short
-/// by gerdr quitting, runs first; a failed one runs again on a fresh start.
+/// Whether a Build agent starting (`fresh`: Ctrl+R, or the first) waits
+/// for the setup: `has_commands` whether the project gives the feature
+/// any, `setup` where it stands, `running` whether it runs now. One never
+/// run, or cut short by gerdr quitting, runs first; a failed one runs
+/// again on a fresh start.
 fn setup_first(
     has_commands: bool,
     setup: Option<&SetupRun>,
