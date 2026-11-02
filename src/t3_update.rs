@@ -420,7 +420,7 @@ fn try_in(
     made?;
     let conn = crate::t3_agents::open_read_only(&db).map_err(|err| err.to_string())?;
     let migration = crate::t3_agents::migration(&conn);
-    match crate::t3_agents::read_rows(&conn) {
+    match crate::t3_agents::read_rows(&conn, &[]) {
         Ok(_) => Ok(migration),
         Err(err) => {
             keep_schema(&conn, version);

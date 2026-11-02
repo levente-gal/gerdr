@@ -503,9 +503,10 @@ impl Hidden {
 }
 
 /// The threads in the database at `conn` worth a card: those changed in
-/// the last day, at work, waiting, or done since the user last looked;
-/// none archived, deleted or settled.
-pub fn read_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ThreadRow>> {
+/// the last day, at work, waiting, done since the user last looked, or in
+/// `held` (held done by gerdr, however old: see `hold_finished`); none
+/// archived, deleted or settled.
+pub fn read_rows(conn: &rusqlite::Connection, held: &[String]) -> rusqlite::Result<Vec<ThreadRow>> {
     let mut query = conn.prepare_cached(
         "SELECT t.thread_id, t.title, t.updated_at,
             p.workspace_root,
@@ -529,9 +530,11 @@ pub fn read_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ThreadRow>
           AND json_extract(t.payload_json, '$.settledAt') IS NULL
           AND (t.updated_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
                OR r.status IN ('preparing', 'queued', 'starting', 'running', 'waiting')
-               OR r.completed_at > coalesce(json_extract(t.payload_json, '$.lastVisitedAt'), ''))",
+               OR r.completed_at > coalesce(json_extract(t.payload_json, '$.lastVisitedAt'), '')
+               OR t.thread_id IN (SELECT value FROM json_each(?1)))",
     )?;
-    let rows = query.query_map([], |r| {
+    let held = serde_json::to_string(held).unwrap_or_else(|_| "[]".to_owned());
+    let rows = query.query_map([held], |r| {
         let path = |i: usize| r.get::<_, Option<String>>(i).map(|p| p.map(PathBuf::from));
         let relation: Option<String> = r.get(7)?;
         let side: Option<i64> = r.get(8)?;
@@ -602,6 +605,7 @@ pub struct Snapshot {
 pub fn watch_db(
     home: PathBuf,
     dirs: Arc<Mutex<Vec<PathBuf>>>,
+    held: Arc<Mutex<Vec<String>>>,
     mut send: impl FnMut(Snapshot) -> bool + Send + 'static,
 ) {
     std::thread::spawn(move || {
@@ -613,6 +617,7 @@ pub fn watch_db(
         let mut broken: Option<String> = None;
         let mut asked: Option<Instant> = None;
         let mut tried = Instant::now();
+        let held = move || held.lock().map(|h| h.clone()).unwrap_or_default();
         let mut emit = |snapshot: Snapshot| {
             if last.as_ref() == Some(&snapshot) {
                 return true;
@@ -636,7 +641,7 @@ pub fn watch_db(
                     None if db.exists() => {}
                     None => broken = Some(format!("no database at {}", db.display())),
                     Some(_) if !changed => {}
-                    Some(c) => match read_rows(c) {
+                    Some(c) => match read_rows(c, &held()) {
                         Ok(rows) => {
                             version = now_version;
                             let migration = migration(c);
@@ -666,7 +671,7 @@ pub fn watch_db(
                     tried = Instant::now();
                     conn = db.exists().then(|| open_read_only(&db).ok()).flatten();
                     if let Some(c) = &conn
-                        && let Ok(rows) = read_rows(c)
+                        && let Ok(rows) = read_rows(c, &held())
                     {
                         tracing::info!("t3 code's database reads again");
                         broken = None;
@@ -1057,6 +1062,9 @@ pub struct T3 {
     pub migration: Option<i64>,
     /// The workspaces' folders, for asking the server of their threads.
     dirs: Arc<Mutex<Vec<PathBuf>>>,
+    /// The threads held done (`Store::t3_finished`), for the watcher to
+    /// read however old they are.
+    held: Arc<Mutex<Vec<String>>>,
     /// What gerdr decided about T3 Code's versions (see `t3_update`).
     pub updates: crate::t3_update::Updates,
     /// Whether newer versions are taken as soon as they fit, else only
@@ -1099,9 +1107,13 @@ impl crate::Gerdr {
         if let Err(err) = inserted {
             return tracing::warn!("t3 code's agents: {err}");
         }
-        watch_db(home.clone(), self.t3.dirs.clone(), move |s| {
-            tx.send(s).is_ok()
-        });
+        self.t3_held();
+        watch_db(
+            home.clone(),
+            self.t3.dirs.clone(),
+            self.t3.held.clone(),
+            move |s| tx.send(s).is_ok(),
+        );
         self.watch_t3_updates();
         let tick = move |_, _: &mut (), state: &mut crate::Gerdr| {
             state.t3_dirs();
@@ -1124,6 +1136,13 @@ impl crate::Gerdr {
         let timer = Timer::from_duration(SERVER_INTERVAL);
         if let Err(err) = self.loop_handle.insert_source(timer, tick) {
             tracing::warn!("t3 code's server: {err}");
+        }
+    }
+
+    /// Note the threads held done for the watcher (see `read_rows`).
+    fn t3_held(&self) {
+        if let Ok(mut shared) = self.t3.held.lock() {
+            *shared = self.projects.t3_finished.iter().cloned().collect();
         }
     }
 
@@ -1195,6 +1214,7 @@ impl crate::Gerdr {
         if changed {
             self.projects.save();
         }
+        self.t3_held();
         self.t3.threads = threads;
         self.notify_agents();
         self.t3_maybe_restart();
@@ -2234,9 +2254,13 @@ mod tests {
                VALUES ('q1', 'side', 'n', 'approval', 'pending', '', '{{}}');"
         ))
         .unwrap();
-        let rows = read_rows(&conn).unwrap();
+        let rows = read_rows(&conn, &[]).unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["t1", "side"]);
+        // One held done is read however old, but not once archived.
+        let held = read_rows(&conn, &["old".into(), "gone".into()]).unwrap();
+        let ids: Vec<&str> = held.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["t1", "old", "side"]);
         let t1 = &rows[0];
         assert_eq!(t1.status(), AgentStatus::Working, "by its latest run");
         assert_eq!(
@@ -2257,7 +2281,7 @@ mod tests {
             "ALTER TABLE orchestration_v2_projection_runs RENAME COLUMN status TO state;",
         )
         .unwrap();
-        let err = read_rows(&conn).unwrap_err().to_string();
+        let err = read_rows(&conn, &[]).unwrap_err().to_string();
         assert!(err.contains("status"), "{err}");
     }
 
