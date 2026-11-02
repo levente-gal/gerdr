@@ -696,6 +696,7 @@ pub fn service_items(src: &Sources) -> Vec<InboxItem> {
                     count: group.count,
                     first: group.first_secs,
                     lines: group.lines.clone(),
+                    seen: group.seen,
                 },
             }
         })

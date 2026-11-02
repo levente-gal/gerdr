@@ -342,6 +342,8 @@ pub enum Detail {
         first: u64,
         /// All of it, as last printed.
         lines: Vec<String>,
+        /// Whether it was looked at since it last came.
+        seen: bool,
     },
 }
 
@@ -422,14 +424,15 @@ pub fn visible(
 }
 
 /// Whether the tab strip's inbox button counts `item`: an agent blocked or
-/// done, a pull request asking for review, a failed CI of `main`, `master`,
-/// `dev` or `develop`.
+/// done, a service's error not looked at (as its workspace's count in the
+/// sidebar), a pull request asking for review, a failed CI of `main`,
+/// `master`, `dev` or `develop`.
 pub fn counted(item: &InboxItem) -> bool {
     match &item.detail {
         Detail::Agent { status, .. } => {
             matches!(status, AgentStatus::Blocked | AgentStatus::Done)
         }
-        Detail::Service { .. } => true,
+        Detail::Service { seen, .. } => !seen,
         Detail::Ci { subject, state, .. } => {
             item.tone == Tone::Review
                 || (*state == CiState::Failed && crate::ci::LONG_LIVED.contains(&subject.as_str()))
@@ -707,12 +710,15 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             count,
             first,
             lines,
+            ..
         } => {
             field("Service", service.clone());
             field("In", place.clone());
             field("Times", count.to_string());
+            // Both as the same kind of "ago".
             if let Some(age) = item.age {
-                field("Last", format!("{} ago", age_text(age)));
+                let last = now.saturating_sub(age.as_secs());
+                field("Last", crate::projects::ago(now, last));
             }
             field("First", crate::projects::ago(now, *first));
             if !lines.is_empty() {
@@ -1734,6 +1740,25 @@ mod tests {
             actions: vec![A::GoTo, A::Snooze, A::SnoozeLong, A::Dismiss],
             detail,
         }
+    }
+
+    #[test]
+    fn a_service_error_counts_until_looked_at() {
+        let mut error = item("service:p|w1:p1|f", Section::Services, Some(0));
+        error.detail = Detail::Service {
+            service: "npm run dev".into(),
+            place: "api".into(),
+            stopped: false,
+            count: 1,
+            first: 0,
+            lines: Vec::new(),
+            seen: false,
+        };
+        assert!(counted(&error));
+        if let Detail::Service { seen, .. } = &mut error.detail {
+            *seen = true;
+        }
+        assert!(!counted(&error));
     }
 
     fn agent(id: &str, status: AgentStatus, age: u64) -> InboxItem {
