@@ -91,8 +91,6 @@ struct Watcher {
     sent: Vec<Service>,
 }
 
-/// What gerdr keeps of the watching (the errors themselves are in the
-/// store, `Store::service_errors`).
 /// Which error of which pane of which project: what an Undo marks as not
 /// looked at again.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +101,8 @@ pub struct ServiceErrorKey {
     pub fingerprint: String,
 }
 
+/// What gerdr keeps of the watching (the errors themselves are in the
+/// store, `Store::service_errors`).
 #[derive(Default)]
 pub struct ServiceErrors {
     /// By project id.

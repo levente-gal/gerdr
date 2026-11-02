@@ -550,7 +550,7 @@ impl Gerdr {
                 self.save_inbox();
                 let text = format!("Deleted: {}", item.title);
                 let Some(project) = self.project.clone() else {
-                    return self.toast(text, Level::Info);
+                    return self.toast(text, Level::Success);
                 };
                 let undelete = MenuAction::InboxUndelete {
                     project,
@@ -558,7 +558,7 @@ impl Gerdr {
                     at,
                     triage,
                 };
-                self.toast_with(text, Level::Info, Some(("Undo".to_owned(), undelete)));
+                self.toast_with(text, Level::Success, Some(("Undo".to_owned(), undelete)));
             }
             // The panel edits the todo itself, and hands back `SaveTodo`.
             ItemAction::Edit => {}
@@ -580,14 +580,14 @@ impl Gerdr {
     /// at again.
     fn toast_undo(&mut self, text: String, ids: Vec<String>, unsee: Vec<ServiceErrorKey>) {
         let Some(project) = self.project.clone() else {
-            return self.toast(text, Level::Info);
+            return self.toast(text, Level::Success);
         };
         let restore = MenuAction::InboxRestore {
             project,
             ids,
             unsee,
         };
-        self.toast_with(text, Level::Info, Some(("Undo".to_owned(), restore)));
+        self.toast_with(text, Level::Success, Some(("Undo".to_owned(), restore)));
     }
 
     /// Mark `item`'s service error, if it is one, as looked at; the error,
@@ -645,7 +645,7 @@ impl Gerdr {
         }
         self.save_inbox();
         let text = format!(
-            "Dismissed {} in {} until they change",
+            "Dismissed {} items in {} until they change",
             items.len(),
             section.title()
         );
