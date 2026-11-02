@@ -676,7 +676,7 @@ const SERVICE: [ItemAction; 5] = [
 ];
 
 /// What an ignored error can have done to it.
-const IGNORED: [ItemAction; 2] = [ItemAction::GoTo, ItemAction::Unignore];
+const IGNORED: [ItemAction; 3] = [ItemAction::GoTo, ItemAction::Unignore, ItemAction::Forget];
 
 /// `item`'s inbox item, ignored (`ignored`) or not.
 fn service_item(item: &ServiceItem, now_secs: u64, ignored: bool) -> InboxItem {
