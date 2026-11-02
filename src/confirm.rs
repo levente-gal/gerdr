@@ -62,6 +62,15 @@ pub enum Then {
     /// Close this profile's app, import it, start the app again (see
     /// `Gerdr::import_profile`).
     ImportProfile(Source),
+    /// Remove the worktrees of this project's feature, `force`: with the
+    /// work they hold; abandon it if `abandon` (see
+    /// `Gerdr::remove_feature`).
+    RemoveFeature {
+        project: String,
+        slug: String,
+        abandon: bool,
+        force: bool,
+    },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -409,6 +418,18 @@ impl Gerdr {
         self.ask(title, body, "Close and import", Then::ImportProfile(source));
     }
 
+    /// Ask before removing a feature's worktrees (see
+    /// `Gerdr::remove_feature`).
+    pub fn ask_remove_worktrees(
+        &mut self,
+        title: String,
+        body: String,
+        go: &'static str,
+        then: Then,
+    ) {
+        self.ask(title, body, go, then);
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -483,6 +504,12 @@ impl Gerdr {
                 }
             }
             Then::ImportProfile(source) => self.start_import(source, true),
+            Then::RemoveFeature {
+                project,
+                slug,
+                abandon,
+                force,
+            } => self.remove_feature(&project, &slug, abandon, force),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs

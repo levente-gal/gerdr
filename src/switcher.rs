@@ -106,6 +106,10 @@ pub enum Target {
     T3Updates,
     /// The tasks running in the background (see `tasks`).
     Tasks,
+    /// The new feature dialog (see `features`).
+    NewFeature,
+    /// The feature panel on the project's features.
+    Features,
 }
 
 impl Target {
@@ -126,6 +130,8 @@ impl Target {
             | Target::UpdateT3
             | Target::T3Updates
             | Target::Tasks
+            | Target::NewFeature
+            | Target::Features
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -152,6 +158,8 @@ impl Target {
             | Target::UpdateT3
             | Target::T3Updates
             | Target::Tasks
+            | Target::NewFeature
+            | Target::Features
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -763,6 +771,8 @@ fn frecency_key(
         | Target::UpdateT3
         | Target::T3Updates
         | Target::Tasks
+        | Target::NewFeature
+        | Target::Features
         | Target::ImportProfile(_) => return None,
     })
 }
@@ -941,6 +951,7 @@ impl Gerdr {
         items.extend(self.t3_update_entries());
         items.push(self.inbox_entry());
         items.push(self.tasks_entry());
+        items.extend(self.feature_entries());
         let home = home_dir();
         if let Some(home) = &home {
             items.extend(profile_import::sources(home).into_iter().map(|source| {
@@ -1042,6 +1053,38 @@ impl Gerdr {
             n => format!("{n} run"),
         };
         Item::new(ItemIcon::Command, "Background tasks", detail, Target::Tasks)
+    }
+
+    /// The rows starting a feature in the shown project, and opening its
+    /// features when it has some.
+    fn feature_entries(&self) -> Vec<Item> {
+        let Some(project) = &self.project else {
+            return Vec::new();
+        };
+        let open = self
+            .features
+            .all
+            .get(project)
+            .map_or(0, |all| crate::features::listed(all).len());
+        let mut items = vec![Item::new(
+            ItemIcon::Command,
+            "New feature\u{2026}",
+            "worktrees and stages for a change",
+            Target::NewFeature,
+        )];
+        if open > 0 {
+            let detail = match open {
+                1 => "1 open".to_owned(),
+                n => format!("{n} open"),
+            };
+            items.push(Item::new(
+                ItemIcon::Command,
+                "Features",
+                detail,
+                Target::Features,
+            ));
+        }
+        items
     }
 
     /// `items` with their frecency.
@@ -1265,6 +1308,8 @@ impl Gerdr {
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
             Target::Tasks => self.open_tasks(0),
+            Target::NewFeature => self.open_new_feature(None),
+            Target::Features => self.open_features(),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),

@@ -136,6 +136,11 @@ impl Gerdr {
             .map(|(ws, _)| ws)
             .collect();
         chrome::sidebar_layout_at(&workspaces, &agents, self.sidebar_width, self.density)
+            .with_features(
+                self.sidebar_feature_count(),
+                self.sidebar_width,
+                self.density,
+            )
             .scrolled_over(
                 self.sidebar_scroll.pos(),
                 self.sidebar_scroll.overscroll(),
@@ -309,7 +314,12 @@ impl Gerdr {
     ) -> SidebarState {
         let height = self.sidebar_height();
         let layout =
-            chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density);
+            chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density)
+                .with_features(
+                    self.sidebar_feature_count(),
+                    self.sidebar_width,
+                    self.density,
+                );
         // Held to what the rows now take, and moved to show the active
         // workspace when another becomes it: gliding there, or at once
         // the first time.
@@ -350,6 +360,9 @@ impl Gerdr {
             .inbox
             .iter()
             .map(|(i, k, _)| quantize(hover.alpha(SidebarHit::Inbox(*i, *k), now)))
+            .collect();
+        let features = (0..layout.features.len())
+            .map(|n| quantize(hover.alpha(SidebarHit::Feature(n), now)))
             .collect();
         let focused = self.focused_agent();
         let cards = agents
@@ -403,6 +416,7 @@ impl Gerdr {
             cards,
             ci,
             inbox,
+            features,
             plus,
             plus_open,
             repos,
@@ -589,6 +603,13 @@ impl Gerdr {
                 }
             }
             (SidebarHit::InboxTitle, BTN_LEFT) => self.open_inbox(Some(Section::Agents)),
+            (SidebarHit::FeaturesTitle, BTN_LEFT) => self.open_features(),
+            (SidebarHit::Feature(n), BTN_LEFT) => {
+                if let Some(f) = self.sidebar_feature(n) {
+                    let (project, slug) = (f.project.clone(), f.slug.clone());
+                    self.open_feature(&project, &slug);
+                }
+            }
             (SidebarHit::Card(i, k) | SidebarHit::Inbox(i, k), BTN_LEFT) => {
                 // An agent shown from the "Needs you" list shows in its
                 // workspace too: a fold by hand gives way, and the
@@ -895,6 +916,34 @@ impl Gerdr {
                     None => tip,
                 })
             }
+            SidebarHit::FeaturesTitle => {
+                let tip = Tooltip::new(
+                    "The project's open features · open the feature panel",
+                    layout.features_title?,
+                );
+                Some(match self.keymap.help().key_of(Action::Features, 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
+                })
+            }
+            SidebarHit::Feature(n) => {
+                let f = self.sidebar_feature(n)?;
+                let rect = *layout.features.get(n)?;
+                let stage = match f.current() {
+                    Some(stage) => format!("{} \u{b7} {}", stage.label(), stage.about()),
+                    None => "Every stage done".to_owned(),
+                };
+                let done = f.marks.len();
+                let fields = vec![
+                    ("Stage".to_owned(), stage),
+                    (
+                        "Done".to_owned(),
+                        format!("{done} of {}", crate::feature::Stage::ALL.len()),
+                    ),
+                ];
+                let tip = Tooltip::new(&f.title, rect).fields(fields);
+                Some(tip.key("click to open its panel"))
+            }
             SidebarHit::Inbox(i, k) => {
                 let card = agents.get(i)?.get(k)?;
                 let rect = layout.inbox.iter().find(|e| (e.0, e.1) == (i, k))?.2;
@@ -1009,6 +1058,7 @@ impl Gerdr {
                     MenuItem::new("Fold all workspaces", MenuAction::FoldAll(Some(true))),
                     MenuItem::new("Unfold all workspaces", MenuAction::FoldAll(Some(false))),
                     MenuItem::new("Fold each while quiet", MenuAction::FoldAll(None)),
+                    MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
                 ],
             }),
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
@@ -1072,6 +1122,23 @@ impl Gerdr {
                 }
                 Some(MenuSpec { anchor: at, items })
             }
+            SidebarHit::FeaturesTitle => Some(MenuSpec {
+                anchor: at,
+                items: vec![
+                    MenuItem::new("Open features", MenuAction::Features),
+                    MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                ],
+            }),
+            SidebarHit::Feature(n) => {
+                let f = self.sidebar_feature(n)?;
+                let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
+                let items = vec![
+                    MenuItem::new("Open", open),
+                    MenuItem::new("Copy path", MenuAction::CopyPath(f.dir.clone())),
+                    MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                ];
+                Some(MenuSpec { anchor: at, items })
+            }
             hit => {
                 let i = hit.row()?;
                 let dir = self.workspaces.get(i)?.dir.clone();
@@ -1091,6 +1158,7 @@ impl Gerdr {
                     ),
                     MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
+                    MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(Some(i))),
                 ];
                 let git = self.git.get(&dir);
                 if git.is_some_and(|g| g.root.is_some()) {

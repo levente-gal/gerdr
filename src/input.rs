@@ -164,6 +164,10 @@ enum Intercepted {
     CloseSwitcher,
     /// The tasks panel asked for this.
     Tasks(crate::tasks::Outcome),
+    /// The new feature dialog asked for this.
+    NewFeature(crate::features::DialogOutcome),
+    /// The feature panel asked for this.
+    Features(crate::features::PanelOutcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -181,6 +185,11 @@ pub enum Overlay {
     /// The background tasks, which has no field: only its key hints come
     /// this way.
     Tasks,
+    /// The new feature dialog, with its title field.
+    NewFeature,
+    /// The feature panel, which has no field: only its key hints come
+    /// this way.
+    Features,
 }
 
 /// Whether `action`, picked with the prefix, works over the welcome screen:
@@ -203,6 +212,7 @@ fn over_panel(action: &Action) -> bool {
             | Action::Projects
             | Action::Inbox
             | Action::Tasks
+            | Action::Features
             | Action::Repos
             | Action::Worktrees
     )
@@ -212,6 +222,8 @@ fn over_panel(action: &Action) -> bool {
 pub(crate) fn works_over(over: overlay::Overlay, action: &Action) -> bool {
     match over {
         overlay::Overlay::Welcome => over_welcome(action),
+        // A dialog asks first: nothing else goes on over it.
+        o if o.is_dialog() => false,
         _ => over_panel(action),
     }
 }
@@ -226,6 +238,7 @@ fn opens_panel(action: &Action) -> bool {
             | Action::Worktrees
             | Action::Switcher
             | Action::Scrollback
+            | Action::Features
     )
 }
 
@@ -240,6 +253,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
+        O::Features => Intercepted::Features(crate::features::PanelOutcome::Close),
         _ => return None,
     })
 }
@@ -307,6 +321,21 @@ impl Gerdr {
                         // A dialog takes every key.
                         if let Some(dialog) = top.filter(|o| o.is_dialog()) {
                             state.suppressed_keys.push(code);
+                            // The new feature dialog's title takes pastes,
+                            // and repeats what it takes while held.
+                            if dialog == overlay::Overlay::NewFeature {
+                                state.prefix_armed = false;
+                                if text_field::is_paste(mods, sym) {
+                                    state.paste_clipboard(Overlay::NewFeature);
+                                    return FilterResult::Intercept(None);
+                                }
+                                let typed = handle.modified_sym();
+                                text_field::took_key();
+                                let out = state.overlay_key(Overlay::NewFeature, mods, sym, typed);
+                                let took = text_field::took_key();
+                                state.repeat_key(code, *mods, sym, typed, took);
+                                return FilterResult::Intercept(out);
+                            }
                             let out = state.dialog_key(dialog, mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out);
                         }
@@ -737,6 +766,8 @@ impl Gerdr {
             O::Checkout => _ = self.checkout_click(pos),
             O::Confirm => _ = self.confirm_click(pos),
             O::Tasks => self.tasks_click(pos),
+            O::NewFeature => self.new_feature_click(pos),
+            O::Features => self.feature_panel_click(pos),
             // A click on a toast dismisses it, on its button does what the
             // button says.
             O::Toasts => {
@@ -764,7 +795,7 @@ impl Gerdr {
             O::Tooltip | O::ContextMenu => {}
         }
         // A click on a field focuses it, and puts the caret there.
-        if overlay.grabs() && !overlay.is_dialog() {
+        if overlay.grabs() && (!overlay.is_dialog() || overlay == O::NewFeature) {
             self.press_field(pos);
         }
     }
@@ -784,6 +815,8 @@ impl Gerdr {
             O::Checkout => self.checkout_controls().iter().any(on),
             O::Confirm => self.confirm_controls().iter().any(on),
             O::Tasks => self.tasks_controls().iter().any(on),
+            O::NewFeature => self.new_feature_controls().iter().any(on),
+            O::Features => self.feature_panel_controls().iter().any(on),
             O::ContextMenu => self
                 .context_menu
                 .as_ref()
@@ -888,6 +921,10 @@ impl Gerdr {
         // The tasks panel, over the others, makes way for the one asked.
         if over == overlay::Overlay::Tasks && opens_panel(&action) {
             self.close_tasks();
+        }
+        // So does the feature panel.
+        if over == overlay::Overlay::Features && opens_panel(&action) {
+            self.close_feature_panel();
         }
         Some(Intercepted::Action(action))
     }
@@ -1168,6 +1205,8 @@ impl Gerdr {
                 self.refresh_pointer_focus();
             }
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
+            Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
+            Intercepted::Features(outcome) => self.apply_feature_panel(outcome),
         }
     }
 
@@ -1184,6 +1223,8 @@ impl Gerdr {
             O::Scrollback => Some(Overlay::Scrollback),
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
+            O::NewFeature => Some(Overlay::NewFeature),
+            O::Features => Some(Overlay::Features),
             _ => None,
         }
     }
@@ -1227,6 +1268,10 @@ impl Gerdr {
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
             Overlay::Tasks => self.tasks_key(mods, sym).map(Intercepted::Tasks),
+            Overlay::NewFeature => self
+                .new_feature_key(mods, sym, typed)
+                .map(Intercepted::NewFeature),
+            Overlay::Features => self.feature_panel_key(mods, sym).map(Intercepted::Features),
         }
     }
 
@@ -1269,7 +1314,12 @@ impl Gerdr {
                 self.content_rect(),
                 scale,
             )),
-            Overlay::Tasks => None,
+            Overlay::Tasks | Overlay::Features => None,
+            Overlay::NewFeature => Some(chrome::new_feature_field(
+                &self.new_feature_view()?,
+                size,
+                scale,
+            )),
         }
     }
 
@@ -1283,7 +1333,8 @@ impl Gerdr {
             Overlay::Inbox => self.inbox.field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
-            Overlay::Tasks => None,
+            Overlay::Tasks | Overlay::Features => None,
+            Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
         }
     }
 
