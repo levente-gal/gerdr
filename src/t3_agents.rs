@@ -869,19 +869,42 @@ fn has_project(home: &Path, dir: &Path) -> Option<bool> {
 }
 
 /// Add folder `dir` as a T3 Code project of `server` (by `t3 project add`).
+/// How long `t3 project add` may take.
+const ADD_PROJECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn add_project(home: &Path, server: &Server, dir: &Path) -> Result<(), String> {
     let binary = t3_binary(home, server).ok_or_else(|| "no t3 command found".to_owned())?;
-    let out = std::process::Command::new(&binary)
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(&binary)
         .args(["project", "add", "--base-dir"])
         .arg(home)
         .arg(dir)
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| format!("{}: {err}", binary.display()))?;
-    if out.status.success() {
+    // It only talks to the server on this machine: one stuck is stopped.
+    let until = Instant::now() + ADD_PROJECT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("no answer in {}s", ADD_PROJECT_TIMEOUT.as_secs()));
+            }
+            Err(err) => return Err(err.to_string()),
+        }
+    };
+    if status.success() {
         return Ok(());
     }
-    let err = String::from_utf8_lossy(&out.stderr);
+    let mut err = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut err);
+    }
     Err(err.lines().last().unwrap_or("failed").trim().to_owned())
 }
 
@@ -1280,6 +1303,12 @@ impl crate::Gerdr {
         );
         let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
         self.t3.unscoped_in = Some((running, reason.to_owned()));
+        crate::problems::report(
+            "t3 code",
+            format!(
+                "T3 Code {version} doesn't take gerdr's project filter ({reason}): see the log"
+            ),
+        );
         if !self.t3.unscoped.insert(reason.to_owned()) {
             return;
         }
