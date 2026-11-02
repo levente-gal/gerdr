@@ -57,8 +57,12 @@ pub struct Store {
     pub t3_hidden: crate::t3_agents::Hidden,
     /// The T3 Code threads that finished out of the user's sight, shown
     /// done until the user looks at them in gerdr (see `t3_agents`).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub t3_finished: BTreeSet<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::t3_agents::de_held"
+    )]
+    pub t3_finished: crate::t3_agents::Held,
     /// The pull requests whose CI is watched, by repository.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ci_watched: crate::ci::Watched,
@@ -100,8 +104,12 @@ struct State {
     cursor_history: History,
     #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
     t3_hidden: crate::t3_agents::Hidden,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    t3_finished: BTreeSet<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::t3_agents::de_held"
+    )]
+    t3_finished: crate::t3_agents::Held,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
