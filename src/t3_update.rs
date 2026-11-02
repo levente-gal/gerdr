@@ -736,11 +736,14 @@ impl crate::Gerdr {
             return;
         };
         let Some(server) = self.t3.server.clone().filter(|_| self.t3.alive) else {
+            // Gone meanwhile: it starts at the version pinned anyway.
             return;
         };
         if !is_t3(server.pid) {
             tracing::warn!("t3 code's server: pid {} isn't t3's", server.pid);
-            return;
+            let text = format!("Couldn't restart T3 Code at {version}");
+            let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+            return self.toast_with(text, Level::Warning, Some(open_log));
         }
         let w = self.t3_pane().map_or(self.active_workspace, |(w, ..)| w);
         let port = server.port();

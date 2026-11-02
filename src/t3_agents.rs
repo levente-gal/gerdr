@@ -468,6 +468,22 @@ pub enum Source {
     Cli(String),
 }
 
+/// Where the problem of reading T3 Code in part comes from, for
+/// `problems::set`.
+const T3_PROBLEMS: &str = "t3";
+
+/// What the problems list says while gerdr reads T3 Code from `source`:
+/// nothing while it reads the database.
+fn partial_problem(source: &Source) -> Vec<String> {
+    match source {
+        Source::Database => Vec::new(),
+        Source::Cli(why) => vec![format!(
+            "T3 Code's database can't be read ({why}): its threads show basic status only. \
+             \u{201c}Update T3 Code\u{201d} in the launcher can take a version gerdr reads"
+        )],
+    }
+}
+
 /// What the watcher read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
@@ -867,6 +883,8 @@ impl crate::Gerdr {
     /// T3 Code in part.
     fn t3_read(&mut self, snapshot: Snapshot) {
         let partial = matches!(snapshot.source, Source::Cli(_));
+        // Kept in the problems list while it lasts.
+        crate::problems::set(T3_PROBLEMS, partial_problem(&snapshot.source));
         let was = std::mem::replace(&mut self.t3.source, snapshot.source);
         self.t3.rows = snapshot.rows;
         self.t3.migration = snapshot.migration;
@@ -1062,7 +1080,7 @@ impl crate::Gerdr {
         let Some(server) = self.t3.server.clone().filter(|_| self.t3.alive) else {
             let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3(w));
             let text = "T3 Code's server isn't running".to_owned();
-            return self.toast_with(text, Level::Info, Some(action));
+            return self.toast_with(text, Level::Warning, Some(action));
         };
         let link = |origin: &str| match thread {
             Some(id) => server.thread_link(origin, id),
@@ -1247,6 +1265,14 @@ impl Start<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_in_part_is_a_problem_until_the_database_reads() {
+        assert!(partial_problem(&Source::Database).is_empty());
+        let problem = partial_problem(&Source::Cli("no such table: x".into()));
+        assert_eq!(problem.len(), 1);
+        assert!(problem[0].contains("no such table: x"));
+    }
 
     fn row(id: &str) -> ThreadRow {
         ThreadRow {

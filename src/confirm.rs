@@ -170,6 +170,18 @@ fn forget_question(name: &str) -> (String, String) {
     )
 }
 
+/// What a confirm dialog about restarting T3 Code at `version` while
+/// `busy` of its threads work or wait says: its title and the line under
+/// it, short enough for the dialog's one line.
+fn restart_t3_question(version: &str, busy: usize) -> (String, String) {
+    let title = format!("Restart T3 Code at {version}?");
+    let body = match busy {
+        1 => "A thread is at work: restarting now stops it".to_owned(),
+        n => format!("{n} threads are at work: restarting now stops them"),
+    };
+    (title, body)
+}
+
 impl Gerdr {
     /// The card of agent `key`, if one shows.
     fn agent_card(&self, key: &AgentKey) -> Option<AgentView> {
@@ -307,18 +319,9 @@ impl Gerdr {
 
     /// Ask before restarting T3 Code's server at `version` while `busy`
     /// of its threads work or wait: cancelled, it restarts once they're
-    /// done.
+    /// done, and says so.
     pub fn ask_restart_t3(&mut self, version: String, busy: usize) {
-        let title = format!("Restart T3 Code at {version}?");
-        let body = match busy {
-            1 => "One of its threads is at work: restarting stops it. \
-                  Otherwise it restarts once the thread is done"
-                .to_owned(),
-            n => format!(
-                "{n} of its threads are at work: restarting stops them. \
-                 Otherwise it restarts once they're done"
-            ),
-        };
+        let (title, body) = restart_t3_question(&version, busy);
         self.ask(title, body, "Restart now", Then::RestartT3);
     }
 
@@ -370,6 +373,11 @@ impl Gerdr {
         // Gone, what is under the pointer gets it back.
         self.refresh_pointer_focus();
         if outcome == Outcome::Cancel {
+            // Not now, but still once its threads are done.
+            if dialog.then == Then::RestartT3 {
+                let text = "T3 Code restarts once its threads are done".to_owned();
+                self.show_notice(text);
+            }
             return;
         }
         match dialog.then {
@@ -551,5 +559,17 @@ mod tests {
         );
         assert_eq!(stop_question("aft", false, &cursor).1, "Cursor closes");
         assert_eq!(forget_question("aft").0, "Forget \u{201c}aft\u{201d}?");
+    }
+
+    #[test]
+    fn the_t3_restart_question_fits_the_dialog_line() {
+        let (title, body) = restart_t3_question("0.1.7-nightly.20261102.4066", 1);
+        assert_eq!(title, "Restart T3 Code at 0.1.7-nightly.20261102.4066?");
+        assert_eq!(body, "A thread is at work: restarting now stops it");
+        let many = restart_t3_question("0.1.7", 12).1;
+        assert_eq!(many, "12 threads are at work: restarting now stops them");
+        // No longer than the longest body the other dialogs have.
+        let longest = close_many_question("workspace", "w", &["a".into(), "b".into()]).1;
+        assert!(many.chars().count() <= longest.chars().count());
     }
 }
