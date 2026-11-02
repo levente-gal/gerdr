@@ -6073,6 +6073,7 @@ impl Gerdr {
         self.tick_scrolls(now);
         self.tooltip.tick(now);
         self.expire_toasts(now);
+        self.t3_seen();
         let tab_strip = self.tab_hover_tick(now);
         let workspaces: Vec<_> = self
             .workspace_views()
