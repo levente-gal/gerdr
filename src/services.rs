@@ -778,14 +778,19 @@ impl Gerdr {
     }
 
     /// Open the inbox on workspace `w`'s newest error not looked at, else
-    /// its newest; on its Services section if that one is hidden.
+    /// its newest; on its Services section if that one is hidden. The error
+    /// counts as looked at, so the workspace's badge counts one less.
     pub fn show_workspace_service_error(&mut self, w: usize) {
         let errors = self.workspace_service_errors(w);
-        let item = errors
+        let picked = errors
             .iter()
             .find(|g| !g.seen)
             .or(errors.first())
-            .map(|g| inbox_sources::service_item_id(&g.project, &g.pane_id, &g.fingerprint));
+            .map(|g| (g.project.clone(), g.pane_id.clone(), g.fingerprint.clone()));
+        let item = picked.as_ref().map(|(project, pane_id, fingerprint)| {
+            self.see_service_error(project, pane_id, fingerprint);
+            inbox_sources::service_item_id(project, pane_id, fingerprint)
+        });
         self.open_inbox_on(Some(Section::Services), item);
     }
 
