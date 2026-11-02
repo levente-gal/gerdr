@@ -2406,6 +2406,7 @@ impl Gerdr {
                 if let Some(agents) = round.agents {
                     state.agents = agents;
                     state.notify_agents();
+                    state.stage_agents_tick();
                 }
             }
         });
@@ -2839,6 +2840,7 @@ impl Gerdr {
             Ok(agents) => {
                 self.agents = agents;
                 self.notify_agents();
+                self.stage_agents_tick();
             }
             Err(err) => tracing::debug!("herdr: {err}"),
         }

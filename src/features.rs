@@ -49,6 +49,7 @@ use crate::{
     },
     feature::{
         self, Event, Feature, Pr, Stage, Status,
+        agents::needs,
         hook::Guard,
         layout::{self, Created, Root},
         patch::{self, Reading},
@@ -83,6 +84,8 @@ pub struct Features {
     /// is dropped.
     serial: u64,
     done: Option<channel::Sender<Done>>,
+    /// The stage agents being watched (see `feature_agents`).
+    pub(crate) agents: BTreeMap<crate::feature_agents::WatchKey, crate::feature_agents::Watch>,
 }
 
 /// How often the patch watch looks: the feature shown, and one whose
@@ -180,6 +183,15 @@ enum Done {
         project: String,
         slug: String,
         stage: Stage,
+        result: Result<Reading, String>,
+    },
+    /// The code read once run `n` of the Plan agent was done, its file
+    /// at `stamp`: whether the agent kept to reading.
+    PlanChecked {
+        project: String,
+        slug: String,
+        n: u32,
+        stamp: crate::feature_agents::Stamp,
         result: Result<Reading, String>,
     },
     Shipped {
@@ -477,15 +489,43 @@ pub fn row_action(feature: &Feature, row: PanelRow) -> Option<PanelOutcome> {
         PanelRow::Stage(stage) => Some(match stage_mark(feature, stage) {
             StageMark::Done => PanelOutcome::Untick(stage),
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
+            StageMark::Current if needs(stage).is_some() => agent_action(feature, stage),
             StageMark::Current => PanelOutcome::Tick,
             StageMark::Later => PanelOutcome::NotYet(feature.current()?),
         }),
     }
 }
 
+/// What an agent stage's row does: start its agent, show it while its
+/// tab is there, review its file once ready.
+fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
+    match feature.runs.get(&stage) {
+        Some(run) if run.ready.is_some() => PanelOutcome::ReviewDoc(stage),
+        Some(run) if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
+        _ => PanelOutcome::StartAgent(stage, false),
+    }
+}
+
+/// The agent stage under `row` when it is current and has had an agent:
+/// Ctrl+R starts a fresh one.
+fn fresh_stage(feature: &Feature, row: PanelRow) -> Option<Stage> {
+    let PanelRow::Stage(stage) = row else {
+        return None;
+    };
+    (feature.status == Status::Open
+        && feature.current() == Some(stage)
+        && needs(stage).is_some()
+        && feature.runs.contains_key(&stage))
+    .then_some(stage)
+}
+
 /// What Enter does on `row`, in words for its hint.
 fn row_hint(feature: &Feature, row: PanelRow) -> &'static str {
     match row_action(feature, row) {
+        Some(PanelOutcome::StartAgent(..)) => "start agent",
+        Some(PanelOutcome::ShowAgent(_)) => "show agent",
+        Some(PanelOutcome::ReviewDoc(Stage::Discover)) => "review brief",
+        Some(PanelOutcome::ReviewDoc(_)) => "review plan",
         Some(PanelOutcome::Tick) => "mark done",
         Some(PanelOutcome::Ship) => "ship\u{2026}",
         Some(PanelOutcome::Untick(_)) => "reopen",
@@ -501,6 +541,10 @@ fn stage_button(feature: &Feature, stage: Stage) -> Option<&'static str> {
         PanelOutcome::Tick => Some("Mark done"),
         PanelOutcome::Ship => Some("Ship\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
+        PanelOutcome::StartAgent(..) => Some("Start agent"),
+        PanelOutcome::ShowAgent(_) => Some("Show agent"),
+        PanelOutcome::ReviewDoc(Stage::Discover) => Some("Review brief"),
+        PanelOutcome::ReviewDoc(_) => Some("Review plan"),
         _ => None,
     }
 }
@@ -754,6 +798,10 @@ impl FeaturePanel {
             }
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
+            Keysym::r | Keysym::R if ctrl => {
+                return fresh_stage(feature, rows[self.cursor])
+                    .map(|stage| PanelOutcome::StartAgent(stage, true));
+            }
             Keysym::n | Keysym::N if ctrl => return Some(PanelOutcome::New),
             Keysym::Delete | Keysym::KP_Delete if plain => return Some(PanelOutcome::Remove),
             _ => {}
@@ -877,7 +925,8 @@ impl Gerdr {
             .find(|f| f.slug == slug)
     }
 
-    fn feature_mut(&mut self, project: &str, slug: &str) -> Option<&mut Feature> {
+    /// Feature `slug` of project `project`, to change.
+    pub(crate) fn feature_mut(&mut self, project: &str, slug: &str) -> Option<&mut Feature> {
         self.features
             .all
             .get_mut(project)?
@@ -886,7 +935,7 @@ impl Gerdr {
     }
 
     /// Save feature `slug` of `project` as it is now; a failure says so.
-    fn save_feature(&mut self, project: &str, slug: &str) {
+    pub(crate) fn save_feature(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
@@ -1010,6 +1059,13 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Read);
                 self.feature_read(&project, &slug, stage, result);
             }
+            Done::PlanChecked {
+                project,
+                slug,
+                n,
+                stamp,
+                result,
+            } => self.plan_code_checked(&project, &slug, n, stamp, result),
             Done::Shipped {
                 project,
                 slug,
@@ -1172,6 +1228,28 @@ impl Gerdr {
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         self.show_success(format!("\u{201c}{title}\u{201d} is merged: done"));
+    }
+
+    /// Read the code of feature `slug` off the thread for run `n` of its
+    /// Plan agent, whose file has `stamp` (see `plan_code_checked`).
+    pub(crate) fn check_plan_code(
+        &mut self,
+        project: &str,
+        slug: &str,
+        n: u32,
+        stamp: crate::feature_agents::Stamp,
+    ) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(None, move || Done::PlanChecked {
+            result: patch::read(&feature),
+            project,
+            slug,
+            n,
+            stamp,
+        });
     }
 
     /// Mark bound stage `stage` of feature `slug` done once its code is
@@ -1616,6 +1694,7 @@ impl Gerdr {
         match outcome {
             PanelOutcome::Close => self.close_feature_panel(),
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
+                Some(stage) if needs(stage).is_some() => self.approve_stage(&project, &slug, stage),
                 Some(stage) if stage.bound() => self.read_and_tick(&project, &slug, stage),
                 Some(_) => {
                     self.tick_feature(&project, &slug, None);
@@ -1627,7 +1706,7 @@ impl Gerdr {
             PanelOutcome::StartAgent(stage, fresh) => {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }
-            PanelOutcome::ShowAgent(_) => todo!("features: show the stage's agent"),
+            PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
             PanelOutcome::ReviewDoc(stage) => self.open_doc_review(&project, &slug, stage),
             PanelOutcome::OpenPr(url) => {
                 self.close_feature_panel();
@@ -1682,9 +1761,32 @@ impl Gerdr {
         }
     }
 
+    /// Show the tab of `stage`'s agent; one gone is forgotten, and Enter
+    /// starts a new one.
+    fn show_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+        let pane = self
+            .feature(project, slug)
+            .and_then(|f| f.runs.get(&stage)?.pane.clone());
+        if let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
+            self.close_feature_panel();
+            return self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
+        }
+        if let Some(run) = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.runs.get_mut(&stage))
+        {
+            run.pane = None;
+            self.save_feature(project, slug);
+        }
+        self.show_warning(format!(
+            "{}'s agent tab is gone; Enter starts a new one",
+            stage.label()
+        ));
+    }
+
     /// Put the panel's cursor on the current stage of feature `slug`,
     /// when the panel shows it.
-    fn feature_cursor_to_current_of(&mut self, project: &str, slug: &str) {
+    pub(crate) fn feature_cursor_to_current_of(&mut self, project: &str, slug: &str) {
         let on_it = self
             .features
             .panel
@@ -2174,10 +2276,30 @@ impl Gerdr {
         let shipping = mine().any(|b| b.job == Job::Ship);
         let key = (panel.project.clone(), panel.slug.clone());
         let probe = self.features.probes.get(&key).and_then(|p| p.last.as_ref());
+        let agent = feature.current().and_then(|stage| {
+            needs(stage)?;
+            let run = feature.runs.get(&stage)?;
+            let status = run.pane.as_ref().and_then(|p| {
+                self.agents
+                    .iter()
+                    .find(|a| a.pane_id == *p)
+                    .map(|a| a.agent_status)
+            });
+            let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
+            let watch = self.features.agents.get(&watch_key);
+            Some(crate::feature_agents::agent_line(
+                run,
+                stage,
+                status,
+                watch,
+                feature::now(),
+            ))
+        });
         let state = PanelState {
             busy: &busy,
             probe,
             shipping,
+            agent,
         };
         Some(panel_view(panel, feature, &slugs, &state, feature::now()))
     }
@@ -2322,6 +2444,9 @@ struct PanelState<'a> {
     probe: Option<&'a Probe>,
     /// Its pull requests are being opened.
     shipping: bool,
+    /// What its current stage's agent does, for that stage's row (see
+    /// `feature_agents::agent_line`).
+    agent: Option<String>,
 }
 
 /// The line under repository `repo` of `feature`: its branch, its pull
@@ -2372,9 +2497,10 @@ fn panel_view(
             let mark = stage_mark(feature, *s);
             StageRow {
                 label: s.label().to_owned(),
-                detail: match feature.marks.get(s) {
-                    Some(m) => mark_detail(m, now),
-                    None => s.about().to_owned(),
+                detail: match (feature.marks.get(s), &state.agent) {
+                    (Some(m), _) => mark_detail(m, now),
+                    (None, Some(line)) if mark == StageMark::Current => line.clone(),
+                    (None, _) => s.about().to_owned(),
                 },
                 mark,
                 button: stage_button(feature, *s),
@@ -2393,6 +2519,9 @@ fn panel_view(
         && let Some(PanelOutcome::OpenPr(_)) = repo_button(feature, i)
     {
         hints.push(hint("Ctrl+Shift+O", "open PR"));
+    }
+    if fresh_stage(feature, row).is_some() {
+        hints.push(hint("Ctrl+R", "fresh agent"));
     }
     if slugs.len() > 1 {
         hints.push(hint("Left / Right", "other feature"));
@@ -2727,6 +2856,110 @@ pub(crate) mod tests {
         );
         assert_eq!(view.hints[1].1, "mark done");
         assert_eq!(view.remove, "Abandon");
+    }
+
+    fn agent_run(pane: Option<&str>, ready: Option<u64>) -> feature::agents::StageRun {
+        feature::agents::StageRun {
+            n: 1,
+            agent: "Claude Code".into(),
+            pane: pane.map(str::to_owned),
+            ready,
+            ..feature::agents::StageRun::default()
+        }
+    }
+
+    #[test]
+    fn agent_stage_rows_start_show_and_review_their_agent() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "b".into(),
+            cursor: start_cursor(&f),
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["b".to_owned()];
+        let plan = PanelRow::Stage(Stage::Plan);
+        let hints = |panel: &FeaturePanel, f: &Feature, state: &PanelState| {
+            panel_view(panel, f, &slugs, state, 2_000)
+                .hints
+                .into_iter()
+                .take(3)
+                .collect::<Vec<_>>()
+        };
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        // No run yet: Enter starts one; no fresh one to ask for.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::StartAgent(Stage::Plan, false))
+        );
+        assert_eq!(press(&mut panel, &f, ctrl(Keysym::r)), None);
+        assert_eq!(stage_button(&f, Stage::Plan), Some("Start agent"));
+        let state = PanelState::default();
+        assert_eq!(
+            hints(&panel, &f, &state),
+            [
+                pair("Up / Down", "move"),
+                pair("Enter", "start agent"),
+                pair("Ctrl+O", "open tab")
+            ]
+        );
+        assert_eq!(
+            panel_view(&panel, &f, &slugs, &state, 2_000).stages[1].detail,
+            Stage::Plan.about()
+        );
+        // Running: Enter shows it, Ctrl+R starts a fresh one.
+        f.runs.insert(Stage::Plan, agent_run(Some("p1"), None));
+        assert_eq!(
+            row_action(&f, plan),
+            Some(PanelOutcome::ShowAgent(Stage::Plan))
+        );
+        assert_eq!(
+            press(&mut panel, &f, ctrl(Keysym::r)),
+            Some(PanelOutcome::StartAgent(Stage::Plan, true))
+        );
+        assert_eq!(stage_button(&f, Stage::Plan), Some("Show agent"));
+        let state = PanelState {
+            agent: Some("Claude Code working \u{b7} started 3m ago".into()),
+            ..PanelState::default()
+        };
+        assert_eq!(
+            hints(&panel, &f, &state),
+            [
+                pair("Up / Down", "move"),
+                pair("Enter", "show agent"),
+                pair("Ctrl+R", "fresh agent")
+            ]
+        );
+        let view = panel_view(&panel, &f, &slugs, &state, 2_000);
+        assert_eq!(
+            view.stages[1].detail,
+            "Claude Code working \u{b7} started 3m ago"
+        );
+        // Only the current stage's row says it.
+        assert_eq!(view.stages[2].detail, Stage::Build.about());
+        // Its tab gone: Enter starts again.
+        f.runs.insert(Stage::Plan, agent_run(None, None));
+        assert_eq!(
+            row_action(&f, plan),
+            Some(PanelOutcome::StartAgent(Stage::Plan, false))
+        );
+        // Ready: Enter reviews the plan.
+        f.runs
+            .insert(Stage::Plan, agent_run(Some("p1"), Some(1_500)));
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::ReviewDoc(Stage::Plan))
+        );
+        assert_eq!(stage_button(&f, Stage::Plan), Some("Review plan"));
+        assert_eq!(hints(&panel, &f, &state)[1], pair("Enter", "review plan"));
+        // Ctrl+R only on the agent stage's own row.
+        press(&mut panel, &f, key(Keysym::Up));
+        assert_eq!(press(&mut panel, &f, ctrl(Keysym::r)), None);
+        let discover = feature("a", vec![repo("api", true)], 0);
+        assert_eq!(
+            stage_button(&discover, Stage::Discover),
+            Some("Start agent")
+        );
     }
 
     fn probe(ship: Option<ShipCheck>) -> Probe {
