@@ -2677,7 +2677,16 @@ fn inline(what: &str) -> String {
 /// agent, its line comes first: what it waits for matters more.
 fn build_line(feature: &Feature, setup: Option<&str>, agent: Option<&str>) -> Option<String> {
     if let Some(what) = setup {
-        return Some(format!("setting up: {}", inline(what)));
+        // The task's text names the feature: its own panel needn't.
+        let own = format!("Setting up \u{201c}{}\u{201d}", feature.title);
+        let rest = what
+            .strip_prefix(&own)
+            .map(|r| r.trim_start_matches(':').trim());
+        return Some(match rest {
+            Some("") => "setting up".to_owned(),
+            Some(rest) => format!("setting up: {rest}"),
+            None => format!("setting up: {}", inline(what)),
+        });
     }
     let failed = feature.setup.as_ref().and_then(|s| s.failed.as_deref());
     match (agent, failed) {
@@ -3382,9 +3391,15 @@ pub(crate) mod tests {
             build_line(&f, Some("services-api: npm ci (2 of 3)"), agent).as_deref(),
             Some("setting up: services-api: npm ci (2 of 3)")
         );
+        let own = format!("Setting up \u{201c}{}\u{201d}", f.title);
         assert_eq!(
-            build_line(&f, Some("Setting up \u{201c}Bulk\u{201d}"), agent).as_deref(),
-            Some("setting up: setting up \u{201c}Bulk\u{201d}")
+            build_line(&f, Some(&own), agent).as_deref(),
+            Some("setting up")
+        );
+        let step = format!("{own}: api: npm ci (1 of 2)");
+        assert_eq!(
+            build_line(&f, Some(&step), agent).as_deref(),
+            Some("setting up: api: npm ci (1 of 2)")
         );
         f.setup = Some(feature::setup::SetupRun {
             started: 1_000,
