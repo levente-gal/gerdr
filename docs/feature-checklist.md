@@ -144,6 +144,12 @@ How to use it:
   stopped, has a timeout, and doesn't block unrelated actions.
 - **D3** It doesn't run git or another tool on the UI thread.
 
+  Feature setup and Verify's checks are such work: each is a tasks panel
+  row (chip "setup" or "checks", the feature named), says what runs on its
+  stage's row of the feature panel ("setting up: api: npm ci (2 of 3)"),
+  has the project's timeout, and Enter on a stage whose work runs says so
+  rather than starting it again.
+
 ## X. State across places
 
 - **X1** The same count or "seen" state is shared everywhere it shows:

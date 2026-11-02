@@ -97,6 +97,9 @@ pub struct DocOf {
     pub text: Option<String>,
     /// Opened from the feature panel, which Esc goes back to.
     pub back: bool,
+    /// Verify's `evidence.md`, only read: no comments, no Approve or Send
+    /// back (see `Gerdr::open_evidence`).
+    pub evidence: bool,
 }
 
 impl DocOf {
@@ -109,6 +112,9 @@ impl DocOf {
 
 /// Why an edit or a restore does nothing on a file under review.
 pub const DOC_READ_ONLY: &str = "A file under review can't be edited here";
+/// Why a comment, an edit, Approve or Send back do nothing on Verify's
+/// evidence.
+pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
 /// Why Send back does nothing yet.
 pub const NO_COMMENT: &str = "Add a comment first";
 /// Why Approve or Send back wait.
@@ -264,8 +270,21 @@ impl WorktreeDiff {
         crate::review::doc_markdown(&self.diff.review, &name, outdated)
     }
 
+    /// Whether it shows Verify's evidence.
+    fn evidence(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.evidence)
+    }
+
+    /// Whether its lines take no comments: a commit's, the evidence.
+    fn read_only(&self) -> bool {
+        self.commit.is_some() || self.evidence()
+    }
+
     /// Approve the file under review, unless a comment is being written.
     fn approve(&self) -> Option<Done> {
+        if self.evidence() {
+            return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        }
         if self.diff.editing.is_some() {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
         }
@@ -275,6 +294,9 @@ impl WorktreeDiff {
     /// Send the file under review back with its comments: there must be
     /// one, and none being written.
     fn send_back(&self) -> Option<Done> {
+        if self.evidence() {
+            return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        }
         if self.diff.editing.is_some() {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
         }
@@ -290,7 +312,9 @@ impl WorktreeDiff {
         if self.doc.is_none() {
             return outcome;
         }
+        let refused = |o: &Outcome| o.edits() || *o == Outcome::Notice(diff_view::READ_ONLY);
         match outcome {
+            Some(o) if self.evidence() && refused(&o) => Some(Outcome::Notice(EVIDENCE_READ_ONLY)),
             Some(o) if o.edits() => Some(Outcome::Notice(DOC_READ_ONLY)),
             Some(Outcome::Copy { count, .. }) => Some(Outcome::Copy {
                 text: self.doc_markdown(),
@@ -308,19 +332,25 @@ impl WorktreeDiff {
                 || what.contains("yank")
                 || what.contains("restore the change")
         };
+        // Evidence takes no comments either.
+        let comments = |what: &str| what.contains("comment");
         let read_only = self.doc.is_some() || self.commit.is_some();
+        let evidence = self.evidence();
         let diff = diff_help_lines()
             .into_iter()
-            .filter(|(_, what, _)| !(read_only && edits(what)));
+            .filter(|(_, what, _)| !(read_only && edits(what)) && !(evidence && comments(what)));
         if self.doc.is_none() {
             return diff.collect();
         }
-        let own = [
-            ("Esc", "close the review"),
-            ("F1", "list the keys"),
-            (APPROVE_KEY, "approve the file as it is"),
-            (SEND_BACK_KEY, "send it back to its agent with the comments"),
-        ];
+        let own: &[(&str, &str)] = match evidence {
+            true => &[("Esc", "close the evidence"), ("F1", "list the keys")],
+            false => &[
+                ("Esc", "close the review"),
+                ("F1", "list the keys"),
+                (APPROVE_KEY, "approve the file as it is"),
+                (SEND_BACK_KEY, "send it back to its agent with the comments"),
+            ],
+        };
         let own = own.iter().map(|(key, what)| {
             (
                 key.to_string(),
@@ -336,13 +366,13 @@ impl WorktreeDiff {
     fn with_diff<R>(&mut self, env: Env, f: impl FnOnce(&mut DiffView, &diff_view::Ctx) -> R) -> R {
         let lead = self.lead();
         let empty = self.empty();
+        let read_only = self.read_only();
         let WorktreeDiff {
             root,
             label,
             branch,
             since,
             diff,
-            commit,
             ..
         } = self;
         let sections = [Section {
@@ -352,7 +382,6 @@ impl WorktreeDiff {
             head: None,
             changes: &since.changes,
         }];
-        let read_only = commit.is_some();
         f(diff, &ctx(&sections, env, &lead, empty, read_only))
     }
 
@@ -400,6 +429,9 @@ impl WorktreeDiff {
             return format!("Commit · {}", self.label);
         }
         if let Some(doc) = &self.doc {
+            if doc.evidence {
+                return format!("Evidence of \u{201c}{}\u{201d}", doc.title);
+            }
             return format!("{} · {}", doc.stage.label(), doc.name());
         }
         let name = self.branch.clone().unwrap_or_else(|| {
@@ -419,6 +451,9 @@ impl WorktreeDiff {
             return "reading…".into();
         }
         if let Some(doc) = &self.doc {
+            if doc.evidence {
+                return doc.state.clone();
+            }
             return format!("\u{201c}{}\u{201d} · {}", doc.title, doc.state);
         }
         if let Some(commit) = &self.commit {
@@ -436,7 +471,7 @@ impl WorktreeDiff {
     pub fn view(&self, env: Env) -> DetailView {
         let sections = self.sections();
         let lead = self.lead();
-        let read_only = self.commit.is_some();
+        let read_only = self.read_only();
         let mut view = self
             .diff
             .view(&ctx(&sections, env, &lead, self.empty(), read_only));
@@ -456,6 +491,9 @@ impl WorktreeDiff {
             };
         }
         (view.row_buttons).retain(|(_, hint)| hint.button != ReposButton::Restore);
+        if self.evidence() {
+            return;
+        }
         let hint = |button: ReposButton, key: &str| Hint {
             button,
             label: button.label().into(),
@@ -558,10 +596,10 @@ impl WorktreeDiff {
     pub fn hints(&self) -> Vec<Hint> {
         use ReposButton as B;
         let mut buttons = Vec::new();
-        if self.commit.is_none() {
+        if !self.read_only() {
             buttons.push(B::Comment);
         }
-        if self.doc.is_some() {
+        if self.doc.is_some() && !self.evidence() {
             buttons.extend([B::Approve, B::SendBack]);
         }
         if !self.diff.review.is_empty() {
@@ -607,6 +645,9 @@ impl WorktreeDiff {
             match hit {
                 ReposHit::Button(ReposButton::Approve) => return self.approve(),
                 ReposHit::Button(ReposButton::SendBack) => return self.send_back(),
+                ReposHit::DiffRestore(_) if self.evidence() => {
+                    return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+                }
                 ReposHit::DiffRestore(_) => {
                     return Some(Done::Diff(Outcome::Notice(DOC_READ_ONLY)));
                 }
@@ -664,6 +705,7 @@ impl WorktreeDiff {
                 title: help_title(
                     match (&self.commit, &self.doc) {
                         (Some(_), _) => "Keys in a commit's diff",
+                        (_, Some(doc)) if doc.evidence => "Keys in the evidence",
                         (_, Some(_)) => "Keys in a file under review",
                         (None, None) => "Keys in a worktree's diff",
                     },
@@ -680,7 +722,7 @@ impl WorktreeDiff {
         let sections = self.sections();
         let lead = self.lead();
         let outdated = self.clearing_outdated;
-        let read_only = self.commit.is_some();
+        let read_only = self.read_only();
         let ctx = ctx(&sections, env, &lead, self.empty(), read_only);
         let (title, lines) = self.diff.clear_sheet(&ctx, outdated);
         let buttons = clear_buttons(outdated);
@@ -1552,6 +1594,7 @@ mod tests {
             state: "ready for review".into(),
             text: None,
             back: false,
+            evidence: false,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
@@ -1668,6 +1711,71 @@ mod tests {
         key(&mut wd, Keysym::c);
         assert!(wd.diff.editing.is_some());
         assert_eq!(key(&mut wd, Keysym::Escape), None);
+        assert_eq!(key(&mut wd, Keysym::Escape), Some(Done::Close));
+    }
+
+    fn evidence() -> WorktreeDiff {
+        let doc = DocOf {
+            project: "p".into(),
+            slug: "login".into(),
+            stage: crate::feature::Stage::Verify,
+            path: "/data/features/p/login/evidence.md".into(),
+            comments: "/data/features/p/login/verify-comments.json".into(),
+            title: "Log in".into(),
+            state: "run 2 failed".into(),
+            text: None,
+            back: true,
+            evidence: true,
+        };
+        let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
+        wd.set_doc(Ok("# Evidence\napi: npm test failed\n".into()), ENV);
+        wd
+    }
+
+    #[test]
+    fn the_evidence_is_only_read() {
+        let mut wd = evidence();
+        assert_eq!(wd.heading(), "Evidence of \u{201c}Log in\u{201d}");
+        assert_eq!(wd.summary(), "run 2 failed");
+        let refused = Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let row = texts(&wd).iter().position(|t| t == "# Evidence").unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        // No comment, edit or restore.
+        assert_eq!(key(&mut wd, Keysym::c), refused);
+        assert!(wd.diff.editing.is_none());
+        key(&mut wd, Keysym::d);
+        assert_eq!(key(&mut wd, Keysym::d), refused);
+        assert_eq!(key(&mut wd, Keysym::R), refused);
+        assert_eq!(wd.click(ReposHit::DiffRestore(row), ENV), refused);
+        // No Approve or Send back, by key or button.
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let ctrl_shift = ModifiersState {
+            shift: true,
+            ..ctrl
+        };
+        let enter = Keysym::Return;
+        assert_eq!(wd.key(&ctrl, enter, enter, ENV), refused);
+        assert_eq!(wd.key(&ctrl_shift, enter, enter, ENV), refused);
+        let approve = ReposHit::Button(ReposButton::Approve);
+        assert_eq!(wd.click(approve, ENV), refused);
+        // Nor buttons, hints or keys sheet lines for them.
+        let view = wd.view(ENV);
+        assert!(view.title_buttons.is_empty());
+        assert!(view.row_buttons.is_empty());
+        let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
+        assert_eq!(hints, [ReposButton::Help, ReposButton::Close]);
+        let lines = wd.help_lines();
+        assert_eq!(lines[0].1, "close the evidence");
+        assert!(
+            lines.iter().all(|(key, what, _)| !what.contains("comment")
+                && key != APPROVE_KEY
+                && key != SEND_BACK_KEY),
+            "{lines:?}"
+        );
         assert_eq!(key(&mut wd, Keysym::Escape), Some(Done::Close));
     }
 

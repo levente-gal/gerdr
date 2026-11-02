@@ -9,6 +9,9 @@
 //! feature's data dir (`<stage>-comments.json`), so closing and opening
 //! the review again keeps them, and deleted once the file is approved or
 //! sent back.
+//!
+//! Verify's `evidence.md` shows in the same view, only read: no comments,
+//! no Approve or Send back (`Gerdr::open_evidence`).
 
 use std::{
     io::ErrorKind,
@@ -18,7 +21,8 @@ use std::{
 use crate::{
     Gerdr,
     diff::{self, FileDiff, Hunk, Line, LineKind},
-    feature::{Feature, Stage, Status, store},
+    feature::{Feature, Stage, Status, store, verify::EVIDENCE},
+    features::Job,
     review::{self, Review},
     toast::Level,
     worktree_diff::{DocOf, WorktreeDiff},
@@ -93,6 +97,26 @@ pub fn state(feature: Option<&Feature>, stage: Stage) -> String {
     }
 }
 
+/// Where Verify of `feature` stands, as its evidence's header says it;
+/// `running` while its checks run again.
+pub fn evidence_state(feature: Option<&Feature>, running: bool) -> String {
+    let Some(feature) = feature else {
+        return "feature gone".into();
+    };
+    let Some(run) = &feature.verify else {
+        return "no run yet".into();
+    };
+    if running {
+        let shown = run.n.saturating_sub(1);
+        return format!("checks running again \u{b7} this is run {shown}");
+    }
+    match run.passed {
+        Some(true) => format!("run {} passed", run.n),
+        Some(false) => format!("run {} failed", run.n),
+        None => format!("run {}", run.n),
+    }
+}
+
 /// The file `path` read, or why it couldn't be, as the review says it.
 fn read(path: &Path, name: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|err| match err.kind() {
@@ -108,7 +132,37 @@ impl Gerdr {
     /// Show feature `slug`'s `evidence.md` (see `feature::verify`) in the
     /// same view, read-only, without Approve or Send back.
     pub fn open_evidence(&mut self, project: &str, slug: &str) {
-        let _ = (project, slug);
+        let Some(feature) = self.feature(project, slug) else {
+            return self.show_warning("That feature is gone".into());
+        };
+        let title = feature.title.clone();
+        let running = self.busy_with(project, slug, Job::Verify).is_some();
+        let state = evidence_state(Some(feature), running);
+        let dir = store::dir(None, project, slug);
+        let path = dir.join(EVIDENCE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return self.show_warning("No evidence yet: Run checks first".into());
+            }
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                return self.show_error(format!("Couldn't read {EVIDENCE}: {err}"));
+            }
+        };
+        let doc = DocOf {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            stage: Stage::Verify,
+            path,
+            comments: comments_path(&dir, Stage::Verify),
+            title,
+            state,
+            text: None,
+            back: false,
+            evidence: true,
+        };
+        self.show_doc(doc, text, Review::default());
     }
 
     /// Show `stage`'s file of feature `slug` for review.
@@ -135,8 +189,28 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't read {name}: {err}"));
             }
         };
-        let back =
-            (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug);
+        let comments = comments_path(&dir, stage);
+        let review = review::load_file(&comments);
+        let doc = DocOf {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            stage,
+            path,
+            comments,
+            title,
+            state,
+            text: None,
+            back: false,
+            evidence: false,
+        };
+        self.show_doc(doc, text, review);
+    }
+
+    /// Show `doc`, read as `text`, its review comments `review`: back to
+    /// the feature panel on close when that is open on its feature.
+    fn show_doc(&mut self, mut doc: DocOf, text: String, review: Review) {
+        doc.back = (self.features.panel.as_ref())
+            .is_some_and(|p| p.project == doc.project && p.slug == doc.slug);
         // It covers the other panels: they close, the repositories panel
         // kept as it was.
         self.switcher = None;
@@ -159,19 +233,6 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
-        let comments = comments_path(&dir, stage);
-        let review = review::load_file(&comments);
-        let doc = DocOf {
-            project: project.to_owned(),
-            slug: slug.to_owned(),
-            stage,
-            path,
-            comments,
-            title,
-            state,
-            text: None,
-            back,
-        };
         let wd = WorktreeDiff::of_doc(doc, self.active_workspace, review);
         self.repos.worktree = Some(wd);
         let env = self.worktree_env();
@@ -194,7 +255,16 @@ impl Gerdr {
             return;
         };
         let read = read(&doc.path, &doc.name());
-        let state = state(self.feature(&doc.project, &doc.slug), doc.stage);
+        let feature = self.feature(&doc.project, &doc.slug);
+        let state = match doc.evidence {
+            true => {
+                let running = self
+                    .busy_with(&doc.project, &doc.slug, Job::Verify)
+                    .is_some();
+                evidence_state(feature, running)
+            }
+            false => state(feature, doc.stage),
+        };
         let env = self.worktree_env();
         let Some(wd) = self.repos.worktree.as_mut() else {
             return;
@@ -370,5 +440,24 @@ mod tests {
         );
         let f = crate::features::tests::feature("login", Vec::new(), 1);
         assert_eq!(state(Some(&f), Stage::Discover), "approved");
+    }
+
+    #[test]
+    fn the_evidence_header_says_how_the_run_went() {
+        let mut f = crate::features::tests::feature("login", Vec::new(), 3);
+        assert_eq!(evidence_state(None, false), "feature gone");
+        assert_eq!(evidence_state(Some(&f), false), "no run yet");
+        f.verify = Some(crate::feature::verify::VerifyRun {
+            n: 2,
+            passed: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(evidence_state(Some(&f), false), "run 2 failed");
+        assert_eq!(
+            evidence_state(Some(&f), true),
+            "checks running again \u{b7} this is run 1"
+        );
+        f.verify.as_mut().unwrap().passed = Some(true);
+        assert_eq!(evidence_state(Some(&f), false), "run 2 passed");
     }
 }

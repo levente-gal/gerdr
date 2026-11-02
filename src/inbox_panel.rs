@@ -729,7 +729,14 @@ impl Gerdr {
                 project,
                 slug,
                 stage,
+                kind: crate::feature_agents::GateKind::Review,
             } => self.open_doc_review(&project, &slug, stage),
+            Target::Gate {
+                project,
+                slug,
+                stage,
+                ..
+            } => self.open_feature_at(&project, &slug, stage),
             Target::ServiceError {
                 project,
                 pane_id,
