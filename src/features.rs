@@ -580,14 +580,23 @@ fn changed_text(title: &str, stage: Stage) -> String {
     format!("\u{201c}{title}\u{201d} changed: back to {}", stage.label())
 }
 
-/// The success toast once `n` pull requests of `title` are open.
-fn opened_text(title: &str, n: usize) -> String {
-    let what = if n == 1 {
-        "pull request"
-    } else {
-        "pull requests"
+/// The success toast once the pull requests of `title` are open:
+/// `opened` new ones, and `updated` ones it had open already, which the
+/// push updated.
+fn opened_text(title: &str, opened: usize, updated: usize) -> String {
+    let what = |n: usize| {
+        if n == 1 {
+            "pull request"
+        } else {
+            "pull requests"
+        }
     };
-    format!("Opened {n} {what} for \u{201c}{title}\u{201d}")
+    let title = format!("\u{201c}{title}\u{201d}");
+    match (opened, updated) {
+        (n, 0) => format!("Opened {n} {} for {title}", what(n)),
+        (0, n) => format!("Updated {n} {} for {title}", what(n)),
+        (o, u) => format!("Opened {o} and updated {u} {} for {title}", what(o + u)),
+    }
 }
 
 /// `lines` as the panel has room for: past `MAX_CHECK_LINES`, the first
@@ -1917,6 +1926,11 @@ impl Gerdr {
             Err((why, prs)) => (prs, Some(why)),
         };
         let n = prs.len();
+        // Those it had open already, the push updated.
+        let updated = prs
+            .iter()
+            .filter(|pr| feature.shipping.prs.contains(pr))
+            .count();
         for pr in prs {
             match feature.shipping.prs.iter_mut().find(|p| p.repo == pr.repo) {
                 Some(old) => *old = pr,
@@ -1933,7 +1947,8 @@ impl Gerdr {
         if n == 0 {
             return self.probe_feature(project, slug);
         }
-        feature.log(now, opened_text(&title, n));
+        let text = opened_text(&title, n - updated, updated);
+        feature.log(now, text.clone());
         if squash.is_empty()
             && feature.status == Status::Open
             && feature.current() == Some(Stage::Ship)
@@ -1942,7 +1957,7 @@ impl Gerdr {
         }
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
-        self.show_success(opened_text(&title, n));
+        self.show_success(text);
         self.probe_feature(project, slug);
     }
 
@@ -2215,7 +2230,7 @@ fn still_checked(feature: &Feature, patch: Option<&str>) -> Result<(), String> {
         ));
     }
     if patch != Some(reading.patch.as_str()) {
-        return Err("its code changed since the check; ship again".into());
+        return Err("its code changed since the check".into());
     }
     Ok(())
 }
@@ -2899,12 +2914,20 @@ pub(crate) mod tests {
             "\u{201c}Bulk\u{201d} changed: back to Build"
         );
         assert_eq!(
-            opened_text("Bulk", 1),
+            opened_text("Bulk", 1, 0),
             "Opened 1 pull request for \u{201c}Bulk\u{201d}"
         );
         assert_eq!(
-            opened_text("Bulk", 2),
+            opened_text("Bulk", 2, 0),
             "Opened 2 pull requests for \u{201c}Bulk\u{201d}"
+        );
+        assert_eq!(
+            opened_text("Bulk", 0, 2),
+            "Updated 2 pull requests for \u{201c}Bulk\u{201d}"
+        );
+        assert_eq!(
+            opened_text("Bulk", 1, 1),
+            "Opened 1 and updated 1 pull requests for \u{201c}Bulk\u{201d}"
         );
         assert_eq!(
             pr_tail("https://github.com/acme/api/pull/12/"),
