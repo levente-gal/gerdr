@@ -52,6 +52,9 @@ pub struct Features {
     pub all: BTreeMap<String, Vec<Feature>>,
     pub dialog: Option<NewFeatureDialog>,
     pub panel: Option<FeaturePanel>,
+    /// The feature last shown in the panel, by project: the features key
+    /// opens it again.
+    shown: BTreeMap<String, String>,
     /// What runs off the thread now, for the tasks panel.
     busy: Vec<Busy>,
     /// The serial of the last dialog opened: a root found for an older one
@@ -489,6 +492,17 @@ fn switch(slugs: &[String], slug: &str, back: bool) -> Option<String> {
     Some(slugs[to].clone())
 }
 
+/// The feature the features key shows, of `slugs` listed: the one open,
+/// else the one last shown, else the newest.
+fn pick_feature(slugs: &[String], open: Option<&str>, last: Option<&str>) -> Option<String> {
+    [open, last]
+        .into_iter()
+        .flatten()
+        .find(|s| slugs.iter().any(|l| l == s))
+        .map(str::to_owned)
+        .or_else(|| slugs.last().cloned())
+}
+
 /// The cursor a feature's panel starts at: its current stage, else its
 /// last.
 fn start_cursor(feature: &Feature) -> usize {
@@ -825,6 +839,7 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't create \u{201c}{title}\u{201d}: {why}"));
             }
         };
+        let text = created_text(&title, &root.path, &created.ignores);
         let now = feature::now();
         let feature = Feature {
             version: feature::VERSION,
@@ -852,16 +867,6 @@ impl Gerdr {
         if self.project.as_deref() == Some(project.as_str()) {
             self.open_feature(&project, &slug);
         }
-        let ignored: Vec<String> = created.ignores.iter().map(|p| tilde(p)).collect();
-        let text = if ignored.is_empty() {
-            format!("Created \u{201c}{title}\u{201d}")
-        } else {
-            format!(
-                "Created \u{201c}{title}\u{201d} \u{b7} kept {} out of git in {}",
-                layout::FEATURES_DIR,
-                ignored.join(", ")
-            )
-        };
         self.show_success(text);
     }
 
@@ -954,14 +959,9 @@ impl Gerdr {
             return self.show_warning("Open a project to see its features".into());
         };
         let slugs = self.listed_slugs(&project);
-        let slug = self
-            .features
-            .panel
-            .as_ref()
-            .map(|p| p.slug.clone())
-            .filter(|s| slugs.contains(s))
-            .or_else(|| slugs.last().cloned());
-        match slug {
+        let open = self.features.panel.as_ref().map(|p| p.slug.as_str());
+        let last = self.features.shown.get(&project).map(String::as_str);
+        match pick_feature(&slugs, open, last) {
             Some(slug) => self.open_feature(&project, &slug),
             None => self.open_new_feature(None),
         }
@@ -987,6 +987,9 @@ impl Gerdr {
         self.close_menu();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
+        self.features
+            .shown
+            .insert(project.to_owned(), slug.to_owned());
         self.features.panel = Some(FeaturePanel {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -1112,6 +1115,7 @@ impl Gerdr {
             PanelOutcome::Show(to) => {
                 if let Some(feature) = self.feature(&project, &to) {
                     let cursor = start_cursor(feature);
+                    self.features.shown.insert(project.clone(), to.clone());
                     if let Some(panel) = self.features.panel.as_mut() {
                         panel.slug = to;
                         panel.cursor = cursor;
@@ -1210,7 +1214,7 @@ impl Gerdr {
         }
         if let Some(user) = self.folder_in_use(&feature.dir) {
             return self.show_warning(format!(
-                "{user} is in \u{201c}{}\u{201d}; close it first",
+                "\u{201c}{}\u{201d} has {user} in it; close it first",
                 feature.title
             ));
         }
@@ -1461,6 +1465,27 @@ impl Gerdr {
         let all = self.features.all.get(self.project.as_ref()?)?;
         sidebar_features(all).get(i).copied()
     }
+}
+
+/// What the toast says once feature `title` is made under `root`, naming
+/// the files `.features` was added to (`ignores`) from the root: whole
+/// paths are long enough to cut the last ones off.
+fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
+    if ignores.is_empty() {
+        return format!("Created \u{201c}{title}\u{201d}");
+    }
+    let names: Vec<String> = ignores
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .map_or_else(|_| tilde(p), |r| r.display().to_string())
+        })
+        .collect();
+    format!(
+        "Created \u{201c}{title}\u{201d} \u{b7} added {} to {}",
+        layout::FEATURES_DIR,
+        names.join(", ")
+    )
 }
 
 /// What a confirm dialog about removing a feature's worktrees says of
@@ -1926,6 +1951,32 @@ pub(crate) mod tests {
         ];
         assert_eq!(new_slug("Bulk export!", &all), "bulk-export-3");
         assert_eq!(new_slug("Other thing", &all), "other-thing");
+    }
+
+    #[test]
+    fn the_features_key_shows_the_open_then_the_last_shown_then_the_newest() {
+        let slugs = vec!["a".to_owned(), "b".to_owned()];
+        assert_eq!(pick_feature(&slugs, Some("a"), Some("b")), Some("a".into()));
+        assert_eq!(pick_feature(&slugs, None, Some("a")), Some("a".into()));
+        // One gone (abandoned) is passed over.
+        assert_eq!(pick_feature(&slugs, None, Some("gone")), Some("b".into()));
+        assert_eq!(pick_feature(&[], None, Some("a")), None);
+    }
+
+    #[test]
+    fn the_created_toast_names_the_ignore_files_from_the_root() {
+        let root = Path::new("/w/multi");
+        let ignores = vec![
+            root.join(".cursorignore"),
+            root.join("pyrightconfig.json"),
+            PathBuf::from("/elsewhere/.git/info/exclude"),
+        ];
+        assert_eq!(
+            created_text("Bulk export", root, &ignores),
+            "Created \u{201c}Bulk export\u{201d} \u{b7} added .features to .cursorignore, \
+             pyrightconfig.json, /elsewhere/.git/info/exclude"
+        );
+        assert_eq!(created_text("X", root, &[]), "Created \u{201c}X\u{201d}");
     }
 
     #[test]
