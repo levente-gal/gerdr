@@ -1,15 +1,48 @@
 //! The scrolled lists' share of input and of each frame: the wheel's and
 //! the touchpad's events made `Motion`s, and every list moving on its own
-//! (a glide, a fling, a bounce) moved on once a frame.
+//! (a glide, a fling, a bounce) moved on once a frame. A list that moves
+//! by whole rows only, as a dialog's, takes a `Motion` as rows (see
+//! `whole_rows`).
 
-use std::time::Instant;
+use std::{cell::Cell, time::Instant};
 
 use smithay::backend::input::{Axis, Event, InputBackend, PointerAxisEvent};
 
-use crate::{Gerdr, scroll::Motion};
+use crate::{
+    Gerdr,
+    scroll::{Motion, NOTCH_PX},
+};
 
 /// How many logical pixels a list moves for each a touchpad's fingers move.
 const FINGER_SPEED: f64 = 1.5;
+
+thread_local! {
+    /// What the motions so far moved a list of whole rows short of
+    /// another row, in rows (see `whole_rows`).
+    static ROWS_LEFT: Cell<f64> = const { Cell::new(0.0) };
+}
+
+/// How many whole rows `motion` moves a list moving by whole rows, its
+/// rows `pitch` logical pixels apart, after the motions before it moved
+/// it `left` rows short of another (down positive): a notch of the wheel
+/// as far as it moves a list of pixels, at least a row, and the fingers
+/// as far as they move. What it moves short of another row comes back
+/// with it, to carry on to the next motion; a lift, or a turn the other
+/// way, drops it.
+pub(crate) fn whole_rows(motion: Motion, pitch: f64, left: f64) -> (isize, f64) {
+    let pitch = pitch.max(1.0);
+    let by = match motion {
+        Motion::Wheel(notches) | Motion::Notches(notches) => {
+            notches * (NOTCH_PX / pitch).round().max(1.0)
+        }
+        Motion::Finger { px, .. } => px / pitch,
+        Motion::Lift { .. } => return (0, 0.0),
+    };
+    let left = if left * by < 0.0 { 0.0 } else { left };
+    let total = left + by;
+    let rows = total.trunc();
+    (rows as isize, total - rows)
+}
 
 impl Gerdr {
     /// What a wheel or touchpad event does to a list. The wheel turns
@@ -34,6 +67,15 @@ impl Gerdr {
             px: dy / self.scale() * FINGER_SPEED,
             time,
         })
+    }
+
+    /// How many whole rows `motion` moves a list moving by whole rows
+    /// `pitch` logical pixels apart, carrying what it moves short of a row
+    /// on to the next motion (see `whole_rows`).
+    pub(crate) fn motion_rows(&self, motion: Motion, pitch: f64) -> isize {
+        let (rows, left) = whole_rows(motion, pitch, ROWS_LEFT.get());
+        ROWS_LEFT.set(left);
+        rows
     }
 
     /// Stop every list flung, where it stands; whether one was.
@@ -71,5 +113,37 @@ impl Gerdr {
             self.pointer_moved(self.pointer, time);
         }
         self.scrolling = moving;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_notch_moves_whole_rows_as_far_as_a_list_of_pixels_goes() {
+        // Rows 50 px apart: a notch's 100 px is two rows.
+        assert_eq!(whole_rows(Motion::Wheel(1.0), 50.0, 0.0), (2, 0.0));
+        assert_eq!(whole_rows(Motion::Wheel(-1.0), 50.0, 0.0), (-2, 0.0));
+        // Taller rows than a notch: a row at least.
+        assert_eq!(whole_rows(Motion::Wheel(1.0), 300.0, 0.0), (1, 0.0));
+        // A fine wheel's fraction of a notch carries on.
+        let (rows, left) = whole_rows(Motion::Wheel(0.25), 50.0, 0.0);
+        assert_eq!((rows, left), (0, 0.5));
+        assert_eq!(whole_rows(Motion::Wheel(0.25), 50.0, left), (1, 0.0));
+    }
+
+    #[test]
+    fn fingers_move_whole_rows_and_carry_the_rest() {
+        let finger = |px| Motion::Finger { px, time: 0 };
+        let (rows, left) = whole_rows(finger(30.0), 40.0, 0.0);
+        assert_eq!(rows, 0);
+        let (rows, left) = whole_rows(finger(30.0), 40.0, left);
+        assert_eq!(rows, 1);
+        assert!((left - 0.5).abs() < 1e-9);
+        // Turned the other way, what was carried is dropped.
+        assert_eq!(whole_rows(finger(-20.0), 40.0, left), (0, -0.5));
+        // So does a lift.
+        assert_eq!(whole_rows(Motion::Lift { time: 0 }, 40.0, left), (0, 0.0));
     }
 }

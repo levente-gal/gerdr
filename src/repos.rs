@@ -31,28 +31,27 @@
 //! fold every repository and folder, or unfold them all. A folder checks
 //! and folds as a whole.
 //!
-//! Keys: Tab moves from the tree to the detail to the field. In the tree
-//! Up/Down select, Space checks, Left/Right fold, Enter opens a file in
-//! Zed or folds a repository or folder, and typing goes to the field; Shift with
-//! Up/Down or the pages scrolls the detail. In the diff the arrows and the
-//! pages move a cursor over its rows (with Shift, reaching a range back),
-//! Alt+Up/Down go to the file before or after, and for the cursor's file
-//! Space checks it, Left/Right fold it (on a line, move the caret) and
-//! Enter opens it in Zed at the cursor's line (`g` Space and Ctrl+click
-//! too, at the caret's char; on a file's header, the file). C writes a comment on the
-//! range's lines (or edits the one the cursor is on): Shift+Enter breaks
-//! its line, Enter keeps it, Esc drops it; Delete deletes it, Ctrl+Shift+C copies the review, and
-//! "Clear review" deletes it all, asked first. Ctrl+N opens the branch
-//! picker to create a branch (in it, Ctrl+Enter creates the one typed),
-//! Ctrl+Enter
-//! commits (Ctrl+Shift+Enter then pushes), Ctrl+P pushes (Ctrl+Shift+P force
-//! pushes), Ctrl+F fetches, Ctrl+L pulls, Ctrl+M merges the default
-//! branch in (Ctrl+Shift+M rebases on it), Alt+M merges a branch picked
-//! in (Alt+Shift+M rebases on it), Ctrl+E opens the conflicts in Zed,
-//! Ctrl+R marks a file resolved, Ctrl+G continues (Ctrl+Shift+Delete
-//! aborts), Alt+Z undoes the last batch, Alt+R retries what failed, Alt+S
-//! stashes (Alt+Shift+S pops), Ctrl+D and Ctrl+T show the diff and the
-//! log, Ctrl+S opens the branch picker, F1 lists the keys; Esc closes.
+//! Keys: Tab moves from the tree to the detail to the field, Shift+Tab
+//! back; Esc steps back to the tree (the message typed kept), then
+//! closes. In the tree Up/Down select, Space checks, Left/Right fold,
+//! Enter opens a file in Zed or folds a repository or folder, and typing
+//! goes to the field; Shift with Up/Down or the pages scrolls the detail.
+//! In the diff the arrows and the pages move a cursor over its rows (with
+//! Shift, reaching a range back), Alt+Up/Down go to the file before or
+//! after, and for the cursor's file Space checks it, Left/Right fold it
+//! (on a line, move the caret) and Enter opens it in Zed at the cursor's
+//! line (`g` Space and Ctrl+click too, at the caret's char; on a file's
+//! header, the file). `c` writes a comment on the range's lines (or edits
+//! the one the cursor is on): Shift+Enter breaks its line, Enter or Esc
+//! keeps it; Delete deletes it, Ctrl+Shift+C copies the review, and
+//! "Clear review" deletes it all, asked first. Alt+1, 2 and 3 show the
+//! diff, the log and the stashes; Ctrl+S opens the branch picker, Ctrl+N
+//! it to create a branch (in it, Ctrl+Enter creates the one typed), Alt+Del
+//! it to delete one. The actions' chords (`ACTIONS`, which F1 lists with
+//! the rest) work with either focus: Ctrl+Enter commits, Ctrl+P pushes,
+//! Ctrl+F fetches (in the diff, finds), Ctrl+M merges the default branch
+//! in, Alt+D marks a file resolved, Ctrl+R reads them all again (in the
+//! diff, redoes), and so on.
 //! What can't be taken back (a force push, an abort, an undo, a branch or
 //! stash deleted) asks first, on a sheet. On a repository's line, a click
 //! on the arrow up pushes it, on the arrow down pulls it, and on its stash
@@ -75,8 +74,8 @@ use crate::{
     chrome::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, CleanLine,
         Density, DetailLine, DetailRow, DetailTab, DetailView, DiffTone, DirLine, FileLine, Hint,
-        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, SheetView,
-        Tone, TreeLine, TreeTool,
+        LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, RowMark,
+        SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
     diff_edit::{FileEdit, Put},
@@ -91,17 +90,28 @@ use crate::{
     worktree_diff::WorktreeDiff,
 };
 
+/// How long the line saying why an action wasn't done stays; one saying
+/// what is under way (ending in `…`) stays while it is.
+const WHY_LIVES: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// A repository changing this many files or more starts folded.
 pub const FOLD_FILES: usize = 200;
 
 /// How many of the branch menu's longest branches it is measured by.
 const WIDEST: usize = 3;
+/// Why the review can't be sent to an agent.
+const NO_AGENT: &str = "No agent runs in this workspace: start one, or copy the review";
 
 /// The panel, while open, and the batch running or last run.
 #[derive(Default)]
 pub struct Repos {
     pub(crate) panel: Option<Panel>,
     pub(crate) batch: Option<Batch>,
+    /// Batches still running that a later one over other repositories
+    /// took the panel's result bar from: told in a toast once done.
+    pub(crate) background: Vec<Batch>,
+    /// The flags that stop each batch running, by id.
+    pub(crate) stops: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Hands the batches' and checks' results to the event loop.
     pub(crate) done: Option<channel::Sender<RepoEvent>>,
     /// The id the next batch, check or detail read gets.
@@ -148,10 +158,13 @@ impl Repos {
         self.panel.is_some() || self.worktree.is_some()
     }
 
-    /// Close it for good, as when leaving the project.
+    /// Close it for good, as when leaving the project: the edits made
+    /// from the diff can't be undone after.
     pub fn close(&mut self) {
         self.panel = None;
         self.kept = None;
+        self.cuts.clear();
+        self.undone.clear();
         self.close_worktree();
     }
 
@@ -231,6 +244,11 @@ pub struct Ctx<'a> {
     /// How many characters a review comment's row of the diff holds
     /// (`chrome::repos_detail_cols`).
     pub cols: usize,
+    /// How many lines a sheet shows at once (`chrome::repos_sheet_rows`).
+    pub sheet_rows: usize,
+    /// Batches still running in the background: started before `batch`,
+    /// over other repositories.
+    pub background: &'a [Batch],
 }
 
 /// How the tree lists a repository's changed files: a line each with its
@@ -315,7 +333,7 @@ pub struct Panel {
     pub(crate) tree_scroll: Scroll,
     /// Where the log or the stashes stand, in rows.
     pub(crate) detail_scroll: Scroll,
-    /// The tab asked for with Ctrl+D / Ctrl+T, else the diff.
+    /// The tab asked for with Alt+1 / 2 / 3, else the diff.
     pub(crate) tab: Option<DetailTab>,
     /// The log or stashes read for, and what they say.
     pub(crate) detail: Option<(DetailKey, String)>,
@@ -324,6 +342,8 @@ pub struct Panel {
     pub(crate) hover: Option<ReposHit>,
     /// Why the last action wasn't done, under the field.
     pub(crate) error: Option<String>,
+    /// That line as first shown, and when: it goes after `WHY_LIVES`.
+    pub(crate) error_shown: std::cell::RefCell<Option<(String, SystemTime)>>,
     pub(crate) sheet: Option<Sheet>,
     /// Where the selected line was among the tree's lines: what is
     /// selected once it is gone.
@@ -333,6 +353,14 @@ pub struct Panel {
     pub(crate) detail_stale: bool,
     /// The branch picker's menu, while open.
     pub(crate) branch_menu: Option<BranchMenu>,
+    /// The files edited from the diff since the panel opened, by (root,
+    /// path): marked in the tree, while `u` can undo it.
+    pub(crate) edited: HashSet<(PathBuf, String)>,
+    /// The stash picked in the Stashes tab, by line (0 the newest).
+    pub(crate) stash_pick: usize,
+    /// What the agent the review would be sent to is called; `None` while
+    /// none runs in its workspaces. Kept up by the host.
+    pub(crate) agent: Option<String>,
 }
 
 /// The branch picker's menu: where its lines stand, and the branch Enter
@@ -370,6 +398,8 @@ pub enum MenuAction {
     Switch,
     /// Merge it into the branch checked out, or rebase that onto it.
     Integrate(Integrate),
+    /// Delete it, where it is a local branch (asked first).
+    Delete,
 }
 
 /// A branch the picker offers: its names (more than one for a group of
@@ -473,28 +503,30 @@ fn name_in<'a>(status: &GitStatus, names: &'a [String]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// A question over the panel.
+/// A question over the panel. Each keeps the button Enter presses, by
+/// index into `sheet_buttons`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sheet {
     /// Before `kind` over `jobs`, which can't be taken back: what it does
-    /// to each repository, and the button Enter presses: 0 does it, 1
-    /// cancels.
+    /// to each repository, and the button Enter presses: 0 cancels, 1
+    /// does it.
     Confirm {
         kind: BatchKind,
         jobs: Vec<Job>,
         lines: Vec<(String, String, Tone)>,
         choice: usize,
     },
-    /// The panel's keys.
-    Help { choice: usize },
-    /// Before dropping the review's comments.
-    ClearReview { choice: usize },
+    /// The panel's keys, from line `top` on.
+    Help { choice: usize, top: usize },
+    /// Before dropping the review's comments; only those on lines no
+    /// longer in the diff when `outdated`.
+    ClearReview { choice: usize, outdated: bool },
     /// What the check before `kind` found, per repository in `jobs`.
     Preflight {
         kind: BatchKind,
         jobs: Vec<Job>,
         verdicts: Vec<(PathBuf, Verdict)>,
-        /// The button Enter presses: 0 All, 1 Clean only, 2 Cancel.
+        /// The button Enter presses: 0 Cancel, 1 Clean only, 2 All.
         choice: usize,
     },
     /// These repositories' branches and upstreams both moved: rebase,
@@ -539,6 +571,13 @@ pub enum BatchKind {
         msg: String,
         push: bool,
     },
+    /// Amend the last commit with the job's files (none to only reword
+    /// it), its message replaced by `msg` if there is one; `pushed` when
+    /// the commit is on an upstream already, so it is asked first.
+    Amend {
+        msg: Option<String>,
+        pushed: bool,
+    },
     Push {
         force: bool,
     },
@@ -558,10 +597,12 @@ pub enum BatchKind {
     Undo,
     /// Stash the uncommitted changes, untracked files too.
     Stash,
-    /// Bring the newest stash back, and drop it.
-    StashPop,
-    /// Drop the newest stash.
-    StashDrop,
+    /// Bring stash `n` (0 the newest) back, and drop it.
+    StashPop(usize),
+    /// Drop stash `n` (0 the newest).
+    StashDrop(usize),
+    /// Throw away the uncommitted changes to the job's files.
+    Discard,
 }
 
 impl BatchKind {
@@ -573,6 +614,7 @@ impl BatchKind {
             BatchKind::DeleteBranch { .. } => "Delete branch",
             BatchKind::Commit { push: false, .. } => "Commit",
             BatchKind::Commit { push: true, .. } => "Commit and push",
+            BatchKind::Amend { .. } => "Amend last commit",
             BatchKind::Push { force: false } => "Push",
             BatchKind::Push { force: true } => "Force push",
             BatchKind::Fetch => "Fetch",
@@ -581,8 +623,8 @@ impl BatchKind {
             BatchKind::Integrate { how, from } => {
                 let from = from.as_ref().map(|names| names.join(" / "));
                 return match (how, from) {
-                    (Integrate::Merge, None) => "Merge base".into(),
-                    (Integrate::Rebase, None) => "Rebase on base".into(),
+                    (Integrate::Merge, None) => "Merge default branch in".into(),
+                    (Integrate::Rebase, None) => "Rebase onto default branch".into(),
                     (Integrate::Merge, Some(from)) => format!("Merge {from}"),
                     (Integrate::Rebase, Some(from)) => format!("Rebase onto {from}"),
                 };
@@ -592,8 +634,9 @@ impl BatchKind {
             BatchKind::Abort => "Abort",
             BatchKind::Undo => "Undo",
             BatchKind::Stash => "Stash",
-            BatchKind::StashPop => "Pop stash",
-            BatchKind::StashDrop => "Drop stash",
+            BatchKind::StashPop(_) => "Pop stash",
+            BatchKind::StashDrop(_) => "Drop stash",
+            BatchKind::Discard => "Discard changes",
         }
         .into()
     }
@@ -605,6 +648,7 @@ impl BatchKind {
             BatchKind::Branch(_) | BatchKind::Switch(_) => "switched",
             BatchKind::DeleteBranch { .. } => "deleted",
             BatchKind::Commit { push: false, .. } => "committed",
+            BatchKind::Amend { .. } => "amended",
             BatchKind::Commit { push: true, .. } | BatchKind::Push { force: false } => "pushed",
             BatchKind::Push { force: true } => "force pushed",
             BatchKind::Fetch => "fetched",
@@ -623,21 +667,25 @@ impl BatchKind {
             BatchKind::Abort => "aborted",
             BatchKind::Undo => "undone",
             BatchKind::Stash => "stashed",
-            BatchKind::StashPop => "popped",
-            BatchKind::StashDrop => "dropped",
+            BatchKind::StashPop(_) => "popped",
+            BatchKind::StashDrop(_) => "dropped",
+            BatchKind::Discard => "discarded",
         }
     }
 
     /// Whether it can't be taken back, so is asked about first: a force
-    /// push, an abort, an undo, a branch or a stash dropped.
+    /// push, an abort, an undo, a branch or a stash dropped, a pushed
+    /// commit amended.
     pub fn confirmed_first(&self) -> bool {
         matches!(
             self,
             BatchKind::Push { force: true }
+                | BatchKind::Amend { pushed: true, .. }
                 | BatchKind::Abort
                 | BatchKind::Undo
                 | BatchKind::DeleteBranch { .. }
-                | BatchKind::StashDrop
+                | BatchKind::StashDrop(_)
+                | BatchKind::Discard
         )
     }
 
@@ -666,6 +714,7 @@ impl BatchKind {
             BatchKind::Branch(_)
                 | BatchKind::Switch(_)
                 | BatchKind::Commit { push: false, .. }
+                | BatchKind::Amend { .. }
                 | BatchKind::Pull(_)
                 | BatchKind::Integrate { .. }
         )
@@ -697,6 +746,11 @@ pub struct Batch {
     pub id: u64,
     pub kind: BatchKind,
     pub runs: Vec<RepoRun>,
+    /// When it started: how long it has run shows while it does.
+    pub started: SystemTime,
+    /// The user asked it to stop: its commands are killed, the rest not
+    /// run.
+    pub stopping: bool,
 }
 
 impl Batch {
@@ -744,7 +798,9 @@ impl Batch {
         if skipped > 0 {
             parts.push(format!("{skipped} skipped"));
         }
-        if going > 0 {
+        if going > 0 && self.stopping {
+            parts.push("stopping…".into());
+        } else if going > 0 {
             parts.push(format!("{going} of {} running", self.runs.len()));
         }
         let tone = if going > 0 {
@@ -762,6 +818,37 @@ impl Batch {
     pub fn run(&self, root: &Path) -> Option<&RepoRun> {
         self.runs.iter().find(|r| r.root == root)
     }
+
+    /// Whether it still runs in the repository at `root`.
+    pub fn runs_in(&self, root: &Path) -> bool {
+        self.run(root).is_some_and(|r| !r.state.over())
+    }
+}
+
+/// How long since `then`, at `now`, in words: `12s`, `2m 5s`.
+pub fn took(then: SystemTime, now: SystemTime) -> String {
+    let s = now.duration_since(then).map_or(0, |d| d.as_secs());
+    match s {
+        0..60 => format!("{s}s"),
+        _ => format!("{}m {}s", s / 60, s % 60),
+    }
+}
+
+/// Why a batch over the repositories at `roots` must wait, if one of them
+/// is in a batch still running: which, and where.
+pub fn busy<'a>(roots: impl IntoIterator<Item = &'a Path>, ctx: &Ctx) -> Option<String> {
+    let running = ctx.batch.into_iter().chain(ctx.background);
+    let batches: Vec<&Batch> = running.filter(|b| !b.finished()).collect();
+    roots.into_iter().find_map(|root| {
+        let batch = batches.iter().find(|b| b.runs_in(root))?;
+        let label = (ctx.items.iter())
+            .find(|i| i.root == root)
+            .map_or_else(|| root.display().to_string(), |i| i.label.clone());
+        let what = batch.kind.label().to_lowercase();
+        Some(format!(
+            "Wait for the {what} running in {label} (Alt+C stops it)"
+        ))
+    })
 }
 
 /// A repository in a batch.
@@ -776,6 +863,8 @@ pub struct RepoRun {
     pub state: RunState,
     /// Every command run in it, for the log.
     pub log: Vec<Ran>,
+    /// When it started running there.
+    pub since: Option<SystemTime>,
 }
 
 impl RepoRun {
@@ -911,6 +1000,12 @@ pub enum Outcome {
         text: String,
         count: usize,
     },
+    /// Send the review, as Markdown, to the agent of its workspace:
+    /// `count` comments.
+    SendReview {
+        text: String,
+        count: usize,
+    },
     /// Open these files of the repository at `root` in its workspace's
     /// Zed, the first at `at` (else where Zed puts it).
     OpenInZed {
@@ -934,9 +1029,14 @@ pub enum Outcome {
     Yank(FileEdit),
     /// Put what was yanked or deleted last in a file.
     Paste(Put),
-    /// Undo the last cut; do the last undone again.
-    UndoCut,
-    RedoCut,
+    /// Undo the last cut in the file (by root and path; with none, the
+    /// last anywhere); do the last undone there again.
+    UndoCut(Option<(PathBuf, String)>),
+    RedoCut(Option<(PathBuf, String)>),
+    /// Read the repositories' status and diffs again.
+    Refresh,
+    /// Stop the batches running: their commands killed, the rest not run.
+    Stop,
 }
 
 /// A tree line, by index: a repository of `Ctx::items`, a folder of its
@@ -1125,6 +1225,7 @@ fn sections(items: &[RepoItem]) -> Vec<Section<'_>> {
             root: &i.root,
             label: &i.label,
             branch: i.status.branch.as_deref(),
+            head: i.status.head.as_deref(),
             changes: &i.status.changes,
         })
         .collect()
@@ -1152,6 +1253,17 @@ fn diff_keys(focus: Focus) -> Keys {
     }
 }
 
+/// The detail tab Alt and a digit shows: 1 the diff, 2 the log, 3 the
+/// stashes.
+fn tab_key(sym: Keysym) -> Option<DetailTab> {
+    match sym {
+        Keysym::_1 | Keysym::KP_1 => Some(DetailTab::Diff),
+        Keysym::_2 | Keysym::KP_2 => Some(DetailTab::Log),
+        Keysym::_3 | Keysym::KP_3 => Some(DetailTab::Stashes),
+        _ => None,
+    }
+}
+
 /// The selected tree line, while a file.
 fn selected_file(selected: &Option<Selected>) -> Option<(&Path, &str)> {
     match selected {
@@ -1171,9 +1283,9 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
         D::Cut(edit) => Outcome::Cut(edit),
         D::Yank(edit) => Outcome::Yank(edit),
         D::Paste(put) => Outcome::Paste(put),
-        D::UndoCut => Outcome::UndoCut,
-        D::RedoCut => Outcome::RedoCut,
-        D::Toggle { .. } | D::Clear => Outcome::Notice("Done in the panel"),
+        D::UndoCut(file) => Outcome::UndoCut(file),
+        D::RedoCut(file) => Outcome::RedoCut(file),
+        D::Toggle { .. } | D::Clear | D::ClearOutdated => Outcome::Notice("Done in the panel"),
     }
 }
 
@@ -1193,49 +1305,361 @@ impl Why {
     }
 }
 
-/// The action a key asks for, with either focus: before the field, as
-/// Ctrl+Shift+Delete would otherwise delete a word there.
-fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
+/// A chord: the modifiers held, exactly, and the symbols it is pressed
+/// with (both cases of a letter: Shift changes the symbol).
+#[derive(Clone, Copy, Debug)]
+struct Chord {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    syms: &'static [Keysym],
+}
+
+impl Chord {
+    /// Whether `sym` with `mods` is it.
+    fn matches(&self, mods: &ModifiersState, sym: Keysym) -> bool {
+        !mods.logo
+            && (mods.ctrl, mods.shift, mods.alt) == (self.ctrl, self.shift, self.alt)
+            && self.syms.contains(&sym)
+    }
+}
+
+const fn ctrl(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        ctrl: true,
+        shift: false,
+        alt: false,
+        syms,
+    }
+}
+
+const fn ctrl_shift(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        shift: true,
+        ..ctrl(syms)
+    }
+}
+
+const fn alt(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        ctrl: false,
+        shift: false,
+        alt: true,
+        syms,
+    }
+}
+
+const fn alt_shift(syms: &'static [Keysym]) -> Chord {
+    Chord {
+        shift: true,
+        ..alt(syms)
+    }
+}
+
+const ENTER: &[Keysym] = &[Keysym::Return, Keysym::KP_Enter];
+const DELETE: &[Keysym] = &[Keysym::Delete, Keysym::KP_Delete];
+
+/// An action of the panel with a chord of its own, pressed with either
+/// focus (before the field, as Ctrl+Shift+Delete would otherwise delete a
+/// word there): the button it presses, its chord, the key as the footer
+/// shows it, and what it does as the keys sheet (F1) says. `action_key`,
+/// the footer's keys and the sheet all read it.
+struct Action {
+    button: ReposButton,
+    chord: Chord,
+    key: &'static str,
+    what: &'static str,
+}
+
+/// The panel's actions with a chord, as F1 lists them.
+const ACTIONS: &[Action] = {
     use ReposButton as B;
-    if mods.logo {
-        return None;
-    }
-    let shift = mods.shift;
-    if sym == Keysym::F1 && !mods.ctrl && !mods.alt {
-        return Some(B::Help);
-    }
-    if mods.alt && !mods.ctrl {
-        return match sym {
-            Keysym::z | Keysym::Z => Some(B::Undo),
-            Keysym::r | Keysym::R => Some(B::RetryFailed),
-            Keysym::m | Keysym::M if shift => Some(B::RebaseFrom),
-            Keysym::m | Keysym::M => Some(B::MergeFrom),
-            Keysym::s | Keysym::S if shift => Some(B::StashPop),
-            Keysym::s | Keysym::S => Some(B::Stash),
-            _ => None,
-        };
-    }
-    if !mods.ctrl || mods.alt {
-        return None;
-    }
-    // Shift changes the symbol: match both cases.
-    let button = match sym {
-        Keysym::Return | Keysym::KP_Enter if shift => B::CommitPush,
-        Keysym::Return | Keysym::KP_Enter => B::Commit,
-        Keysym::c | Keysym::C if shift => B::CopyReview,
-        Keysym::p | Keysym::P if shift => B::ForcePush,
-        Keysym::p | Keysym::P => B::Push,
-        Keysym::f | Keysym::F if !shift => B::Fetch,
-        Keysym::l | Keysym::L => B::Pull,
-        Keysym::m | Keysym::M if shift => B::Rebase,
-        Keysym::m | Keysym::M => B::Merge,
-        Keysym::e | Keysym::E => B::OpenInZed,
-        Keysym::r | Keysym::R => B::MarkResolved,
-        Keysym::g | Keysym::G => B::Continue,
-        Keysym::Delete | Keysym::KP_Delete if shift => B::Abort,
-        _ => return None,
-    };
-    Some(button)
+    &[
+        Action {
+            button: B::Commit,
+            chord: ctrl(ENTER),
+            key: "Ctrl+Enter",
+            what: "commit the checked files with the message",
+        },
+        Action {
+            button: B::CommitPush,
+            chord: ctrl_shift(ENTER),
+            key: "Ctrl+Shift+Enter",
+            what: "commit them, then push",
+        },
+        Action {
+            button: B::Amend,
+            chord: alt(&[Keysym::a, Keysym::A]),
+            key: "Alt+A",
+            what: "amend the last commit with the checked files; a message typed replaces its own",
+        },
+        Action {
+            button: B::Push,
+            chord: ctrl(&[Keysym::p, Keysym::P]),
+            key: "Ctrl+P",
+            what: "push the checked repositories, else the selected",
+        },
+        Action {
+            button: B::ForcePush,
+            chord: ctrl_shift(&[Keysym::p, Keysym::P]),
+            key: "Ctrl+Shift+P",
+            what: "force push them, with lease (asked first)",
+        },
+        Action {
+            button: B::Fetch,
+            chord: ctrl(&[Keysym::f, Keysym::F]),
+            key: "Ctrl+F",
+            what: "fetch the checked, else all; in the diff, find",
+        },
+        Action {
+            button: B::Pull,
+            chord: ctrl(&[Keysym::l, Keysym::L]),
+            key: "Ctrl+L",
+            what: "pull the checked, else the selected",
+        },
+        Action {
+            button: B::Merge,
+            chord: ctrl(&[Keysym::m, Keysym::M]),
+            key: "Ctrl+M",
+            what: "merge the default branch into the branch checked out",
+        },
+        Action {
+            button: B::Rebase,
+            chord: ctrl_shift(&[Keysym::m, Keysym::M]),
+            key: "Ctrl+Shift+M",
+            what: "rebase the branch checked out onto the default branch",
+        },
+        Action {
+            button: B::MergeFrom,
+            chord: alt(&[Keysym::m, Keysym::M]),
+            key: "Alt+M",
+            what: "merge a branch picked in the menu into the one checked out",
+        },
+        Action {
+            button: B::RebaseFrom,
+            chord: alt_shift(&[Keysym::m, Keysym::M]),
+            key: "Alt+Shift+M",
+            what: "rebase the branch checked out onto one picked",
+        },
+        Action {
+            button: B::OpenInZed,
+            chord: ctrl(&[Keysym::e, Keysym::E]),
+            key: "Ctrl+E",
+            what: "open the file, or the conflicts, in Zed",
+        },
+        Action {
+            button: B::MarkResolved,
+            chord: alt(&[Keysym::d, Keysym::D]),
+            key: "Alt+D",
+            what: "mark the conflicted file resolved (on a repository, all)",
+        },
+        Action {
+            button: B::Continue,
+            chord: ctrl(&[Keysym::g, Keysym::G]),
+            key: "Ctrl+G",
+            what: "continue the merge or rebase stopped on conflicts",
+        },
+        Action {
+            button: B::Abort,
+            chord: ctrl_shift(DELETE),
+            key: "Ctrl+Shift+Del",
+            what: "abort it, back to before it (asked first)",
+        },
+        Action {
+            button: B::Undo,
+            chord: alt(&[Keysym::z, Keysym::Z]),
+            key: "Alt+Z",
+            what: "undo the last batch (asked first)",
+        },
+        Action {
+            button: B::RetryFailed,
+            chord: alt(&[Keysym::r, Keysym::R]),
+            key: "Alt+R",
+            what: "retry what failed in the last batch",
+        },
+        Action {
+            button: B::Stash,
+            chord: alt(&[Keysym::s, Keysym::S]),
+            key: "Alt+S",
+            what: "stash the selected repository's changes",
+        },
+        Action {
+            button: B::StashPop,
+            chord: alt_shift(&[Keysym::s, Keysym::S]),
+            key: "Alt+Shift+S",
+            what: "pop the selected repository's newest stash",
+        },
+        Action {
+            button: B::DeleteBranchMenu,
+            chord: alt(DELETE),
+            key: "Alt+Del",
+            what: "delete a local branch picked in the menu (asked first)",
+        },
+        Action {
+            button: B::Stop,
+            chord: alt(&[Keysym::c, Keysym::C]),
+            key: "Alt+C",
+            what: "stop the batches running: their git commands are killed",
+        },
+        Action {
+            button: B::CopyReview,
+            chord: ctrl_shift(&[Keysym::c, Keysym::C]),
+            key: "Ctrl+Shift+C",
+            what: "copy the review comments for an AI agent",
+        },
+        Action {
+            button: B::Refresh,
+            chord: ctrl(&[Keysym::r, Keysym::R]),
+            key: "Ctrl+R",
+            what: "read the repositories again; in the diff, redo as vim's",
+        },
+        Action {
+            button: B::Help,
+            chord: Chord {
+                ctrl: false,
+                shift: false,
+                alt: false,
+                syms: &[Keysym::F1],
+            },
+            key: "F1",
+            what: "list the keys",
+        },
+    ]
+};
+
+/// The panel's other keys, taken where the focus is, as F1 lists them
+/// before the actions: the key, what it does.
+const FOCUS_KEYS: &[(&str, &str)] = &[
+    (
+        "Tab / Shift+Tab",
+        "the tree, the diff, the field; the other way",
+    ),
+    (
+        "Esc",
+        "back a step: the field or the diff to the tree, then close",
+    ),
+    (
+        "Up / Down, Ctrl+K / J",
+        "select a line; in the diff, move the cursor",
+    ),
+    ("PgUp / PgDn", "a page of lines"),
+    (
+        "Shift+Up / Down",
+        "scroll the diff or log; in the diff, reach a range",
+    ),
+    ("Space", "check the line, or the diff's file"),
+    ("Ctrl+A", "check everything, or nothing"),
+    (
+        "Left / Right",
+        "in the tree, fold or unfold the line; in the diff, move the caret (on a header, fold it)",
+    ),
+    (
+        "Enter",
+        "on a file, open it in Zed; on a repository or folder, fold it",
+    ),
+    ("Typing", "in the tree, starts the commit message"),
+    (
+        "Del",
+        "in the tree, discard a file's or folder's changes (asked first)",
+    ),
+    (
+        "Up / Down, Enter, Del",
+        "in the Stashes tab, pick a stash, pop it, drop it (asked first)",
+    ),
+    ("Alt+F", "list the files by folder, or flat"),
+    ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
+    (
+        "Alt+1 / 2 / 3, Ctrl+D",
+        "the diff, the log, the stashes; Ctrl+D the diff (in it, half a page)",
+    ),
+    ("Ctrl+S", "switch them all to a branch picked in the menu"),
+    ("Ctrl+N", "create a branch: type its name"),
+    ("Ctrl+Enter", "in the branch menu, create the branch typed"),
+    ("Del", "in the branch menu, delete the branch picked"),
+    ("Alt+Up / Down", "in the diff, the file before or after"),
+    (
+        "c / Del Del",
+        "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it",
+    ),
+    (
+        "Enter / Shift+Enter",
+        "in a comment, keep it; a new line (Esc keeps it too)",
+    ),
+    (
+        "g Space / Ctrl+click",
+        "in the diff, open the code in Zed at the caret; on a file's name, the file",
+    ),
+    (
+        "/ / Ctrl+F",
+        "in the diff, find its lines, paths, hunks; capitals match case (Ctrl+Shift+F from anywhere)",
+    ),
+    (
+        "Enter / Shift+Enter",
+        "in the search, the next place, the one before",
+    ),
+    (
+        "n / N, F3 / Shift+F3",
+        "the next place found, the one before",
+    ),
+    (
+        "h j k l w b e 0 ^ $",
+        "in the diff, move the caret, as in vim",
+    ),
+    (
+        "gg G { } Ctrl+U Ctrl+D",
+        "in the diff, the top, the end, the hunk before or after, half a page",
+    ),
+    ("* / #", "find the word at the caret, back for #"),
+    (
+        "x X D dd dw de d$ 3dd",
+        "in the diff, delete from the file, as in vim",
+    ),
+    (
+        "v / V, then d",
+        "select by chars, by lines; delete it from the file",
+    ),
+    (
+        "yy yw y$ Y, p / P",
+        "in the diff, yank (and copy); paste after, before",
+    ),
+    (
+        "Shift+R",
+        "in the diff, restore the change at the caret or the lines selected",
+    ),
+    (
+        "u / U or Ctrl+R",
+        "undo the last edit to this file, do it again",
+    ),
+    ("Right click", "the actions, on a line or anywhere"),
+];
+
+/// The keys of a worktree's diff (`worktree_diff`), as its keys sheet
+/// lists them: the diff's own, and Esc.
+pub fn diff_help_lines() -> Vec<(String, String, Tone)> {
+    let diff = FOCUS_KEYS
+        .iter()
+        .filter(|(_, what)| what.starts_with("in the diff") || what.starts_with("in a comment"));
+    let shared = FOCUS_KEYS
+        .iter()
+        .filter(|(key, _)| matches!(*key, "PgUp / PgDn" | "* / #" | "Right click"));
+    [
+        ("Esc", "close the diff, back to the worktrees"),
+        ("F1", "list the keys"),
+    ]
+    .iter()
+    .chain(diff)
+    .chain(shared)
+    .chain([("Ctrl+Shift+C", "copy the review comments for an AI agent")].iter())
+    .map(|(key, what)| (key.to_string(), what.to_string(), Tone::Normal))
+    .collect()
+}
+
+/// The action a key asks for, with either focus.
+fn action_key(mods: &ModifiersState, sym: Keysym) -> Option<ReposButton> {
+    ACTIONS
+        .iter()
+        .find(|a| a.chord.matches(mods, sym))
+        .map(|a| a.button)
 }
 
 /// Whether `item` is stopped on conflicts: an operation half-way, or
@@ -1244,44 +1668,22 @@ fn in_conflict(item: &RepoItem) -> bool {
     item.status.op.is_some() || item.status.changes.iter().any(Change::conflicted)
 }
 
-/// `button`'s key, as the footer shows it; empty for those without one.
-fn key_name(button: ReposButton) -> &'static str {
+/// `button`'s key, as the footer and the diff's chips show it: its
+/// chord's, else the key that presses it where it is; empty for those
+/// without one.
+pub(crate) fn key_name(button: ReposButton) -> &'static str {
     use ReposButton as B;
+    if let Some(action) = ACTIONS.iter().find(|a| a.button == button) {
+        return action.key;
+    }
     match button {
-        B::Commit => "Ctrl+Enter",
-        B::CommitPush => "Ctrl+Shift+Enter",
-        B::Push => "Ctrl+P",
-        B::ForcePush => "Ctrl+Shift+P",
-        B::Fetch => "Ctrl+F",
-        B::Pull => "Ctrl+L",
-        B::Merge => "Ctrl+M",
-        B::Rebase => "Ctrl+Shift+M",
-        B::MergeFrom => "Alt+M",
-        B::RebaseFrom => "Alt+Shift+M",
-        B::OpenInZed => "Ctrl+E",
-        B::MarkResolved => "Ctrl+R",
-        B::Continue => "Ctrl+G",
-        B::Abort => "Ctrl+Shift+Del",
-        B::Undo => "Alt+Z",
-        B::RetryFailed => "Alt+R",
-        B::Stash => "Alt+S",
-        B::StashPop => "Alt+Shift+S",
-        B::Help => "F1",
-        B::CopyReview => "Ctrl+Shift+C",
-        B::Comment => "C",
-        B::Restore => "R",
+        B::Comment => "c",
+        B::Restore => "Shift+R",
         B::SaveComment => "Enter",
-        B::DiscardComment => "Esc",
+        B::DiscardFile => "Del",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
-        B::RunInTerminal
-        | B::OpenWorkspace
-        | B::StashDrop
-        | B::DeleteBranch
-        | B::SwitchExisting
-        | B::CreateMissing
-        | B::ClearReview
-        | B::DeleteComment => "",
+        _ => "",
     }
 }
 
@@ -1309,39 +1711,61 @@ fn menu_integrate(button: ReposButton) -> Option<Integrate> {
 fn confirm_button(kind: &BatchKind) -> ReposButton {
     match kind {
         BatchKind::Push { force: true } => ReposButton::ForcePush,
+        BatchKind::Amend { .. } => ReposButton::Amend,
         BatchKind::Abort => ReposButton::Abort,
         BatchKind::Undo => ReposButton::Undo,
         BatchKind::DeleteBranch { .. } => ReposButton::DeleteBranch,
-        BatchKind::StashDrop => ReposButton::StashDrop,
+        BatchKind::StashDrop(_) => ReposButton::StashDrop,
+        BatchKind::Discard => ReposButton::DiscardFile,
         _ => ReposButton::Cancel,
     }
 }
 
-/// The buttons `sheet` has, in order.
+/// The buttons `sheet` has, in order: what backs out on the left, what
+/// goes ahead on the right.
 fn sheet_buttons(sheet: &Sheet) -> Vec<ReposButton> {
     match sheet {
         Sheet::Preflight { .. } => vec![
-            ReposButton::All,
-            ReposButton::CleanOnly,
             ReposButton::Cancel,
+            ReposButton::CleanOnly,
+            ReposButton::All,
         ],
         Sheet::Diverged { .. } => vec![
-            ReposButton::PullRebase,
-            ReposButton::PullMerge,
             ReposButton::SkipDiverged,
+            ReposButton::PullMerge,
+            ReposButton::PullRebase,
         ],
-        Sheet::Confirm { kind, .. } => vec![confirm_button(kind), ReposButton::Cancel],
+        Sheet::Confirm { kind, .. } => vec![ReposButton::Cancel, confirm_button(kind)],
         Sheet::Help { .. } => vec![ReposButton::Close],
-        Sheet::ClearReview { .. } => vec![ReposButton::ClearReview, ReposButton::Cancel],
+        Sheet::ClearReview {
+            outdated: false, ..
+        } => {
+            vec![ReposButton::Cancel, ReposButton::ClearReview]
+        }
+        Sheet::ClearReview { outdated: true, .. } => {
+            vec![ReposButton::Cancel, ReposButton::DropOutdated]
+        }
         // Created where missing only when some are.
         Sheet::Exists { jobs, have, .. } => {
-            let mut buttons = vec![ReposButton::SwitchExisting];
+            let mut buttons = vec![ReposButton::EditName];
             if !missing(jobs, have).is_empty() {
                 buttons.push(ReposButton::CreateMissing);
             }
-            buttons.push(ReposButton::EditName);
+            buttons.push(ReposButton::SwitchExisting);
             buttons
         }
+    }
+}
+
+/// Whether the button on the right of `sheet` loses what can't be got
+/// back (a force push, a branch or stash dropped, the review deleted):
+/// it is painted in the error colour, and Enter means Cancel until the
+/// user moves to it.
+fn sheet_danger(sheet: &Sheet) -> bool {
+    match sheet {
+        Sheet::Confirm { .. } | Sheet::ClearReview { .. } => true,
+        Sheet::Preflight { kind, .. } => matches!(kind, BatchKind::DeleteBranch { .. }),
+        Sheet::Help { .. } | Sheet::Diverged { .. } | Sheet::Exists { .. } => false,
     }
 }
 
@@ -1377,81 +1801,44 @@ fn missing(jobs: &[Job], have: &[(PathBuf, Found)]) -> Vec<Job> {
         .collect()
 }
 
-/// The panel's keys, as the help sheet lists them: the key, what it does.
-const HELP_KEYS: &[(&str, &str)] = &[
-    ("Tab", "the tree, the diff, the field"),
-    ("Up / Down", "select a line; in the diff, move the cursor"),
-    ("PgUp / PgDn", "a page of lines"),
-    (
-        "Shift+Up / Down",
-        "scroll the diff or log; in the diff, a range",
-    ),
-    ("Alt+Up / Down", "in the diff, the file before or after"),
-    (
-        "C / Del",
-        "in the diff, comment on the lines; delete a comment",
-    ),
-    ("Shift+Enter", "in a comment, a new line; Enter keeps it"),
-    ("Ctrl+Shift+C", "copy the review comments for an AI agent"),
-    ("Space", "check the line, or the diff's file"),
-    ("Ctrl+A", "check everything, or nothing"),
-    (
-        "Left / Right",
-        "fold a repository, a folder or a diff file header; move the caret",
-    ),
-    ("Enter", "open the file in Zed; fold a repository or folder"),
-    (
-        "g Space / Ctrl+click",
-        "in the diff, open the code in Zed at the caret; on a file's name, the file",
-    ),
-    ("Alt+F", "list the files by folder, or flat"),
-    ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
-    ("Ctrl+D / Ctrl+T", "the diff, the log"),
-    (
-        "/ / Ctrl+Shift+F",
-        "find in the diff: its lines, paths, hunks",
-    ),
-    (
-        "Enter / Shift+Enter",
-        "in the search, the next place, the one before",
-    ),
-    (
-        "n / N, F3 / Shift+F3",
-        "the next place found, the one before",
-    ),
-    (
-        "h j k l w b e 0 ^ $",
-        "in the diff, move the caret, as in vim",
-    ),
-    ("* / #", "find the word at the caret, back for #"),
-    (
-        "x X D dd dw de d$ 3dd",
-        "in the diff, delete from the file, as in vim",
-    ),
-    (
-        "v / V, then d",
-        "select by chars, by lines; delete it from the file",
-    ),
-    (
-        "yy yw y$ Y, p / P",
-        "in the diff, yank (and copy); paste after, before",
-    ),
-    (
-        "R",
-        "in the diff, restore the change at the caret or the lines selected",
-    ),
-    (
-        "u / U",
-        "undo the last delete, paste or restore, do it again",
-    ),
-    ("Ctrl+S", "switch them all to a branch"),
-    ("Ctrl+N", "create a branch: type its name"),
-    ("Ctrl+Enter", "in the branch menu, create the branch typed"),
-    ("Del", "delete the branch picked in the menu"),
-    ("Alt+Z / Alt+R", "undo the last batch, retry what failed"),
-    ("Right click", "the actions, on a line or anywhere"),
-    ("Esc", "close"),
-];
+/// Scroll a list of `len` lines with `rows` in view, standing at line
+/// `top`, by `sym`: the arrows a line, the pages a page, Home and End to
+/// the ends. Whether `sym` was one of those.
+pub fn scroll_lines(top: &mut usize, len: usize, rows: usize, sym: Keysym) -> bool {
+    let last = len.saturating_sub(rows.max(1));
+    let page = rows.max(2) - 1;
+    *top = match sym {
+        Keysym::Down | Keysym::KP_Down => *top + 1,
+        Keysym::Up | Keysym::KP_Up => top.saturating_sub(1),
+        Keysym::Page_Down | Keysym::KP_Page_Down => *top + page,
+        Keysym::Page_Up | Keysym::KP_Page_Up => top.saturating_sub(page),
+        Keysym::Home | Keysym::KP_Home => 0,
+        Keysym::End | Keysym::KP_End => last,
+        _ => return false,
+    }
+    .min(last);
+    true
+}
+
+/// The keys sheet's title, `title`, saying where it stands when its
+/// `len` lines are scrolled to line `top`.
+pub fn help_title(title: &str, top: usize, len: usize) -> String {
+    match top {
+        0 => format!("{title} · Up/Down for more"),
+        _ => format!("{title} · from {} of {len}", top + 1),
+    }
+}
+
+/// Every key of the panel, as the keys sheet (F1) lists them: those
+/// taken where the focus is, then the actions'.
+fn help_lines() -> Vec<(String, String, Tone)> {
+    let focus = FOCUS_KEYS.iter().map(|&(key, what)| (key, what));
+    let actions = ACTIONS.iter().map(|a| (a.key, a.what));
+    focus
+        .chain(actions)
+        .map(|(key, what)| (key.to_owned(), what.to_owned(), Tone::Normal))
+        .collect()
+}
 
 /// `n` repositories, in words.
 fn repos(n: usize) -> String {
@@ -2077,6 +2464,44 @@ impl Panel {
             .unwrap_or_default()
     }
 
+    /// The stash of `item` a pop or drop takes: the one picked in the
+    /// Stashes tab while it shows, else the newest.
+    fn stash_at(&self, item: &RepoItem) -> usize {
+        match self.tab() {
+            DetailTab::Stashes => self
+                .stash_pick
+                .min(item.status.stashes.saturating_sub(1) as usize),
+            _ => 0,
+        }
+    }
+
+    /// The repository and the files a discard throws the changes of away:
+    /// the selected file (both paths of a rename), or every file under
+    /// the selected folder; else why none.
+    fn discard_files(&self, items: &[RepoItem]) -> Result<(usize, Vec<String>), Why> {
+        let pick = "Select a file or folder to discard its changes";
+        let k = (self.selected_item(items))
+            .and_then(|item| items.iter().position(|i| i.root == item.root))
+            .ok_or_else(|| Why::other(pick))?;
+        let changes = &items[k].status.changes;
+        let taken: Vec<&Change> = match &self.selected {
+            Some(Selected::File(_, path)) => changes.iter().filter(|c| c.path == *path).collect(),
+            Some(Selected::Dir(_, dir)) => {
+                changes.iter().filter(|c| in_dir(&c.path, dir)).collect()
+            }
+            _ => return Err(Why::other(pick)),
+        };
+        let files: Vec<String> = taken
+            .into_iter()
+            .flat_map(|c| [Some(c.path.clone()), c.orig.clone()])
+            .flatten()
+            .collect();
+        if files.is_empty() {
+            return Err(Why::other(pick));
+        }
+        Ok((k, files))
+    }
+
     /// What `button` says in the footer: a merge or rebase names the
     /// branch it brings in, the default one, and the branch it changes,
     /// the one checked out (`Merge main into feat/x`, `Rebase feat/x onto
@@ -2100,6 +2525,16 @@ impl Panel {
             B::Pull => over("pull", targets),
             B::Commit => over("commit", committing),
             B::CommitPush => over("commit and push", committing.max(self.picked(items).len())),
+            B::StashPop | B::StashDrop if self.tab() == DetailTab::Stashes => {
+                let verb = if button == B::StashPop { "pop" } else { "drop" };
+                let n = self.selected_item(items).map_or(0, |i| self.stash_at(i));
+                format!("{verb} stash@{{{n}}}")
+            }
+            B::DiscardFile => "discard changes…".into(),
+            B::SendReview => match &self.agent {
+                Some(agent) => format!("send to {agent}"),
+                None => "send to agent".into(),
+            },
             B::Fetch => match self.picked(items).len() {
                 0 => "fetch all".into(),
                 n => format!("fetch {n}"),
@@ -2209,13 +2644,16 @@ impl Panel {
 
     /// The branches the menu shows: those with every word typed in its
     /// search in their name, whatever the case; to merge or rebase, not
-    /// the one they are all on.
+    /// the one they are all on; to delete, those that can be.
     fn shown_branches(&self, ctx: &Ctx) -> Vec<Branch> {
         let mut branches = self.branches(ctx);
         if self.menu_action() != MenuAction::Switch
             && let Some(current) = self.current_branch(ctx)
         {
             branches.retain(|b| b.names.join(" / ") != current);
+        }
+        if self.menu_action() == MenuAction::Delete {
+            branches.retain(|b| self.delete_jobs(b, ctx).is_ok());
         }
         let query = self.branch_menu.as_ref().map(|m| m.query.to_lowercase());
         let words: Vec<&str> = query.as_deref().unwrap_or("").split_whitespace().collect();
@@ -2249,7 +2687,8 @@ impl Panel {
     fn branch_picker(&self, ctx: &Ctx) -> BranchPicker {
         let items = ctx.items;
         let targets = self.targets(items);
-        let running = ctx.batch.is_some_and(|b| !b.finished());
+        let roots = targets.iter().map(|&k| items[k].root.as_path());
+        let running = busy(roots, ctx).is_some();
         let branch = |k: usize| items[k].status.branch.as_deref();
         let (label, mixed) = if targets.is_empty() {
             ("No repository".to_owned(), true)
@@ -2296,7 +2735,10 @@ impl Panel {
                 rows: shown.iter().map(|b| b.label.clone()).collect(),
                 deletable: shown
                     .iter()
-                    .map(|&b| switch && self.delete_jobs(b, ctx).is_ok())
+                    .map(|&b| {
+                        let deletes = switch || menu.action == MenuAction::Delete;
+                        deletes && self.delete_jobs(b, ctx).is_ok()
+                    })
                     .collect(),
                 current: current
                     .and_then(|key| branches.iter().position(|b| b.names.join(" / ") == key))
@@ -2320,6 +2762,8 @@ impl Panel {
                     "No branch matches".into()
                 } else if switch {
                     "No branch they all have".into()
+                } else if menu.action == MenuAction::Delete {
+                    "No local branch to delete: not the one checked out".into()
                 } else {
                     "No other branch they all have".into()
                 },
@@ -2333,6 +2777,7 @@ impl Panel {
                     MenuAction::Integrate(Integrate::Rebase) => {
                         format!("Find a branch to rebase {} onto", self.current_name(ctx))
                     }
+                    MenuAction::Delete => "Find a local branch to delete".into(),
                 },
             }
         });
@@ -2345,14 +2790,12 @@ impl Panel {
     }
 
     /// Why the branch menu can't open, if it can't.
-    fn menu_blocked(&self, ctx: &Ctx) -> Option<&'static str> {
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            return Some("Wait for the batch to finish");
+    fn menu_blocked(&self, ctx: &Ctx) -> Option<String> {
+        let targets = self.targets(ctx.items);
+        if targets.is_empty() {
+            return Some("Select a repository first".into());
         }
-        if self.targets(ctx.items).is_empty() {
-            return Some("Select a repository first");
-        }
-        None
+        busy(targets.iter().map(|&k| ctx.items[k].root.as_path()), ctx)
     }
 
     /// What picking a branch in the menu does, while it is open.
@@ -2367,7 +2810,7 @@ impl Panel {
     /// branch they are on; else on the first.
     fn open_branch_menu(&mut self, action: MenuAction, ctx: &Ctx) {
         if let Some(why) = self.menu_blocked(ctx) {
-            self.error = Some(why.into());
+            self.error = Some(why);
             return;
         }
         let page = self.menu_page(ctx);
@@ -2380,7 +2823,7 @@ impl Panel {
                     .unwrap_or(0);
                 (scroll_to(&menu_lines(&branches), picked, 0.0, page), picked)
             }
-            MenuAction::Integrate(_) => (0.0, 0),
+            MenuAction::Integrate(_) | MenuAction::Delete => (0.0, 0),
         };
         self.error = None;
         self.branch_menu = Some(BranchMenu {
@@ -2462,7 +2905,8 @@ impl Panel {
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         let switch = self.menu_action() == MenuAction::Switch;
         let on_create = self.branch_menu.as_ref()?.on_create;
-        if switch && plain && !on_create && matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
+        let deletes = switch || self.menu_action() == MenuAction::Delete;
+        if deletes && plain && !on_create && matches!(sym, Keysym::Delete | Keysym::KP_Delete) {
             let picked = self.branch_menu.as_ref()?.picked;
             return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
         }
@@ -2502,6 +2946,9 @@ impl Panel {
             }
             Keysym::Return | Keysym::KP_Enter => {
                 let picked = menu.picked;
+                if menu.action == MenuAction::Delete {
+                    return self.delete_branch(picked.min(len.saturating_sub(1)), ctx);
+                }
                 return self.pick_branch(picked, ctx);
             }
             Keysym::Escape => {
@@ -2547,10 +2994,6 @@ impl Panel {
             self.error = Some(format!("Not a branch name: {why}"));
             return None;
         }
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return None;
-        }
         let items = ctx.items;
         let jobs: Vec<Job> = self
             .targets(items)
@@ -2562,6 +3005,10 @@ impl Panel {
             .collect();
         if jobs.is_empty() {
             self.error = Some("Select a repository first".into());
+            return None;
+        }
+        if let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx) {
+            self.error = Some(why);
             return None;
         }
         self.branch_menu = None;
@@ -2587,11 +3034,11 @@ impl Panel {
         // None found: the menu stays for another search.
         let branch = self.shown_branches(ctx).into_iter().nth(k)?;
         let action = self.menu_action();
-        self.branch_menu = None;
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return None;
+        // To delete, asked on a sheet over the menu.
+        if action == MenuAction::Delete {
+            return self.delete_branch(k, ctx);
         }
+        self.branch_menu = None;
         let key = branch.names.join(" / ");
         let items = ctx.items;
         let jobs: Vec<Job> = self
@@ -2610,6 +3057,10 @@ impl Panel {
             self.error = Some(format!("Already on {}", branch.label));
             return None;
         }
+        if let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx) {
+            self.error = Some(why);
+            return None;
+        }
         self.error = None;
         let kind = match action {
             MenuAction::Switch => BatchKind::Switch(branch.names),
@@ -2617,6 +3068,7 @@ impl Panel {
                 how,
                 from: Some(branch.names),
             },
+            MenuAction::Delete => return None,
         };
         Some(Outcome::Batch { kind, jobs })
     }
@@ -2660,10 +3112,6 @@ impl Panel {
     /// repositories acted on have it, on a sheet over the menu.
     fn delete_branch(&mut self, k: usize, ctx: &Ctx) -> Option<Outcome> {
         let branch = self.shown_branches(ctx).into_iter().nth(k)?;
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
-            return None;
-        }
         let jobs = match self.delete_jobs(&branch, ctx) {
             Ok(jobs) => jobs,
             Err(why) => {
@@ -2671,6 +3119,10 @@ impl Panel {
                 return None;
             }
         };
+        if let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx) {
+            self.error = Some(why);
+            return None;
+        }
         let menu = self.branch_menu.as_mut()?;
         menu.picked = k;
         self.error = None;
@@ -2724,25 +3176,22 @@ impl Panel {
     }
 
     /// Whether `button` can be done now and what it asks for, else why
-    /// not. It changes nothing: the footer asks it too.
+    /// not: a batch waits for those of its repositories in one still
+    /// running. It changes nothing: the footer asks it too.
     fn plan(&self, button: ReposButton, ctx: &Ctx) -> Result<Outcome, Why> {
+        let outcome = self.plan_free(button, ctx)?;
+        if let Outcome::Batch { jobs, .. } = &outcome
+            && let Some(why) = busy(jobs.iter().map(|j| j.root.as_path()), ctx)
+        {
+            return Err(Why::Other(why));
+        }
+        Ok(outcome)
+    }
+
+    /// What `plan` says, but for the batches running.
+    fn plan_free(&self, button: ReposButton, ctx: &Ctx) -> Result<Outcome, Why> {
         use ReposButton as B;
         let items = ctx.items;
-        let local = matches!(
-            button,
-            B::OpenInZed
-                | B::RunInTerminal
-                | B::OpenWorkspace
-                | B::CopyReview
-                | B::ClearReview
-                | B::Comment
-                | B::SaveComment
-                | B::DiscardComment
-                | B::DeleteComment
-        );
-        if !local && ctx.batch.is_some_and(|b| !b.finished()) {
-            return Err(Why::other("Wait for the batch to finish"));
-        }
         if items.is_empty() {
             return Err(Why::other("No git repositories in this project"));
         }
@@ -2818,6 +3267,41 @@ impl Panel {
                     jobs,
                 })
             }
+            B::Amend => {
+                let ks = self.targets(items);
+                if ks.is_empty() {
+                    return Err(Why::other("Select a repository first"));
+                }
+                let mut jobs = Vec::new();
+                let mut pushed = false;
+                for k in ks {
+                    let item = &items[k];
+                    if item.status.head.is_none() {
+                        return Err(Why::other(format!("{} has no commit to amend", item.label)));
+                    }
+                    // On its upstream already: nothing ahead of it.
+                    pushed |= item.status.upstream.is_some() && item.status.ahead == 0;
+                    let mut files = Vec::new();
+                    for change in &item.status.changes {
+                        if self.file_checked(item, change) {
+                            files.push(change.path.clone());
+                            files.extend(change.orig.clone());
+                        }
+                    }
+                    let root = item.root.clone();
+                    jobs.push(Job { root, files });
+                }
+                let msg = Some(self.field.trim().to_owned()).filter(|m| !m.is_empty());
+                if msg.is_none() && jobs.iter().all(|j| j.files.is_empty()) {
+                    return Err(Why::Field(
+                        "Check the files to add, or type the new message first".into(),
+                    ));
+                }
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Amend { msg, pushed },
+                    jobs,
+                })
+            }
             B::Push => run(BatchKind::Push { force: false }, targets),
             B::ForcePush => run(BatchKind::Push { force: true }, targets),
             B::Fetch => {
@@ -2840,7 +3324,7 @@ impl Panel {
             // They open the branch menu (see `act`), when it can.
             B::MergeFrom | B::RebaseFrom => Err(Why::other(
                 self.menu_blocked(ctx)
-                    .unwrap_or("Pick the branch in the menu"),
+                    .unwrap_or_else(|| "Pick the branch in the menu".into()),
             )),
             B::OpenInZed => {
                 let (k, c) = self
@@ -2885,7 +3369,7 @@ impl Panel {
                 if left > 0 {
                     let files = if left == 1 { "file" } else { "files" };
                     return Err(Why::other(format!(
-                        "Resolve {left} conflicted {files} first (Ctrl+R)"
+                        "Resolve {left} conflicted {files} first (Alt+D)"
                     )));
                 }
                 let k = items.iter().position(|i| i.root == item.root);
@@ -2923,12 +3407,27 @@ impl Panel {
                 if item.status.stashes == 0 {
                     return Err(Why::other(format!("No stash in {}", item.label)));
                 }
+                // The one picked in the Stashes tab, else the newest.
+                let n = self.stash_at(item);
                 let kind = match button {
-                    B::StashPop => BatchKind::StashPop,
-                    _ => BatchKind::StashDrop,
+                    B::StashPop => BatchKind::StashPop(n),
+                    _ => BatchKind::StashDrop(n),
                 };
                 let k = items.iter().position(|i| i.root == item.root);
                 run(kind, k.into_iter().collect())
+            }
+            B::DiscardFile => {
+                let (k, files) = self.discard_files(items)?;
+                if in_conflict(&items[k]) {
+                    return Err(Why::other("Resolve the conflicts, or abort, first"));
+                }
+                Ok(Outcome::Batch {
+                    kind: BatchKind::Discard,
+                    jobs: vec![Job {
+                        root: items[k].root.clone(),
+                        files,
+                    }],
+                })
             }
             B::RunInTerminal => match (selected, failure) {
                 (Some(item), Some(Failure::Auth | Failure::Timeout | Failure::Other)) => {
@@ -2941,14 +3440,41 @@ impl Panel {
                 _ => Err(Why::other("Not checked out elsewhere")),
             },
             B::Help => Err(Why::other("Press F1 for the keys")),
+            B::Refresh => Ok(Outcome::Refresh),
+            B::Stop => {
+                let running = ctx.batch.into_iter().chain(ctx.background);
+                match running.filter(|b| !b.finished()).count() {
+                    0 => Err(Why::other("No batch is running")),
+                    _ => Ok(Outcome::Stop),
+                }
+            }
+            // It opens the branch menu (see `act`), when it can.
+            B::DeleteBranchMenu => Err(Why::other(
+                self.menu_blocked(ctx)
+                    .unwrap_or_else(|| "Pick the branch in the menu".into()),
+            )),
             B::CopyReview => {
                 diff_ctx!(self, ctx, dctx);
                 (self.diff.copy_review(&dctx))
                     .map(from_diff)
                     .map_err(Why::other)
             }
+            B::SendReview if self.agent.is_none() && !self.diff.review.is_empty() => {
+                Err(Why::other(NO_AGENT))
+            }
+            B::SendReview => {
+                diff_ctx!(self, ctx, dctx);
+                match self.diff.copy_review(&dctx).map(from_diff) {
+                    Ok(Outcome::Copy { text, count }) => Ok(Outcome::SendReview { text, count }),
+                    Ok(other) => Ok(other),
+                    Err(why) => Err(Why::other(why)),
+                }
+            }
             B::ClearReview if self.diff.review.is_empty() => Err(Why::other(NO_REVIEW)),
-            B::ClearReview => Err(Why::other("Asked on a sheet")),
+            B::DropOutdated if self.diff.outdated_count() == 0 => {
+                Err(Why::other("No comment is on lines no longer in the diff"))
+            }
+            B::ClearReview | B::DropOutdated => Err(Why::other("Asked on a sheet")),
             B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment | B::Restore => {
                 Err(Why::other("Done on the diff"))
             }
@@ -3021,7 +3547,30 @@ impl Panel {
                             .unwrap_or(names.first().map_or("", String::as_str));
                         format!("delete the local branch {name}")
                     }
-                    BatchKind::StashDrop => "drop its newest stash for good".into(),
+                    BatchKind::StashDrop(n) => format!("drop stash@{{{n}}} for good"),
+                    BatchKind::Amend { .. } => match status {
+                        Some(s) if s.upstream.is_some() && s.ahead == 0 => {
+                            "rewrite its last commit, which is pushed: \
+                             putting it up again takes a force push"
+                                .into()
+                        }
+                        _ => "rewrite its last commit".into(),
+                    },
+                    BatchKind::Discard => {
+                        let n = job.files.len();
+                        let files = if n == 1 { "1 file" } else { "files" };
+                        let shown = job.files.iter().take(3).cloned().collect::<Vec<_>>();
+                        let more = n.saturating_sub(3);
+                        let rest = if more > 0 {
+                            format!(" and {more} more")
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "throw away the changes to {files}: {}{rest}",
+                            shown.join(", ")
+                        )
+                    }
                     _ => kind.label().to_lowercase(),
                 };
                 (label, what, Tone::Warning)
@@ -3030,7 +3579,7 @@ impl Panel {
     }
 
     /// Ask on a sheet before `kind` over `jobs`, which can't be taken
-    /// back; Enter does it.
+    /// back; Enter cancels until the user moves to the button doing it.
     fn confirm(&mut self, kind: BatchKind, jobs: Vec<Job>, ctx: &Ctx) {
         let lines = self.confirm_lines(&kind, &jobs, ctx);
         self.sheet = Some(Sheet::Confirm {
@@ -3051,6 +3600,8 @@ impl Panel {
     /// back (a force push, an abort, an undo, a stash dropped) is asked
     /// about on a sheet first.
     fn act(&mut self, button: ReposButton, ctx: &Ctx) -> Option<Outcome> {
+        // Said again, the line why shows anew.
+        self.error_shown.replace(None);
         if self.sheet.is_some() {
             return self.sheet_press(button, ctx);
         }
@@ -3060,13 +3611,29 @@ impl Panel {
             } else {
                 self.error = None;
                 self.branch_menu = None;
-                self.sheet = Some(Sheet::ClearReview { choice: 0 });
+                self.sheet = Some(Sheet::ClearReview {
+                    choice: 0,
+                    outdated: false,
+                });
+            }
+            return None;
+        }
+        if button == ReposButton::DropOutdated {
+            if self.diff.outdated_count() == 0 {
+                self.error = Some("No comment is on lines no longer in the diff".into());
+            } else {
+                self.error = None;
+                self.branch_menu = None;
+                self.sheet = Some(Sheet::ClearReview {
+                    choice: 0,
+                    outdated: true,
+                });
             }
             return None;
         }
         if button == ReposButton::Help {
             self.branch_menu = None;
-            self.sheet = Some(Sheet::Help { choice: 0 });
+            self.sheet = Some(Sheet::Help { choice: 0, top: 0 });
             return None;
         }
         {
@@ -3078,6 +3645,10 @@ impl Panel {
         }
         if let Some(how) = menu_integrate(button) {
             self.open_branch_menu(MenuAction::Integrate(how), ctx);
+            return None;
+        }
+        if button == ReposButton::DeleteBranchMenu {
+            self.open_branch_menu(MenuAction::Delete, ctx);
             return None;
         }
         match self.plan(button, ctx) {
@@ -3138,6 +3709,10 @@ impl Panel {
             (Sheet::Help { .. }, _) => None,
             (Sheet::ClearReview { .. }, B::ClearReview) => {
                 self.diff.clear_review(&sections(ctx.items));
+                None
+            }
+            (Sheet::ClearReview { .. }, B::DropOutdated) => {
+                self.diff.drop_outdated(&sections(ctx.items));
                 None
             }
             (Sheet::Diverged { roots, .. }, B::PullRebase | B::PullMerge) => {
@@ -3205,6 +3780,11 @@ impl Panel {
     /// button, Enter presses it, Esc cancels.
     fn sheet_key(&mut self, mods: &ModifiersState, sym: Keysym, ctx: &Ctx) -> Option<Outcome> {
         let sheet = self.sheet.as_mut()?;
+        if let Sheet::Help { top, .. } = sheet
+            && scroll_lines(top, help_lines().len(), ctx.sheet_rows, sym)
+        {
+            return None;
+        }
         let buttons = sheet_buttons(sheet);
         let (Sheet::Preflight { choice, .. }
         | Sheet::Diverged { choice, .. }
@@ -3214,6 +3794,14 @@ impl Panel {
         | Sheet::Exists { choice, .. }) = sheet;
         let button = sheet_step(choice, &buttons, mods, sym)?;
         self.sheet_press(button, ctx)
+    }
+
+    /// Pick stash `n` in the Stashes tab, scrolled to show it on a page
+    /// of `page`.
+    fn pick_stash(&mut self, n: usize, page: usize) {
+        self.stash_pick = n;
+        let pos = showing(self.detail_scroll.pos(), (n, n), page);
+        move_to(&mut self.detail_scroll, pos);
     }
 
     /// Show the detail's `tab`; the diff where the selection is.
@@ -3238,6 +3826,7 @@ impl Panel {
             self.focus = Focus::Detail;
         }
         if let Some(error) = signals.error {
+            self.error_shown.replace(None);
             self.error = error;
         }
         let Some(moved) = signals.moved else {
@@ -3282,6 +3871,7 @@ impl Panel {
                 None
             }
             diff_view::Outcome::Clear => self.act(ReposButton::ClearReview, ctx),
+            diff_view::Outcome::ClearOutdated => self.act(ReposButton::DropOutdated, ctx),
             outcome => Some(from_diff(outcome)),
         }
     }
@@ -3344,10 +3934,26 @@ impl Panel {
             self.fold_all(true, ctx);
             return None;
         }
+        if only_alt && let Some(tab) = tab_key(sym) {
+            self.set_tab(tab);
+            return None;
+        }
+        // Ctrl+D shows the diff, as it does in the other popups; with the
+        // diff's keys it goes half a page down (vim's), taken above.
+        if only_ctrl && matches!(sym, Keysym::d | Keysym::D) {
+            self.set_tab(DetailTab::Diff);
+            return None;
+        }
         let in_diff = self.focus == Focus::Detail && self.tab() == DetailTab::Diff;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
+        // Esc steps back: the field (its message kept) or the detail give
+        // the keyboard to the tree; from there it closes.
         if sym == Keysym::Escape && plain {
-            return Some(Outcome::Close);
+            if self.focus == Focus::Tree {
+                return Some(Outcome::Close);
+            }
+            self.focus = Focus::Tree;
+            return None;
         }
         if let Some(button) = action_key(mods, sym) {
             return self.act(button, ctx);
@@ -3369,26 +3975,43 @@ impl Panel {
                 return None;
             }
         }
-        if mods.ctrl && !mods.alt && !mods.logo {
+        // Tab goes round the tree, the detail and the field; Shift+Tab the
+        // other way.
+        if plain && matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) {
+            let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+            self.focus = match (self.focus, back) {
+                (Focus::Tree, false) | (Focus::Field, true) => Focus::Detail,
+                (Focus::Detail, false) | (Focus::Tree, true) => Focus::Field,
+                (Focus::Field, false) | (Focus::Detail, true) => Focus::Tree,
+            };
+            return None;
+        }
+        // In the stashes, the arrows pick one: Enter pops it, Del drops
+        // it (asked first).
+        if self.focus == Focus::Detail && self.tab() == DetailTab::Stashes && plain && !mods.shift {
+            let count = self
+                .selected_item(ctx.items)
+                .map_or(0, |i| i.status.stashes as usize);
+            let last = count.saturating_sub(1);
             match sym {
-                Keysym::d | Keysym::D => {
-                    self.set_tab(DetailTab::Diff);
-                    return None;
+                Keysym::Down | Keysym::KP_Down => {
+                    self.pick_stash((self.stash_pick + 1).min(last), ctx.page.1)
                 }
-                Keysym::t | Keysym::T => {
-                    self.set_tab(DetailTab::Log);
-                    return None;
+                Keysym::Up | Keysym::KP_Up => {
+                    self.pick_stash(self.stash_pick.saturating_sub(1), ctx.page.1)
+                }
+                Keysym::Return | Keysym::KP_Enter => return self.act(ReposButton::StashPop, ctx),
+                Keysym::Delete | Keysym::KP_Delete => {
+                    return self.act(ReposButton::StashDrop, ctx);
                 }
                 _ => {}
             }
-        }
-        if plain && matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) {
-            self.focus = match self.focus {
-                Focus::Tree => Focus::Detail,
-                Focus::Detail => Focus::Field,
-                Focus::Field => Focus::Tree,
-            };
-            return None;
+            if matches!(
+                sym,
+                Keysym::Down | Keysym::KP_Down | Keysym::Up | Keysym::KP_Up
+            ) {
+                return None;
+            }
         }
         // The arrows, the pages, Home and End scroll the log.
         if self.focus == Focus::Detail && !in_diff && plain && !mods.shift {
@@ -3443,9 +4066,13 @@ impl Panel {
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let tree = self.focus == Focus::Tree;
         let row = at.map(|k| rows[k]);
+        let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         let moved = match sym {
             Keysym::Down | Keysym::KP_Down => step(1),
             Keysym::Up | Keysym::KP_Up => step(-1),
+            // Ctrl+J and Ctrl+K move as Down and Up do, in every list.
+            Keysym::j | Keysym::J if only_ctrl => step(1),
+            Keysym::k | Keysym::K if only_ctrl => step(-1),
             Keysym::Page_Down | Keysym::KP_Page_Down => step(page as isize),
             Keysym::Page_Up | Keysym::KP_Page_Up => step(-(page as isize)),
             Keysym::Home | Keysym::KP_Home if tree => step(-n),
@@ -3500,6 +4127,10 @@ impl Panel {
                     return self.fold_line(row, ctx);
                 }
             }
+            // A file's or folder's changes thrown away, asked first.
+            Keysym::Delete | Keysym::KP_Delete if plain && !mods.shift => {
+                return self.act(ReposButton::DiscardFile, ctx);
+            }
             _ => {
                 let printable = typed.key_char().is_some_and(|c| !c.is_control());
                 if sym == text_field::PASTE || (plain && printable) {
@@ -3536,7 +4167,9 @@ impl Panel {
             return match hit {
                 ReposHit::BranchCreate => self.create_branch(ctx),
                 ReposHit::BranchRow(i) => self.pick_branch(branch(i)?, ctx),
-                ReposHit::BranchDelete(i) if self.menu_action() == MenuAction::Switch => {
+                ReposHit::BranchDelete(i)
+                    if matches!(self.menu_action(), MenuAction::Switch | MenuAction::Delete) =>
+                {
                     self.delete_branch(branch(i)?, ctx)
                 }
                 ReposHit::BranchMenu => None,
@@ -3548,7 +4181,9 @@ impl Panel {
         }
         // The diff's parts act on it; a click elsewhere takes the
         // keyboard from its search and keeps the comment being written.
-        {
+        // The log's or stashes' rows are no diff's.
+        let other_rows = self.tab() != DetailTab::Diff && matches!(hit, ReposHit::DiffRow(_));
+        if !other_rows {
             diff_ctx!(self, ctx, dctx);
             if let Some(outcome) = self.diff.click(hit, &dctx) {
                 return self.diff_done(outcome, ctx);
@@ -3606,6 +4241,16 @@ impl Panel {
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
+            ReposHit::DiffRow(i) if self.tab() == DetailTab::Stashes => {
+                self.focus = Focus::Detail;
+                let (first, _) = standing(&self.detail_scroll, usize::MAX, ctx.page.1);
+                let count = self
+                    .selected_item(items)
+                    .map_or(0, |i| i.status.stashes as usize);
+                if first + i < count {
+                    self.stash_pick = first + i;
+                }
+            }
             ReposHit::DiffRow(_)
             | ReposHit::DiffCheck(_)
             | ReposHit::DiffFold(_)
@@ -3755,8 +4400,8 @@ impl Panel {
             RepoMark::Ahead => BatchKind::Push { force: false },
             RepoMark::Behind => BatchKind::Pull(Pull::FastForward),
         };
-        if ctx.batch.is_some_and(|b| !b.finished()) {
-            self.error = Some("Wait for the batch to finish".into());
+        if let Some(why) = busy([ctx.items[k].root.as_path()], ctx) {
+            self.error = Some(why);
             return None;
         }
         self.error = None;
@@ -3990,7 +4635,7 @@ impl Panel {
                         Failure::Other => (
                             "failed",
                             Tone::Error,
-                            format!("{batch} failed: see the log (Ctrl+T)"),
+                            format!("{batch} failed: see the log (Alt+2)"),
                         ),
                     };
                     // What git said first: the hint alone hides it.
@@ -4039,10 +4684,15 @@ impl Panel {
         }
         let Row::File(_, c, depth) = row else {
             let chip = self.chip(item, ctx.batch);
-            let run = ctx.batch.and_then(|b| b.run(&item.root));
-            let state = match run.map(|r| &r.state) {
-                Some(RunState::Running(what)) => LineState::Busy(what.clone()),
-                Some(RunState::Queued) => LineState::Busy("waiting…".into()),
+            // Running in the background, or in the batch shown.
+            let running = ctx.background.iter().find(|b| b.runs_in(&item.root));
+            let run = running.or(ctx.batch).and_then(|b| b.run(&item.root));
+            let state = match run.map(|r| (&r.state, r.since)) {
+                Some((RunState::Running(what), Some(since))) => {
+                    LineState::Busy(format!("{what} {}", took(since, ctx.now)))
+                }
+                Some((RunState::Running(what), None)) => LineState::Busy(what.clone()),
+                Some((RunState::Queued, _)) => LineState::Busy("waiting…".into()),
                 _ if chip
                     .as_ref()
                     .is_some_and(|c| matches!(c.tone, Tone::Error | Tone::Warning)) =>
@@ -4070,7 +4720,12 @@ impl Panel {
         };
         let change = &status.changes[c];
         let diff = files.iter().find(|f| f.path == change.path);
+        let here = |root: &Path, path: &str| *root == item.root && path == change.path;
         TreeLine::File(FileLine {
+            edited: self.edited.iter().any(|(root, path)| here(root, path)),
+            comments: (self.diff.review.comments.iter())
+                .filter(|c| here(&c.root, &c.path))
+                .count(),
             check: if self.file_checked(item, change) {
                 Check::On
             } else {
@@ -4109,6 +4764,13 @@ impl Panel {
         let fetch_batch = ctx.batch.is_some_and(|b| {
             !b.finished() && matches!(b.kind, BatchKind::Fetch | BatchKind::Pull(_))
         });
+        let behind = ctx.background.iter().filter(|b| !b.finished()).count();
+        if behind > 0 {
+            parts.push(match behind {
+                1 => "1 more batch running".into(),
+                n => format!("{n} more batches running"),
+            });
+        }
         parts.push(if ctx.fetching || fetch_batch {
             "fetching…".into()
         } else {
@@ -4144,7 +4806,7 @@ impl Panel {
         if selected.is_some_and(in_conflict) {
             buttons.extend([B::OpenInZed, B::MarkResolved, B::Continue, B::Abort]);
         } else {
-            buttons.extend([B::Commit, B::CommitPush, B::Push]);
+            buttons.extend([B::Commit, B::CommitPush, B::Push, B::Amend]);
             // After a rebase the branch and its upstream both moved on.
             if selected.is_some_and(|i| i.status.ahead > 0 && i.status.behind > 0) {
                 buttons.push(B::ForcePush);
@@ -4157,6 +4819,14 @@ impl Panel {
                 B::MergeFrom,
                 B::RebaseFrom,
             ]);
+            // A file opened in Zed; its or a folder's changes thrown away,
+            // asked first.
+            if matches!(self.selected, Some(Selected::File(..))) {
+                buttons.push(B::OpenInZed);
+            }
+            if matches!(self.selected, Some(Selected::File(..) | Selected::Dir(..))) {
+                buttons.push(B::DiscardFile);
+            }
             // The stashes of the selected repository: made while it has
             // changes, brought back or dropped while it has some.
             if let Some(item) = selected {
@@ -4169,7 +4839,7 @@ impl Panel {
             }
         }
         if !self.diff.review.is_empty() {
-            buttons.extend([B::CopyReview, B::ClearReview]);
+            buttons.extend([B::CopyReview, B::SendReview, B::ClearReview]);
         }
         buttons.push(B::Help);
         buttons
@@ -4183,9 +4853,7 @@ impl Panel {
                     _ if button == ReposButton::ClearReview => {
                         self.diff.review.is_empty().then(|| NO_REVIEW.into())
                     }
-                    _ if menu_integrate(button).is_some() => {
-                        self.menu_blocked(ctx).map(String::from)
-                    }
+                    _ if menu_integrate(button).is_some() => self.menu_blocked(ctx),
                     Err(Why::Other(why)) => Some(why),
                     _ => None,
                 },
@@ -4286,6 +4954,7 @@ impl Panel {
         };
         let lines = self.detail_lines(ctx);
         let total = lines.len();
+        let stashes = ctx.items[k].status.stashes;
         // Scrolled part of a line, the pane shows one more under it.
         let (first, part) = standing(&self.detail_scroll, total, page);
         DetailView {
@@ -4298,7 +4967,18 @@ impl Panel {
                 .map(DetailRow::Text)
                 .collect(),
             sticky: false,
-            marks: Vec::new(),
+            // The stash picked, lit as the diff's cursor is.
+            marks: match tab {
+                DetailTab::Stashes => (first..first + page + usize::from(part > 0.0))
+                    .map(|r| RowMark {
+                        selected: r == self.stash_pick && focused && stashes > 0,
+                        top: true,
+                        bottom: true,
+                        noted: false,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
             title_buttons: Vec::new(),
             row_buttons: Vec::new(),
             part,
@@ -4417,7 +5097,13 @@ impl Panel {
                     BatchKind::DeleteBranch { names, .. } => {
                         format!("Delete the branch {}", names.join(" / "))
                     }
-                    BatchKind::StashDrop => "Drop the newest stash".into(),
+                    BatchKind::StashDrop(0) => "Drop the newest stash".into(),
+                    BatchKind::StashDrop(n) => format!("Drop stash@{{{n}}}"),
+                    BatchKind::Discard => {
+                        let n: usize = jobs.iter().map(|j| j.files.len()).sum();
+                        let files = if n == 1 { "1 file" } else { "files" };
+                        format!("Discard the changes to {files}")
+                    }
                     BatchKind::Undo => format!(
                         "Undo {}",
                         ctx.batch
@@ -4457,17 +5143,16 @@ impl Panel {
                 };
                 (title, lines, *choice)
             }
-            Sheet::ClearReview { choice } => {
+            Sheet::ClearReview { choice, outdated } => {
                 diff_ctx!(self, ctx, dctx);
-                let (title, lines) = self.diff.clear_sheet(&dctx);
+                let (title, lines) = self.diff.clear_sheet(&dctx, *outdated);
                 (title, lines, *choice)
             }
-            Sheet::Help { choice } => {
-                let lines = HELP_KEYS
-                    .iter()
-                    .map(|(key, what)| (key.to_string(), what.to_string(), Tone::Normal))
-                    .collect();
-                ("Keys in the repositories panel".to_owned(), lines, *choice)
+            Sheet::Help { choice, top } => {
+                let lines = help_lines();
+                let top = (*top).min(lines.len().saturating_sub(1));
+                let title = help_title("Keys in the repositories panel", top, lines.len());
+                (title, lines[top..].to_vec(), *choice)
             }
         };
         let buttons = sheet_buttons(sheet);
@@ -4476,6 +5161,7 @@ impl Panel {
             lines,
             default: choice.min(buttons.len().saturating_sub(1)),
             buttons,
+            danger: sheet_danger(sheet),
         })
     }
 
@@ -4489,8 +5175,15 @@ impl Panel {
         let end = (first + page + usize::from(part > 0.0)).min(rows.len());
         let shown = &rows[first..end];
         let result = ctx.batch.map(|batch| {
-            let (text, tone) = batch.summary();
+            let (mut text, tone) = batch.summary();
             let mut buttons = Vec::new();
+            // How long it has run, and a button to stop it.
+            if !batch.finished() {
+                text = format!("{text} · {}", took(batch.started, ctx.now));
+                if !batch.stopping {
+                    buttons.push(ReposButton::Stop);
+                }
+            }
             if undo_jobs(Some(batch)).is_ok() {
                 buttons.push(ReposButton::Undo);
             }
@@ -4532,7 +5225,7 @@ impl Panel {
             } else {
                 "Commit message".into()
             },
-            error: self.error.clone(),
+            error: self.why(ctx.now),
             result,
             hints: self.hints(ctx),
             detail: self.detail_view(ctx),
@@ -4543,6 +5236,26 @@ impl Panel {
             grouping: self.grouping,
             diff_only: false,
         }
+    }
+
+    /// The line saying why the last action wasn't done, at `now`: gone
+    /// `WHY_LIVES` after it was first shown, but one saying what is under
+    /// way.
+    fn why(&self, now: SystemTime) -> Option<String> {
+        let mut shown = self.error_shown.borrow_mut();
+        let Some(error) = self.error.as_ref() else {
+            *shown = None;
+            return None;
+        };
+        let since = match &*shown {
+            Some((text, at)) if text == error => *at,
+            _ => {
+                *shown = Some((error.clone(), now));
+                now
+            }
+        };
+        let old = now.duration_since(since).is_ok_and(|d| d >= WHY_LIVES);
+        (!old || error.ends_with('…')).then(|| error.clone())
     }
 
     /// The log or stashes the selection wants read, when not read yet (or
@@ -4561,13 +5274,14 @@ impl Panel {
         }
         if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
             self.detail_scroll.jump(0.0);
+            self.stash_pick = 0;
         }
         self.detail = Some((key, text));
         self.detail_stale = false;
     }
 
     /// Ask about what the check before `kind` found: Enter runs only the
-    /// clean ones when some would conflict, else all.
+    /// clean ones when some would conflict (or lose commits), else all.
     pub fn ask_preflight(
         &mut self,
         kind: BatchKind,
@@ -4582,7 +5296,7 @@ impl Panel {
             kind,
             jobs,
             verdicts,
-            choice: usize::from(conflicts),
+            choice: if conflicts { 1 } else { 2 },
         });
     }
 
@@ -4590,23 +5304,19 @@ impl Panel {
     /// which those in `have` have already: Enter edits the name.
     pub fn ask_exists(&mut self, name: String, jobs: Vec<Job>, have: Vec<(PathBuf, Found)>) {
         self.branch_menu = None;
-        let mut sheet = Sheet::Exists {
+        self.sheet = Some(Sheet::Exists {
             name,
             jobs,
             have,
             choice: 0,
-        };
-        let edit = sheet_buttons(&sheet).len() - 1;
-        if let Sheet::Exists { choice, .. } = &mut sheet {
-            *choice = edit;
-        }
-        self.sheet = Some(sheet);
+        });
     }
 
-    /// Ask which way to pull the repositories at `roots`, which diverged.
+    /// Ask which way to pull the repositories at `roots`, which diverged:
+    /// Enter rebases.
     pub fn ask_diverged(&mut self, roots: Vec<PathBuf>) {
         self.branch_menu = None;
-        self.sheet = Some(Sheet::Diverged { roots, choice: 0 });
+        self.sheet = Some(Sheet::Diverged { roots, choice: 2 });
     }
 
     /// A batch using the field's text (a commit) went through: empty it
@@ -4777,6 +5487,8 @@ mod tests {
             density: Density::Comfortable,
             tree_share: crate::chrome::REPOS_TREE_SHARE,
             cols: 40,
+            sheet_rows: 12,
+            background: &[],
         }
     }
 
@@ -4899,6 +5611,7 @@ mod tests {
             after: None,
             state,
             log: Vec::new(),
+            since: None,
         }
     }
 
@@ -4910,7 +5623,13 @@ mod tests {
     }
 
     fn batch(kind: BatchKind, runs: Vec<RepoRun>) -> Batch {
-        Batch { id: 1, kind, runs }
+        Batch {
+            id: 1,
+            kind,
+            runs,
+            started: UNIX_EPOCH + Duration::from_secs(NOW),
+            stopping: false,
+        }
     }
 
     /// The repository lines of `view`.
@@ -5013,7 +5732,7 @@ mod tests {
                 from: None
             }
             .label(),
-            "Rebase on base"
+            "Rebase onto default branch"
         );
         assert_eq!(BatchKind::Push { force: true }.label(), "Force push");
         assert!(
@@ -5227,6 +5946,59 @@ mod tests {
     }
 
     #[test]
+    fn amend_takes_the_checked_files_and_asks_first_when_pushed() {
+        let mut items = items();
+        // gerdr's last commit isn't up yet.
+        items[0].status.ahead = 1;
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "gerdr");
+        // Nothing to add and no message: it asks for one.
+        assert_eq!(press(&mut panel, alt(), Keysym::a, &ctx), None);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Check the files to add, or type the new message first")
+        );
+        let mut panel = Panel::new(&items);
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        press(&mut panel, none(), Keysym::space, &ctx);
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::a, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Amend {
+                    msg: None,
+                    pushed: false,
+                },
+                jobs: vec![job("gerdr", &["src/git.rs"])],
+            })
+        );
+        // zed's is on its upstream: rewording it is asked about first.
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "zed");
+        panel.field.set("Reworded");
+        let kind = BatchKind::Amend {
+            msg: Some("Reworded".into()),
+            pushed: true,
+        };
+        assert_eq!(press(&mut panel, alt(), Keysym::a, &ctx), None);
+        assert!(matches!(&panel.sheet, Some(Sheet::Confirm { kind: k, .. }) if *k == kind));
+        assert_eq!(
+            panel.press(ReposButton::Amend, &ctx),
+            Some(Outcome::Batch {
+                kind,
+                jobs: vec![job("zed", &[])],
+            })
+        );
+        assert!(
+            BatchKind::Amend {
+                msg: None,
+                pushed: false
+            }
+            .undoable()
+        );
+    }
+
+    #[test]
     fn no_action_takes_the_default_prefix() {
         // Ctrl+B arms the prefix before the panel sees it, and the prefix
         // then eats the next key too.
@@ -5287,28 +6059,85 @@ mod tests {
         );
         let ctx = ctx(&items, Some(&b));
         let mut panel = Panel::new(&items);
+        // Where it runs, a batch waits; elsewhere, it goes ahead.
+        let waits = "Wait for the fetch running in herdr (Alt+C stops it)";
+        select(&mut panel, "herdr");
         for (m, sym) in [
             (ctrl(), Keysym::p),
             (ctrl(), Keysym::f),
             (ctrl_shift(), Keysym::M),
         ] {
             assert_eq!(press(&mut panel, m, sym, &ctx), None);
-            assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+            assert_eq!(panel.error.as_deref(), Some(waits));
         }
+        assert!(
+            panel
+                .view("p", &ctx)
+                .hints
+                .iter()
+                .find(|h| h.button == ReposButton::Push)
+                .is_some_and(|h| h.disabled.as_deref() == Some(waits))
+        );
+        select(&mut panel, "gerdr");
+        assert_eq!(
+            press(&mut panel, ctrl(), Keysym::p, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: false },
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        // Alt+C stops it.
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::c, &ctx),
+            Some(Outcome::Stop)
+        );
         let view = panel.view("p", &ctx);
         let lines = repo_lines(&view);
         // herdr, with nothing to do, is under the heading, last.
         assert_eq!(lines[2].label, "herdr");
         assert_eq!(lines[2].state, LineState::Busy("fetching…".into()));
         assert_eq!(lines[0].chip.as_ref().map(|c| c.tone), Some(Tone::Success));
+        // How long it has run, and a button to stop it.
         let result = view.result.unwrap();
-        assert_eq!(result.text, "Fetch: 1 done · 1 of 2 running");
+        assert_eq!(result.text, "Fetch: 1 done · 1 of 2 running · 0s");
+        let buttons: Vec<ReposButton> = result.buttons.iter().map(|h| h.button).collect();
+        assert_eq!(buttons, [ReposButton::Stop]);
+        // A line running a while says for how long.
+        let mut long = b.clone();
+        long.runs[1].since = Some(UNIX_EPOCH + Duration::from_secs(NOW - 75));
+        let ctx = super::Ctx {
+            batch: Some(&long),
+            ..ctx
+        };
+        let view = panel.view("p", &ctx);
+        let busy = LineState::Busy("fetching… 1m 15s".into());
+        assert_eq!(repo_lines(&view)[2].state, busy);
+        // Stopping, it says so, and no button stops it again.
+        let mut stopping = long.clone();
+        stopping.stopping = true;
+        let ctx = super::Ctx {
+            batch: Some(&stopping),
+            ..ctx
+        };
+        let result = panel.view("p", &ctx).result.unwrap();
+        assert_eq!(result.text, "Fetch: 1 done · stopping… · 0s");
         assert!(result.buttons.is_empty());
-        assert!(
-            view.hints
-                .iter()
-                .find(|h| h.button == ReposButton::Push)
-                .is_some_and(|h| h.disabled.as_deref() == Some("Wait for the batch to finish"))
+        // In the background, its line is busy still and the header says
+        // so, the result bar another batch's.
+        let other = batch(
+            BatchKind::Push { force: false },
+            vec![run("gerdr", RunState::Done)],
+        );
+        let ctx = super::Ctx {
+            batch: Some(&other),
+            background: std::slice::from_ref(&b),
+            ..ctx
+        };
+        let view = panel.view("p", &ctx);
+        assert!(view.summary.contains("1 more batch running"));
+        assert_eq!(
+            repo_lines(&view)[2].state,
+            LineState::Busy("fetching…".into())
         );
     }
 
@@ -5342,10 +6171,17 @@ mod tests {
                 Tone::Warning
             )]
         );
-        assert_eq!(sheet.buttons, [ReposButton::ForcePush, ReposButton::Cancel]);
+        // Cancel on the left, the push in the error colour on the right;
+        // Enter cancels until the push is moved to.
+        assert_eq!(sheet.buttons, [ReposButton::Cancel, ReposButton::ForcePush]);
         assert_eq!(sheet.default, 0);
-        // The panel's keys wait; Enter does it.
+        assert!(sheet.danger);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        press(&mut panel, ctrl_shift(), Keysym::P, &ctx);
+        // The panel's keys wait; Right, then Enter does it.
         assert_eq!(press(&mut panel, ctrl(), Keysym::p, &ctx), None);
+        assert_eq!(press(&mut panel, none(), Keysym::Right, &ctx), None);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5386,6 +6222,7 @@ mod tests {
                 Tone::Warning
             )
         );
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5433,6 +6270,7 @@ mod tests {
             (ReposButton::Undo, "Alt+Z")
         );
         assert_eq!(buttons[0].label, "undo");
+        press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -5462,11 +6300,32 @@ mod tests {
         assert_eq!(help.label, "keys");
         assert_eq!(press(&mut panel, none(), Keysym::F1, &ctx), None);
         let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
-        assert_eq!(sheet.title, "Keys in the repositories panel");
-        assert_eq!(sheet.lines.len(), HELP_KEYS.len());
-        assert_eq!(sheet.lines[0].0, "Tab");
+        assert_eq!(
+            sheet.title,
+            "Keys in the repositories panel · Up/Down for more"
+        );
+        assert_eq!(sheet.lines.len(), FOCUS_KEYS.len() + ACTIONS.len());
+        assert_eq!(sheet.lines[0].0, "Tab / Shift+Tab");
         assert_eq!(sheet.buttons, [ReposButton::Close]);
         assert_eq!(help.disabled, None);
+        // Every action's key is listed, from the table the keys come from.
+        for action in ACTIONS {
+            assert!(sheet.lines.iter().any(|(key, ..)| key == action.key));
+            assert_eq!(key_name(action.button), action.key);
+        }
+        // It scrolls, no further than its last page.
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(sheet.lines[0].0, FOCUS_KEYS[1].0);
+        assert!(
+            sheet
+                .title
+                .ends_with(&format!("from 2 of {}", help_lines().len()))
+        );
+        press(&mut panel, none(), Keysym::End, &ctx);
+        let rest = panel.view("p", &ctx).sheet.expect("a sheet").lines.len();
+        assert_eq!(rest, ctx.sheet_rows);
+        press(&mut panel, none(), Keysym::Home, &ctx);
         // Enter or Esc closes it, and so does a click on its button.
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());
@@ -5501,7 +6360,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, mods(false, true, true), Keysym::S, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashPop,
+                kind: BatchKind::StashPop(0),
                 jobs: jobs(&["gerdr"])
             })
         );
@@ -5512,10 +6371,11 @@ mod tests {
         );
         let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
         assert_eq!(sheet.title, "Drop the newest stash in 1 repository?");
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashDrop,
+                kind: BatchKind::StashDrop(0),
                 jobs: jobs(&["gerdr"])
             })
         );
@@ -5534,6 +6394,116 @@ mod tests {
         );
         assert_eq!(press(&mut panel, alt(), Keysym::s, &ctx), None);
         assert_eq!(panel.error.as_deref(), Some("Nothing to stash in herdr"));
+    }
+
+    #[test]
+    fn del_discards_a_files_changes_after_a_sheet_asks() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        // On a repository: nothing to pick.
+        assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        assert!(panel.sheet.is_none());
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Select a file or folder to discard its changes")
+        );
+        select_file(&mut panel, "gerdr", "src/git.rs");
+        let hints: Vec<ReposButton> = panel
+            .view("p", &ctx)
+            .hints
+            .iter()
+            .map(|h| h.button)
+            .collect();
+        assert!(
+            hints.contains(&ReposButton::OpenInZed) && hints.contains(&ReposButton::DiscardFile)
+        );
+        assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(
+            sheet.title,
+            "Discard the changes to 1 file in 1 repository?"
+        );
+        assert!(sheet.danger && sheet.default == 0);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(panel.sheet.is_none());
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Discard,
+                jobs: vec![job("gerdr", &["src/git.rs"])],
+            })
+        );
+        // A rename takes both its paths.
+        select_file(&mut panel, "zed", "new.rs");
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Discard,
+                jobs: vec![job("zed", &["new.rs", "old.rs"])],
+            })
+        );
+    }
+
+    #[test]
+    fn a_stash_is_picked_in_its_tab_to_pop_or_drop() {
+        let mut items = items();
+        items[0].status.stashes = 3;
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, alt(), Keysym::_3, &ctx);
+        let key = panel.detail_wanted(&ctx).unwrap();
+        panel.set_detail(key, "stash@{0} · a\nstash@{1} · b\nstash@{2} · c".into());
+        panel.focus = Focus::Detail;
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        let view = panel.view("p", &ctx);
+        assert!(view.detail.marks[2].selected);
+        let pop = view
+            .hints
+            .iter()
+            .find(|h| h.button == ReposButton::StashPop)
+            .unwrap();
+        assert_eq!(pop.label, "pop stash@{2}");
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Return, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::StashPop(2),
+                jobs: jobs(&["gerdr"])
+            })
+        );
+        press(&mut panel, none(), Keysym::Up, &ctx);
+        assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(sheet.title, "Drop stash@{1} in 1 repository?");
+    }
+
+    #[test]
+    fn why_an_action_wasnt_done_goes_after_a_while() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "herdr");
+        press(&mut panel, alt(), Keysym::s, &ctx);
+        let said = Some("Nothing to stash in herdr".to_owned());
+        assert_eq!(panel.view("p", &ctx).error, said);
+        let later = |s: u64| super::Ctx {
+            now: ctx.now + Duration::from_secs(s),
+            ..ctx
+        };
+        assert_eq!(panel.view("p", &later(7)).error, said);
+        assert_eq!(panel.view("p", &later(9)).error, None);
+        // Asked again, it says so again.
+        press(&mut panel, alt(), Keysym::s, &later(9));
+        assert_eq!(panel.view("p", &later(10)).error, said);
+        // What is under way stays.
+        panel.error = Some("Checking merge…".into());
+        assert!(panel.view("p", &later(100)).error.is_some());
     }
 
     #[test]
@@ -5625,7 +6595,7 @@ mod tests {
         let sheet = panel.view("p", &ctx).sheet.unwrap();
         assert_eq!(
             sheet.title,
-            "Merge base: 1 clean · 1 would conflict · 1 blocked"
+            "Merge default branch in: 1 clean · 1 would conflict · 1 blocked"
         );
         assert_eq!(
             sheet.lines[1],
@@ -5648,9 +6618,9 @@ mod tests {
             })
         );
         assert!(panel.sheet.is_none());
-        // All drops only the blocked.
+        // All, on the right, drops only the blocked.
         ask(&mut panel);
-        press(&mut panel, none(), Keysym::Left, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Confirmed {
@@ -5658,9 +6628,9 @@ mod tests {
                 jobs: jobs(&["gerdr", "herdr"])
             })
         );
-        // Cancel, by Tab round to it or by Esc.
+        // Cancel, on the left, or Esc.
         ask(&mut panel);
-        press(&mut panel, none(), Keysym::Tab, &ctx);
+        press(&mut panel, none(), Keysym::Left, &ctx);
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());
         ask(&mut panel);
@@ -5680,12 +6650,14 @@ mod tests {
         assert_eq!(
             sheet.buttons,
             [
-                ReposButton::PullRebase,
+                ReposButton::SkipDiverged,
                 ReposButton::PullMerge,
-                ReposButton::SkipDiverged
+                ReposButton::PullRebase
             ]
         );
-        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(sheet.default, 2);
+        assert!(!sheet.danger);
+        press(&mut panel, none(), Keysym::Left, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Confirmed {
@@ -5863,19 +6835,44 @@ mod tests {
         assert_eq!(panel.field.line().caret, 0);
         assert_eq!(panel.view("p", &ctx).selected, Some(1));
         assert!(panel.view("p", &ctx).field_focused);
-        // Tab goes round: the tree, the detail, the field.
+        // Tab goes round: the tree, the detail, the field; Shift+Tab
+        // the other way.
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Tree);
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Detail);
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(panel.focus, Focus::Field);
-        // Esc closes, from the field too.
+        press(
+            &mut panel,
+            mods(false, true, false),
+            Keysym::ISO_Left_Tab,
+            &ctx,
+        );
+        assert_eq!(panel.focus, Focus::Detail);
+        press(
+            &mut panel,
+            mods(false, true, false),
+            Keysym::ISO_Left_Tab,
+            &ctx,
+        );
+        assert_eq!(panel.focus, Focus::Tree);
+        press(
+            &mut panel,
+            mods(false, true, false),
+            Keysym::ISO_Left_Tab,
+            &ctx,
+        );
+        assert_eq!(panel.focus, Focus::Field);
+        // Esc steps back: from the field to the tree, the message kept;
+        // then it closes.
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
+        assert_eq!(&*panel.field, "fix it");
         assert_eq!(
             press(&mut panel, none(), Keysym::Escape, &ctx),
             Some(Outcome::Close)
         );
-        assert_eq!(panel.focus, Focus::Field);
         // Ctrl+A in the field selects its text instead of checking.
         panel.focus = Focus::Field;
         press(&mut panel, ctrl(), Keysym::a, &ctx);
@@ -6256,8 +7253,8 @@ mod tests {
         // The next batch's chips show.
         let next = Batch {
             id: 2,
-            kind: BatchKind::Fetch,
             runs: runs.to_vec(),
+            ..batch(BatchKind::Fetch, Vec::new())
         };
         let ctx = super::Ctx {
             batch: Some(&next),
@@ -6309,17 +7306,20 @@ mod tests {
                 DiffTone::Plain
             ))
         );
-        // Not while a batch runs.
+        // Not while a batch runs there.
         let b = batch(
             BatchKind::Fetch,
-            vec![run("gerdr", RunState::Running("fetching…".into()))],
+            vec![run("herdr", RunState::Running("fetching…".into()))],
         );
         let ctx = super::Ctx {
             batch: Some(&b),
             ..ctx
         };
         assert_eq!(panel.click(ReposHit::Mark(6, RepoMark::Ahead), &ctx), None);
-        assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Wait for the fetch running in herdr (Alt+C stops it)")
+        );
     }
 
     #[test]
@@ -6461,7 +7461,7 @@ mod tests {
         assert!(file.selected);
         // The repository's log, with what the batch ran there.
         select(&mut panel, "gerdr");
-        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        press(&mut panel, alt(), Keysym::_2, &ctx);
         let log = DetailKey {
             root: root("gerdr"),
             file: None,
@@ -6497,8 +7497,8 @@ mod tests {
         // A file's line, its repository's log.
         select_file(&mut panel, "gerdr", "src/git.rs");
         assert_eq!(panel.detail_wanted(&ctx), None);
-        // Ctrl+D, the diff again, where the selection is.
-        press(&mut panel, ctrl(), Keysym::d, &ctx);
+        // Alt+1, the diff again, where the selection is.
+        press(&mut panel, alt(), Keysym::_1, &ctx);
         assert_eq!(panel.detail_wanted(&ctx), None);
         assert_eq!(panel.diff.scroll.pos(), 1.0);
     }
@@ -6560,7 +7560,7 @@ mod tests {
         assert_eq!(panel.view("p", &ctx).detail.part, 0.0);
         // A log too, from its top.
         select(&mut panel, "gerdr");
-        press(&mut panel, ctrl(), Keysym::t, &ctx);
+        press(&mut panel, alt(), Keysym::_2, &ctx);
         let log = DetailKey {
             root: root("gerdr"),
             file: None,
@@ -6662,7 +7662,12 @@ mod tests {
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(
             rows[5..9],
-            ["| why", "| and b", "~ Shift+Enter breaks the line", "+c"]
+            [
+                "| why",
+                "| and b",
+                "~ Shift+Enter breaks the line · Enter or Esc keeps it",
+                "+c"
+            ]
         );
         // The editor has the keys: Tab and Up don't leave it.
         press(&mut panel, none(), Keysym::Up, &ctx);
@@ -6700,6 +7705,26 @@ mod tests {
                 .iter()
                 .any(|h| h.button == ReposButton::CopyReview)
         );
+        // Sent to an agent only while one runs in the workspace.
+        let send = |panel: &Panel| {
+            let hints = panel.view("p", &ctx).hints;
+            let hint = hints.iter().find(|h| h.button == ReposButton::SendReview);
+            hint.map(|h| (h.label.clone(), h.disabled.clone()))
+        };
+        assert_eq!(
+            send(&panel),
+            Some(("send to agent".into(), Some(NO_AGENT.into())))
+        );
+        assert_eq!(panel.press(ReposButton::SendReview, &ctx), None);
+        panel.agent = Some("claude".into());
+        assert_eq!(send(&panel), Some(("send to claude".into(), None)));
+        assert_eq!(
+            panel.press(ReposButton::SendReview, &ctx),
+            Some(Outcome::SendReview {
+                text: text.clone(),
+                count: 1
+            })
+        );
 
         // A line added above, it stays under b.
         let g = panel.diff.reads + 1;
@@ -6709,13 +7734,17 @@ mod tests {
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(rows[3..9], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
 
-        // C on it edits it; Esc drops the edit, not the panel.
+        // c on it edits it; Esc keeps the edit, and doesn't close the
+        // panel.
         panel.diff.set_cursor(6, None);
         press(&mut panel, none(), Keysym::c, &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
+        type_text(&mut panel, "!", &ctx);
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.editing.is_none());
-        assert_eq!(panel.diff.review.comments[0].text, "why\nand b");
+        assert_eq!(panel.diff.review.comments[0].text, "why\nand b!");
+        panel.diff.review.comments[0].text = "why\nand b".into();
+        panel.diff.rebuild(&sections(&items));
 
         // b gone, it is listed with those whose lines are gone.
         let g = g + 1;
@@ -6737,10 +7766,38 @@ mod tests {
             panic!("not copied");
         };
         assert!(text.contains("`src/git.rs:1-2` (the code changed since)"));
+        // It says the branch it was written on.
+        assert!(text.contains("## gerdr · main"), "{text}");
+        // Those on lines gone can be dropped on their own, asked first.
+        let title: Vec<String> = (panel.view("p", &ctx).detail.title_buttons.iter())
+            .map(|h| h.label.clone())
+            .collect();
+        assert_eq!(title, ["Copy 1 comment", "Drop 1 outdated", "Clear review"]);
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::DropOutdated), &ctx),
+            None
+        );
+        let sheet = panel.view("p", &ctx).sheet.expect("a sheet");
+        assert_eq!(
+            sheet.title,
+            "Delete the 1 comment on lines no longer in the diff?"
+        );
+        assert_eq!(
+            sheet.buttons,
+            [ReposButton::Cancel, ReposButton::DropOutdated]
+        );
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert_eq!(panel.diff.review.comments.len(), 1);
 
-        // Delete on it deletes it.
+        // Delete on it arms it, saying so; again deletes it.
         panel.diff.review_dirty = false;
         panel.diff.set_cursor(n - 2, None);
+        press(&mut panel, none(), Keysym::Delete, &ctx);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Press Del again to delete the comment")
+        );
+        assert!(!panel.diff.review.is_empty());
         press(&mut panel, none(), Keysym::Delete, &ctx);
         assert!(panel.diff.review.is_empty() && panel.diff.review_dirty);
         assert!(
@@ -6750,6 +7807,49 @@ mod tests {
         );
         assert_eq!(press(&mut panel, ctrl_shift(), Keysym::C, &ctx), None);
         assert_eq!(panel.error.as_deref(), Some(NO_REVIEW));
+    }
+
+    #[test]
+    fn a_comment_on_a_file_header_is_on_the_whole_file() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 30);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        press(&mut panel, none(), Keysym::Tab, &ctx);
+        let header = panel
+            .diff
+            .rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::File(..)))
+            .expect("a file's header");
+        panel.diff.set_cursor(header, None);
+        press(&mut panel, none(), Keysym::c, &ctx);
+        assert!(panel.diff.editing.is_some(), "{:?}", panel.error);
+        type_text(&mut panel, "split it", &ctx);
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        let comment = &panel.diff.review.comments[0];
+        assert!(comment.lines.is_empty());
+        assert_eq!(comment.text, "split it");
+        // Shown under the header, before the file's hunks.
+        let rows = detail_rows(&panel.view("p", &ctx));
+        assert_eq!(rows[header + 1], "> split it");
+        assert_eq!(panel.diff.outdated_count(), 0);
+        let Some(Outcome::Copy { text, .. }) = press(&mut panel, ctrl_shift(), Keysym::C, &ctx)
+        else {
+            panic!("not copied");
+        };
+        assert!(
+            text.contains("### `src/git.rs` (the whole file)\n\nsplit it\n"),
+            "{text}"
+        );
+        // The diff's search finds what comments say too.
+        panel.focus = Focus::Detail;
+        panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
+        type_text(&mut panel, "split", &ctx);
+        assert_eq!(search_count(&panel, &ctx), "1 of 1");
+        assert_eq!(cursor_row(&panel), Some(header + 1));
+        assert_eq!(panel.diff.found_on(header + 1), vec![(0..5, true)]);
     }
 
     #[test]
@@ -6859,8 +7959,51 @@ mod tests {
         panel.press(ReposButton::ClearReview, &ctx);
         assert!(matches!(panel.sheet, Some(Sheet::ClearReview { .. })));
         assert_eq!(panel.diff.review.comments.len(), 1);
+        // Enter cancels first; on Clear review, it deletes them.
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(panel.diff.review.comments.len(), 1);
+        panel.press(ReposButton::ClearReview, &ctx);
+        press(&mut panel, none(), Keysym::Right, &ctx);
         press(&mut panel, none(), Keysym::Return, &ctx);
         assert!(panel.sheet.is_none() && panel.diff.review.is_empty());
+    }
+
+    #[test]
+    fn a_long_file_shows_its_first_lines_till_asked_for_all() {
+        use crate::diff::FILE_LINES;
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        let many: Vec<String> = (0..FILE_LINES + 5).map(|n| n.to_string()).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let g = panel.diff.reads;
+        let files = vec![added("src/git.rs", 'M', &many)];
+        panel.set_diffs(root("gerdr"), g, files, &ctx);
+        let more = |panel: &Panel| {
+            (0..panel.diff.rows.len())
+                .find(|&r| matches!(panel.diff.rows[r], crate::diff_view::DiffRow::More(..)))
+        };
+        let at = more(&panel).expect("a row saying there are more");
+        // Right after the lines shown, saying how many more.
+        assert_eq!(
+            panel.diff.line_text(at - 1),
+            Some(&*(FILE_LINES - 1).to_string())
+        );
+        panel.diff.scroll.jump(at as f64);
+        let view = panel.view("p", &ctx);
+        let i = view
+            .detail
+            .rows
+            .iter()
+            .position(|r| matches!(r, DetailRow::Note(n) if n.starts_with("… 5 more lines")));
+        assert!(i.is_some(), "{:?}", detail_rows(&view));
+        // Enter on it shows them all.
+        panel.focus = Focus::Detail;
+        panel.diff.set_cursor(at, None);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert_eq!(more(&panel), None);
+        assert_eq!(panel.diff.line_text(at), Some(&*FILE_LINES.to_string()));
     }
 
     #[test]
@@ -7068,7 +8211,7 @@ mod tests {
         let hints = panel.view("p", &ctx).hints;
         assert_eq!(
             hints[2].disabled.as_deref(),
-            Some("Resolve 1 conflicted file first (Ctrl+R)")
+            Some("Resolve 1 conflicted file first (Alt+D)")
         );
         assert_eq!(
             press(&mut panel, ctrl(), Keysym::e, &ctx),
@@ -7080,6 +8223,10 @@ mod tests {
         );
         assert_eq!(
             press(&mut panel, ctrl(), Keysym::r, &ctx),
+            Some(Outcome::Refresh)
+        );
+        assert_eq!(
+            press(&mut panel, alt(), Keysym::d, &ctx),
             Some(Outcome::Batch {
                 kind: BatchKind::MarkResolved,
                 jobs: vec![job("herdr", &["src/api.rs"])]
@@ -7423,12 +8570,13 @@ mod tests {
         );
         assert_eq!(
             sheet.buttons,
-            [ReposButton::DeleteBranch, ReposButton::Cancel]
+            [ReposButton::Cancel, ReposButton::DeleteBranch]
         );
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.sheet.is_none() && panel.branch_menu.is_some());
         // Those on it go too: the check tells why they are left out.
         assert_eq!(press(&mut panel, none(), Keysym::Delete, &ctx), None);
+        press(&mut panel, none(), Keysym::Right, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
@@ -7447,6 +8595,23 @@ mod tests {
         assert!(matches!(
             panel.click(ReposHit::Button(ReposButton::DeleteBranch), &ctx),
             Some(Outcome::Batch {
+                kind: BatchKind::DeleteBranch { .. },
+                ..
+            })
+        ));
+        // Alt+Del opens the menu to delete one: only those that can be,
+        // Enter asking.
+        panel.branch_menu = None;
+        panel.sheet = None;
+        press(&mut panel, alt(), Keysym::Delete, &ctx);
+        assert_eq!(menu_rows(&panel, &ctx), ["main / master", "feat/x"]);
+        let menu = panel.view("p", &ctx).branch.menu.unwrap();
+        assert_eq!(menu.placeholder, "Find a local branch to delete");
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
+        assert!(matches!(
+            panel.sheet,
+            Some(Sheet::Confirm {
                 kind: BatchKind::DeleteBranch { .. },
                 ..
             })
@@ -7529,7 +8694,10 @@ mod tests {
         assert!(!panel.view("p", &ctx).branch.enabled);
         press(&mut panel, ctrl(), Keysym::s, &ctx);
         assert!(panel.branch_menu.is_none());
-        assert_eq!(panel.error.as_deref(), Some("Wait for the batch to finish"));
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Wait for the fetch running in gerdr (Alt+C stops it)")
+        );
         // With nothing selected, there is nothing to switch.
         let mut none_selected = Panel::new(&items);
         none_selected.selected = None;
@@ -7784,13 +8952,13 @@ mod tests {
         assert_eq!(
             sheet.buttons,
             [
-                ReposButton::SwitchExisting,
+                ReposButton::EditName,
                 ReposButton::CreateMissing,
-                ReposButton::EditName
+                ReposButton::SwitchExisting
             ]
         );
         // Enter edits the name: back in the menu, to create it again.
-        assert_eq!(sheet.default, 2);
+        assert_eq!(sheet.default, 0);
         assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), None);
         assert!(panel.sheet.is_none());
         let menu = panel.view("p", &ctx).branch.menu.unwrap();
@@ -7831,7 +8999,7 @@ mod tests {
         assert_eq!(sheet.title, "feat/x exists in all of them: switch to it?");
         assert_eq!(
             sheet.buttons,
-            [ReposButton::SwitchExisting, ReposButton::EditName]
+            [ReposButton::EditName, ReposButton::SwitchExisting]
         );
     }
 
@@ -8195,6 +9363,41 @@ mod tests {
     }
 
     #[test]
+    fn gg_g_the_braces_and_half_pages_move_the_diffs_cursor() {
+        use crate::diff_view::DiffRow;
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        panel.focus = Focus::Detail;
+        let rows = panel.diff.rows.clone();
+        let shift = mods(false, true, false);
+        // G the end, gg the top.
+        press(&mut panel, shift, Keysym::G, &ctx);
+        assert_eq!(cursor_row(&panel), Some(rows.len() - 1));
+        press(&mut panel, none(), Keysym::g, &ctx);
+        press(&mut panel, none(), Keysym::g, &ctx);
+        assert_eq!(cursor_row(&panel), Some(0));
+        // } and { the hunk (or file) after and before.
+        let heads: Vec<usize> = (0..rows.len())
+            .filter(|&r| matches!(rows[r], DiffRow::Hunk(..) | DiffRow::File(..)))
+            .collect();
+        press(&mut panel, shift, Keysym::braceright, &ctx);
+        assert_eq!(cursor_row(&panel), Some(heads[0]));
+        press(&mut panel, shift, Keysym::braceright, &ctx);
+        assert_eq!(cursor_row(&panel), Some(heads[1]));
+        press(&mut panel, shift, Keysym::braceleft, &ctx);
+        assert_eq!(cursor_row(&panel), Some(heads[0]));
+        // Ctrl+D and Ctrl+U half a page.
+        let at = cursor_row(&panel).unwrap();
+        press(&mut panel, ctrl(), Keysym::d, &ctx);
+        assert_eq!(cursor_row(&panel), Some(at + 3));
+        press(&mut panel, ctrl(), Keysym::u, &ctx);
+        assert_eq!(cursor_row(&panel), Some(at));
+    }
+
+    #[test]
     fn the_caret_goes_along_the_diffs_lines_as_vims_does() {
         let items = items();
         let ctx = ctx(&items, None);
@@ -8341,11 +9544,70 @@ mod tests {
             .position(|r| matches!(r, DetailRow::Line(l) if l.text == "new"));
         assert!(on(line.unwrap()));
         assert_eq!(key(hunk).as_deref(), Some(""));
-        assert_eq!(key(line.unwrap()).as_deref(), Some("R"));
+        assert_eq!(key(line.unwrap()).as_deref(), Some("Shift+R"));
         assert_eq!(
             restore(panel.click(ReposHit::DiffRestore(hunk), &ctx)),
             (vec![2, 3, 4, 6], put(6, "\told"))
         );
+    }
+
+    #[test]
+    fn lines_have_numbers_and_a_long_ones_caret_stays_in_view() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let long = "x".repeat(300);
+        let g = panel.diff.reads;
+        let files = vec![added("src/git.rs", 'M', &["a", &long])];
+        panel.set_diffs(root("gerdr"), g, files, &ctx);
+        let view = panel.view("p", &ctx);
+        assert_eq!(view.detail.gutter, 2);
+        assert_eq!(view.detail.skipped, None);
+        // The caret far along the long line: it is shown from a char on,
+        // the caret moved back by as many.
+        let row = (0..panel.diff.rows.len())
+            .find(|&r| panel.diff.line_text(r) == Some(&long))
+            .unwrap();
+        panel.diff.set_cursor(row, None);
+        panel.focus = Focus::Detail;
+        press(&mut panel, none(), Keysym::dollar, &ctx);
+        let view = panel.view("p", &ctx);
+        let (i, skip) = view.detail.skipped.expect("shown from a char on");
+        let room = crate::chrome::diff_line_room(ctx.cols, 2);
+        assert_eq!(view.detail.caret, Some((i, 299 - skip)));
+        assert!(299 - skip < room);
+        let DetailRow::Line(line) = &view.detail.rows[i] else {
+            panic!();
+        };
+        assert_eq!(line.text.chars().count(), 300 - skip);
+    }
+
+    #[test]
+    fn the_tree_marks_files_edited_from_the_diff_and_commented_on() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        let file = |panel: &Panel| {
+            let view = panel.view("p", &ctx);
+            view.lines
+                .into_iter()
+                .find_map(|l| match l {
+                    TreeLine::File(f) if f.path == "src/git.rs" => Some(f),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(!file(&panel).edited && file(&panel).comments == 0);
+        panel.edited.insert((root("gerdr"), "src/git.rs".into()));
+        panel.diff.review.comments.push(crate::review::Comment {
+            root: root("gerdr"),
+            path: "src/git.rs".into(),
+            lines: vec![crate::review::Quoted::default()],
+            text: "why".into(),
+        });
+        let f = file(&panel);
+        assert!(f.edited);
+        assert_eq!(f.comments, 1);
     }
 
     #[test]
@@ -8459,7 +9721,7 @@ mod tests {
         assert_eq!(keys(&mut panel, "Vjj"), None);
         assert_eq!(
             panel.diff.mode_title().as_deref(),
-            Some("-- VISUAL LINE -- d delete · y yank · R restore · Esc stop")
+            Some("-- VISUAL LINE -- d delete · y yank · Shift+R restore · Esc stop")
         );
         assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
         assert!(panel.diff.visual.is_none());
@@ -8511,9 +9773,10 @@ mod tests {
             keys(&mut panel, "p"),
             Some(Outcome::Notice("A removed line isn't in the file"))
         );
-        // `u` and `U` undo and do again.
-        assert_eq!(keys(&mut panel, "u"), Some(Outcome::UndoCut));
-        assert_eq!(keys(&mut panel, "U"), Some(Outcome::RedoCut));
+        // `u` and `U` undo and do again, in the file at the caret.
+        let here = Some((root("gerdr"), "src/a.rs".to_owned()));
+        assert_eq!(keys(&mut panel, "u"), Some(Outcome::UndoCut(here.clone())));
+        assert_eq!(keys(&mut panel, "U"), Some(Outcome::RedoCut(here)));
     }
 
     #[test]
@@ -8618,10 +9881,13 @@ mod tests {
         press(&mut panel, none(), Keysym::F3, &ctx);
         assert_eq!(cursor_row(&panel), Some(8));
         assert_eq!(search_count(&panel, &ctx), "2 of 3");
-        // Esc closes the search first, then the panel.
+        // Esc closes the search first, then gives the tree the keys,
+        // then closes the panel.
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.search.is_none());
         assert!(panel.view("p", &ctx).detail.found.iter().all(Vec::is_empty));
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
         assert_eq!(
             press(&mut panel, none(), Keysym::Escape, &ctx),
             Some(Outcome::Close)
@@ -8629,7 +9895,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_f_searches_and_ctrl_f_still_fetches() {
+    fn ctrl_f_finds_in_the_diff_and_fetches_elsewhere() {
         let items = items();
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
@@ -8644,6 +9910,13 @@ mod tests {
         assert_eq!(search_count(&panel, &ctx), "1 of 1");
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.search.is_none());
+        // With the diff's keys, Ctrl+F finds too.
+        assert_eq!(press(&mut panel, ctrl(), Keysym::f, &ctx), None);
+        assert!(panel.search_has_keys());
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        // With the tree's, it fetches.
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert_eq!(panel.focus, Focus::Tree);
         let fetch = press(&mut panel, ctrl(), Keysym::f, &ctx);
         assert!(matches!(
             fetch,

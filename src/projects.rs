@@ -61,6 +61,12 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// How wide the sidebar was left, in logical pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<i32>,
+    /// How big gerdr's window was left, in logical pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_size: Option<(i32, i32)>,
     /// Where reading each service's output for errors left off, by
     /// `<herdr session>|<pane id>` (see `service_watch`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -90,6 +96,10 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_width: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_size: Option<(i32, i32)>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     service_anchors: BTreeMap<String, crate::service_errors::Anchor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -393,7 +403,10 @@ impl Store {
                 Self::load_legacy(&root.join("projects.json"), books, first_run)
             }
             Err(err) => {
-                tracing::warn!("reading {}: {err}", dir.display());
+                crate::problems::report(
+                    "store",
+                    format!("Couldn't read the projects in {}: {err}", dir.display()),
+                );
                 let mut store = Self {
                     books,
                     ..Self::empty()
@@ -428,6 +441,8 @@ impl Store {
         self.t3_hidden = state.t3_hidden;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.sidebar_width = state.sidebar_width;
+        self.window_size = state.window_size;
         self.service_anchors = state.service_anchors;
         self.service_errors = state.service_errors;
     }
@@ -442,6 +457,8 @@ impl Store {
             t3_hidden: self.t3_hidden.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            sidebar_width: self.sidebar_width,
+            window_size: self.window_size,
             service_anchors: self.service_anchors.clone(),
             service_errors: self.service_errors.clone(),
         }
@@ -922,17 +939,31 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Move the unreadable file at `path` out of the way of the next save, as
 /// `<path>.bad-<unix time>`; whether it is out of the way.
+///
+/// What it did goes to the problems list (see `problems`): the user may
+/// want what was in it.
 pub(crate) fn set_aside(path: &Path) -> bool {
     let bad = bad_name(path, now());
     match std::fs::rename(path, &bad) {
         Ok(()) => {
-            tracing::warn!("set {} aside as {}", path.display(), bad.display());
+            let name = bad.file_name().unwrap_or_default().to_string_lossy();
+            crate::problems::report(
+                "store",
+                format!(
+                    "{} couldn't be read: it is kept as {name} (see the log)",
+                    path.display()
+                ),
+            );
             true
         }
         Err(err) => {
-            tracing::warn!(
-                "setting {} aside: {err}; it won't be saved over",
-                path.display()
+            tracing::warn!("setting {} aside: {err}", path.display());
+            crate::problems::report(
+                "store",
+                format!(
+                    "{} couldn't be read nor set aside: it won't be saved over",
+                    path.display()
+                ),
             );
             false
         }
@@ -1334,15 +1365,26 @@ pub fn ago(now: u64, then: u64) -> String {
     }
 }
 
-/// The notice on switching to project `new` from project `old`, which keeps
-/// running.
-pub fn switch_notice(new: &str, old: &str) -> String {
-    format!("Switched to {new} · {old} keeps running")
+/// The notice on switching to project `new` (just made, if `created`)
+/// from project `old`, which keeps running.
+pub fn switch_notice(new: &str, old: &str, created: bool) -> String {
+    format!("{} {new} · {old} keeps running", switched(created))
 }
 
-/// The notice after switching to project `new` from `old`, which stops.
-pub fn stop_notice(new: &str, old: &str) -> String {
-    format!("Switched to {new} · stopping {old}")
+/// The notice after switching to project `new` (just made, if `created`)
+/// from `old`, which stops.
+pub fn stop_notice(new: &str, old: &str, created: bool) -> String {
+    format!("{} {new} · stopping {old}", switched(created))
+}
+
+/// How a switch notice starts: one notice says both that the project was
+/// made and shown.
+fn switched(created: bool) -> &'static str {
+    if created {
+        "Created and switched to"
+    } else {
+        "Switched to"
+    }
 }
 
 /// The greeting for the local `hour` (0–23).
@@ -1539,6 +1581,8 @@ mod tests {
             t3_hidden: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            sidebar_width: Some(280),
+            window_size: Some((1600, 1000)),
             service_anchors: BTreeMap::new(),
             service_errors: Vec::new(),
             books: Books::default(),
@@ -2570,7 +2614,7 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
     #[test]
     fn switching_says_the_old_project_keeps_running() {
         assert_eq!(
-            switch_notice("gerdr", "aft"),
+            switch_notice("gerdr", "aft", false),
             "Switched to gerdr · aft keeps running"
         );
     }

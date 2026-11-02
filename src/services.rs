@@ -202,6 +202,28 @@ impl Gerdr {
         }
     }
 
+    /// Take `settings`, the `[services]` table read again: new patterns
+    /// start every watcher over with them, from where each left off.
+    pub fn set_service_settings(&mut self, settings: Services) {
+        let restart = settings.patterns != self.service_errors.settings.patterns;
+        self.service_errors.settings = settings;
+        if !restart {
+            return;
+        }
+        let ids: Vec<String> = self.service_errors.watchers.keys().cloned().collect();
+        for id in &ids {
+            self.drop_service_watcher(id);
+        }
+        // The shown project's at once; the others' as they are found.
+        if let Some(project) = self.project.clone().filter(|p| ids.contains(p))
+            && let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf())
+        {
+            self.watch_project_services(&project, socket, false);
+            self.feed_services();
+        }
+        self.discover_services();
+    }
+
     /// The herdr server of the project shown went away: its watcher with it.
     pub fn services_server_gone(&mut self) {
         if let Some(id) = self.project.clone() {
@@ -522,7 +544,8 @@ impl Gerdr {
         let stop = group.is_stop();
         groups.insert(0, group);
         groups.truncate(MAX_GROUPS);
-        if !self.service_errors.settings.notify {
+        // As an agent's: none while its pane is in sight.
+        if !self.service_errors.settings.notify || self.service_in_sight(project, pane_id) {
             return;
         }
         let elsewhere = (self.project.as_deref() != Some(project))
@@ -531,18 +554,29 @@ impl Gerdr {
         let summary = match (stop, elsewhere) {
             (true, None) => format!("{label} stopped"),
             (true, Some(name)) => format!("{name} · {label} stopped"),
-            (false, None) => format!("{label}: error"),
-            (false, Some(name)) => format!("{name} · {label}: error"),
+            (false, None) => format!("{label} printed an error"),
+            (false, Some(name)) => format!("{name} · {label} printed an error"),
         };
         let body = match (said, count) {
             (Some(said), _) => said,
             (None, 1) => title,
             (None, n) => format!("{title} (×{n})"),
         };
-        if let Some(notifier) = self.notifier.as_mut() {
+        // `[notifications] enabled` turns every notification off.
+        if let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
             let key = format!("{NOTIFY_PREFIX}{project}|{pane_id}|{fingerprint}");
             notifier.send(&key, &summary, &body);
         }
+    }
+
+    /// Whether project `project`'s pane `pane_id` is in sight: the project
+    /// and the pane's tab shown, gerdr's window with the keyboard.
+    fn service_in_sight(&self, project: &str, pane_id: &str) -> bool {
+        self.host_focused
+            && self.project.as_deref() == Some(project)
+            && self
+                .herdr_pane_place(pane_id)
+                .is_some_and(|(w, t)| self.is_visible(w, t))
     }
 
     /// Show the error `fingerprint` of project `project`'s pane `pane_id`:
@@ -554,7 +588,7 @@ impl Gerdr {
                 g.project == project && g.pane_id == pane_id && g.fingerprint == fingerprint
             });
         if !found {
-            return self.show_notice("That error is gone".into());
+            return self.show_warning("That error is gone".into());
         }
         if self.project.as_deref() != Some(project) {
             self.service_errors.pending = Some((
@@ -580,7 +614,7 @@ impl Gerdr {
             .flatten();
         self.projects.save();
         if !self.show_herdr_pane(pane_id) {
-            return self.show_notice("Its pane isn't shown".into());
+            return self.show_warning("Its pane isn't shown".into());
         }
         let Some(id) = self.tab().and_then(|tab| tab.focused_id()) else {
             return;

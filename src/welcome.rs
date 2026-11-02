@@ -87,7 +87,7 @@ impl Welcome {
 
     /// Replace the projects, keeping the query, and the selection on the
     /// same project if it is still there.
-    fn set_projects(&mut self, projects: Vec<(String, ProjectRow)>) {
+    pub fn set_projects(&mut self, projects: Vec<(String, ProjectRow)>) {
         let picked = self.picked().map(str::to_owned);
         let was = self.selected;
         self.projects = projects;
@@ -215,6 +215,18 @@ impl Welcome {
 
     /// Move the selection `by` places among the matches and then the button,
     /// scrolling to keep it shown.
+    /// Scroll the rows `by` (down when positive), `page` shown at once,
+    /// as the wheel does: the selection stays on a row in sight.
+    fn scroll_by(&mut self, by: isize, page: usize) {
+        let page = page.max(1);
+        let most = self.matches.len().saturating_sub(page);
+        let first = self.first_shown(page).saturating_add_signed(by).min(most);
+        self.scroll = first;
+        if let Some(i) = self.selected {
+            self.selected = Some(i.clamp(first, first + page - 1));
+        }
+    }
+
     fn step(&mut self, by: isize, page: usize) {
         let button = self.matches.len();
         let at = self.selected.unwrap_or(button) as isize;
@@ -314,14 +326,24 @@ impl Welcome {
             .confirm_forget
             .as_ref()
             .and_then(|id| shown.iter().position(|(m, _)| &self.projects[*m].0 == id));
-        let subtitle = if self.projects.is_empty() {
-            "Start your first project."
+        let mut subtitle = if self.projects.is_empty() {
+            "Start your first project".to_owned()
         } else {
-            "Pick up where you left off."
+            "Pick up where you left off".to_owned()
         };
+        // Where the rows shown are, when not all fit.
+        let total = self.matches.len();
+        if total > shown.len() && !shown.is_empty() {
+            let last = first + shown.len();
+            subtitle += &format!(" \u{b7} {}\u{2013}{last} of {total}", first + 1);
+        }
+        let scroll = (total > shown.len() && !shown.is_empty()).then_some(chrome::ListBar {
+            down: first as f64,
+            total: total as f64,
+        });
         WelcomeView {
             greeting,
-            subtitle: subtitle.into(),
+            subtitle,
             query: self.query.line(),
             rows,
             hits,
@@ -333,6 +355,7 @@ impl Welcome {
             note,
             in_app: self.in_app,
             quit_keys,
+            scroll,
         }
     }
 }
@@ -376,13 +399,8 @@ impl Gerdr {
                 self.welcome = None;
                 self.create_project(&name);
             }
-            Outcome::Forget(id) => {
-                self.forget_project(&id);
-                let rows = self.project_rows();
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.set_projects(rows);
-                }
-            }
+            // Asked first while it runs; the rows follow once it is gone.
+            Outcome::Forget(id) => self.forget_project(&id),
             Outcome::Closed => self.welcome = None,
         }
         // Gone, the client under the pointer gets it back.
@@ -405,6 +423,13 @@ impl Gerdr {
                 return true;
             }
             _ => {}
+        }
+        // On the scrollbar: the thumb comes under the pointer.
+        if let Some(thumb) = self.welcome_thumb().filter(|t| t.takes(pos)) {
+            if thumb.on_thumb(pos.y).is_none() {
+                self.welcome_scroll_to(thumb.pos_at(pos.y - thumb.h / 2.0));
+            }
+            return true;
         }
         let Some(welcome) = self.welcome.as_mut() else {
             return false;
@@ -477,18 +502,21 @@ impl Gerdr {
             Some(user) => format!("{hello}, {user}"),
             None => hello.into(),
         };
-        // Without herdr, projects live only as long as gerdr.
+        // Without herdr, projects live only as long as gerdr; projects that
+        // couldn't be read are said, else "Start your first project" would
+        // be all there is.
         let note = welcome
             .herdr_missing
-            .then(|| "herdr isn't installed — projects won't keep running".into())
-            .or_else(|| welcome.refused.clone());
+            .then(|| "herdr isn't installed: put it on PATH to keep projects running".into())
+            .or_else(|| welcome.refused.clone())
+            .or_else(|| {
+                let store = crate::problems::list()
+                    .into_iter()
+                    .find(|p| p.source == "store");
+                store.map(|p| p.text)
+            });
         // The prefix and the key after it that quit, for the bar at the bottom.
-        let help = self.keymap.help();
-        let quit_keys = help
-            .rows
-            .iter()
-            .find(|(_, label)| label.trim_end_matches('…') == "quit")
-            .map(|(keys, _)| format!("{} {keys}", help.prefix));
+        let quit_keys = self.action_keys(crate::Action::Quit);
         Some(welcome.view(
             self.welcome_page(),
             greeting,
@@ -497,6 +525,37 @@ impl Gerdr {
             quit_keys,
             Instant::now(),
         ))
+    }
+
+    /// Scroll the welcome screen's projects `by` rows (down when
+    /// positive), as the wheel over them does.
+    pub fn welcome_scroll(&mut self, by: isize) {
+        let page = self.welcome_page();
+        if let Some(welcome) = self.welcome.as_mut() {
+            welcome.scroll_by(by, page);
+        }
+    }
+
+    /// The welcome screen's scrollbar, while not all its projects show.
+    pub(crate) fn welcome_thumb(&self) -> Option<chrome::Thumb> {
+        let view = self.welcome_view()?;
+        let layout = chrome::welcome_layout(
+            self.output_size(),
+            view.rows.len(),
+            view.naming.is_some(),
+            view.note.is_some(),
+        );
+        chrome::welcome_thumb(&view, &layout)
+    }
+
+    /// Scroll the welcome screen's projects so the first shown is `at`
+    /// (a row, to the fraction), as its scrollbar's thumb dragged says.
+    pub(crate) fn welcome_scroll_to(&mut self, at: f64) {
+        let page = self.welcome_page();
+        if let Some(welcome) = self.welcome.as_mut() {
+            let first = welcome.first_shown(page) as isize;
+            welcome.scroll_by(at.round() as isize - first, page);
+        }
     }
 
     fn welcome_page(&self) -> usize {
@@ -750,7 +809,7 @@ mod tests {
         let view = view(&w);
         assert_eq!(
             (view.selected, view.subtitle.as_str()),
-            (None, "Start your first project.")
+            (None, "Start your first project")
         );
         press(&mut w, Keysym::Down);
         press(&mut w, Keysym::Tab);
@@ -770,6 +829,10 @@ mod tests {
         assert_eq!(names(&w), ["p2", "p3", "p4"]);
         assert_eq!(view.selected, Some(2));
         assert_eq!(w.row_id(0, 3), Some("p2"));
+        assert_eq!(
+            view.subtitle,
+            "Pick up where you left off \u{b7} 3\u{2013}5 of 8"
+        );
         press(&mut w, Keysym::Page_Down);
         assert_eq!(names(&w), ["p5", "p6", "p7"]);
         assert_eq!(
@@ -789,6 +852,13 @@ mod tests {
             press(&mut w, Keysym::Return),
             Some(Outcome::Pick("p5".into()))
         );
+        // The wheel scrolls, taking the selection along when it leaves.
+        w.scroll_by(10, 3);
+        assert_eq!(names(&w), ["p5", "p6", "p7"]);
+        assert_eq!(w.selected, Some(5));
+        w.scroll_by(-5, 3);
+        assert_eq!(names(&w), ["p0", "p1", "p2"]);
+        assert_eq!(w.selected, Some(2));
     }
 
     #[test]
@@ -816,5 +886,14 @@ mod tests {
         assert_eq!(&*w.query, "foo ");
         press(&mut w, Keysym::BackSpace);
         assert_eq!(&*w.query, "foo");
+    }
+
+    #[test]
+    fn the_view_says_where_the_list_stands_while_not_all_show() {
+        let mut w = welcome(&["a", "b", "c", "d", "e"]);
+        assert_eq!(view(&w).scroll.map(|b| (b.down, b.total)), Some((0.0, 5.0)));
+        w.scroll_by(2, 3);
+        assert_eq!(view(&w).scroll.map(|b| b.down), Some(2.0));
+        assert_eq!(view(&welcome(&["a", "b"])).scroll, None);
     }
 }

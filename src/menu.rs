@@ -2,7 +2,9 @@
 //! under a button's chevron), one component for all of them. A region
 //! builds a `MenuSpec`; `open_menu` shows it; a pick runs its
 //! `MenuAction` through `menu_action`, which maps onto what the keys do.
-//! The arrow keys walk the menu, Enter picks, Esc closes.
+//! The arrow keys (and Home, End) walk the menu, Enter picks, Esc closes;
+//! any other key only closes it. A menu taller than its output shows the
+//! items that fit.
 
 use std::path::PathBuf;
 
@@ -121,6 +123,18 @@ pub enum MenuAction {
     },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
+    /// Join project `id`, open in another gerdr, here (see
+    /// `Gerdr::attach_project`).
+    AttachProject(String),
+    /// Open the settings file, in a tab.
+    OpenSettings,
+    /// Open gerdr's log file, in a tab.
+    OpenLog,
+    /// Show tab `t` of workspace `w`.
+    SwitchTab(usize, usize),
+    /// Fold every workspace in the sidebar (`Some(true)`), unfold every
+    /// one (`Some(false)`), or leave each to fold while quiet (`None`).
+    FoldAll(Option<bool>),
 }
 
 /// One row of a menu.
@@ -180,9 +194,14 @@ impl ContextMenu {
         }
     }
 
+    /// The items shown: as many as fit on the output.
+    fn items(&self) -> &[MenuItem] {
+        let fit = chrome::menu_rows_fitting(self.output.h);
+        &self.spec.items[..self.spec.items.len().min(fit)]
+    }
+
     fn rows(&self) -> Vec<MenuRow> {
-        self.spec
-            .items
+        self.items()
             .iter()
             .map(|item| MenuRow {
                 label: item.label.clone(),
@@ -215,8 +234,9 @@ impl ContextMenu {
     /// Move the pick by `delta` rows (down for positive), over the enabled
     /// items, wrapping around; from the first or last with none picked.
     pub fn step(&mut self, delta: i32) {
-        let n = self.spec.items.len() as i32;
-        if n == 0 || !self.spec.items.iter().any(|item| item.enabled) {
+        let items = self.items();
+        let n = items.len() as i32;
+        if n == 0 || !items.iter().any(|item| item.enabled) {
             return;
         }
         let mut at = match self.hover {
@@ -226,7 +246,7 @@ impl ContextMenu {
         };
         for _ in 0..n {
             at = at.rem_euclid(n);
-            if self.spec.items[at as usize].enabled {
+            if items[at as usize].enabled {
                 self.hover = Some(at as usize);
                 return;
             }
@@ -234,9 +254,15 @@ impl ContextMenu {
         }
     }
 
+    /// Pick the first enabled item (`last`: the last one).
+    pub fn step_to_end(&mut self, last: bool) {
+        self.hover = None;
+        self.step(if last { -1 } else { 1 });
+    }
+
     /// What the picked item does, if one is picked and enabled.
     pub fn pick(&self) -> Option<MenuAction> {
-        let item = &self.spec.items[self.hover?];
+        let item = self.items().get(self.hover?)?;
         item.enabled.then(|| item.action.clone())
     }
 }
@@ -256,13 +282,10 @@ impl Gerdr {
     }
 
     /// The pointer moved to `pos` while the menu is open: light the item
-    /// under it.
+    /// under it, or none off the items, so Enter picks nothing it left.
     pub fn menu_motion(&mut self, pos: Point<f64, Logical>) {
-        let hover = self.context_menu.as_ref().and_then(|m| m.item_at(pos));
-        if let Some(menu) = self.context_menu.as_mut()
-            && hover.is_some()
-        {
-            menu.hover = hover;
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.hover = menu.item_at(pos);
         }
     }
 
@@ -270,7 +293,7 @@ impl Gerdr {
     /// anything else just closes the menu. The press goes no further.
     pub fn menu_press(&mut self, pos: Point<f64, Logical>) {
         let picked = self.context_menu.as_ref().and_then(|menu| {
-            let item = &menu.spec.items[menu.item_at(pos)?];
+            let item = menu.items().get(menu.item_at(pos)?)?;
             item.enabled.then(|| item.action.clone())
         });
         self.close_menu();
@@ -279,9 +302,10 @@ impl Gerdr {
         }
     }
 
-    /// A key while the menu is open: the arrows walk it, Enter picks,
-    /// Esc closes. Whether the key was the menu's; any other closes the
-    /// menu and goes on to whatever it would do otherwise.
+    /// A key while the menu is open: the arrows, Home and End walk it,
+    /// Enter picks, Esc closes. Whether the key was the menu's: with one
+    /// open every key is, and any other only closes it, so a key meant
+    /// for the menu never reaches the app under it.
     pub fn menu_key(&mut self, sym: Keysym) -> bool {
         let Some(menu) = self.context_menu.as_mut() else {
             return false;
@@ -289,6 +313,12 @@ impl Gerdr {
         match sym {
             Keysym::Up | Keysym::KP_Up => menu.step(-1),
             Keysym::Down | Keysym::KP_Down => menu.step(1),
+            Keysym::Home | Keysym::KP_Home | Keysym::Page_Up | Keysym::KP_Page_Up => {
+                menu.step_to_end(false)
+            }
+            Keysym::End | Keysym::KP_End | Keysym::Page_Down | Keysym::KP_Page_Down => {
+                menu.step_to_end(true)
+            }
             Keysym::Return | Keysym::KP_Enter => {
                 let picked = menu.pick();
                 self.close_menu();
@@ -296,11 +326,7 @@ impl Gerdr {
                     self.menu_action(action);
                 }
             }
-            Keysym::Escape => self.close_menu(),
-            _ => {
-                self.close_menu();
-                return false;
-            }
+            _ => self.close_menu(),
         }
         true
     }
@@ -360,6 +386,14 @@ impl Gerdr {
             MenuAction::FocusAgent(key) => self.focus_agent(&key),
             MenuAction::CloseAgent(key) => self.close_agent(&key),
             MenuAction::CopyPath(path) => self.copy_text(path.display().to_string()),
+            MenuAction::AttachProject(id) => self.attach_project(&id),
+            MenuAction::OpenSettings => self.open_settings(crate::launch::Place::Tab),
+            MenuAction::OpenLog => self.open_log(crate::launch::Place::Tab),
+            MenuAction::FoldAll(folded) => self.fold_all(folded),
+            MenuAction::SwitchTab(w, t) => {
+                self.switch_workspace(w);
+                self.switch_tab(t);
+            }
             MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
@@ -421,6 +455,23 @@ mod tests {
         // A disabled row under the pointer picks nothing.
         open.hover = Some(1);
         assert_eq!(open.pick(), None);
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_ends_and_a_short_output_cuts_the_menu() {
+        let mut open = menu();
+        open.step_to_end(true);
+        assert_eq!(open.hover, Some(2));
+        open.step_to_end(false);
+        assert_eq!(open.hover, Some(0));
+        // Room for two rows: the third is not shown, picked or walked to.
+        let mut short = ContextMenu::new(menu().spec, (800, 70).into());
+        assert_eq!(short.layout().1.len(), 2);
+        assert_eq!(short.view().rows.len(), 2);
+        short.step(-1);
+        assert_eq!(short.hover, Some(0));
+        short.hover = Some(2);
+        assert_eq!(short.pick(), None);
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! A pane dragged by its bar: hold the bar's label with the left button
 //! and move. Over another pane of the tab, it lands on the side nearest
 //! the pointer (a band along each edge) or, in the middle, swaps with it;
-//! over the tab strip, it goes to that tab, or a new one on the "+". The
-//! place it would land lights up meanwhile (`ChromeView::pane_drop`). The
-//! drop itself goes through `pane_moves`.
+//! over the tab strip, it goes to that tab, or a new one on the "+"; over
+//! another workspace in the sidebar, to a new tab there. The place it
+//! would land lights up meanwhile (`ChromeView::pane_drop`). The drop
+//! itself goes through `pane_moves`.
 
 use smithay::utils::{Logical, Point, Rectangle};
 
@@ -29,6 +30,8 @@ pub enum PaneDrop {
     Tab(usize),
     /// Into a new tab of the active workspace.
     NewTab,
+    /// Into a new tab of workspace `w`, another one.
+    Workspace(usize),
 }
 
 /// The part of a pane the pointer is over while a pane is held.
@@ -86,7 +89,16 @@ impl Gerdr {
     /// `None` over itself or nothing it can land on.
     pub fn pane_drop_at(&self, id: u32, pos: Point<f64, Logical>) -> Option<PaneDrop> {
         if pos.x < self.sidebar_width as f64 {
-            return None;
+            // Under the sidebar's header, the block of another workspace.
+            if pos.y < chrome::BAR_HEIGHT as f64 {
+                return None;
+            }
+            let layout = self.sidebar_layout();
+            let w = layout
+                .blocks
+                .iter()
+                .position(|block| block.to_f64().contains(pos))?;
+            return (w != self.active_workspace).then_some(PaneDrop::Workspace(w));
         }
         if pos.y < self.tab_strip_height() as f64 {
             let view = self.tab_strip_view();
@@ -127,14 +139,7 @@ impl Gerdr {
         let in_strip = |pick: fn(&chrome::TabLayout, usize) -> Option<Rect>, t: usize| {
             let view = self.tab_strip_view();
             let strip = self.tab_strip_rect();
-            let layout = chrome::tab_layout(
-                view.tabs.len(),
-                strip.size,
-                view.prefix,
-                view.overflow(),
-                view.watch.is_some(),
-                view.inbox.is_some(),
-            );
+            let layout = view.layout(strip.size);
             let mut rect = pick(&layout, t)?;
             rect.loc += strip.loc;
             Some(rect)
@@ -144,6 +149,7 @@ impl Gerdr {
             PaneDrop::Swap(t) => target(t),
             PaneDrop::Tab(t) => in_strip(|layout, t| layout.tabs.get(t).copied(), t),
             PaneDrop::NewTab => in_strip(|layout, _| Some(layout.plus), 0),
+            PaneDrop::Workspace(w) => self.sidebar_layout().rows.get(w).map(|row| row.rect),
         }
     }
 
@@ -154,6 +160,7 @@ impl Gerdr {
             Some(PaneDrop::Swap(target)) => self.swap_panes(id, target),
             Some(PaneDrop::Tab(t)) => self.move_pane_to_tab(id, Some(t)),
             Some(PaneDrop::NewTab) => self.move_pane_to_tab(id, None),
+            Some(PaneDrop::Workspace(w)) => self.move_pane_to_workspace(id, w),
             None => {}
         }
     }

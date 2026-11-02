@@ -194,6 +194,60 @@ impl Gerdr {
         self.prune();
     }
 
+    /// Move pane `id` of the shown tab to a new tab of workspace `to`,
+    /// another one, and show it there, focused. herdr moves a terminal
+    /// first, to the herdr workspace `to` mirrors; one `to` has none for
+    /// (no terminal in it), or that herdr refuses, stays where it is. A
+    /// tab, or workspace, left empty goes away.
+    pub fn move_pane_to_workspace(&mut self, id: u32, to: usize) {
+        let from_w = self.active_workspace;
+        if to == from_w || to >= self.workspaces.len() {
+            return;
+        }
+        let dest_herdr = self.workspaces[to].herdr_id().map(str::to_owned);
+        let ws = &self.workspaces[from_w];
+        let from = ws.active_tab;
+        let Some(source) = ws.tabs.get(from).filter(|t| has_leaf(t, id)) else {
+            return;
+        };
+        let name = self.workspaces[to].name.clone();
+        let mut info = None;
+        if let Some(pane) = herdr_of(source, id).map(|p| p.pane_id.clone()) {
+            let Some(dest) = dest_herdr else {
+                self.show_warning(format!("{name} has no terminal to put a terminal pane by"));
+                return;
+            };
+            let Some(herdr) = self.herdr.as_mut() else {
+                return;
+            };
+            match herdr.pane_move_to_new_tab(&pane, &dest) {
+                Ok(moved) => info = Some(moved),
+                Err(err) => {
+                    tracing::warn!("herdr: {err}");
+                    self.show_error(format!("Couldn't move the pane to {name}"));
+                    return;
+                }
+            }
+        }
+        let Some(mut moved) = take_pane(&mut self.workspaces[from_w].tabs[from], id) else {
+            return;
+        };
+        if let Some(info) = info {
+            moved.set_herdr(info);
+        }
+        let mut tab = Tab {
+            layout: Some(Node::Leaf(id)),
+            ..Default::default()
+        };
+        put_pane(&mut tab, moved);
+        let dest = &mut self.workspaces[to];
+        dest.tabs.push(tab);
+        dest.active_tab = dest.tabs.len() - 1;
+        self.switch_workspace(to);
+        self.prune();
+        self.focus_pane(|_| Some(id));
+    }
+
     /// The shown tab, to change.
     fn shown_tab_mut(&mut self) -> Option<&mut Tab> {
         let ws = self.workspaces.get_mut(self.active_workspace)?;

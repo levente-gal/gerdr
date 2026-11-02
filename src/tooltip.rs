@@ -15,6 +15,11 @@ use crate::{
 
 /// How long the pointer rests on something before its tooltip shows.
 pub const SHOW_DELAY: Duration = Duration::from_millis(500);
+/// How long it rests before the next one shows while a tooltip just
+/// showed (moving along a row of buttons, say): hardly at all.
+pub const WARM_DELAY: Duration = Duration::from_millis(60);
+/// How long after a tooltip went the next one still shows that soon.
+pub const WARM_TIME: Duration = Duration::from_millis(700);
 
 /// What a tooltip says, and what it is about (window coordinates).
 #[derive(Clone, Debug, PartialEq)]
@@ -56,11 +61,14 @@ impl Tooltip {
     }
 }
 
-/// The tooltip offered last and since when, and the one shown.
+/// The tooltip offered last and when it is due, and the one shown.
 #[derive(Debug, Default)]
 pub struct TooltipState {
     pending: Option<(Tooltip, Instant)>,
     shown: Option<Tooltip>,
+    /// Until when another tooltip shows after `WARM_DELAY`: one showed
+    /// just now. The pointer leaving keeps it; a press or a key ends it.
+    warm_until: Option<Instant>,
     /// A timer on the event loop waits for `pending`.
     timed: bool,
 }
@@ -68,8 +76,12 @@ pub struct TooltipState {
 impl TooltipState {
     /// The pointer is over what `tip` is about (nothing with a tooltip
     /// when `None`), at `now`: the same tooltip keeps its time, another
-    /// starts over, none hides what shows.
+    /// starts over, none hides what shows. Right after one showed, the
+    /// next waits only `WARM_DELAY`.
     pub fn offer(&mut self, tip: Option<Tooltip>, now: Instant) {
+        if self.shown.is_some() && self.shown != tip {
+            self.warm_until = Some(now + WARM_TIME);
+        }
         match tip {
             None => {
                 self.pending = None;
@@ -80,17 +92,21 @@ impl TooltipState {
                     return;
                 }
                 if self.pending.as_ref().is_none_or(|(p, _)| *p != tip) {
-                    self.pending = Some((tip, now));
+                    let warm = self.warm_until.is_some_and(|until| now < until);
+                    let wait = if warm { WARM_DELAY } else { SHOW_DELAY };
+                    self.pending = Some((tip, now + wait));
                     self.shown = None;
                 }
             }
         }
     }
 
-    /// Hide the tooltip, on a press or the pointer leaving.
+    /// Hide the tooltip, on a press or a key: the next waits the whole
+    /// `SHOW_DELAY` again.
     pub fn hide(&mut self) {
         self.pending = None;
         self.shown = None;
+        self.warm_until = None;
     }
 
     /// Whether a tooltip shows or is about to.
@@ -98,11 +114,10 @@ impl TooltipState {
         self.pending.is_some() || self.shown.is_some()
     }
 
-    /// Show the pending tooltip once it has waited `SHOW_DELAY`; whether
-    /// anything changed.
+    /// Show the pending tooltip once it is due; whether anything changed.
     pub fn tick(&mut self, now: Instant) -> bool {
         match &self.pending {
-            Some((tip, since)) if now.duration_since(*since) >= SHOW_DELAY => {
+            Some((tip, due)) if now >= *due => {
                 self.shown = Some(tip.clone());
                 self.pending = None;
                 true
@@ -113,7 +128,7 @@ impl TooltipState {
 
     /// When the pending tooltip is due, if one is.
     pub fn due(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|(_, since)| *since + SHOW_DELAY)
+        self.pending.as_ref().map(|(_, due)| *due)
     }
 
     /// What the chrome draws, if a tooltip shows.
@@ -163,7 +178,7 @@ impl Gerdr {
 
 #[cfg(test)]
 mod tests {
-    use super::{SHOW_DELAY, Tooltip, TooltipState};
+    use super::{SHOW_DELAY, Tooltip, TooltipState, WARM_DELAY, WARM_TIME};
     use crate::chrome::Rect;
     use std::time::{Duration, Instant};
 
@@ -204,9 +219,38 @@ mod tests {
         assert!(!state.tick(start + SHOW_DELAY));
         assert!(state.tick(later + SHOW_DELAY));
         assert_eq!(state.view().map(|v| v.text), Some("Stop".into()));
-        // Moving on while shown hides it until the next one is due.
-        state.offer(Some(Tooltip::new("Close", anchor)), later + SHOW_DELAY);
+        // Moving on while shown hides it until the next one is due: soon,
+        // as one just showed.
+        let shown = later + SHOW_DELAY;
+        state.offer(Some(Tooltip::new("Close", anchor)), shown);
         assert!(state.view().is_none());
-        assert_eq!(state.due(), Some(later + 2 * SHOW_DELAY));
+        assert_eq!(state.due(), Some(shown + WARM_DELAY));
+    }
+
+    #[test]
+    fn right_after_a_tooltip_the_next_shows_at_once() {
+        let anchor = Rect::new((0, 0).into(), (10, 10).into());
+        let mut state = TooltipState::default();
+        let start = Instant::now();
+        state.offer(Some(Tooltip::new("Restart", anchor)), start);
+        assert!(state.tick(start + SHOW_DELAY));
+        // Off it onto the gap between buttons, then the next button.
+        let left = start + SHOW_DELAY + Duration::from_millis(100);
+        state.offer(None, left);
+        let next = left + Duration::from_millis(50);
+        state.offer(Some(Tooltip::new("Stop", anchor)), next);
+        assert_eq!(state.due(), Some(next + WARM_DELAY));
+        assert!(state.tick(next + WARM_DELAY));
+        // Long after, the whole wait again.
+        state.offer(None, next + WARM_DELAY);
+        let much_later = next + WARM_DELAY + WARM_TIME;
+        state.offer(Some(Tooltip::new("Close", anchor)), much_later);
+        assert_eq!(state.due(), Some(much_later + SHOW_DELAY));
+        // A press ends the warm time at once.
+        assert!(state.tick(much_later + SHOW_DELAY));
+        state.hide();
+        let after = much_later + SHOW_DELAY;
+        state.offer(Some(Tooltip::new("Stop", anchor)), after);
+        assert_eq!(state.due(), Some(after + SHOW_DELAY));
     }
 }

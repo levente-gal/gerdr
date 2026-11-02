@@ -6,7 +6,8 @@
 //! its choosing (`Updates::pin`, see `Gerdr::start_t3`), and moves it on
 //! only to versions it read:
 //!
-//! - every `CHECK_EVERY` (one gerdr at a time) it asks npm for the newest
+//! - every `CHECK_EVERY` (one gerdr at a time), unless Settings' `[t3]
+//!   updates` is false, it asks npm for the newest
 //!   version on the channel of the one running (`latest`, `nightly` or
 //!   `preview`);
 //! - a version making the same database migration as the one gerdr reads
@@ -23,7 +24,8 @@
 //! "Update T3 Code" in the launcher does the same at once, asking before
 //! stopping threads at work; a version that doesn't fit can still be taken.
 //! What was decided is in `t3.json` beside gerdr's other files, shared by
-//! every gerdr.
+//! every gerdr. The switch turning updates off used to be there too; it is
+//! moved to Settings once (see `migration`).
 
 use std::{
     cmp::Ordering,
@@ -78,8 +80,9 @@ pub enum Verdict {
 pub struct Updates {
     /// The version gerdr starts the server at; none: the newest.
     pub pin: Option<String>,
-    /// Whether newer versions wait to be asked for, instead of being
-    /// taken as soon as they fit.
+    /// The old switch: newer versions waited to be asked for. Read only
+    /// to move it to Settings (see `migration`), never written again.
+    #[serde(skip_serializing)]
     pub manual: bool,
     /// When the newest version was last looked for, in seconds since 1970.
     pub checked_at: u64,
@@ -112,9 +115,10 @@ impl Updates {
         }
     }
 
-    /// Whether the newest version is to be looked for at `now`.
+    /// Whether the newest version is to be looked for at `now`, when
+    /// T3 Code updates itself.
     pub fn due(&self, now: u64) -> bool {
-        !self.manual && now.saturating_sub(self.checked_at) >= CHECK_EVERY.as_secs()
+        now.saturating_sub(self.checked_at) >= CHECK_EVERY.as_secs()
     }
 
     /// Note `verdict` on `version`, forgetting the oldest beyond
@@ -127,6 +131,31 @@ impl Updates {
             };
             self.verdicts.remove(&oldest);
         }
+    }
+}
+
+/// What to do with `t3.json`'s old switch, given the config file's
+/// `settings` text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Migration {
+    /// Nothing: the switch was on, which is the default.
+    Nothing,
+    /// Write `updates = false` in `[t3]` of Settings, then forget it.
+    TurnOff,
+    /// Forget it: Settings says already.
+    Forget,
+}
+
+/// What to do with `t3.json`'s old switch, `manual` (updates off), given
+/// the config file's `settings` text: moved once, unless Settings sets
+/// `[t3] updates` itself.
+pub fn migration(manual: bool, settings: &str) -> Migration {
+    if !manual {
+        Migration::Nothing
+    } else if crate::config::sets(settings, "t3", "updates") {
+        Migration::Forget
+    } else {
+        Migration::TurnOff
     }
 }
 
@@ -539,9 +568,10 @@ impl crate::Gerdr {
     pub fn watch_t3_updates(&mut self) {
         use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
         self.t3.updates = Updates::load();
+        self.move_t3_switch();
         let tick = |_, _: &mut (), state: &mut crate::Gerdr| {
             state.t3.updates = Updates::load();
-            if state.t3.updates.due(now()) {
+            if state.t3.auto_update && state.t3.updates.due(now()) {
                 state.check_t3(false);
             }
             TimeoutAction::ToDuration(LOOK_EVERY)
@@ -631,7 +661,7 @@ impl crate::Gerdr {
                     // Pinned back on purpose: the newest is there to take.
                     let text = format!("T3 Code {newest} is out");
                     let action = (
-                        "Take it".to_owned(),
+                        "Update".to_owned(),
                         crate::menu::MenuAction::UpdateT3(Some(newest)),
                     );
                     self.toast_with(text, Level::Info, Some(action));
@@ -648,7 +678,9 @@ impl crate::Gerdr {
                 self.t3.updates.told.insert(version.clone());
                 self.t3.updates.save();
                 // The version is in the log: nightlies' names are long.
-                let text = "Newer T3 Code isn't readable yet".to_owned();
+                // Taken anyway, its threads show with basic status only.
+                let text =
+                    "A newer T3 Code is out, but gerdr can't fully read its threads yet".to_owned();
                 let action = (
                     "Update anyway".to_owned(),
                     crate::menu::MenuAction::UpdateT3(Some(version)),
@@ -670,18 +702,52 @@ impl crate::Gerdr {
         }
     }
 
-    /// Turn taking newer versions of T3 Code without asking on or off.
+    /// Move `t3.json`'s old switch to Settings, once (see `migration`).
+    fn move_t3_switch(&mut self) {
+        let path = crate::config::config_file();
+        let settings = std::fs::read_to_string(&path).unwrap_or_default();
+        match migration(self.t3.updates.manual, &settings) {
+            Migration::Nothing => return,
+            Migration::Forget => {}
+            Migration::TurnOff => {
+                if let Err(err) = crate::config::write_bool("t3", "updates", false) {
+                    // Kept in t3.json, to try again next time.
+                    return tracing::warn!("{}: [t3] updates: {err}", path.display());
+                }
+                self.settings_modified = crate::config::modified();
+                self.t3.auto_update = false;
+                let text = "T3 Code updates off \u{b7} now in Settings".to_owned();
+                let open = (
+                    "Open settings".to_owned(),
+                    crate::menu::MenuAction::OpenSettings,
+                );
+                self.toast_with(text, Level::Info, Some(open));
+            }
+        }
+        self.t3.updates.manual = false;
+        self.t3.updates.save();
+    }
+
+    /// Turn taking newer versions of T3 Code without asking on or off:
+    /// Settings' `[t3] updates`, written there and read again.
     pub fn toggle_t3_updates(&mut self) {
-        let mut updates = Updates::load();
-        updates.manual = !updates.manual;
-        updates.save();
-        let text = if updates.manual {
-            "T3 Code updates when you ask"
-        } else {
-            "T3 Code updates itself"
+        let on = !self.t3.auto_update;
+        if let Err(err) = crate::config::write_bool("t3", "updates", on) {
+            let text = format!("Couldn't change T3 Code updates in Settings: {err}");
+            let open = (
+                "Open settings".to_owned(),
+                crate::menu::MenuAction::OpenSettings,
+            );
+            return self.toast_with(text, Level::Error, Some(open));
+        }
+        // Read again whole, so what else changed in the file counts too;
+        // its problems were told when they came.
+        let _ = self.apply_settings();
+        let text = match self.t3.auto_update {
+            true => "T3 Code updates on \u{b7} in Settings",
+            false => "T3 Code updates off \u{b7} in Settings",
         };
-        self.t3.updates = updates;
-        self.toast(text.to_owned(), Level::Info);
+        self.show_success(text.to_owned());
     }
 
     /// How many of T3 Code's threads work or wait for the user.
@@ -700,7 +766,7 @@ impl crate::Gerdr {
         self.t3.updates.save();
         let server = self.t3.server.clone().filter(|_| self.t3.alive);
         let Some(server) = server else {
-            let text = "Newer T3 Code is ready to start".to_owned();
+            let text = "A newer T3 Code is ready for its next start".to_owned();
             return self.toast(text, Level::Success);
         };
         if server.version.as_deref() == Some(version.as_str()) {
@@ -736,11 +802,14 @@ impl crate::Gerdr {
             return;
         };
         let Some(server) = self.t3.server.clone().filter(|_| self.t3.alive) else {
+            // Gone meanwhile: it starts at the version pinned anyway.
             return;
         };
         if !is_t3(server.pid) {
             tracing::warn!("t3 code's server: pid {} isn't t3's", server.pid);
-            return;
+            let text = format!("Couldn't restart T3 Code at {version}");
+            let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+            return self.toast_with(text, Level::Warning, Some(open_log));
         }
         let w = self.t3_pane().map_or(self.active_workspace, |(w, ..)| w);
         let port = server.port();
@@ -814,15 +883,54 @@ mod tests {
     }
 
     #[test]
-    fn checks_come_every_six_hours_unless_manual() {
+    fn checks_come_every_six_hours() {
         let mut updates = Updates {
             checked_at: 1_000,
             ..Updates::default()
         };
         assert!(!updates.due(1_000 + 3600));
         assert!(updates.due(1_000 + 6 * 3600));
-        updates.manual = true;
-        assert!(!updates.due(1_000 + 6 * 3600));
+        updates.checked_at = 1_000 + 6 * 3600;
+        assert!(!updates.due(1_000 + 7 * 3600));
+    }
+
+    #[test]
+    fn the_old_switch_reads_but_is_never_written() {
+        let old = r#"{"pin":"0.1.6","manual":true,"told":["0.1.7"]}"#;
+        let updates: Updates = serde_json::from_str(old).unwrap();
+        assert!(updates.manual);
+        assert_eq!(updates.pin.as_deref(), Some("0.1.6"));
+        assert!(updates.told.contains("0.1.7"));
+        let json = serde_json::to_string(&updates).unwrap();
+        assert!(!json.contains("manual"), "{json}");
+        assert!(json.contains("0.1.7"));
+    }
+
+    #[test]
+    fn the_old_switch_moves_to_settings_once() {
+        // On, the default: nothing to move.
+        assert_eq!(migration(false, ""), Migration::Nothing);
+        assert_eq!(
+            migration(false, "[t3]\nupdates = true\n"),
+            Migration::Nothing
+        );
+        // Off, and Settings doesn't say: written there.
+        assert_eq!(migration(true, ""), Migration::TurnOff);
+        assert_eq!(
+            migration(true, "# [t3]\n# updates = false\n"),
+            Migration::TurnOff
+        );
+        assert_eq!(migration(true, "[t3]\n"), Migration::TurnOff);
+        assert_eq!(
+            migration(true, "[ui]\nupdates = true\n"),
+            Migration::TurnOff
+        );
+        // Settings says, either way: it wins.
+        assert_eq!(migration(true, "[t3]\nupdates = true\n"), Migration::Forget);
+        assert_eq!(
+            migration(true, "[t3]\nupdates = false\n"),
+            Migration::Forget
+        );
     }
 
     #[test]

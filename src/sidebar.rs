@@ -8,7 +8,7 @@ use std::{path::Path, time::Instant};
 use smithay::utils::{Logical, Point};
 
 use crate::{
-    Gerdr, Reorderable,
+    Action, Gerdr, Reorderable, WorkspaceKind,
     agents::AgentKey,
     anim::quantize,
     chrome::{
@@ -24,6 +24,7 @@ use crate::{
     launch,
     menu::{MenuAction, MenuItem, MenuSpec},
     paths,
+    projects::VenvSetting,
     rename::RenameTarget,
     repo_batches::repos_tip,
     scroll::{Bounds, Motion},
@@ -60,13 +61,24 @@ fn worktrees_tooltip(worktrees: &[Worktree], root: Option<&Path>, anchor: Rect) 
     Tooltip::new(&text, anchor).rows(rows)
 }
 
+/// What a workspace's tooltip says of the venv its new shells activate.
+fn venv_word(venv: &VenvSetting) -> String {
+    match venv {
+        VenvSetting::Auto => "Auto (the one each shell finds)".into(),
+        VenvSetting::Off => "Off".into(),
+        VenvSetting::Path(path) => path.display().to_string(),
+    }
+}
+
 /// The tooltip of workspace `ws`'s header, about `anchor`: its name, then
-/// its branch, where its tabs are and what runs in them, each when known.
-fn workspace_tooltip(ws: &WorkspaceView, anchor: Rect) -> Tooltip {
+/// its branch, where its tabs are and what runs in them, and the venv its
+/// new shells activate (`venv`, for one with shells), each when known.
+fn workspace_tooltip(ws: &WorkspaceView, anchor: Rect, venv: Option<&VenvSetting>) -> Tooltip {
     let fields = [
         ("Branch", ws.branch.clone()),
         ("Folder", Some(ws.place.clone())),
         ("Tabs", Some(ws.activity.clone())),
+        ("Python venv", venv.map(venv_word)),
     ]
     .into_iter()
     .filter_map(|(label, value)| Some((label.to_owned(), value.filter(|v| !v.is_empty())?)))
@@ -101,6 +113,17 @@ impl Gerdr {
         })
     }
 
+    /// The venv new shells of workspace `w` activate, as its record keeps
+    /// it: none for a workspace without shells (Cursor's).
+    fn workspace_venv(&self, w: usize) -> Option<&VenvSetting> {
+        let ws = self.workspaces.get(w)?;
+        if ws.kind == WorkspaceKind::Cursor {
+            return None;
+        }
+        let project = self.project.as_deref()?;
+        Some(&self.projects.record(project, &ws.record)?.venv)
+    }
+
     /// Fold workspace `w` in the sidebar if it shows what is under its
     /// header, else unfold it; kept in its record.
     pub(crate) fn toggle_fold(&mut self, w: usize) {
@@ -113,8 +136,29 @@ impl Gerdr {
     /// Fold workspace `w` by hand (`Some`), or leave it to fold while
     /// quiet (`None`); here and in its record.
     fn set_fold(&mut self, w: usize, folded: Option<bool>) {
+        if self.keep_fold(w, folded) {
+            self.projects.save();
+        }
+    }
+
+    /// Fold every workspace by hand (`Some`: folded or not), or leave them
+    /// all to fold while quiet (`None`); here and in their records, saved
+    /// once. The sidebar header's menu offers it.
+    pub(crate) fn fold_all(&mut self, folded: Option<bool>) {
+        let mut changed = false;
+        for w in 0..self.workspaces.len() {
+            changed |= self.keep_fold(w, folded);
+        }
+        if changed {
+            self.projects.save();
+        }
+    }
+
+    /// Fold workspace `w` as `set_fold` does, without saving: whether its
+    /// record changed.
+    fn keep_fold(&mut self, w: usize, folded: Option<bool>) -> bool {
         let Some(ws) = self.workspaces.get_mut(w) else {
-            return;
+            return false;
         };
         ws.folded = folded;
         let id = ws.record.clone();
@@ -123,8 +167,9 @@ impl Gerdr {
             && record.folded != folded
         {
             record.folded = folded;
-            self.projects.save();
+            return true;
         }
+        false
     }
 
     /// Move the sidebar's rows as `motion` has it, under the header.
@@ -258,6 +303,7 @@ impl Gerdr {
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
+                by_hand: self.workspace_folded(i).is_some(),
             })
             .collect();
         let inbox = layout
@@ -355,6 +401,36 @@ impl Gerdr {
         Some(self.cli_agents.get(k)?.command.clone())
     }
 
+    /// The menu listing the Cursor chats of workspace `w` its rows leave
+    /// out (its "+N more" line), at `anchor`: a click shows one.
+    fn more_agents_menu(&self, w: usize, anchor: Rect) -> MenuSpec {
+        let items = self
+            .cursor_history(w)
+            .1
+            .into_iter()
+            .map(|chat| {
+                let card = AgentView::cursor(chat);
+                MenuItem::new(&card.label(), MenuAction::FocusAgent(card.key))
+            })
+            .collect();
+        MenuSpec { anchor, items }
+    }
+
+    /// The menu listing workspace `w`'s agents, the most pressing first,
+    /// at `anchor`, from its status chip: a click shows one.
+    fn chip_agents_menu(&self, w: usize, anchor: Rect) -> Option<MenuSpec> {
+        let cards = self.agent_views().into_iter().nth(w)?;
+        let items: Vec<MenuItem> = chrome::card_order(&cards)
+            .into_iter()
+            .map(|k| {
+                let card = &cards[k];
+                let label = format!("{} · {}", card.label(), chrome::status_label(card.status));
+                MenuItem::new(&label, MenuAction::FocusAgent(card.key.clone()))
+            })
+            .collect();
+        (!items.is_empty()).then_some(MenuSpec { anchor, items })
+    }
+
     /// A press at `(x, y)` in the sidebar. Left click selects a workspace
     /// (a second one right after renames it: see `input`), "×" or middle
     /// click closes it; a left click on an agent card shows its pane, on
@@ -363,7 +439,9 @@ impl Gerdr {
     /// "+" opens the menu of what to add, the button left of it the
     /// repositories panel; the project's name left of them opens the
     /// project menu (the welcome screen while no project is
-    /// shown).
+    /// shown). The "+N more" line lists the chats it counts, and the
+    /// status chip of a header lists its agents (one blocked agent alone
+    /// is shown at once).
     pub(crate) fn sidebar_press(&mut self, x: i32, y: i32, button: u32) {
         let pos = Point::from((x as f64 + 0.5, y as f64 + 0.5));
         let layout = self.sidebar_layout();
@@ -441,10 +519,35 @@ impl Gerdr {
                 self.open_worktrees(dir);
             }
             // Its count of errors: the newest one not looked at.
-            (SidebarHit::Chip(i), BTN_LEFT) if self.chip_shows_errors(i) => {
+            (SidebarHit::Errors(i), BTN_LEFT) => {
                 self.show_workspace_service_error(i);
             }
-            (SidebarHit::Row(i) | SidebarHit::Name(i) | SidebarHit::Chip(i), BTN_LEFT) => {
+            (SidebarHit::More(i), BTN_LEFT) => {
+                if let Some(line) = layout.more.get(i).copied().flatten() {
+                    self.open_menu(self.more_agents_menu(i, line));
+                }
+            }
+            (SidebarHit::Chip(i), BTN_LEFT) => {
+                let cards = self.agent_views().into_iter().nth(i).unwrap_or_default();
+                let blocked: Vec<_> = cards
+                    .iter()
+                    .filter(|c| c.status == crate::herdr::AgentStatus::Blocked)
+                    .collect();
+                let chip = layout.rows.get(i).and_then(|row| row.chip);
+                match (blocked.as_slice(), chip) {
+                    ([one], _) => {
+                        let key = one.key.clone();
+                        self.focus_agent(&key);
+                    }
+                    (_, Some(chip)) if !cards.is_empty() => {
+                        if let Some(menu) = self.chip_agents_menu(i, chip) {
+                            self.open_menu(menu);
+                        }
+                    }
+                    _ => self.switch_workspace(i),
+                }
+            }
+            (SidebarHit::Row(i) | SidebarHit::Name(i), BTN_LEFT) => {
                 self.switch_workspace(i);
                 self.hold(Reorderable::Workspace);
             }
@@ -455,17 +558,6 @@ impl Gerdr {
             }
             _ => {}
         }
-    }
-
-    /// Whether workspace `i`'s header chip counts its services' errors
-    /// (see `WorkspaceView::errors`): it has some not looked at, and no
-    /// blocked agent, whose count goes first.
-    fn chip_shows_errors(&self, i: usize) -> bool {
-        let blocked = self
-            .agent_views()
-            .get(i)
-            .is_some_and(|cards| chrome::blocked_count(cards) > 0);
-        !blocked && self.workspace_service_errors(i).iter().any(|g| !g.seen)
     }
 
     /// The pointer moved to `pos` with nothing open over the sidebar, laid
@@ -487,13 +579,13 @@ impl Gerdr {
         match hit? {
             SidebarHit::Plus => {
                 let tip = Tooltip::new(
-                    "New terminal, folder, project, Cursor or GitHub",
+                    "Add a workspace: a terminal, a folder in Zed or Cursor; or open the inbox",
                     layout.plus,
                 );
                 let help = self.keymap.help();
-                let keys: Vec<_> = ["terminal workspace in home", "open project"]
+                let keys: Vec<_> = [Action::NewTerminal, Action::NewProject]
                     .into_iter()
-                    .filter_map(|label| help.key_for(label, 0))
+                    .filter_map(|action| help.key_of(action, 0))
                     .collect();
                 Some(if keys.is_empty() {
                     tip
@@ -504,26 +596,26 @@ impl Gerdr {
             SidebarHit::Repos => {
                 let (changed, stuck) = self.repos_changed();
                 let tip = Tooltip::new(&repos_tip(changed, stuck), layout.repos);
-                Some(match self.keymap.help().key_for("repositories", 0) {
+                Some(match self.keymap.help().key_of(Action::Repos, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
             }
             SidebarHit::Close(i) => {
                 let tip = Tooltip::new("Close workspace", layout.rows[i].close);
-                Some(match self.keymap.help().key_for("close workspace", 0) {
+                Some(match self.keymap.help().key_of(Action::CloseWorkspace, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
             }
             SidebarHit::NewAgent(i) => {
                 let text = if self.cli_agents.is_empty() {
-                    "No agent CLI found on PATH"
+                    "No agent CLI found on PATH · add yours under [agents] in Settings"
                 } else {
                     "New agent"
                 };
                 let tip = Tooltip::new(text, layout.rows[i].agent);
-                Some(match self.keymap.help().key_for("new agent", 0) {
+                Some(match self.keymap.help().key_of(Action::NewAgent, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -542,7 +634,8 @@ impl Gerdr {
             SidebarHit::Restart(i) => {
                 let rect = layout.rows.get(i)?.restart?;
                 // Each command, where it runs, whether it has exited, and
-                // whether the user chose to leave it alone.
+                // whether the user chose to leave it alone: status words
+                // in sentence case, as every tooltip has them.
                 let home = home_dir();
                 let choices = self.restart_choices(i);
                 let fields: Vec<_> = self
@@ -553,13 +646,13 @@ impl Gerdr {
                             paths::display(dir, home.as_deref(), 40)
                         });
                         if self.pane_bar_content(&pane_id).status == BarStatus::Exited {
-                            place = format!("exited · {place}");
+                            place = format!("Exited · {place}");
                         }
                         if choices
                             .iter()
                             .any(|ch| ch.command == c.command && !ch.restart)
                         {
-                            place = format!("skipped · {place}");
+                            place = format!("Skipped · {place}");
                         }
                         (chrome::command_line(&c.command).unwrap_or(c.command), place)
                     })
@@ -571,7 +664,7 @@ impl Gerdr {
                 let tip = Tooltip::new(&text, rect).fields(fields);
                 Some(tip.key("right click to choose which"))
             }
-            SidebarHit::Chip(i) if self.chip_shows_errors(i) => {
+            SidebarHit::Errors(i) => {
                 let errors = self.workspace_service_errors(i);
                 let unseen = errors.iter().filter(|g| !g.seen).count();
                 let text = match unseen {
@@ -584,28 +677,45 @@ impl Gerdr {
                     .take(6)
                     .map(|g| (g.service.clone(), g.title.clone()))
                     .collect();
-                let tip = Tooltip::new(&text, layout.rows[i].chip?).fields(fields);
+                let tip = Tooltip::new(&text, layout.rows[i].errors?).fields(fields);
                 Some(tip.key("click to show the newest"))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
-                let text = match cards.len() {
-                    1 => "1 agent".to_owned(),
-                    n => format!("{n} agents"),
+                let blocked = chrome::blocked_count(cards);
+                let text = match (cards.len(), blocked) {
+                    (1, 0) => "1 agent".to_owned(),
+                    (n, 0) => format!("{n} agents"),
+                    (1, _) => "1 agent, blocked".to_owned(),
+                    (n, b) => format!("{b} of {n} agents blocked"),
                 };
                 let fields = cards
                     .iter()
                     .map(|c| (c.label(), chrome::status_meaning(c.status).to_owned()))
                     .collect();
-                Some(Tooltip::new(&text, layout.rows[i].chip?).fields(fields))
+                let click = if blocked == 1 {
+                    "click to show the blocked one"
+                } else {
+                    "click for the list"
+                };
+                Some(
+                    Tooltip::new(&text, layout.rows[i].chip?)
+                        .fields(fields)
+                        .key(click),
+                )
             }
             SidebarHit::Name(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                Some(workspace_tooltip(&ws.0, row.title))
+                Some(workspace_tooltip(&ws.0, row.title, self.workspace_venv(i)))
             }
             SidebarHit::Fold(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                let text = if ws.0.folded { "Unfold" } else { "Fold" };
+                let by_hand = self.workspace_folded(i).is_some();
+                let text = match (ws.0.folded, by_hand) {
+                    (true, true) => "Unfold (folded by hand)",
+                    (true, false) => "Unfold (folded while quiet)",
+                    (false, _) => "Fold",
+                };
                 Some(Tooltip::new(text, row.fold?))
             }
             SidebarHit::CiMark(i) => {
@@ -628,8 +738,12 @@ impl Gerdr {
                 Some(tip.key("click to show its page"))
             }
             SidebarHit::InboxTitle => {
-                let tip = Tooltip::new("Open the inbox", layout.inbox_title?);
-                Some(match self.keymap.help().key_for("inbox", 0) {
+                let tip = Tooltip::new(
+                    "Agents of other workspaces that are blocked or done · open the inbox, \
+                     which lists repos, pull requests and tickets too",
+                    layout.inbox_title?,
+                );
+                Some(match self.keymap.help().key_of(Action::Inbox, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
@@ -645,7 +759,11 @@ impl Gerdr {
             SidebarHit::Card(i, k) => {
                 let card = agents.get(i)?.get(k)?;
                 let rect = layout.cards[i].iter().find(|(c, _)| *c == k)?.1;
-                Some(Tooltip::new(&card.label(), rect).fields(card.tooltip_fields()))
+                let mut fields = card.tooltip_fields();
+                if let Some(why) = card.close_unavailable() {
+                    fields.push(("No ×".to_owned(), why.to_owned()));
+                }
+                Some(Tooltip::new(&card.label(), rect).fields(fields))
             }
             SidebarHit::CardClose(i, k) => {
                 let card = agents.get(i)?.get(k)?;
@@ -660,7 +778,7 @@ impl Gerdr {
             SidebarHit::More(i) => {
                 let names = &workspaces.get(i)?.0.more_agents;
                 let text = format!("Also kept: {}", names.join(" · "));
-                Some(Tooltip::new(&text, layout.more[i]?))
+                Some(Tooltip::new(&text, layout.more[i]?).key("click for the list"))
             }
             SidebarHit::Worktrees(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
@@ -672,16 +790,23 @@ impl Gerdr {
             SidebarHit::Attention(i, _) => {
                 let lines = layout.rows.get(i)?.attention?;
                 let tip = Tooltip::new("Review, merge or delete", lines);
-                Some(match self.keymap.help().key_for("worktrees", 0) {
+                Some(match self.keymap.help().key_of(Action::Worktrees, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
                 })
             }
             SidebarHit::Row(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
-                Some(workspace_tooltip(&ws.0, row.title))
+                Some(workspace_tooltip(&ws.0, row.title, self.workspace_venv(i)))
             }
-            SidebarHit::Header => None,
+            SidebarHit::Header => {
+                self.project.as_ref()?;
+                let tip = Tooltip::new("Project menu: switch, add or stop projects", layout.header);
+                Some(match self.keymap.help().key_of(Action::Projects, 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
+                })
+            }
             SidebarHit::Ci(i) => {
                 let repo = self.ci_repo(i)?;
                 let card = layout.ci.get(i)?.as_ref()?.card;
@@ -731,6 +856,14 @@ impl Gerdr {
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
             SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
+            SidebarHit::Header => Some(MenuSpec {
+                anchor: at,
+                items: vec![
+                    MenuItem::new("Fold all workspaces", MenuAction::FoldAll(Some(true))),
+                    MenuItem::new("Unfold all workspaces", MenuAction::FoldAll(Some(false))),
+                    MenuItem::new("Fold each while quiet", MenuAction::FoldAll(None)),
+                ],
+            }),
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
                 let repo = self.ci_repo(i)?;
                 let (pulls, web) = (repo.pulls_url(), repo.web_url());
@@ -784,6 +917,11 @@ impl Gerdr {
                         label.to_owned()
                     };
                     items.push(MenuItem::new(&label, MenuAction::CloseAgent(card.key)));
+                } else if card.close_unavailable().is_some() {
+                    // There, but off, so it can be found; the card's
+                    // tooltip says why.
+                    let item = MenuItem::new(card.close_label(), MenuAction::CloseAgent(card.key));
+                    items.push(item.enabled(false));
                 }
                 Some(MenuSpec { anchor: at, items })
             }
@@ -791,27 +929,30 @@ impl Gerdr {
                 let i = hit.row()?;
                 let dir = self.workspaces.get(i)?.dir.clone();
                 let help = self.keymap.help();
-                let hinted = |item: MenuItem, label: &str| match help.key_for(label, 0) {
+                let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
                     Some(key) => item.hint(&key),
                     None => item,
                 };
                 let mut items = vec![
-                    hinted(MenuItem::new("New tab", MenuAction::NewTab(i)), "new tab"),
+                    hinted(
+                        MenuItem::new("New tab", MenuAction::NewTab(i)),
+                        Action::NewTab,
+                    ),
                     hinted(
                         MenuItem::new("New agent…", MenuAction::NewAgent(i)),
-                        "new agent",
+                        Action::NewAgent,
                     ),
                     MenuItem::new("Rename", MenuAction::RenameWorkspace(i)),
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
                 ];
                 let git = self.git.get(&dir);
                 if git.is_some_and(|g| g.root.is_some()) {
-                    let item = MenuItem::new("Repositories…", MenuAction::Repos);
-                    items.push(hinted(item, "repositories"));
+                    let item = MenuItem::new("Repositories", MenuAction::Repos);
+                    items.push(hinted(item, Action::Repos));
                 }
                 if git.is_some_and(|g| !g.worktrees.is_empty()) {
-                    let item = MenuItem::new("Worktrees…", MenuAction::Worktrees(dir));
-                    items.push(hinted(item, "worktrees"));
+                    let item = MenuItem::new("Worktrees", MenuAction::Worktrees(dir));
+                    items.push(hinted(item, Action::Worktrees));
                 }
                 let restartable = !self.workspace_restarts(i).is_empty();
                 let restart = MenuItem::new("Restart commands", MenuAction::RestartWorkspace(i));
@@ -821,18 +962,20 @@ impl Gerdr {
                 items.push(choose.enabled(restartable));
                 items.push(hinted(
                     MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
-                    "close workspace",
+                    Action::CloseWorkspace,
                 ));
                 Some(MenuSpec { anchor: at, items })
             }
         }
     }
 
-    /// The menu under the header's "+": what to add, with the keys that
-    /// do the same.
+    /// The menu under the header's "+": the workspaces it can add, each
+    /// saying what it opens (a project holds the workspaces; see
+    /// `docs/ux-conventions.md`), and the inbox, with the keys that do the
+    /// same.
     pub(crate) fn sidebar_plus_menu(&self, layout: &SidebarLayout) -> MenuSpec {
         let help = self.keymap.help();
-        let hinted = |item: MenuItem, label: &str| match help.key_for(label, 0) {
+        let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
             Some(key) => item.hint(&key),
             None => item,
         };
@@ -840,17 +983,44 @@ impl Gerdr {
             anchor: layout.plus,
             items: vec![
                 hinted(
-                    MenuItem::new("New terminal", MenuAction::NewTerminal),
-                    "terminal workspace in home",
+                    MenuItem::new("Terminal workspace in home", MenuAction::NewTerminal),
+                    Action::NewTerminal,
                 ),
-                MenuItem::new("Open folder…", MenuAction::OpenFolder),
+                MenuItem::new("Terminal workspace in a folder…", MenuAction::OpenFolder),
                 hinted(
-                    MenuItem::new("New project…", MenuAction::NewProject),
-                    "open project",
+                    MenuItem::new("Zed workspace in a folder…", MenuAction::NewProject),
+                    Action::NewProject,
                 ),
-                MenuItem::new("New Cursor", MenuAction::NewCursor),
-                hinted(MenuItem::new("Inbox…", MenuAction::Inbox), "inbox"),
+                MenuItem::new("Cursor workspace", MenuAction::NewCursor),
+                hinted(
+                    MenuItem::new("Open inbox", MenuAction::Inbox),
+                    Action::Inbox,
+                ),
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VenvSetting, workspace_tooltip};
+    use crate::{WorkspaceKind, chrome::Rect, chrome::WorkspaceView};
+
+    #[test]
+    fn a_workspace_tooltip_says_which_venv_its_shells_activate() {
+        let ws = WorkspaceView::new("api".into(), WorkspaceKind::Terminal, &[]);
+        let venv = |setting: Option<&VenvSetting>| {
+            let tip = workspace_tooltip(&ws, Rect::default(), setting);
+            tip.fields
+                .into_iter()
+                .find(|(label, _)| label == "Python venv")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(venv(Some(&VenvSetting::Off)).as_deref(), Some("Off"));
+        assert!(venv(Some(&VenvSetting::Auto)).unwrap().starts_with("Auto"));
+        let path = VenvSetting::Path(".venv-3.12".into());
+        assert_eq!(venv(Some(&path)).as_deref(), Some(".venv-3.12"));
+        // A workspace without shells says nothing of it.
+        assert_eq!(venv(None), None);
     }
 }

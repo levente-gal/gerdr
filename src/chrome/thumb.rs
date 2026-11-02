@@ -36,6 +36,11 @@ pub(super) fn gutter_track(right: i32, list: Rect) -> Rect {
     )
 }
 
+/// The colour every scrollbar's thumb is painted in.
+fn thumb_color(p: &Palette) -> super::Rgb {
+    mix(p.elevated, p.muted, 0.45)
+}
+
 impl Painter {
     /// A scrollbar's thumb, `size` big.
     pub(super) fn bar_thumb(
@@ -46,8 +51,18 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(size, scale));
         let (w, h) = (c.w as f32, c.h as f32);
-        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        c.rounded(0.0, 0.0, w, h, w / 2.0, thumb_color(p));
         c.into_buffer(false)
+    }
+
+    /// `thumb` painted in place on `c`, whose coordinates are its own:
+    /// for a surface drawn in one buffer.
+    pub(super) fn thumb_in(&self, c: &mut Canvas, thumb: &Thumb, scale: f64, p: &Palette) {
+        let px = |v: f64| (v * scale).round() as f32;
+        let t = thumb.track;
+        let (x, w) = (px(t.loc.x as f64), px(t.size.w as f64));
+        let (y, h) = (px(thumb.top), px(thumb.h));
+        c.rounded(x, y, w, h, w / 2.0, thumb_color(p));
     }
 }
 

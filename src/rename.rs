@@ -117,7 +117,11 @@ impl Gerdr {
         match rename.target {
             RenameTarget::Workspace(w) if !name.is_empty() => self.rename_workspace(w, name),
             RenameTarget::Tab(w, t) => self.rename_tab(w, t, name),
-            RenameTarget::Workspace(_) => {}
+            RenameTarget::Workspace(w) => {
+                if let Some(old) = self.workspaces.get(w).map(|ws| ws.name.clone()) {
+                    self.show_notice(format!("A workspace needs a name: it stays {old}"));
+                }
+            }
         }
     }
 

@@ -8,16 +8,16 @@
 //! board's order), then the GitHub and Linear issues assigned to the user,
 //! then gerdr's own todos.
 //!
-//! Typing filters the list. Up/Down select, Enter goes to the item,
-//! Delete dismisses it (until it changes), Ctrl+S snoozes it for an hour,
-//! Ctrl+Shift+S until tomorrow morning, Ctrl+H lists the hidden ones
-//! (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits one (Tab
-//! cycles the workspace it is linked to); Ctrl+T adds a ticket repository
-//! (`owner/repo`) to the shown project; Delete marks a todo done,
-//! Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C copies it,
-//! Ctrl+R reads the issues again. Tab lists the active workspace's items
-//! only, or every workspace's again. Esc clears the filter, then goes back
-//! from the hidden ones, then closes.
+//! Typing filters the list. Up/Down (or Ctrl+J and Ctrl+K) select, Enter
+//! goes to the item, Delete dismisses it (until it changes), Ctrl+H hides
+//! it for an hour, Ctrl+Shift+H until tomorrow morning, Alt+H lists the
+//! hidden ones (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits
+//! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
+//! repository (`owner/repo`) to the shown project; Delete marks a todo
+//! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
+//! copies it, Ctrl+R reads the issues and the CI again. Tab lists the active
+//! workspace's items only, or every workspace's again. Esc clears the
+//! filter, then goes back from the hidden ones, then closes.
 //!
 //! This module is the model: the items (built by `inbox_sources`), what
 //! of them shows (`visible`, `order`), and the panel's keys, clicks and
@@ -147,7 +147,31 @@ impl InboxItem {
             Detail::Service { .. } => I::Failed,
             Detail::Issue { .. } => I::Ticket,
             Detail::Todo { .. } => I::Todo,
+            Detail::Unread { .. } => I::Failed,
         }
+    }
+
+    /// A repository's or worktree's Git marks, for its line.
+    pub fn marks(&self) -> Option<chrome::InboxMarks> {
+        let Detail::Git {
+            dirty,
+            ahead,
+            behind,
+            stashes,
+            op,
+            changes,
+            ..
+        } = &self.detail
+        else {
+            return None;
+        };
+        Some(chrome::InboxMarks {
+            stopped: op.is_some() || changes.iter().any(|(code, _)| *code == 'U'),
+            dirty: *dirty,
+            ahead: *ahead,
+            behind: *behind,
+            stashes: *stashes,
+        })
     }
 }
 
@@ -167,6 +191,9 @@ pub enum Target {
     Link(String),
     /// Edit the todo (its workspace, if linked, is switched to).
     Todo(TodoId),
+    /// Read the issues and the CI again, the panel left open: an item
+    /// saying they couldn't be.
+    Refresh,
     /// A service's error, in its pane's output
     /// (`Gerdr::show_service_error`).
     ServiceError {
@@ -181,9 +208,9 @@ pub enum Target {
 pub enum ItemAction {
     /// Enter.
     GoTo,
-    /// For an hour: Ctrl+S.
+    /// For an hour: Ctrl+H.
     Snooze,
-    /// Until tomorrow morning: Ctrl+Shift+S.
+    /// Until tomorrow morning: Ctrl+Shift+H.
     SnoozeLong,
     /// Until it changes: Delete.
     Dismiss,
@@ -222,11 +249,11 @@ impl ItemAction {
     pub fn key(self) -> &'static str {
         match self {
             ItemAction::GoTo => "Enter",
-            ItemAction::Snooze => "Ctrl+S",
-            ItemAction::SnoozeLong => "Ctrl+Shift+S",
-            ItemAction::Dismiss | ItemAction::Restore | ItemAction::Done => "Delete",
+            ItemAction::Snooze => "Ctrl+H",
+            ItemAction::SnoozeLong => "Ctrl+Shift+H",
+            ItemAction::Dismiss | ItemAction::Restore | ItemAction::Done => "Del",
             ItemAction::Edit => "Ctrl+E",
-            ItemAction::Delete => "Shift+Delete",
+            ItemAction::Delete => "Shift+Del",
             ItemAction::OpenLink => "Ctrl+O",
             ItemAction::CopyLink => "Ctrl+C",
         }
@@ -258,6 +285,8 @@ pub enum Detail {
     Git {
         branch: Option<String>,
         upstream: Option<String>,
+        /// Some file is changed, staged or untracked.
+        dirty: bool,
         ahead: u32,
         behind: u32,
         stashes: u32,
@@ -294,6 +323,11 @@ pub enum Detail {
         workspace: Option<String>,
         created: u64,
     },
+    /// What couldn't be read, in place of what would be listed.
+    Unread {
+        /// Why, as the source said it.
+        why: String,
+    },
     /// An error a service printed, or its stopping.
     Service {
         /// What its pane's bar calls the service.
@@ -308,6 +342,8 @@ pub enum Detail {
         first: u64,
         /// All of it, as last printed.
         lines: Vec<String>,
+        /// Whether it was looked at since it last came.
+        seen: bool,
     },
 }
 
@@ -329,7 +365,7 @@ pub enum Outcome {
     /// Add this repository (`owner/repo` or `host/owner/repo`) to the
     /// shown project's ticket repositories.
     AddTickets(String),
-    /// Read the issues again.
+    /// Read the issues and the CI again.
     Refresh,
     /// List the dismissed or snoozed item again.
     Restore(ItemId),
@@ -388,14 +424,15 @@ pub fn visible(
 }
 
 /// Whether the tab strip's inbox button counts `item`: an agent blocked or
-/// done, a pull request asking for review, a failed CI of `main`, `master`,
-/// `dev` or `develop`.
+/// done, a service's error not looked at (as its workspace's count in the
+/// sidebar), a pull request asking for review, a failed CI of `main`,
+/// `master`, `dev` or `develop`.
 pub fn counted(item: &InboxItem) -> bool {
     match &item.detail {
         Detail::Agent { status, .. } => {
             matches!(status, AgentStatus::Blocked | AgentStatus::Done)
         }
-        Detail::Service { .. } => true,
+        Detail::Service { seen, .. } => !seen,
         Detail::Ci { subject, state, .. } => {
             item.tone == Tone::Review
                 || (*state == CiState::Failed && crate::ci::LONG_LIVED.contains(&subject.as_str()))
@@ -429,7 +466,7 @@ fn urgency(item: &InboxItem) -> u8 {
     }
 }
 
-/// What can be done to `item` as listed: a hidden one (listed with Ctrl+H)
+/// What can be done to `item` as listed: a hidden one (listed with Alt+H)
 /// is restored rather than dismissed or snoozed again.
 fn actions(item: &InboxItem, hidden: bool) -> Vec<ItemAction> {
     use ItemAction as A;
@@ -555,6 +592,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         Detail::Git {
             branch,
             upstream,
+            dirty: _,
             ahead,
             behind,
             stashes,
@@ -661,6 +699,10 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             block_title = Some("Todo".to_owned());
             block = text.lines().map(str::to_owned).collect();
         }
+        Detail::Unread { why } => {
+            field("Why", why.clone());
+            field("Again", "Enter or Ctrl+R reads it again".to_owned());
+        }
         Detail::Service {
             service,
             place,
@@ -668,12 +710,15 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             count,
             first,
             lines,
+            ..
         } => {
             field("Service", service.clone());
             field("In", place.clone());
             field("Times", count.to_string());
+            // Both as the same kind of "ago".
             if let Some(age) = item.age {
-                field("Last", format!("{} ago", age_text(age)));
+                let last = now.saturating_sub(age.as_secs());
+                field("Last", crate::projects::ago(now, last));
             }
             field("First", crate::projects::ago(now, *first));
             if !lines.is_empty() {
@@ -702,8 +747,8 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
     use ItemAction as A;
     match action {
         A::GoTo => ("Enter", "go to"),
-        A::Snooze => ("Ctrl+S", "snooze 1h"),
-        A::SnoozeLong => ("Ctrl+Shift+S", "until tomorrow"),
+        A::Snooze => ("Ctrl+H", "snooze 1h"),
+        A::SnoozeLong => ("Ctrl+Shift+H", "until tomorrow"),
         A::Dismiss => ("Del", "dismiss"),
         A::Restore => ("Del", "restore"),
         A::Done => ("Del", "done"),
@@ -740,6 +785,9 @@ pub struct Inbox {
     pub store: Option<(String, InboxFile)>,
     /// Agent panes' last lines, by herdr pane id.
     pub pane_text: HashMap<String, PaneText>,
+    /// What was being written when the panel closed, for it to take up
+    /// again (see `Panel::drafts`).
+    pub drafts: Vec<Compose>,
     /// The panes whose text is being read.
     pub pending: HashSet<String>,
     /// Hands a pane's text (pane id, its text or why not) to the event loop
@@ -752,8 +800,21 @@ impl Inbox {
         self.panel.is_some()
     }
 
+    /// Open the panel on `focus`'s first item, else the first; what was
+    /// being written when it last closed is taken up again by writing it.
+    pub fn open(&mut self, focus: Option<Section>) {
+        let drafts = std::mem::take(&mut self.drafts);
+        self.panel = Some(Panel {
+            drafts,
+            ..Panel::new(focus)
+        });
+    }
+
+    /// Close the panel, keeping what was being written.
     pub fn close(&mut self) {
-        self.panel = None;
+        if let Some(panel) = self.panel.take() {
+            self.drafts = panel.into_drafts();
+        }
     }
 
     /// The field with the keyboard (the filter, or the todo being
@@ -772,6 +833,10 @@ pub struct Panel {
     /// The todo (Ctrl+N, Ctrl+E) or ticket repository (Ctrl+T) being
     /// written, while one is.
     compose: Option<Compose>,
+    /// What Esc stepped back from writing, not empty: a new todo, a ticket
+    /// repository, a todo edited (by id), at most one of each. Writing the
+    /// same again takes it up; saving it lets it go.
+    drafts: Vec<Compose>,
     hover: Option<InboxHit>,
     /// The section to select the first item of, on opening.
     focus: Option<Section>,
@@ -789,7 +854,7 @@ pub struct Panel {
     bounds: Cell<Bounds>,
     /// Every workspace's items, not just the active one's.
     all: bool,
-    /// Only the hidden items are listed (Ctrl+H).
+    /// Only the hidden items are listed (Alt+H).
     show_hidden: bool,
 }
 
@@ -798,6 +863,7 @@ impl Default for Panel {
         Panel {
             query: TextField::default(),
             compose: None,
+            drafts: Vec::new(),
             hover: None,
             focus: None,
             selected: None,
@@ -819,7 +885,7 @@ impl Default for Panel {
 
 /// A todo, or a ticket repository, being written.
 #[derive(Debug)]
-struct Compose {
+pub struct Compose {
     text: TextField,
     /// A ticket repository to add, not a todo: no id, no workspace.
     tickets: bool,
@@ -827,6 +893,14 @@ struct Compose {
     id: Option<TodoId>,
     /// The workspace it is linked to, by index into `Listing::workspaces`.
     workspace: Option<usize>,
+}
+
+impl Compose {
+    /// Whether it writes the same as `other`: both a new todo, both a
+    /// ticket repository, or both todo `id` edited.
+    fn same(&self, other: &Compose) -> bool {
+        self.tickets == other.tickets && self.id == other.id
+    }
 }
 
 /// A row of the list: a section's label, or an item by index.
@@ -892,7 +966,7 @@ impl Panel {
         }
     }
 
-    /// Whether the hidden items are listed (Ctrl+H).
+    /// Whether the hidden items are listed (Alt+H).
     pub fn show_hidden(&self) -> bool {
         self.show_hidden
     }
@@ -917,7 +991,7 @@ impl Panel {
     }
 
     /// What it lists of `list`: the items not hidden (or only those, with
-    /// Ctrl+H), of the scope, matching the query, the best matches first
+    /// Alt+H), of the scope, matching the query, the best matches first
     /// within each section; with every section's label.
     fn listed(&self, list: &Listing) -> Listed {
         let in_scope = |item: &InboxItem| {
@@ -1087,7 +1161,7 @@ impl Panel {
         }
     }
 
-    /// What it lists changed with the filter, the scope or Ctrl+H: the best
+    /// What it lists changed with the filter, the scope or Alt+H: the best
     /// match selected while there is a query, else the selection kept when
     /// still listed, else the first.
     fn refilter(&mut self, list: &Listing) {
@@ -1103,7 +1177,7 @@ impl Panel {
         }
     }
 
-    /// Do `action` to `item` (`hidden`: listed with Ctrl+H), if it can be
+    /// Do `action` to `item` (`hidden`: listed with Alt+H), if it can be
     /// done to it.
     fn act(&mut self, item: &InboxItem, action: ItemAction, list: &Listing) -> Option<Outcome> {
         if !actions(item, self.show_hidden).contains(&action) {
@@ -1132,7 +1206,7 @@ impl Panel {
     /// active one.
     fn write(&mut self, item: Option<&InboxItem>, list: &Listing) {
         let workspace = item.and_then(|i| i.workspace).or(list.active);
-        self.compose = Some(Compose {
+        self.start(Compose {
             text: TextField::default(),
             tickets: false,
             id: None,
@@ -1142,12 +1216,41 @@ impl Panel {
 
     /// Write a ticket repository to add.
     fn write_tickets(&mut self) {
-        self.compose = Some(Compose {
+        self.start(Compose {
             text: TextField::default(),
             tickets: true,
             id: None,
             workspace: None,
         });
+    }
+
+    /// Start writing `fresh`, or the draft Esc kept of the same (see
+    /// `drafts`) in its place.
+    fn start(&mut self, fresh: Compose) {
+        let kept = self.drafts.iter().position(|d| d.same(&fresh));
+        self.compose = Some(match kept {
+            Some(at) => self.drafts.remove(at),
+            None => fresh,
+        });
+    }
+
+    /// Step back from writing: what was written is kept as a draft (in
+    /// place of one of the same), unless it is empty.
+    fn set_aside(&mut self) {
+        let Some(compose) = self.compose.take() else {
+            return;
+        };
+        self.drafts.retain(|d| !d.same(&compose));
+        if !compose.text.trim().is_empty() {
+            self.drafts.push(compose);
+        }
+    }
+
+    /// What is being written, and the drafts: what the panel keeps once
+    /// closed (see `Inbox::close`).
+    fn into_drafts(mut self) -> Vec<Compose> {
+        self.set_aside();
+        self.drafts
     }
 
     /// Edit todo `item`'s text and workspace.
@@ -1163,7 +1266,7 @@ impl Panel {
             Detail::Todo { text, .. } => text.clone(),
             _ => item.title.clone(),
         };
-        self.compose = Some(Compose {
+        self.start(Compose {
             text: text.into(),
             tickets: false,
             id: Some(id),
@@ -1174,7 +1277,8 @@ impl Panel {
     /// A key while a todo or ticket repository is being written: the
     /// field takes what edits it; Enter saves (an empty one is dropped; a
     /// repository not written as one is said so, and kept to fix), Esc
-    /// drops it, Tab and Shift+Tab cycle the workspace a todo is linked to.
+    /// steps back keeping it as a draft (see `drafts`), Tab and Shift+Tab
+    /// cycle the workspace a todo is linked to.
     fn compose_key(
         &mut self,
         mods: &ModifiersState,
@@ -1187,7 +1291,7 @@ impl Panel {
             return None;
         }
         match sym {
-            Keysym::Escape => self.compose = None,
+            Keysym::Escape => self.set_aside(),
             Keysym::Return | Keysym::KP_Enter if !mods.ctrl => {
                 let compose = self.compose.take()?;
                 let text = compose.text.trim().to_owned();
@@ -1242,6 +1346,12 @@ impl Panel {
             }
             Edit::Moved => return None,
         }
+        let alt_only = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
+        if alt_only && matches!(sym, Keysym::h | Keysym::H) {
+            self.show_hidden = !self.show_hidden;
+            self.refilter(list);
+            return None;
+        }
         if mods.alt || mods.logo {
             return None;
         }
@@ -1254,7 +1364,6 @@ impl Panel {
             Keysym::Escape if !self.query.is_empty() => self.query.clear(),
             Keysym::Escape if self.show_hidden => self.show_hidden = false,
             Keysym::Escape => return Some(Outcome::Close),
-            Keysym::h | Keysym::H if ctrl => self.show_hidden = !self.show_hidden,
             Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
             _ => {
                 let listed = self.listed(list);
@@ -1290,6 +1399,8 @@ impl Panel {
         let to = match sym {
             Keysym::Down | Keysym::KP_Down => step(1),
             Keysym::Up | Keysym::KP_Up => step(-1),
+            Keysym::j | Keysym::J if ctrl && !shift => step(1),
+            Keysym::k | Keysym::K if ctrl && !shift => step(-1),
             Keysym::Page_Down | Keysym::KP_Page_Down => step(by_page),
             Keysym::Page_Up | Keysym::KP_Page_Up => step(-by_page),
             Keysym::Home | Keysym::KP_Home => step(isize::MIN / 2),
@@ -1311,8 +1422,8 @@ impl Panel {
             }
             Keysym::Return | Keysym::KP_Enter if !ctrl => ItemAction::GoTo,
             // Shift changes the symbol: match both cases.
-            Keysym::s | Keysym::S if ctrl && shift => ItemAction::SnoozeLong,
-            Keysym::s | Keysym::S if ctrl => ItemAction::Snooze,
+            Keysym::h | Keysym::H if ctrl && shift => ItemAction::SnoozeLong,
+            Keysym::h | Keysym::H if ctrl => ItemAction::Snooze,
             Keysym::e | Keysym::E if ctrl => ItemAction::Edit,
             Keysym::o | Keysym::O if ctrl => ItemAction::OpenLink,
             Keysym::c | Keysym::C if ctrl => ItemAction::CopyLink,
@@ -1430,7 +1541,7 @@ impl Panel {
             if !compose.tickets && !list.workspaces.is_empty() {
                 hints.push(hint("Tab", "link a workspace"));
             }
-            hints.push(hint("Esc", "cancel"));
+            hints.push(hint("Esc", "back"));
             return hints;
         }
         use ItemAction as A;
@@ -1460,7 +1571,7 @@ impl Panel {
         hints.push(hint("Ctrl+N", "new todo"));
         hints.push(hint("Ctrl+T", "add ticket repo"));
         hints.push(hint(
-            "Ctrl+H",
+            "Alt+H",
             if self.show_hidden {
                 "back to the list"
             } else {
@@ -1529,6 +1640,7 @@ impl Panel {
                         age: item.age.map(age_text).unwrap_or_default(),
                         hidden: self.show_hidden,
                         buttons,
+                        marks: item.marks(),
                     })
                 }
             })
@@ -1630,6 +1742,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_service_error_counts_until_looked_at() {
+        let mut error = item("service:p|w1:p1|f", Section::Services, Some(0));
+        error.detail = Detail::Service {
+            service: "npm run dev".into(),
+            place: "api".into(),
+            stopped: false,
+            count: 1,
+            first: 0,
+            lines: Vec::new(),
+            seen: false,
+        };
+        assert!(counted(&error));
+        if let Detail::Service { seen, .. } = &mut error.detail {
+            *seen = true;
+        }
+        assert!(!counted(&error));
+    }
+
     fn agent(id: &str, status: AgentStatus, age: u64) -> InboxItem {
         let mut item = item(id, Section::Agents, Some(0));
         item.age = Some(Duration::from_secs(age));
@@ -1682,6 +1813,14 @@ mod tests {
 
     fn ctrl(panel: &mut Panel, sym: Keysym, list: &Listing) -> Option<Outcome> {
         panel.key(&mods(true, false), sym, sym, list)
+    }
+
+    fn alt(panel: &mut Panel, sym: Keysym, list: &Listing) -> Option<Outcome> {
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        panel.key(&alt, sym, sym, list)
     }
 
     fn type_text(panel: &mut Panel, text: &str, list: &Listing) {
@@ -1753,7 +1892,7 @@ mod tests {
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         assert_eq!(ids(&panel.view(&list)), ["a"]);
-        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
+        assert_eq!(alt(&mut panel, Keysym::h, &list), None);
         assert!(panel.show_hidden());
         let view = panel.view(&list);
         assert!(view.show_hidden);
@@ -1765,7 +1904,7 @@ mod tests {
         let labels: Vec<_> = line.buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(labels, ["Go to", "Restore"]);
         // Hidden already: no snoozing it again.
-        assert_eq!(ctrl(&mut panel, Keysym::s, &list), None);
+        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
         assert_eq!(
             press(&mut panel, Keysym::Delete, &list),
             Some(Outcome::Restore(ItemId("b".into())))
@@ -1783,7 +1922,7 @@ mod tests {
         // With nothing hidden, it says so.
         let none = BTreeMap::new();
         let list = listing(&items, &none, &names);
-        ctrl(&mut panel, Keysym::h, &list);
+        alt(&mut panel, Keysym::h, &list);
         let view = panel.view(&list);
         assert!(view.rows.is_empty());
         assert_eq!(view.empty, "Nothing hidden");
@@ -1862,7 +2001,7 @@ mod tests {
         assert_eq!(tab(&mut panel, true).as_deref(), Some("herdr"));
         // Keys for the list are the field's, or nothing.
         assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
-        assert_eq!(ctrl(&mut panel, Keysym::s, &list), None);
+        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
         assert!(panel.view(&list).compose.is_some());
         assert_eq!(
             press(&mut panel, Keysym::Return, &list),
@@ -1883,6 +2022,44 @@ mod tests {
         assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
         assert!(panel.view(&list).compose.is_none());
         assert_eq!(&**panel.field_mut(), "");
+    }
+
+    #[test]
+    fn esc_keeps_the_draft_to_take_up_again() {
+        let items = vec![item("a", Section::Repos, Some(1))];
+        let triage = BTreeMap::new();
+        let names = vec!["gerdr".to_owned(), "herdr".to_owned()];
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::default();
+        ctrl(&mut panel, Keysym::n, &list);
+        type_text(&mut panel, "half a thought", &list);
+        assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
+        assert!(panel.view(&list).compose.is_none());
+        // A ticket repository is another draft.
+        ctrl(&mut panel, Keysym::t, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().text, "");
+        type_text(&mut panel, "o/t", &list);
+        press(&mut panel, Keysym::Escape, &list);
+        // Writing a todo again takes it up, where it was linked.
+        ctrl(&mut panel, Keysym::n, &list);
+        let compose = panel.view(&list).compose.unwrap();
+        assert_eq!(compose.text, "half a thought");
+        assert_eq!(compose.workspace.as_deref(), Some("herdr"));
+        // Saved, it is gone.
+        press(&mut panel, Keysym::Return, &list);
+        ctrl(&mut panel, Keysym::n, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().text, "");
+        press(&mut panel, Keysym::Escape, &list);
+        // The panel closed and opened again keeps the ticket repository.
+        let mut inbox = Inbox {
+            panel: Some(panel),
+            ..Inbox::default()
+        };
+        inbox.close();
+        inbox.open(None);
+        let panel = inbox.panel.as_mut().unwrap();
+        ctrl(panel, Keysym::t, &list);
+        assert_eq!(panel.view(&list).compose.unwrap().text, "o/t");
     }
 
     #[test]
@@ -2052,7 +2229,7 @@ mod tests {
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         let id = ItemId("gh:o/r#1".into());
-        assert_eq!(ctrl(&mut panel, Keysym::s, &list), None);
+        assert_eq!(ctrl(&mut panel, Keysym::h, &list), None);
         assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
         assert_eq!(ctrl(&mut panel, Keysym::e, &list), None);
         assert_eq!(
@@ -2076,12 +2253,12 @@ mod tests {
             Some(Outcome::Act(todo.clone(), A::Delete))
         );
         assert_eq!(
-            ctrl(&mut panel, Keysym::s, &list),
+            ctrl(&mut panel, Keysym::h, &list),
             Some(Outcome::Act(todo.clone(), A::Snooze))
         );
         // Not allowed for this one.
         assert_eq!(
-            panel.key(&mods(true, true), Keysym::S, Keysym::S, &list),
+            panel.key(&mods(true, true), Keysym::H, Keysym::H, &list),
             None
         );
         assert_eq!(ctrl(&mut panel, Keysym::o, &list), None);
@@ -2099,7 +2276,7 @@ mod tests {
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
         assert_eq!(
-            panel.key(&mods(true, true), Keysym::S, Keysym::S, &list),
+            panel.key(&mods(true, true), Keysym::H, Keysym::H, &list),
             Some(Outcome::Act(ItemId("a".into()), A::SnoozeLong))
         );
         assert_eq!(
@@ -2455,6 +2632,7 @@ mod tests {
         git.detail = Detail::Git {
             branch: Some("main".into()),
             upstream: None,
+            dirty: true,
             ahead: 2,
             behind: 0,
             stashes: 0,

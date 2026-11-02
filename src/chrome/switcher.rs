@@ -7,15 +7,14 @@
 //! muted text on the second, with a small pill at the right naming its
 //! kind. The key hints go in a footer, as in the project menu.
 
-use super::Rgb;
 use super::layers::{Part, RowCache};
 use super::{
-    AGENT_ICON, BUTTON_RADIUS, Badge, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN,
-    HELP_PADDING, HELP_RADIUS, MENU_RADIUS, PADDING, PILL_HEIGHT, PILL_PADDING, Painter, Palette,
-    ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING,
-    SWITCHER_ROWS, SWITCHER_SECTION, SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app,
-    dot_slot, folder, folder_plus, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf,
-    mix, pencil, prompt, rect_px, row_dot, status_dot, tab, terminal,
+    AGENT_ICON, BUTTON_RADIUS, Badge, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, PADDING,
+    PILL_HEIGHT, PILL_PADDING, POPUP_RADIUS, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect,
+    SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
+    SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app, dot_slot, folder, folder_plus,
+    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, measure, mix, pencil, prompt,
+    query_text, rect_px, row_dot, row_fill, status_dot, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -40,10 +39,13 @@ const PILL_GAP: i32 = 10;
 /// A category chip's height, and the gap between chips.
 const CHIP_HEIGHT: i32 = 24;
 const CHIP_GAP: i32 = 4;
-/// A chip's room per character of its label, and around the label: an
-/// estimate of the text's width, as the layout has no font to measure with.
-const CHIP_CHAR: i32 = 7;
+/// The room either side of a chip's label; and per character of it, a
+/// guess at its width when there is no font to measure it with.
 const CHIP_INSET: i32 = 12;
+const CHIP_CHAR: f32 = 7.0;
+/// How far a row's highlight stops short of the rows above and below, so
+/// neighbouring highlights don't touch.
+const ROW_HIGHLIGHT_INSET: i32 = 2;
 /// The row of chips: a chip and the gap under it.
 const CHIPS_ROW: i32 = CHIP_HEIGHT + SWITCHER_PADDING;
 
@@ -316,7 +318,11 @@ pub fn switcher_hint(
 fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
     let natural: Vec<i32> = labels
         .iter()
-        .map(|label| label.chars().count() as i32 * CHIP_CHAR + 2 * CHIP_INSET)
+        .map(|label| {
+            let text =
+                measure(label, SMALL_FONT_SIZE).unwrap_or(label.chars().count() as f32 * CHIP_CHAR);
+            text.ceil() as i32 + 2 * CHIP_INSET
+        })
         .collect();
     let gaps = CHIP_GAP * (labels.len() as i32 - 1).max(0);
     let room = (right - x - gaps).max(0);
@@ -438,22 +444,13 @@ fn parts(
     }
 }
 
-/// Where the text of the switcher's query, in its `input` rect, goes.
-pub(super) fn switcher_text(input: Rect, scale: f64) -> (f32, f32) {
-    let px = |v: i32| (v as f64 * scale).round() as f32;
-    (
-        px(input.loc.x + HELP_PADDING),
-        px(input.loc.x + input.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
-    )
-}
-
 /// The switcher's query field, in the app `area`.
 pub fn switcher_field(view: &SwitcherView, area: Rect, scale: f64) -> FieldSpot {
     let input = switcher_geometry(view, area).input;
     FieldSpot {
         size: FONT_SIZE,
         area: input,
-        text: switcher_text(input, scale),
+        text: query_text(input, scale),
         line: view.query.clone(),
     }
 }
@@ -480,8 +477,8 @@ impl Painter {
                 self.switcher_heading(c, label, *rect, scale, p);
             }
             for (i, (slot, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
-                let fill = row_fill(view.selected == Some(i), view.hover == Some(i), p);
-                self.switcher_row(c, row, fill, *slot, scale, p);
+                let lit = (view.selected == Some(i), view.hover == Some(i));
+                self.switcher_row(c, row, lit, *slot, scale, p);
             }
             if let Some((rect, label)) = layout.kept {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -504,23 +501,11 @@ impl Painter {
         p: &Palette,
     ) -> Canvas {
         let (panel, input) = (layout.panel, layout.input);
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
         let border = px(1).max(1);
 
-        let band = (px(input.loc.y), px(input.size.h));
-        self.edit_line(
-            &mut c,
-            &view.query,
-            view.hint,
-            switcher_text(input, scale),
-            band,
-            true,
-            FONT_SIZE,
-            scale,
-            p,
-        );
+        self.query_field(&mut c, &view.query, view.hint, input, true, scale, p);
         let divider = |c: &mut Canvas, y: i32| {
             c.fill(
                 px(panel.loc.x) + border,
@@ -538,14 +523,11 @@ impl Painter {
 
         if empty {
             let slot = Rectangle::new(layout.list.loc, (layout.list.size.w, ROW_HEIGHT).into());
-            let band = (px(slot.loc.y), px(slot.size.h));
-            self.text(
+            self.centered(
                 &mut c,
                 "Nothing matches",
                 FONT_SIZE,
-                px(slot.loc.x) as f32 + PADDING * s,
-                px(input.loc.x + input.size.w - HELP_PADDING) as f32,
-                band,
+                slot,
                 scale,
                 p.placeholder,
             );
@@ -594,12 +576,13 @@ impl Painter {
     }
 
     /// `row` in `slot`: its icon, its two lines of text and the kind
-    /// pill, on a pill of `fill` (when selected or under the pointer).
+    /// pill, lit as a list row is when `selected` or `hovered`.
+    #[allow(clippy::too_many_arguments)]
     fn switcher_row(
         &self,
         c: &mut Canvas,
         row: &SwitcherRow,
-        fill: Option<Rgb>,
+        (selected, hovered): (bool, bool),
         slot: Rect,
         scale: f64,
         p: &Palette,
@@ -612,16 +595,14 @@ impl Painter {
             px(slot.size.w),
             px(slot.size.h),
         );
-        if let Some(fill) = fill {
-            c.rounded(
-                x as f32,
-                y as f32,
-                w as f32,
-                h as f32,
-                (MENU_RADIUS - 2.0) * s,
-                fill,
-            );
-        }
+        // The highlight stops short of the rows above and below.
+        let lit = Rectangle::new(
+            (slot.loc.x, slot.loc.y + ROW_HIGHLIGHT_INSET).into(),
+            (slot.size.w, slot.size.h - 2 * ROW_HIGHLIGHT_INSET).into(),
+        );
+        let hover = if hovered { 1.0 } else { 0.0 };
+        self.row_highlight(c, lit, (selected, hover), scale, p);
+        let fill = row_fill(p, selected, hover);
         let icon = switcher_icon(slot);
         let small = 0.8 * s;
         match &row.icon {
@@ -741,17 +722,6 @@ impl Painter {
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
         let color = if on { p.text } else { p.muted };
         self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
-    }
-}
-
-/// The pill under a switcher row: selected, else under the pointer.
-fn row_fill(selected: bool, hovered: bool, p: &Palette) -> Option<Rgb> {
-    if selected {
-        Some(p.selected)
-    } else if hovered {
-        Some(p.element)
-    } else {
-        None
     }
 }
 
@@ -897,8 +867,8 @@ impl SwitcherLayers {
                     let key = (row, w, selected, hovered, theme, scale);
                     let buffer = self.rows.get(key, size, scale, |(row, ..)| {
                         painter.switcher_piece(size, scale, p, |c, rect| {
-                            let fill = row_fill(selected, hovered, p);
-                            painter.switcher_row(c, row, fill, rect, scale, p)
+                            let lit = (selected, hovered);
+                            painter.switcher_row(c, row, lit, rect, scale, p)
                         })
                     });
                     let part = Part::new(&buffer, (x, 0).into(), size, 1.0);
@@ -920,9 +890,10 @@ impl SwitcherLayers {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHIP_GAP, CHIP_HEIGHT, CHIPS_ROW, ItemIcon, ROW_HEIGHT, SECTION_HEIGHT, SWITCHER_INPUT,
-        SWITCHER_PADDING, SwitcherLayers, SwitcherRow, SwitcherView, chip_rects, footer_height,
-        switcher_geometry, switcher_layout, switcher_places, switcher_room, switcher_row_at,
+        CHIP_GAP, CHIP_HEIGHT, CHIPS_ROW, ItemIcon, ROW_HEIGHT, ROW_ICON_GAP, ROW_ICON_WIDTH,
+        SECTION_HEIGHT, SWITCHER_INPUT, SWITCHER_PADDING, SwitcherLayers, SwitcherRow,
+        SwitcherView, chip_rects, footer_height, query_text, switcher_geometry, switcher_icon,
+        switcher_layout, switcher_places, switcher_room, switcher_row_at,
     };
     use crate::chrome::{Painter, Rect, Theme};
     use smithay::utils::Rectangle;
@@ -995,6 +966,15 @@ mod tests {
             switcher_layout(0, area).0.size.h,
             SWITCHER_INPUT + 2 * SWITCHER_PADDING + ROW_HEIGHT + footer
         );
+    }
+
+    #[test]
+    fn the_query_lines_up_with_the_rows_text() {
+        let area = Rectangle::new((200, 36).into(), (1000, 800).into());
+        let (_, input, rows) = switcher_layout(3, area);
+        let icon = switcher_icon(rows[0]);
+        let (text_x, _) = query_text(input, 1.0);
+        assert_eq!(text_x as i32, icon.loc.x + ROW_ICON_WIDTH + ROW_ICON_GAP);
     }
 
     #[test]

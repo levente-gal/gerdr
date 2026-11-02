@@ -1,7 +1,7 @@
 //! The diff's search (`/` in the diff, Ctrl+Shift+F anywhere in the
 //! panel): a field in the detail's title row finding what is typed in the
 //! diff's lines, its files' paths and what its hunks are in, folded files
-//! too. Every place found is tinted, the one gone to more; Enter goes to
+//! too, and the review comments shown. Every place found is tinted, the one gone to more; Enter goes to
 //! the next (Shift+Enter, the one before), round past the ends, the
 //! cursor on its row and a folded file unfolded for it. Ticks on the
 //! diff's scrollbar say where they all are. Esc closes it. `*` (`#` back)
@@ -61,6 +61,9 @@ enum Within {
     Context(usize),
     /// Line `l` of hunk `h`.
     Line(usize, usize),
+    /// Row `i` of review comment `c` (by index into `review.comments`),
+    /// as it wraps.
+    Comment(usize, usize),
 }
 
 /// A file header's path: after what a rename was called.
@@ -299,7 +302,12 @@ impl DiffView {
         else {
             return;
         };
-        if hit.within != Within::Path && self.folded.remove(&(hit.root.clone(), hit.path.clone())) {
+        // In a folded file, or past the lines a long one shows: shown.
+        let key = (hit.root.clone(), hit.path.clone());
+        let in_file = !matches!(hit.within, Within::Path | Within::Comment(..));
+        let hidden =
+            in_file && (self.folded.remove(&key) | (hit.row.is_none() && self.whole.insert(key)));
+        if hidden {
             self.build_rows(ctx.sections, self.diff_anchor());
         }
         let row = self
@@ -355,6 +363,31 @@ impl DiffView {
                 _ => {}
             }
         }
+        // The comments' rows, each with its text, by the row they are
+        // under (a line, a file's header), so that they are found in the
+        // rows' order; those whose lines are gone on their own.
+        let mut under: HashMap<usize, Vec<(usize, Within, &str)>> = HashMap::new();
+        let mut gone = Vec::new();
+        let mut parent = None;
+        for (r, row) in self.rows.iter().enumerate() {
+            let DiffRow::Comment { at, c, i } = *row else {
+                if !matches!(row, DiffRow::Editor { .. } | DiffRow::EditorHint { .. }) {
+                    parent = Some(r);
+                }
+                continue;
+            };
+            let (Some(comment), Some(wrap)) =
+                (self.review.comments.get(c), self.comment_wraps.get(c))
+            else {
+                continue;
+            };
+            let text = wrap.get(i).map_or("", |range| &comment.text[range.clone()]);
+            let found = (r, Within::Comment(c, i), text);
+            match (at, parent) {
+                (Some(_), Some(p)) => under.entry(p).or_default().push(found),
+                _ => gone.push((comment, found)),
+            }
+        }
         let mut hits = Vec::new();
         for (k, root) in self.roots.iter().enumerate() {
             let Some((_, files)) = self.diffs.get(root) else {
@@ -364,8 +397,8 @@ impl DiffView {
                 let Some(&head) = heads.get(&(k, f)) else {
                     continue;
                 };
-                let mut add = |within: Within, text: &str| {
-                    let row = rows.get(&(k, f, within)).copied();
+                let mut add = |within: Within, text: &str, at: Option<usize>| {
+                    let row = at.or_else(|| rows.get(&(k, f, within)).copied());
                     hits.extend(
                         find::find(text, &query, whole)
                             .into_iter()
@@ -379,16 +412,39 @@ impl DiffView {
                             }),
                     );
                 };
-                add(Within::Path, &path_text(file));
+                add(Within::Path, &path_text(file), None);
+                for &(r, within, text) in under.get(&head).into_iter().flatten() {
+                    add(within, text, Some(r));
+                }
                 for (h, hunk) in file.hunks.iter().enumerate() {
                     if !hunk.context.is_empty() {
-                        add(Within::Context(h), &hunk.context);
+                        add(Within::Context(h), &hunk.context, None);
                     }
                     for (l, line) in hunk.lines.iter().enumerate() {
-                        add(Within::Line(h, l), &line.text);
+                        add(Within::Line(h, l), &line.text, None);
+                        let row = rows.get(&(k, f, Within::Line(h, l)));
+                        for &(r, within, text) in
+                            row.and_then(|r| under.get(r)).into_iter().flatten()
+                        {
+                            add(within, text, Some(r));
+                        }
                     }
                 }
             }
+        }
+        for (comment, (r, within, text)) in gone {
+            hits.extend(
+                find::find(text, &query, whole)
+                    .into_iter()
+                    .map(|chars| Hit {
+                        root: comment.root.clone(),
+                        path: comment.path.clone(),
+                        within,
+                        chars,
+                        row: Some(r),
+                        tick: r,
+                    }),
+            );
         }
         let current = match (&was, typed) {
             (Some(was), false) => hits

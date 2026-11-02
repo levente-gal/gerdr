@@ -7,6 +7,7 @@ use smithay::utils::{Logical, Point};
 use crate::{
     Gerdr,
     chrome::{self, Thumb},
+    overlay::Overlay,
 };
 
 /// A scrollbar the pointer can hold.
@@ -20,6 +21,7 @@ pub enum Bar {
     Scrollback,
     ReposTree,
     ReposDetail,
+    Welcome,
 }
 
 /// A scrollbar's thumb held with the left button: which, and how far
@@ -32,34 +34,18 @@ pub struct ThumbDrag {
 
 impl Gerdr {
     /// The scrollbar under `pos` that nothing covers, and its thumb: the
-    /// popup on top's, as a press finds it.
+    /// overlay's on top there, as a press finds it, else the sidebar's.
     fn bar_at(&self, pos: Point<f64, Logical>) -> Option<(Bar, Thumb)> {
-        if self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-            || self.welcome.is_some()
-        {
-            return None;
-        }
-        let bars: &[Bar] = if self.project_menu.is_some() {
-            &[Bar::ProjectMenu]
-        } else if self.worktrees.is_open() {
-            &[Bar::Worktrees]
-        } else if self.context_menu.is_some() {
-            &[]
-        } else if self.repos.is_open() {
-            &[Bar::ReposTree, Bar::ReposDetail]
-        } else if self.inbox.is_open() {
-            &[Bar::Inbox]
-        } else if self.scrollback.is_some() {
-            &[Bar::Scrollback]
-        } else if self.switcher.is_some() {
-            &[Bar::Switcher]
-        } else if self.help_hit(pos).is_some() {
-            &[]
-        } else {
-            &[Bar::Sidebar]
+        let bars: &[Bar] = match self.overlay_at(pos) {
+            Some(Overlay::ProjectMenu) => &[Bar::ProjectMenu],
+            Some(Overlay::Worktrees) => &[Bar::Worktrees],
+            Some(Overlay::Repos) => &[Bar::ReposTree, Bar::ReposDetail],
+            Some(Overlay::Inbox) => &[Bar::Inbox],
+            Some(Overlay::Scrollback) => &[Bar::Scrollback],
+            Some(Overlay::Switcher) => &[Bar::Switcher],
+            Some(Overlay::Welcome) => &[Bar::Welcome],
+            Some(_) => &[],
+            None => &[Bar::Sidebar],
         };
         bars.iter().find_map(|&bar| {
             let thumb = self.thumb(bar)?;
@@ -73,6 +59,7 @@ impl Gerdr {
     fn thumb(&self, bar: Bar) -> Option<Thumb> {
         let size = self.output_size();
         match bar {
+            Bar::Welcome => self.welcome_thumb(),
             Bar::Sidebar => chrome::sidebar_thumb(
                 &self.sidebar_layout(),
                 self.sidebar_width,
@@ -117,6 +104,13 @@ impl Gerdr {
         }
     }
 
+    /// Whether `pos` is on the thumb of a scrollbar nothing covers: it can
+    /// be held there.
+    pub(crate) fn on_thumb(&self, pos: Point<f64, Logical>) -> bool {
+        self.bar_at(pos)
+            .is_some_and(|(_, thumb)| thumb.on_thumb(pos.y).is_some())
+    }
+
     /// Whether the sidebar's scrollbar takes `pos`, before its edge does.
     pub(crate) fn on_sidebar_bar(&self, pos: Point<f64, Logical>) -> bool {
         self.bar_at(pos).is_some_and(|(bar, _)| bar == Bar::Sidebar)
@@ -155,6 +149,7 @@ impl Gerdr {
             Bar::Scrollback => self.scrollback_scroll_to(at),
             Bar::ReposTree => self.repos_scroll_to(at, false),
             Bar::ReposDetail => self.repos_scroll_to(at, true),
+            Bar::Welcome => self.welcome_scroll_to(at),
         }
     }
 }

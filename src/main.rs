@@ -46,11 +46,13 @@ mod launch;
 mod layout;
 mod menu;
 mod notify;
+mod overlay;
 mod pane_control;
 mod pane_drag;
 mod pane_moves;
 mod paths;
 mod prepare;
+mod problems;
 mod profile_import;
 mod project_list;
 mod project_lock;
@@ -100,16 +102,17 @@ use std::{
 };
 
 use chrome::{
-    AgentView, BarButton, Chrome, ChromeView, Density, HelpHit, HelpPress, PlaceholderView,
+    AgentView, BarButton, Chrome, ChromeView, Density, Help, HelpHit, HelpPress, PlaceholderView,
     SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
 };
 use frecency::Frecency;
 use hooks::Hook;
 use layout::{Dir, Node, SavedLeaf, SavedNode, Side};
-use menu::{ContextMenu, MenuAction};
+use menu::{ContextMenu, MenuAction, MenuSpec};
+use overlay::Overlay;
 use paths::tilde;
 use projects::{PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
-use rename::Rename;
+use rename::{Rename, RenameTarget};
 use smithay::{
     backend::{
         egl::EGLDevice,
@@ -171,6 +174,9 @@ const REORDER_START: f64 = 4.0;
 /// Smallest pane size a divider drag leaves, and the app area width the
 /// sidebar always leaves.
 const MIN_PANE: i32 = 80;
+/// How far right of a pane's bar or a sidebar row's start the menu its
+/// key opens goes.
+const MENU_KEY_INDENT: i32 = 8;
 const REAP_INTERVAL: Duration = Duration::from_millis(500);
 /// How often the agent cards are refreshed from herdr, for what changes
 /// without an event (terminal titles).
@@ -864,12 +870,12 @@ fn venv_notice(setting: &VenvSetting) -> String {
 }
 
 /// What the welcome screen says of a project with workspaces in `dirs`:
-/// "3 repos · ~/Work/aft", or "empty".
+/// "3 workspaces · ~/Work/aft", or "empty".
 fn project_detail(dirs: &[&Path], home: Option<&Path>) -> String {
     let count = match dirs.len() {
         0 => return "empty".into(),
-        1 => "1 repo".to_owned(),
-        n => format!("{n} repos"),
+        1 => "1 workspace".to_owned(),
+        n => format!("{n} workspaces"),
     };
     match common_dir(dirs).filter(|d| d.parent().is_some()) {
         Some(dir) => format!(
@@ -886,6 +892,11 @@ usage: gerdr [--project <name>] [--attach] [--] [folder…]
   --attach          join a project even if another gerdr has it open
   -h, --help        show this help
   -V, --version     show the version
+
+files:
+  settings  $XDG_CONFIG_HOME/gerdr/config.toml (~/.config/gerdr/config.toml)
+  projects  ~/.local/share/gerdr/projects/<id>.json and state.json
+  log       $XDG_STATE_HOME/gerdr/gerdr.log (~/.local/state/gerdr/gerdr.log)
 ";
 
 /// What gerdr was started with.
@@ -1040,6 +1051,10 @@ pub enum Action {
     /// workspace.
     NewAgent,
     CloseTab,
+    /// Name the active tab: a field on it takes the name.
+    RenameTab,
+    /// Move the active tab a place right (1) or left (-1).
+    MoveTab(isize),
     NextTab,
     PrevTab,
     GotoTab(usize),
@@ -1049,6 +1064,9 @@ pub enum Action {
     CloseWorkspace,
     NextWorkspace,
     PrevWorkspace,
+    /// Open the active workspace's menu, as a right click on its sidebar
+    /// row does, to go through with the arrow keys.
+    WorkspaceMenu,
     /// Split the focused pane and open a terminal in the new half.
     Split(Dir),
     /// Close the focused pane.
@@ -1096,6 +1114,9 @@ pub enum Action {
     PaneToNewTab,
     /// Zoom the focused pane to fill its tab, or unzoom it.
     ZoomPane,
+    /// Open the focused pane's menu, as a right click on its bar does, to
+    /// go through with the arrow keys.
+    PaneMenu,
     /// Open the worktrees popup, to review, check out, merge and delete the
     /// repositories' worktrees.
     Worktrees,
@@ -1172,6 +1193,13 @@ pub struct Gerdr {
     pub density: Density,
     /// Whether the sidebar shows its "Needs you" list, from the config file.
     pub needs_you: bool,
+    /// Whether agents that need the user say so with a desktop
+    /// notification, from the config file.
+    pub notify: bool,
+    /// When the config file was last read as written (see
+    /// `Gerdr::watch_settings`).
+    pub settings_modified: Option<std::time::SystemTime>,
+    /// How wide the sidebar is, kept in `state.json` for the next start.
     pub sidebar_width: i32,
     /// The next pane id to hand out.
     pub next_pane: u32,
@@ -1394,6 +1422,15 @@ pub struct Gerdr {
     /// The projects whose sessions are being stopped, by id: not shown
     /// until they have.
     pub stopping: HashSet<String>,
+    /// The projects to forget once their sessions have stopped, by id (see
+    /// `Gerdr::forget_project`).
+    pub forget_after_stop: HashSet<String>,
+    /// The project just made and being shown, by id: the switch's notice
+    /// says it was made.
+    pub just_created: Option<String>,
+    /// A project to show although another gerdr has it open, by id (see
+    /// `Gerdr::attach_project`).
+    pub attach_once: Option<String>,
     /// The project menu, while it is open.
     pub project_menu: Option<project_menu::ProjectMenu>,
     /// The pointer is over the sidebar header's project name.
@@ -1505,6 +1542,15 @@ pub struct Gerdr {
 }
 
 impl Gerdr {
+    /// Something went wrong that the user must fix (a tool missing, a file
+    /// unreadable): kept in the problems list under `source` (and so in the
+    /// log), and said in an error toast that opens the log.
+    pub fn report_problem(&mut self, source: &'static str, text: String) {
+        problems::report(source, text.clone());
+        let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
+        self.toast_with(text, Level::Error, Some(open_log));
+    }
+
     pub fn output_size(&self) -> Size<i32, Logical> {
         let mode = self.output.current_mode().unwrap();
         mode.size.to_f64().to_logical(self.scale()).to_i32_round()
@@ -1722,7 +1768,14 @@ impl Gerdr {
                 Some(pid)
             }
             Err(err) => {
-                tracing::error!("spawn {:?} failed: {err}", cmd.get_program());
+                let program = cmd.get_program().to_string_lossy().into_owned();
+                let why = match err.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        format!("{program} isn't installed or not on PATH")
+                    }
+                    _ => format!("{program} didn't start: {err}"),
+                };
+                self.report_problem("spawn", why);
                 None
             }
         }
@@ -1800,9 +1853,17 @@ impl Gerdr {
                 herdr.workspace_create(&dir, &name, kind == WorkspaceKind::Project, &env)
             }
         };
-        let pane = pane
-            .inspect_err(|err| tracing::warn!("herdr: {err}; starting a plain terminal"))
-            .ok()?;
+        let pane = match pane {
+            Ok(pane) => pane,
+            Err(err) => {
+                // It goes on as a plain terminal, which won't persist.
+                self.show_warning(format!(
+                    "herdr didn't open a terminal ({err}): this one won't persist"
+                ));
+                return None;
+            }
+        };
+        let herdr = self.herdr.as_mut()?;
         let socket = herdr.socket().to_path_buf();
         if new_workspace {
             self.mirror_herdr(&record, &pane.workspace_id);
@@ -1941,10 +2002,10 @@ impl Gerdr {
         let (mut herdr, start) = match herdr::Herdr::connect_or_start(session, &self.socket_name) {
             Ok(connected) => connected,
             Err(err) => {
-                tracing::warn!("{err}; terminals won't persist");
-                return self.toast(err, Level::Error);
+                return self.report_problem("herdr", format!("{err}: terminals won't persist"));
             }
         };
+        problems::clear("herdr");
         let mut workspaces = herdr.workspace_list().unwrap_or_default();
         // A restarted server answers before it has brought back all it
         // saved. Those that come later are shown and run again as they come
@@ -2050,10 +2111,9 @@ impl Gerdr {
                     .into_iter()
                     .for_each(|event| state.on_herdr_event(event)),
                 Err(()) => {
-                    tracing::warn!("herdr server went away; new terminals won't persist");
-                    state.toast(
-                        "herdr server went away; new terminals won't persist".into(),
-                        Level::Error,
+                    state.report_problem(
+                        "herdr",
+                        "herdr's server went away: new terminals won't persist".into(),
                     );
                     state.herdr = None;
                     state.herdr_poke = None;
@@ -2766,7 +2826,7 @@ impl Gerdr {
             .collect();
         self.agent_since = since;
         self.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
-        if let Some(notifier) = self.notifier.as_mut() {
+        if let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
             for news in news {
                 notifier.send(&news.key.to_string(), &news.summary, &news.body);
             }
@@ -3558,8 +3618,10 @@ impl Gerdr {
             .map(Path::to_path_buf)
             .or_else(home_dir);
         let title = match kind {
-            WorkspaceKind::Project => "Open project folder",
-            WorkspaceKind::Terminal | WorkspaceKind::Cursor => "Open terminal folder",
+            WorkspaceKind::Project => "Pick a folder to add to the project as a workspace",
+            WorkspaceKind::Terminal | WorkspaceKind::Cursor => {
+                "Pick a folder to open a terminal workspace in"
+            }
         };
         self.pick_folder(title, start, PickFor::Workspace(kind));
     }
@@ -3568,7 +3630,7 @@ impl Gerdr {
     /// `start` (else the home folder).
     pub fn pick_folder_for_menu(&mut self, start: Option<PathBuf>) {
         let start = start.or_else(home_dir);
-        self.pick_folder("Choose the project's folder", start, PickFor::MenuFolder);
+        self.pick_folder("Pick the project's folder", start, PickFor::MenuFolder);
     }
 
     /// Ask zenity for a folder (on the host) under `title`, starting in
@@ -3593,8 +3655,19 @@ impl Gerdr {
             cmd.arg(format!("--filename={}/", start.display()));
         }
         match cmd.spawn() {
-            Ok(child) => self.picker = Some((child, purpose)),
-            Err(err) => tracing::warn!("folder picker (zenity) failed to start: {err}"),
+            Ok(child) => {
+                problems::clear("zenity");
+                self.picker = Some((child, purpose));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => self.report_problem(
+                "zenity",
+                "Can't ask for a folder: zenity isn't installed (install it, or type the path)"
+                    .into(),
+            ),
+            Err(err) => self.report_problem(
+                "zenity",
+                format!("The folder picker (zenity) didn't start: {err}"),
+            ),
         }
     }
 
@@ -3635,8 +3708,24 @@ impl Gerdr {
         }
     }
 
-    /// Close every pane of the workspace; it goes away once their windows do.
+    /// Close every pane of workspace `idx`; it goes away once their
+    /// windows do. One where something runs asks first (see
+    /// `Gerdr::ask_close_workspace`).
     pub fn close_workspace(&mut self, idx: usize) {
+        let Some(ws) = self.workspaces.get(idx) else {
+            return;
+        };
+        let panes = ws.tabs.iter().flat_map(|tab| &tab.panes);
+        let running: Vec<String> = panes.clone().filter_map(|p| self.running_in(p)).collect();
+        if running.is_empty() {
+            return self.close_workspace_now(idx);
+        }
+        let ids = panes.map(|p| p.id).collect();
+        self.ask_close_workspace(idx, ids, &running);
+    }
+
+    /// Close workspace `idx` without asking.
+    pub fn close_workspace_now(&mut self, idx: usize) {
         if let Some(ws) = self.workspaces.get(idx) {
             // Closed on purpose: once gone, it doesn't come back.
             self.closing_records.insert(ws.record.clone());
@@ -3891,12 +3980,44 @@ impl Gerdr {
         }
     }
 
+    /// The keys pressing `action` after the prefix, as the help panel
+    /// says them ("Ctrl+B Shift+Q"), if any do.
+    pub fn action_keys(&self, action: Action) -> Option<String> {
+        let help = self.keymap.help();
+        help.rows
+            .iter()
+            .zip(&help.presses)
+            .find_map(|((keys, _), presses)| {
+                let at = presses
+                    .iter()
+                    .position(|press| *press == Some(HelpPress::Action(action)))?;
+                let key = keys.split(" / ").nth(at)?;
+                Some(format!("{} {key}", help.prefix))
+            })
+    }
+
+    /// The help as the panel shows it now: the keys that don't work over
+    /// what has the keys (a panel, the welcome screen, a dialog) greyed
+    /// out. A menu open closes on the key, so what is under it decides.
+    fn shown_help(&self) -> Arc<Help> {
+        let over = self
+            .open_overlays()
+            .find(|o| o.takes_keys() && *o != Overlay::ContextMenu);
+        let Some(over) = over else {
+            return self.keymap.help();
+        };
+        Arc::new(self.keymap.help_at(keys::Reach {
+            works: &|action| prefix_works(over, action),
+            to_app: false,
+        }))
+    }
+
     /// What `pos` is over in the help panel, while it shows.
     pub fn help_hit(&self, pos: Point<f64, Logical>) -> Option<HelpHit> {
         if !(self.prefix_armed || self.help_pinned) {
             return None;
         }
-        let help = self.keymap.help();
+        let help = self.shown_help();
         let (area, scale) = (self.content_rect(), self.scale());
         self.chrome
             .help_hit(&help, self.help_pinned, area, scale, pos)
@@ -3911,6 +4032,7 @@ impl Gerdr {
         match press {
             HelpPress::Action(action) => self.run_action(action),
             HelpPress::Close => self.help_pinned = false,
+            HelpPress::NotHere => {}
         }
         let time = self.start_time.elapsed().as_millis() as u32;
         self.pointer_moved(pos, time);
@@ -3936,6 +4058,8 @@ impl Gerdr {
             Action::NewTab => self.new_tab(),
             Action::NewAgent => self.open_agent_picker(self.active_workspace),
             Action::CloseTab => self.close_tab(tab),
+            Action::RenameTab if tabs > 0 => self.start_rename(RenameTarget::Tab(ws, tab)),
+            Action::MoveTab(step) => self.move_tab(step),
             Action::NextTab if tabs > 0 => self.switch_tab((tab + 1) % tabs),
             Action::PrevTab if tabs > 0 => self.switch_tab((tab + tabs - 1) % tabs),
             Action::GotoTab(idx) => self.switch_tab(idx),
@@ -3944,6 +4068,8 @@ impl Gerdr {
             Action::CloseWorkspace => self.close_workspace(ws),
             Action::NextWorkspace if wss > 0 => self.switch_workspace((ws + 1) % wss),
             Action::PrevWorkspace if wss > 0 => self.switch_workspace((ws + wss - 1) % wss),
+            Action::WorkspaceMenu => self.open_workspace_menu(),
+            Action::PaneMenu => self.open_pane_menu(),
             Action::Split(dir) => self.split_pane(dir),
             Action::ClosePane => self.close_pane(),
             Action::FocusSide(side) => {
@@ -3997,11 +4123,18 @@ impl Gerdr {
                     self.move_pane_to_tab(id, None);
                 }
             }
+            // Their key closes them again, as the inbox's does.
+            Action::Worktrees if self.is_open(Overlay::Worktrees) => {
+                self.apply_worktrees(worktrees::Outcome::Close)
+            }
             Action::Worktrees => self.open_worktrees(None),
+            Action::Repos if self.is_open(Overlay::Repos) => {
+                self.apply_repos(repos::Outcome::Close)
+            }
             Action::Repos => self.open_repos(),
-            Action::Inbox if self.inbox.is_open() => self.close_inbox(),
+            Action::Inbox if self.is_open(Overlay::Inbox) => self.close_inbox(),
             Action::Inbox => self.open_inbox(None),
-            Action::Scrollback if self.scrollback.is_some() => self.close_scrollback(),
+            Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
@@ -4033,20 +4166,95 @@ impl Gerdr {
             })
             .filter(|r| r.command.is_some());
         let summary = match record {
-            None => "Nothing running in this pane".to_owned(),
+            None => "Nothing runs in this pane".to_owned(),
             Some(record) => {
                 let command = record.command.clone().unwrap_or_default();
                 if let Some(i) = record.skip.iter().position(|c| *c == command) {
                     record.skip.remove(i);
-                    format!("Will restart `{command}` after reboot")
+                    format!("`{command}` runs again after a reboot")
                 } else {
                     record.skip.push(command.clone());
-                    format!("Won't restart `{command}` after reboot")
+                    format!(
+                        "`{command}` won't run again after a reboot · its tab shows \u{2298}"
+                    )
                 }
             }
         };
         self.projects.save();
         self.toast(summary, Level::Info);
+    }
+
+    /// Move the active tab `step` places along the strip (right for
+    /// positive), as dragging it does; at either end it stays.
+    fn move_tab(&mut self, step: isize) {
+        let Some(ws) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        let to = ws.active_tab.saturating_add_signed(step);
+        if to == ws.active_tab || to >= ws.tabs.len() {
+            return;
+        }
+        move_item(&mut ws.tabs, &mut ws.active_tab, to);
+        self.reorder_herdr(Reorderable::Tab);
+    }
+
+    /// Open `spec` as from the keys: its first item picked, for the
+    /// arrow keys and Enter to go on from.
+    fn open_menu_by_key(&mut self, spec: MenuSpec) {
+        self.open_menu(spec);
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.step_to_end(false);
+        }
+    }
+
+    /// Open the focused pane's menu (see `pane_bar_menu`) under its bar.
+    fn open_pane_menu(&mut self) {
+        let Some(tab) = self.tab() else { return };
+        let Some(id) = tab.focused_id() else { return };
+        let Some((_, rect)) = tab
+            .shown_rects(self.content_rect())
+            .into_iter()
+            .find(|(pane, _)| *pane == id)
+        else {
+            return;
+        };
+        let bar = chrome::pane_bar_rects(rect).0;
+        // At the bar's left end, clear of its buttons; on its grip too
+        // while the bar is hidden.
+        let on = Point::from((bar.loc.x as f64 + 4.0, bar.loc.y as f64 + 1.0));
+        if let Some(mut spec) = self.pane_bar_menu(on) {
+            spec.anchor = Rectangle::new(
+                (bar.loc.x + MENU_KEY_INDENT, bar.loc.y).into(),
+                (0, bar.size.h).into(),
+            );
+            self.open_menu_by_key(spec);
+        }
+    }
+
+    /// Open the active workspace's menu (see `sidebar_menu`) under its
+    /// sidebar row, scrolled into view first.
+    fn open_workspace_menu(&mut self) {
+        let w = self.active_workspace;
+        let height = self.output_size().h;
+        let scroll = self.sidebar_scroll.pos().round() as i32;
+        let to = self.sidebar_layout().showing(w, scroll, height);
+        if to != scroll {
+            self.sidebar_scroll.jump(to as f64);
+        }
+        let Some(title) = self.sidebar_layout().rows.get(w).map(|row| row.title) else {
+            return;
+        };
+        let on = Point::from((
+            title.loc.x as f64 + 1.0,
+            title.loc.y as f64 + title.size.h as f64 / 2.0,
+        ));
+        if let Some(mut spec) = self.sidebar_menu(on) {
+            spec.anchor = Rectangle::new(
+                (title.loc.x + MENU_KEY_INDENT, title.loc.y).into(),
+                (0, title.size.h).into(),
+            );
+            self.open_menu_by_key(spec);
+        }
     }
 
     /// The shown project and the active workspace's record: whose shells a
@@ -4091,7 +4299,7 @@ impl Gerdr {
                 _ => r.dir.clone(),
             });
         let purpose = PickFor::Venv { project, workspace };
-        self.pick_folder("Choose the workspace's Python venv", start, purpose);
+        self.pick_folder("Pick the workspace's Python venv", start, purpose);
     }
 
     /// zenity gave back `dir` for the venv of `project`'s `workspace`: the
@@ -4104,7 +4312,7 @@ impl Gerdr {
         };
         let Some(venv) = venv.filter(|venv| prepare::is_venv(venv)) else {
             let dir = tilde(&dir, home_dir().as_deref());
-            return self.show_notice(format!("Not a Python venv: {dir}"));
+            return self.show_warning(format!("Not a Python venv: {dir}"));
         };
         let Some(record) = self.projects.record_mut(project, workspace) else {
             return;
@@ -4120,8 +4328,16 @@ impl Gerdr {
     }
 
     /// Flip between light and dark, remembered for the next start.
+    /// Flip between the dark and the light look. Following the system's
+    /// stops then, and the toast says so.
     pub fn toggle_theme(&mut self) {
+        let was_system = self.theme_mode == ThemeMode::System;
         self.set_theme_mode(self.theme().toggled().into());
+        if was_system && let Some(toast) = self.toasts.back_mut() {
+            toast
+                .text
+                .push_str(" \u{b7} no longer following the system");
+        }
     }
 
     /// Use `mode`, remembered for the next start.
@@ -4852,17 +5068,7 @@ impl Gerdr {
             .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
         let reordering = self.reorder.is_some_and(|r| r.moving);
         // These take every click.
-        if self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-            || self.welcome.is_some()
-            || self.project_menu.is_some()
-            || self.worktrees.is_open()
-            || self.repos.is_open()
-            || self.inbox.is_open()
-            || self.scrollback.is_some()
-        {
+        if self.grabbing_overlay().is_some() {
             return None;
         }
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
@@ -5130,15 +5336,17 @@ impl Gerdr {
                 .unwrap_or_default();
             let name = |id: &str| self.projects.project(id).map(|p| p.name.clone());
             if let (Some(new), Some(old)) = (name(id), name(&left)) {
+                let created = self.just_created.as_deref() == Some(id);
                 let notice = if stops.session {
-                    projects::stop_notice(&new, &old)
+                    projects::stop_notice(&new, &old, created)
                 } else {
-                    projects::switch_notice(&new, &old)
+                    projects::switch_notice(&new, &old, created)
                 };
-                self.show_notice(notice);
+                self.show_success(notice);
+                self.just_created = None;
             }
             if stops.any() {
-                self.stop_project(&left, stops);
+                self.stop_project_now(&left, stops);
             }
             self.previous_project = Some(left);
         }
@@ -5152,6 +5360,7 @@ impl Gerdr {
     /// shown here: never when started with `--attach`.
     fn open_elsewhere(&self, id: &str) -> bool {
         !self.attach
+            && self.attach_once.as_deref() != Some(id)
             && self.project.as_deref() != Some(id)
             && self
                 .project_lock
@@ -5160,13 +5369,22 @@ impl Gerdr {
             && project_lock::dir().is_some_and(|dir| project_lock::is_open_elsewhere(&dir, id))
     }
 
+    /// Show project `id` here although another gerdr has it open, as
+    /// `--attach` does for every project: the refusal's "Join here".
+    pub fn attach_project(&mut self, id: &str) {
+        self.attach_once = Some(id.to_owned());
+        self.switch_project(id);
+    }
+
     /// Say that project `id` isn't shown because another gerdr has it
     /// open: on the welcome screen when nothing is shown, else in a toast.
     fn refuse_open(&mut self, id: &str) {
         let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
-        let why = format!("{name} is open in another gerdr — pick another, or start with --attach");
+        let why = format!("{name} is open in another gerdr: pick another, or join it here");
         if self.project.is_some() {
-            return self.toast(why, Level::Warning);
+            let join = ("Join here".to_owned(), MenuAction::AttachProject(id.to_owned()));
+            let text = format!("{name} is open in another gerdr");
+            return self.toast_with(text, Level::Warning, Some(join));
         }
         if self.welcome.is_none() {
             self.open_welcome(false);
@@ -5395,6 +5613,8 @@ impl Gerdr {
     /// Show project `id`, just made, opening `folder` in it as a workspace
     /// of `kind`, if given.
     fn enter_project_with(&mut self, id: &str, folder: Option<PathBuf>, kind: WorkspaceKind) {
+        // The switch's notice says it was made, if there is one.
+        self.just_created = Some(id.to_owned());
         self.enter_project(id, false, Vec::new());
         match (folder, kind) {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
@@ -5402,9 +5622,11 @@ impl Gerdr {
             (_, WorkspaceKind::Cursor) => self.open_cursor(None),
             (None, _) => {}
         }
-        // After the switch's notice, so it wins.
-        if let Some(name) = self.projects.project(id).map(|p| p.name.clone()) {
-            self.show_notice(format!("Created {name}"));
+        // No switch said so: nothing was shown before.
+        if self.just_created.take().is_some()
+            && let Some(name) = self.projects.project(id).map(|p| p.name.clone())
+        {
+            self.show_success(format!("Created {name}"));
         }
     }
 
@@ -5435,13 +5657,14 @@ impl Gerdr {
         project.after_stop = after;
         let name = project.name.clone();
         self.projects.save();
-        self.show_notice(format!("Saved {name}'s start and stop commands"));
+        self.show_success(format!("Saved {name}'s start and stop commands"));
     }
 
     /// Stop project `id`'s herdr session, off the event loop, and its apps
-    /// kept running (see `keep`), as far as `stops` says; not the shown
-    /// one. `project_stopped` takes it from there.
-    pub fn stop_project(&mut self, id: &str, stops: projects::Stops) {
+    /// kept running (see `keep`), as far as `stops` says, without asking
+    /// (`stop_project` asks); not the shown one. `project_stopped` takes it
+    /// from there.
+    pub fn stop_project_now(&mut self, id: &str, stops: projects::Stops) {
         if self.project.as_deref() == Some(id) {
             return tracing::warn!("not stopping project {id}: it is the one shown");
         }
@@ -5453,6 +5676,9 @@ impl Gerdr {
         }
         // Only its apps: the project runs on.
         if !stops.session || !self.stopping.insert(id.to_owned()) {
+            if self.forget_after_stop.remove(id) {
+                self.forget_project_now(id);
+            }
             return;
         }
         // Neither running nor stopped until it answers.
@@ -5493,13 +5719,15 @@ impl Gerdr {
     /// it did: then it counts as stopped, and the windows held for it close.
     fn project_stopped(&mut self, id: &str, stopped: bool) {
         self.stopping.remove(id);
+        let forget = self.forget_after_stop.remove(id);
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
         if !stopped {
             // Whether it still runs is found out again.
             self.check_running();
-            return self.show_notice(format!("Couldn't stop {name}"));
+            let kept = if forget { "; it is kept" } else { "" };
+            return self.show_error(format!("Couldn't stop {name}{kept}"));
         }
         self.running.insert(id.to_owned(), false);
         if let Some(project) = self.projects.project_mut(id) {
@@ -5511,8 +5739,12 @@ impl Gerdr {
         for window in self.held.get(id).into_iter().flatten() {
             window.toplevel().unwrap().send_close();
         }
+        if forget {
+            self.forget_project_now(id);
+            return self.show_success(format!("Stopped and forgot {name}"));
+        }
         self.refresh_project_menu();
-        self.show_notice(format!("Stopped {name}"));
+        self.show_success(format!("Stopped {name}"));
     }
 
     /// Show the project shown before this one, if it is still there.
@@ -5525,8 +5757,10 @@ impl Gerdr {
         }
     }
 
-    /// Forget project `id`; its herdr session stays. Not the shown one.
-    pub fn forget_project(&mut self, id: &str) {
+    /// Forget project `id` without asking (`forget_project` asks while it
+    /// runs). Not the shown one. The welcome screen and the project menu
+    /// show it gone.
+    pub fn forget_project_now(&mut self, id: &str) {
         if self.project.as_deref() == Some(id) {
             return tracing::warn!("not forgetting project {id}: it is the one shown");
         }
@@ -5539,6 +5773,10 @@ impl Gerdr {
         }
         self.projects.save();
         self.refresh_project_menu();
+        let rows = self.project_rows();
+        if let Some(welcome) = self.welcome.as_mut() {
+            welcome.set_projects(rows);
+        }
     }
 
     /// The projects for the welcome screen, most recently used first, by id;
@@ -5601,6 +5839,10 @@ impl Gerdr {
                 RunState::Kept
             };
         }
+        // Opened again as big, with the sidebar as wide.
+        let size = self.output_size();
+        self.projects.window_size = Some((size.w, size.h));
+        self.projects.sidebar_width = Some(self.sidebar_width);
         self.projects.save();
         self.close_cursor_socket();
         self.loop_signal.stop();
@@ -5645,7 +5887,16 @@ impl Gerdr {
     /// Without herdr, projects can't run: the welcome screen says so.
     fn start_project(&mut self, name: Option<&str>, folders: Vec<PathBuf>) {
         if !herdr::is_installed() {
-            tracing::warn!("herdr isn't installed: projects can't run");
+            let skipped = match name {
+                Some(name) => format!(": {name} isn't shown"),
+                None => String::new(),
+            };
+            problems::report(
+                "herdr",
+                format!(
+                    "herdr isn't installed: install it and put it on PATH to run projects{skipped}"
+                ),
+            );
             return self.open_welcome(false);
         }
         let last = self
@@ -5761,9 +6012,9 @@ impl Gerdr {
         };
         // After the switch's notice, so it wins.
         match result {
-            Err(err) => self.show_notice(format!("{name}'s {} failed: {err}", hook.label())),
+            Err(err) => self.show_error(format!("{name}'s {} failed: {err}", hook.label())),
             Ok(()) if hook == Hook::BeforeStart && !entered => {
-                self.show_notice(format!("{name}'s start commands are done"));
+                self.show_success(format!("{name}'s start commands are done"));
             }
             Ok(()) => {}
         }
@@ -5842,7 +6093,7 @@ impl Gerdr {
             context_menu: self.context_menu.as_ref().map(ContextMenu::view),
             tooltip: self.tooltip.view(),
             switcher: self.switcher_view(),
-            prefix: (self.prefix_armed || self.help_pinned).then(|| self.keymap.help()),
+            prefix: (self.prefix_armed || self.help_pinned).then(|| self.shown_help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             restart: self.restart_view(),
@@ -5863,6 +6114,20 @@ impl Gerdr {
             scale: self.scale(),
         }
     }
+}
+
+/// Whether `action`, picked with the prefix, works while `over` has the
+/// keys: as `input` decides it. A dialog takes every key; the welcome
+/// screen only what acts on gerdr itself; a panel that and the keys of
+/// the panels, its own closing it again.
+fn prefix_works(over: Overlay, action: Action) -> bool {
+    if over.is_dialog() {
+        return false;
+    }
+    if over.toggled_by() == Some(action) {
+        return true;
+    }
+    crate::input::works_over(over, &action)
 }
 
 /// Move the item at `active` to place `to`, keeping `active` on it.
@@ -5890,6 +6155,28 @@ fn retain_active<T>(items: &mut Vec<T>, active: &mut usize, keep: impl Fn(&T) ->
     });
     *active = new_active.min(items.len().saturating_sub(1));
     items.len() != before
+}
+
+/// How big gerdr's window opens the first time, in logical pixels; after,
+/// as it was left.
+const WINDOW_SIZE: (i32, i32) = (1400, 900);
+
+/// The look to start with: the later choice of the theme toggle (kept in
+/// `theme_file`) and `[ui] theme` (`named`): the file's when it was
+/// written after the toggle, else the toggle's; the system's by default.
+fn start_theme(named: Option<ThemeMode>) -> ThemeMode {
+    let file = theme_file();
+    let toggled = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|s| ThemeMode::from_name(&s));
+    let toggled_at = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+    match (named, toggled) {
+        (Some(named), Some(toggled)) => match (config::modified(), toggled_at) {
+            (Some(written), Some(at)) if at > written => toggled,
+            _ => named,
+        },
+        (named, toggled) => named.or(toggled).unwrap_or_default(),
+    }
 }
 
 /// Where the theme choice (system, dark or light) is kept between runs.
@@ -5924,6 +6211,31 @@ fn extend_path() {
         // SAFETY: called at the start of `main`, before any other thread.
         unsafe { std::env::set_var("PATH", path) };
     }
+}
+
+/// Log to stderr (warnings, or as `RUST_LOG` says) and to `log_path`
+/// (gerdr's own news from info up, everything's warnings): started from a
+/// desktop entry, stderr goes nowhere.
+fn init_logging() {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let stderr = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")));
+    let file = launch::append_log(&log_path()).map(|file| {
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .with_filter(EnvFilter::new("warn,gerdr=info"))
+    });
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(file)
+        .init();
+}
+
+/// gerdr's own log: `gerdr.log` in its state folder.
+pub fn log_path() -> PathBuf {
+    state_dir().join("gerdr.log")
 }
 
 /// gerdr's state folder, for logs: `$XDG_STATE_HOME/gerdr`, by default
@@ -5987,11 +6299,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    init_logging();
+    // Before the window opens, which takes the size it was left at.
+    let (store, loaded) = projects::Store::load();
 
     extend_path();
     // The portal can be slow to answer: asked now, alongside the setup.
@@ -6006,9 +6316,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_title("gerdr")
         .with_name("gerdr", "gerdr")
         .with_window_icon(app_icons::window_icon())
-        .with_inner_size(smithay::reexports::winit::dpi::LogicalSize::new(
-            1400.0, 900.0,
-        ));
+        .with_inner_size({
+            let (w, h) = store.window_size.unwrap_or(WINDOW_SIZE);
+            smithay::reexports::winit::dpi::LogicalSize::new(w.max(320) as f64, h.max(240) as f64)
+        });
     let (mut backend, winit_loop) = winit::init_from_attributes::<GlesRenderer>(attrs)?;
 
     // Output that mirrors the host window.
@@ -6077,10 +6388,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance_dir = launch::instance_dir(&home, &socket_name.to_string_lossy());
     let zed_data = launch::zed_data_dir(&home, &instance_dir);
 
-    let (keymap, apps, ui, git_config, linear, keep_apps, agent_config) = config::load();
-    let saved_theme = std::fs::read_to_string(theme_file())
-        .ok()
-        .and_then(|s| ThemeMode::from_name(&s));
+    let settings = config::load();
+    let config::Settings {
+        keymap,
+        apps,
+        ui,
+        git: git_config,
+        linear,
+        keep: keep_apps,
+        agents: agent_config,
+        services: service_settings,
+        t3: t3_settings,
+        notifications,
+        problems: settings_problems,
+    } = settings;
+    anim::set_motion(ui.motion);
     let mut state = Gerdr {
         start_time: Instant::now(),
         display_handle: dh.clone(),
@@ -6094,11 +6416,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspaces: Vec::new(),
         active_workspace: 0,
         chrome: Chrome::new(),
-        theme_mode: ui.theme.or(saved_theme).unwrap_or_default(),
+        theme_mode: start_theme(ui.theme),
         system_dark: true,
         density: ui.density,
         needs_you: ui.needs_you,
-        sidebar_width: SIDEBAR_WIDTH,
+        notify: notifications.enabled,
+        settings_modified: config::modified(),
+        sidebar_width: store
+            .sidebar_width
+            .unwrap_or(SIDEBAR_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
         next_pane: 0,
         drag: None,
         reorder: None,
@@ -6201,6 +6528,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scrollback: None,
         thumb_drag: None,
         stopping: HashSet::new(),
+        forget_after_stop: HashSet::new(),
+        just_created: None,
+        attach_once: None,
         project_menu: None,
         header_hover: false,
         previous_project: None,
@@ -6218,7 +6548,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         order_pending: HashSet::new(),
         pane_leaders: HashMap::new(),
         last_commands: HashMap::new(),
-        service_errors: services::ServiceErrors::new(config::load_services()),
+        service_errors: services::ServiceErrors::new(service_settings),
         pane_jobs: HashMap::new(),
         pane_job_tx: None,
         pane_bar_hover: None,
@@ -6251,6 +6581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_shape_state: CursorShapeManagerState::new::<Gerdr>(&dh),
         seat,
     };
+    state.t3.auto_update = t3_settings.updates;
 
     event_loop
         .handle()
@@ -6355,10 +6686,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     // The first run turns the session gerdr used before projects into one.
-    let (store, loaded) = projects::Store::load();
     state.projects = store;
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
+    }
+    state.settings_problems(&settings_problems, false);
+    if let Some(problem) = problems::list().into_iter().find(|p| p.source == "store") {
+        state.show_error(problem.text);
     }
     // Before the first terminals, which take the look's colours with them,
     // when the look follows the system; any other look can do without it.
@@ -6378,7 +6712,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_web_pages();
     state.watch_ci();
     state.watch_issues();
-    state.connect_notifier();
+    if state.notify {
+        state.connect_notifier();
+    }
+    state.watch_settings();
     state.start_services();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
@@ -6406,6 +6743,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_prefix_works_over_a_panel_as_input_has_it() {
+        // Over a panel: gerdr's own keys, the panels' keys, and its own
+        // key closing it.
+        assert!(prefix_works(Overlay::Repos, Action::Repos));
+        assert!(prefix_works(Overlay::Repos, Action::Inbox));
+        assert!(prefix_works(Overlay::Repos, Action::Quit));
+        assert!(!prefix_works(Overlay::Repos, Action::NewTab));
+        assert!(prefix_works(Overlay::Switcher, Action::Switcher));
+        assert!(!prefix_works(Overlay::Switcher, Action::PaneMenu));
+        // Over the welcome screen less, over a dialog nothing.
+        assert!(prefix_works(Overlay::Welcome, Action::ToggleTheme));
+        assert!(!prefix_works(Overlay::Welcome, Action::Repos));
+        assert!(!prefix_works(Overlay::Quit, Action::Quit));
+    }
 
     /// A tab laid out 1 | (2 over 3), with no windows.
     fn three_panes() -> Tab {
@@ -6705,16 +7058,16 @@ mod tests {
             project_detail(&dirs, Some(home))
         };
         assert_eq!(detail(&[]), "empty");
-        assert_eq!(detail(&["/home/me/Work/aft"]), "1 repo · ~/Work/aft");
+        assert_eq!(detail(&["/home/me/Work/aft"]), "1 workspace · ~/Work/aft");
         let aft = [
             "/home/me/Work/aft/api",
             "/home/me/Work/aft/app",
             "/home/me/Work/aft/api/sub",
         ];
-        assert_eq!(detail(&aft), "3 repos · ~/Work/aft");
-        assert_eq!(detail(&["/home/me/a", "/home/me/b"]), "2 repos · ~");
-        assert_eq!(detail(&["/srv/a", "/opt/b"]), "2 repos");
-        assert_eq!(detail(&["/srv/a", "/srv/b"]), "2 repos · /srv");
+        assert_eq!(detail(&aft), "3 workspaces · ~/Work/aft");
+        assert_eq!(detail(&["/home/me/a", "/home/me/b"]), "2 workspaces · ~");
+        assert_eq!(detail(&["/srv/a", "/opt/b"]), "2 workspaces");
+        assert_eq!(detail(&["/srv/a", "/srv/b"]), "2 workspaces · /srv");
     }
 
     #[test]

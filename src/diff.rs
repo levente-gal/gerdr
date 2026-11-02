@@ -7,7 +7,8 @@ use std::ops::Range;
 
 use crate::syntax::{self, Spans};
 
-/// How many lines of one file's diff are kept; the rest are counted.
+/// How many lines of one file's diff the diff view shows until asked for
+/// them all.
 pub const FILE_LINES: usize = 2000;
 /// A removed and an added line this long or longer aren't compared word
 /// by word.
@@ -31,8 +32,9 @@ pub struct FileDiff {
     /// `git::Change::code`.
     pub code: char,
     pub hunks: Vec<Hunk>,
-    /// What isn't a hunk: `Binary file`, how many more lines there were,
-    /// an untracked folder's files, why git couldn't say.
+    /// What isn't a hunk: `Binary file`, a mode changed, how many more
+    /// lines there were, an untracked folder's files, why git couldn't
+    /// say.
     pub notes: Vec<String>,
     /// Lines added and removed, all of them, kept or not.
     pub added: usize,
@@ -57,6 +59,9 @@ pub struct Line {
     pub raw: Option<String>,
     /// Where it is in the file as it is now; a removed line, where it was.
     pub number: usize,
+    /// Where it was in the file before (the diff's base); 0 for an added
+    /// line, which wasn't.
+    pub old: usize,
     /// The words changed from the line it pairs with, by char index
     /// into `text`; empty when it pairs with none, or is all changed.
     pub words: Words,
@@ -109,11 +114,13 @@ struct Section {
     renamed: Option<String>,
     /// Inside a hunk (past the header).
     in_hunk: bool,
-    /// The next line's number in the file as it is now.
+    /// The next line's number in the file as it is now, and in the file
+    /// before.
     number: usize,
-    /// Lines kept, and lines past `FILE_LINES` dropped.
-    kept: usize,
-    dropped: usize,
+    old: usize,
+    /// The file's mode before and after, when it changed.
+    old_mode: Option<String>,
+    new_mode: Option<String>,
 }
 
 impl Section {
@@ -126,8 +133,9 @@ impl Section {
             renamed: None,
             in_hunk: false,
             number: 1,
-            kept: 0,
-            dropped: 0,
+            old: 1,
+            old_mode: None,
+            new_mode: None,
         }
     }
 
@@ -135,17 +143,19 @@ impl Section {
         if let Some(rest) = raw.strip_prefix("@@") {
             self.in_hunk = true;
             let (numbers, context) = rest.split_once("@@").unwrap_or((rest, ""));
-            self.number = numbers
-                .split_whitespace()
-                .find_map(|n| n.strip_prefix('+'))
-                .and_then(|n| n.split(',').next()?.parse().ok())
-                .unwrap_or(1);
-            if self.kept < FILE_LINES {
-                self.diff.hunks.push(Hunk {
-                    context: expand(context.trim()),
-                    lines: Vec::new(),
-                });
-            }
+            let start = |sign: char| {
+                numbers
+                    .split_whitespace()
+                    .find_map(|n| n.strip_prefix(sign))
+                    .and_then(|n| n.split(',').next()?.parse().ok())
+                    .unwrap_or(1)
+            };
+            self.number = start('+');
+            self.old = start('-');
+            self.diff.hunks.push(Hunk {
+                context: expand(context.trim()),
+                lines: Vec::new(),
+            });
             return;
         }
         if !self.in_hunk {
@@ -174,17 +184,20 @@ impl Section {
         if kind != LineKind::Removed {
             self.number += 1;
         }
-        if self.kept >= FILE_LINES {
-            self.dropped += 1;
-            return;
-        }
-        self.kept += 1;
+        let old = match kind {
+            LineKind::Added => 0,
+            _ => {
+                self.old += 1;
+                self.old - 1
+            }
+        };
         if let Some(hunk) = self.diff.hunks.last_mut() {
             hunk.lines.push(Line {
                 kind,
                 text: expand(text),
                 raw: text.contains('\t').then(|| text.to_owned()),
                 number,
+                old,
                 words: Vec::new(),
                 syntax: Vec::new(),
             });
@@ -209,6 +222,10 @@ impl Section {
             self.diff.orig = Some(unquote(path));
         } else if raw.starts_with("Binary files ") {
             self.diff.notes.push("Binary file".into());
+        } else if let Some(mode) = raw.strip_prefix("old mode ") {
+            self.old_mode = Some(mode.trim().to_owned());
+        } else if let Some(mode) = raw.strip_prefix("new mode ") {
+            self.new_mode = Some(mode.trim().to_owned());
         }
     }
 
@@ -219,12 +236,23 @@ impl Section {
             .or(self.minus)
             .or(self.header)
             .unwrap_or_default();
-        if self.dropped > 0 {
-            let more = format!("… {} more lines", self.dropped);
-            self.diff.notes.insert(0, more);
+        // A mode change alone has no hunk: said, as is one with them.
+        if let (Some(old), Some(new)) = (self.old_mode, self.new_mode) {
+            let executable = match (old.ends_with("755"), new.ends_with("755")) {
+                (false, true) => " (now executable)",
+                (true, false) => " (no longer executable)",
+                _ => "",
+            };
+            let note = format!("Mode changed from {old} to {new}{executable}");
+            self.diff.notes.insert(0, note);
         }
+        let mut unmarked = false;
         for hunk in &mut self.diff.hunks {
-            pair_words(&mut hunk.lines);
+            unmarked |= pair_words(&mut hunk.lines);
+        }
+        if unmarked {
+            let note = format!("Words changed aren't marked on lines of {WORD_LINE} chars or more");
+            self.diff.notes.push(note);
         }
         colour_file(&mut self.diff);
         self.diff
@@ -343,7 +371,8 @@ pub fn unquote(path: &str) -> String {
 
 /// Each run of removed lines followed by added lines paired one to one,
 /// and the words changed between each pair marked.
-fn pair_words(lines: &mut [Line]) {
+fn pair_words(lines: &mut [Line]) -> bool {
+    let mut unmarked = false;
     let mut i = 0;
     while i < lines.len() {
         if lines[i].kind != LineKind::Removed {
@@ -361,12 +390,15 @@ fn pair_words(lines: &mut [Line]) {
         let pairs = (added - removed).min(i - added);
         for k in 0..pairs {
             let (old, new) = (removed + k, added + k);
+            let long = |l: &Line| l.text.len() >= WORD_LINE;
+            unmarked |= long(&lines[old]) || long(&lines[new]);
             if let Some((a, b)) = changed_words(&lines[old].text, &lines[new].text) {
                 lines[old].words = a;
                 lines[new].words = b;
             }
         }
     }
+    unmarked
 }
 
 /// The char ranges of `old` and of `new` not in their longest common run
@@ -538,6 +570,11 @@ mod tests {
             (LineKind::Removed, "let x = 1;", 2)
         );
         assert_eq!((l[2].kind, l[2].number), (LineKind::Added, 2));
+        // Where each was before: an added line wasn't.
+        let olds: Vec<usize> = l.iter().map(|l| l.old).collect();
+        assert_eq!(olds, [1, 2, 0]);
+        let h = &a.hunks[1].lines;
+        assert_eq!((h[0].old, h[1].old, h[2].old), (10, 0, 11));
         assert_eq!(l[1].words, [8..9]);
         assert_eq!(l[2].words, [8..9]);
         // A tab-led line is no context line; kept as a note instead.
@@ -583,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn long_files_are_cut() {
+    fn long_files_are_kept_whole() {
         let mut lines = vec![
             "diff --git a/f b/f",
             "--- a/f",
@@ -594,8 +631,34 @@ mod tests {
         lines.extend(added.iter().map(String::as_str));
         let files = parse(&text(&lines));
         assert_eq!(files[0].added, FILE_LINES + 100);
-        assert_eq!(files[0].hunks[0].lines.len(), FILE_LINES);
-        assert_eq!(files[0].notes, ["… 100 more lines"]);
+        assert_eq!(files[0].hunks[0].lines.len(), FILE_LINES + 100);
+        assert!(files[0].notes.is_empty());
+    }
+
+    #[test]
+    fn a_mode_change_and_words_left_unmarked_are_said() {
+        let long = format!("-{}", "a ".repeat(300));
+        let longer = format!("+{}", "b ".repeat(300));
+        let files = parse(&text(&[
+            "diff --git a/run.sh b/run.sh",
+            "old mode 100644",
+            "new mode 100755",
+            "diff --git a/f b/f",
+            "--- a/f",
+            "+++ b/f",
+            "@@ -1 +1 @@",
+            &long,
+            &longer,
+        ]));
+        assert!(files[0].hunks.is_empty());
+        assert_eq!(
+            files[0].notes,
+            ["Mode changed from 100644 to 100755 (now executable)"]
+        );
+        assert_eq!(
+            files[1].notes,
+            ["Words changed aren't marked on lines of 500 chars or more"]
+        );
     }
 
     #[test]
@@ -630,6 +693,7 @@ mod tests {
             text: text.into(),
             raw: None,
             number: 1,
+            old: 1,
             words: Vec::new(),
             syntax: Vec::new(),
         })

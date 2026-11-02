@@ -5,7 +5,8 @@
 
 use super::{
     BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, DETAIL_FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH,
-    Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf, rect_px,
+    POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf,
+    rect_px,
 };
 use crate::git::GitStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -19,7 +20,6 @@ const TOOLTIP_PADDING: i32 = 10;
 const TOOLTIP_KEY_GAP: i32 = 8;
 const TOOLTIP_GAP: i32 = 6;
 const TOOLTIP_MARGIN: i32 = 4;
-const TOOLTIP_RADIUS: f32 = 6.0;
 /// A line of the list under the text, the room after the list, and the
 /// gap between a line's name and where it is.
 const TOOLTIP_ROW: i32 = 20;
@@ -151,7 +151,7 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let size = Size::from((w, view.height()));
-        let mut c = self.popup(size, TOOLTIP_RADIUS, scale, p);
+        let mut c = self.popup(size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
         let panel = Rectangle::new((SHADOW, SHADOW).into(), size);
         let (x, _, pw, _) = rect_px(panel, scale);

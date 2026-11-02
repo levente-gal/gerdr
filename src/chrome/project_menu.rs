@@ -3,17 +3,17 @@
 
 use super::layers::{Part, RowCache};
 use super::{
-    BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, CARET_WIDTH, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT,
-    FIELD_GAP, FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING,
-    FORM_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KIND_CHOICES, KIND_HEIGHT,
-    LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER,
-    PROJECT_MENU_INPUT, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING,
-    PROJECT_MENU_ROW, PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette,
-    ProjectRow, QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
-    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_INSET, Rect, SETTINGS_BUTTONS, SHADOW, SMALL_FONT_SIZE,
-    SUGGESTION_ROW, band, commands_prompt, cross, field_text, file, focus_ring, folder,
-    footer_hint_spots, hint_at, hint_strs, icon_sdf, magnifier, mix, pencil, phys, plus, rect_px,
-    stop,
+    BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT, FIELD_GAP,
+    FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING, FORM_ROW,
+    FieldSpot, HELP_MARGIN, KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE, MENU_MARK_GAP,
+    MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
+    PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
+    PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow,
+    QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
+    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, ROW_INSET, Rect, SETTINGS_BUTTONS,
+    SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross, field_text, file,
+    focus_ring, folder, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, phys, plus,
+    rect_px, search::query_text, stop,
 };
 use crate::WorkspaceKind;
 use crate::project_list::RowTops;
@@ -145,9 +145,9 @@ impl RowButton {
         match self {
             RowButton::Settings => ("Start and stop commands", "Ctrl+E"),
             RowButton::ProjectFile => ("Edit the project file", "Ctrl+O"),
-            RowButton::Rename => ("Rename", "Ctrl+R"),
-            RowButton::Stop => ("Stop its session", "Ctrl+S"),
-            RowButton::Forget => ("Forget the project", "Delete"),
+            RowButton::Rename => ("Rename", "F2"),
+            RowButton::Stop => ("Stop its session", "Ctrl+Q"),
+            RowButton::Forget => ("Forget the project", "Del"),
         }
     }
 }
@@ -233,6 +233,19 @@ pub fn footer_height(hints: usize) -> i32 {
     PROJECT_MENU_FOOTER + (footer_rows(hints) - 1) * FOOTER_ROW
 }
 
+/// How high the footer is with `hints` across `w`, measured: a row for
+/// each they take, so a second row is kept only when they need it.
+pub(super) fn measured_footer_height(hints: &[(&str, &str)], w: i32) -> i32 {
+    let tall = Rectangle::new((0, 0).into(), (w, footer_height(hints.len())).into());
+    let rows = footer_hint_spots(hints, tall)
+        .iter()
+        .map(|(_, r)| r.loc.y)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        .max(1) as i32;
+    PROJECT_MENU_FOOTER + (rows - 1) * FOOTER_ROW
+}
+
 /// Where the project menu's settings form parts go, in output coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsLayout {
@@ -265,7 +278,7 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
             (entries, None, None)
         }
     };
-    let footer_h = footer_height(view.hints.len());
+    let footer_h = measured_footer_height(&hint_strs(&view.hints), w);
     let bottom = (y + PROJECT_MENU_PADDING + footer_h)
         .min(size.h - HELP_MARGIN)
         .max(top + PROJECT_MENU_INPUT + footer_h);
@@ -320,7 +333,7 @@ pub(super) fn menu_entries(
             let h = entry_height(entry);
             let rect = Rectangle::new((x, start + top.round() as i32).into(), (w, h).into());
             let buttons = match entry {
-                MenuEntry::Project { row, .. } if EntryLook::of(view, i).hovered => {
+                MenuEntry::Project { row, .. } if EntryLook::of(view, i).buttons() => {
                     row_button_rects(&row_buttons(row), rect)
                 }
                 _ => Vec::new(),
@@ -410,9 +423,16 @@ impl EntryLook {
             hover_alpha: if hovered { view.hover_alpha } else { 0 },
         }
     }
+
+    /// Whether the entry shows its row buttons: when selected, so they
+    /// follow the keyboard, and under the pointer.
+    fn buttons(&self) -> bool {
+        self.selected || self.hovered
+    }
 }
 
-/// The buttons a project row shows under the pointer, left to right:
+/// The buttons a project row shows, selected or under the pointer, left
+/// to right:
 /// settings, its file and rename always; stop while its session may run,
 /// and forget, unless it is the current project.
 pub(super) fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
@@ -649,17 +669,6 @@ pub fn project_menu_hit(
     Some(MenuHit::Panel)
 }
 
-/// Where the text of the project menu's query field in `rect` goes, after
-/// its magnifier.
-pub(super) fn menu_query_text(rect: Rect, scale: f64) -> (f32, f32) {
-    let px = |v: i32| (v as f64 * scale).round() as f32;
-    let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
-    (
-        px(mark_x + MENU_MARK_WIDTH + MENU_MARK_GAP),
-        px(rect.loc.x + rect.size.w - HELP_PADDING) - px(CARET_WIDTH + 1),
-    )
-}
-
 /// The field a project menu entry in `rect` turns into while its project is
 /// renamed: over the name, up to the row's `buttons` if it shows them.
 pub(super) fn rename_field(rect: Rect, buttons: &[(RowButton, Rect)]) -> Rect {
@@ -717,7 +726,7 @@ pub fn project_menu_field(
         Some(FieldSpot {
             size: FONT_SIZE,
             area: layout.query,
-            text: menu_query_text(layout.query, scale),
+            text: query_text(layout.query, scale),
             line: view.query.clone(),
         })
     })
@@ -811,7 +820,7 @@ impl Painter {
         p: &Palette,
     ) -> Canvas {
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let border = px(1).max(1);
@@ -858,7 +867,8 @@ impl Painter {
                 }
             }
             (None, None) => {
-                self.menu_query(&mut c, &view.query, !renaming, query, scale, p);
+                let placeholder = "Find or name a project…";
+                self.query_field(&mut c, &view.query, placeholder, query, !renaming, scale, p);
                 if empty {
                     let first = Rectangle::new(
                         (
@@ -910,47 +920,13 @@ impl Painter {
         c.fill(0, 0, w, h, p.elevated);
         let rect = Rectangle::from_size(size);
         let buttons = match entry {
-            MenuEntry::Project { row, .. } if look.hovered => {
+            MenuEntry::Project { row, .. } if look.buttons() => {
                 row_button_rects(&row_buttons(row), rect)
             }
             _ => Vec::new(),
         };
         self.menu_entry(&mut c, entry, look, rect, &buttons, scale, p);
         c.into_buffer(true)
-    }
-
-    /// The project menu's query field in `rect`: a magnifier, then `query`
-    /// (or what to type) with a caret after it when `focused`.
-    pub(super) fn menu_query(
-        &self,
-        c: &mut Canvas,
-        query: &Line,
-        focused: bool,
-        rect: Rect,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let s = scale as f32;
-        // Lined up with the marks and labels of the rows below.
-        let mark_x = rect.loc.x + PROJECT_MENU_PADDING + PADDING as i32;
-        let mark = Rectangle::new(
-            (mark_x, rect.loc.y).into(),
-            (MENU_MARK_WIDTH, rect.size.h).into(),
-        );
-        icon_sdf(c, mark, scale, p.placeholder, |x, y| magnifier(x, y, s));
-        let query_band = band(rect, scale);
-        let placeholder = "Find or name a project…";
-        self.edit_line(
-            c,
-            query,
-            placeholder,
-            menu_query_text(rect, scale),
-            query_band,
-            focused,
-            FONT_SIZE,
-            scale,
-            p,
-        );
     }
 
     /// `entry` of the project menu in `rect` (buffer coordinates), looking
@@ -972,7 +948,7 @@ impl Painter {
         let mark = menu_mark(rect);
         let label_lx = mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP;
         let label_x = px(label_lx) as f32;
-        let (x, y, w, h) = rect_px(rect, scale);
+        let (x, _, w, _) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let gap = (FIELD_GAP as f32 * s).round();
         if let MenuEntry::Section(label) = entry {
@@ -990,8 +966,10 @@ impl Painter {
         }
 
         // The highlight stops short of the rows above and below.
-        let (y, h) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = (MENU_RADIUS - 2.0) * s;
+        let lit = Rectangle::new(
+            (rect.loc.x, rect.loc.y + 2).into(),
+            (rect.size.w, rect.size.h - 4).into(),
+        );
         let confirm = matches!(
             entry,
             MenuEntry::Project {
@@ -1000,12 +978,17 @@ impl Painter {
             }
         );
         if confirm {
+            let (x, y, w, h) = rect_px(lit, scale);
+            let r = ROW_HIGHLIGHT_RADIUS * s;
             c.rounded(x, y, w, h, r, mix(p.elevated, p.warning, 0.15));
-        } else if look.selected {
-            c.rounded(x, y, w, h, r, p.selected);
-        } else if look.hovered {
-            let t = 0.5 * look.hover_alpha as f32 / 16.0;
-            c.rounded(x, y, w, h, r, mix(p.elevated, p.selected, t));
+        } else {
+            // Fading in to the one hover colour.
+            let hover = if look.hovered {
+                look.hover_alpha as f32 / 16.0
+            } else {
+                0.0
+            };
+            self.row_highlight(c, lit, (look.selected, hover), scale, p);
         }
 
         // A keycap at the right end of the row; returns where it starts.
@@ -1055,7 +1038,7 @@ impl Painter {
                 if confirm {
                     self.text(
                         c,
-                        &format!("Press Delete again to forget {}", row.name),
+                        &format!("Press Del again to forget {}", row.name),
                         FONT_SIZE,
                         label_x,
                         end,
@@ -1626,9 +1609,9 @@ mod tests {
             hints: vec![
                 ("Enter".into(), "open".into()),
                 ("Ctrl+N".into(), "new".into()),
-                ("Ctrl+R".into(), "rename".into()),
+                ("F2".into(), "rename".into()),
                 ("Ctrl+E".into(), "commands".into()),
-                ("Ctrl+S".into(), "stop".into()),
+                ("Ctrl+Q".into(), "stop".into()),
                 ("Del".into(), "forget".into()),
                 ("Esc".into(), "close".into()),
             ],
@@ -1942,7 +1925,10 @@ mod tests {
         let mut view = list_view();
         let l = project_menu_layout(&view, size);
         let hit = |view: &ProjectMenuView, pos| project_menu_hit(view, size, pos);
-        assert!(l.entries.iter().all(|(_, buttons)| buttons.is_empty()));
+        // Only the selected project has its buttons, unhovered.
+        for (i, (_, buttons)) in l.entries.iter().enumerate() {
+            assert_eq!(buttons.is_empty(), view.selected != Some(i), "entry {i}");
+        }
         assert_eq!(hit(&view, centre(l.query)), Some(MenuHit::Query));
         let corner = (l.footer.loc.x as f64 + 2.0, l.footer.loc.y as f64 + 2.0);
         assert_eq!(hit(&view, corner.into()), Some(MenuHit::Panel));
@@ -1952,8 +1938,8 @@ mod tests {
             assert_eq!(hit(&view, centre(*rect)), Some(MenuHit::Entry(i)));
         }
 
-        // Row buttons: only on the hovered project row, and which depend on
-        // whether it is current and runs.
+        // Row buttons: on the hovered project row (and the selected one),
+        // and which depend on whether it is current and runs.
         use RowButton::{Forget, ProjectFile, Rename, Settings, Stop};
         let expected: [&[RowButton]; 8] = [
             &[],
@@ -1965,13 +1951,14 @@ mod tests {
             &[],
             &[],
         ];
-        for (i, want) in expected.iter().enumerate() {
+        for i in 0..expected.len() {
             for hover in [MenuHit::Entry(i), MenuHit::Button(i, Rename)] {
                 view.hover = Some(hover);
                 let l = project_menu_layout(&view, size);
                 for (j, (rect, buttons)) in l.entries.iter().enumerate() {
                     let shown: Vec<_> = buttons.iter().map(|(b, _)| *b).collect();
-                    assert_eq!(shown, if i == j { want.to_vec() } else { vec![] });
+                    let on = i == j || view.selected == Some(j);
+                    assert_eq!(shown, if on { expected[j].to_vec() } else { vec![] });
                     for (button, b) in buttons {
                         assert_eq!(hit(&view, centre(*b)), Some(MenuHit::Button(j, *button)));
                     }

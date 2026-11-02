@@ -9,23 +9,24 @@
 //! is blocked. Under it, unless folded: a line per worktree that needs a
 //! look (a few at most), a flat row per agent (the most pressing first:
 //! its status mark, its name or kind, what it is on, a line per subagent
-//! that runs), a "+N more" line, then the CI and pull requests of its
-//! folder's repository once something there needs a look (a run failed, a
-//! review waits): a line per group, each a label and a chip per branch or
-//! pull request, and a count of the other pull requests. Quiet things stay
-//! quiet: an idle agent is muted, a green CI is one mark on the header,
-//! and a workspace with nothing going on folds itself (see
-//! `WorkspaceView::is_quiet`). Above the workspaces, a "Needs you" list
+//! that runs), a "+N more" line listing the chats it counts when clicked,
+//! then the CI and pull requests of its folder's repository, green or
+//! not: a line per group, each a label and a chip per branch or pull
+//! request, and a count of the other pull requests. Folded, the CI is one
+//! mark on the header. Quiet things stay quiet: an idle agent is muted,
+//! and a workspace with nothing going on (a green CI is nothing) folds
+//! itself (see `WorkspaceView::is_quiet`); its chevron is fainter than one
+//! folded by hand. Above the workspaces, a "Needs you" list
 //! gathers the agents of the other workspaces that are blocked or done. The
-//! active workspace's block is tinted. The header of the sidebar holds the
-//! project's name, a button opening the repositories panel and a "+"
-//! button opening the menu of what to add. What moves (hover pills, the
+//! active workspace's block is tinted, and its header's buttons show
+//! faintly even without the pointer, so they can be found. The header of
+//! the sidebar holds the project's name, a button opening the repositories
+//! panel and a "+" button opening the menu of what to add; with no
+//! workspace, a hint under it says so. What moves (hover pills, the
 //! pulse on a blocked agent, a name being renamed) comes in through
 //! `SidebarState`.
 
 use super::layers::{Part, RowCache};
-#[cfg(test)]
-use super::repos::scrollbar;
 use super::{
     AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
     Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
@@ -102,6 +103,8 @@ const STATUS_SLOT: i32 = 16;
 const COUNT_GAP: i32 = 2;
 /// The gap between a header's name and what is right of it.
 const NAME_GAP: i32 = 4;
+/// The gap between a header's pill of errors and its status right of it.
+const PILL_GAP: i32 = 3;
 /// Room for the count of other worktrees on the header.
 const WORKTREE_COUNT_WIDTH: i32 = 30;
 /// How far a hover pill on the header's count or CI mark reaches past it.
@@ -130,6 +133,19 @@ const BLOCKED_TINT: f32 = 0.15;
 const BLOCKED_REST: f32 = 0.4;
 /// How much of the selection colour tints the active workspace's block.
 const ACTIVE_TINT: f32 = 0.45;
+/// How strongly the active workspace's header buttons show at rest, as
+/// a fraction of their hovered look.
+const ACTIVE_BUTTONS: f32 = 0.45;
+/// How much of the warning colour a blocked agent's "blocked" pill has,
+/// over the panel (see `blocked_pill`).
+const BLOCKED_PILL_TINT: f32 = 0.2;
+/// The hint an empty sidebar shows under its header, a line each, and
+/// how far under the header it starts.
+const EMPTY_HINT: [&str; 2] = [
+    "No workspaces yet",
+    "Use + to open a terminal, Zed or Cursor",
+];
+const EMPTY_HINT_TOP: i32 = 12;
 /// The "Needs you" list: its heading's height, and the room after it.
 const INBOX_TITLE: i32 = 20;
 const INBOX_GAP: i32 = 6;
@@ -272,7 +288,6 @@ pub fn sidebar_blinkers(view: &SidebarView, layout: &SidebarLayout, height: i32)
         if let Some(slot) = row.chip
             && ws.status == Some(AgentStatus::Working)
             && blocked_count(cards) == 0
-            && ws.errors == 0
         {
             dots.push(centred_dot(header_status_mark(slot)));
         }
@@ -559,6 +574,17 @@ impl AgentView {
         }
     }
 
+    /// Why it has no "×", when one would be expected: a Cursor chat that
+    /// runs before Cursor saved it can't be deleted yet.
+    pub fn close_unavailable(&self) -> Option<&'static str> {
+        match (&self.key, self.closable) {
+            (AgentKey::Cursor(_), false) => {
+                Some("Cursor hasn't saved this chat yet; it can be deleted once it has")
+            }
+            _ => None,
+        }
+    }
+
     /// What closing it does, as its "×" and menu say: a terminal agent or
     /// a running test goes with its pane; a finished test run, its card;
     /// a Cursor chat goes from gerdr until it changes again.
@@ -598,7 +624,12 @@ impl AgentView {
     /// Everything known of it, for its tooltip under `label`: a line each,
     /// its status first, said in full.
     pub fn tooltip_fields(&self) -> Vec<(String, String)> {
-        let mut fields = vec![("Status".to_owned(), status_meaning(self.status).to_owned())];
+        // A test run says how it went, not what an agent would.
+        let status = match self.test {
+            Some(state) => test_meaning(state),
+            None => status_meaning(self.status),
+        };
+        let mut fields = vec![("Status".to_owned(), status.to_owned())];
         fields.extend(self.lines.iter().map(|l| match l {
             AgentLine::Title(title) => ("Working on".to_owned(), title.clone()),
             AgentLine::Field(label, value) => (label.clone(), value.clone()),
@@ -655,6 +686,16 @@ pub fn status_meaning(status: AgentStatus) -> &'static str {
     }
 }
 
+/// What a test run's `state` means, said in full for a tooltip.
+pub fn test_meaning(state: CiState) -> &'static str {
+    match state {
+        CiState::Running => "Running",
+        CiState::Passed => "Done, passed",
+        CiState::Failed => "Done, failed",
+        CiState::Unknown => "Done",
+    }
+}
+
 /// What a workspace header shows: its name and kind, and what its tabs
 /// show, put together.
 #[derive(Clone, Debug, PartialEq)]
@@ -677,7 +718,7 @@ pub struct WorkspaceView {
     /// a "+N more" line after the rows counts them.
     pub more_agents: Vec<String>,
     /// The CI and pull requests of its folder's repository: a mark on its
-    /// header, or a GitHub section after its agents once it needs a look.
+    /// header while folded, else a GitHub section after its agents.
     pub ci: Option<CiView>,
     /// Whether it shows just its header: folded by hand, or quiet.
     pub folded: bool,
@@ -688,8 +729,7 @@ pub struct WorkspaceView {
     /// (the pointer on its AI button or the strip); else none.
     pub picks: Vec<AgentIcon>,
     /// How many errors its services printed that weren't looked at: a
-    /// badge counting them on its header (after one counting blocked
-    /// agents).
+    /// pill counting them on its header, left of its status.
     pub errors: usize,
 }
 
@@ -880,11 +920,11 @@ impl WorkspaceView {
         all.filter(|w| w.needs_attention()).collect()
     }
 
-    /// How many lines those take under its header at `density`: one each
-    /// up to `WORKTREE_LINES`, and one counting the rest; none while it is
-    /// folded or compact.
-    fn attention_lines(&self, density: Density) -> usize {
-        if self.folded || density == Density::Compact {
+    /// How many lines those take under its header (at either density):
+    /// one each up to `WORKTREE_LINES`, and one counting the rest; none
+    /// while it is folded.
+    fn attention_lines(&self, _density: Density) -> usize {
+        if self.folded {
             return 0;
         }
         let n = self.needing_attention().len();
@@ -960,7 +1000,7 @@ pub fn inbox_order(agents: &[Vec<AgentView>]) -> Vec<(usize, usize)> {
 /// What moves in a workspace header: its hover pill's alpha (0 to 16) and
 /// whether the pointer is on its "×", its restart button, its AI button,
 /// which agent of its strip, its worktree count, its fold chevron, its CI
-/// mark.
+/// mark; and whether it was folded or unfolded by hand.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowState {
     pub hover: u8,
@@ -971,6 +1011,8 @@ pub struct RowState {
     pub worktrees: bool,
     pub fold: bool,
     pub ci: bool,
+    /// Folded or unfolded by hand, not left to fold while quiet.
+    pub by_hand: bool,
 }
 
 /// What moves in an agent row: its hover pill's alpha (0 to 16). A blocked
@@ -1116,6 +1158,9 @@ pub struct RowLayout {
     pub fold: Option<Rect>,
     /// Its status, when it shows: folded, or an agent blocked.
     pub chip: Option<Rect>,
+    /// The pill counting its services' errors not looked at, when it has
+    /// any: left of its status.
+    pub errors: Option<Rect>,
     /// The mark of its CI, while that shows on the header: at the right
     /// end of the branch's line, else of the name's band.
     pub ci: Option<Rect>,
@@ -1164,7 +1209,7 @@ impl RowLayout {
     pub fn rename_field(&self) -> Rect {
         let x = self.name.loc.x - RENAME_INSET;
         let y = self.title.loc.y + (self.title.size.h - RENAME_HEIGHT) / 2;
-        let end = [self.worktrees, self.ci, self.chip]
+        let end = [self.worktrees, self.ci, self.errors, self.chip]
             .into_iter()
             .flatten()
             .filter(|r| r.loc.y == self.title.loc.y)
@@ -1246,11 +1291,13 @@ pub enum SidebarHit {
     /// The repositories button.
     Repos,
     /// Workspace `i`: its header off any part below, its name, its status,
-    /// its "×", its restart button, its agent button, the count of its
-    /// other worktrees, its fold chevron, the mark of its CI.
+    /// the count of its services' errors, its "×", its restart button, its
+    /// agent button, the count of its other worktrees, its fold chevron,
+    /// the mark of its CI.
     Row(usize),
     Name(usize),
     Chip(usize),
+    Errors(usize),
     Close(usize),
     Restart(usize),
     NewAgent(usize),
@@ -1288,6 +1335,7 @@ impl SidebarHit {
             Self::Row(i)
             | Self::Name(i)
             | Self::Chip(i)
+            | Self::Errors(i)
             | Self::Close(i)
             | Self::Restart(i)
             | Self::NewAgent(i)
@@ -1391,6 +1439,8 @@ impl SidebarLayout {
             SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
         } else if row.chip.is_some_and(inside) {
             SidebarHit::Chip(i)
+        } else if row.errors.is_some_and(inside) {
+            SidebarHit::Errors(i)
         } else if inside(row.name) {
             SidebarHit::Name(i)
         } else {
@@ -1468,6 +1518,7 @@ impl SidebarLayout {
                 &mut row.branch,
                 &mut row.fold,
                 &mut row.chip,
+                &mut row.errors,
                 &mut row.ci,
                 &mut row.worktrees,
                 &mut row.attention,
@@ -1514,16 +1565,20 @@ pub fn sidebar_layout(
 /// and how many agents it hides.
 fn status_extent(ws: &WorkspaceView, cards: &[AgentView]) -> Option<i32> {
     let blocked = blocked_count(cards);
-    let count = if blocked > 0 { blocked } else { ws.errors };
-    if count > 0 {
-        let w = text_extent(&count.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
-        return Some(w.max(PILL_HEIGHT));
+    if blocked > 0 {
+        return Some(pill_extent(blocked));
     }
     ws.status.filter(|_| ws.folded)?;
     Some(match cards.len() {
         0 => STATUS_SLOT,
         n => STATUS_SLOT + COUNT_GAP + text_extent(&n.to_string(), TINY_FONT_SIZE),
     })
+}
+
+/// The width of a header pill counting `count`.
+fn pill_extent(count: usize) -> i32 {
+    let w = text_extent(&count.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+    w.max(PILL_HEIGHT)
 }
 
 /// Where the header's parts sit in a sidebar `width` wide: the project's
@@ -1607,7 +1662,8 @@ pub fn sidebar_layout_at(
         let folded = ws.folded && foldable;
 
         // The header: from the right, its "×", its restart button, its
-        // agent button, its status, its CI mark and its worktree count, its name in the rest. With a branch, the
+        // agent button, its status, its count of errors, its CI mark and
+        // its worktree count, its name in the rest. With a branch, the
         // branch goes on a line under the name, with the CI mark and the
         // count at that line's right end.
         let h = ws.height(density);
@@ -1630,6 +1686,14 @@ pub fn sidebar_layout_at(
         });
         let mut end = buttons;
         let chip = status_extent(ws, cards).map(|w| {
+            end -= w;
+            slot(end, w)
+        });
+        let errors = (ws.errors > 0).then(|| {
+            if chip.is_some() {
+                end -= PILL_GAP;
+            }
+            let w = pill_extent(ws.errors);
             end -= w;
             slot(end, w)
         });
@@ -1669,6 +1733,7 @@ pub fn sidebar_layout_at(
             branch,
             fold,
             chip,
+            errors,
             ci: ci_mark,
             close,
             restart,
@@ -1872,17 +1937,16 @@ impl Painter {
         // The header over the rows scrolled under it.
         self.sidebar_head(&mut c, &SidebarHead::of(view), size.w, scale, p);
 
-        // Where the rows are scrolled to, when they do not all fit.
-        let shown = size.h - BAR_HEIGHT;
-        let total = shown + layout.max_scroll(size.h);
-        let first = layout.scroll.max(0) as usize;
-        scrollbar(
-            &mut c,
-            scroll_track(size),
-            (first, shown.max(0) as usize, total.max(0) as usize),
-            scale,
-            p,
-        );
+        // Where the rows are scrolled to, when they do not all fit: the
+        // thumb the chrome composes (see `SidebarLayers`).
+        if let Some(bar) = sidebar_thumb(&layout, size.w, size, state.scroll) {
+            let (x, _, w, _) = rect_px(bar.track, scale);
+            let (y, h) = (
+                (bar.top * scale).round() as f32,
+                (bar.h * scale).round() as f32,
+            );
+            c.rounded(x, y, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
+        }
         sidebar_edge(&mut c, scale, p);
         c.into_buffer(true)
     }
@@ -1921,6 +1985,15 @@ impl Painter {
         }
         let lit = (alpha(head.plus), head.plus_open);
         self.header_button(c, plus, lit, scale, p, |x, y| new_tab(x, y, 0.9 * s));
+        if head.empty && c.h > px(BAR_HEIGHT + EMPTY_HINT_TOP + 2 * CARD_LINE) {
+            let x = px(ROW_INSET) as f32 + PADDING * s;
+            let end = px(width - GAP - ROW_INSET) as f32;
+            for (k, (line, color)) in EMPTY_HINT.iter().zip([p.muted, p.placeholder]).enumerate() {
+                let y = BAR_HEIGHT + EMPTY_HINT_TOP + k as i32 * CARD_LINE;
+                let band = (px(y), px(y + CARD_LINE) - px(y));
+                self.text(c, line, DETAIL_FONT_SIZE, x, end, band, scale, color);
+            }
+        }
         let lit = (alpha(head.repos), head.repos_open);
         self.header_button(c, repos, lit, scale, p, |x, y| git_branch(x, y, 1.05 * s));
         if head.repos_changed > 0 {
@@ -2051,6 +2124,7 @@ impl Painter {
             );
         }
         if let Some(Some(line)) = layout.more.get(i) {
+            // Muted rather than faint: a click lists them.
             let n = ws.more_agents.len();
             self.text(
                 c,
@@ -2060,7 +2134,7 @@ impl Painter {
                 px(line.loc.x + line.size.w) as f32,
                 band(*line, scale),
                 scale,
-                p.placeholder,
+                p.muted,
             );
         }
         if let (Some(Some(ci)), Some(ci_view)) = (layout.ci.get(i), ws.ci.as_ref()) {
@@ -2089,6 +2163,13 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let hover = alpha(row_state.hover);
+        // How strongly its buttons show: with the hover, and faintly at
+        // rest on the active workspace's header.
+        let buttons = if view.active == Some(i) {
+            hover.max(ACTIVE_BUTTONS)
+        } else {
+            hover
+        };
         let title_band = band(row.title, scale);
         let at = |x: i32, w: i32| {
             Rectangle::new((x, row.title.loc.y).into(), (w, row.title.size.h).into())
@@ -2097,10 +2178,16 @@ impl Painter {
             |r: Rect, x: i32, w: i32| Rectangle::new((x, r.loc.y).into(), (w, r.size.h).into());
 
         if let Some(fold) = row.fold {
+            // Folded while quiet, it is fainter than folded by hand.
+            let rest = if row_state.by_hand || !ws.folded {
+                p.placeholder
+            } else {
+                mix(p.placeholder, surface, 0.45)
+            };
             let color = if row_state.fold {
                 p.text
             } else {
-                mix(p.placeholder, p.muted, hover)
+                mix(rest, p.muted, hover)
             };
             let icon = Rectangle::new(
                 (FOLD_X, fold.loc.y).into(),
@@ -2131,11 +2218,12 @@ impl Painter {
         match view.state.rename.as_ref().filter(|(w, _)| *w == i) {
             Some((_, typed)) => self.rename_field(c, typed, row.rename_field(), scale, p),
             None => {
-                // Under the pointer the "×", the restart button, the AI
-                // button and its strip show, and a name reaching under
-                // them stops short of them.
+                // Under the pointer, or faintly on the active workspace's
+                // header, the "×", the restart button, the AI button and
+                // its strip show, and a name reaching under them stops
+                // short of them.
                 let mut end = row.name.loc.x + row.name.size.w;
-                if hover > 0.0 {
+                if buttons > 0.0 {
                     end = end.min(row.buttons_x() - NAME_GAP);
                 }
                 self.text(
@@ -2222,27 +2310,26 @@ impl Painter {
             }
         }
 
-        if let Some(chip) = row.chip {
-            let blocked = blocked_count(cards);
-            if blocked == 0 && ws.errors > 0 {
-                self.header_pill(c, ws.errors, chip, p.error, scale, p);
-            } else if let Some(status) = ws.status {
-                let hidden = if ws.folded { cards.len() } else { 0 };
-                self.header_status(c, status, blocked, hidden, chip, scale, p);
-            }
+        if let Some(pill) = row.errors {
+            self.header_pill(c, ws.errors, pill, p.error, scale, p);
         }
-        if hover > 0.0 {
+        if let (Some(chip), Some(status)) = (row.chip, ws.status) {
+            let hidden = if ws.folded { cards.len() } else { 0 };
+            let blocked = blocked_count(cards);
+            self.header_status(c, status, blocked, hidden, chip, scale, p);
+        }
+        if buttons > 0.0 {
             let color = if row_state.close {
                 p.text
             } else {
-                mix(surface, p.placeholder, hover)
+                mix(surface, p.placeholder, buttons)
             };
             icon_sdf(c, row.close, scale, color, |x, y| cross(x, y, 0.8 * s));
             if let Some(restart) = row.restart {
                 let color = if row_state.restart {
                     p.text
                 } else {
-                    mix(surface, p.placeholder, hover)
+                    mix(surface, p.placeholder, buttons)
                 };
                 icon_sdf(c, restart, scale, color, |x, y| {
                     restart_arrow(x, y, 0.8 * s)
@@ -2251,7 +2338,7 @@ impl Painter {
             let color = if row_state.agent {
                 p.text
             } else {
-                mix(surface, p.placeholder, hover)
+                mix(surface, p.placeholder, buttons)
             };
             icon_sdf(c, row.agent, scale, color, |x, y| sparkle(x, y, s));
         }
@@ -2481,7 +2568,7 @@ impl Painter {
             f32::MAX,
             pill_band,
             scale,
-            p.on_accent,
+            ink_on(color, p),
         );
     }
 
@@ -2645,6 +2732,13 @@ impl Painter {
             };
             icon_sdf(c, close, scale, color, |x, y| cross(x, y, 0.8 * s));
             px(close.loc.x) as f32
+        } else if card.close_unavailable().is_some() && hover > 0.0 {
+            // Where its "×" would be, too faint to look pressable: its
+            // tooltip says why it isn't there.
+            let close = card_close(rect, density);
+            let color = mix(surface, p.placeholder, 0.3 * hover);
+            icon_sdf(c, close, scale, color, |x, y| cross(x, y, 0.8 * s));
+            px(close.loc.x) as f32
         } else if let Some(place) = place {
             let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
             let w = self.text_width(place, DETAIL_FONT_SIZE, scale).min(most);
@@ -2667,7 +2761,7 @@ impl Painter {
             let pill_h = px(PILL_HEIGHT) as f32;
             let pill_x = (right - pill_w).round();
             let pill_y = (line_band.0 as f32 + (line_band.1 as f32 - pill_h) / 2.0).round();
-            let pill_fill = mix(surface, p.warning, 0.25);
+            let pill_fill = blocked_pill(p);
             c.rounded(
                 pill_x,
                 pill_y,
@@ -2686,7 +2780,7 @@ impl Painter {
                 f32::MAX,
                 pill_band,
                 scale,
-                p.warning,
+                ink_on(pill_fill, p),
             );
             pill_x - px(TITLE_GAP) as f32
         } else {
@@ -2737,7 +2831,13 @@ impl Painter {
                 let (lx, ly, lw, lh) = rect_px(line, scale);
                 c.rounded(lx, ly, lw, lh, lh / 2.0, mix(base, p.text, 0.1 * lit));
             }
-            let color = mix(p.muted, p.text, lit);
+            // One with no agent to show yet can't be clicked: fainter.
+            let rest = if sub.key.is_some() {
+                p.muted
+            } else {
+                p.placeholder
+            };
+            let color = mix(rest, p.text, lit);
             let (ex, thin) = (text_x as i32 + px(2), px(1).max(1));
             let (top, mid) = (px(line.loc.y + 3), px(line.loc.y + CARD_LINE / 2));
             c.fill(ex, top, thin, mid - top + thin, color);
@@ -2912,6 +3012,8 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
 /// they open is, and the repositories button's badge.
 #[derive(Clone, Debug, PartialEq)]
 struct SidebarHead {
+    /// No workspace shows: a hint under the header says how to add one.
+    empty: bool,
     project: Option<String>,
     lit: bool,
     plus: u8,
@@ -2926,6 +3028,7 @@ impl SidebarHead {
     fn of(view: &SidebarView) -> Self {
         let state = &view.state;
         Self {
+            empty: view.workspaces.is_empty(),
             project: view.project.clone(),
             lit: view.header_lit,
             plus: state.plus,
@@ -2960,25 +3063,48 @@ pub fn sidebar_thumb(
     output: Size<i32, Logical>,
     scroll: f64,
 ) -> Option<super::Thumb> {
-    let max = layout.max_scroll(output.h);
     let shown = output.h - BAR_HEIGHT;
     let track = scroll_track((width, output.h).into());
-    let room = track.size.h as f64;
-    if max <= 0 || shown <= 0 || room <= 0.0 {
-        return None;
+    let total = (shown + layout.max_scroll(output.h)) as f64;
+    let bar = super::ListBar {
+        down: scroll,
+        total,
+    };
+    super::Thumb::of(track, shown as f64, bar)
+}
+
+/// The fill of a blocked card's status pill: the warning colour over the
+/// panel, not over the card, so its label reads at 4.5:1 or more however
+/// lit the card is (hovered, open, pulsing), in both themes.
+fn blocked_pill(p: &Palette) -> Rgb {
+    mix(p.panel, p.warning, BLOCKED_PILL_TINT)
+}
+
+/// How far apart `a` and `b` are in WCAG contrast, 1 to 21.
+fn contrast(a: Rgb, b: Rgb) -> f32 {
+    let luminance = |[r, g, b]: Rgb| {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
+/// a count or label on a coloured pill keeps its contrast in both themes.
+fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+    if contrast(p.on_accent, fill) >= contrast(p.text, fill) {
+        p.on_accent
+    } else {
+        p.text
     }
-    let total = (shown + max) as f64;
-    let h = (room * shown as f64 / total)
-        .max((THUMB_MIN as f64).min(room))
-        .min(room)
-        .round();
-    let top = track.loc.y as f64 + (room - h) * scroll.clamp(0.0, max as f64) / max as f64;
-    Some(super::Thumb {
-        track,
-        top,
-        h,
-        last: max as f64,
-    })
 }
 
 /// The line closing the sidebar at its right edge, down all of `c`.
@@ -2990,8 +3116,6 @@ fn sidebar_edge(c: &mut Canvas, scale: f64, p: &Palette) {
 /// How far above its top a workspace's block buffer reaches: a name being
 /// renamed stands out of a compact header's band.
 const BLOCK_OVER: i32 = 2;
-/// The shortest the scrollbar's thumb gets, as in the repositories panel.
-const THUMB_MIN: i32 = 24;
 
 /// What a workspace's block is drawn from: its view and its agents',
 /// whether it is the active one, what moves in it, the name typed while
@@ -3101,19 +3225,6 @@ impl Painter {
         self.inbox_rows(&mut c, title, &rows, key.density, scale, p);
         c.into_buffer(true)
     }
-
-    /// The sidebar scrollbar's thumb, `size` big.
-    fn scroll_thumb(
-        &self,
-        size: Size<i32, Logical>,
-        scale: f64,
-        p: &Palette,
-    ) -> MemoryRenderBuffer {
-        let mut c = Canvas::new(physical(size, scale));
-        let (w, h) = (c.w as f32, c.h as f32);
-        c.rounded(0.0, 0.0, w, h, w / 2.0, mix(p.elevated, p.muted, 0.45));
-        c.into_buffer(false)
-    }
 }
 
 /// The sidebar as the chrome shows it: its frame (the header and what
@@ -3188,7 +3299,7 @@ impl SidebarLayers {
         if let Some(bar) = sidebar_thumb(&layout, width, output, scroll) {
             let thumb = (SCROLLBAR_WIDTH, bar.h as i32).into();
             let buffer = self.thumb.get((thumb, theme, scale), |(size, ..)| {
-                painter.scroll_thumb(*size, scale, theme.palette())
+                painter.bar_thumb(*size, scale, theme.palette())
             });
             let at = (bar.track.loc.x as f64, bar.top).into();
             parts.push(Part::new(buffer, bar.track.loc, thumb, 1.0).at(at));
@@ -3311,14 +3422,30 @@ impl SidebarLayers {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_blocked_pills_label_reads_at_4_5_to_1_in_both_themes() {
+        use super::{blocked_pill, contrast, ink_on, mix, pulse_alpha};
+        for theme in [crate::chrome::Theme::Dark, crate::chrome::Theme::Light] {
+            let p = theme.palette();
+            let pill = blocked_pill(p);
+            let ink = ink_on(pill, p);
+            // At rest and with the pulse at its strongest over it.
+            for fill in [pill, mix(pill, p.warning, pulse_alpha(1.0))] {
+                let ratio = contrast(ink, fill);
+                assert!(ratio >= 4.5, "{theme:?}: {ratio}");
+            }
+        }
+    }
+
     use super::{
         AGENT_ROW, AGENT_ROW_COMPACT, AGENT_SLOT, ATTENTION_BOTTOM, AgentIcon, AgentLine,
         AgentView, BLOCK_GAP, BRANCH_LINE, BRANCH_LINE_COMPACT, CARD_LINE, CHILD_GAP, CHILD_TEXT_X,
         CHILD_X, CI_CHIP_GAP, CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip, CiLayout, CiView,
         DETAIL_FONT_SIZE, Density, FOLDER, GAP, HEADER_BUTTON, HEADER_ROW, HEADER_ROW_COMPACT,
-        INBOX_GAP, INBOX_TITLE, NAME_LINE, NAME_LINE_COMPACT, NAME_X, ROW_INSET, ROWS_TOP,
-        SCROLL_END, SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView, card_order, ci_chip_width,
-        inbox_order, sentence_case, sidebar_layout, sidebar_layout_at, text_extent, workspace_slot,
+        INBOX_GAP, INBOX_TITLE, NAME_GAP, NAME_LINE, NAME_LINE_COMPACT, NAME_X, PILL_GAP,
+        ROW_INSET, ROWS_TOP, SCROLL_END, SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView,
+        card_order, ci_chip_width, inbox_order, sentence_case, sidebar_layout, sidebar_layout_at,
+        text_extent, workspace_slot,
     };
     use crate::WorkspaceKind;
     use crate::chrome::{BAR_HEIGHT, Rect, TabView};
@@ -3545,7 +3672,9 @@ mod tests {
             w.merged = false;
         }
         assert_eq!(ws.height(Density::Comfortable), lines(4));
-        assert_eq!(ws.height(Density::Compact), BRANCHED_COMPACT);
+        // Compact keeps the lines too.
+        let compact = BRANCHED_COMPACT + 4 * TAB_LINE + ATTENTION_BOTTOM;
+        assert_eq!(ws.height(Density::Compact), compact);
         let layout = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
         let row = layout.rows[0];
         // On the branch's line, at its right end.
@@ -3560,10 +3689,10 @@ mod tests {
         let lines = row.attention.expect("worktree lines");
         assert_eq!(lines.loc.y, ROWS_TOP + BRANCHED);
         assert_eq!(layout.hit(mid(lines)), Some(SidebarHit::Attention(0, 2)));
-        // Compact headers count them, and have no lines.
+        // Compact headers count them, and keep their lines.
         let compact = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Compact);
         assert!(compact.rows[0].worktrees.is_some());
-        assert_eq!(compact.rows[0].attention, None);
+        assert!(compact.rows[0].attention.is_some());
         // Folded: the lines go, the count stays.
         ws.folded = true;
         assert_eq!(ws.height(Density::Comfortable), BRANCHED);
@@ -4005,6 +4134,143 @@ mod tests {
         let layout = sidebar_layout(&workspaces, &blocked, 200);
         let chip = layout.rows[0].chip.unwrap();
         assert_eq!(layout.hit(mid(chip)), Some(SidebarHit::Chip(0)));
+    }
+
+    #[test]
+    fn errors_and_blocked_agents_each_get_a_pill() {
+        let long = "a-workspace-with-a-very-long-name-indeed";
+        let mut ws = workspace(long, Some(AgentStatus::Blocked), Some("main"));
+        ws.errors = 3;
+        let blocked = vec![vec![agent("p1", AgentStatus::Blocked, None)]];
+        for density in [Density::Comfortable, Density::Compact] {
+            // Both: the errors left of the blocked badge, a gap between,
+            // the name ending before the errors.
+            let layout = sidebar_layout_at(std::slice::from_ref(&ws), &blocked, 200, density);
+            let row = layout.rows[0];
+            let (chip, errors) = (row.chip.unwrap(), row.errors.unwrap());
+            assert_eq!(errors.loc.x + errors.size.w + PILL_GAP, chip.loc.x);
+            assert_eq!(chip.loc.x + chip.size.w, row.agent.loc.x);
+            assert_eq!((errors.loc.y, errors.size.h), (chip.loc.y, chip.size.h));
+            assert_eq!(row.name.loc.x + row.name.size.w, errors.loc.x - NAME_GAP);
+            assert!(row.rename_field().loc.x + row.rename_field().size.w < errors.loc.x);
+            assert_eq!(layout.hit(mid(chip)), Some(SidebarHit::Chip(0)));
+            assert_eq!(layout.hit(mid(errors)), Some(SidebarHit::Errors(0)));
+            assert_eq!(SidebarHit::Errors(0).pill(), SidebarHit::Row(0));
+            // The errors alone: where the badge would be, the name up to
+            // them.
+            let mut quiet = ws.clone();
+            quiet.status = Some(AgentStatus::Idle);
+            let idle = vec![vec![agent("p1", AgentStatus::Idle, None)]];
+            let layout = sidebar_layout_at(&[quiet], &idle, 200, density);
+            let row = layout.rows[0];
+            assert_eq!(row.chip, None);
+            let alone = row.errors.unwrap();
+            assert_eq!(alone.loc.x + alone.size.w, row.agent.loc.x);
+            assert_eq!(row.name.loc.x + row.name.size.w, alone.loc.x - NAME_GAP);
+            // The blocked badge alone: no errors, the name up to it.
+            let mut none = ws.clone();
+            none.errors = 0;
+            let layout = sidebar_layout_at(&[none], &blocked, 200, density);
+            let row = layout.rows[0];
+            assert_eq!(row.errors, None);
+            let chip = row.chip.unwrap();
+            assert_eq!(row.name.loc.x + row.name.size.w, chip.loc.x - NAME_GAP);
+            // Folded: the status and how many it hides, the errors left
+            // of them.
+            let mut folded = ws.clone();
+            folded.status = Some(AgentStatus::Working);
+            folded.folded = true;
+            let working = vec![vec![agent("p1", AgentStatus::Working, None)]];
+            let layout = sidebar_layout_at(&[folded.clone()], &working, 200, density);
+            let row = layout.rows[0];
+            let (chip, errors) = (row.chip.unwrap(), row.errors.unwrap());
+            assert_eq!(errors.loc.x + errors.size.w + PILL_GAP, chip.loc.x);
+            if density == Density::Comfortable {
+                // Its working dot still blinks in the status, not on the
+                // errors (`blinkers` lays out 240 wide).
+                let layout = sidebar_layout_at(&[folded.clone()], &working, 240, density);
+                let (chip, errors) = (layout.rows[0].chip, layout.rows[0].errors);
+                let dots = blinkers(vec![folded], working);
+                assert_eq!(dots.len(), 1);
+                assert!(chip.unwrap().contains(dots[0].loc));
+                assert!(!errors.unwrap().contains(dots[0].loc));
+            }
+        }
+        // A wider count, a wider pill.
+        let mut many = ws.clone();
+        many.errors = 120;
+        let layout = sidebar_layout(&[many], &blocked, 200);
+        let wide = layout.rows[0].errors.unwrap();
+        let layout = sidebar_layout(&[ws], &blocked, 200);
+        assert!(wide.size.w > layout.rows[0].errors.unwrap().size.w);
+    }
+
+    #[test]
+    fn cards_say_why_they_cant_close_and_how_tests_went() {
+        let mut chat = agent("p1", AgentStatus::Working, None);
+        chat.key = crate::agents::AgentKey::Cursor("c1".into());
+        chat.closable = false;
+        assert!(chat.close_unavailable().is_some());
+        chat.closable = true;
+        assert_eq!(chat.close_unavailable(), None);
+        // A terminal agent always has its "×".
+        assert_eq!(
+            agent("p2", AgentStatus::Idle, None).close_unavailable(),
+            None
+        );
+        // A finished test, seen, is idle, but says it is done.
+        let mut test = agent("p3", AgentStatus::Idle, None);
+        test.test = Some(CiState::Passed);
+        assert_eq!(test.tooltip_fields()[0].1, "Done, passed");
+    }
+
+    #[test]
+    fn pills_take_the_ink_that_reads_on_them() {
+        use crate::chrome::Theme;
+        let dark = Theme::Dark.palette();
+        let light = Theme::Light.palette();
+        // Whichever ink it takes reads on the warning pill: the label is
+        // small text, so it needs 4.5:1.
+        let luminance = |[r, g, b]: super::Rgb| {
+            let lin = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        };
+        let contrast = |a: super::Rgb, b: super::Rgb| {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        for p in [dark, light] {
+            let ink = super::ink_on(p.warning, p);
+            assert!([p.on_accent, p.text].contains(&ink));
+            assert!(
+                contrast(ink, p.warning) >= 4.5,
+                "{}",
+                contrast(ink, p.warning)
+            );
+        }
+        // An empty sidebar draws its hint, in both themes.
+        let painter = crate::chrome::Painter::new();
+        for p in [dark, light] {
+            let head = super::SidebarHead {
+                empty: true,
+                project: None,
+                lit: false,
+                plus: 0,
+                plus_open: false,
+                repos: 0,
+                repos_open: false,
+                repos_changed: 0,
+                repos_stuck: false,
+            };
+            painter.sidebar_frame(&head, (240, 400).into(), 1.5, p);
+        }
     }
 
     #[test]

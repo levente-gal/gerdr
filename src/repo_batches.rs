@@ -8,7 +8,10 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -26,7 +29,7 @@ use crate::{
         TreeLine, TreeTool,
     },
     desktop,
-    diff_edit::{self, Done, FileEdit, Put},
+    diff_edit::{self, Cut, Done, FileEdit, Put},
     diff_view::Position,
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
@@ -43,6 +46,10 @@ use crate::{
 const BATCH_THREADS: usize = 4;
 /// How many cuts made from the diff can be undone.
 const CUTS: usize = 100;
+
+/// A batch that took this long says it is done in a toast, panel open
+/// or not.
+const SAY_DONE_AFTER: Duration = Duration::from_secs(5);
 
 /// Opening the panel fetches the repositories last fetched longer ago.
 const FETCH_AGE: Duration = Duration::from_secs(5 * 60);
@@ -186,6 +193,10 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("pushing…");
             chain(log, git_ops::push(dir, task.remote.as_deref(), false))
         }
+        BatchKind::Amend { msg, .. } => {
+            step("amending…");
+            git_ops::amend_paths(dir, &task.job.files, msg.as_deref())
+        }
         BatchKind::Push { force } => {
             step("pushing…");
             git_ops::push(dir, task.remote.as_deref(), *force)
@@ -257,13 +268,17 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("stashing…");
             git_ops::stash_push(dir)
         }
-        BatchKind::StashPop => {
+        BatchKind::StashPop(n) => {
             step("popping the stash…");
-            git_ops::stash_pop(dir)
+            git_ops::stash_pop(dir, *n)
         }
-        BatchKind::StashDrop => {
+        BatchKind::StashDrop(n) => {
             step("dropping the stash…");
-            git_ops::stash_drop(dir)
+            git_ops::stash_drop(dir, *n)
+        }
+        BatchKind::Discard => {
+            step("discarding…");
+            git_ops::discard(dir, &task.job.files)
         }
     }
 }
@@ -450,6 +465,61 @@ pub(crate) fn repos_tip(changed: usize, stuck: usize) -> String {
     text
 }
 
+/// `n` lines, in words.
+fn lines(n: usize) -> String {
+    match n {
+        1 => "1 line".into(),
+        n => format!("{n} lines"),
+    }
+}
+
+/// What `edit` does to its file, as said once done: `Deleted 2 lines from
+/// src/a.rs:40`.
+fn cut_said(edit: &FileEdit) -> String {
+    let path = &edit.path;
+    match &edit.cut {
+        Cut::Lines(numbers) => {
+            let first = numbers.iter().min().copied().unwrap_or(edit.caret.line);
+            format!("Deleted {} from {path}:{first}", lines(numbers.len()))
+        }
+        Cut::Chars(from, to) if from.line == to.line => {
+            let n = to.col.saturating_sub(from.col);
+            let chars = if n == 1 { "char" } else { "chars" };
+            format!("Deleted {n} {chars} from {path}:{}", from.line)
+        }
+        Cut::Chars(from, to) => format!(
+            "Deleted from {path}:{} to line {}, joining them",
+            from.line, to.line
+        ),
+        Cut::Restore { drop, put } => {
+            let n = edit.cut.restored().unwrap_or(0);
+            let first = (drop.iter().copied())
+                .chain(put.iter().map(|(at, _)| *at))
+                .min()
+                .unwrap_or(edit.caret.line);
+            format!("Restored {} in {path}:{first}", lines(n))
+        }
+    }
+}
+
+/// What pasting `register` as `put` does, as said once done: `Pasted 2
+/// lines into src/a.rs:41`.
+fn paste_said(put: &Put, register: &diff_edit::Register) -> String {
+    let path = &put.path;
+    let line = match (register.lines, put.before) {
+        (true, false) => put.at.line + 1,
+        _ => put.at.line,
+    };
+    if register.lines {
+        let n = register.text.lines().count() * put.count.max(1);
+        format!("Pasted {} into {path}:{line}", lines(n))
+    } else {
+        let n = register.text.chars().count() * put.count.max(1);
+        let chars = if n == 1 { "char" } else { "chars" };
+        format!("Pasted {n} {chars} into {path}:{line}")
+    }
+}
+
 fn level(tone: Tone) -> Level {
     match tone {
         Tone::Success => Level::Success,
@@ -500,12 +570,13 @@ impl Gerdr {
     }
 
     /// What the panel's views and keys need of the chrome: the density,
-    /// the tree's share of the panel, and how many characters a review
-    /// comment's row of the diff holds.
-    fn repos_env(&self) -> (Density, f64, usize) {
+    /// the tree's share of the panel, how many characters a review
+    /// comment's row of the diff holds, and how many lines a sheet shows.
+    fn repos_env(&self) -> (Density, f64, usize, usize) {
         let share = self.repos.tree_share.unwrap_or(chrome::REPOS_TREE_SHARE);
         let cols = chrome::repos_detail_cols(self.output_size(), share);
-        (self.density, share, cols)
+        let sheet = chrome::repos_sheet_rows(self.output_size(), false);
+        (self.density, share, cols, sheet)
     }
 
     /// Open the repositories panel: as it was left, for the same project.
@@ -542,6 +613,65 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// The agent the review goes to, by its pane and what it is called:
+    /// one in the workspace of a repository commented on (working in that
+    /// repository first), else in the workspace shown.
+    fn review_agent(&self) -> Option<(String, String)> {
+        let panel = self.repos.panel.as_ref()?;
+        let mut roots: Vec<&Path> = Vec::new();
+        for comment in &panel.diff.review.comments {
+            if !roots.contains(&comment.root.as_path()) {
+                roots.push(&comment.root);
+            }
+        }
+        let item_of = |root: &&Path| self.repos.items.iter().find(|i| i.root == *root);
+        let mut workspaces: Vec<usize> = roots
+            .iter()
+            .filter_map(item_of)
+            .map(|i| i.workspace)
+            .collect();
+        workspaces.push(self.active_workspace);
+        for w in workspaces {
+            let Some(id) = self.workspaces.get(w).and_then(|ws| ws.herdr_id()) else {
+                continue;
+            };
+            let here: Vec<&crate::herdr::AgentInfo> = self
+                .agents
+                .iter()
+                .filter(|a| a.workspace_id == id)
+                .collect();
+            let in_repo = here.iter().find(|a| {
+                let dir = a.foreground_cwd.as_ref().or(a.cwd.as_ref());
+                dir.is_some_and(|dir| roots.iter().any(|root| dir.starts_with(root)))
+            });
+            if let Some(agent) = in_repo.or(here.first()) {
+                return Some((agent.pane_id.clone(), agent.label().to_owned()));
+            }
+        }
+        None
+    }
+
+    /// Send the review (`text`, `count` comments) to its agent, as typed
+    /// there and sent with Enter; said either way.
+    fn repos_send_review(&mut self, text: &str, count: usize) {
+        let what = if count == 1 {
+            "1 review comment".to_owned()
+        } else {
+            format!("{count} review comments")
+        };
+        let Some((pane, label)) = self.review_agent() else {
+            return self
+                .show_warning("No agent runs in this workspace: copy the review instead".into());
+        };
+        let Some(herdr) = self.herdr.as_mut() else {
+            return self.show_error("herdr isn't running: copy the review instead".into());
+        };
+        match herdr.send_line(&pane, text.trim_end()) {
+            Ok(()) => self.show_success(format!("Sent {what} to {label}")),
+            Err(err) => self.show_error(format!("Couldn't send the review to {label}: {err}")),
+        }
+    }
+
     /// Save the panel's review comments with the project, if they changed.
     fn repos_save_review(&mut self) {
         let Some(panel) = self.repos.panel.as_mut().filter(|p| p.diff.review_dirty) else {
@@ -557,14 +687,17 @@ impl Gerdr {
         }
     }
 
-    /// Close the panel, kept as it is for opening again.
+    /// Close the panel, kept as it is for opening again; the edits made
+    /// from its diff can no longer be undone.
     fn close_repos(&mut self) {
         if self.repos.worktree.is_some() {
-            return self.close_worktree_diff();
+            self.close_worktree_diff();
+            return self.forget_edits();
         }
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
+        self.forget_edits();
         self.refresh_pointer_focus();
     }
 
@@ -630,8 +763,12 @@ impl Gerdr {
     /// The panel's state brought in line with the last Git status read,
     /// and the detail it wants read.
     fn repos_refresh(&mut self) {
+        let agent = self.review_agent().map(|(_, label)| label);
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.agent = agent;
+        }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -639,6 +776,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         if let Some(panel) = panel.as_mut() {
@@ -653,6 +791,8 @@ impl Gerdr {
                 density,
                 tree_share,
                 cols,
+                sheet_rows,
+                background,
             };
             panel.refresh(&ctx);
         }
@@ -688,7 +828,7 @@ impl Gerdr {
     /// thread.
     fn repos_detail(&mut self) {
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Some(panel) = self.repos.panel.as_ref() else {
             return;
         };
@@ -703,6 +843,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background: &self.repos.background,
         };
         let diffs = panel.diffs_wanted(&ctx);
         let key = panel
@@ -753,7 +895,7 @@ impl Gerdr {
             return self.worktree_diff_key(mods, sym, typed);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -761,6 +903,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -774,6 +917,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
@@ -834,7 +979,7 @@ impl Gerdr {
             return self.worktree_diff_hit(hit, double, shift, ctrl);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -842,6 +987,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -855,6 +1001,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         let mut drags = false;
         let outcome = panel.as_mut().and_then(|p| {
@@ -889,9 +1037,6 @@ impl Gerdr {
     /// and a menu of the actions opens; elsewhere in the panel, the menu
     /// alone.
     pub fn repos_right_click(&mut self, pos: Point<f64, Logical>) {
-        if self.repos.worktree.is_some() {
-            return;
-        }
         let Some(view) = self.repos_view() else {
             return;
         };
@@ -902,6 +1047,13 @@ impl Gerdr {
         };
         if view.sheet.is_some() || view.branch.menu.is_some() {
             return;
+        }
+        // A worktree's diff: its footer's actions.
+        if self.repos.worktree.is_some() {
+            let at = chrome::Rect::new((pos.x as i32, pos.y as i32).into(), (1, 1).into());
+            let hints: Vec<&Hint> = view.hints.iter().collect();
+            let spec = repos_menu_spec(&hints, None, at);
+            return self.open_menu(spec);
         }
         let line = match hit {
             ReposHit::Line(i)
@@ -926,15 +1078,30 @@ impl Gerdr {
         let path = view
             .selected
             .and_then(|_| self.repos.panel.as_ref()?.selected_path());
-        let hints: Vec<&Hint> = view.hints.iter().collect();
-        let spec = repos_menu_spec(&hints, path, anchor);
+        // On a file or folder, what acts on it first, then its path.
+        let on_file =
+            |h: &&Hint| matches!(h.button, ReposButton::OpenInZed | ReposButton::DiscardFile);
+        let file: bool = line.is_some() && view.hints.iter().any(|h| on_file(&h));
+        let spec = if file {
+            let (first, rest): (Vec<&Hint>, Vec<&Hint>) = view.hints.iter().partition(on_file);
+            let mut spec = repos_menu_spec(&first, path, anchor);
+            spec.items
+                .extend(repos_menu_spec(&rest, None, anchor).items);
+            spec
+        } else {
+            let hints: Vec<&Hint> = view.hints.iter().collect();
+            repos_menu_spec(&hints, path, anchor)
+        };
         self.open_menu(spec);
     }
 
     /// Do `button`, as a menu asks.
     pub fn repos_press(&mut self, button: ReposButton) {
+        if self.repos.worktree.is_some() {
+            return self.worktree_diff_press(button);
+        }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -942,6 +1109,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -955,6 +1123,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         let outcome = panel.as_mut().and_then(|p| p.press(button, &ctx));
         self.repos_detail();
@@ -995,7 +1165,7 @@ impl Gerdr {
             return self.worktree_diff_drag(by, row);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1003,6 +1173,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1016,6 +1187,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         let Some(p) = panel.as_mut() else {
             return;
@@ -1167,7 +1340,7 @@ impl Gerdr {
             .as_ref()
             .is_some_and(|(menu, _)| menu.to_f64().contains(pos));
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1175,6 +1348,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1188,6 +1362,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         let Some(panel) = panel.as_mut() else {
             return;
@@ -1209,7 +1385,7 @@ impl Gerdr {
             return self.worktree_diff_scroll_to(pos);
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1217,6 +1393,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1230,6 +1407,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         if let Some(panel) = panel.as_mut() {
             panel.stand_at(pos, detail, &ctx);
@@ -1246,7 +1425,7 @@ impl Gerdr {
             return false;
         }
         let page = self.repos_page();
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
             panel,
             batch,
@@ -1254,6 +1433,7 @@ impl Gerdr {
             same_branches,
             top_branches,
             fetches,
+            background,
             ..
         } = &mut self.repos;
         let ctx = Ctx {
@@ -1267,6 +1447,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background,
         };
         let Some(panel) = panel.as_mut() else {
             return false;
@@ -1284,7 +1466,7 @@ impl Gerdr {
             return self.worktree_diff_view();
         }
         let panel = self.repos.panel.as_ref()?;
-        let (density, tree_share, cols) = self.repos_env();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let ctx = Ctx {
             items: &self.repos.items,
             batch: self.repos.batch.as_ref(),
@@ -1296,6 +1478,8 @@ impl Gerdr {
             density,
             tree_share,
             cols,
+            sheet_rows,
+            background: &self.repos.background,
         };
         let title = self
             .project
@@ -1313,12 +1497,18 @@ impl Gerdr {
                 self.projects.repo_grouping = grouping;
                 self.projects.save();
             }
-            Outcome::Notice(text) => self.show_notice(text.into()),
+            // Why a key did nothing.
+            Outcome::Notice(text) => self.show_warning(text.into()),
             Outcome::Cut(edit) => self.repos_cut(edit),
             Outcome::Yank(edit) => self.repos_yank(edit),
             Outcome::Paste(put) => self.repos_paste(put),
-            Outcome::UndoCut => self.repos_undo_cut(false),
-            Outcome::RedoCut => self.repos_undo_cut(true),
+            Outcome::Stop => self.stop_batches(),
+            Outcome::Refresh => {
+                self.refresh_git();
+                self.repos_read();
+            }
+            Outcome::UndoCut(file) => self.repos_undo_cut(false, file),
+            Outcome::RedoCut(file) => self.repos_undo_cut(true, file),
             Outcome::Batch { .. }
             | Outcome::Confirmed { .. }
             | Outcome::CreateBranch { .. }
@@ -1371,6 +1561,7 @@ impl Gerdr {
                 };
                 self.toast(format!("Copied {what} for an AI agent"), Level::Success);
             }
+            Outcome::SendReview { text, count } => self.repos_send_review(&text, count),
             Outcome::RunInTerminal(root) => {
                 let Some(item) = self.repos.items.iter().find(|i| i.root == root) else {
                     return;
@@ -1409,20 +1600,19 @@ impl Gerdr {
     }
 
     /// Cut `edit` out of its file, kept to paste, the caret to go where
-    /// the cut was once the diff is read again. A restore isn't kept to
-    /// paste: it says what it put back instead.
+    /// the cut was once the diff is read again; said, with where. A
+    /// restore isn't kept to paste.
     fn repos_cut(&mut self, edit: FileEdit) {
-        match (diff_edit::apply(&edit), edit.cut.restored()) {
-            (Ok((done, _)), Some(n)) => {
+        match diff_edit::apply(&edit) {
+            Ok((done, taken)) => {
+                if edit.cut.restored().is_none() {
+                    self.repos.register = taken;
+                }
+                let said = cut_said(&edit);
                 self.repos_edited(done);
-                let lines = if n == 1 { "line" } else { "lines" };
-                self.show_notice(format!("Restored {n} {lines} · u to undo"));
+                self.show_success(format!("{said} · u to undo"));
             }
-            (Ok((done, taken)), None) => {
-                self.repos.register = taken;
-                self.repos_edited(done);
-            }
-            (Err(why), _) => self.show_notice(why),
+            Err(why) => self.show_error(why),
         }
     }
 
@@ -1440,26 +1630,37 @@ impl Gerdr {
                 self.repos.register = taken;
                 self.show_notice(what);
             }
-            Err(why) => self.show_notice(why),
+            Err(why) => self.show_error(why),
         }
     }
 
-    /// Put what was yanked or deleted last in as `put` says.
+    /// Put what was yanked or deleted last in as `put` says; said, with
+    /// where.
     fn repos_paste(&mut self, put: Put) {
         match diff_edit::paste(&put, &self.repos.register) {
-            Ok(done) => self.repos_edited(done),
-            Err(why) => self.show_notice(why),
+            Ok(done) => {
+                let said = paste_said(&put, &self.repos.register);
+                self.repos_edited(done);
+                self.show_success(format!("{said} · u to undo"));
+            }
+            Err(why) => self.show_error(why),
         }
     }
 
-    /// A file was edited from the diff: undone with `u`, the caret to go
+    /// A file was edited from the diff: undone with `u` (its file's edits
+    /// done again with `U` no longer), marked in the tree, the caret to go
     /// where the edit left it once the diff is read again.
     fn repos_edited(&mut self, done: Done) {
         if let Some(diff) = self.repos.diff_mut() {
             diff.place_caret(done.root.clone(), done.path.clone(), done.then);
         }
         let root = done.root.clone();
-        self.repos.undone.clear();
+        let file = (done.root.clone(), done.path.clone());
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.edited.insert(file.clone());
+        }
+        let same = |d: &Done| d.root == file.0 && d.path == file.1;
+        self.repos.undone.retain(|d| !same(d));
         self.repos.cuts.push(done);
         if self.repos.cuts.len() > CUTS {
             self.repos.cuts.remove(0);
@@ -1481,20 +1682,26 @@ impl Gerdr {
         self.refresh_git();
     }
 
-    /// Undo the last cut, or (`again`) do the last undone again, unless
-    /// its file changed since.
-    fn repos_undo_cut(&mut self, again: bool) {
-        let done = match again {
-            true => self.repos.undone.pop(),
-            false => self.repos.cuts.pop(),
+    /// Undo the last cut in `file` (by root and path; with none, the last
+    /// anywhere), or (`again`) do the last undone there again, unless its
+    /// file changed since; said, with the file.
+    fn repos_undo_cut(&mut self, again: bool, file: Option<(PathBuf, String)>) {
+        let stack = match again {
+            true => &mut self.repos.undone,
+            false => &mut self.repos.cuts,
         };
-        let Some(done) = done else {
-            let none = if again {
-                "Nothing to do again"
-            } else {
-                "Nothing to undo"
+        let of = |d: &Done| {
+            file.as_ref()
+                .is_none_or(|(r, p)| d.root == *r && d.path == *p)
+        };
+        let at = stack.iter().rposition(of);
+        let Some(done) = at.map(|at| stack.remove(at)) else {
+            let what = if again { "do again" } else { "undo" };
+            let none = match &file {
+                Some((_, path)) => format!("Nothing to {what} in {path}"),
+                None => format!("Nothing to {what}"),
             };
-            return self.show_notice(none.into());
+            return self.show_warning(none);
         };
         match diff_edit::redo(&done, !again) {
             Ok(spot) => {
@@ -1502,13 +1709,32 @@ impl Gerdr {
                     diff.place_caret(done.root.clone(), done.path.clone(), spot);
                 }
                 let root = done.root.clone();
+                let said = match again {
+                    true => format!("Did the edit to {}:{} again", done.path, spot.line),
+                    false => format!("Undid the edit to {}:{}", done.path, spot.line),
+                };
                 match again {
                     true => self.repos.cuts.push(done),
                     false => self.repos.undone.push(done),
                 }
+                self.show_success(said);
                 self.repos_reread(&root);
             }
-            Err(why) => self.show_notice(why),
+            Err(why) => self.show_error(why),
+        }
+    }
+
+    /// The edits made from the diff can't be undone once it closes: they
+    /// are let go, and the tree's marks with them.
+    fn forget_edits(&mut self) {
+        let edits = self.repos.cuts.len();
+        self.repos.cuts.clear();
+        self.repos.undone.clear();
+        if let Some((_, panel)) = self.repos.kept.as_mut() {
+            panel.edited.clear();
+        }
+        if edits > 0 {
+            tracing::debug!("let go of {edits} edits made from the diff");
         }
     }
 
@@ -1673,8 +1899,16 @@ impl Gerdr {
         if jobs.is_empty() {
             return;
         }
-        if self.repos.batch.as_ref().is_some_and(|b| !b.finished()) {
-            return self.repos_refuse("Wait for the batch to finish");
+        // Only those repositories wait that a batch still runs in; the
+        // others go ahead, that batch going on in the background.
+        let running = (self.repos.batch.iter())
+            .chain(&self.repos.background)
+            .find(|b| jobs.iter().any(|j| b.runs_in(&j.root)));
+        if let Some(batch) = running {
+            let what = batch.kind.label().to_lowercase();
+            return self.repos_refuse(&format!(
+                "Wait for the {what} running there (Alt+C stops it)"
+            ));
         }
         let Some(tx) = self.repos_sender() else {
             return;
@@ -1690,7 +1924,10 @@ impl Gerdr {
             };
             let undo = match (&kind, &previous) {
                 (BatchKind::Undo, Some(undone)) => {
-                    let soft = matches!(undone.kind, BatchKind::Commit { .. });
+                    let soft = matches!(
+                        undone.kind,
+                        BatchKind::Commit { .. } | BatchKind::Amend { .. }
+                    );
                     undone
                         .run(&job.root)
                         .and_then(|r| Some((r.before.clone()?, r.after.clone()?, soft)))
@@ -1715,6 +1952,7 @@ impl Gerdr {
                 after: None,
                 state: RunState::Queued,
                 log: Vec::new(),
+                since: None,
             });
         }
         if tasks.is_empty() {
@@ -1722,7 +1960,18 @@ impl Gerdr {
             return;
         }
         let threads = tasks.len().min(BATCH_THREADS);
-        self.repos.batch = Some(Batch { id, kind, runs });
+        if let Some(previous) = previous.filter(|b| !b.finished()) {
+            self.repos.background.push(previous);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        self.repos.stops.insert(id, stop.clone());
+        self.repos.batch = Some(Batch {
+            id,
+            kind,
+            runs,
+            started: SystemTime::now(),
+            stopping: false,
+        });
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.error = None;
         }
@@ -1731,7 +1980,7 @@ impl Gerdr {
             busy: Vec::new(),
         }));
         for _ in 0..threads {
-            let (queue, tx) = (queue.clone(), tx.clone());
+            let (queue, tx, stop) = (queue.clone(), tx.clone(), stop.clone());
             std::thread::spawn(move || {
                 while let Some(task) = Queue::next(&queue) {
                     let root = task.job.root.clone();
@@ -1742,17 +1991,41 @@ impl Gerdr {
                             what: what.to_owned(),
                         });
                     };
+                    // What its commands wait for is said too; stopped,
+                    // they are killed.
+                    let say = {
+                        let (tx, batch, root) = (tx.clone(), task.batch, root.clone());
+                        move |what: &str| {
+                            let _ = tx.send(RepoEvent::Step {
+                                batch,
+                                root: root.clone(),
+                                what: what.to_owned(),
+                            });
+                        }
+                    };
+                    git_ops::watch(Some(git_ops::Watch {
+                        stop: stop.clone(),
+                        say: Box::new(say),
+                    }));
                     // A fetch of the panel's own, or a check's, may run
                     // there still.
                     let key = task.common.clone().unwrap_or_else(|| root.clone());
                     let what = format!("the {}", task.kind.label().to_lowercase());
-                    let turn = Turn::try_take(&key, &what).unwrap_or_else(|holder| {
-                        step(&format!("waiting for {holder}"));
-                        Turn::take(&key, &what)
-                    });
-                    let before = git_ops::head(&root);
-                    let result = perform(&task, &step);
-                    let after = git_ops::head(&root);
+                    let turn = match Turn::try_take(&key, &what) {
+                        Ok(turn) => Some(turn),
+                        Err(holder) => {
+                            step(&format!("waiting for {holder}"));
+                            Turn::take_unless_stopped(&key, &what)
+                        }
+                    };
+                    let stopped = turn.is_none() || stop.load(AtomicOrdering::Relaxed);
+                    let before = (!stopped).then(|| git_ops::head(&root)).flatten();
+                    let result = match stopped {
+                        true => Err(blocked(git_ops::STOPPED)),
+                        false => perform(&task, &step),
+                    };
+                    let after = (!stopped).then(|| git_ops::head(&root)).flatten();
+                    git_ops::watch(None);
                     drop(turn);
                     Queue::done(&queue, &task);
                     let _ = tx.send(RepoEvent::Finished {
@@ -1776,10 +2049,42 @@ impl Gerdr {
         }
     }
 
-    /// A batch's run in the repository at `root`, while it is the batch.
+    /// A batch's run in the repository at `root`, while it is the batch
+    /// or runs in the background.
     fn batch_run_mut(&mut self, batch: u64, root: &Path) -> Option<&mut RepoRun> {
-        let current = self.repos.batch.as_mut().filter(|b| b.id == batch)?;
-        current.runs.iter_mut().find(|r| r.root == root)
+        let mut batches = self
+            .repos
+            .batch
+            .iter_mut()
+            .chain(&mut self.repos.background);
+        let found = batches.find(|b| b.id == batch)?;
+        found.runs.iter_mut().find(|r| r.root == root)
+    }
+
+    /// Stop every batch running: their commands killed, the rest not run.
+    fn stop_batches(&mut self) {
+        let running = (self.repos.batch.iter_mut())
+            .chain(&mut self.repos.background)
+            .filter(|b| !b.finished());
+        for batch in running {
+            batch.stopping = true;
+            if let Some(stop) = self.repos.stops.get(&batch.id) {
+                stop.store(true, AtomicOrdering::Relaxed);
+            }
+        }
+    }
+
+    /// A batch running in the background is done: told in a toast, as
+    /// the result bar shows another.
+    fn background_finished(&mut self, id: u64) {
+        let Some(at) = (self.repos.background.iter()).position(|b| b.id == id && b.finished())
+        else {
+            return;
+        };
+        let batch = self.repos.background.remove(at);
+        self.repos.stops.remove(&id);
+        let (summary, tone) = batch.summary();
+        self.toast(summary, level(tone));
     }
 
     /// A thread's news.
@@ -1788,6 +2093,7 @@ impl Gerdr {
             RepoEvent::Step { batch, root, what } => {
                 if let Some(run) = self.batch_run_mut(batch, &root) {
                     run.state = RunState::Running(what);
+                    run.since.get_or_insert_with(SystemTime::now);
                 }
             }
             RepoEvent::Finished {
@@ -1823,8 +2129,10 @@ impl Gerdr {
                     .as_ref()
                     .is_some_and(|b| b.id == batch && b.finished())
                 {
+                    self.repos.stops.remove(&batch);
                     self.batch_finished();
                 }
+                self.background_finished(batch);
                 self.refresh_git();
             }
             RepoEvent::Checked {
@@ -1885,7 +2193,7 @@ impl Gerdr {
             } => {
                 self.repos.reading_diffs.remove(&root);
                 let page = self.repos_page();
-                let (density, tree_share, cols) = self.repos_env();
+                let (density, tree_share, cols, sheet_rows) = self.repos_env();
                 let Repos {
                     panel,
                     batch,
@@ -1893,6 +2201,7 @@ impl Gerdr {
                     same_branches,
                     top_branches,
                     fetches,
+                    background,
                     ..
                 } = &mut self.repos;
                 let ctx = Ctx {
@@ -1906,6 +2215,8 @@ impl Gerdr {
                     density,
                     tree_share,
                     cols,
+                    sheet_rows,
+                    background,
                 };
                 if let Some(panel) = panel.as_mut() {
                     panel.set_diffs(root, generation, files, &ctx);
@@ -1945,8 +2256,9 @@ impl Gerdr {
             .map(|r| r.root.clone())
             .collect();
         let (summary, tone) = batch.summary();
+        let batch_started = batch.started;
         match batch.kind {
-            BatchKind::Commit { .. } if done => {
+            BatchKind::Commit { .. } | BatchKind::Amend { .. } if done => {
                 if let Some(panel) = self.repos.panel.as_mut() {
                     panel.clear_field();
                 }
@@ -1958,7 +2270,12 @@ impl Gerdr {
             }
             _ => {}
         }
-        if self.repos.panel.is_none() {
+        // Told when the panel is closed, or took long enough that the
+        // result bar may not be looked at.
+        let long = SystemTime::now()
+            .duration_since(batch_started)
+            .is_ok_and(|d| d >= SAY_DONE_AFTER);
+        if self.repos.panel.is_none() || long {
             self.toast(summary, level(tone));
         }
     }
@@ -2159,6 +2476,50 @@ mod tests {
             dirty,
             ..GitStatus::default()
         }
+    }
+
+    #[test]
+    fn edits_from_the_diff_say_what_they_did_and_where() {
+        use crate::diff_edit::{Register, Spot};
+        let spot = |line, col| Spot { line, col };
+        let edit = |cut| FileEdit {
+            root: PathBuf::from("/r"),
+            path: "src/a.rs".into(),
+            cut,
+            shown: Vec::new(),
+            caret: spot(40, 0),
+        };
+        assert_eq!(
+            cut_said(&edit(Cut::Lines(vec![40, 41]))),
+            "Deleted 2 lines from src/a.rs:40"
+        );
+        assert_eq!(
+            cut_said(&edit(Cut::Chars(spot(7, 2), spot(7, 3)))),
+            "Deleted 1 char from src/a.rs:7"
+        );
+        let restore = Cut::Restore {
+            drop: vec![12],
+            put: vec![(10, vec!["a".into(), "b".into()])],
+        };
+        assert_eq!(cut_said(&edit(restore)), "Restored 3 lines in src/a.rs:10");
+        let put = Put {
+            root: PathBuf::from("/r"),
+            path: "src/a.rs".into(),
+            shown: Vec::new(),
+            at: spot(40, 0),
+            before: false,
+            count: 2,
+        };
+        let lines = Register {
+            text: "x\n".into(),
+            lines: true,
+        };
+        assert_eq!(paste_said(&put, &lines), "Pasted 2 lines into src/a.rs:41");
+        let chars = Register {
+            text: "ab".into(),
+            lines: false,
+        };
+        assert_eq!(paste_said(&put, &chars), "Pasted 4 chars into src/a.rs:40");
     }
 
     #[test]

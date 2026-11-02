@@ -4,8 +4,8 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, Rect, Rgb, SHADOW, TINY_FONT_SIZE, arrow,
-    check, coverage, cross, mix, segment,
+    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW,
+    SMALL_FONT_SIZE, TINY_FONT_SIZE, arrow, check, coverage, cross, mix, segment,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
@@ -30,6 +30,9 @@ pub(super) struct Painter {
     /// The UI font in bold, for names that head a group (a repository's);
     /// `None` when there is none, and the UI font is used instead.
     pub(super) bold: Option<FontVec>,
+    /// The monospace font in bold, for terminal text drawn bold; `None`
+    /// when there is none (bold is then struck twice, see `mono_bold`).
+    pub(super) mono_bold: Option<FontVec>,
     /// Popup backgrounds drawn lately, the last used first: a popup drawn
     /// again, say as its list scrolls, starts from a copy.
     popups: RefCell<Vec<(PopupKey, Canvas)>>,
@@ -126,6 +129,64 @@ pub(super) fn focus_ring(
     c.rounded(gx, gy, gw, gh, gr, behind);
 }
 
+/// What a keycap for `key` says: the key's short name, "Del" for
+/// "Delete" ("Shift+Del"), so every panel names a key the same way.
+pub(super) fn keycap_text(key: &str) -> std::borrow::Cow<'_, str> {
+    match key.strip_suffix("Delete") {
+        Some(mods) if mods.is_empty() || mods.ends_with('+') => format!("{mods}Del").into(),
+        _ => key.into(),
+    }
+}
+
+/// Room either side of a button's label, and the narrowest a button is.
+const BUTTON_PADDING: i32 = 20;
+const BUTTON_MIN_WIDTH: i32 = 84;
+
+/// How a button looks (see `Painter::button`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Outlined, on the element colour.
+    #[default]
+    Plain,
+    /// Filled with the accent: the action a dialog is for.
+    Primary,
+    /// Filled with the error colour: an action that loses something.
+    /// Never the default of its dialog.
+    Destructive,
+    /// Outlined like a plain one, its label dimmed (still readable): one
+    /// that can't be pressed now. Hovering doesn't light it.
+    Off,
+}
+
+impl From<bool> for ButtonStyle {
+    /// `true` for the primary button, `false` for a plain one.
+    fn from(primary: bool) -> Self {
+        if primary {
+            ButtonStyle::Primary
+        } else {
+            ButtonStyle::Plain
+        }
+    }
+}
+
+/// How wide a button labelled `label` is (logical pixels), as
+/// `Painter::button_width` says; for layouts, which have no painter.
+pub(super) fn button_width(label: &str) -> i32 {
+    let text = measure(label, FONT_SIZE).unwrap_or(label.chars().count() as f32 * 8.0);
+    (text.ceil() as i32 + 2 * BUTTON_PADDING).max(BUTTON_MIN_WIDTH)
+}
+
+/// What a list row is lit with on a popup's ground: `selected` when it is
+/// the selected row, else `element` faded in from the ground as far as
+/// `hover` (0 to 1) says; `None` for a row neither selected nor hovered.
+pub(super) fn row_fill(p: &Palette, selected: bool, hover: f32) -> Option<Rgb> {
+    if selected {
+        return Some(p.selected);
+    }
+    let hover = hover.clamp(0.0, 1.0);
+    (hover > 0.0).then(|| mix(p.elevated, p.element, hover))
+}
+
 /// Pixel size of a buffer covering `size` logical pixels.
 pub(super) fn physical(size: Size<i32, Logical>, scale: f64) -> Size<i32, Logical> {
     let px = |v: i32| ((v as f64 * scale).round() as i32).max(1);
@@ -165,6 +226,26 @@ fn load_bold() -> Option<FontVec> {
 
 /// The weight bold text is drawn at, from a font with a weight axis.
 const BOLD_WEIGHT: f32 = 650.0;
+
+/// The monospace font in bold: its own file at a terminal's bold weight
+/// when it has a weight axis, else the bold face fontconfig picks, if
+/// that is another file than the regular one (else there is no bold).
+fn load_mono_bold() -> Option<FontVec> {
+    let regular = find_mono_font();
+    if let Some(mut font) = load_font(regular.clone())
+        && font.set_variation(b"wght", MONO_BOLD_WEIGHT)
+    {
+        return Some(font);
+    }
+    let bold = find_family("monospace:bold")?;
+    if Some(&bold) == regular.as_ref() {
+        return None;
+    }
+    load_font(Some(bold))
+}
+
+/// The weight terminal bold is drawn at, from a font with a weight axis.
+const MONO_BOLD_WEIGHT: f32 = 700.0;
 
 /// The font in the file at `path`, if it can be read.
 fn load_font(path: Option<String>) -> Option<FontVec> {
@@ -319,6 +400,54 @@ fn text_in(
     pen
 }
 
+/// Draw `text` in the monospace `font` as `text_in` does, the characters
+/// it lacks each in the font fontconfig picks for it. Returns where it
+/// ends.
+#[allow(clippy::too_many_arguments)]
+fn mono_in(
+    font: &FontVec,
+    c: &mut Canvas,
+    text: &str,
+    size: f32,
+    x: f32,
+    max_x: f32,
+    band: (i32, i32),
+    scale: f64,
+    color: Rgb,
+) -> f32 {
+    let lacks = |ch: char| !ch.is_whitespace() && font.glyph_id(ch).0 == 0;
+    let missing: Vec<char> = text.chars().filter(|&ch| lacks(ch)).collect();
+    if missing.is_empty() {
+        return text_in(font, c, text, size, x, max_x, band, scale, color);
+    }
+    // Runs the monospace font has, and the characters it lacks each in
+    // the font fontconfig picks for it.
+    let other: std::collections::HashMap<char, &FontVec> = missing
+        .iter()
+        .zip(fallbacks(&missing))
+        .filter_map(|(ch, f)| Some((*ch, f?)))
+        .collect();
+    let font_of = |ch: char| other.get(&ch).copied().unwrap_or(font);
+    let mut pen = x;
+    let mut rest = text;
+    while let Some(first) = rest.chars().next() {
+        let run_font = font_of(first);
+        let end = rest
+            .char_indices()
+            .find(|&(_, ch)| !std::ptr::eq(font_of(ch), run_font))
+            .map_or(rest.len(), |(i, _)| i);
+        let (run, after) = rest.split_at(end);
+        let width = width_in(run_font, run, size, scale);
+        if pen + width > max_x {
+            // What fits of it, with "…": the end.
+            return text_in(run_font, c, run, size, pen, max_x, band, scale, color);
+        }
+        pen = text_in(run_font, c, run, size, pen, f32::MAX, band, scale, color);
+        rest = after;
+    }
+    pen
+}
+
 impl Painter {
     pub(super) fn new() -> Self {
         let font = load_font(find_font());
@@ -333,6 +462,7 @@ impl Painter {
             font,
             mono,
             bold: load_bold(),
+            mono_bold: load_mono_bold(),
             popups: RefCell::default(),
         }
     }
@@ -412,37 +542,33 @@ impl Painter {
         let Some(font) = self.mono_font() else {
             return x;
         };
-        let lacks = |ch: char| !ch.is_whitespace() && font.glyph_id(ch).0 == 0;
-        let missing: Vec<char> = text.chars().filter(|&ch| lacks(ch)).collect();
-        if missing.is_empty() {
-            return text_in(font, c, text, size, x, max_x, band, scale, color);
+        mono_in(font, c, text, size, x, max_x, band, scale, color)
+    }
+
+    /// Whether the monospace font has a bold face of its own, which
+    /// `mono_bold_text` draws in.
+    pub(super) fn has_mono_bold(&self) -> bool {
+        self.mono_bold.is_some()
+    }
+
+    /// Draw `text` in the bold monospace font as `mono_text` does, else
+    /// (none found) in the monospace font. Returns where it ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn mono_bold_text(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        size: f32,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        color: Rgb,
+    ) -> f32 {
+        match &self.mono_bold {
+            Some(font) => mono_in(font, c, text, size, x, max_x, band, scale, color),
+            None => self.mono_text(c, text, size, x, max_x, band, scale, color),
         }
-        // Runs the monospace font has, and the characters it lacks each in
-        // the font fontconfig picks for it.
-        let other: std::collections::HashMap<char, &FontVec> = missing
-            .iter()
-            .zip(fallbacks(&missing))
-            .filter_map(|(ch, f)| Some((*ch, f?)))
-            .collect();
-        let font_of = |ch: char| other.get(&ch).copied().unwrap_or(font);
-        let mut pen = x;
-        let mut rest = text;
-        while let Some(first) = rest.chars().next() {
-            let run_font = font_of(first);
-            let end = rest
-                .char_indices()
-                .find(|&(_, ch)| !std::ptr::eq(font_of(ch), run_font))
-                .map_or(rest.len(), |(i, _)| i);
-            let (run, after) = rest.split_at(end);
-            let width = width_in(run_font, run, size, scale);
-            if pen + width > max_x {
-                // What fits of it, with "…": the end.
-                return text_in(run_font, c, run, size, pen, max_x, band, scale, color);
-            }
-            pen = text_in(run_font, c, run, size, pen, f32::MAX, band, scale, color);
-            rest = after;
-        }
-        pen
     }
 
     /// A checkbox at the left of `rect`, vertically centred: an outlined
@@ -600,9 +726,11 @@ impl Painter {
         }
     }
 
-    /// A button in `rect` like the quit dialog's, labelled `label`: the
-    /// `primary` one in the accent. `(hovered, focused)` lightens it and
-    /// rings it.
+    /// A button in `rect` like the quit dialog's, labelled `label`, in
+    /// `style`: plain, the primary one in the accent, or a destructive
+    /// one in the error colour (`true` and `false` stand for primary and
+    /// plain), or dimmed while it can't be pressed. `(hovered, focused)`
+    /// lightens it and rings it, the ring in the button's own colour.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn button(
         &self,
@@ -610,31 +738,113 @@ impl Painter {
         label: &str,
         rect: Rect,
         (hovered, focused): (bool, bool),
-        primary: bool,
+        style: impl Into<ButtonStyle>,
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
         let (x, y, w, h) = rect_px(rect, scale);
         let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
+        let style = style.into();
+        let hovered = hovered && style != ButtonStyle::Off;
         if focused {
-            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
-        }
-        let color = if primary {
-            let fill = if hovered {
-                mix(p.accent, p.text, 0.12)
-            } else {
-                p.accent
+            let ring = match style {
+                ButtonStyle::Destructive => p.error,
+                _ => p.accent,
             };
-            c.rounded(x, y, w, h, r, fill);
-            p.on_accent
-        } else {
-            let fill = if hovered { p.selected } else { p.element };
-            c.rounded(x, y, w, h, r, p.border);
-            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-            p.text
+            focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, ring);
+        }
+        let color = match style {
+            ButtonStyle::Primary | ButtonStyle::Destructive => {
+                let base = match style {
+                    ButtonStyle::Destructive => p.error,
+                    _ => p.accent,
+                };
+                let fill = if hovered {
+                    mix(base, p.text, 0.12)
+                } else {
+                    base
+                };
+                c.rounded(x, y, w, h, r, fill);
+                p.on_accent
+            }
+            ButtonStyle::Plain | ButtonStyle::Off => {
+                let fill = if hovered { p.selected } else { p.element };
+                c.rounded(x, y, w, h, r, p.border);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
+                if style == ButtonStyle::Off {
+                    p.muted
+                } else {
+                    p.text
+                }
+            }
         };
         self.centered(c, label, FONT_SIZE, rect, scale, color);
+    }
+
+    /// How wide a dialog button labelled `label` is (logical pixels): its
+    /// text with room either side, and never under `BUTTON_MIN_WIDTH`, so
+    /// no dialog keeps a table of widths that drift from its labels.
+    #[cfg(test)]
+    pub(super) fn button_width(&self, label: &str) -> i32 {
+        button_width(label)
+    }
+
+    /// A toggle between choices, like a popup's "This workspace / All"
+    /// scope: an outlined `track`, and on it a segment per (label, rect),
+    /// the one `on` filled in `selected` with its label in `text`, the one
+    /// under the pointer (`hover`) lit as a hovered row.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn segmented(
+        &self,
+        c: &mut Canvas,
+        track: Rect,
+        segments: &[(&str, Rect)],
+        on: usize,
+        hover: Option<usize>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(track, scale);
+        let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        for (i, &(label, rect)) in segments.iter().enumerate() {
+            let fill = if i == on {
+                Some(p.selected)
+            } else if hover == Some(i) {
+                Some(mix(p.element, p.selected, 0.5))
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * s, fill);
+            }
+            let color = if i == on { p.text } else { p.muted };
+            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+        }
+    }
+
+    /// The ground of a list row in `rect` (buffer coordinates): the
+    /// selected row in `selected`, a hovered one fading into `element`
+    /// as far as `hover` (0 to 1) says, rounded by
+    /// `ROW_HIGHLIGHT_RADIUS`; nothing for a row neither selected nor
+    /// hovered. Every list's rows are lit this one way.
+    pub(super) fn row_highlight(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        (selected, hover): (bool, f32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let Some(fill) = row_fill(p, selected, hover) else {
+            return;
+        };
+        let (x, y, w, h) = rect_px(rect, scale);
+        c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * scale as f32, fill);
     }
 
     /// `text` with the characters at `hits` (char positions) in the second
@@ -695,7 +905,7 @@ impl Painter {
         let sep = self.text_width("/", KEY_FONT_SIZE, scale) + 2.0 * CAP_GAP as f32 * scale as f32;
         let caps: Vec<f32> = keys
             .split(" / ")
-            .map(|k| self.text_width(k, KEY_FONT_SIZE, scale) + pad)
+            .map(|k| self.text_width(&keycap_text(k), KEY_FONT_SIZE, scale) + pad)
             .collect();
         caps.iter().sum::<f32>() + sep * (caps.len() - 1) as f32
     }
@@ -717,6 +927,7 @@ impl Painter {
         let band = (cap_y as i32, cap_h as i32);
         let mut pen = x;
         for (i, key) in keys.split(" / ").enumerate() {
+            let key = &*keycap_text(key);
             if i > 0 {
                 pen += CAP_GAP as f32 * s;
                 self.text(
@@ -1057,6 +1268,26 @@ mod tests {
     }
 
     #[test]
+    fn rows_are_lit_one_way_and_buttons_are_as_wide_as_their_labels() {
+        let p = crate::chrome::Theme::Dark.palette();
+        assert_eq!(super::row_fill(p, true, 0.0), Some(p.selected));
+        assert_eq!(super::row_fill(p, true, 1.0), Some(p.selected));
+        assert_eq!(super::row_fill(p, false, 1.0), Some(p.element));
+        assert_eq!(super::row_fill(p, false, 0.0), None);
+        assert_eq!(super::ButtonStyle::from(true), super::ButtonStyle::Primary);
+        assert_eq!(super::ButtonStyle::from(false), super::ButtonStyle::Plain);
+        assert_eq!(super::keycap_text("Delete"), "Del");
+        assert_eq!(super::keycap_text("Shift+Delete"), "Shift+Del");
+        assert_eq!(super::keycap_text("KP_Delete"), "KP_Delete");
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        assert_eq!(painter.button_width("Quit"), super::BUTTON_MIN_WIDTH);
+        assert!(painter.button_width("Open in new gerdr") > painter.button_width("Switch"));
+    }
+
+    #[test]
     fn a_checkbox_ends_after_its_box_whatever_its_state() {
         let painter = Painter::new();
         let p = Theme::Light.palette();
@@ -1083,6 +1314,27 @@ mod tests {
         let p = Theme::Dark.palette();
         painter.mono_text(&mut c, "❯", 14.0, 4.0, 60.0, (0, 30), 1.0, p.text);
         assert!(c.px.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn bold_monospace_text_is_drawn_heavier_in_its_own_face() {
+        let painter = Painter::new();
+        if !painter.has_mono_bold() {
+            return;
+        }
+        let p = Theme::Dark.palette();
+        let ink = |bold: bool| {
+            let mut c = Canvas::new((200, 30).into());
+            let text = "Compiling gerdr";
+            match bold {
+                true => {
+                    painter.mono_bold_text(&mut c, text, 13.0, 4.0, 200.0, (0, 30), 1.0, p.text)
+                }
+                false => painter.mono_text(&mut c, text, 13.0, 4.0, 200.0, (0, 30), 1.0, p.text),
+            };
+            c.px.iter().map(|&b| b as u64).sum::<u64>()
+        };
+        assert!(ink(true) > ink(false));
     }
 
     #[test]

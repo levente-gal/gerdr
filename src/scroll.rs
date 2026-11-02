@@ -78,7 +78,7 @@ impl Bounds {
 }
 
 /// How far a notch of the wheel scrolls, logical pixels, at least.
-const NOTCH_PX: f64 = 100.0;
+pub(crate) const NOTCH_PX: f64 = 100.0;
 /// Notches turned within this long of the last go further each time, up
 /// to `BURST_MAX` times as far: a wheel spun fast covers more ground.
 const BURST: Duration = Duration::from_millis(120);

@@ -5,8 +5,14 @@
 //! its own, so a selection goes on while it does: dragged past an edge,
 //! or with the wheel turned while the button is held.
 //!
+//! It is a snapshot: what the pane had as it opened, until Ctrl+R reads
+//! it again. F1 lists every key it takes in place of the text.
+//!
 //! Lines are wrapped at the viewer's width (herdr joins those it wrapped),
-//! and a place in them is a character of a line (see `Spot`).
+//! and a place in them is a character of a line (see `Spot`). They are
+//! drawn in the colours, bold and dim the terminal drew them in, as far
+//! as herdr gives those: for the end of the scrollback only (see
+//! `set_styles`).
 //!
 //! `/` or Ctrl+F searches it: every place found is tinted, the one gone
 //! to more, Enter goes to the next (Shift+Enter, the one before), round
@@ -135,6 +141,26 @@ struct Find {
     shown: (usize, usize),
 }
 
+/// How the terminal drew some of the text: in a colour of its own (else
+/// the terminal's), bold, dim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Style {
+    pub fg: Option<Ink>,
+    pub bold: bool,
+    pub dim: bool,
+}
+
+/// A colour as the terminal names it: one of its 256 (the first 16 its
+/// theme's), or red, green and blue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Ink {
+    Index(u8),
+    Rgb([u8; 3]),
+}
+
+/// The runs of a line drawn other than plainly, by character of it.
+type Styled = Vec<(Range<usize>, Style)>;
+
 /// What a key or a click asks of gerdr.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -147,6 +173,8 @@ pub enum Outcome {
     },
     /// Copying, with nothing selected.
     NothingSelected,
+    /// Read the pane's output again.
+    Reload,
 }
 
 /// The viewer as it stands.
@@ -157,6 +185,9 @@ pub struct Scrollback {
     /// What the pane's bar calls it.
     pub label: String,
     lines: Vec<String>,
+    /// How each line was drawn, by index into `lines`: none, drawn
+    /// plainly, past those herdr gave colours for.
+    styles: Vec<Styled>,
     /// The lines wrapped at `cols`.
     rows: Vec<Row>,
     cols: usize,
@@ -180,6 +211,8 @@ pub struct Scrollback {
     /// `v` (by characters) or `V` (by lines) is on: the selection goes
     /// with the caret.
     visual: Option<Grain>,
+    /// The keys it takes are listed in place of the text (F1).
+    keys: bool,
     /// The last press on the text: when, where, and how many came in a
     /// row, for double and triple clicks.
     pub clicks: Option<(Instant, Point<f64, Logical>, u8)>,
@@ -189,18 +222,12 @@ impl Scrollback {
     /// The viewer over gerdr pane `pane` (herdr's `pane_id`), showing
     /// `text`, the pane's view `from_bottom` rows up from its bottom.
     pub fn new(pane: u32, pane_id: String, label: String, text: &str, from_bottom: u64) -> Self {
-        let mut lines: Vec<String> = text
-            .split('\n')
-            .map(|line| line.trim_end_matches('\r').to_owned())
-            .collect();
-        while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.pop();
-        }
         Self {
             pane,
             pane_id,
             label,
-            lines,
+            lines: split(text),
+            styles: Vec::new(),
             rows: Vec::new(),
             cols: 0,
             scroll: Scroll::default(),
@@ -213,7 +240,94 @@ impl Scrollback {
             caret: Spot::default(),
             want: None,
             visual: None,
+            keys: false,
             clicks: None,
+        }
+    }
+
+    /// Whether the keys it takes are listed (F1).
+    pub fn keys_open(&self) -> bool {
+        self.keys
+    }
+
+    /// List the keys it takes, or stop.
+    pub fn show_keys(&mut self, on: bool) {
+        self.keys = on;
+    }
+
+    /// Show `text`, the pane's output read again, in place of what it
+    /// showed, the list as `fit` lays it out: at the bottom it stays
+    /// there, for what came since, else the line at the top stays there.
+    /// The caret stays on its line as far as there is one, the selection
+    /// goes, and the search finds again.
+    pub fn reload(&mut self, text: &str, fit: Fit) {
+        let max = fit.bounds(self.rows.len()).max;
+        let bottom = self.scroll.pos() >= max - 0.5;
+        let top = self.rows.get(self.scroll.first()).map_or(0, |r| r.line);
+        self.lines = split(text);
+        self.styles = Vec::new();
+        self.rows = wrap(&self.lines, self.cols.max(1));
+        let last = self.lines.len() - 1;
+        if bottom {
+            self.from_bottom = Some(0);
+        } else {
+            let row = self.row_of(Spot {
+                line: top.min(last),
+                ch: 0,
+            });
+            self.scroll.jump(row as f64);
+        }
+        let line = self.caret.line.min(last);
+        self.caret = Spot {
+            line,
+            ch: self.caret.ch.min(self.last_ch(line)),
+        };
+        self.want = None;
+        self.selection = None;
+        self.visual = None;
+        self.dragging = false;
+        self.edge_at = None;
+        self.find_hits();
+        self.fit(fit);
+    }
+
+    /// Draw the lines as `ansi` says the terminal drew them: the end of
+    /// the pane's output with the escape sequences that colour it (see
+    /// `parse_ansi`). Its lines are matched to these from the bottom up,
+    /// one going to a line with the same text; those it has none for, or
+    /// another text for, are drawn plainly.
+    pub fn set_styles(&mut self, ansi: &str) {
+        let mut styled = parse_ansi(ansi);
+        while styled.len() > 1 && styled.last().is_some_and(|(l, _)| l.trim().is_empty()) {
+            styled.pop();
+        }
+        self.styles = vec![Vec::new(); self.lines.len()];
+        let lines = &self.lines;
+        let same = |i: usize, j: usize| lines[i].trim_end() == styled[j].0.trim_end();
+        let (mut i, mut j) = (lines.len(), styled.len());
+        let mut pairs = Vec::new();
+        while i > 0 && j > 0 {
+            if same(i - 1, j - 1) {
+                pairs.push((i - 1, j - 1));
+                (i, j) = (i - 1, j - 1);
+            } else if j > 1 && same(i - 1, j - 2) {
+                // A line here it has no match for: past it.
+                j -= 1;
+            } else if i > 1 && same(i - 2, j - 1) {
+                i -= 1;
+            } else {
+                (i, j) = (i - 1, j - 1);
+            }
+        }
+        for (i, j) in pairs {
+            let len = self.lines[i].chars().count();
+            self.styles[i] = std::mem::take(&mut styled[j].1)
+                .into_iter()
+                .filter_map(|(r, style)| {
+                    let end = r.end.min(len);
+                    (r.start < end).then_some((r.start..end, style))
+                })
+                .collect();
         }
     }
 
@@ -275,6 +389,24 @@ impl Scrollback {
         self.rows
             .get(i)
             .map_or("", |r| &self.lines[r.line][r.from..r.to])
+    }
+
+    /// How row `i` is drawn: the runs of it drawn other than plainly, by
+    /// character of the row.
+    pub fn row_styles(&self, i: usize) -> Styled {
+        let Some(row) = self.rows.get(i) else {
+            return Vec::new();
+        };
+        let Some(spans) = self.styles.get(row.line) else {
+            return Vec::new();
+        };
+        spans
+            .iter()
+            .filter_map(|(r, style)| {
+                let (a, b) = (r.start.max(row.start), r.end.min(row.end));
+                (a < b).then(|| (a - row.start..b - row.start, *style))
+            })
+            .collect()
     }
 
     /// What of row `i` is selected: from and to which of its characters,
@@ -614,6 +746,22 @@ impl Scrollback {
         now: Instant,
         fit: Fit,
     ) -> Option<Outcome> {
+        let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+        // The keys listed take only those that close them.
+        if self.keys {
+            let closes = matches!(
+                sym,
+                Keysym::Escape | Keysym::F1 | Keysym::q | Keysym::Return | Keysym::KP_Enter
+            );
+            if closes && bare {
+                self.keys = false;
+            }
+            return None;
+        }
+        if sym == Keysym::F1 && bare {
+            self.keys = true;
+            return None;
+        }
         if self.find_key(mods, sym, typed, fit) {
             return None;
         }
@@ -626,14 +774,16 @@ impl Scrollback {
         let ctrl = mods.ctrl && !(mods.alt || mods.logo);
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         match sym {
-            // Out of `v` first, the selection gone.
-            Keysym::Escape if plain && self.visual.is_some() => {
+            // Out of `v` first, the selection gone; a selection made
+            // with the pointer goes before the viewer does too.
+            Keysym::Escape if plain && (self.visual.is_some() || self.has_selection()) => {
                 self.visual = None;
                 self.selection = None;
                 return None;
             }
             Keysym::Escape | Keysym::q if !mods.ctrl => return Some(Outcome::Close),
             Keysym::Return | Keysym::KP_Enter => return Some(copy(true)),
+            Keysym::r | Keysym::R if ctrl => return Some(Outcome::Reload),
             Keysym::c if mods.ctrl => return Some(copy(false)),
             Keysym::y if !mods.ctrl => {
                 let copied = copy(false);
@@ -745,14 +895,17 @@ impl Scrollback {
     /// Whether the search took a key: `/` or Ctrl+F open it (or give it
     /// the keyboard back), Enter or F3 go to the next place (with Shift
     /// the one before; `n` and `N` while the list has the keyboard), Esc
-    /// closes it, Tab gives the keyboard to the list. While it has the
-    /// keyboard its field takes every other key but those that scroll
-    /// the list and, when it has nothing for them, those with Ctrl.
+    /// clears what is typed and then closes it (with the list's selection
+    /// gone first), Tab and Shift+Tab move the keyboard between it and
+    /// the list. While it has the keyboard its field takes every other
+    /// key but those that scroll the list and, when it has nothing for
+    /// them, those with Ctrl.
     fn find_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, fit: Fit) -> bool {
         let others = mods.ctrl || mods.alt || mods.logo;
         let plain = !(others || mods.shift);
         let only_shift = mods.shift && !others;
         let focused = self.find_focused();
+        let selected = self.has_selection();
         let opens = match sym {
             Keysym::f | Keysym::F => mods.ctrl && !(mods.alt || mods.logo),
             // Typed into the field, it is the field's.
@@ -777,15 +930,26 @@ impl Scrollback {
             return true;
         }
         match sym {
+            Keysym::Escape if plain && focused && !find.field.line().text.is_empty() => {
+                find.field.set("");
+                find.whole = false;
+                self.find_hits();
+                return true;
+            }
+            // The selection goes first (see `key`).
+            Keysym::Escape if plain && !focused && selected => return false,
             Keysym::Escape if plain => {
                 self.close_find();
                 return true;
             }
-            _ if !focused => return false,
-            Keysym::Tab if plain => {
-                find.focused = false;
+            Keysym::Tab | Keysym::ISO_Left_Tab if plain || only_shift => {
+                find.focused = !focused;
+                if find.focused {
+                    find.field.select_all();
+                }
                 return true;
             }
+            _ if !focused => return false,
             _ => {}
         }
         match find.field.key(mods, sym, typed) {
@@ -809,6 +973,18 @@ impl Scrollback {
                 !(scrolls || mods.ctrl)
             }
         }
+    }
+
+    /// Whether something is selected, with the pointer, the keys or `v`.
+    pub fn has_selection(&self) -> bool {
+        self.selected_lines().is_some()
+    }
+
+    /// Whether what is typed in the search is empty (or it is closed).
+    pub fn find_empty(&self) -> bool {
+        self.find
+            .as_ref()
+            .is_none_or(|f| f.field.line().text.is_empty())
     }
 
     /// Whether the search has the keyboard.
@@ -1144,6 +1320,146 @@ impl Scrollback {
     }
 }
 
+/// The lines of `text`, with the escape sequences a terminal draws by,
+/// as they show: each line's text and the runs of it drawn other than
+/// plainly. Colours, bold and dim are kept, going on past a line's end
+/// as a terminal's do; other sequences are dropped, but a move of the
+/// cursor forward, which stands for blanks.
+fn parse_ansi(text: &str) -> Vec<(String, Styled)> {
+    let mut out = Vec::new();
+    let (mut line, mut runs, mut n) = (String::new(), Styled::new(), 0);
+    let mut style = Style::default();
+    let put = |c: char, line: &mut String, runs: &mut Styled, n: &mut usize, style: Style| {
+        line.push(c);
+        if style != Style::default() {
+            match runs.last_mut() {
+                Some((r, s)) if *s == style && r.end == *n => r.end += 1,
+                _ => runs.push((*n..*n + 1, style)),
+            }
+        }
+        *n += 1;
+    };
+    let mut chars = text.chars().peekable();
+    // A string sequence (OSC, DCS, ...) up to BEL or ESC \.
+    let skip_string = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+        while let Some(c) = chars.next() {
+            if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                break;
+            }
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => {
+                out.push((std::mem::take(&mut line), std::mem::take(&mut runs)));
+                n = 0;
+            }
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let mut end = None;
+                    for d in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&d) {
+                            end = Some(d);
+                            break;
+                        }
+                        params.push(d);
+                    }
+                    match end {
+                        Some('m') => sgr(&params, &mut style),
+                        Some('C') => {
+                            let by = params.parse::<usize>().unwrap_or(1).clamp(1, 1000);
+                            for _ in 0..by {
+                                put(' ', &mut line, &mut runs, &mut n, style);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
+                // A character set chosen: one more.
+                Some('(' | ')' | '*' | '+' | '#' | '%') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            c if c.is_control() && c != '\t' => {}
+            c => put(c, &mut line, &mut runs, &mut n, style),
+        }
+    }
+    out.push((line, runs));
+    out
+}
+
+/// Apply SGR parameters `params` (as in ESC [ `params` m) to `style`:
+/// colours of the text, bold and dim; the ground's colour and the rest
+/// passed over.
+fn sgr(params: &str, style: &mut Style) {
+    let params: Vec<&str> = params.split(';').collect();
+    let num = |i: usize| params.get(i).and_then(|p| p.parse::<u32>().ok());
+    let byte = |v: Option<u32>| v.unwrap_or(0).min(255) as u8;
+    let mut i = 0;
+    while i < params.len() {
+        // As 38:5:n or 38:2:r:g:b (a colour space first, perhaps).
+        if params[i].contains(':') {
+            let sub: Vec<Option<u32>> = params[i].split(':').map(|s| s.parse().ok()).collect();
+            if sub[0] == Some(38) {
+                style.fg = match (sub.get(1).copied().flatten(), sub.len()) {
+                    (Some(5), _) => Some(Ink::Index(byte(sub.get(2).copied().flatten()))),
+                    (Some(2), 6..) => Some(Ink::Rgb([byte(sub[3]), byte(sub[4]), byte(sub[5])])),
+                    (Some(2), 5) => Some(Ink::Rgb([byte(sub[2]), byte(sub[3]), byte(sub[4])])),
+                    _ => style.fg,
+                };
+            }
+            i += 1;
+            continue;
+        }
+        let code = if params[i].is_empty() {
+            Some(0)
+        } else {
+            num(i)
+        };
+        match code {
+            Some(0) => *style = Style::default(),
+            Some(1) => style.bold = true,
+            Some(2) => style.dim = true,
+            Some(22) => (style.bold, style.dim) = (false, false),
+            Some(c @ 30..=37) => style.fg = Some(Ink::Index((c - 30) as u8)),
+            Some(c @ 90..=97) => style.fg = Some(Ink::Index((c - 90 + 8) as u8)),
+            Some(39) => style.fg = None,
+            Some(c @ (38 | 48)) => {
+                let (ink, by) = match num(i + 1) {
+                    Some(5) => (Some(Ink::Index(byte(num(i + 2)))), 2),
+                    Some(2) => {
+                        let rgb = [byte(num(i + 2)), byte(num(i + 3)), byte(num(i + 4))];
+                        (Some(Ink::Rgb(rgb)), 4)
+                    }
+                    _ => (None, 0),
+                };
+                if c == 38 && ink.is_some() {
+                    style.fg = ink;
+                }
+                i += by;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// The lines of `text` as herdr gives it, without the blank ones at its
+/// end (the rows under the prompt) but one.
+fn split(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_owned())
+        .collect();
+    while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
 /// Characters `from` up to `to` of `line`.
 fn chars(line: &str, from: usize, to: usize) -> String {
     line.chars()
@@ -1346,10 +1662,153 @@ mod tests {
             s.key(&none, Keysym::Return, Keysym::Return, now, f),
             Some(Outcome::Copy { close: true, .. })
         ));
+        // Esc lets go of the selection first, then closes; so does `q`
+        // at once.
+        assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
+        assert!(!s.has_selection());
         assert_eq!(
             s.key(&none, Keysym::Escape, Keysym::Escape, now, f),
             Some(Outcome::Close)
         );
+        s.key(&ctrl, Keysym::a, Keysym::a, now, f);
+        assert_eq!(
+            s.key(&none, Keysym::q, Keysym::q, now, f),
+            Some(Outcome::Close)
+        );
+    }
+
+    fn fg(ink: Ink) -> Style {
+        Style {
+            fg: Some(ink),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn escape_sequences_give_colours_bold_and_dim_and_the_rest_go() {
+        let red = fg(Ink::Index(1));
+        let bold = Style {
+            bold: true,
+            ..Default::default()
+        };
+        let lines = parse_ansi(
+            "\x1b[31merror\x1b[0m: \x1b[1mbad\x1b[22m\n\
+             \x1b]8;;file:///a\x1b\\a.rs\x1b]8;;\x07\x1b[2C\x1b[38;5;208mx\x1b[38;2;1;2;3my\r\n\
+             \x1b[38:2::4:5:6mz\x1b[39;48;5;3mw\x1b[1;2;92mv\x1b[mu\x1b(B",
+        );
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            ("error: bad".into(), vec![(0..5, red), (7..10, bold)])
+        );
+        // A link's sequences go; a move forward stands for blanks.
+        assert_eq!(lines[1].0, "a.rs  xy");
+        assert_eq!(
+            lines[1].1,
+            [(6..7, fg(Ink::Index(208))), (7..8, fg(Ink::Rgb([1, 2, 3])))]
+        );
+        // Colons, a colour space among them; the ground's colour passed
+        // over; a style going on past the line's end.
+        let bright = Style {
+            fg: Some(Ink::Index(10)),
+            bold: true,
+            dim: true,
+        };
+        assert_eq!(lines[2].0, "zwvu");
+        assert_eq!(
+            lines[2].1,
+            [(0..1, fg(Ink::Rgb([4, 5, 6]))), (2..3, bright)]
+        );
+        let on = parse_ansi("\x1b[33ma\nb\x1b[0m");
+        assert_eq!(on[1].1, [(0..1, fg(Ink::Index(3)))]);
+    }
+
+    #[test]
+    fn styles_go_to_the_lines_with_their_text_from_the_bottom_up() {
+        let mut s = viewer("old\nkept\nsame\nchanged\nlong line here\nlast", 5, 10);
+        let red = fg(Ink::Index(1));
+        // Only the end; a line it lacks; one that differs.
+        s.set_styles(
+            "\x1b[31msame\x1b[0m\nchanged \x1b[31mnot\x1b[0m\n\
+             \x1b[31mlong line\x1b[0m here\n\x1b[31mlast\x1b[0m\n\n",
+        );
+        let styled: Vec<bool> = s.styles.iter().map(|l| !l.is_empty()).collect();
+        assert_eq!(styled, [false, false, true, false, true, true]);
+        // Split by rows as the lines wrap ("long " / "line " / "here").
+        let first = s.rows.iter().position(|r| r.line == 4).unwrap();
+        assert_eq!(s.row_styles(first), [(0..5, red)]);
+        assert_eq!(s.row_styles(first + 1), [(0..4, red)]);
+        assert!(s.row_styles(first + 2).is_empty());
+        // Read again, plain until styled again.
+        s.reload("last", fit(5, 10));
+        assert!(s.row_styles(0).is_empty());
+        s.set_styles("\x1b[31mlast");
+        assert_eq!(s.row_styles(0), [(0..4, red)]);
+    }
+
+    #[test]
+    fn f1_lists_the_keys_until_esc_f1_q_or_enter_and_takes_no_other() {
+        let mut s = viewer("one two\nthree", 80, 10);
+        let none = ModifiersState::default();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let f = fit(80, 10);
+        let caret = |s: &Scrollback| (s.caret.line, s.caret.ch);
+        let before = caret(&s);
+        for close in [Keysym::Escape, Keysym::F1, Keysym::q, Keysym::Return] {
+            assert_eq!(s.key(&none, Keysym::F1, Keysym::F1, now, f), None);
+            assert!(s.keys_open());
+            assert_eq!(s.key(&none, Keysym::k, Keysym::k, now, f), None);
+            assert_eq!(s.key(&ctrl, Keysym::a, Keysym::a, now, f), None);
+            type_in(&mut s, "/", f);
+            assert!(s.keys_open() && caret(&s) == before);
+            assert!(!s.has_selection() && s.find_bar().is_none());
+            // Closing them leaves the viewer open.
+            assert_eq!(s.key(&none, close, close, now, f), None);
+            assert!(!s.keys_open());
+        }
+        // From the search's field too.
+        type_in(&mut s, "/", f);
+        s.key(&none, Keysym::F1, Keysym::F1, now, f);
+        assert!(s.keys_open() && s.find_empty());
+    }
+
+    #[test]
+    fn ctrl_r_reads_again_at_the_bottom_or_where_it_stood() {
+        let text = |n: usize| (0..n).map(|i| format!("line {i}\n")).collect::<String>();
+        let f = fit(80, 10);
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let mut s = viewer(&text(30), 80, 10);
+        assert_eq!(
+            s.key(&ctrl, Keysym::r, Keysym::r, now, f),
+            Some(Outcome::Reload)
+        );
+        // At the bottom, it shows what came since.
+        assert_eq!(s.first(), 20);
+        s.select_all();
+        s.reload(&text(40), f);
+        assert_eq!((s.line_count(), s.first()), (40, 30));
+        assert!(!s.has_selection());
+        // Up the list, the line at the top stays there.
+        s.scroll_to(5.0, f);
+        s.reload(&text(50), f);
+        assert_eq!((s.line_count(), s.first()), (50, 5));
+        // The search finds in what is read.
+        type_in(&mut s, "/", f);
+        type_in(&mut s, "line 5", f);
+        assert_eq!(count(&s), "1 of 1");
+        s.reload(&text(60), f);
+        assert_eq!(count(&s), "11 found");
+        // Fewer lines than it stood at: it stands at the bottom.
+        s.reload(&text(3), f);
+        assert_eq!((s.line_count(), s.first()), (3, 0));
     }
 
     /// Type `text` into what has the keyboard.
@@ -1410,9 +1869,15 @@ mod tests {
         s.key(&ctrl, Keysym::a, Keysym::a, now, f);
         type_in(&mut s, "error", f);
         assert_eq!(count(&s), "6 of 6");
+        // Esc clears what is typed, then closes the search.
+        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
+        assert!(s.find_focused() && s.find_empty());
+        assert_eq!(count(&s), "");
+        assert!(s.row_found(53).is_empty());
+        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
+        assert!(s.find_bar().is_none());
         // With none in view (five rows of it), the nearest above.
         let f = fit(80, 5);
-        s.key(&none, Keysym::Escape, Keysym::Escape, now, f);
         s.scroll_to(25.0, f);
         type_in(&mut s, "/", f);
         s.key(&ctrl, Keysym::a, Keysym::a, now, f);
@@ -1427,6 +1892,18 @@ mod tests {
         assert_eq!(s.first(), 32);
         s.key(&shift, Keysym::N, Keysym::N, now, f);
         assert_eq!(count(&s), "3 of 6");
+        // Shift+Tab (or Tab) gives them back to the search, and again
+        // to the list.
+        let left_tab = Keysym::ISO_Left_Tab;
+        s.key(&shift, left_tab, left_tab, now, f);
+        assert!(s.find_focused());
+        s.key(&none, Keysym::Tab, Keysym::Tab, now, f);
+        assert!(!s.find_focused());
+        // A selection goes before the search does.
+        s.key(&shift, Keysym::Right, Keysym::Right, now, f);
+        assert!(s.has_selection());
+        assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
+        assert!(!s.has_selection() && s.find_bar().is_some());
         // Esc closes the search first, then the viewer.
         assert_eq!(s.key(&none, Keysym::Escape, Keysym::Escape, now, f), None);
         assert!(s.find_bar().is_none());

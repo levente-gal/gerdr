@@ -16,6 +16,7 @@
 //! density = "compact"   # or "comfortable", the default
 //! theme = "light"       # or "dark" or "system"; else the last choice
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
+//! motion = "reduced"    # or "off": no blinking dots or pulses; "full", the default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -56,36 +57,58 @@
 //! extra_errors = ['level=error']
 //! # Lines never taken for errors, though they match.
 //! ignore = ['DeprecationWarning']
-//! # Desktop notifications of the errors; on by default.
+//! # Desktop notifications of the errors; on by default ([notifications]
+//! # enabled = false turns them off too).
 //! notify = false
 //! # Tell when a service's command stops by itself; on by default.
 //! stopped = false
 //!
+//! [t3]
+//! # Take each newer T3 Code that gerdr reads as soon as it is out
+//! # (checked every 6 hours); false updates it only when asked. On by
+//! # default. The launcher's row turning it on or off writes this key.
+//! updates = false
+//!
 //! [notifications]
+//! # Desktop notifications: of agents that need you, finished test runs and
+//! # the services' errors. On by default.
+//! enabled = false
 //! # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
 //! # until dismissed, -1 leaves it to the notification daemon. By default 30.
 //! timeout = 0
 //! ```
 //!
-//! Mistakes are logged, and the defaults stand in for what they spoil.
+//! Each table is read on its own, and a key that can't be read on its
+//! own too: a mistake spoils only that key (or, when the file isn't TOML at
+//! all, the file), and the defaults stand in for what it spoils. Mistakes
+//! go to the problems list (see `problems`) and the log, and gerdr says so
+//! with an error toast. gerdr reads the file again when it is saved (see
+//! `Gerdr::watch_settings`).
 
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
+
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
+    Gerdr,
+    anim::Motion,
     chrome::{Density, ThemeMode},
     home_dir,
     keys::{Keymap, KeysConfig},
     launch::App,
+    menu::MenuAction,
     service_errors::{DEFAULT_ERRORS, Patterns},
+    toast::Level,
 };
 
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+/// The file's tables, as written; each read on its own (see `read`).
+#[derive(Default)]
 struct Config {
     keys: KeysConfig,
     /// Commands by name.
@@ -97,13 +120,93 @@ struct Config {
     /// Agent CLI commands by name (see `cli_agents`).
     agents: BTreeMap<String, String>,
     services: ServicesConfig,
+    t3: T3Config,
     notifications: NotificationsConfig,
+}
+
+/// The `[t3]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct T3Config {
+    updates: Option<bool>,
+}
+
+/// How T3 Code is kept up to date, from the `[t3]` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct T3Settings {
+    /// Whether each newer version gerdr reads is taken as soon as it is
+    /// out, instead of only when asked (see `t3_update`).
+    pub updates: bool,
+}
+
+impl Default for T3Settings {
+    fn default() -> Self {
+        Self { updates: true }
+    }
+}
+
+/// The `[t3]` settings `text` describes. What is wrong with them is
+/// `from_text`'s to say.
+pub fn t3_from_text(text: &str) -> T3Settings {
+    let table = Config::read(text, &mut Vec::new()).t3;
+    T3Settings {
+        updates: table.updates.unwrap_or(T3Settings::default().updates),
+    }
+}
+
+/// Whether `text` sets `key` of table `table` itself, whatever to.
+pub fn sets(text: &str, table: &str, key: &str) -> bool {
+    text.parse::<toml::Table>()
+        .ok()
+        .and_then(|file| file.get(table)?.get(key).cloned())
+        .is_some()
+}
+
+/// `text` with `key` of table `table` set to `value`: the table added at
+/// the end when it isn't there, everything else (comments, other keys,
+/// their order and spacing) as it was.
+pub fn with_bool(text: &str, table: &str, key: &str, value: bool) -> Result<String, String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|err: toml_edit::TomlError| {
+        err.message().to_owned() + &line_of(text, err.span())
+    })?;
+    match doc.get(table) {
+        Some(item) if !item.is_table_like() => return Err(format!("[{table}] isn't a table")),
+        Some(_) => {}
+        None => {
+            // After what the file ends with (the template's comments), not
+            // above it, a blank line between.
+            let mut new = toml_edit::Table::new();
+            let trailing = doc.trailing().as_str().unwrap_or_default().to_owned();
+            let gap = if text.trim().is_empty() || trailing.ends_with("\n\n") {
+                ""
+            } else {
+                "\n"
+            };
+            new.decor_mut().set_prefix(format!("{trailing}{gap}"));
+            doc.set_trailing("");
+            doc.insert(table, toml_edit::Item::Table(new));
+        }
+    }
+    doc[table][key] = toml_edit::value(value);
+    Ok(doc.to_string())
+}
+
+/// Set `key` of table `table` to `value` in the config file, made from
+/// the template first when there is none, keeping the rest of it as it
+/// was (see `with_bool`).
+pub fn write_bool(table: &str, key: &str, value: bool) -> Result<(), String> {
+    let path = config_file();
+    ensure_file(&path).map_err(|err| err.to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let text = with_bool(&text, table, key, value)?;
+    crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
 }
 
 /// The `[notifications]` table, as written.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct NotificationsConfig {
+    enabled: Option<bool>,
     timeout: Option<i64>,
 }
 
@@ -111,6 +214,9 @@ struct NotificationsConfig {
 /// table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Notifications {
+    /// Whether gerdr sends any: agents that need the user, finished test
+    /// runs, the services' errors (see `notify`).
+    pub enabled: bool,
     /// Seconds each stays on screen: 0 until dismissed, below 0 as long as
     /// the notification daemon likes.
     pub timeout: i64,
@@ -118,7 +224,10 @@ pub struct Notifications {
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { timeout: 30 }
+        Self {
+            enabled: true,
+            timeout: 30,
+        }
     }
 }
 
@@ -143,10 +252,11 @@ pub fn load_notifications() -> Notifications {
 /// The `[notifications]` settings `text` describes; the rest of the file is
 /// `from_text`'s, which tells its mistakes.
 pub fn notifications_from_text(text: &str) -> Notifications {
-    let table = toml::from_str::<Config>(text)
-        .map(|config| config.notifications)
-        .unwrap_or_default();
+    let table = Config::read(text, &mut Vec::new()).notifications;
     let mut settings = Notifications::default();
+    if let Some(enabled) = table.enabled {
+        settings.enabled = enabled;
+    }
     if let Some(timeout) = table.timeout {
         settings.timeout = timeout;
     }
@@ -186,26 +296,13 @@ impl Default for Services {
     }
 }
 
-/// How the services' errors are found and told, as the config file says.
-pub fn load_services() -> Services {
-    let path = config_file();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let (services, problems) = services_from_text(&text);
-    for problem in problems {
-        tracing::warn!("{}: {problem}", path.display());
-    }
-    services
-}
-
 /// The `[services]` settings `text` describes, and what's wrong with them
 /// (the defaults stand in for patterns that spoil them). The rest of the
 /// file is `from_text`'s.
 pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
+    // What else is wrong with the file is `from_text`'s to say.
+    let table = Config::read(text, &mut Vec::new()).services;
     let mut problems = Vec::new();
-    let Ok(config) = toml::from_str::<Config>(text) else {
-        return (Services::default(), problems);
-    };
-    let table = config.services;
     let mut services = Services::default();
     if table.errors.is_some() || table.extra_errors.is_some() || table.ignore.is_some() {
         let mut errors: Vec<String> = match table.errors {
@@ -230,6 +327,96 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
     (services, problems)
 }
 
+/// How a problem of the `[keys]` table starts.
+const KEYS_PROBLEM: &str = "[keys] ";
+
+/// The tables the file may have.
+const TABLES: [&str; 10] = [
+    "keys",
+    "apps",
+    "ui",
+    "git",
+    "keep",
+    "inbox",
+    "agents",
+    "services",
+    "t3",
+    "notifications",
+];
+
+impl Config {
+    /// The tables of `text`, each read on its own: one that can't be read
+    /// whole is read key by key (see `table`). What is wrong goes to
+    /// `problems`, as "[table] key: why".
+    fn read(text: &str, problems: &mut Vec<String>) -> Self {
+        let mut file: toml::Table = match text.parse() {
+            Ok(file) => file,
+            Err(err) => {
+                problems.push(err.message().to_owned() + &line_of(text, err.span()));
+                return Self::default();
+            }
+        };
+        for name in file.keys().filter(|name| !TABLES.contains(&name.as_str())) {
+            problems.push(format!("[{name}] isn't a table gerdr reads"));
+        }
+        let mut take = |name: &str| file.remove(name);
+        let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
+        let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
+        let (services, t3, notifications) = (take("services"), take("t3"), take("notifications"));
+        Self {
+            keys: table("keys", keys, problems),
+            apps: table("apps", apps, problems),
+            ui: table("ui", ui, problems),
+            git: table("git", git, problems),
+            keep: table("keep", keep, problems),
+            inbox: table("inbox", inbox, problems),
+            agents: table("agents", agents, problems),
+            services: table("services", services, problems),
+            t3: table("t3", t3, problems),
+            notifications: table("notifications", notifications, problems),
+        }
+    }
+}
+
+/// " (line N)" for where `span` starts in `text`, if it says.
+fn line_of(text: &str, span: Option<std::ops::Range<usize>>) -> String {
+    span.map_or_else(String::new, |span| {
+        let line = text[..span.start.min(text.len())].lines().count().max(1);
+        format!(" (line {line})")
+    })
+}
+
+/// Table `name` of the file, `value`, as `T`: whole when it reads so,
+/// else key by key, each key that doesn't read on its own reported to
+/// `problems` and left out; the default without it.
+fn table<T: DeserializeOwned + Default>(
+    name: &str,
+    value: Option<toml::Value>,
+    problems: &mut Vec<String>,
+) -> T {
+    let Some(value) = value else {
+        return T::default();
+    };
+    if let Ok(read) = T::deserialize(value.clone()) {
+        return read;
+    }
+    let toml::Value::Table(keys) = value else {
+        problems.push(format!("[{name}] isn't a table"));
+        return T::default();
+    };
+    let mut good = toml::Table::new();
+    for (key, value) in keys {
+        let alone = toml::Table::from_iter([(key.clone(), value.clone())]);
+        match T::deserialize(toml::Value::Table(alone)) {
+            Ok(_) => {
+                good.insert(key, value);
+            }
+            Err(err) => problems.push(format!("[{name}] {key}: {}", err.message().trim())),
+        }
+    }
+    T::deserialize(toml::Value::Table(good)).unwrap_or_default()
+}
+
 /// The `[ui]` table, as written.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -237,6 +424,7 @@ struct UiConfig {
     density: Option<String>,
     theme: Option<String>,
     needs_you: Option<bool>,
+    motion: Option<String>,
 }
 
 /// The `[git]` table, as written.
@@ -338,6 +526,8 @@ pub struct Ui {
     /// Whether the sidebar gathers the blocked and done agents of the
     /// other workspaces in a "Needs you" list at its top.
     pub needs_you: bool,
+    /// How much the chrome moves (see `anim::Motion`).
+    pub motion: Motion,
 }
 
 impl Default for Ui {
@@ -346,40 +536,81 @@ impl Default for Ui {
             density: Density::default(),
             theme: None,
             needs_you: true,
+            motion: Motion::Full,
         }
     }
+}
+
+/// Everything the config file sets, as `load` reads it.
+pub struct Settings {
+    pub keymap: Keymap,
+    pub apps: Vec<App>,
+    pub ui: Ui,
+    pub git: Git,
+    pub linear: Option<Linear>,
+    /// The programs whose apps keep running (see `keep`).
+    pub keep: Vec<String>,
+    /// The agent CLI commands by name (see `cli_agents`).
+    pub agents: BTreeMap<String, String>,
+    /// How the services' errors are found and told (see `services`).
+    pub services: Services,
+    /// How T3 Code is kept up to date.
+    pub t3: T3Settings,
+    /// Whether and how desktop notifications show.
+    pub notifications: Notifications,
+    /// What is wrong with the file, as sentences for the user.
+    pub problems: Vec<String>,
 }
 
 /// The shortcuts, apps, look and git settings in the config file, how
 /// the inbox reads Linear (`LINEAR_API_KEY` in the environment over the
 /// file's key), the programs whose apps keep running (see `keep`) and the
-/// agent CLI commands by name (see `cli_agents`).
-#[allow(clippy::type_complexity)]
-pub fn load() -> (
-    Keymap,
-    Vec<App>,
-    Ui,
-    Git,
-    Option<Linear>,
-    Vec<String>,
-    BTreeMap<String, String>,
-) {
+/// agent CLI commands by name (see `cli_agents`), how the services'
+/// errors are found (see `services`) and whether T3 Code updates itself.
+/// What is wrong with the file is kept in the problems list under
+/// `"config"` (and logged), in place of what was there before.
+pub fn load() -> Settings {
     let path = config_file();
+    let mut problems = Vec::new();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("can't read {}: {err}", path.display());
+                problems.push(format!("can't be read: {err}"));
             }
             String::new()
         }
     };
-    let (keymap, apps, ui, git, inbox, problems, keep, agents) = from_text(&text);
-    for problem in problems {
-        tracing::warn!("{}: {problem}", path.display());
+    let (keymap, apps, ui, git, inbox, found, keep, agents) = from_text(&text);
+    problems.extend(found);
+    let (services, service_problems) = services_from_text(&text);
+    problems.extend(service_problems);
+    let t3 = t3_from_text(&text);
+    let notifications = notifications_from_text(&text);
+    // `Keymap::new` keeps its own under "keys": only the rest here.
+    crate::problems::clear("config");
+    for problem in problems.iter().filter(|p| !p.starts_with(KEYS_PROBLEM)) {
+        crate::problems::report("config", format!("Settings: {problem}"));
     }
     let linear = inbox.linear(std::env::var("LINEAR_API_KEY").ok());
-    (keymap, apps, ui, git, linear, keep, agents)
+    Settings {
+        keymap,
+        apps,
+        ui,
+        git,
+        linear,
+        keep,
+        agents,
+        services,
+        t3,
+        notifications,
+        problems,
+    }
+}
+
+/// When the config file was last written, if it is there.
+pub fn modified() -> Option<SystemTime> {
+    std::fs::metadata(config_file()).ok()?.modified().ok()
 }
 
 /// The shortcuts, apps, look, git and inbox settings `text` describes,
@@ -399,12 +630,13 @@ pub fn from_text(
     BTreeMap<String, String>,
 ) {
     let mut problems = Vec::new();
-    let config: Config = toml::from_str(text).unwrap_or_else(|err| {
-        problems.push(err.to_string());
-        Config::default()
-    });
+    let config = Config::read(text, &mut problems);
     let (keymap, keys_problems) = Keymap::new(config.keys);
-    problems.extend(keys_problems);
+    problems.extend(
+        keys_problems
+            .into_iter()
+            .map(|p| format!("{KEYS_PROBLEM}{p}")),
+    );
     let mut apps = Vec::new();
     for (name, command) in config.apps {
         match command.trim() {
@@ -422,6 +654,12 @@ pub fn from_text(
         None | Some("comfortable") => {}
         Some("compact") => ui.density = Density::Compact,
         Some(other) => problems.push(format!("unknown density `{other}`")),
+    }
+    match config.ui.motion.as_deref().map(str::trim) {
+        None | Some("full") => {}
+        Some("reduced") => ui.motion = Motion::Reduced,
+        Some("off") => ui.motion = Motion::Off,
+        Some(other) => problems.push(format!("unknown motion `{other}`")),
     }
     if let Some(theme) = config.ui.theme.as_deref() {
         match ThemeMode::from_name(theme) {
@@ -513,10 +751,27 @@ fn same_branches(groups: Vec<Vec<String>>, problems: &mut Vec<String>) -> Vec<Ve
 /// What a config file made for the user to edit starts with: all of it
 /// commented out, so it changes nothing yet.
 const TEMPLATE: &str = "\
-# gerdr's settings, read when gerdr starts.
+# gerdr's settings, read again each time this file is saved. A mistake
+# spoils only its own line: gerdr says what is wrong, and the default
+# stands in for it.
 #
 # [keys]
+# # A key is modifiers (Ctrl, Alt, Shift, Super) and a key name joined by
+# # \"+\": \"Shift+Tab\", \"F12\", \"Down\". Letters are the same either case,
+# # so \"Shift+X\" needs its Shift. A character typed with Shift (\"?\",
+# # \"!\", \"@\") is Shift and the key it is on in the keyboard's layout;
+# # one the layout types only with AltGr is a mistake: name the key it is
+# # on instead. Ctrl still held from the prefix doesn't count: a key
+# # with Ctrl in it takes pressing Ctrl again. An action given keys
+# # loses its default ones; [] leaves it none. The prefix is Ctrl+B by
+# # default. open-workspace was called open-project, and new-agent
+# # new-cursor-agent: the old names still work, with a word that they
+# # changed.
 # prefix = \"Ctrl+A\"
+# new-tab = \"t\"
+# toggle-theme = [\"Alt+T\", \"F12\"]
+# open-workspace = \"o\"
+# rename-tab = [\",\", \"F2\"]
 #
 # [apps]
 # # Run by `sh` in the workspace folder.
@@ -526,6 +781,8 @@ const TEMPLATE: &str = "\
 # [ui]
 # density = \"compact\"   # or \"comfortable\", the default
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
+# needs_you = false     # hide the sidebar's \"Needs you\" list; shown by default
+# motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
 #
 # [git]
 # # Branch names that are one branch across repositories, in the
@@ -540,7 +797,8 @@ const TEMPLATE: &str = "\
 # # The agent CLIs the AI button of a workspace starts in a new tab: the
 # # known ones on PATH (claude, codex, gemini, cursor-agent, opencode…),
 # # each run by its own command unless given another here (\"\" hides it),
-# # and the ones added here, by name.
+# # and the ones added here, by name. Each runs in a new terminal tab of
+# # the workspace, in its folder, as typed at its shell.
 # claude = \"claude --dangerously-skip-permissions\"
 # my-agent = \"my-agent --fast\"
 #
@@ -566,12 +824,22 @@ const TEMPLATE: &str = "\
 # extra_errors = ['level=error']
 # # Lines never taken for errors, though they match.
 # ignore = ['DeprecationWarning']
-# # Desktop notifications of the errors; on by default.
+# # Desktop notifications of the errors; on by default ([notifications]
+# # enabled = false turns them off too).
 # notify = false
 # # Tell when a service's command stops by itself; on by default.
 # stopped = false
 #
+# [t3]
+# # Take each newer T3 Code that gerdr reads as soon as it is out
+# # (checked every 6 hours); false updates it only when asked. On by
+# # default. The launcher's row turning it on or off writes this key.
+# updates = false
+#
 # [notifications]
+# # Desktop notifications: of agents that need you, finished test runs and
+# # the services' errors. On by default.
+# enabled = false
 # # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
 # # until dismissed, -1 leaves it to the notification daemon. By default 30.
 # timeout = 0
@@ -591,6 +859,94 @@ pub fn ensure_file(path: &Path) -> std::io::Result<()> {
         Ok(mut file) => std::io::Write::write_all(&mut file, TEMPLATE.as_bytes()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(err) => Err(err),
+    }
+}
+
+/// How often gerdr looks whether the config file was saved.
+const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+
+impl Gerdr {
+    /// Read the config file again whenever it is saved (see
+    /// `reload_settings`).
+    pub fn watch_settings(&mut self) {
+        let timer = Timer::from_duration(WATCH_INTERVAL);
+        let look = |_, _: &mut (), state: &mut Gerdr| {
+            let modified = modified();
+            if modified != state.settings_modified {
+                state.settings_modified = modified;
+                state.reload_settings();
+            }
+            TimeoutAction::ToDuration(WATCH_INTERVAL)
+        };
+        if let Err(err) = self.loop_handle.insert_source(timer, look) {
+            tracing::warn!("watching the settings: {err}");
+        }
+    }
+
+    /// Read the config file again and use what it says now (see
+    /// `apply_settings`). Says so, with what is wrong with it.
+    pub fn reload_settings(&mut self) {
+        let problems = self.apply_settings();
+        self.settings_problems(&problems, true);
+    }
+
+    /// Read the config file again and use what it says now: the keys,
+    /// apps, look, git, inbox, kept apps, agents, notifications, how the
+    /// services' errors are found and whether T3 Code updates itself.
+    /// What is wrong with it.
+    pub fn apply_settings(&mut self) -> Vec<String> {
+        self.settings_modified = modified();
+        let settings = load();
+        self.keymap = settings.keymap;
+        self.apps = settings.apps;
+        self.density = settings.ui.density;
+        self.needs_you = settings.ui.needs_you;
+        crate::anim::set_motion(settings.ui.motion);
+        if let Some(mode) = settings.ui.theme.filter(|mode| *mode != self.theme_mode) {
+            self.set_theme_mode(mode);
+        }
+        self.repos.same_branches = settings.git.same_branches;
+        self.repos.top_branches = settings.git.top_branches;
+        self.inbox.linear = settings.linear;
+        self.keep_apps = settings.keep;
+        self.cli_agents = crate::cli_agents::installed(&settings.agents);
+        self.agent_config = settings.agents;
+        if let Some(notifier) = &mut self.notifier {
+            notifier.set_settings(settings.notifications);
+        }
+        if settings.notifications.enabled != self.notify {
+            self.notify = settings.notifications.enabled;
+            // The bus source lets go once the notifier is gone.
+            match self.notify {
+                true => self.connect_notifier(),
+                false => self.notifier = None,
+            }
+        }
+        self.set_service_settings(settings.services);
+        self.t3.auto_update = settings.t3.updates;
+        self.arrange();
+        settings.problems
+    }
+
+    /// Say what is wrong with the config file, `problems`, in an error
+    /// toast with a button opening it; once `reloaded`, that it was read
+    /// again, either way.
+    pub fn settings_problems(&mut self, problems: &[String], reloaded: bool) {
+        let read = if reloaded {
+            "Settings reloaded"
+        } else {
+            "Settings"
+        };
+        let text = match problems {
+            [] if reloaded => return self.show_success(read.into()),
+            [] => return,
+            [one] => format!("{read}: {one}"),
+            [first, rest @ ..] => {
+                format!("{read}: {first} \u{b7} {} more in the log", rest.len())
+            }
+        };
+        let open = ("Open settings".to_owned(), MenuAction::OpenSettings);
+        self.toast_with(text, Level::Error, Some(open));
     }
 }
 
@@ -640,6 +996,68 @@ mod tests {
         assert!(services.patterns.is_error("an ERROR"));
         assert!(!services.patterns.is_error("ERROR DeprecationWarning"));
         assert!(!services.patterns.is_error("a 500 FATAL"));
+        assert!(!super::t3_from_text(&examples).updates);
+        assert!(super::t3_from_text(TEMPLATE).updates);
+    }
+
+    #[test]
+    fn t3_updates_are_on_unless_the_file_turns_them_off() {
+        use super::{T3Settings, t3_from_text};
+        assert_eq!(t3_from_text(""), T3Settings { updates: true });
+        assert!(t3_from_text("[t3]\n").updates);
+        assert!(t3_from_text("[t3]\nupdates = true\n").updates);
+        assert!(!t3_from_text("[t3]\nupdates = false\n").updates);
+        // A wrong value is told, and the default stands.
+        let text = "[t3]\nupdates = \"no\"\n";
+        assert!(t3_from_text(text).updates);
+        assert_eq!(from_text(text).5.len(), 1, "{:?}", from_text(text).5);
+        assert_eq!(from_text("[t3]\nupdate = false\n").5.len(), 1);
+        assert!(from_text("[t3]\nupdates = false\n").5.is_empty());
+    }
+
+    #[test]
+    fn writing_a_key_keeps_the_rest_of_the_file() {
+        use super::{sets, with_bool};
+        // An existing table: its other keys and every comment stay.
+        let text = "\
+# My settings.
+[ui]
+density = \"compact\"  # tight
+
+[t3]
+# Off while on the train.
+updates = true
+other = 1
+";
+        let out = with_bool(text, "t3", "updates", false).unwrap();
+        assert_eq!(out, text.replace("updates = true", "updates = false"));
+        // A missing table: added at the end, after the comments the file
+        // ends with.
+        let text =
+            "# My settings.\n[ui]\ndensity = \"compact\" # tight\n\n# [t3]\n# updates = false\n";
+        let out = with_bool(text, "t3", "updates", false).unwrap();
+        assert_eq!(out, format!("{text}\n[t3]\nupdates = false\n"));
+        assert!(!sets(text, "t3", "updates") && sets(&out, "t3", "updates"));
+        assert!(!super::t3_from_text(&out).updates);
+        assert_eq!(from_text(&out).2.density, Density::Compact);
+        // The template: still all its comments, then the key.
+        let out = with_bool(TEMPLATE, "t3", "updates", true).unwrap();
+        assert!(out.starts_with(TEMPLATE), "{out}");
+        assert!(out.ends_with("\n[t3]\nupdates = true\n"), "{out}");
+        assert!(from_text(&out).5.is_empty());
+        // An empty file, one of tables only.
+        assert_eq!(
+            with_bool("", "t3", "updates", false).unwrap(),
+            "[t3]\nupdates = false\n"
+        );
+        let out = with_bool("[ui]\nneeds_you = false\n", "t3", "updates", true).unwrap();
+        assert_eq!(out, "[ui]\nneeds_you = false\n\n[t3]\nupdates = true\n");
+        // A table without the key, written inline: the key joins it.
+        let out = with_bool("t3 = { }\n", "t3", "updates", false).unwrap();
+        assert!(!super::t3_from_text(&out).updates, "{out}");
+        // What can't be written says why.
+        assert!(with_bool("t3 = 1\n", "t3", "updates", false).is_err());
+        assert!(with_bool("[t3\n", "t3", "updates", false).is_err());
     }
 
     #[test]
@@ -679,9 +1097,29 @@ mod tests {
 
     #[test]
     fn mistakes() {
-        assert_eq!(from_text("[key]\n").5.len(), 1);
+        assert_eq!(from_text("[key]\n").5, ["[key] isn't a table gerdr reads"]);
         assert_eq!(from_text("[apps]\nbrowser = 1\n").5.len(), 1);
         assert_eq!(from_text("[inbox]\nlinear = 1\n").5.len(), 1);
+        // Not TOML at all: where it goes wrong.
+        let problems = from_text("[ui]\ndensity = \"compact\"\ntheme = \n").5;
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].ends_with("(line 3)"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_mistake_spoils_only_its_own_key() {
+        let text = "[keys]\nprefix = \"Ctrl+A\"\n\
+                    [apps]\nbrowser = 1\nfiles = \"nautilus .\"\n\
+                    [ui]\ndensty = \"compact\"\ntheme = \"light\"\n\
+                    [agents]\nmine = \"mine --fast\"\n";
+        let (keymap, apps, ui, _, _, problems, _, agents) = from_text(text);
+        assert_eq!(keymap.help().prefix, "Ctrl+A");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(ui.theme, Some(ThemeMode::Light));
+        assert_eq!(agents["mine"], "mine --fast");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].starts_with("[apps] browser: "), "{problems:?}");
+        assert!(problems[1].starts_with("[ui] densty: "), "{problems:?}");
     }
 
     fn ui(text: &str) -> (Ui, Vec<String>) {
@@ -769,6 +1207,7 @@ mod tests {
                 density: Density::Compact,
                 theme: Some(ThemeMode::Light),
                 needs_you: true,
+                motion: crate::anim::Motion::Full,
             }
         );
         assert!(problems.is_empty());
@@ -824,19 +1263,21 @@ mod tests {
         let (parsed, problems) = ui("[ui]\ndensity = \"cosy\"\ntheme = \"blue\"\n");
         assert_eq!(parsed, Ui::default());
         assert_eq!(problems.len(), 2);
-        // A wrong type, or a key that isn't there, spoils the whole file.
+        // A wrong type, or a key that isn't there, spoils only that key.
         let (parsed, problems) = ui("[ui]\ndensity = 1\n");
         assert_eq!(parsed, Ui::default());
         assert_eq!(problems.len(), 1);
-        let (parsed, problems) = ui("[ui]\ncolour = \"red\"\n");
-        assert_eq!(parsed, Ui::default());
+        let (parsed, problems) = ui("[ui]\ncolour = \"red\"\ntheme = \"dark\"\n");
+        assert_eq!(parsed.theme, Some(ThemeMode::Dark));
         assert_eq!(problems.len(), 1);
     }
 
     #[test]
     fn notifications_last_30_seconds_unless_told() {
         use super::{Notifications, notifications_from_text};
-        assert_eq!(notifications_from_text(""), Notifications { timeout: 30 });
+        assert_eq!(notifications_from_text(""), Notifications::default());
+        assert!(Notifications::default().enabled);
+        assert!(!notifications_from_text("[notifications]\nenabled = false\n").enabled);
         assert_eq!(notifications_from_text("").expire_ms(), 30_000);
         let never = notifications_from_text("[notifications]\ntimeout = 0\n");
         assert_eq!(never.expire_ms(), 0);

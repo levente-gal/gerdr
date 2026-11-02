@@ -2,11 +2,11 @@
 
 use super::{
     BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, GREETING_FONT_SIZE, GREETING_HEIGHT,
-    HELP_MARGIN, HINTS_HEIGHT, LABEL_FONT_SIZE, NOTE_GAP, NOTE_HEIGHT, PADDING, Painter, Palette,
-    ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, WELCOME_BUTTON,
-    WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROW, WELCOME_ROWS,
-    WELCOME_WIDTH, band, coverage, field_text, focus_ring, hint_at, hint_spots, icon_sdf, mix,
-    phys, physical, plus, rect_px,
+    HELP_MARGIN, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, NOTE_GAP, NOTE_HEIGHT, PADDING, Painter,
+    Palette, ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, Thumb,
+    WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROW,
+    WELCOME_ROWS, WELCOME_WIDTH, band, coverage, field_text, focus_ring, gutter_track, hint_at,
+    hint_spots, icon_sdf, mix, phys, physical, plus, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -24,6 +24,9 @@ const CARD_NAME_TOP: i32 = 10;
 const CARD_NAME_HEIGHT: i32 = 22;
 const CARD_DETAIL_TOP: i32 = 32;
 const CARD_DETAIL_HEIGHT: i32 = 18;
+/// How far right of the cards their scrollbar stands, besides the gutter's
+/// own gap.
+const WELCOME_BAR_GAP: i32 = 4;
 
 /// What the welcome screen shows: a greeting, the projects, and the button
 /// to start a new one.
@@ -53,13 +56,16 @@ pub struct WelcomeView {
     pub in_app: bool,
     /// The keys that quit gerdr ("Ctrl+B q"), for the bar at the bottom.
     pub quit_keys: Option<String>,
+    /// Where the list stands, in rows, while not all projects show: its
+    /// scrollbar says so.
+    pub scroll: Option<ListBar>,
 }
 
 /// A project on the welcome screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectRow {
     pub name: String,
-    /// "3 repos · ~/Work/aft".
+    /// "3 workspaces · ~/Work/aft".
     pub detail: String,
     /// "2h ago".
     pub ago: String,
@@ -235,6 +241,14 @@ pub fn running_label(running: Option<bool>) -> &'static str {
     }
 }
 
+/// The scrollbar right of the welcome screen's cards in `layout`, while
+/// not all of `view`'s projects show.
+pub fn welcome_thumb(view: &WelcomeView, layout: &WelcomeLayout) -> Option<Thumb> {
+    let list = layout.list;
+    let track = gutter_track(list.loc.x + list.size.w + WELCOME_BAR_GAP, list);
+    Thumb::of(track, view.rows.len() as f64, view.scroll?)
+}
+
 /// How high the list of `rows` cards is.
 fn list_height(rows: usize) -> i32 {
     let rows = rows as i32;
@@ -367,6 +381,9 @@ impl Painter {
         for (i, (rect, row)) in layout.rows.iter().zip(&view.rows).enumerate() {
             let hits = view.hits.get(i).map_or(&[][..], Vec::as_slice);
             self.project_row(&mut c, view, i, row, hits, *rect, scale, p);
+        }
+        if let Some(thumb) = welcome_thumb(view, &layout) {
+            self.thumb_in(&mut c, &thumb, scale, p);
         }
 
         let button = layout.button;
@@ -554,8 +571,8 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        HINTS_GAP, ProjectRow, WELCOME_CARD, WELCOME_CARD_GAP, WelcomeHit, WelcomeView,
-        running_label, welcome_label, welcome_layout, welcome_mark, welcome_page,
+        HINTS_GAP, ListBar, ProjectRow, WELCOME_CARD, WELCOME_CARD_GAP, WelcomeHit, WelcomeView,
+        running_label, welcome_label, welcome_layout, welcome_mark, welcome_page, welcome_thumb,
     };
     use crate::chrome::{
         Painter, QuitHit, QuitRow, QuitView, Rect, TabStripView, TabView, Theme, ThemeMode, inside,
@@ -566,7 +583,7 @@ mod tests {
     fn row(name: &str, running: Option<bool>, current: bool) -> ProjectRow {
         ProjectRow {
             name: name.into(),
-            detail: "3 repos · ~/Work/aft".into(),
+            detail: "3 workspaces · ~/Work/aft".into(),
             ago: "2h ago".into(),
             running,
             current,
@@ -596,6 +613,7 @@ mod tests {
             note: Some("herdr isn't installed".into()),
             in_app: true,
             quit_keys: Some("Ctrl+B q".into()),
+            scroll: None,
         }
     }
 
@@ -744,6 +762,13 @@ mod tests {
                 }
             }
         }
+        // Scrolled, its scrollbar shows.
+        view.scroll = Some(ListBar {
+            down: 2.0,
+            total: 9.0,
+        });
+        painter.welcome(&view, (800, 600).into(), 1.0, Theme::Light.palette());
+        view.scroll = None;
         view.naming = Some(Line::default());
         view.rows.clear();
         view.hits.clear();
@@ -766,5 +791,23 @@ mod tests {
         ];
         let strip = TabStripView::plain(tabs.to_vec(), 0, false, ThemeMode::Dark);
         painter.tab_strip_view(&strip, Theme::Dark, (900, 48).into(), 1.25);
+    }
+
+    #[test]
+    fn the_scrollbar_stands_right_of_the_cards_while_not_all_show() {
+        let mut v = view();
+        let layout = welcome_layout((1280, 800).into(), v.rows.len(), false, true);
+        assert_eq!(welcome_thumb(&v, &layout), None);
+        v.scroll = Some(ListBar {
+            down: 6.0,
+            total: 9.0,
+        });
+        let thumb = welcome_thumb(&v, &layout).expect("a scrollbar");
+        let list = layout.list;
+        assert!(thumb.track.loc.x >= list.loc.x + list.size.w);
+        assert_eq!(thumb.track.loc.y, list.loc.y);
+        // At the end of the list, the thumb is at the end of the track.
+        let end = (thumb.track.loc.y + thumb.track.size.h) as f64;
+        assert_eq!(thumb.top + thumb.h, end);
     }
 }

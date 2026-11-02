@@ -3,7 +3,7 @@
 //! opens one and what its items do).
 
 use super::{
-    FONT_SIZE, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_RADIUS, MENU_WIDTH, PADDING, Painter, Palette,
+    FONT_SIZE, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, PADDING, POPUP_RADIUS, Painter, Palette,
     Rect, SHADOW, SMALL_FONT_SIZE,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -43,10 +43,18 @@ pub fn menu_width(rows: &[MenuRow]) -> i32 {
     }
 }
 
+/// How many rows a menu has room for on an output `height` high: a menu
+/// with more shows only these (see `crate::menu::ContextMenu`).
+pub fn menu_rows_fitting(height: i32) -> usize {
+    ((height - 2 * MENU_PADDING) / MENU_ITEM_HEIGHT).max(1) as usize
+}
+
 /// A menu of `rows` just below `anchor` (window coordinates; it may reach
 /// over the apps), kept on an output of `output`: above the anchor when
-/// there is no room below it, moved left when it would reach past the
-/// right edge. The panel and one rect per item.
+/// there is no room below it, else on whichever side has more room, moved
+/// up or down as far as it takes to stay on the output, and moved left
+/// when it would reach past the right edge. The panel and one rect per
+/// item.
 pub fn menu_layout(
     anchor: Rect,
     rows: &[MenuRow],
@@ -55,8 +63,14 @@ pub fn menu_layout(
     let w = menu_width(rows);
     let h = 2 * MENU_PADDING + rows.len() as i32 * MENU_ITEM_HEIGHT;
     let below = anchor.loc.y + anchor.size.h + MENU_GAP;
-    let top = if below + h > output.h && anchor.loc.y - MENU_GAP - h >= 0 {
-        anchor.loc.y - MENU_GAP - h
+    let above = anchor.loc.y - MENU_GAP - h;
+    let room_below = output.h - below;
+    let room_above = anchor.loc.y - MENU_GAP;
+    let top = if below + h <= output.h {
+        below
+    } else if above >= 0 || room_above > room_below {
+        // Above it, or as near it as fits, from the top down.
+        above.max(0)
     } else {
         below.min((output.h - h).max(0))
     };
@@ -83,7 +97,7 @@ impl Painter {
         // it, on an output tall enough that it hangs below.
         let anchor = Rectangle::new((0, -MENU_GAP).into(), (0, 0).into());
         let (panel, items) = menu_layout(anchor, &view.rows, (i32::MAX / 2, i32::MAX / 2).into());
-        let mut c = self.popup(panel.size, MENU_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         // Item rects relative to the buffer, which starts `SHADOW` before the panel.
@@ -97,14 +111,8 @@ impl Painter {
                 px(item.size.h),
             );
             if view.hover == Some(i) && row.enabled {
-                c.rounded(
-                    x as f32,
-                    y as f32,
-                    w as f32,
-                    h as f32,
-                    (MENU_RADIUS - 2.0) * s,
-                    p.selected,
-                );
+                // The row Enter picks: lit as a list's selected row.
+                self.row_highlight(&mut c, item, (true, 0.0), scale, p);
             }
             let color = if row.enabled { p.text } else { p.muted };
             let (left, right) = (x as f32 + PADDING * s, (x + w) as f32 - PADDING * s);
@@ -177,6 +185,24 @@ mod tests {
     fn hints_make_the_menu_wider() {
         assert_eq!(menu_width(&rows(2, false)), MENU_WIDTH);
         assert_eq!(menu_width(&rows(2, true)), MENU_WIDTH + MENU_HINT_ROOM);
+    }
+
+    #[test]
+    fn a_menu_with_no_room_either_side_takes_the_roomier_one() {
+        let output = (800, 300).into();
+        // Ten rows are too tall for either side of an anchor mid-way.
+        let mid = Rect::new((100, 140).into(), (28, 20).into());
+        let (panel, _) = menu_layout(mid, &rows(8, false), output);
+        assert!(
+            panel.loc.y >= 0 && panel.loc.y + panel.size.h <= 300,
+            "{panel:?}"
+        );
+        // Low down, it goes up from the anchor's top.
+        let low = Rect::new((100, 250).into(), (28, 20).into());
+        let (panel, _) = menu_layout(low, &rows(9, false), output);
+        assert_eq!(panel.loc.y, 0);
+        assert_eq!(super::menu_rows_fitting(300), 9);
+        assert_eq!(super::menu_rows_fitting(10), 1);
     }
 
     #[test]

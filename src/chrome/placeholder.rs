@@ -17,7 +17,7 @@ const SPINNER_GAP: i32 = 12;
 pub const SPINNER_PERIOD: Duration = Duration::from_millis(900);
 /// How many drawings one turn of the spinner is made of.
 pub const SPINNER_STEPS: u32 = 24;
-/// The label line, and the Retry and Close buttons side by side under it.
+/// The label line, and the Close and Retry buttons side by side under it.
 const LABEL_HEIGHT: i32 = 24;
 const RETRY_GAP: i32 = 14;
 const RETRY_WIDTH: i32 = 84;
@@ -99,8 +99,9 @@ pub fn placeholder_layout(rect: Rect, timed_out: bool) -> PlaceholderLayout {
         PlaceholderLayout {
             spinner: None,
             label: label(top),
-            retry: button(cx - BUTTON_GAP / 2 - RETRY_WIDTH),
-            close: button(cx + BUTTON_GAP / 2),
+            // Close on the left, Retry, what it is for, on the right.
+            close: button(cx - BUTTON_GAP / 2 - RETRY_WIDTH),
+            retry: button(cx + BUTTON_GAP / 2),
         }
     } else {
         let h = SPINNER_SIZE + SPINNER_GAP + LABEL_HEIGHT;
@@ -219,11 +220,11 @@ mod tests {
         assert!(layout.spinner.is_none());
         assert!(inside(rect, retry) && inside(rect, close));
         assert!(retry.loc.y >= layout.label.loc.y + layout.label.size.h);
-        // Side by side, centered together.
+        // Side by side, Close first, centered together.
         assert_eq!(retry.loc.y, close.loc.y);
-        assert!(retry.loc.x + retry.size.w < close.loc.x);
+        assert!(close.loc.x + close.size.w < retry.loc.x);
         assert_eq!(
-            retry.loc.x + (close.loc.x + close.size.w - retry.loc.x) / 2,
+            close.loc.x + (retry.loc.x + retry.size.w - close.loc.x) / 2,
             500
         );
         let middle = |r: Rect| {

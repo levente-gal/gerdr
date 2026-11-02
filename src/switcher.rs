@@ -18,8 +18,9 @@
 //! Enter would launch it.
 //!
 //! A row of category chips over the list, "All" first, narrows it to one
-//! section; Tab and Shift+Tab move along them. The key hints show in a
-//! footer.
+//! section; Tab and Shift+Tab move along them. Up/Down (or Ctrl+J and
+//! Ctrl+K) move the selection; Esc clears the query, then closes. The key
+//! hints show in a footer.
 
 use std::{
     cmp::Reverse,
@@ -46,18 +47,15 @@ use crate::{
     desktop, fuzzy, git, home_dir,
     input::Overlay,
     launch::{self, Place},
-    paths::{display, tilde},
+    paths::tilde,
     profile_import,
     project_list::RowTops,
     projects::Project,
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
-    toast::Level,
+    toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
-
-/// How long a path in a row's detail may get.
-const DETAIL_CHARS: usize = 60;
 
 /// What an item switches to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -479,8 +477,12 @@ impl Switcher {
         let ctrl = mods.ctrl;
         let page = self.shown().map_or(1, |(first, last)| last - first + 1) as isize;
         match sym {
+            // Esc clears the query first, then closes.
+            Keysym::Escape if !self.query.is_empty() => {
+                self.query.clear();
+                self.refilter();
+            }
             Keysym::Escape => return Outcome::Closed,
-            Keysym::c if ctrl => return Outcome::Closed,
             Keysym::Return | Keysym::KP_Enter => {
                 if let Some(target) = self.picked() {
                     let place = if mods.alt { Place::Tab } else { self.place };
@@ -489,14 +491,15 @@ impl Switcher {
             }
             Keysym::Up | Keysym::KP_Up => self.step(-1),
             Keysym::Down | Keysym::KP_Down => self.step(1),
+            Keysym::k if ctrl => self.step(-1),
+            Keysym::j if ctrl => self.step(1),
+            // Tab and Shift+Tab go along the category chips, both ways.
             Keysym::Tab | Keysym::ISO_Left_Tab if self.chips() => {
-                self.step_category(if mods.shift { -1 } else { 1 })
+                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+                self.step_category(if back { -1 } else { 1 })
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab => self.step(if mods.shift { -1 } else { 1 }),
-            Keysym::Page_Up => self.step(-page),
-            Keysym::Page_Down => self.step(page),
-            Keysym::p if ctrl => self.step(-1),
-            Keysym::n if ctrl => self.step(1),
+            Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-page),
+            Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page),
             _ => {}
         }
         Outcome::Open
@@ -624,7 +627,7 @@ impl Switcher {
         let hint = match (self.run, self.place) {
             (true, Place::Split) => "Command to run in a split…",
             (true, Place::Tab) => "Command to run in a new tab…",
-            (false, _) => "Workspace, tab, agent, project, app, folder or command…",
+            (false, _) => "Go to a workspace, tab, agent, project, app, folder or command…",
         };
         let categories: Vec<&'static str> = if self.chips() {
             std::iter::once("All")
@@ -666,7 +669,14 @@ impl Switcher {
         if self.chips() {
             hints.push(("Tab", "category"));
         }
-        hints.push(("Esc", "close"));
+        hints.push((
+            "Esc",
+            if self.query.is_empty() {
+                "close"
+            } else {
+                "clear"
+            },
+        ));
         hints
             .into_iter()
             .map(|(keys, what)| (keys.to_owned(), what.to_owned()))
@@ -750,6 +760,15 @@ fn frecency_key(
     })
 }
 
+/// `what` a key hint does, as a tooltip says it: with a capital.
+fn sentence(what: &str) -> String {
+    let mut chars = what.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// The other projects than `current`, the most recently used first, and a
 /// row for the project menu (the welcome screen while no project is shown).
 fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
@@ -788,7 +807,7 @@ fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
             Item::new(
                 ItemIcon::Settings,
                 "Project file",
-                display(&crate::projects::project_file(id), home, DETAIL_CHARS),
+                tilde(&crate::projects::project_file(id), home),
                 Target::ProjectFile(id.to_owned()),
             )
         })
@@ -804,11 +823,24 @@ fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
 }
 
 impl Gerdr {
-    /// Open the switcher, and ask zoxide for its folders again meanwhile.
-    pub fn open_switcher(&mut self) {
+    /// Close what the switcher opens in place of, as the other popups do
+    /// when they open: one popup at a time, no key repeating into it, no
+    /// menu or tooltip left over it.
+    fn make_room_for_switcher(&mut self) {
         self.project_menu = None;
         self.inbox.close();
         self.scrollback = None;
+        self.worktrees.close();
+        self.repos.close();
+        self.stop_key_repeat();
+        self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+    }
+
+    /// Open the switcher, and ask zoxide for its folders again meanwhile.
+    pub fn open_switcher(&mut self) {
+        self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.switcher_items(), false, Place::Split);
         switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
@@ -824,9 +856,7 @@ impl Gerdr {
             self.toast("No agent CLI found on PATH".into(), Level::Info);
             return;
         }
-        self.project_menu = None;
-        self.inbox.close();
-        self.scrollback = None;
+        self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
         switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
@@ -835,9 +865,7 @@ impl Gerdr {
     /// Open the switcher as the run prompt, for a command to launch in
     /// `place`, and look for installed apps again meanwhile.
     pub fn open_run_prompt(&mut self, place: Place) {
-        self.project_menu = None;
-        self.inbox.close();
-        self.scrollback = None;
+        self.make_room_for_switcher();
         // The commands run before there was frecency start it off, once.
         let history: Vec<String> = launch::history()
             .iter()
@@ -911,10 +939,7 @@ impl Gerdr {
                 Item::new(
                     command_icon(&source.key, &icons),
                     format!("Import {} profile", source.name),
-                    format!(
-                        "into gerdr, from {}",
-                        display(&source.from, Some(home), DETAIL_CHARS)
-                    ),
+                    format!("into gerdr, from {}", tilde(&source.from, Some(home))),
                     Target::ImportProfile(source),
                 )
             }));
@@ -934,7 +959,7 @@ impl Gerdr {
             Item::new(
                 ItemIcon::Command,
                 "T3 Code",
-                format!("its agents' threads, for {}", ws.name),
+                format!("its agents' threads, in {}", ws.name),
                 Target::T3(w),
             )
         });
@@ -971,20 +996,21 @@ impl Gerdr {
             detail.push_str(&format!(", {pin} next"));
         }
         if let crate::t3_agents::Source::Cli(_) = self.t3.source {
-            detail.push_str(" · gerdr reads it in part");
+            detail.push_str(" · gerdr shows basic status only");
         }
-        let auto = if updates.manual {
+        // Settings' `[t3] updates`, written there.
+        let auto = if self.t3.auto_update {
             Item::new(
                 ItemIcon::Command,
-                "Update T3 Code automatically",
-                "to each newer version gerdr reads, checked every 6 hours",
+                "Turn off T3 Code updates in Settings",
+                "update only when asked \u{b7} [t3] updates = false",
                 Target::T3Updates,
             )
         } else {
             Item::new(
                 ItemIcon::Command,
-                "Stop updating T3 Code automatically",
-                "update only when asked",
+                "Turn on T3 Code updates in Settings",
+                "to each newer version gerdr fully reads, checked every 6 hours \u{b7} [t3] updates",
                 Target::T3Updates,
             )
         };
@@ -1043,6 +1069,20 @@ impl Gerdr {
             switcher.hover = hover;
             switcher.chip_hover = chip;
             switcher.hint_hover = hint;
+        }
+        // A chip says what it narrows the list to, a key hint what it
+        // does; Tab steps through the chips.
+        if let Some(i) = chip {
+            let text = match view.categories.get(i)? {
+                &"All" => "Show every section".to_owned(),
+                label => format!("Show only {label}"),
+            };
+            return Some(Tooltip::new(&text, layout.chips[i]).key("Tab"));
+        }
+        if let Some(i) = hint {
+            let (keys, what) = view.hints.get(i)?;
+            let (_, spot) = layout.hints.iter().find(|(h, _)| *h == i)?;
+            return Some(Tooltip::new(&sentence(what), *spot).key(keys));
         }
         // An agent's mark says how it is doing.
         let i = hover?;
@@ -1125,7 +1165,8 @@ impl Gerdr {
     }
 
     /// Move the switcher's list on to `now` if it moves on its own; whether it
-    /// still moves (see `Scroll::moving`).
+    /// still moves (see `Scroll::moving`). Run before every frame, it also
+    /// fits the list to the output as it is now, resized or not.
     pub fn switcher_scroll_tick(&mut self, now: Instant) -> bool {
         if self.switcher.is_none() {
             return false;
@@ -1140,7 +1181,8 @@ impl Gerdr {
 
     /// A button pressed while the switcher is open: on a row it switches to
     /// that row's target, on a category chip it shows that category,
-    /// outside the panel it closes the switcher.
+    /// outside the panel it closes the switcher, but on a toast presses
+    /// that.
     pub fn switcher_click(&mut self, pos: Point<f64, Logical>) {
         // A key hint: its key, pressed.
         if let Some(view) = self.switcher_view() {
@@ -1172,7 +1214,15 @@ impl Gerdr {
                 }
             }
             None if layout.panel.to_f64().contains(pos) => self.switcher = Some(switcher),
-            None => {}
+            // A toast takes the click, and the switcher stays.
+            None => {
+                if let Some(hit) = self.toast_press(pos) {
+                    self.switcher = Some(switcher);
+                    if let ToastHit::Action(action) = hit {
+                        self.menu_action(action);
+                    }
+                }
+            }
         }
     }
 
@@ -1195,11 +1245,9 @@ impl Gerdr {
             }
             Target::Agent(key) => self.focus_agent(&key),
             Target::Project(id) => self.switch_project(&id),
-            Target::Welcome if self.project.is_some() => {
-                if self.project_menu.is_none() {
-                    self.toggle_project_menu();
-                }
-            }
+            // What Shift+P opens: the project menu while a project is
+            // shown, else the welcome screen.
+            Target::Welcome if self.project.is_some() => self.open_project_menu(),
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
@@ -1227,13 +1275,20 @@ impl Gerdr {
     /// Open the config file, made first when there is none: in the active
     /// workspace's Zed, shown, when it has one; else with `xdg-open`, in
     /// `place`.
-    fn open_settings(&mut self, place: Place) {
+    pub(crate) fn open_settings(&mut self, place: Place) {
         let path = crate::config::config_file();
         if let Err(err) = crate::config::ensure_file(&path) {
             let path = tilde(&path, home_dir().as_deref());
             return self.toast(format!("Can't make {path}: {err}"), Level::Error);
         }
         self.open_in_zed(&path, place, "the settings file");
+    }
+
+    /// Open gerdr's log file (see `crate::log_path`), as the settings file
+    /// is opened.
+    pub(crate) fn open_log(&mut self, place: Place) {
+        let path = crate::log_path();
+        self.open_in_zed(&path, place, "the log file");
     }
 
     /// Open project `id`'s file in a new Zed window, in a new tab of the
@@ -1312,13 +1367,10 @@ impl Gerdr {
             .zip(self.workspace_views())
             .enumerate()
         {
-            let detail: Vec<String> = [
-                Some(display(&ws.dir, home.as_deref(), DETAIL_CHARS)),
-                view.branch,
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let detail: Vec<String> = [Some(tilde(&ws.dir, home.as_deref())), view.branch]
+                .into_iter()
+                .flatten()
+                .collect();
             let icon = match view.icon {
                 Some(picture) => ItemIcon::Picture(picture),
                 None => ItemIcon::Workspace(ws.kind),
@@ -1371,7 +1423,7 @@ impl Gerdr {
             items.push(Item::new(
                 ItemIcon::Folder,
                 label,
-                display(dir, home.as_deref(), DETAIL_CHARS),
+                tilde(dir, home.as_deref()),
                 Target::Folder(dir.clone()),
             ));
         }
@@ -1385,7 +1437,7 @@ impl Gerdr {
         items.push(Item::new(
             ItemIcon::Settings,
             "Settings file",
-            display(&crate::config::config_file(), home.as_deref(), DETAIL_CHARS),
+            tilde(&crate::config::config_file(), home.as_deref()),
             Target::Settings,
         ));
         items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
@@ -1616,7 +1668,8 @@ mod tests {
             Item::new(ItemIcon::App, "x", "", Target::App("x".into())),
         ]);
         assert_eq!(switcher.view().category, 0);
-        // With one category there are no chips, and Tab walks the rows.
+        // With one category there are no chips, and Tab moves nothing:
+        // it never walks the rows.
         switcher.set_items(vec![item("a", "", 0), item("b", "", 1)]);
         let ctrl = ModifiersState {
             ctrl: true,
@@ -1627,7 +1680,7 @@ mod tests {
         assert!(view.categories.is_empty());
         assert!(view.hints.iter().all(|(k, _)| k != "Tab"));
         switcher.key(&none, Keysym::Tab, Keysym::Tab);
-        assert_eq!(switcher.picked(), Some(&Target::Workspace(1)));
+        assert_eq!(switcher.picked(), Some(&Target::Workspace(0)));
     }
 
     #[test]
@@ -2019,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn takes_a_paste_and_closes_on_ctrl_c() {
+    fn takes_a_paste_and_ctrl_c_never_closes() {
         let mut switcher = Switcher::new(Vec::new(), true, Place::Split);
         let ctrl = ModifiersState {
             ctrl: true,
@@ -2027,12 +2080,56 @@ mod tests {
         };
         assert!(matches!(
             switcher.key(&ctrl, Keysym::c, Keysym::c),
-            Outcome::Closed
+            Outcome::Open
         ));
         type_in(&mut switcher, "echo ");
         let none = ModifiersState::default();
         crate::text_field::pasting("a\tb\nc\n", |sym| switcher.key(&none, sym, sym));
         assert_eq!(&*switcher.query, "echo a b c");
+    }
+
+    #[test]
+    fn esc_clears_the_query_then_closes() {
+        let mut switcher = Switcher::new(
+            (0..3).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        let none = ModifiersState::default();
+        let esc = |s: &Switcher| s.hints().last().map(|(_, what)| what.clone());
+        type_in(&mut switcher, "ws1");
+        assert_eq!(esc(&switcher).as_deref(), Some("clear"));
+        assert!(matches!(
+            switcher.key(&none, Keysym::Escape, Keysym::Escape),
+            Outcome::Open
+        ));
+        assert!(switcher.query.is_empty());
+        assert_eq!(labels(&switcher).len(), 3);
+        assert_eq!(esc(&switcher).as_deref(), Some("close"));
+        assert!(matches!(
+            switcher.key(&none, Keysym::Escape, Keysym::Escape),
+            Outcome::Closed
+        ));
+    }
+
+    #[test]
+    fn ctrl_j_and_k_move_and_ctrl_n_and_p_do_not() {
+        let mut switcher = Switcher::new(
+            (0..3).map(|w| item(&format!("ws{w}"), "", w)).collect(),
+            false,
+            Place::Split,
+        );
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..Default::default()
+        };
+        switcher.key(&ctrl, Keysym::j, Keysym::j);
+        assert_eq!(switcher.view().selected, Some(1));
+        switcher.key(&ctrl, Keysym::n, Keysym::n);
+        switcher.key(&ctrl, Keysym::p, Keysym::p);
+        assert_eq!(switcher.view().selected, Some(1));
+        switcher.key(&ctrl, Keysym::k, Keysym::k);
+        assert_eq!(switcher.view().selected, Some(0));
     }
 
     #[test]

@@ -47,7 +47,7 @@ const TICK: Duration = Duration::from_secs(1);
 const PANE_FRESH: Duration = Duration::from_secs(2);
 /// How many of a pane's last lines are read.
 const PANE_LINES: usize = 40;
-/// How long Ctrl+S snoozes an item for, in seconds.
+/// How long Ctrl+H snoozes an item for, in seconds.
 const SNOOZE: u64 = 3600;
 /// How long a triage entry's `seen` may lag before opening the panel
 /// brings it up to date, in seconds: a write per open at most this often.
@@ -91,7 +91,7 @@ impl Gerdr {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
         self.scrollback = None;
-        self.inbox.panel = Some(Panel::new(focus));
+        self.inbox.open(focus);
         self.inbox_mark_seen();
         if self.issues_due(ISSUES_OPEN) {
             self.refresh_issues();
@@ -455,7 +455,10 @@ impl Gerdr {
                 workspace,
             } => self.save_todo(id, text, workspace),
             Outcome::AddTickets(repo) => self.add_tickets(repo),
-            Outcome::Refresh => self.refresh_issues(),
+            Outcome::Refresh => {
+                self.refresh_issues();
+                self.refresh_ci();
+            }
             Outcome::Notice(text) => self.show_notice(text),
             Outcome::Restore(id) => {
                 if let Some(project) = self.project.clone() {
@@ -584,6 +587,10 @@ impl Gerdr {
         if matches!(item.target, Target::Todo(_)) && item.workspace.is_none() {
             return;
         }
+        // What couldn't be read is read again; the panel stays.
+        if item.target == Target::Refresh {
+            return self.apply_inbox(Outcome::Refresh);
+        }
         self.close_inbox();
         match item.target {
             Target::Agent(key) => self.focus_agent(&key),
@@ -596,6 +603,7 @@ impl Gerdr {
                     self.switch_workspace(w);
                 }
             }
+            Target::Refresh => {}
             Target::ServiceError {
                 project,
                 pane_id,
@@ -807,6 +815,15 @@ impl Gerdr {
         if repos.is_empty() && tickets.is_empty() && linear.is_none() {
             self.inbox.issues.last = IssuesRead::default();
             self.inbox.issues.at = Some(Instant::now());
+            // Nothing to read: nothing failed to be.
+            for source in [
+                issues::GITHUB_PROBLEMS,
+                issues::TICKET_PROBLEMS,
+                issues::BOARD_PROBLEMS,
+                issues::LINEAR_PROBLEMS,
+            ] {
+                crate::problems::clear(source);
+            }
             return;
         }
         self.inbox.issues.pending = true;

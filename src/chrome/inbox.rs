@@ -9,14 +9,14 @@
 
 use super::{
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
-    FOOTER_ROW, FieldSpot, HELP_MARGIN, HELP_PADDING, HELP_RADIUS, KEY_FONT_SIZE, LABEL_FONT_SIZE,
-    MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
-    PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, STROKE, agent_icon, band, cross, dot_slot, folder, footer_height,
-    footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf, magnifier, measure, mix, pencil,
-    phys, plus, project_menu::menu_query_text, rect_px, robot, rounded_rect, row_dot, segment,
-    status_dot, tray,
+    FieldSpot, HELP_MARGIN, HELP_PADDING, KEY_FONT_SIZE, LABEL_FONT_SIZE, MENU_MARK_GAP,
+    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
+    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE,
+    agent_icon, band, cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch,
+    hint_at, hint_strs, icon_sdf, measure, mix, pencil, phys, plus, rect_px, robot, rounded_rect,
+    row_dot, row_fill, search::query_text, segment, status_dot, tray,
 };
+use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -36,13 +36,13 @@ const INBOX_LIST_SHARE: f64 = 0.4;
 const INBOX_LIST_MIN: i32 = 260;
 /// The room above and below the list's rows, and beside them.
 const INBOX_PAD: i32 = PROJECT_MENU_PADDING;
-/// The list's scrollbar, and the gap before it; its thumb is never
-/// shorter than `THUMB_MIN`.
-const SCROLLBAR: i32 = 6;
+/// The list's scrollbar, as wide as every popup's, and the gap before
+/// it.
+const SCROLLBAR: i32 = 4;
 const SCROLLBAR_GAP: i32 = 4;
-const THUMB_MIN: i32 = 24;
-/// The scope toggle's segments in the title row: "This workspace" and
-/// "All", and how far it keeps from the right edge.
+/// The scope toggle's segments in a title row: "This workspace" and
+/// "All", and how far it keeps from the right edge. The worktrees popup
+/// has the same toggle.
 const SCOPE_OWN: i32 = 124;
 const SCOPE_ALL: i32 = 52;
 const SCOPE_INSET: i32 = 14;
@@ -126,7 +126,7 @@ pub struct InboxView {
     pub hints: Vec<(String, String)>,
     /// What the list says when it is empty.
     pub empty: String,
-    /// Hidden (dismissed, snoozed) items are listed too (Ctrl+H).
+    /// Hidden (dismissed, snoozed) items are listed too (Alt+H).
     pub show_hidden: bool,
     /// The part of the first row scrolled past, 0 up to 1.
     pub part: f64,
@@ -175,10 +175,25 @@ pub struct InboxLine {
     pub tone: InboxTone,
     /// At the right: `5m`, `2h`, `3d`; empty when unknown.
     pub age: String,
-    /// Dismissed or snoozed, listed with Ctrl+H: muted.
+    /// Dismissed or snoozed, listed with Alt+H: muted.
     pub hidden: bool,
     /// What it can have done, shown on it when selected or hovered.
     pub buttons: Vec<InboxButton>,
+    /// A repository's or worktree's Git marks, after its subtitle.
+    pub marks: Option<InboxMarks>,
+}
+
+/// A repository's Git marks on its inbox line, as the repositories
+/// panel's tree marks it: a cross for an operation stopped half-way or a
+/// conflict, a dot for changes, arrows with the commits to push and pull,
+/// then how many stashes it has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InboxMarks {
+    pub stopped: bool,
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    pub stashes: u32,
 }
 
 /// What an item's mark (and its detail's title mark) shows, and a
@@ -226,7 +241,7 @@ pub enum InboxTone {
 
 /// A button on an item's row or in the detail: its label and the key that
 /// does the same (shown in tooltips and the detail), as `("Snooze",
-/// "Ctrl+S")`.
+/// "Ctrl+H")`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxButton {
     pub label: String,
@@ -379,21 +394,25 @@ fn thumb_place(
     track: Rect,
     page: usize,
 ) -> Option<(Point<f64, Logical>, Size<i32, Logical>)> {
-    if view.total <= page || page == 0 || track.size.h <= 0 {
+    let thumb = list_thumb(view, track, page)?;
+    Some((
+        (track.loc.x as f64, thumb.top).into(),
+        (track.size.w, thumb.h as i32).into(),
+    ))
+}
+
+/// The scrollbar along `track` for `view`, `page` rows shown at once, as
+/// every popup's (`chrome::Thumb`), in rows: the list stands at its first
+/// row shown and the part of it scrolled past.
+fn list_thumb(view: &InboxView, track: Rect, page: usize) -> Option<super::Thumb> {
+    if page == 0 {
         return None;
     }
-    let h = track.size.h as f64;
-    let thumb_h = (h * page as f64 / view.total as f64)
-        .max((THUMB_MIN as f64).min(h))
-        .min(h)
-        .round();
-    let last = (view.total - page) as f64;
-    let pos = (view.first as f64 + view.part).min(last);
-    let y = track.loc.y as f64 + (h - thumb_h) * pos / last;
-    Some((
-        (track.loc.x as f64, y).into(),
-        (track.size.w, thumb_h as i32).into(),
-    ))
+    let bar = super::ListBar {
+        down: view.first as f64 + view.part,
+        total: view.total as f64,
+    };
+    super::Thumb::of(track, page as f64, bar)
 }
 
 /// The list's scrollbar in `layout` for `view` on an `output`, where the
@@ -403,15 +422,7 @@ pub fn inbox_thumb(
     layout: &InboxLayout,
     output: Size<i32, Logical>,
 ) -> Option<super::Thumb> {
-    let track = scroll_track(layout.list);
-    let page = inbox_page(output);
-    let (loc, size) = thumb_place(view, track, page)?;
-    Some(super::Thumb {
-        track,
-        top: loc.y,
-        h: size.h as f64,
-        last: (view.total - page) as f64,
-    })
+    list_thumb(view, scroll_track(layout.list), inbox_page(output))
 }
 
 /// The list's scrollbar track, at the right of `list`.
@@ -434,23 +445,9 @@ pub fn inbox_page(size: Size<i32, Logical>) -> usize {
     ((list.size.h - 2 * INBOX_PAD) / INBOX_ROW).max(1) as usize
 }
 
-/// How high the footer is with `hints` across `w`: a row for each they
-/// take, so a second row is kept only when they need it.
-fn footer_height_for(hints: &[(&str, &str)], w: i32) -> i32 {
-    let tall = Rectangle::new((0, 0).into(), (w, footer_height(hints.len())).into());
-    let spots = footer_hint_spots(hints, tall);
-    let rows = spots
-        .iter()
-        .map(|(_, r)| r.loc.y)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        .max(1) as i32;
-    PROJECT_MENU_FOOTER + (rows - 1) * FOOTER_ROW
-}
-
 /// How wide a row's button is: its label and the room either side.
 fn row_button_width(button: &InboxButton) -> i32 {
-    extent(&button.label, SMALL_FONT_SIZE) + 2 * BUTTON_PAD
+    extent(&button.label, FONT_SIZE) + 2 * BUTTON_PAD
 }
 
 /// The first of `buttons` that fit at the right end of a row in `rect`,
@@ -627,7 +624,7 @@ fn compose_chip(compose: &InboxCompose, query: Rect) -> Rect {
 /// Where the text of the field `query` goes (physical pixels): after its
 /// mark, up to its end or, while composing, the chip.
 fn field_text(view: &InboxView, query: Rect, scale: f64) -> (f32, f32) {
-    let (x, end) = menu_query_text(query, scale);
+    let (x, end) = query_text(query, scale);
     match &view.compose {
         Some(compose) if !compose.tickets => {
             let chip = compose_chip(compose, query);
@@ -638,6 +635,24 @@ fn field_text(view: &InboxView, query: Rect, scale: f64) -> (f32, f32) {
     }
 }
 
+/// The scope toggle's segments at the right of the title row `title`, as
+/// (for every workspace, rect): "This workspace", then "All".
+pub(super) fn scope_segments(title: Rect) -> Vec<(bool, Rect)> {
+    let y = title.loc.y + (title.size.h - ROW_BUTTON) / 2;
+    let all_x = title.loc.x + title.size.w - SCOPE_INSET - SCOPE_ALL;
+    let own_x = all_x - SCOPE_OWN;
+    vec![
+        (
+            false,
+            Rectangle::new((own_x, y).into(), (SCOPE_OWN, ROW_BUTTON).into()),
+        ),
+        (
+            true,
+            Rectangle::new((all_x, y).into(), (SCOPE_ALL, ROW_BUTTON).into()),
+        ),
+    ]
+}
+
 /// Where the parts of the inbox panel showing `view` go, on an output of
 /// `size`: the title row (the scope toggle at its right), the field, the
 /// list at the left and the detail at the right, then the footer.
@@ -646,25 +661,13 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let (x, top, w) = (panel.loc.x, panel.loc.y, panel.size.w);
     let title = Rectangle::new(panel.loc, (w, INBOX_TITLE).into());
     let scope = if view.all.is_some() {
-        let y = top + (INBOX_TITLE - ROW_BUTTON) / 2;
-        let all_x = x + w - SCOPE_INSET - SCOPE_ALL;
-        let own_x = all_x - SCOPE_OWN;
-        vec![
-            (
-                false,
-                Rectangle::new((own_x, y).into(), (SCOPE_OWN, ROW_BUTTON).into()),
-            ),
-            (
-                true,
-                Rectangle::new((all_x, y).into(), (SCOPE_ALL, ROW_BUTTON).into()),
-            ),
-        ]
+        scope_segments(title)
     } else {
         Vec::new()
     };
     let query = Rectangle::new((x, top + INBOX_TITLE).into(), (w, INBOX_FIELD).into());
     let hints = hint_strs(&view.hints);
-    let footer_h = footer_height_for(&hints, w);
+    let footer_h = super::measured_footer_height(&hints, w);
     let footer = Rectangle::new(
         (x, top + panel.size.h - footer_h).into(),
         (w, footer_h).into(),
@@ -674,10 +677,13 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let window = list_window(list);
     let (row_x, row_w) = row_span(list);
     let (start, end) = (window.loc.y as f64, (window.loc.y + window.size.h) as f64);
-    let with_buttons = match view.hover {
+    // The selected row has its buttons, and so has the one under the
+    // pointer: the buttons follow the selection, the pointer reaches them.
+    let hovered = match view.hover {
         Some(InboxHit::Row(i) | InboxHit::Button(i, _)) => Some(i),
-        _ => view.selected,
+        _ => None,
     };
+    let with_buttons = |i: usize| view.selected == Some(i) || hovered == Some(i);
     let rows = view
         .rows
         .iter()
@@ -692,7 +698,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
             let rect = Rectangle::new((row_x, top.round() as i32).into(), (row_w, h).into());
             let buttons = match row {
                 _ if !shown => Vec::new(),
-                InboxRow::Item(line) if with_buttons == Some(i) => {
+                InboxRow::Item(line) if with_buttons(i) => {
                     row_buttons(&line.buttons, item_line(rect))
                 }
                 _ => Vec::new(),
@@ -998,7 +1004,7 @@ impl Painter {
     ) -> Canvas {
         let layout = inbox_layout(view, size);
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let border = px(1).max(1);
         let by = Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y));
@@ -1070,7 +1076,8 @@ impl Painter {
         c
     }
 
-    /// The scrollbar's thumb, of `size`.
+    /// The scrollbar's thumb, of `size`, as `bar_thumb` draws it, to blit.
+    #[cfg(test)]
     fn inbox_thumb(&self, size: Size<i32, Logical>, scale: f64, p: &Palette) -> Canvas {
         let mut c = Canvas::new(super::physical(size, scale));
         let (w, h) = (c.w as f32, c.h as f32);
@@ -1228,48 +1235,44 @@ impl Painter {
                 p.warning,
             );
         }
-        // One outlined track behind both segments.
-        if let (Some((_, first)), Some((_, last))) = (scope.first(), scope.last()) {
-            let track = first.merge(*last);
-            let pad = SCOPE_TRACK_PAD;
-            let track = Rectangle::new(
-                (track.loc.x - pad, track.loc.y - pad).into(),
-                (track.size.w + 2 * pad, track.size.h + 2 * pad).into(),
-            );
-            self.inbox_pill(c, track, p.element, scale, p);
-        }
-        for &(all, rect) in scope {
-            self.inbox_scope(c, view, all, rect, scale, p);
+        let hover = match view.hover {
+            Some(InboxHit::Scope(all)) => Some(all),
+            _ => None,
+        };
+        if let Some(on) = view.all {
+            self.scope_toggle(c, scope, on, hover, scale, p);
         }
     }
 
-    /// The scope toggle's segment for every workspace (`all`) or the
-    /// active one's, in `rect` on the toggle's track: filled when it is
-    /// the scope shown, lighter under the pointer.
-    fn inbox_scope(
+    /// The scope toggle of `segments` (see `scope_segments`), as
+    /// `Painter::segmented` draws a toggle: the scope shown (every
+    /// workspace when `all`) filled, the one under the pointer (`hover`)
+    /// lit. The inbox and the worktrees popup draw it alike.
+    pub(super) fn scope_toggle(
         &self,
         c: &mut Canvas,
-        view: &InboxView,
+        segments: &[(bool, Rect)],
         all: bool,
-        rect: Rect,
+        hover: Option<bool>,
         scale: f64,
         p: &Palette,
     ) {
-        let on = view.all == Some(all);
-        let fill = if on {
-            Some(p.selected)
-        } else if view.hover == Some(InboxHit::Scope(all)) {
-            Some(mix(p.element, p.selected, 0.5))
-        } else {
-            None
+        let (Some((_, first)), Some((_, last))) = (segments.first(), segments.last()) else {
+            return;
         };
-        if let Some(fill) = fill {
-            let (x, y, w, h) = rect_px(rect, scale);
-            c.rounded(x, y, w, h, (BUTTON_RADIUS - 2.0) * scale as f32, fill);
-        }
-        let label = if all { "All" } else { "This workspace" };
-        let color = if on { p.text } else { p.muted };
-        self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+        let track = first.merge(*last);
+        let pad = SCOPE_TRACK_PAD;
+        let track = Rectangle::new(
+            (track.loc.x - pad, track.loc.y - pad).into(),
+            (track.size.w + 2 * pad, track.size.h + 2 * pad).into(),
+        );
+        let labelled: Vec<(&str, Rect)> = segments
+            .iter()
+            .map(|&(every, rect)| (if every { "All" } else { "This workspace" }, rect))
+            .collect();
+        let at = |scope: bool| segments.iter().position(|(s, _)| *s == scope);
+        let on = at(all).unwrap_or(0);
+        self.segmented(c, track, &labelled, on, hover.and_then(at), scale, p);
     }
 
     /// An outlined pill in `rect`, filled with `fill`.
@@ -1307,8 +1310,8 @@ impl Painter {
                 &compose.text
             }
             None => {
-                icon_sdf(c, mark, scale, p.placeholder, |x, y| magnifier(x, y, s));
-                &view.query
+                let placeholder = &view.placeholder;
+                return self.query_field(c, &view.query, placeholder, query, true, scale, p);
             }
         };
         self.edit_line(
@@ -1369,7 +1372,7 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let gap = (FIELD_GAP as f32 * s).round();
-        let (x, y, w, h) = rect_px(rect, scale);
+        let (x, y, w, _) = rect_px(rect, scale);
         let right = x + w - PADDING * s;
         let text_x = px(rect.loc.x + BADGE_INSET + BADGE + BADGE_GAP) as f32;
         let line = match &key.row {
@@ -1450,18 +1453,13 @@ impl Painter {
         };
 
         // The highlight stops short of the rows above and below.
-        let (hy, hh) = (y + px(2) as f32, h - 2.0 * px(2) as f32);
-        let r = (MENU_RADIUS + 2.0) * s;
-        let ground = if key.selected {
-            p.selected
-        } else if key.hovered {
-            mix(p.elevated, p.selected, 0.5)
-        } else {
-            p.elevated
-        };
-        if ground != p.elevated {
-            c.rounded(x, hy, w, hh, r, ground);
-        }
+        let lit = Rectangle::new(
+            (rect.loc.x, rect.loc.y + 2).into(),
+            (rect.size.w, rect.size.h - 4).into(),
+        );
+        let hover = if key.hovered { 1.0 } else { 0.0 };
+        self.row_highlight(c, lit, (key.selected, hover), scale, p);
+        let ground = row_fill(p, key.selected, hover).unwrap_or(p.elevated);
 
         // The title's line, and the subtitle's under it; without a
         // subtitle, the title across the row.
@@ -1501,9 +1499,7 @@ impl Painter {
         for (k, &button) in buttons.iter().enumerate() {
             let label = line.buttons.get(k).map_or("", |b| b.label.as_str());
             let hot = key.hot == Some(k);
-            let fill = if hot { p.selected } else { p.element };
-            self.inbox_pill(c, button, fill, scale, p);
-            self.centered(c, label, SMALL_FONT_SIZE, button, scale, p.text);
+            self.button(c, label, button, (hot, false), false, scale, p);
         }
         let end = match buttons.first() {
             Some(first) => px(first.loc.x) as f32 - gap,
@@ -1545,15 +1541,58 @@ impl Painter {
             title_color,
         );
         if let Some(st) = subtitle_rect {
-            self.any_text(
+            let st_band = band(st, scale);
+            let after = self.any_text(
                 c,
                 &line.subtitle,
                 SMALL_FONT_SIZE,
                 text_x,
                 end,
-                band(st, scale),
+                st_band,
                 scale,
                 subtitle_color,
+            );
+            if let Some(marks) = &line.marks {
+                self.inbox_marks(c, marks, after, end, st_band, scale, p);
+            }
+        }
+    }
+
+    /// `marks` from `x` to at most `max_x` (physical pixels) in the band
+    /// `(top, height)`: as `git_marks` draws a branch's, then the stash
+    /// count as the repositories panel says it.
+    #[allow(clippy::too_many_arguments)]
+    fn inbox_marks(
+        &self,
+        c: &mut Canvas,
+        marks: &InboxMarks,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let git = GitStatus {
+            dirty: marks.dirty,
+            ahead: marks.ahead,
+            behind: marks.behind,
+            // Any operation: it only says one stopped.
+            op: marks.stopped.then_some(InProgress::Merge),
+            ..GitStatus::default()
+        };
+        let after = self.git_marks(c, &git, x, max_x, band, scale, p);
+        if marks.stashes > 0 {
+            let gap = (FIELD_GAP as f32 * scale as f32).round();
+            let note = format!("{} stashed", marks.stashes);
+            self.text(
+                c,
+                &note,
+                SMALL_FONT_SIZE,
+                after + gap,
+                max_x,
+                band,
+                scale,
+                p.placeholder,
             );
         }
     }
@@ -1723,25 +1762,13 @@ impl Painter {
             let hot = view.hover == Some(InboxHit::DetailButton(k));
             // The first is what Enter does: in the accent.
             let primary = k == 0;
-            let (fill, label_color, key_color) = match (primary, hot) {
-                (true, false) => (p.accent, p.on_accent, mix(p.accent, p.on_accent, 0.8)),
-                (true, true) => (
-                    mix(p.accent, p.text, 0.12),
-                    p.on_accent,
-                    mix(p.accent, p.on_accent, 0.8),
-                ),
-                (false, hot) => (
-                    if hot { p.selected } else { p.element },
-                    p.text,
-                    p.placeholder,
-                ),
-            };
-            if primary {
-                let (x, y, w, h) = rect_px(button, scale);
-                c.rounded(x, y, w, h, BUTTON_RADIUS * s, fill);
+            let (label_color, key_color) = if primary {
+                (p.on_accent, mix(p.accent, p.on_accent, 0.8))
             } else {
-                self.inbox_pill(c, button, fill, scale, p);
-            }
+                (p.text, p.placeholder)
+            };
+            // The button's own look; its label and key go on it here.
+            self.button(c, "", button, (hot, false), primary, scale, p);
             let (x, right) = phys(button, scale);
             let button_band = band(button, scale);
             let pad = px(BUTTON_PAD) as f32;
@@ -1917,7 +1944,7 @@ impl InboxLayers {
             let track = scroll_track(layout.list);
             if let Some((loc, size)) = thumb_place(view, track, inbox_page(output)) {
                 let buffer = thumb.get((size, theme, scale), |(size, ..)| {
-                    painter.inbox_thumb(*size, scale, p).into_buffer(false)
+                    painter.bar_thumb(*size, scale, p)
                 });
                 parts.push(Part::new(buffer, track.loc, size, 1.0).at(loc));
             }
@@ -1974,9 +2001,10 @@ mod tests {
             hidden: false,
             buttons: vec![
                 button("Go to", "Enter"),
-                button("Snooze", "Ctrl+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Dismiss", "Del"),
             ],
+            marks: None,
         })
     }
 
@@ -1992,9 +2020,9 @@ mod tests {
     fn detail_buttons() -> Vec<InboxButton> {
         vec![
             button("Go to", "Enter"),
-            button("Snooze 1h", "Ctrl+S"),
-            button("Until tomorrow", "Ctrl+Shift+S"),
-            button("Dismiss", "Delete"),
+            button("Snooze 1h", "Ctrl+H"),
+            button("Until tomorrow", "Ctrl+Shift+H"),
+            button("Dismiss", "Del"),
         ]
     }
 
@@ -2071,8 +2099,8 @@ mod tests {
             buttons: vec![
                 button("Open", "Enter"),
                 button("Copy link", "Ctrl+C"),
-                button("Snooze", "Ctrl+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Dismiss", "Del"),
             ],
         }
     }
@@ -2101,8 +2129,8 @@ mod tests {
             buttons: vec![
                 button("Open", "Enter"),
                 button("Copy link", "Ctrl+C"),
-                button("Snooze", "Ctrl+S"),
-                button("Dismiss", "Delete"),
+                button("Snooze", "Ctrl+H"),
+                button("Dismiss", "Del"),
             ],
         }
     }
@@ -2123,8 +2151,8 @@ mod tests {
             buttons: vec![
                 button("Go to", "Enter"),
                 button("Edit", "Ctrl+E"),
-                button("Done", "Delete"),
-                button("Delete", "Shift+Delete"),
+                button("Done", "Del"),
+                button("Delete", "Shift+Del"),
             ],
         }
     }
@@ -2190,10 +2218,10 @@ mod tests {
     fn hints() -> Vec<(String, String)> {
         [
             ("Enter", "go to"),
-            ("Delete", "dismiss"),
-            ("Ctrl+S", "snooze"),
+            ("Del", "dismiss"),
+            ("Ctrl+H", "snooze"),
             ("Ctrl+N", "new todo"),
-            ("Ctrl+H", "hidden"),
+            ("Alt+H", "hidden"),
             ("Up / Down", "select"),
             ("Esc", "close"),
         ]
@@ -2297,7 +2325,7 @@ mod tests {
             InboxRow::Item(InboxLine {
                 hidden: true,
                 subtitle: "frontend · dismissed".into(),
-                buttons: vec![button("Restore", "Delete"), button("Go to", "Enter")],
+                buttons: vec![button("Restore", "Del"), button("Go to", "Enter")],
                 ..match item("agent:p3", "aider", "", InboxTone::Done, "1d") {
                     InboxRow::Item(line) => line,
                     _ => unreachable!(),
@@ -2307,7 +2335,7 @@ mod tests {
             InboxRow::Item(InboxLine {
                 hidden: true,
                 subtitle: "#139 · snoozed until 09:00".into(),
-                buttons: vec![button("Restore", "Delete")],
+                buttons: vec![button("Restore", "Del")],
                 ..match item("ci:x", "Fix the CI cache", "", InboxTone::Failed, "2d") {
                     InboxRow::Item(line) => line,
                     _ => unreachable!(),
@@ -2331,7 +2359,7 @@ mod tests {
                 block_title: Some("Last output".into()),
                 block: vec!["All tests pass.".into()],
                 block_tail: true,
-                buttons: vec![button("Restore", "Delete"), button("Go to", "Enter")],
+                buttons: vec![button("Restore", "Del"), button("Go to", "Enter")],
             }),
             ..view()
         }
@@ -2521,13 +2549,14 @@ mod tests {
         for (k, b) in l.rows[1].1.iter().enumerate() {
             assert_eq!(inbox_hit(&v, &l, centre(*b)), Some(InboxHit::Button(1, k)));
         }
-        // Hovering another item moves the buttons there.
+        // Hovering another item shows its buttons too; the selected one
+        // keeps its own.
         let hovered = InboxView {
             hover: Some(InboxHit::Row(2)),
             ..v.clone()
         };
         let lh = inbox_layout(&hovered, size);
-        assert!(lh.rows[1].1.is_empty() && lh.rows[2].1.len() == 3);
+        assert!(lh.rows[1].1.len() == 3 && lh.rows[2].1.len() == 3);
         assert!(lh.rows[0].1.is_empty());
         // The detail's buttons.
         assert_eq!(l.detail_buttons.len(), 4);
@@ -2802,7 +2831,7 @@ mod tests {
         let l = inbox_layout(&v, size);
         assert_eq!(spot.area, l.query);
         assert_eq!(spot.line, Line::from("git"));
-        assert_eq!(spot.text, menu_query_text(l.query, 1.0));
+        assert_eq!(spot.text, query_text(l.query, 1.0));
         // While composing, the todo's text, ending before the chip.
         let c = compose(Some("backend"), false);
         let spot = inbox_field(&c, size, 2.0);

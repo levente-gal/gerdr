@@ -18,7 +18,7 @@ use smithay::{
     utils::{Logical, Physical, Point, Rectangle, Size},
 };
 
-use super::{Rect, physical};
+use super::{Canvas, Palette, Rect, physical};
 
 /// What the chrome renders: a part's buffer, cut to its clip.
 pub type ChromeElement = CropRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>;
@@ -37,6 +37,8 @@ pub(super) struct Part {
     pub alpha: f32,
     /// What of it shows, on the output: all of it when `None`.
     pub clip: Option<Rect>,
+    /// Its buffer is one pixel stretched over all of `size`, as a scrim's.
+    pub stretched: bool,
 }
 
 impl Part {
@@ -52,6 +54,7 @@ impl Part {
             size,
             alpha,
             clip: None,
+            stretched: false,
         }
     }
 
@@ -91,7 +94,10 @@ pub(super) fn render_parts(
             // The buffer holds physical pixels at buffer scale 1: sample all
             // of it and squeeze it into the logical size, starting on a
             // whole physical pixel.
-            let src = Rectangle::from_size(physical(part.size, scale).to_f64());
+            let src = match part.stretched {
+                true => Rectangle::from_size((1.0, 1.0).into()),
+                false => Rectangle::from_size(physical(part.size, scale).to_f64()),
+            };
             let loc: Point<i32, Physical> = part.loc.to_physical(scale).to_i32_round();
             let element = MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
@@ -110,6 +116,31 @@ pub(super) fn render_parts(
             CropRenderElement::from_element(element, scale, crop)
         })
         .collect()
+}
+
+thread_local! {
+    /// The scrim's one black pixel, uploaded once.
+    static SCRIM: MemoryRenderBuffer = {
+        let mut c = Canvas::new((1, 1).into());
+        c.fill(0, 0, 1, 1, [0, 0, 0]);
+        c.into_buffer(false)
+    };
+}
+
+/// The scrim behind a modal dialog: `area` (the output, logical) dimmed
+/// as far as the theme's `scrim` says, times `alpha`, the dialog's own
+/// fade. It goes in the parts just under the dialog's, over all the rest.
+pub(super) fn scrim(area: Rect, alpha: f32, p: &Palette) -> Part {
+    let buffer = SCRIM.with(MemoryRenderBuffer::clone);
+    Part {
+        stretched: true,
+        ..Part::new(
+            &buffer,
+            area.loc,
+            area.size,
+            p.scrim * alpha.clamp(0.0, 1.0),
+        )
+    }
 }
 
 /// The blinking dot and how opaque it is now, for the parts showing what
@@ -257,6 +288,17 @@ mod tests {
         assert_eq!((parts[1].loc, parts[1].clip), ((300.0, 20.0).into(), None));
         // Unlit, there are none.
         assert!(dot_parts(Some((&dot, 0.0)), vec![on_row], &rows, list).is_empty());
+    }
+
+    #[test]
+    fn a_scrim_covers_its_area_as_dark_as_the_theme_says() {
+        let p = crate::chrome::Theme::Dark.palette();
+        let area = Rect::new((0, 0).into(), (1920, 1080).into());
+        let part = scrim(area, 0.5, p);
+        assert!(part.stretched);
+        assert_eq!((part.loc, part.size), ((0.0, 0.0).into(), area.size));
+        assert_eq!(part.alpha, p.scrim * 0.5);
+        assert_eq!(scrim(area, 2.0, p).alpha, p.scrim);
     }
 
     #[test]

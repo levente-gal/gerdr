@@ -81,12 +81,15 @@ pub(super) const LABEL_FONT_SIZE: f32 = 17.0;
 pub(super) const SMALL_FONT_SIZE: f32 = 13.0;
 /// Agent card details, and their ids and status pill.
 pub(super) const DETAIL_FONT_SIZE: f32 = 12.0;
-pub(super) const TINY_FONT_SIZE: f32 = 12.0;
+/// The smallest text (counts on badges and pills): the same size as the
+/// details, one size under `SMALL_FONT_SIZE`.
+pub(super) const TINY_FONT_SIZE: f32 = DETAIL_FONT_SIZE;
 pub(super) const KEY_FONT_SIZE: f32 = 13.0;
 pub(super) const PADDING: f32 = 10.0;
 pub(super) const HELP_MARGIN: i32 = 16;
 pub(super) const HELP_PADDING: i32 = 14;
-pub(super) const HELP_RADIUS: f32 = 8.0;
+/// The help panel's corners, as every popup's (`POPUP_RADIUS`).
+pub(super) const HELP_RADIUS: f32 = POPUP_RADIUS;
 /// Room around popups (help panel, menu) for their drop shadow.
 pub(super) const SHADOW: i32 = 12;
 pub(super) const HELP_TITLE_HEIGHT: i32 = 40;
@@ -101,6 +104,8 @@ pub(super) const CAP_RADIUS: f32 = 4.0;
 pub(super) const MENU_WIDTH: i32 = 180;
 pub(super) const MENU_PADDING: i32 = 4;
 pub(super) const MENU_ITEM_HEIGHT: i32 = 30;
+/// What row highlights were rounded from (`MENU_RADIUS - 2.0` is
+/// `ROW_HIGHLIGHT_RADIUS`); a popup's own corners are `POPUP_RADIUS`.
 pub(super) const MENU_RADIUS: f32 = 6.0;
 
 /// The switcher, at the top of the app area.
@@ -147,8 +152,7 @@ pub(super) const FOCUS_GAP: f32 = 2.0;
 
 /// The quit dialog, centred on the output: title, question, a checkbox
 /// row per thing to stop and "Don't ask again", and the buttons at the
-/// bottom right.
-pub(super) const QUIT_WIDTH: i32 = 440;
+/// bottom right. Every modal dialog is laid out with these.
 pub(super) const QUIT_PADDING: i32 = 20;
 pub(super) const QUIT_TITLE: i32 = 24;
 pub(super) const QUIT_BODY: i32 = 22;
@@ -159,17 +163,14 @@ pub(super) const CHECKBOX_SIZE: i32 = 16;
 pub(super) const CHECKBOX_GAP: i32 = 8;
 pub(super) const QUIT_BUTTON: i32 = 32;
 pub(super) const QUIT_BUTTON_GAP: i32 = 8;
-/// Cancel, Quit: labels and widths.
-pub(super) const QUIT_BUTTONS: &[(&str, i32)] = &[("Cancel", 84), ("Quit", 84)];
-/// Cancel, Switch, Open in new gerdr: labels and widths, when switching
-/// projects.
-pub(super) const SWITCH_BUTTONS: &[(&str, i32)] =
-    &[("Cancel", 84), ("Switch", 84), ("Open in new gerdr", 148)];
-/// Cancel, Leave behind, Bring along: labels and widths, when checking a
-/// worktree's branch out with its untracked files.
-pub(super) const CHECKOUT_BUTTONS: &[(&str, i32)] =
-    &[("Cancel", 84), ("Leave behind", 112), ("Bring along", 108)];
 pub(super) const BUTTON_RADIUS: f32 = 6.0;
+
+/// Shared look tokens: every popup's corner (help, menus, tooltips,
+/// toasts, dialogs), every list row's highlight corner, and every modal
+/// dialog's width.
+pub(super) const POPUP_RADIUS: f32 = 8.0;
+pub(super) const ROW_HIGHLIGHT_RADIUS: f32 = 4.0;
+pub(super) const DIALOG_WIDTH: i32 = 560;
 
 /// The sidebar header's project name: the gap between it and its chevron,
 /// and the room after the chevron inside the highlight.
@@ -216,8 +217,10 @@ pub(super) const FORM_GAP: i32 = 8;
 pub(super) const BROWSE_WIDTH: i32 = 84;
 /// A folder offered under the folder field.
 pub(super) const SUGGESTION_ROW: i32 = 28;
-/// The "Opens" choices: what each opens, its label and its width; their
-/// height, and the side of the round mark before the label.
+/// The "Opens" choices: what kind of workspace the new project's folder
+/// opens as (`WorkspaceKind::Project` is the Zed + terminal workspace, not
+/// a project), its label and its width; their height, and the side of the
+/// round mark before the label.
 pub(super) const KIND_CHOICES: [(WorkspaceKind, &str, i32); 2] = [
     (WorkspaceKind::Project, "Zed + terminal", 150),
     (WorkspaceKind::Terminal, "Terminal only", 130),
