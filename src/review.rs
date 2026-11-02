@@ -57,6 +57,19 @@ pub struct Comment {
     pub lines: Vec<Quoted>,
     /// What it says; lines broken with `\n`.
     pub text: String,
+    /// An AI review finding shown as a comment (see `feature_diff`): not
+    /// the user's, never saved or copied, decided with its own keys.
+    #[serde(skip)]
+    pub flag: Option<Flag>,
+}
+
+/// What makes a comment an AI review finding (`Comment::flag`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Flag {
+    /// `Finding::id`.
+    pub id: String,
+    pub severity: crate::feature::review_import::Severity,
+    pub state: crate::feature::review_import::FindingState,
 }
 
 /// A project's review.
@@ -79,6 +92,22 @@ impl Default for Review {
 impl Review {
     pub fn is_empty(&self) -> bool {
         self.comments.is_empty()
+    }
+
+    /// How many of its comments are the user's: not findings.
+    pub fn own(&self) -> usize {
+        self.comments.iter().filter(|c| c.flag.is_none()).count()
+    }
+
+    /// It without the findings: what is saved and sent.
+    pub fn without_findings(&self) -> Review {
+        Review {
+            version: self.version,
+            comments: (self.comments.iter())
+                .filter(|c| c.flag.is_none())
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -159,14 +188,15 @@ pub fn markdown(
     outdated: impl Fn(&Comment) -> bool,
 ) -> String {
     let mut by_root: BTreeMap<(usize, &Path), Vec<&Comment>> = BTreeMap::new();
-    for c in &review.comments {
+    // Findings aren't the user's: never copied.
+    for c in review.comments.iter().filter(|c| c.flag.is_none()) {
         let rank = order
             .iter()
             .position(|r| *r == c.root)
             .unwrap_or(order.len());
         by_root.entry((rank, &c.root)).or_default().push(c);
     }
-    let n = review.comments.len();
+    let n = review.own();
     let mut out = format!(
         "Review comments on uncommitted changes ({n} comment{}). \
          Each quotes the diff lines it is about; address each one.\n",
@@ -484,6 +514,7 @@ mod tests {
             path: "src/a.rs".into(),
             lines: lines.iter().map(Quoted::of).collect(),
             text: text.into(),
+            flag: None,
         }
     }
 

@@ -2298,6 +2298,7 @@ impl Gerdr {
                 self.refresh_git();
             }
             RepoEvent::WorktreeDiff { root, read } => self.worktree_diff_event(root, read),
+            RepoEvent::FeatureDiff(read) => self.feature_diff_event(*read),
             RepoEvent::MarkCommits {
                 root,
                 ahead,

@@ -1005,6 +1005,9 @@ pub enum RepoEvent {
         root: PathBuf,
         read: Result<(crate::git_ops::Since, Vec<FileDiff>), String>,
     },
+    /// A feature's touched repositories read for its code review
+    /// (`feature_diff`).
+    FeatureDiff(Box<crate::feature_diff::Read>),
 }
 
 /// What the panel asked for.
@@ -1253,6 +1256,7 @@ macro_rules! diff_ctx {
             empty: "No changes in any repository",
             count_sections: true,
             check: Some(&check),
+            note: None,
             selected: selected_file(&$panel.selected),
             read_only: false,
         };
@@ -3528,7 +3532,13 @@ impl Panel {
                 Err(Why::other("Done on the diff"))
             }
             // Only a feature stage's file under review has them.
-            B::Approve | B::SendBack => Err(Why::other("Nothing to review here")),
+            B::Approve
+            | B::SendBack
+            | B::FixFinding
+            | B::DismissFinding
+            | B::ReopenFinding
+            | B::MarkViewed
+            | B::NextUnviewed => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly
             | B::Cancel
@@ -9854,6 +9864,7 @@ mod tests {
             path: "src/git.rs".into(),
             lines: vec![crate::review::Quoted::default()],
             text: "why".into(),
+            flag: None,
         });
         let f = file(&panel);
         assert!(f.edited);
