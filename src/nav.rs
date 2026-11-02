@@ -157,6 +157,11 @@ impl Gerdr {
             return false;
         }
         if waited {
+            // Its project shows, but not the tab: closed since, or its
+            // herdr session restarted.
+            if let Some(label) = self.visit_label(&pending.to) {
+                self.show_warning(format!("{label} isn't open any more"));
+            }
             return false;
         }
         self.nav_pending = Some(pending);
