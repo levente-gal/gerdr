@@ -199,7 +199,9 @@ function scopeT3(dirs) {
   const LOOKS = 120, EVERY = 500, FRESH = 15000;
   return new Promise((done) => {
     let looks = 0;
-    const fail = (reason, detail) => done({ reason, detail: `${detail} (page ${location.href}, folders ${want.join(", ")}, storage ${name})` });
+    // The page without its hash: a sign-in link's token is there.
+    const fail = (reason, detail) =>
+      done({ reason, detail: `${detail} (page ${location.origin}${location.pathname}, folders ${want.join(", ")}, storage ${name})` });
     // A change that breaks the reading itself is told too.
     function look() {
       try {
@@ -209,6 +211,9 @@ function scopeT3(dirs) {
       }
     }
     function step() {
+      // Signing in: the app and its projects come after, however long it
+      // takes.
+      if (location.pathname.startsWith("/pair")) return void setTimeout(look, EVERY);
       const seen = groups();
       const wanted = seen ? keys(seen.all) : [];
       if (!wanted.length) {
