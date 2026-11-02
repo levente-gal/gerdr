@@ -70,6 +70,7 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
             )),
             _ => {}
         },
+        Stage::AiReview => return super::review_import::parse(text).map(|_| ()),
         _ => {}
     }
     if lacks.is_empty() { Ok(()) } else { Err(lacks) }
@@ -240,10 +241,18 @@ mod tests {
         assert_eq!(name(Stage::Plan), Some("plan.md"));
         assert_eq!(name(Stage::Build), Some("build.md"));
         assert_eq!(name(Stage::Verify), None);
+        assert_eq!(name(Stage::AiReview), Some("review.json"));
         assert_eq!(
             path(Path::new("/d"), Stage::Plan),
             Some(PathBuf::from("/d/plan.md"))
         );
+    }
+
+    #[test]
+    fn a_review_passes_when_it_parses() {
+        assert_eq!(check(Stage::AiReview, r#"{"findings": []}"#), Ok(()));
+        let lacks = check(Stage::AiReview, r#"{"findings": [{"file": "a"}]}"#).unwrap_err();
+        assert_eq!(lacks, ["finding 1 has no title"]);
     }
 
     #[test]

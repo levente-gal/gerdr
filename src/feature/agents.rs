@@ -70,7 +70,7 @@ pub struct Needs {
     pub template: &'static str,
 }
 
-/// What `stage` needs of its agent; `None` for a stage no agent runs (yet).
+/// What `stage` needs of its agent; `None` for a stage no agent runs.
 pub fn needs(stage: Stage) -> Option<Needs> {
     match stage {
         Stage::Discover => Some(Needs {
@@ -87,6 +87,11 @@ pub fn needs(stage: Stage) -> Option<Needs> {
             read_only: false,
             artifact: Some("build.md"),
             template: "build",
+        }),
+        Stage::AiReview => Some(Needs {
+            read_only: true,
+            artifact: Some(super::review_import::REVIEW),
+            template: "ai-review",
         }),
         _ => None,
     }
@@ -204,5 +209,10 @@ mod tests {
         assert!(!build.read_only);
         assert_eq!(build.artifact, Some("build.md"));
         assert_eq!(needs(Stage::Verify), None);
+        let review = needs(Stage::AiReview).unwrap();
+        assert!(review.read_only);
+        assert_eq!(review.artifact, Some("review.json"));
+        assert_eq!(review.template, "ai-review");
+        assert_eq!(needs(Stage::CodeReview), None);
     }
 }

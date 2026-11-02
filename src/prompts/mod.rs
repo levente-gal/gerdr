@@ -13,7 +13,9 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
         "discover" => (include_str!("../../assets/prompts/discover.md"), 1),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 1),
+        "build" => (include_str!("../../assets/prompts/build.md"), 2),
+        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 1),
+        "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 1),
         "fix" => (include_str!("../../assets/prompts/fix.md"), 1),
         "continue" => (include_str!("../../assets/prompts/continue.md"), 1),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
@@ -65,6 +67,13 @@ mod tests {
             ("comments.path", "/d/c.md"),
             ("missing", "no Outcome section"),
             ("absent", ""),
+            ("fixes", ""),
+            ("fixes.path", "/d/bulk-edit/prompts/build-1-findings-1.md"),
+            ("fixes.what", "2 findings"),
+            ("review.diffs", "- api: `git diff abc123...HEAD`"),
+            ("review.sent", ""),
+            ("review.dismissed", ""),
+            ("review.open", ""),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -83,6 +92,8 @@ mod tests {
             "send-back",
             "rules",
             "repos",
+            "ai-review",
+            "send-fixes",
         ] {
             for multi in [false, true] {
                 for comments in ["", "Fix the scope."] {
@@ -154,6 +165,55 @@ mod tests {
         // A fix round builds no milestone.
         assert!(!many.contains("Build the first unticked milestone"));
         assert!(many.contains("Name the endpoint bulk."));
+    }
+
+    #[test]
+    fn the_build_agent_fixes_what_a_review_found() {
+        let mut v = build_vars(false, "", "");
+        v.insert("fixes".into(), "## r1-1: Off by one".into());
+        let text = render_builtin("build", &v).unwrap();
+        assert!(text.contains("wants these 2 findings fixed"));
+        assert!(text.contains("## r1-1: Off by one"));
+        assert!(text.contains("/d/bulk-edit/prompts/build-1-findings-1.md"));
+        assert!(!text.contains("Build the first unticked milestone"));
+        let line = render_builtin("send-fixes", &v).unwrap();
+        assert!(!line.trim_end().contains('\n'), "{line}");
+        assert!(line.contains("2 findings") && line.contains("build-1-findings-1.md"));
+    }
+
+    #[test]
+    fn the_review_prompt_lists_the_diffs_and_earlier_findings() {
+        let mut v = build_vars(true, "", "");
+        v.insert("artifact.path".into(), "/d/bulk-edit/review.json".into());
+        let first = render_builtin("ai-review", &v).unwrap();
+        for words in [
+            "/d/bulk-edit/brief.md",
+            "/d/bulk-edit/plan.md",
+            "/d/bulk-edit/review.json",
+            "`git diff abc123...HEAD`",
+            "read-only",
+            "{\"findings\": []}",
+            "\"severity\": \"high\"",
+        ] {
+            assert!(first.contains(words), "{words}: {first}");
+        }
+        assert!(!first.contains("Do not raise\nthem again"));
+        v.insert("review.sent".into(), "- r1-1: Off by one".into());
+        v.insert(
+            "review.dismissed".into(),
+            "- r1-2: Naming (by design)".into(),
+        );
+        v.insert("review.open".into(), "- r1-3: Slow".into());
+        let later = render_builtin("ai-review", &v).unwrap();
+        for words in [
+            "- r1-1: Off by one",
+            "same `id`",
+            "- r1-2: Naming (by design)",
+            "Do not raise\nthem again",
+            "- r1-3: Slow",
+        ] {
+            assert!(later.contains(words), "{words}: {later}");
+        }
     }
 
     #[test]

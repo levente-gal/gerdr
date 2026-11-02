@@ -853,6 +853,11 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 K::VerifyFailed { .. } => {
                     ("Failed", "Enter opens the feature: fix it, then run checks")
                 }
+                K::Findings { open: 0, .. } => {
+                    ("Read", "Enter opens the feature to send the fixes to Build")
+                }
+                K::Findings { .. } => ("Read", "Enter shows the diff at the first finding"),
+                K::CodeReview => ("Waiting", "Enter shows the diff to review"),
             };
             field(when, crate::projects::ago(now, *since));
             field("Next", next.to_owned());
@@ -2128,6 +2133,19 @@ mod tests {
             "Next",
             "Enter opens the feature: fix it, then run checks"
         )));
+        assert!(
+            next(GateKind::Findings { open: 2, fix: 0 })
+                .contains(&field("Next", "Enter shows the diff at the first finding"))
+        );
+        assert!(
+            next(GateKind::Findings { open: 0, fix: 2 }).contains(&field(
+                "Next",
+                "Enter opens the feature to send the fixes to Build"
+            ))
+        );
+        assert!(
+            next(GateKind::CodeReview).contains(&field("Next", "Enter shows the diff to review"))
+        );
     }
 
     #[test]

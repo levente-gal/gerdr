@@ -798,6 +798,24 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             "fix it, then run checks".to_owned(),
             Some(crate::feature::verify::EVIDENCE),
         ),
+        GateKind::Findings { open, fix } => {
+            let (n, what, next) = if open > 0 {
+                (open, "to decide", "decide them")
+            } else {
+                (fix, "to send to Build", "send them to Build")
+            };
+            let findings = crate::features::plural(n as usize, "finding");
+            (
+                format!("AI review of “{title}”: {findings} {what}"),
+                next.to_owned(),
+                None,
+            )
+        }
+        GateKind::CodeReview => (
+            format!("Code review of “{title}”: review the diff"),
+            "review the diff".to_owned(),
+            None,
+        ),
     }
 }
 
@@ -1390,6 +1408,38 @@ mod tests {
             assert_eq!(other.id, gate.id);
             assert_ne!(other.fingerprint, gate.fingerprint);
         }
+    }
+
+    #[test]
+    fn review_gates_say_what_waits() {
+        let gate = |kind| {
+            let mut g = gate_of("p1", "log-in", Stage::AiReview, 990_000);
+            g.gate.kind = kind;
+            let item = gate_items(&[g], 1_000_000).remove(0);
+            (item.title, item.subtitle)
+        };
+        let line = |t: &str, s: &str| (t.to_owned(), s.to_owned());
+        assert_eq!(
+            gate(GateKind::Findings { open: 2, fix: 1 }),
+            line(
+                "AI review of “log-in title”: 2 findings to decide",
+                "p1 name · decide them"
+            )
+        );
+        assert_eq!(
+            gate(GateKind::Findings { open: 0, fix: 1 }),
+            line(
+                "AI review of “log-in title”: 1 finding to send to Build",
+                "p1 name · send them to Build"
+            )
+        );
+        assert_eq!(
+            gate(GateKind::CodeReview),
+            line(
+                "Code review of “log-in title”: review the diff",
+                "p1 name · review the diff"
+            )
+        );
     }
 
     #[test]

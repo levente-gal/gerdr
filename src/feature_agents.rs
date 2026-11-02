@@ -31,6 +31,7 @@ use crate::{
         agents::{StageRun, Stop, command_line, needs},
         artifacts,
         patch::Reading,
+        review_import::FindingState,
         store, verify,
     },
     herdr::AgentStatus,
@@ -39,8 +40,9 @@ use crate::{
 };
 
 /// A gate waiting for the user: an agent stage's file is ready to review,
-/// a Build agent stopped after a milestone, or Verify failed more often
-/// than gerdr sends to the Build agent.
+/// a Build agent stopped after a milestone, Verify failed more often than
+/// gerdr sends to the Build agent, AI review's findings wait to be decided
+/// or sent, or Code review waits for the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gate {
     pub project: String,
@@ -65,13 +67,19 @@ pub enum GateKind {
     /// Verify failed `fixes` times in a row; gerdr stopped sending the
     /// failures to the Build agent (stage: Verify).
     VerifyFailed { fixes: u32 },
+    /// AI review found `open` findings to decide (Fix or Dismiss), and
+    /// `fix` the user wants fixed, not sent to Build yet (stage: AI
+    /// review).
+    Findings { open: u32, fix: u32 },
+    /// Code review waits for the user to review the diff.
+    CodeReview,
 }
 
 /// How long a file must stay good and unchanged to count as done when
 /// herdr can't say what the agent does, and how long a pane must be gone
 /// before its run forgets it.
 const STABLE: Duration = Duration::from_secs(10);
-/// How often a refused Plan's code is read again: undoing the agent's
+/// How often a refused Plan's or review's code is read again: undoing the agent's
 /// changes lets the plan go up for review.
 const RECHECK: Duration = Duration::from_secs(10);
 
@@ -95,9 +103,10 @@ pub(crate) struct Watch {
     gone: Option<Instant>,
     /// What its file lacks, as last read.
     pub(crate) missing: Vec<String>,
-    /// The code is being read for a Plan or Build file with this stamp.
+    /// The code is being read for a Plan, Build or review file with this
+    /// stamp.
     pub(crate) checking: Option<Stamp>,
-    /// The Plan or Build file with this stamp was refused: the code
+    /// The Plan, Build or review file with this stamp was refused: the code
     /// isn't as it should be, as the text says ("uncommitted changes in
     /// api").
     pub(crate) refused: Option<(Stamp, String)>,
@@ -281,8 +290,10 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
 /// The gate `f` waits at, if any: its stage, since when, and what for.
 /// A file to review (Discover, Plan), a Build agent stopped after a
 /// milestone, or Verify failed once gerdr stopped sending its failures
-/// to the Build agent. A Build run's `ready` says Build was marked done,
-/// not that anything waits for review.
+/// to the Build agent; AI review's findings once read in, while any wait
+/// to be decided or sent to Build; Code review, from AI review's mark. A
+/// Build run's `ready` says Build was marked done, not that anything waits
+/// for review.
 fn gate_of(f: &Feature) -> Option<(Stage, u64, GateKind)> {
     if f.status != Status::Open {
         return None;
@@ -306,6 +317,18 @@ fn gate_of(f: &Feature) -> Option<(Stage, u64, GateKind)> {
             let failed = run.passed == Some(false) && run.fixes >= verify::MAX_FIXES;
             let since = run.finished.filter(|_| failed)?;
             Some((stage, since, GateKind::VerifyFailed { fixes: run.fixes }))
+        }
+        Stage::AiReview => {
+            let since = f.runs.get(&stage)?.ready?;
+            let review = f.review.as_ref()?;
+            let count = |state| u32::try_from(review.count(state)).unwrap_or(u32::MAX);
+            let open = count(FindingState::Open);
+            let fix = count(FindingState::Fix);
+            (open > 0 || fix > 0).then_some((stage, since, GateKind::Findings { open, fix }))
+        }
+        Stage::CodeReview => {
+            let since = f.marks.get(&Stage::AiReview).map_or(f.created, |m| m.at);
+            Some((stage, since, GateKind::CodeReview))
         }
         _ => None,
     }
@@ -352,6 +375,59 @@ fn pick_agent(configured: Option<&str>, installed: &[CliAgent]) -> Option<(Strin
     installed
         .iter()
         .find_map(|a| Some((a.name.clone(), a.command()?.to_owned())))
+}
+
+/// Who reviews the code at AI review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Pick {
+    /// This agent: its name and command.
+    Agent(String, String),
+    /// No CLI agent is installed at all.
+    NoCli,
+    /// None that may: why not, for a warning.
+    Refused(String),
+}
+
+/// Where the user names AI review's agent, or lets Build's review itself.
+const REVIEWER_SETTING: &str = "add \"workflow\": {\"agents\": {\"ai-review\": \u{2026}}} with another agent to the project's file, or \"allow_same_reviewer\": true in its \"workflow\"";
+
+/// The agent to review the code built by `builder` (Build's agent, by
+/// name): `configured` if set, else the first installed CLI agent other
+/// than the builder. The builder reviewing its own code is refused unless
+/// `allow_same`: a model misses what it missed.
+fn pick_reviewer(
+    configured: Option<&str>,
+    builder: Option<&str>,
+    installed: &[CliAgent],
+    allow_same: bool,
+) -> Pick {
+    let same = |name: &str| builder.is_some_and(|b| b.eq_ignore_ascii_case(name));
+    let configured = configured.map(str::trim).filter(|c| !c.is_empty());
+    if configured.is_some() {
+        let Some((name, command)) = pick_agent(configured, installed) else {
+            return Pick::NoCli;
+        };
+        if same(&name) && !allow_same {
+            return Pick::Refused(format!(
+                "AI review is set to {name}, which built the code; {REVIEWER_SETTING}"
+            ));
+        }
+        return Pick::Agent(name, command);
+    }
+    let other = installed
+        .iter()
+        .filter(|a| !same(&a.name))
+        .find_map(|a| Some((a.name.clone(), a.command()?.to_owned())));
+    if let Some((name, command)) = other {
+        return Pick::Agent(name, command);
+    }
+    match pick_agent(None, installed) {
+        None => Pick::NoCli,
+        Some((name, command)) if allow_same => Pick::Agent(name, command),
+        Some((name, _)) => Pick::Refused(format!(
+            "No agent but {name}, which built the code, is installed to review it; install another, or {REVIEWER_SETTING}"
+        )),
+    }
 }
 
 /// `stage` as file names have it: `discover`, `ai-review`.
@@ -410,6 +486,13 @@ pub(crate) fn vars(feature: &Feature, project_name: &str, data: &Path, stage: St
         ("comments.path", String::new()),
         ("missing", String::new()),
         ("absent", String::new()),
+        ("fixes", String::new()),
+        ("fixes.path", String::new()),
+        ("fixes.what", String::new()),
+        ("review.diffs", String::new()),
+        ("review.sent", String::new()),
+        ("review.dismissed", String::new()),
+        ("review.open", String::new()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))
@@ -437,6 +520,13 @@ pub(crate) fn agent_line(
         if watch.is_some_and(|w| w.checking.is_some()) {
             return "checking the code".into();
         }
+    } else if stage == Stage::AiReview {
+        if run.ready.is_some() {
+            return "findings read".into();
+        }
+        if watch.is_some_and(|w| w.checking.is_some()) {
+            return "reading the findings".into();
+        }
     } else if run.ready.is_some() {
         return format!("{file} ready for review");
     }
@@ -455,6 +545,7 @@ pub(crate) fn agent_line(
         };
     }
     let doing = match status {
+        Some(AgentStatus::Working) if stage == Stage::AiReview => "reviewing",
         Some(AgentStatus::Working) => "working",
         Some(AgentStatus::Blocked) => "needs you",
         Some(AgentStatus::Idle | AgentStatus::Done) => "waiting for you",
@@ -563,15 +654,28 @@ impl Gerdr {
             .projects
             .project(project)
             .map_or_else(|| project.to_owned(), |p| p.name.clone());
-        let configured = self
-            .projects
-            .project(project)
-            .and_then(|p| p.workflow.agents.get(&stage).cloned());
-        let Some((agent, base)) = pick_agent(configured.as_deref(), &self.cli_agents) else {
-            let why = "No coding agent CLI is installed: install Claude Code, Codex or Cursor Agent, or set one under [agents] in Settings";
-            crate::problems::report("features", why);
-            self.show_error(why.to_owned());
-            return false;
+        let workflow = self.projects.project(project).map(|p| &p.workflow);
+        let configured = workflow.and_then(|w| w.agents.get(&stage).cloned());
+        let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
+        let picked = if stage == Stage::AiReview {
+            let builder = feature.runs.get(&Stage::Build).map(|r| r.agent.as_str());
+            pick_reviewer(configured.as_deref(), builder, &self.cli_agents, allow_same)
+        } else {
+            pick_agent(configured.as_deref(), &self.cli_agents)
+                .map_or(Pick::NoCli, |(name, command)| Pick::Agent(name, command))
+        };
+        let (agent, base) = match picked {
+            Pick::Agent(agent, base) => (agent, base),
+            Pick::NoCli => {
+                let why = "No coding agent CLI is installed: install Claude Code, Codex or Cursor Agent, or set one under [agents] in Settings";
+                crate::problems::report("features", why);
+                self.show_error(why.to_owned());
+                return false;
+            }
+            Pick::Refused(why) => {
+                self.show_warning(why);
+                return false;
+            }
         };
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
@@ -580,6 +684,9 @@ impl Gerdr {
             .join("prompts")
             .join(format!("{}-{n}.md", stage_key(stage)));
         let mut values = vars(&feature, &project_name, &data, stage);
+        if stage == Stage::AiReview {
+            values.extend(crate::feature_review::review_vars(&feature));
+        }
         for (key, value) in extra {
             values.insert((*key).to_owned(), value.clone());
         }
@@ -730,7 +837,9 @@ impl Gerdr {
             );
             match verdict {
                 Verdict::Wait => {}
-                Verdict::Ready(stamp) if matches!(stage, Stage::Plan | Stage::Build) => {
+                Verdict::Ready(stamp)
+                    if matches!(stage, Stage::Plan | Stage::Build | Stage::AiReview) =>
+                {
                     // A refused file is read again now and then: the
                     // user may have undone the agent's changes, or
                     // committed them.
@@ -740,10 +849,14 @@ impl Gerdr {
                             .is_some_and(|at| now.duration_since(at) < RECHECK);
                     if watch.checking.is_none() && !refused {
                         watch.checking = Some(stamp);
-                        if build {
-                            self.check_build_code(&project, &feature.slug, run.n, stamp);
-                        } else {
-                            self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                        match stage {
+                            Stage::Build => {
+                                self.check_build_code(&project, &feature.slug, run.n, stamp);
+                            }
+                            Stage::Plan => {
+                                self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                            }
+                            _ => self.check_review_code(&project, &feature.slug, run.n, stamp),
                         }
                     }
                 }
@@ -1300,6 +1413,127 @@ mod tests {
             Some(("aider".into(), "/opt/bin/aider --yes".into()))
         );
         assert_eq!(pick_agent(Some(" "), &installed[..1]), None);
+    }
+
+    #[test]
+    fn the_reviewer_is_not_the_builder() {
+        let installed = [
+            agent("T3 Code", Start::T3),
+            agent("Codex", Start::Command("codex".into())),
+            agent("Claude Code", Start::Command("claude".into())),
+        ];
+        let codex = Pick::Agent("Codex".into(), "codex".into());
+        let claude = Pick::Agent("Claude Code".into(), "claude".into());
+        assert_eq!(pick_reviewer(None, None, &installed, false), codex);
+        assert_eq!(
+            pick_reviewer(None, Some("Codex"), &installed, false),
+            claude
+        );
+        assert_eq!(
+            pick_reviewer(Some("claude code"), Some("Codex"), &installed, false),
+            claude
+        );
+        // Set to the builder: refused, unless allowed.
+        let Pick::Refused(why) = pick_reviewer(Some("Codex"), Some("Codex"), &installed, false)
+        else {
+            panic!("not refused");
+        };
+        assert!(why.starts_with("AI review is set to Codex, which built the code"));
+        assert!(why.contains("allow_same_reviewer"));
+        assert_eq!(
+            pick_reviewer(Some("Codex"), Some("Codex"), &installed, true),
+            codex
+        );
+        // No other agent: refused, or the builder when allowed.
+        let only = &installed[..2];
+        let Pick::Refused(why) = pick_reviewer(None, Some("Codex"), only, false) else {
+            panic!("not refused");
+        };
+        assert!(why.starts_with("No agent but Codex, which built the code, is installed"));
+        assert!(why.contains("allow_same_reviewer"));
+        assert_eq!(pick_reviewer(None, Some("Codex"), only, true), codex);
+        assert_eq!(
+            pick_reviewer(None, None, &installed[..1], false),
+            Pick::NoCli
+        );
+    }
+
+    #[test]
+    fn findings_and_code_review_wait_at_their_gates() {
+        use crate::feature::review_import::{AiReview, Finding};
+        let finding = |state| Finding {
+            state,
+            ..Finding::default()
+        };
+        let mut f = feature("a", vec![repo("api", true)], 4);
+        f.runs.insert(Stage::AiReview, run(None));
+        f.review = Some(AiReview {
+            findings: vec![
+                finding(FindingState::Open),
+                finding(FindingState::Open),
+                finding(FindingState::Fix),
+                finding(FindingState::Dismissed),
+            ],
+            ..AiReview::default()
+        });
+        // Read in only once the run is ready.
+        assert_eq!(gate_of(&f), None);
+        f.runs.insert(Stage::AiReview, run(Some(500)));
+        assert_eq!(
+            gate_of(&f),
+            Some((Stage::AiReview, 500, GateKind::Findings { open: 2, fix: 1 }))
+        );
+        let review = f.review.as_mut().unwrap();
+        review.findings[0].state = FindingState::Dismissed;
+        review.findings[1].state = FindingState::Sent;
+        assert_eq!(
+            gate_of(&f),
+            Some((Stage::AiReview, 500, GateKind::Findings { open: 0, fix: 1 }))
+        );
+        f.review.as_mut().unwrap().findings[2].state = FindingState::Sent;
+        assert_eq!(gate_of(&f), None);
+        let mut code = feature("b", vec![repo("api", true)], 5);
+        assert_eq!(
+            gate_of(&code),
+            Some((Stage::CodeReview, 2_000, GateKind::CodeReview))
+        );
+        code.marks.get_mut(&Stage::AiReview).unwrap().at = 3_000;
+        assert_eq!(gate_of(&code).map(|g| g.1), Some(3_000));
+    }
+
+    #[test]
+    fn the_reviewer_line_says_it_reviews_then_reads() {
+        let now = 1_000 + 120;
+        let mut r = run(None);
+        r.agent = "Codex".into();
+        assert_eq!(
+            agent_line(&r, Stage::AiReview, Some(AgentStatus::Working), None, now),
+            "Codex reviewing \u{b7} started 2m ago"
+        );
+        let checking = Watch {
+            checking: Some((1, 1)),
+            ..Watch::default()
+        };
+        assert_eq!(
+            agent_line(&r, Stage::AiReview, None, Some(&checking), now),
+            "reading the findings"
+        );
+        r.ready = Some(1_100);
+        assert_eq!(
+            agent_line(&r, Stage::AiReview, None, None, now),
+            "findings read"
+        );
+    }
+
+    #[test]
+    fn the_review_prompt_gets_its_file_and_the_diffs() {
+        let f = feature("a", vec![repo("api", true)], 4);
+        let mut v = vars(&f, "Acme", Path::new("/data/a"), Stage::AiReview);
+        assert_eq!(v["artifact.path"], "/data/a/review.json");
+        v.extend(crate::feature_review::review_vars(&f));
+        let text = prompts::render_builtin("ai-review", &v).unwrap();
+        assert!(text.contains("`git diff abc123...HEAD`"));
+        assert!(text.contains("/data/a/brief.md") && text.contains("/data/a/plan.md"));
     }
 
     fn watch() -> Watch {

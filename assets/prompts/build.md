@@ -35,6 +35,14 @@ How to work, every time:
    The checks and their output are in {{evidence.path}}. Read it, fix the
    failures, commit the fixes, and stop. Do not start a new milestone.
 {{else}}
+{{#if fixes}}
+3. The build is done, and the user wants these {{fixes.what}} fixed:
+
+{{fixes}}
+
+   They are in {{fixes.path}} too. Fix each one, commit the fixes, and
+   stop. Do not start a new milestone.
+{{else}}
 3. Build the first unticked milestone, and only that one. Commit it.
 4. Tick the milestone in {{artifact.path}} (`- [x] …`), and add a short
    note under it: what changed, and anything the user should know.
@@ -42,6 +50,7 @@ How to work, every time:
    the user to tell you to continue; do not start the next milestone on
    your own. After the last milestone, stop the same way: gerdr then runs
    the project's checks (Verify).
+{{/if}}
 {{/if}}
 {{#if comments}}
 

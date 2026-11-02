@@ -185,6 +185,12 @@ fn check(
             out.blockers.push(format!("{} isn't done", stage.label()));
         }
     }
+    let open = feature.review.as_ref().map_or(0, |r| r.open());
+    match open {
+        0 => {}
+        1 => out.blockers.push("1 AI review finding open".into()),
+        n => out.blockers.push(format!("{n} AI review findings open")),
+    }
     let reading = match reading {
         Ok(reading) => reading,
         Err(err) => {
@@ -809,6 +815,42 @@ esac
         // Not at Ship: no check.
         f.untick(Stage::Verify, 2);
         assert!(probe(&f, None).ship.is_none());
+    }
+
+    #[test]
+    fn open_findings_stop_shipping() {
+        use crate::feature::review_import::{AiReview, Finding, FindingState};
+        let mut f = crate::features::tests::feature("a", vec![], 6);
+        let finding = |state| Finding {
+            state,
+            ..Finding::default()
+        };
+        f.review = Some(AiReview {
+            findings: vec![
+                finding(FindingState::Open),
+                finding(FindingState::Sent),
+                finding(FindingState::Dismissed),
+            ],
+            ..AiReview::default()
+        });
+        let err = Err("gone".to_owned());
+        let blockers = check(&f, &err, None).blockers;
+        assert!(
+            blockers.contains(&"2 AI review findings open".to_owned()),
+            "{blockers:?}"
+        );
+        f.review.as_mut().unwrap().findings.truncate(1);
+        let blockers = check(&f, &err, None).blockers;
+        assert!(
+            blockers.contains(&"1 AI review finding open".to_owned()),
+            "{blockers:?}"
+        );
+        f.review = None;
+        let blockers = check(&f, &err, None).blockers;
+        assert!(
+            !blockers.iter().any(|b| b.contains("AI review")),
+            "{blockers:?}"
+        );
     }
 
     #[test]

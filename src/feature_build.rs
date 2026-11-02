@@ -499,7 +499,7 @@ impl Gerdr {
     }
 
     /// Send `line` to the Build agent's tab of `feature`, if it is there.
-    fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
+    pub(crate) fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
         let pane = feature
             .runs
             .get(&Stage::Build)
@@ -753,7 +753,7 @@ impl Gerdr {
             }
             self.features.build.fixing.remove(&key);
             self.feature_cursor_to_current_of(project, slug);
-            return self.show_success(format!("\u{201c}{title}\u{201d} passed Verify"));
+            return self.start_reviewer(project, slug, &title);
         }
         if snapshot.status != Status::Open || snapshot.current() != Some(Stage::Verify) {
             return self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
@@ -854,8 +854,44 @@ impl Gerdr {
         ));
     }
 
-    /// Look at the Build agents of `project` fixing Verify's failures: one
-    /// that worked and rests has its code probed now.
+    /// Verify of feature `slug` (`title`) passed: AI review's agent starts
+    /// on it, and the toast says so. A reviewer that can't start says why
+    /// itself, and the panel's Enter starts it later.
+    fn start_reviewer(&mut self, project: &str, slug: &str, title: &str) {
+        let reviewing = self
+            .feature(project, slug)
+            .is_some_and(|f| f.status == Status::Open && f.current() == Some(Stage::AiReview));
+        if !reviewing {
+            return self.show_success(format!("\u{201c}{title}\u{201d} passed Verify"));
+        }
+        if !self.launch_stage_agent(project, slug, Stage::AiReview, &[]) {
+            return;
+        }
+        let agent = self
+            .feature(project, slug)
+            .and_then(|f| f.runs.get(&Stage::AiReview))
+            .map_or_else(|| "an agent".to_owned(), |r| r.agent.clone());
+        self.show_success(format!(
+            "\u{201c}{title}\u{201d} passed Verify; {agent} reviews it"
+        ));
+    }
+
+    /// Watch the Build agent in `pane` of feature `slug`, sent findings or
+    /// comments to fix: once it worked and rests, its code is probed (see
+    /// `fixing_tick`).
+    pub(crate) fn watch_fixing(&mut self, project: &str, slug: &str, pane: String) {
+        self.features.build.fixing.insert(
+            (project.to_owned(), slug.to_owned()),
+            Fixing {
+                pane,
+                worked: false,
+            },
+        );
+    }
+
+    /// Look at the Build agents of `project` fixing what Verify or a review
+    /// found: one that worked and rests has its code probed now. Watched
+    /// while Build is done and a later stage is current.
     pub(crate) fn fixing_tick(&mut self, project: &str) {
         let keys: Vec<Key> = self
             .features
@@ -867,9 +903,11 @@ impl Gerdr {
             .collect();
         for key in keys {
             let (project, slug) = (&key.0, &key.1);
-            let verifying = self
-                .feature(project, slug)
-                .is_some_and(|f| f.status == Status::Open && f.current() == Some(Stage::Verify));
+            let verifying = self.feature(project, slug).is_some_and(|f| {
+                f.status == Status::Open
+                    && f.is_done(Stage::Build)
+                    && f.current().is_some_and(|c| c > Stage::Build)
+            });
             let Some(fixing) = self.features.build.fixing.get(&key).cloned() else {
                 continue;
             };

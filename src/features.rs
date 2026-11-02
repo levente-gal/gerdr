@@ -58,6 +58,7 @@ use crate::{
         hook::Guard,
         layout::{self, Created, Root},
         patch::{self, Reading},
+        review_import::{CodeRead, FindingState},
         ship::{self, Action, Probe},
         store,
     },
@@ -205,6 +206,15 @@ pub(crate) enum Done {
         n: u32,
         stamp: crate::feature_agents::Stamp,
         result: Result<Reading, String>,
+    },
+    /// The code and `review.json` read once run `n` of the AI review
+    /// agent was done, its file at `stamp` (see `feature_review`).
+    ReviewRead {
+        project: String,
+        slug: String,
+        n: u32,
+        stamp: crate::feature_agents::Stamp,
+        result: Result<Box<CodeRead>, String>,
     },
     Shipped {
         project: String,
@@ -478,6 +488,12 @@ pub enum PanelOutcome {
     Continue(Stage),
     /// Run Verify's checks (again).
     RunChecks,
+    /// Show the diff at AI review's first finding to decide.
+    Findings,
+    /// Send AI review's findings to fix to the Build agent.
+    SendFixes,
+    /// Review the feature's diff (Code review).
+    CodeReview,
     /// Show Verify's `evidence.md`.
     Evidence,
     /// Open this pull request's page.
@@ -550,6 +566,8 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             StageMark::Done => PanelOutcome::Untick(stage),
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
+            StageMark::Current if stage == Stage::AiReview => review_action(feature),
+            StageMark::Current if stage == Stage::CodeReview => PanelOutcome::CodeReview,
             StageMark::Current if needs(stage).is_some() => agent_action(feature, stage),
             StageMark::Current => PanelOutcome::Tick,
             StageMark::Later => PanelOutcome::NotYet(feature.current()?),
@@ -567,6 +585,64 @@ fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
         Some(run) if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
     }
+}
+
+/// What AI review's row does: show its agent while it runs (start one
+/// when there is none), then once its findings are read, show the first
+/// to decide, or send those to fix to the Build agent. Never marked done
+/// by hand: gerdr marks it once no finding holds up.
+fn review_action(feature: &Feature) -> PanelOutcome {
+    let stage = Stage::AiReview;
+    let Some(run) = feature.runs.get(&stage) else {
+        return PanelOutcome::StartAgent(stage, false);
+    };
+    let review = feature.review.as_ref().filter(|_| run.ready.is_some());
+    match review {
+        Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
+        Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
+        _ if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
+        _ => PanelOutcome::StartAgent(stage, false),
+    }
+}
+
+/// `n` `thing`s, in words: "1 finding", "3 findings".
+pub(crate) fn plural(n: usize, thing: &str) -> String {
+    if n == 1 {
+        format!("1 {thing}")
+    } else {
+        format!("{n} {thing}s")
+    }
+}
+
+/// The detail of AI review's row while it is current, beside `agent`,
+/// its agent's line: that line while the agent reviews; once its findings
+/// are read, what waits for the user.
+fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
+    let run = feature.runs.get(&Stage::AiReview)?;
+    let review = feature.review.as_ref().filter(|_| run.ready.is_some());
+    let Some(review) = review else {
+        return agent.map(str::to_owned);
+    };
+    let open = review.count(FindingState::Open);
+    let fix = review.count(FindingState::Fix);
+    let sent = review.count(FindingState::Sent);
+    Some(if open > 0 {
+        format!(
+            "{} to decide \u{b7} Enter to review",
+            plural(open, "finding")
+        )
+    } else if fix > 0 {
+        format!(
+            "{} to fix \u{b7} Enter to send to Build",
+            plural(fix, "finding")
+        )
+    } else if sent > 0 {
+        format!("{} sent to Build", plural(sent, "finding"))
+    } else if review.findings.is_empty() {
+        "no findings".into()
+    } else {
+        "all findings fixed or dismissed".into()
+    })
 }
 
 /// The agent stage under `row` when it is current and has had an agent:
@@ -612,6 +688,9 @@ fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
         Some(PanelOutcome::ReviewDoc(_)) => "review plan",
         Some(PanelOutcome::Continue(_)) => "continue",
         Some(PanelOutcome::RunChecks) => "run checks",
+        Some(PanelOutcome::Findings) => "review findings",
+        Some(PanelOutcome::SendFixes) => "send fixes",
+        Some(PanelOutcome::CodeReview) => "review code",
         Some(PanelOutcome::Tick) => "mark done",
         Some(PanelOutcome::Ship) => "ship\u{2026}",
         Some(PanelOutcome::Untick(_)) => "reopen",
@@ -633,6 +712,9 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::ReviewDoc(_) => Some("Review plan"),
         PanelOutcome::Continue(_) => Some("Continue"),
         PanelOutcome::RunChecks => Some("Run checks"),
+        PanelOutcome::Findings => Some("Review findings"),
+        PanelOutcome::SendFixes => Some("Send fixes"),
+        PanelOutcome::CodeReview => Some("Review code"),
         _ => None,
     }
 }
@@ -1157,6 +1239,13 @@ impl Gerdr {
                 stamp,
                 result,
             } => self.plan_code_checked(&project, &slug, n, stamp, result),
+            Done::ReviewRead {
+                project,
+                slug,
+                n,
+                stamp,
+                result,
+            } => self.review_read(&project, &slug, n, stamp, result),
             Done::Shipped {
                 project,
                 slug,
@@ -1346,7 +1435,7 @@ impl Gerdr {
 
     /// The code of feature `slug` is `patch`'s now: the marks that no
     /// longer hold go, and the toast says so.
-    fn feature_code_is(&mut self, project: &str, slug: &str, patch: &str) {
+    pub(crate) fn feature_code_is(&mut self, project: &str, slug: &str, patch: &str) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1429,7 +1518,8 @@ impl Gerdr {
 
     /// The code of feature `slug` is read to mark `stage` done: done on
     /// that code, unless it has changes not committed, or `stage` is no
-    /// longer the current one.
+    /// longer the current one. AI review is marked by gerdr, once no
+    /// finding holds up.
     fn feature_read(
         &mut self,
         project: &str,
@@ -1454,19 +1544,33 @@ impl Gerdr {
         let still = self
             .feature(project, slug)
             .is_some_and(|f| f.status == Status::Open && f.current() == Some(stage));
-        if still {
-            self.tick_feature(project, slug, Some(&reading.patch));
+        let open = self
+            .feature(project, slug)
+            .and_then(|f| f.review.as_ref())
+            .map_or(0, |r| r.open());
+        match stage {
+            _ if !still => {}
+            Stage::AiReview if open > 0 => {
+                let title = self.feature(project, slug).map_or("", |f| f.title.as_str());
+                let text = format!(
+                    "AI review of \u{201c}{title}\u{201d} still has {}",
+                    plural(open, "finding")
+                );
+                self.show_warning(text);
+            }
+            Stage::AiReview => self.tick_feature(project, slug, Some(&reading.patch), "gerdr"),
+            _ => self.tick_feature(project, slug, Some(&reading.patch), "you"),
         }
         self.probe_feature(project, slug);
     }
 
-    /// Mark the current stage of feature `slug` done by you, on the code
-    /// whose patch-id is `patch`, and say so.
-    fn tick_feature(&mut self, project: &str, slug: &str, patch: Option<&str>) {
+    /// Mark the current stage of feature `slug` done by `by` ("you",
+    /// "gerdr"), on the code whose patch-id is `patch`, and say so.
+    fn tick_feature(&mut self, project: &str, slug: &str, patch: Option<&str>, by: &str) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
-        let Some(stage) = feature.tick(feature::now(), "you", patch) else {
+        let Some(stage) = feature.tick(feature::now(), by, patch) else {
             return self.show_warning("Nothing left to mark done".into());
         };
         let shipped = feature.status == Status::Done;
@@ -1788,8 +1892,27 @@ impl Gerdr {
     }
 
     /// Open the feature panel on feature `slug` of `project` with the
-    /// cursor on `stage`'s row.
+    /// cursor on `stage`'s row. AI review with findings to decide shows
+    /// the diff at the first instead, and Code review the diff, as their
+    /// rows' Enter does.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
+        let current = self
+            .feature(project, slug)
+            .filter(|f| f.status == Status::Open && f.current() == Some(stage));
+        if let Some(f) = current
+            && matches!(stage, Stage::AiReview | Stage::CodeReview)
+        {
+            let ready = f.runs.get(&stage).is_some_and(|r| r.ready.is_some());
+            let first = f
+                .review
+                .as_ref()
+                .and_then(|r| r.first_open())
+                .map(|x| x.id.clone())
+                .filter(|_| ready);
+            if stage == Stage::CodeReview || first.is_some() {
+                return self.open_feature_diff(project, slug, first.as_deref());
+            }
+        }
         self.open_feature(project, slug);
         let row = Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
         let at = self.panel_feature().map(|f| f.repos.len() + row);
@@ -1862,7 +1985,7 @@ impl Gerdr {
                 }
                 Some(stage) if stage.bound() => self.read_and_tick(&project, &slug, stage),
                 Some(_) => {
-                    self.tick_feature(&project, &slug, None);
+                    self.tick_feature(&project, &slug, None, "you");
                     self.probe_feature(&project, &slug);
                 }
                 None => self.show_warning("Nothing left to mark done".into()),
@@ -1883,6 +2006,14 @@ impl Gerdr {
                 None => {}
             },
             PanelOutcome::Evidence => self.open_evidence(&project, &slug),
+            PanelOutcome::Findings => {
+                let first = self
+                    .feature(&project, &slug)
+                    .and_then(|f| Some(f.review.as_ref()?.first_open()?.id.clone()));
+                self.open_feature_diff(&project, &slug, first.as_deref());
+            }
+            PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::OpenPr(url) => {
                 self.close_feature_panel();
                 let w = self.active_workspace;
@@ -2481,6 +2612,7 @@ impl Gerdr {
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
+            code_review: self.code_review_line(&panel.project, &panel.slug),
         };
         Some(panel_view(panel, feature, &slugs, &state, feature::now()))
     }
@@ -2658,6 +2790,9 @@ struct PanelState<'a> {
     setup: Option<&'a str>,
     /// What Verify's checks do now, while they run.
     verify: Option<&'a str>,
+    /// What Code review's row says once the diff was read (see
+    /// `code_review_line`).
+    code_review: Option<String>,
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads
@@ -2782,6 +2917,13 @@ fn panel_view(
             let line = match s {
                 Stage::Build => build_line(feature, state.setup, agent),
                 Stage::Verify => verify_line(feature, state.ctx, state.verify),
+                Stage::AiReview if mark == StageMark::Current => review_line(feature, agent),
+                Stage::CodeReview if mark == StageMark::Current => Some(
+                    state
+                        .code_review
+                        .clone()
+                        .unwrap_or_else(|| "review every changed file".into()),
+                ),
                 _ => agent.map(str::to_owned),
             };
             StageRow {
@@ -3555,6 +3697,151 @@ pub(crate) mod tests {
             actions,
             notes: notes.iter().map(|n| (*n).to_owned()).collect(),
         })
+    }
+
+    fn reviewing(states: &[FindingState], ready: bool) -> Feature {
+        use crate::feature::{
+            agents::StageRun,
+            review_import::{AiReview, Finding},
+        };
+        let mut f = feature("r", vec![repo("api", true)], 4);
+        f.runs.insert(
+            Stage::AiReview,
+            StageRun {
+                n: 1,
+                agent: "Codex".into(),
+                pane: Some("p1".into()),
+                started: 2_000,
+                ready: ready.then_some(2_050),
+                ..StageRun::default()
+            },
+        );
+        let findings = states
+            .iter()
+            .enumerate()
+            .map(|(i, state)| Finding {
+                id: format!("r1-{}", i + 1),
+                state: *state,
+                ..Finding::default()
+            })
+            .collect();
+        f.review = Some(AiReview {
+            n: 1,
+            findings,
+            ..AiReview::default()
+        });
+        f
+    }
+
+    #[test]
+    fn ai_review_shows_its_agent_then_its_findings_never_mark_done() {
+        use FindingState as S;
+        let row = PanelRow::Stage(Stage::AiReview);
+        let none = RowCtx::default();
+        let fresh = feature("r", vec![repo("api", true)], 4);
+        assert_eq!(
+            row_action(&fresh, row, none),
+            Some(PanelOutcome::StartAgent(Stage::AiReview, false))
+        );
+        assert_eq!(
+            stage_button(&fresh, Stage::AiReview, none),
+            Some("Start agent")
+        );
+        // Running: its tab, whatever the earlier findings.
+        let running = reviewing(&[S::Open], false);
+        assert_eq!(
+            row_action(&running, row, none),
+            Some(PanelOutcome::ShowAgent(Stage::AiReview))
+        );
+        assert_eq!(
+            review_line(&running, Some("Codex reviewing \u{b7} started 2m ago")).as_deref(),
+            Some("Codex reviewing \u{b7} started 2m ago")
+        );
+        let open = reviewing(&[S::Open, S::Open, S::Fix, S::Dismissed], true);
+        assert_eq!(row_action(&open, row, none), Some(PanelOutcome::Findings));
+        assert_eq!(row_hint(&open, row, none), "review findings");
+        assert_eq!(
+            stage_button(&open, Stage::AiReview, none),
+            Some("Review findings")
+        );
+        assert_eq!(
+            review_line(&open, None).as_deref(),
+            Some("2 findings to decide \u{b7} Enter to review")
+        );
+        let fix = reviewing(&[S::Fix, S::Dismissed], true);
+        assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
+        assert_eq!(row_hint(&fix, row, none), "send fixes");
+        assert_eq!(
+            review_line(&fix, None).as_deref(),
+            Some("1 finding to fix \u{b7} Enter to send to Build")
+        );
+        let sent = reviewing(&[S::Sent, S::Sent], true);
+        assert_eq!(
+            review_line(&sent, None).as_deref(),
+            Some("2 findings sent to Build")
+        );
+        let decided = reviewing(&[S::Fixed, S::Dismissed], true);
+        assert_eq!(
+            review_line(&decided, None).as_deref(),
+            Some("all findings fixed or dismissed")
+        );
+        assert_eq!(
+            row_action(&decided, row, none),
+            Some(PanelOutcome::ShowAgent(Stage::AiReview))
+        );
+        assert_eq!(
+            review_line(&reviewing(&[], true), None).as_deref(),
+            Some("no findings")
+        );
+        // Ctrl+R: a fresh reviewer.
+        let mut panel = FeaturePanel {
+            cursor: start_cursor(&open),
+            ..FeaturePanel::default()
+        };
+        assert_eq!(
+            press(&mut panel, &open, ctrl(Keysym::r)),
+            Some(PanelOutcome::StartAgent(Stage::AiReview, true))
+        );
+        let slugs = vec!["r".to_owned()];
+        let view = panel_view(&panel, &open, &slugs, &PanelState::default(), 2_060);
+        let row = &view.stages[4];
+        assert_eq!(row.detail, "2 findings to decide \u{b7} Enter to review");
+        assert_eq!(row.button, Some("Review findings"));
+        assert!(
+            view.hints
+                .contains(&("Ctrl+R".into(), "fresh agent".into()))
+        );
+        assert!(
+            view.hints
+                .contains(&("Enter".into(), "review findings".into()))
+        );
+    }
+
+    #[test]
+    fn code_review_shows_the_diff() {
+        let f = feature("c", vec![repo("api", true)], 5);
+        let row = PanelRow::Stage(Stage::CodeReview);
+        let none = RowCtx::default();
+        assert_eq!(row_action(&f, row, none), Some(PanelOutcome::CodeReview));
+        assert_eq!(row_hint(&f, row, none), "review code");
+        assert_eq!(
+            stage_button(&f, Stage::CodeReview, none),
+            Some("Review code")
+        );
+        let panel = FeaturePanel {
+            cursor: start_cursor(&f),
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["c".to_owned()];
+        let view = panel_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        assert_eq!(view.stages[5].detail, "review every changed file");
+        let state = PanelState {
+            code_review: Some("3 of 7 files viewed".into()),
+            ..PanelState::default()
+        };
+        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
+        assert_eq!(view.stages[5].detail, "3 of 7 files viewed");
+        assert_eq!(view.stages[5].button, Some("Review code"));
     }
 
     fn texts(lines: &[CheckLine]) -> Vec<(&str, CheckTone)> {
