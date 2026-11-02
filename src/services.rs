@@ -12,6 +12,12 @@
 //! it outlives a restart of gerdr, and where reading each pane left off
 //! too, so a restarted gerdr tells what came while it was down.
 //!
+//! An error the user ignores (by its fingerprint, in every pane of its
+//! project) is kept apart, one record for all its panes: still counted as
+//! it comes, listed light in the inbox, but never notified nor counted in
+//! the sidebar. Unlike `[services] ignore`, which never takes its lines for
+//! errors at all, it stays in sight.
+//!
 //! `service_watch` finds them, on a thread per session; this keeps them
 //! and wires them into gerdr.
 
@@ -398,6 +404,11 @@ impl Gerdr {
             .collect();
         self.projects.service_errors = kept;
         let mut changed = self.projects.service_errors.len() != before;
+        let before = self.projects.ignored_errors.len();
+        let store = &mut self.projects;
+        let ids: Vec<String> = store.projects.iter().map(|p| p.id.clone()).collect();
+        store.ignored_errors.retain(|g| ids.contains(&g.project));
+        changed |= store.ignored_errors.len() != before;
         for (id, running) in found {
             if Some(id.as_str()) == shown.as_deref() {
                 continue;
@@ -518,12 +529,24 @@ impl Gerdr {
         error: ServiceError,
         said: Option<String>,
     ) {
+        let now = inbox_store::now_secs();
+        // An error ignored is only counted on its record: no group, no
+        // notification.
+        if record_ignored(
+            &mut self.projects.ignored_errors,
+            project,
+            pane_id,
+            label,
+            &error,
+            now,
+        ) {
+            return;
+        }
         let ServiceError {
             fingerprint,
             title,
             lines,
         } = error;
-        let now = inbox_store::now_secs();
         let groups = &mut self.projects.service_errors;
         let at = groups.iter().position(|g| {
             g.project == project && g.pane_id == pane_id && g.fingerprint == fingerprint
@@ -595,10 +618,11 @@ impl Gerdr {
     /// its pane, its output open over it where the error is. One of
     /// another project switches to it first, then shows once it is there.
     pub fn show_service_error(&mut self, project: &str, pane_id: &str, fingerprint: &str) {
-        let found =
-            self.projects.service_errors.iter().any(|g| {
-                g.project == project && g.pane_id == pane_id && g.fingerprint == fingerprint
-            });
+        let at = |g: &&ErrorGroup| {
+            g.project == project && g.pane_id == pane_id && g.fingerprint == fingerprint
+        };
+        let found = self.projects.service_errors.iter().any(|g| at(&g))
+            || self.projects.ignored_errors.iter().any(|g| at(&g));
         if !found {
             return self.show_warning("That error is gone".into());
         }
@@ -612,19 +636,27 @@ impl Gerdr {
             return self.switch_project(project);
         }
         self.service_errors.pending = None;
-        let Some(group) =
+        let group =
             self.projects.service_errors.iter_mut().find(|g| {
                 g.project == project && g.pane_id == pane_id && g.fingerprint == fingerprint
-            })
-        else {
-            return;
+            });
+        let first = match group {
+            Some(group) => {
+                group.seen = true;
+                // A stopped service's last lines end its output: shown at
+                // the end.
+                let first = (!group.is_stop())
+                    .then(|| group.lines.first().cloned())
+                    .flatten();
+                self.projects.save();
+                first
+            }
+            // One ignored: its record's last time.
+            None => match self.projects.ignored_errors.iter().find(|g| at(g)) {
+                Some(record) => record.lines.first().cloned(),
+                None => return,
+            },
         };
-        group.seen = true;
-        // A stopped service's last lines end its output: shown at the end.
-        let first = (!group.is_stop())
-            .then(|| group.lines.first().cloned())
-            .flatten();
-        self.projects.save();
         if !self.show_herdr_pane(pane_id) {
             return self.show_warning("Its pane isn't shown".into());
         }
@@ -800,6 +832,202 @@ impl Gerdr {
     }
 }
 
+/// An error's state across both lists, by project and fingerprint, before
+/// it was ignored or ignored no more: what an Undo puts back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErrorsSnapshot {
+    /// The project's id.
+    pub project: String,
+    pub fingerprint: String,
+    /// Its groups, a pane each, the newest first.
+    pub groups: Vec<ErrorGroup>,
+    /// Its record, when it was ignored.
+    pub ignored: Option<ErrorGroup>,
+}
+
+/// Whether `g` is project `project`'s error `fingerprint`, of any pane.
+fn same_error(g: &ErrorGroup, project: &str, fingerprint: &str) -> bool {
+    g.project == project && g.fingerprint == fingerprint
+}
+
+/// Project `project`'s error `fingerprint` as `groups` and `ignored` hold
+/// it.
+fn snapshot(
+    groups: &[ErrorGroup],
+    ignored: &[ErrorGroup],
+    project: &str,
+    fingerprint: &str,
+) -> ErrorsSnapshot {
+    ErrorsSnapshot {
+        project: project.to_owned(),
+        fingerprint: fingerprint.to_owned(),
+        groups: groups
+            .iter()
+            .filter(|g| same_error(g, project, fingerprint))
+            .cloned()
+            .collect(),
+        ignored: ignored
+            .iter()
+            .find(|g| same_error(g, project, fingerprint))
+            .cloned(),
+    }
+}
+
+/// Ignore project `project`'s error `fingerprint`: its groups (one per
+/// pane) leave `groups` for one record in `ignored`, their counts summed,
+/// the newest's lines kept. `None` for a service having stopped (every
+/// stop shares that fingerprint) or an error not there.
+fn ignore_in(
+    groups: &mut Vec<ErrorGroup>,
+    ignored: &mut Vec<ErrorGroup>,
+    project: &str,
+    fingerprint: &str,
+) -> Option<ErrorsSnapshot> {
+    if fingerprint == STOPPED {
+        return None;
+    }
+    let before = snapshot(groups, ignored, project, fingerprint);
+    let newest = before.groups.iter().max_by_key(|g| g.last_secs)?;
+    let mut record = before.ignored.clone().unwrap_or_else(|| ErrorGroup {
+        count: 0,
+        first_secs: newest.first_secs,
+        ..newest.clone()
+    });
+    if record.last_secs <= newest.last_secs {
+        record.pane_id = newest.pane_id.clone();
+        record.title = newest.title.clone();
+        record.lines = newest.lines.clone();
+        record.service = newest.service.clone();
+        record.last_secs = newest.last_secs;
+    }
+    record.count += before.groups.iter().map(|g| g.count).sum::<u32>();
+    record.first_secs = before
+        .groups
+        .iter()
+        .map(|g| g.first_secs)
+        .fold(record.first_secs, u64::min);
+    record.seen = true;
+    groups.retain(|g| !same_error(g, project, fingerprint));
+    ignored.retain(|g| !same_error(g, project, fingerprint));
+    ignored.insert(0, record);
+    Some(before)
+}
+
+/// Stop ignoring project `project`'s error `fingerprint`: its record goes
+/// back among `groups`, as looked at. `None` if it wasn't ignored.
+fn unignore_in(
+    groups: &mut Vec<ErrorGroup>,
+    ignored: &mut Vec<ErrorGroup>,
+    project: &str,
+    fingerprint: &str,
+) -> Option<ErrorsSnapshot> {
+    let before = snapshot(groups, ignored, project, fingerprint);
+    let at = ignored
+        .iter()
+        .position(|g| same_error(g, project, fingerprint))?;
+    let mut record = ignored.remove(at);
+    record.seen = true;
+    // A group of the same pane can't be there: ignored errors make none.
+    groups.retain(|g| !(same_error(g, project, fingerprint) && g.pane_id == record.pane_id));
+    insert_newest_first(groups, record);
+    Some(before)
+}
+
+/// Put project `snap.project`'s error `snap.fingerprint` back in `groups`
+/// and `ignored` as `snap` holds it.
+fn restore_in(groups: &mut Vec<ErrorGroup>, ignored: &mut Vec<ErrorGroup>, snap: ErrorsSnapshot) {
+    let (project, fingerprint) = (&snap.project, &snap.fingerprint);
+    groups.retain(|g| !same_error(g, project, fingerprint));
+    ignored.retain(|g| !same_error(g, project, fingerprint));
+    for group in snap.groups {
+        insert_newest_first(groups, group);
+    }
+    if let Some(record) = snap.ignored {
+        ignored.insert(0, record);
+    }
+}
+
+/// Put `group` into `groups` (the newest first) where its last time goes.
+fn insert_newest_first(groups: &mut Vec<ErrorGroup>, group: ErrorGroup) {
+    let at = groups
+        .iter()
+        .position(|g| g.last_secs <= group.last_secs)
+        .unwrap_or(groups.len());
+    groups.insert(at, group);
+    groups.truncate(MAX_GROUPS);
+}
+
+/// Count `error` of project `project`'s pane `pane_id` (service `label`)
+/// on its record in `ignored`, at `now`: whether it is ignored.
+fn record_ignored(
+    ignored: &mut [ErrorGroup],
+    project: &str,
+    pane_id: &str,
+    label: &str,
+    error: &ServiceError,
+    now: u64,
+) -> bool {
+    let Some(record) = ignored
+        .iter_mut()
+        .find(|g| same_error(g, project, &error.fingerprint))
+    else {
+        return false;
+    };
+    record.count += 1;
+    record.pane_id = pane_id.to_owned();
+    record.title = error.title.clone();
+    record.lines = error.lines.clone();
+    record.service = label.to_owned();
+    record.last_secs = now;
+    true
+}
+
+impl Gerdr {
+    /// Ignore project `project`'s error `fingerprint` (see `ignore_in`),
+    /// saved; what an Undo puts back.
+    pub fn ignore_service_error(
+        &mut self,
+        project: &str,
+        fingerprint: &str,
+    ) -> Option<ErrorsSnapshot> {
+        let store = &mut self.projects;
+        let before = ignore_in(
+            &mut store.service_errors,
+            &mut store.ignored_errors,
+            project,
+            fingerprint,
+        )?;
+        store.save();
+        Some(before)
+    }
+
+    /// Stop ignoring project `project`'s error `fingerprint` (see
+    /// `unignore_in`), saved; what an Undo puts back.
+    pub fn unignore_service_error(
+        &mut self,
+        project: &str,
+        fingerprint: &str,
+    ) -> Option<ErrorsSnapshot> {
+        let store = &mut self.projects;
+        let before = unignore_in(
+            &mut store.service_errors,
+            &mut store.ignored_errors,
+            project,
+            fingerprint,
+        )?;
+        store.save();
+        Some(before)
+    }
+
+    /// Put an error back as `snap` holds it: an Undo of ignoring it, or of
+    /// ignoring it no more.
+    pub fn restore_service_errors(&mut self, snap: ErrorsSnapshot) {
+        let store = &mut self.projects;
+        restore_in(&mut store.service_errors, &mut store.ignored_errors, snap);
+        store.save();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,6 +1049,135 @@ mod tests {
         let text = serde_json::to_string(&g).unwrap();
         assert_eq!(serde_json::from_str::<ErrorGroup>(&text).unwrap(), g);
         assert!(g.is_stop());
+    }
+
+    fn group(pane: &str, fingerprint: &str, count: u32, first: u64, last: u64) -> ErrorGroup {
+        ErrorGroup {
+            project: "api".into(),
+            pane_id: pane.into(),
+            fingerprint: fingerprint.into(),
+            title: format!("ValueError {pane}"),
+            lines: vec![format!("line {pane}")],
+            service: "runserver".into(),
+            count,
+            first_secs: first,
+            last_secs: last,
+            seen: false,
+        }
+    }
+
+    #[test]
+    fn ignoring_merges_the_panes_into_one_record() {
+        let mut groups = vec![
+            group("w1:p1", "f", 3, 10, 50),
+            group("w1:p1", "g", 1, 20, 40),
+            group("w2:p1", "f", 2, 5, 30),
+        ];
+        let mut ignored = Vec::new();
+        let before = ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].fingerprint, "g");
+        assert_eq!(ignored.len(), 1);
+        let record = &ignored[0];
+        assert_eq!(
+            (record.count, record.first_secs, record.last_secs),
+            (5, 5, 50)
+        );
+        assert_eq!(record.pane_id, "w1:p1");
+        assert_eq!(record.lines, vec!["line w1:p1".to_owned()]);
+        assert!(record.seen);
+        assert_eq!(before.groups.len(), 2);
+        assert!(before.ignored.is_none());
+        // Another project's same fingerprint stays.
+        let mut other = vec![ErrorGroup {
+            project: "web".into(),
+            ..group("w1:p1", "f", 1, 1, 1)
+        }];
+        assert!(ignore_in(&mut other, &mut ignored, "api", "f").is_none());
+        assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn a_stop_cant_be_ignored() {
+        let mut groups = vec![group("w1:p1", STOPPED, 1, 1, 1)];
+        let mut ignored = Vec::new();
+        assert!(ignore_in(&mut groups, &mut ignored, "api", STOPPED).is_none());
+        assert_eq!(groups.len(), 1);
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn an_ignored_error_counts_on_its_record() {
+        let mut groups = vec![group("w1:p1", "f", 1, 1, 1)];
+        let mut ignored = Vec::new();
+        ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        let error = ServiceError {
+            fingerprint: "f".into(),
+            title: "ValueError: tool 3".into(),
+            lines: vec!["new".into()],
+        };
+        assert!(record_ignored(
+            &mut ignored,
+            "api",
+            "w9:p1",
+            "dev",
+            &error,
+            99
+        ));
+        assert_eq!(ignored[0].count, 2);
+        assert_eq!(ignored[0].pane_id, "w9:p1");
+        assert_eq!(ignored[0].title, "ValueError: tool 3");
+        assert_eq!(ignored[0].last_secs, 99);
+        let other = ServiceError {
+            fingerprint: "g".into(),
+            ..error
+        };
+        assert!(!record_ignored(
+            &mut ignored,
+            "api",
+            "w9:p1",
+            "dev",
+            &other,
+            99
+        ));
+    }
+
+    #[test]
+    fn ignored_no_more_it_lists_again_looked_at() {
+        let mut groups = vec![
+            group("w1:p1", "g", 1, 1, 100),
+            group("w1:p1", "f", 1, 1, 10),
+        ];
+        let mut ignored = Vec::new();
+        ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        let before = unignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        assert!(ignored.is_empty());
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].fingerprint, "f");
+        assert!(groups[1].seen);
+        assert!(before.ignored.is_some());
+        assert!(unignore_in(&mut groups, &mut ignored, "api", "f").is_none());
+    }
+
+    #[test]
+    fn undo_puts_both_lists_back() {
+        let start = vec![
+            group("w1:p1", "f", 3, 10, 50),
+            group("w1:p1", "g", 1, 20, 40),
+            group("w2:p1", "f", 2, 5, 30),
+        ];
+        let mut groups = start.clone();
+        let mut ignored = Vec::new();
+        let before = ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        restore_in(&mut groups, &mut ignored, before);
+        assert_eq!(groups, start);
+        assert!(ignored.is_empty());
+
+        ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        let (kept_groups, kept_ignored) = (groups.clone(), ignored.clone());
+        let before = unignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        restore_in(&mut groups, &mut ignored, before);
+        assert_eq!((groups, ignored), (kept_groups, kept_ignored));
     }
 
     #[test]

@@ -33,7 +33,7 @@ use crate::{
     input::Overlay,
     issues::{self, GhRepo, IssuesRead, TicketRepo},
     menu::MenuAction,
-    services::ServiceErrorKey,
+    services::{self, ServiceErrorKey},
     toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
@@ -205,34 +205,41 @@ impl Gerdr {
     ) -> Vec<InboxItem> {
         let dirs: Vec<_> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
         let records: Vec<_> = self.workspaces.iter().map(|ws| ws.record.clone()).collect();
+        let service_item = |group: &services::ErrorGroup| {
+            let shown = self.project.as_deref() == Some(group.project.as_str());
+            let workspace = shown
+                .then(|| self.herdr_pane_place(&group.pane_id).map(|(w, _)| w))
+                .flatten();
+            let place = match workspace {
+                Some(w) => self.workspaces[w].name.clone(),
+                None => self
+                    .projects
+                    .project(&group.project)
+                    .map_or_else(|| group.project.clone(), |p| p.name.clone()),
+            };
+            inbox_sources::ServiceItem {
+                group: group.clone(),
+                workspace,
+                place,
+                // As it was called then; else as it is now.
+                service: if group.service.is_empty() {
+                    self.service_item_label(&group.project, &group.pane_id)
+                } else {
+                    group.service.clone()
+                },
+            }
+        };
         let service_errors: Vec<_> = self
             .projects
             .service_errors
             .iter()
-            .map(|group| {
-                let shown = self.project.as_deref() == Some(group.project.as_str());
-                let workspace = shown
-                    .then(|| self.herdr_pane_place(&group.pane_id).map(|(w, _)| w))
-                    .flatten();
-                let place = match workspace {
-                    Some(w) => self.workspaces[w].name.clone(),
-                    None => self
-                        .projects
-                        .project(&group.project)
-                        .map_or_else(|| group.project.clone(), |p| p.name.clone()),
-                };
-                inbox_sources::ServiceItem {
-                    group: group.clone(),
-                    workspace,
-                    place,
-                    // As it was called then; else as it is now.
-                    service: if group.service.is_empty() {
-                        self.service_item_label(&group.project, &group.pane_id)
-                    } else {
-                        group.service.clone()
-                    },
-                }
-            })
+            .map(service_item)
+            .collect();
+        let ignored_errors: Vec<_> = self
+            .projects
+            .ignored_errors
+            .iter()
+            .map(service_item)
             .collect();
         inbox_sources::collect(&Sources {
             workspaces,
@@ -251,6 +258,7 @@ impl Gerdr {
             store: self.inbox_file(),
             pane_text: &self.inbox.pane_text,
             service_errors: &service_errors,
+            ignored_errors: &ignored_errors,
             now: Instant::now(),
             now_secs: inbox_store::now_secs(),
         })
@@ -571,6 +579,28 @@ impl Gerdr {
                 let Some(url) = link else { return };
                 self.copy_text(url);
                 self.toast("Copied the link".into(), Level::Info);
+            }
+            ItemAction::Ignore | ItemAction::Unignore => {
+                let Target::ServiceError {
+                    project,
+                    fingerprint,
+                    ..
+                } = &item.target
+                else {
+                    return;
+                };
+                let (before, text) = if action == ItemAction::Ignore {
+                    let before = self.ignore_service_error(project, fingerprint);
+                    (before, format!("Ignored: {}", item.title))
+                } else {
+                    let before = self.unignore_service_error(project, fingerprint);
+                    (before, format!("No longer ignored: {}", item.title))
+                };
+                let Some(before) = before else {
+                    return self.show_warning("That error is gone".into());
+                };
+                let undo = MenuAction::ServiceErrorsRestore(Box::new(before));
+                self.toast_with(text, Level::Success, Some(("Undo".to_owned(), undo)));
             }
         }
     }

@@ -56,7 +56,8 @@
 //! errors = ['Traceback \(most recent call last\)', '\bERROR\b']
 //! # More, besides the default ones (or those of `errors`).
 //! extra_errors = ['level=error']
-//! # Lines never taken for errors, though they match.
+//! # Lines never taken for errors, though they match: never shown. To
+//! # keep an error in sight but quiet, ignore it in the inbox (Ctrl+I).
 //! ignore = ['DeprecationWarning']
 //! # Desktop notifications of the errors; on by default ([notifications]
 //! # enabled = false turns them off too).
@@ -831,7 +832,8 @@ const TEMPLATE: &str = "\
 # errors = ['Traceback \\(most recent call last\\)', '\\bERROR\\b']
 # # More, besides the default ones (or those of `errors`).
 # extra_errors = ['level=error']
-# # Lines never taken for errors, though they match.
+# # Lines never taken for errors, though they match: never shown. To
+# # keep an error in sight but quiet, ignore it in the inbox (Ctrl+I).
 # ignore = ['DeprecationWarning']
 # # Desktop notifications of the errors; on by default ([notifications]
 # # enabled = false turns them off too).

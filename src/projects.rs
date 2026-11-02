@@ -74,6 +74,10 @@ pub struct Store {
     /// The services' errors found, the newest first (see `services`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_errors: Vec<crate::services::ErrorGroup>,
+    /// The services' errors the user ignores: one per project and
+    /// fingerprint, still counted as they come (see `services`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_errors: Vec<crate::services::ErrorGroup>,
     #[serde(skip)]
     books: Books,
 }
@@ -104,6 +108,8 @@ struct State {
     service_anchors: BTreeMap<String, crate::service_errors::Anchor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     service_errors: Vec<crate::services::ErrorGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ignored_errors: Vec<crate::services::ErrorGroup>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -451,6 +457,7 @@ impl Store {
         self.window_size = state.window_size;
         self.service_anchors = state.service_anchors;
         self.service_errors = state.service_errors;
+        self.ignored_errors = state.ignored_errors;
     }
 
     fn state(&self) -> State {
@@ -467,6 +474,7 @@ impl Store {
             window_size: self.window_size,
             service_anchors: self.service_anchors.clone(),
             service_errors: self.service_errors.clone(),
+            ignored_errors: self.ignored_errors.clone(),
         }
     }
 
@@ -1593,6 +1601,7 @@ mod tests {
             window_size: Some((1600, 1000)),
             service_anchors: BTreeMap::new(),
             service_errors: Vec::new(),
+            ignored_errors: Vec::new(),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

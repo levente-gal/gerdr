@@ -13,7 +13,9 @@
 //! (or the label's "Dismiss all") dismisses its section's items as listed,
 //! where the section has that (Services). Ctrl+H hides it for an hour,
 //! Ctrl+Shift+H until tomorrow morning, Alt+H lists the hidden ones
-//! (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits
+//! (Delete restores one). Ctrl+I ignores a service's error: it goes to
+//! the Ignored errors group, listed light, counted but never told of, until
+//! Ctrl+I there stops ignoring it. Ctrl+N writes a todo, Ctrl+E edits
 //! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
 //! repository (`owner/repo`) to the shown project; Delete marks a todo
 //! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
@@ -66,15 +68,18 @@ pub struct ItemId(pub String);
 pub enum Section {
     Agents,
     Services,
+    /// The services' errors the user ignores: listed dim, never counted.
+    Ignored,
     Repos,
     PullRequests,
     Tickets,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::Agents,
         Section::Services,
+        Section::Ignored,
         Section::Repos,
         Section::PullRequests,
         Section::Tickets,
@@ -85,6 +90,7 @@ impl Section {
         match self {
             Section::Agents => "Agents",
             Section::Services => "Services",
+            Section::Ignored => "Ignored errors",
             Section::Repos => "Repos",
             Section::PullRequests => "Pull requests",
             Section::Tickets => "Tickets",
@@ -102,6 +108,7 @@ impl Section {
         match self {
             Section::Agents => chrome::InboxIcon::Agent,
             Section::Services => chrome::InboxIcon::Failed,
+            Section::Ignored => chrome::InboxIcon::Failed,
             Section::Repos => chrome::InboxIcon::Repo,
             Section::PullRequests => chrome::InboxIcon::PullRequest,
             Section::Tickets => chrome::InboxIcon::Ticket,
@@ -234,6 +241,10 @@ pub enum ItemAction {
     OpenLink,
     /// Its link, to the clipboard: Ctrl+C.
     CopyLink,
+    /// A service's error, kept in sight but never told of again: Ctrl+I.
+    Ignore,
+    /// An ignored error, told of again: Ctrl+I.
+    Unignore,
 }
 
 impl ItemAction {
@@ -250,6 +261,8 @@ impl ItemAction {
             ItemAction::Delete => "Delete",
             ItemAction::OpenLink => "Open",
             ItemAction::CopyLink => "Copy link",
+            ItemAction::Ignore => "Ignore",
+            ItemAction::Unignore => "Stop ignoring",
         }
     }
 
@@ -264,6 +277,7 @@ impl ItemAction {
             ItemAction::Delete => "Shift+Del",
             ItemAction::OpenLink => "Ctrl+O",
             ItemAction::CopyLink => "Ctrl+C",
+            ItemAction::Ignore | ItemAction::Unignore => "Ctrl+I",
         }
     }
 
@@ -360,6 +374,8 @@ pub enum Detail {
         lines: Vec<String>,
         /// Whether it was looked at since it last came.
         seen: bool,
+        /// Whether the user ignores it: counted, never told of.
+        ignored: bool,
     },
 }
 
@@ -450,7 +466,7 @@ pub fn counted(item: &InboxItem) -> bool {
         Detail::Agent { status, .. } => {
             matches!(status, AgentStatus::Blocked | AgentStatus::Done)
         }
-        Detail::Service { seen, .. } => !seen,
+        Detail::Service { seen, ignored, .. } => !seen && !ignored,
         Detail::Ci { subject, state, .. } => {
             item.tone == Tone::Review
                 || (*state == CiState::Failed && crate::ci::LONG_LIVED.contains(&subject.as_str()))
@@ -517,7 +533,12 @@ fn row_actions(actions: &[ItemAction]) -> Vec<ItemAction> {
     actions
         .iter()
         .copied()
-        .filter(|a| matches!(a, A::GoTo | A::Snooze | A::Dismiss | A::Done | A::Restore))
+        .filter(|a| {
+            matches!(
+                a,
+                A::GoTo | A::Snooze | A::Dismiss | A::Done | A::Restore | A::Unignore
+            )
+        })
         .collect()
 }
 
@@ -728,11 +749,15 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             count,
             first,
             lines,
+            ignored,
             ..
         } => {
             field("Service", service.clone());
             field("In", place.clone());
             field("Times", count.to_string());
+            if *ignored {
+                field("Ignored", "no notifications, no count".to_owned());
+            }
             // Both as the same kind of "ago".
             if let Some(age) = item.age {
                 let last = now.saturating_sub(age.as_secs());
@@ -774,6 +799,8 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
         A::Delete => ("Shift+Del", "delete"),
         A::OpenLink => ("Ctrl+O", "open link"),
         A::CopyLink => ("Ctrl+C", "copy link"),
+        A::Ignore => ("Ctrl+I", "ignore"),
+        A::Unignore => ("Ctrl+I", "stop ignoring"),
     }
 }
 
@@ -1476,6 +1503,13 @@ impl Panel {
             Keysym::e | Keysym::E if ctrl => ItemAction::Edit,
             Keysym::o | Keysym::O if ctrl => ItemAction::OpenLink,
             Keysym::c | Keysym::C if ctrl => ItemAction::CopyLink,
+            // One key both ways: the item has one of them.
+            Keysym::i | Keysym::I if ctrl && !shift => {
+                let can = actions(item?, self.show_hidden);
+                [ItemAction::Ignore, ItemAction::Unignore]
+                    .into_iter()
+                    .find(|a| can.contains(a))?
+            }
             Keysym::Delete | Keysym::KP_Delete if ctrl && !shift => {
                 return self.dismiss_all(&listed, item?.section);
             }
@@ -1619,6 +1653,8 @@ impl Panel {
             A::SnoozeLong,
             A::Edit,
             A::Delete,
+            A::Unignore,
+            A::Ignore,
             A::OpenLink,
             A::CopyLink,
         ]
@@ -1715,7 +1751,8 @@ impl Panel {
                         icon: item.icon(),
                         tone: item.tone,
                         age: item.age.map(age_text).unwrap_or_default(),
-                        hidden: self.show_hidden,
+                        // An ignored error is listed light, as a hidden one.
+                        hidden: self.show_hidden || item.section == Section::Ignored,
                         buttons,
                         marks: item.marks(),
                     })
@@ -1834,10 +1871,16 @@ mod tests {
             first: 0,
             lines: Vec::new(),
             seen: false,
+            ignored: false,
         };
         assert!(counted(&error));
         if let Detail::Service { seen, .. } = &mut error.detail {
             *seen = true;
+        }
+        assert!(!counted(&error));
+        // Ignored, never, looked at or not.
+        if let Detail::Service { seen, ignored, .. } = &mut error.detail {
+            (*seen, *ignored) = (false, true);
         }
         assert!(!counted(&error));
     }
@@ -2802,5 +2845,65 @@ mod tests {
             InboxRow::Item(_) => true,
         }));
         assert_eq!(panel.click(InboxHit::Button(0, 0), &list), None);
+    }
+
+    #[test]
+    fn ctrl_i_ignores_and_stops_ignoring() {
+        let mut error = item("s1", Section::Services, Some(0));
+        error.actions.push(A::Ignore);
+        let mut ignored = item("i1", Section::Ignored, Some(0));
+        ignored.actions = vec![A::GoTo, A::Unignore];
+        let items = vec![error, ignored, item("r1", Section::Repos, Some(0))];
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::new(None);
+        let view = panel.view(&list);
+        // The ignored group, right after Services, listed light.
+        let rows: Vec<_> = view
+            .rows
+            .iter()
+            .map(|r| match r {
+                InboxRow::Label { title, .. } => title.clone(),
+                InboxRow::Item(line) => format!("{} {}", line.id, line.hidden),
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "Services",
+                "s1 false",
+                "Ignored errors",
+                "i1 true",
+                "Repos",
+                "r1 false"
+            ]
+        );
+        assert!(
+            view.hints
+                .iter()
+                .any(|(k, w)| k == "Ctrl+I" && w == "ignore")
+        );
+        let (hint_mods, hint_sym) = crate::keys::hint_key("Ctrl+I").unwrap();
+        assert!(hint_mods.ctrl && !hint_mods.shift && matches!(hint_sym, Keysym::i | Keysym::I));
+        assert_eq!(
+            ctrl(&mut panel, Keysym::i, &list),
+            Some(Outcome::Act(ItemId("s1".into()), A::Ignore))
+        );
+        press(&mut panel, Keysym::Down, &list);
+        assert_eq!(panel.selected(), Some(&ItemId("i1".into())));
+        let view = panel.view(&list);
+        assert!(
+            view.hints
+                .iter()
+                .any(|(k, w)| k == "Ctrl+I" && w == "stop ignoring")
+        );
+        assert_eq!(
+            ctrl(&mut panel, Keysym::i, &list),
+            Some(Outcome::Act(ItemId("i1".into()), A::Unignore))
+        );
+        // Neither on a repo.
+        press(&mut panel, Keysym::Down, &list);
+        assert_eq!(ctrl(&mut panel, Keysym::i, &list), None);
     }
 }

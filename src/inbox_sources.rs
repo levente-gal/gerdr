@@ -62,6 +62,9 @@ pub struct Sources<'a> {
     pub pane_text: &'a HashMap<String, PaneText>,
     /// The services' errors, the newest first.
     pub service_errors: &'a [ServiceItem],
+    /// The services' errors the user ignores, one per project and
+    /// fingerprint.
+    pub ignored_errors: &'a [ServiceItem],
     pub now: Instant,
     /// Now, in seconds since the epoch.
     pub now_secs: u64,
@@ -663,46 +666,85 @@ pub fn service_item_id(project: &str, pane_id: &str, fingerprint: &str) -> ItemI
     ItemId(format!("service:{project}|{pane_id}|{fingerprint}"))
 }
 
+/// What an error a service printed (a stop) can have done to it.
+const SERVICE: [ItemAction; 5] = [
+    ItemAction::GoTo,
+    ItemAction::Snooze,
+    ItemAction::SnoozeLong,
+    ItemAction::Dismiss,
+    ItemAction::Ignore,
+];
+
+/// What an ignored error can have done to it.
+const IGNORED: [ItemAction; 2] = [ItemAction::GoTo, ItemAction::Unignore];
+
+/// `item`'s inbox item, ignored (`ignored`) or not.
+fn service_item(item: &ServiceItem, now_secs: u64, ignored: bool) -> InboxItem {
+    let group = &item.group;
+    let times = match group.count {
+        1 => String::new(),
+        n => format!(" · ×{n}"),
+    };
+    let (section, actions) = match ignored {
+        true => (Section::Ignored, IGNORED.to_vec()),
+        // Every stop shares a fingerprint: ignoring one would ignore all.
+        false if group.is_stop() => (Section::Services, TRIAGE.to_vec()),
+        false => (Section::Services, SERVICE.to_vec()),
+    };
+    InboxItem {
+        id: match ignored {
+            true => ignored_item_id(&group.project, &group.fingerprint),
+            false => service_item_id(&group.project, &group.pane_id, &group.fingerprint),
+        },
+        section,
+        // Back from a dismissal when it comes again.
+        fingerprint: group.count.to_string(),
+        workspace: item.workspace,
+        title: group.title.clone(),
+        subtitle: format!("{} · {}{times}", item.place, item.service),
+        tone: Tone::Failed,
+        age: Some(Duration::from_secs(
+            now_secs.saturating_sub(group.last_secs),
+        )),
+        target: Target::ServiceError {
+            project: group.project.clone(),
+            pane_id: group.pane_id.clone(),
+            fingerprint: group.fingerprint.clone(),
+        },
+        actions,
+        detail: Detail::Service {
+            service: item.service.clone(),
+            place: item.place.clone(),
+            stopped: group.is_stop(),
+            count: group.count,
+            first: group.first_secs,
+            lines: group.lines.clone(),
+            seen: group.seen,
+            ignored,
+        },
+    }
+}
+
+/// The inbox item of project `project`'s ignored error `fingerprint`, of
+/// whichever pane.
+pub fn ignored_item_id(project: &str, fingerprint: &str) -> ItemId {
+    ItemId(format!("ignored:{project}|{fingerprint}"))
+}
+
 /// The services' errors, each with how many times it came, and the
 /// services stopped.
 pub fn service_items(src: &Sources) -> Vec<InboxItem> {
     src.service_errors
         .iter()
-        .map(|item| {
-            let group = &item.group;
-            let times = match group.count {
-                1 => String::new(),
-                n => format!(" · ×{n}"),
-            };
-            InboxItem {
-                id: service_item_id(&group.project, &group.pane_id, &group.fingerprint),
-                section: Section::Services,
-                // Back from a dismissal when it comes again.
-                fingerprint: group.count.to_string(),
-                workspace: item.workspace,
-                title: group.title.clone(),
-                subtitle: format!("{} · {}{times}", item.place, item.service),
-                tone: Tone::Failed,
-                age: Some(Duration::from_secs(
-                    src.now_secs.saturating_sub(group.last_secs),
-                )),
-                target: Target::ServiceError {
-                    project: group.project.clone(),
-                    pane_id: group.pane_id.clone(),
-                    fingerprint: group.fingerprint.clone(),
-                },
-                actions: TRIAGE.to_vec(),
-                detail: Detail::Service {
-                    service: item.service.clone(),
-                    place: item.place.clone(),
-                    stopped: group.is_stop(),
-                    count: group.count,
-                    first: group.first_secs,
-                    lines: group.lines.clone(),
-                    seen: group.seen,
-                },
-            }
-        })
+        .map(|item| service_item(item, src.now_secs, false))
+        .collect()
+}
+
+/// The services' errors the user ignores, each once.
+pub fn ignored_items(src: &Sources) -> Vec<InboxItem> {
+    src.ignored_errors
+        .iter()
+        .map(|item| service_item(item, src.now_secs, true))
         .collect()
 }
 
@@ -710,6 +752,7 @@ pub fn service_items(src: &Sources) -> Vec<InboxItem> {
 pub fn collect(src: &Sources) -> Vec<InboxItem> {
     let mut items = agent_items(src);
     items.extend(service_items(src));
+    items.extend(ignored_items(src));
     items.extend(git_items(src));
     items.extend(ci_items(src));
     items.extend(unread_items(src));
@@ -813,6 +856,7 @@ mod tests {
                 store: self.store.as_ref(),
                 pane_text: &self.pane_text,
                 service_errors: &[],
+                ignored_errors: &[],
                 now: Instant::now(),
                 now_secs: 1_000_000,
             }

@@ -576,6 +576,21 @@ fn inbox() -> InboxView {
             T::Failed,
             "1h",
         ),
+        label(I::Failed, "Ignored errors", 1, 0),
+        {
+            let mut row = inbox_item(
+                "i1",
+                "ValueError: tool 2 is already in use",
+                "backend · bash ./runlocal.sh · ×55",
+                I::Failed,
+                T::Failed,
+                "3m",
+            );
+            if let InboxRow::Item(line) = &mut row {
+                line.hidden = true;
+            }
+            row
+        },
         label(I::Repo, "Repos", 3, 1),
         {
             let mut row = inbox_item("g1", "gerdr", "gerdr · main", I::Repo, T::Attention, "");

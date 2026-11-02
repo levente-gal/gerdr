@@ -135,6 +135,9 @@ pub enum MenuAction {
         at: usize,
         triage: Option<inbox_store::Triage>,
     },
+    /// A toast's "Undo" after a service's error was ignored, or ignored
+    /// no more: put it back as it was.
+    ServiceErrorsRestore(Box<crate::services::ErrorsSnapshot>),
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -437,6 +440,7 @@ impl Gerdr {
                 at,
                 triage,
             } => self.inbox_undelete(&project, todo, at, triage),
+            MenuAction::ServiceErrorsRestore(before) => self.restore_service_errors(*before),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }
