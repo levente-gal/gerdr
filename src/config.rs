@@ -17,7 +17,6 @@
 //! theme = "light"       # or "dark" or "system"; else the last choice
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
 //! motion = "reduced"    # or "off": no blinking dots or pulses; "full", the default
-//! notify = false        # no desktop notifications; on by default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -58,8 +57,8 @@
 //! extra_errors = ['level=error']
 //! # Lines never taken for errors, though they match.
 //! ignore = ['DeprecationWarning']
-//! # Desktop notifications of the errors; on by default ([ui] notify
-//! # = false turns them off too).
+//! # Desktop notifications of the errors; on by default ([notifications]
+//! # enabled = false turns them off too).
 //! notify = false
 //! # Tell when a service's command stops by itself; on by default.
 //! stopped = false
@@ -69,7 +68,11 @@
 //! # (checked every 6 hours); false updates it only when asked. On by
 //! # default. The launcher's row turning it on or off writes this key.
 //! updates = false
+//!
 //! [notifications]
+//! # Desktop notifications: of agents that need you, finished test runs and
+//! # the services' errors. On by default.
+//! enabled = false
 //! # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
 //! # until dismissed, -1 leaves it to the notification daemon. By default 30.
 //! timeout = 0
@@ -203,6 +206,7 @@ pub fn write_bool(table: &str, key: &str, value: bool) -> Result<(), String> {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct NotificationsConfig {
+    enabled: Option<bool>,
     timeout: Option<i64>,
 }
 
@@ -210,6 +214,9 @@ struct NotificationsConfig {
 /// table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Notifications {
+    /// Whether gerdr sends any: agents that need the user, finished test
+    /// runs, the services' errors (see `notify`).
+    pub enabled: bool,
     /// Seconds each stays on screen: 0 until dismissed, below 0 as long as
     /// the notification daemon likes.
     pub timeout: i64,
@@ -217,7 +224,10 @@ pub struct Notifications {
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { timeout: 30 }
+        Self {
+            enabled: true,
+            timeout: 30,
+        }
     }
 }
 
@@ -244,6 +254,9 @@ pub fn load_notifications() -> Notifications {
 pub fn notifications_from_text(text: &str) -> Notifications {
     let table = Config::read(text, &mut Vec::new()).notifications;
     let mut settings = Notifications::default();
+    if let Some(enabled) = table.enabled {
+        settings.enabled = enabled;
+    }
     if let Some(timeout) = table.timeout {
         settings.timeout = timeout;
     }
@@ -412,7 +425,6 @@ struct UiConfig {
     theme: Option<String>,
     needs_you: Option<bool>,
     motion: Option<String>,
-    notify: Option<bool>,
 }
 
 /// The `[git]` table, as written.
@@ -516,9 +528,6 @@ pub struct Ui {
     pub needs_you: bool,
     /// How much the chrome moves (see `anim::Motion`).
     pub motion: Motion,
-    /// Whether agents that need the user, and finished test runs, say so
-    /// with a desktop notification (see `notify`).
-    pub notify: bool,
 }
 
 impl Default for Ui {
@@ -528,7 +537,6 @@ impl Default for Ui {
             theme: None,
             needs_you: true,
             motion: Motion::Full,
-            notify: true,
         }
     }
 }
@@ -548,6 +556,8 @@ pub struct Settings {
     pub services: Services,
     /// How T3 Code is kept up to date.
     pub t3: T3Settings,
+    /// Whether and how desktop notifications show.
+    pub notifications: Notifications,
     /// What is wrong with the file, as sentences for the user.
     pub problems: Vec<String>,
 }
@@ -576,6 +586,7 @@ pub fn load() -> Settings {
     let (services, service_problems) = services_from_text(&text);
     problems.extend(service_problems);
     let t3 = t3_from_text(&text);
+    let notifications = notifications_from_text(&text);
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
     for problem in problems.iter().filter(|p| !p.starts_with(KEYS_PROBLEM)) {
@@ -592,6 +603,7 @@ pub fn load() -> Settings {
         agents,
         services,
         t3,
+        notifications,
         problems,
     }
 }
@@ -657,9 +669,6 @@ pub fn from_text(
     }
     if let Some(needs_you) = config.ui.needs_you {
         ui.needs_you = needs_you;
-    }
-    if let Some(notify) = config.ui.notify {
-        ui.notify = notify;
     }
     let mut git = Git::default();
     if let Some(groups) = config.git.same_branches {
@@ -774,7 +783,6 @@ const TEMPLATE: &str = "\
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
 # needs_you = false     # hide the sidebar's \"Needs you\" list; shown by default
 # motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
-# notify = false        # no desktop notifications; on by default
 #
 # [git]
 # # Branch names that are one branch across repositories, in the
@@ -816,8 +824,8 @@ const TEMPLATE: &str = "\
 # extra_errors = ['level=error']
 # # Lines never taken for errors, though they match.
 # ignore = ['DeprecationWarning']
-# # Desktop notifications of the errors; on by default ([ui] notify
-# # = false turns them off too).
+# # Desktop notifications of the errors; on by default ([notifications]
+# # enabled = false turns them off too).
 # notify = false
 # # Tell when a service's command stops by itself; on by default.
 # stopped = false
@@ -827,7 +835,11 @@ const TEMPLATE: &str = "\
 # # (checked every 6 hours); false updates it only when asked. On by
 # # default. The launcher's row turning it on or off writes this key.
 # updates = false
+#
 # [notifications]
+# # Desktop notifications: of agents that need you, finished test runs and
+# # the services' errors. On by default.
+# enabled = false
 # # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
 # # until dismissed, -1 leaves it to the notification daemon. By default 30.
 # timeout = 0
@@ -899,8 +911,11 @@ impl Gerdr {
         self.keep_apps = settings.keep;
         self.cli_agents = crate::cli_agents::installed(&settings.agents);
         self.agent_config = settings.agents;
-        if settings.ui.notify != self.notify {
-            self.notify = settings.ui.notify;
+        if let Some(notifier) = &mut self.notifier {
+            notifier.set_settings(settings.notifications);
+        }
+        if settings.notifications.enabled != self.notify {
+            self.notify = settings.notifications.enabled;
             // The bus source lets go once the notifier is gone.
             match self.notify {
                 true => self.connect_notifier(),
@@ -1035,8 +1050,8 @@ other = 1
             with_bool("", "t3", "updates", false).unwrap(),
             "[t3]\nupdates = false\n"
         );
-        let out = with_bool("[ui]\nnotify = false\n", "t3", "updates", true).unwrap();
-        assert_eq!(out, "[ui]\nnotify = false\n\n[t3]\nupdates = true\n");
+        let out = with_bool("[ui]\nneeds_you = false\n", "t3", "updates", true).unwrap();
+        assert_eq!(out, "[ui]\nneeds_you = false\n\n[t3]\nupdates = true\n");
         // A table without the key, written inline: the key joins it.
         let out = with_bool("t3 = { }\n", "t3", "updates", false).unwrap();
         assert!(!super::t3_from_text(&out).updates, "{out}");
@@ -1193,7 +1208,6 @@ other = 1
                 theme: Some(ThemeMode::Light),
                 needs_you: true,
                 motion: crate::anim::Motion::Full,
-                notify: true,
             }
         );
         assert!(problems.is_empty());
@@ -1261,7 +1275,9 @@ other = 1
     #[test]
     fn notifications_last_30_seconds_unless_told() {
         use super::{Notifications, notifications_from_text};
-        assert_eq!(notifications_from_text(""), Notifications { timeout: 30 });
+        assert_eq!(notifications_from_text(""), Notifications::default());
+        assert!(Notifications::default().enabled);
+        assert!(!notifications_from_text("[notifications]\nenabled = false\n").enabled);
         assert_eq!(notifications_from_text("").expire_ms(), 30_000);
         let never = notifications_from_text("[notifications]\ntimeout = 0\n");
         assert_eq!(never.expire_ms(), 0);

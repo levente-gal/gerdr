@@ -74,6 +74,12 @@ impl Notifier {
         })
     }
 
+    /// Show the notifications sent from now on as `settings` says, once
+    /// the settings file changed.
+    pub fn set_settings(&mut self, settings: Notifications) {
+        self.expire = settings.expire_ms();
+    }
+
     /// The fd to poll for reading; ready when there is something to `dispatch`.
     pub fn fd(&self) -> std::io::Result<OwnedFd> {
         // Safety: the channel keeps its fd open for as long as gerdr runs.

@@ -562,7 +562,7 @@ impl Gerdr {
             (None, 1) => title,
             (None, n) => format!("{title} (×{n})"),
         };
-        // `[ui] notify` turns every notification off.
+        // `[notifications] enabled` turns every notification off.
         if let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
             let key = format!("{NOTIFY_PREFIX}{project}|{pane_id}|{fingerprint}");
             notifier.send(&key, &summary, &body);

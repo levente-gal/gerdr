@@ -6399,6 +6399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agents: agent_config,
         services: service_settings,
         t3: t3_settings,
+        notifications,
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
@@ -6419,7 +6420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_dark: true,
         density: ui.density,
         needs_you: ui.needs_you,
-        notify: ui.notify,
+        notify: notifications.enabled,
         settings_modified: config::modified(),
         sidebar_width: store
             .sidebar_width
