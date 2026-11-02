@@ -1391,6 +1391,10 @@ pub struct Gerdr {
     /// The workspace whose header shows the strip of agents to start,
     /// while the pointer is on its AI button or the strip.
     pub agent_strip: Option<usize>,
+    /// The workspace whose strip of agents opens, and when, while the
+    /// pointer rests on its AI button; whether a timer waits for it.
+    pub agent_strip_due: Option<(usize, std::time::Instant)>,
+    pub agent_strip_timed: bool,
     /// Where a read of the installed apps sends them; `None` until set up.
     pub installed_apps_tx: Option<channel::Sender<Vec<launch::App>>>,
 
@@ -6552,6 +6556,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli_agents: cli_agents::installed(&agent_config),
         agent_config,
         agent_strip: None,
+        agent_strip_due: None,
+        agent_strip_timed: false,
         projects: projects::Store::default(),
         project: None,
         project_lock: None,

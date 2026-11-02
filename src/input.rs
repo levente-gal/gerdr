@@ -1030,6 +1030,7 @@ impl Gerdr {
         // `track_agent_strip`).
         if covered || regions.sidebar.is_none() {
             self.agent_strip = None;
+            self.agent_strip_due = None;
         }
         let on_footer = !covered && self.on_footer(pos);
         if !on_footer {

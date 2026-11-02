@@ -475,7 +475,7 @@ fn form() -> ProjectMenuView {
     }
 }
 
-const SURFACES: [&str; 11] = [
+const SURFACES: [&str; 12] = [
     "sidebar",
     "tab_strip",
     "pane_bar",
@@ -487,6 +487,7 @@ const SURFACES: [&str; 11] = [
     "project_menu",
     "project_form",
     "toast",
+    "agent_strip",
 ];
 
 /// Every surface at (theme, scale), in `SURFACES` order.
@@ -745,6 +746,17 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.project_menu(&project_menu(), (800, 600).into(), scale, p)),
         hash(painter.project_menu(&form(), (800, 600).into(), scale, p)),
         hash(painter.toast(&notice, 360, false, scale, p)),
+        hash(painter.agent_strip_part(&super::sidebar::StripKey {
+            picks: vec![
+                crate::agent_icons::AgentIcon::Claude,
+                crate::agent_icons::AgentIcon::Cursor,
+                crate::agent_icons::AgentIcon::OpenCode,
+            ],
+            pick: Some(1),
+            size: (66, 24).into(),
+            theme,
+            scale,
+        })),
     ]
 }
 
@@ -811,7 +823,7 @@ const CASES: [(Theme, f64); 4] = [
 ];
 
 /// The recorded hashes, per case in `CASES`, per surface in `SURFACES`.
-const GOLDEN: [[u64; 11]; 4] = [
+const GOLDEN: [[u64; 12]; 4] = [
     // Dark at 1
     [
         0x742820c5c927d818, // sidebar
@@ -825,6 +837,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x92a49c766cb37d1c, // project_menu
         0xaf72881e8b741219, // project_form
         0xbd0d423ca3de12bd, // toast
+        0x7a81f6c4997e9bd5, // agent_strip
     ],
     // Dark at 2
     [
@@ -839,6 +852,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x68b0b29c55156a50, // project_menu
         0x1d108a7b493c0cd1, // project_form
         0x8a9a152ce2a17651, // toast
+        0xa229bcafa693ea93, // agent_strip
     ],
     // Light at 1
     [
@@ -853,6 +867,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xaf88a1744cdd63ab, // project_menu
         0xe2e62fecf8cb83c6, // project_form
         0x3023720e0af5627f, // toast
+        0x4deb0267edf54fd5, // agent_strip
     ],
     // Light at 2
     [
@@ -867,6 +882,7 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xad9c7bc5aa554ff4, // project_menu
         0x527909807a17afb5, // project_form
         0xd1410a8fb372b973, // toast
+        0xe723751c2522972e, // agent_strip
     ],
 ];
 
@@ -1211,6 +1227,8 @@ fn dump_overlays() {
             crate::agent_icons::AgentIcon::Cursor,
             crate::agent_icons::AgentIcon::OpenCode,
         ];
+        // An errors pill it must leave in sight.
+        picking[0].errors = 1;
         dump(
             &dir,
             &format!("sidebar_agent_strip_{tag}"),
