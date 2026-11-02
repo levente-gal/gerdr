@@ -4,13 +4,17 @@
 //! project is known by its `Tab::id`, so closing or moving others leaves
 //! the history right; a tab that is gone is skipped. The tabs of a project
 //! left are parked under ids that outlive its windows (see `Visit`), and
-//! become tabs again once it is shown again.
+//! become tabs again once it is shown again. The history is kept, parked,
+//! in `state.json`, so it outlives gerdr too.
+
+use serde::{Deserialize, Serialize};
 
 /// How many tabs each way are remembered.
 const LIMIT: usize = 50;
 
 /// A tab visited.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Visit {
     /// A tab of the shown project, by its `Tab::id`.
     Tab(u64),
@@ -26,14 +30,25 @@ pub enum Visit {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NavHistory<T> {
     /// The tabs shown before, the last one last; each tab once.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     back: Vec<T>,
     /// The tabs gone back from, the next one last.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     forward: Vec<T>,
     /// The tab shown now, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
     at: Option<T>,
+}
+
+impl<T> NavHistory<T> {
+    /// Whether no tab is listed.
+    pub fn is_empty(&self) -> bool {
+        self.back.is_empty() && self.forward.is_empty() && self.at.is_none()
+    }
 }
 
 impl<T> Default for NavHistory<T> {
@@ -164,7 +179,7 @@ impl<T: Clone + PartialEq> NavHistory<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::NavHistory;
+    use super::{NavHistory, Visit};
 
     fn all(_: &u64) -> bool {
         true
@@ -266,6 +281,26 @@ mod tests {
         h.rebind(|t| Some(if *t == 1 { 3 } else { *t }));
         assert_eq!(h.backs(all), [3, 2]);
         assert!(!h.any(|t| *t == 1));
+    }
+
+    #[test]
+    fn a_parked_history_reads_back_as_written() {
+        let mut h = NavHistory::default();
+        let parked = |n: u64| Visit::Parked {
+            project: "api".into(),
+            workspace: format!("g{n}"),
+            herdr_tab: n.is_multiple_of(2).then(|| format!("w1:t{n}")),
+            index: n as usize,
+            label: format!("api › {n} zsh"),
+        };
+        for n in 1..=3 {
+            h.visit(Some(parked(n)), |_| true);
+        }
+        h.back_to(&parked(1), |_| true);
+        let json = serde_json::to_string(&h).unwrap();
+        assert_eq!(serde_json::from_str::<NavHistory<Visit>>(&json).unwrap(), h);
+        let empty: NavHistory<Visit> = serde_json::from_str("{}").unwrap();
+        assert!(empty.is_empty());
     }
 
     #[test]
