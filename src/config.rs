@@ -46,6 +46,20 @@
 //! linear_api_key = "lin_api_…"
 //! # Only these teams' issues, by key. By default every team's.
 //! linear_teams = ["ENG"]
+//!
+//! [services]
+//! # Output lines of the services (web servers, workers) taken for errors,
+//! # as regexes, in place of the default ones (tracebacks, panics, ERROR,
+//! # CRITICAL and FATAL, 5xx answers in access logs…).
+//! errors = ['Traceback \(most recent call last\)', '\bERROR\b']
+//! # More, besides the default ones (or those of `errors`).
+//! extra_errors = ['level=error']
+//! # Lines never taken for errors, though they match.
+//! ignore = ['DeprecationWarning']
+//! # Desktop notifications of the errors; on by default.
+//! notify = false
+//! # Tell when a service's command stops by itself; on by default.
+//! stopped = false
 //! ```
 //!
 //! Mistakes are logged, and the defaults stand in for what they spoil.
@@ -62,6 +76,7 @@ use crate::{
     home_dir,
     keys::{Keymap, KeysConfig},
     launch::App,
+    service_errors::{DEFAULT_ERRORS, Patterns},
 };
 
 #[derive(Default, Deserialize)]
@@ -76,6 +91,84 @@ struct Config {
     inbox: InboxConfig,
     /// Agent CLI commands by name (see `cli_agents`).
     agents: BTreeMap<String, String>,
+    services: ServicesConfig,
+}
+
+/// The `[services]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ServicesConfig {
+    errors: Option<Vec<String>>,
+    extra_errors: Option<Vec<String>>,
+    ignore: Option<Vec<String>>,
+    notify: Option<bool>,
+    stopped: Option<bool>,
+}
+
+/// How the services' errors are found and told, from the `[services]`
+/// table.
+#[derive(Clone, Debug)]
+pub struct Services {
+    /// Which output lines are errors.
+    pub patterns: Patterns,
+    /// Whether errors get desktop notifications.
+    pub notify: bool,
+    /// Whether a service's command stopping by itself is told.
+    pub stopped: bool,
+}
+
+impl Default for Services {
+    fn default() -> Self {
+        Self {
+            patterns: Patterns::default(),
+            notify: true,
+            stopped: true,
+        }
+    }
+}
+
+/// How the services' errors are found and told, as the config file says.
+pub fn load_services() -> Services {
+    let path = config_file();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let (services, problems) = services_from_text(&text);
+    for problem in problems {
+        tracing::warn!("{}: {problem}", path.display());
+    }
+    services
+}
+
+/// The `[services]` settings `text` describes, and what's wrong with them
+/// (the defaults stand in for patterns that spoil them). The rest of the
+/// file is `from_text`'s.
+pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
+    let mut problems = Vec::new();
+    let Ok(config) = toml::from_str::<Config>(text) else {
+        return (Services::default(), problems);
+    };
+    let table = config.services;
+    let mut services = Services::default();
+    if table.errors.is_some() || table.extra_errors.is_some() || table.ignore.is_some() {
+        let mut errors: Vec<String> = match table.errors {
+            Some(errors) => errors,
+            None => DEFAULT_ERRORS.iter().map(|p| (*p).to_owned()).collect(),
+        };
+        errors.extend(table.extra_errors.unwrap_or_default());
+        errors.retain(|p| !p.trim().is_empty());
+        let ignore: Vec<String> = table
+            .ignore
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .collect();
+        match Patterns::new(&errors, &ignore) {
+            Ok(patterns) => services.patterns = patterns,
+            Err(err) => problems.push(format!("[services]: {err}")),
+        }
+    }
+    services.notify = table.notify.unwrap_or(true);
+    services.stopped = table.stopped.unwrap_or(true);
+    (services, problems)
 }
 
 /// The `[ui]` table, as written.
@@ -404,6 +497,20 @@ const TEMPLATE: &str = "\
 # linear_api_key = \"lin_api_…\"
 # # Only these teams' issues, by key. By default every team's.
 # linear_teams = [\"ENG\"]
+#
+# [services]
+# # Output lines of the services (web servers, workers) taken for errors,
+# # as regexes, in place of the default ones (tracebacks, panics, ERROR,
+# # CRITICAL and FATAL, 5xx answers in access logs…).
+# errors = ['Traceback \\(most recent call last\\)', '\\bERROR\\b']
+# # More, besides the default ones (or those of `errors`).
+# extra_errors = ['level=error']
+# # Lines never taken for errors, though they match.
+# ignore = ['DeprecationWarning']
+# # Desktop notifications of the errors; on by default.
+# notify = false
+# # Tell when a service's command stops by itself; on by default.
+# stopped = false
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -462,6 +569,27 @@ mod tests {
         assert_eq!(git.top_branches, ["main", "dev", "staging"]);
         assert_eq!(inbox.linear_teams, ["ENG"]);
         assert!(inbox.linear_api_key.is_some());
+        let (services, problems) = super::services_from_text(&examples);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!services.notify && !services.stopped);
+        assert!(services.patterns.is_error("x level=error"));
+        assert!(services.patterns.is_error("an ERROR"));
+        assert!(!services.patterns.is_error("ERROR DeprecationWarning"));
+        assert!(!services.patterns.is_error("a 500 FATAL"));
+    }
+
+    #[test]
+    fn services() {
+        let (services, problems) = super::services_from_text("");
+        assert!(problems.is_empty());
+        assert!(services.notify && services.stopped);
+        assert!(services.patterns.is_error("FATAL boom"));
+        let (services, problems) =
+            super::services_from_text("[services]\nextra_errors = ['level=error', '(']\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        // The defaults stand in.
+        assert!(services.patterns.is_error("FATAL boom"));
+        assert!(!services.patterns.is_error("level=error"));
     }
 
     #[test]

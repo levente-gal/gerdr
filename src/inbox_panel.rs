@@ -191,6 +191,35 @@ impl Gerdr {
     ) -> Vec<InboxItem> {
         let dirs: Vec<_> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
         let records: Vec<_> = self.workspaces.iter().map(|ws| ws.record.clone()).collect();
+        let service_errors: Vec<_> = self
+            .projects
+            .service_errors
+            .iter()
+            .map(|group| {
+                let shown = self.project.as_deref() == Some(group.project.as_str());
+                let workspace = shown
+                    .then(|| self.herdr_pane_place(&group.pane_id).map(|(w, _)| w))
+                    .flatten();
+                let place = match workspace {
+                    Some(w) => self.workspaces[w].name.clone(),
+                    None => self
+                        .projects
+                        .project(&group.project)
+                        .map_or_else(|| group.project.clone(), |p| p.name.clone()),
+                };
+                inbox_sources::ServiceItem {
+                    group: group.clone(),
+                    workspace,
+                    place,
+                    // As it was called then; else as it is now.
+                    service: if group.service.is_empty() {
+                        self.service_item_label(&group.project, &group.pane_id)
+                    } else {
+                        group.service.clone()
+                    },
+                }
+            })
+            .collect();
         inbox_sources::collect(&Sources {
             workspaces,
             dirs: &dirs,
@@ -206,6 +235,7 @@ impl Gerdr {
             tickets: self.ticket_repos(),
             store: self.inbox_file(),
             pane_text: &self.inbox.pane_text,
+            service_errors: &service_errors,
             now: Instant::now(),
             now_secs: inbox_store::now_secs(),
         })
@@ -457,6 +487,14 @@ impl Gerdr {
                     ),
                     _ => (None, "Dismissed until it changes"),
                 };
+                if let Target::ServiceError {
+                    project,
+                    pane_id,
+                    fingerprint,
+                } = &item.target
+                {
+                    self.see_service_error(project, pane_id, fingerprint);
+                }
                 let Some(file) = self.inbox_file_mut() else {
                     return;
                 };
@@ -551,6 +589,11 @@ impl Gerdr {
                     self.switch_workspace(w);
                 }
             }
+            Target::ServiceError {
+                project,
+                pane_id,
+                fingerprint,
+            } => self.show_service_error(&project, &pane_id, &fingerprint),
         }
     }
 

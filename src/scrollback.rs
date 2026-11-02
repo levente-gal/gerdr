@@ -995,6 +995,25 @@ impl Scrollback {
         }
     }
 
+    /// Stand at the last line reading `text` (trailing blanks aside), the
+    /// caret on it, a third down the view as `fit` lays it out; nowhere
+    /// without one.
+    pub fn reveal_last(&mut self, text: &str, fit: Fit) {
+        let text = text.trim_end();
+        let Some(line) = self.lines.iter().rposition(|l| l.trim_end() == text) else {
+            return;
+        };
+        // The pane's own view no longer says where it stands.
+        self.from_bottom = None;
+        self.caret = Spot { line, ch: 0 };
+        self.want = None;
+        let row = self.row_of(self.caret);
+        let max = fit.bounds(self.rows.len()).max;
+        let page = fit.page.max(1);
+        self.scroll
+            .jump((row.saturating_sub(page / 3) as f64).min(max));
+    }
+
     /// The search as its bar shows it, while open.
     pub fn find_bar(&self) -> Option<SearchBar> {
         let find = self.find.as_ref()?;

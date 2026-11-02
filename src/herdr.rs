@@ -1092,6 +1092,83 @@ impl Herdr {
     }
 }
 
+impl Herdr {
+    /// Open a connection ringing whenever an output line matching
+    /// `pattern` (a regex) comes into pane `pane_id`'s last `lines` lines,
+    /// from none there (herdr's `pane.output_matched`, edge-triggered). It
+    /// takes no other subscription: a second `events.subscribe` on it
+    /// silences it.
+    pub fn watch_output(
+        &self,
+        pane_id: &str,
+        lines: usize,
+        pattern: &str,
+    ) -> std::io::Result<OutputWatch> {
+        let mut stream = UnixStream::connect(&self.socket)?;
+        let subscription = json!({
+            "type": "pane.output_matched",
+            "pane_id": pane_id,
+            "source": "recent",
+            "lines": lines,
+            "match": {"type": "regex", "value": pattern},
+            "strip_ansi": true,
+        });
+        let request = json!({"id": "output", "method": "events.subscribe", "params": {"subscriptions": [subscription]}});
+        let mut line = serde_json::to_vec(&request)?;
+        line.push(b'\n');
+        stream.write_all(&line)?;
+        stream.set_nonblocking(true)?;
+        Ok(OutputWatch {
+            stream,
+            buf: Vec::new(),
+        })
+    }
+}
+
+/// A connection ringing on matching output in one pane (see
+/// `Herdr::watch_output`).
+pub struct OutputWatch {
+    stream: UnixStream,
+    buf: Vec<u8>,
+}
+
+impl AsFd for OutputWatch {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.stream.as_fd()
+    }
+}
+
+impl OutputWatch {
+    /// How many times it rang since last read; `Err` once the connection
+    /// is gone, or herdr refused the subscription.
+    pub fn read(&mut self) -> Result<usize, String> {
+        let mut chunk = [0u8; 65536];
+        loop {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err("closed".into()),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        let mut rang = 0;
+        while let Some(end) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=end).collect();
+            let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            if let Some(error) = value.get("error") {
+                return Err(error.to_string());
+            }
+            if value.get("event").is_some() {
+                rang += 1;
+            }
+        }
+        Ok(rang)
+    }
+}
+
 /// herdr's `insert_index` for a move before `before` in `order`: it counts
 /// places in the order before the move.
 fn insert_index(order: &[String], before: Option<&str>) -> usize {

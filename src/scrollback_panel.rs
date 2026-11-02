@@ -109,6 +109,8 @@ impl Gerdr {
             }
         };
         let label = self.pane_bar_content(&pane_id).label;
+        // Its errors are in view now.
+        self.see_service_errors(&pane_id);
         self.switcher = None;
         self.project_menu = None;
         self.worktrees.close();
@@ -152,7 +154,7 @@ impl Gerdr {
         Some(inset(room, INSET))
     }
 
-    fn scrollback_fit_for(&self, id: u32) -> Option<Fit> {
+    pub(crate) fn scrollback_fit_for(&self, id: u32) -> Option<Fit> {
         self.scrollback_panel_for(id).map(chrome::scrollback_fit)
     }
 

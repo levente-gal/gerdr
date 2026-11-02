@@ -56,6 +56,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             folded: false,
             restart: false,
             picks: Vec::new(),
+            errors: 0,
         },
         WorkspaceView {
             name: "~".into(),
@@ -71,6 +72,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             folded: false,
             restart: false,
             picks: Vec::new(),
+            errors: 0,
         },
     ]
 }
