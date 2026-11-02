@@ -435,6 +435,9 @@ const PLUS_GAP: i32 = 4;
 const NAV_GAP: i32 = 2;
 /// Where the first tab starts: right of the back and forward buttons.
 const NAV_WIDTH: i32 = EDGE + PILL + NAV_GAP + PILL + EDGE;
+/// How far a greyed back or forward button's icon goes from the strip's
+/// colour to the placeholder colour.
+const NAV_GREYED: f32 = 0.45;
 /// Room between the chips at the right end, and the room left of them.
 const CHIP_GAP: i32 = 6;
 /// Inset of the theme switch from the strip's right edge.
@@ -791,8 +794,10 @@ impl Painter {
                 let fill = mix(p.tab_bar, p.element, alpha);
                 self.pill(&mut c, button, PILL_RADIUS, fill, scale);
             }
+            // Greyed well below the muted icons: the placeholder colour
+            // alone is too close to them to tell.
             let color = match (can, lit) {
-                (false, _) => p.placeholder,
+                (false, _) => mix(p.tab_bar, p.placeholder, NAV_GREYED),
                 (true, true) => p.text,
                 (true, false) => p.muted,
             };
