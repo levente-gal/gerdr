@@ -60,6 +60,11 @@
 //! notify = false
 //! # Tell when a service's command stops by itself; on by default.
 //! stopped = false
+//!
+//! [notifications]
+//! # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
+//! # until dismissed, -1 leaves it to the notification daemon. By default 30.
+//! timeout = 0
 //! ```
 //!
 //! Mistakes are logged, and the defaults stand in for what they spoil.
@@ -92,6 +97,60 @@ struct Config {
     /// Agent CLI commands by name (see `cli_agents`).
     agents: BTreeMap<String, String>,
     services: ServicesConfig,
+    notifications: NotificationsConfig,
+}
+
+/// The `[notifications]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct NotificationsConfig {
+    timeout: Option<i64>,
+}
+
+/// How gerdr's desktop notifications show, from the `[notifications]`
+/// table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notifications {
+    /// Seconds each stays on screen: 0 until dismissed, below 0 as long as
+    /// the notification daemon likes.
+    pub timeout: i64,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { timeout: 30 }
+    }
+}
+
+impl Notifications {
+    /// The timeout as the notification spec has it: milliseconds, 0 for
+    /// never, -1 for the daemon's choice.
+    pub fn expire_ms(self) -> i32 {
+        if self.timeout < 0 {
+            -1
+        } else {
+            i32::try_from(self.timeout.saturating_mul(1000)).unwrap_or(i32::MAX)
+        }
+    }
+}
+
+/// How gerdr's desktop notifications show, as the config file says.
+pub fn load_notifications() -> Notifications {
+    let text = std::fs::read_to_string(config_file()).unwrap_or_default();
+    notifications_from_text(&text)
+}
+
+/// The `[notifications]` settings `text` describes; the rest of the file is
+/// `from_text`'s, which tells its mistakes.
+pub fn notifications_from_text(text: &str) -> Notifications {
+    let table = toml::from_str::<Config>(text)
+        .map(|config| config.notifications)
+        .unwrap_or_default();
+    let mut settings = Notifications::default();
+    if let Some(timeout) = table.timeout {
+        settings.timeout = timeout;
+    }
+    settings
 }
 
 /// The `[services]` table, as written.
@@ -511,6 +570,11 @@ const TEMPLATE: &str = "\
 # notify = false
 # # Tell when a service's command stops by itself; on by default.
 # stopped = false
+#
+# [notifications]
+# # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
+# # until dismissed, -1 leaves it to the notification daemon. By default 30.
+# timeout = 0
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -767,5 +831,18 @@ mod tests {
         let (parsed, problems) = ui("[ui]\ncolour = \"red\"\n");
         assert_eq!(parsed, Ui::default());
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn notifications_last_30_seconds_unless_told() {
+        use super::{Notifications, notifications_from_text};
+        assert_eq!(notifications_from_text(""), Notifications { timeout: 30 });
+        assert_eq!(notifications_from_text("").expire_ms(), 30_000);
+        let never = notifications_from_text("[notifications]\ntimeout = 0\n");
+        assert_eq!(never.expire_ms(), 0);
+        let daemon = notifications_from_text("[notifications]\ntimeout = -1\n");
+        assert_eq!(daemon.expire_ms(), -1);
+        let long = notifications_from_text("[notifications]\ntimeout = 99999999\n");
+        assert_eq!(long.expire_ms(), i32::MAX);
     }
 }
