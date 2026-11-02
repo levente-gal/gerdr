@@ -580,7 +580,7 @@ impl Gerdr {
                 self.copy_text(url);
                 self.toast("Copied the link".into(), Level::Info);
             }
-            ItemAction::Ignore | ItemAction::Unignore => {
+            ItemAction::Ignore | ItemAction::Unignore | ItemAction::Forget => {
                 let Target::ServiceError {
                     project,
                     fingerprint,
@@ -589,12 +589,19 @@ impl Gerdr {
                 else {
                     return;
                 };
-                let (before, text) = if action == ItemAction::Ignore {
-                    let before = self.ignore_service_error(project, fingerprint);
-                    (before, format!("Ignored: {}", item.title))
-                } else {
-                    let before = self.unignore_service_error(project, fingerprint);
-                    (before, format!("No longer ignored: {}", item.title))
+                let (before, text) = match action {
+                    ItemAction::Ignore => {
+                        let before = self.ignore_service_error(project, fingerprint);
+                        (before, format!("Ignored: {}", item.title))
+                    }
+                    ItemAction::Unignore => {
+                        let before = self.unignore_service_error(project, fingerprint);
+                        (before, format!("No longer ignored: {}", item.title))
+                    }
+                    _ => {
+                        let before = self.forget_ignored_error(project, fingerprint);
+                        (before, format!("Forgot the ignored error: {}", item.title))
+                    }
                 };
                 let Some(before) = before else {
                     return self.show_warning("That error is gone".into());

@@ -15,7 +15,8 @@
 //! Ctrl+Shift+H until tomorrow morning, Alt+H lists the hidden ones
 //! (Delete restores one). Ctrl+I ignores a service's error: it goes to
 //! the Ignored errors group, listed light, counted but never told of, until
-//! Ctrl+I there stops ignoring it. Ctrl+N writes a todo, Ctrl+E edits
+//! Ctrl+I there stops ignoring it; Delete there, twice, forgets it (it is
+//! told of as new when it comes again). Ctrl+N writes a todo, Ctrl+E edits
 //! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
 //! repository (`owner/repo`) to the shown project; Delete marks a todo
 //! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
@@ -245,6 +246,8 @@ pub enum ItemAction {
     Ignore,
     /// An ignored error, told of again: Ctrl+I.
     Unignore,
+    /// An ignored error's record, forgotten: Delete, twice.
+    Forget,
 }
 
 impl ItemAction {
@@ -263,6 +266,7 @@ impl ItemAction {
             ItemAction::CopyLink => "Copy link",
             ItemAction::Ignore => "Ignore",
             ItemAction::Unignore => "Stop ignoring",
+            ItemAction::Forget => "Forget",
         }
     }
 
@@ -272,7 +276,9 @@ impl ItemAction {
             ItemAction::GoTo => "Enter",
             ItemAction::Snooze => "Ctrl+H",
             ItemAction::SnoozeLong => "Ctrl+Shift+H",
-            ItemAction::Dismiss | ItemAction::Restore | ItemAction::Done => "Del",
+            ItemAction::Dismiss | ItemAction::Restore | ItemAction::Done | ItemAction::Forget => {
+                "Del"
+            }
             ItemAction::Edit => "Ctrl+E",
             ItemAction::Delete => "Shift+Del",
             ItemAction::OpenLink => "Ctrl+O",
@@ -536,17 +542,17 @@ fn row_actions(actions: &[ItemAction]) -> Vec<ItemAction> {
         .filter(|a| {
             matches!(
                 a,
-                A::GoTo | A::Snooze | A::Dismiss | A::Done | A::Restore | A::Unignore
+                A::GoTo | A::Snooze | A::Dismiss | A::Done | A::Restore | A::Unignore | A::Forget
             )
         })
         .collect()
 }
 
 /// What Delete does, of `actions`: restores a hidden item, marks a todo
-/// done, else dismisses.
+/// done, dismisses, or forgets an ignored error.
 fn delete_action(actions: &[ItemAction]) -> Option<ItemAction> {
     use ItemAction as A;
-    [A::Restore, A::Done, A::Dismiss]
+    [A::Restore, A::Done, A::Dismiss, A::Forget]
         .into_iter()
         .find(|a| actions.contains(a))
 }
@@ -756,7 +762,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             field("In", place.clone());
             field("Times", count.to_string());
             if *ignored {
-                field("Ignored", "no notifications, no count".to_owned());
+                field("Ignored", "no notifications, not in the badges".to_owned());
             }
             // Both as the same kind of "ago".
             if let Some(age) = item.age {
@@ -801,6 +807,7 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
         A::CopyLink => ("Ctrl+C", "copy link"),
         A::Ignore => ("Ctrl+I", "ignore"),
         A::Unignore => ("Ctrl+I", "stop ignoring"),
+        A::Forget => ("Del", "forget"),
     }
 }
 
@@ -905,6 +912,9 @@ pub struct Panel {
     all: bool,
     /// Only the hidden items are listed (Alt+H).
     show_hidden: bool,
+    /// The item a first Delete (or Forget click) was on, to forget on the
+    /// second; any other key takes it back.
+    armed: Option<ItemId>,
 }
 
 impl Default for Panel {
@@ -929,6 +939,7 @@ impl Default for Panel {
             }),
             all: true,
             show_hidden: false,
+            armed: None,
         }
     }
 }
@@ -1414,6 +1425,11 @@ impl Panel {
         if self.compose.is_some() {
             return self.compose_key(mods, sym, typed, list);
         }
+        // Any key but Delete again takes back a first Delete.
+        let armed = self.armed.take();
+        if armed.is_some() && sym == Keysym::Escape {
+            return None;
+        }
         match self.query.key(mods, sym, typed) {
             Edit::Ignored => {}
             Edit::Changed => {
@@ -1443,20 +1459,22 @@ impl Panel {
             Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
             _ => {
                 let listed = self.listed(list);
-                return self.list_key(ctrl, shift, sym, listed, list);
+                return self.list_key(ctrl, shift, sym, listed, armed, list);
             }
         }
         self.refilter(list);
         None
     }
 
-    /// A key for the list in `listed`, with Ctrl and Shift as said.
+    /// A key for the list in `listed`, with Ctrl and Shift as said;
+    /// `armed`, the item a first Delete was on.
     fn list_key(
         &mut self,
         ctrl: bool,
         shift: bool,
         sym: Keysym,
         listed: Listed,
+        armed: Option<ItemId>,
         list: &Listing,
     ) -> Option<Outcome> {
         let page = list.page;
@@ -1520,7 +1538,30 @@ impl Panel {
             _ => return None,
         };
         let item = item?.clone();
+        if self.arms(&item, action, armed) {
+            return None;
+        }
         self.act(&item, action, list)
+    }
+
+    /// What `item`'s row has buttons for: armed (`armed` is it), only
+    /// Forget, which forgets it, so the row has room to say so.
+    fn row_buttons(&self, item: &InboxItem, armed: Option<&ItemId>) -> Vec<ItemAction> {
+        let mut buttons = row_actions(&actions(item, self.show_hidden));
+        if armed == Some(&item.id) {
+            buttons.retain(|a| *a == ItemAction::Forget);
+        }
+        buttons
+    }
+
+    /// Whether `action` on `item` only arms it: forgetting asks for a
+    /// second Delete (or click), unless `armed` (the first's item) is it.
+    fn arms(&mut self, item: &InboxItem, action: ItemAction, armed: Option<ItemId>) -> bool {
+        if action != ItemAction::Forget || armed.as_ref() == Some(&item.id) {
+            return false;
+        }
+        self.armed = Some(item.id.clone());
+        true
     }
 
     /// A left click on `hit` (not a hint: `inbox_panel` presses those);
@@ -1529,6 +1570,7 @@ impl Panel {
         if self.compose.is_some() {
             return None;
         }
+        let armed = self.armed.take();
         let page = list.page;
         let listed = self.listed(list);
         self.settle(&listed, page);
@@ -1568,8 +1610,8 @@ impl Panel {
             InboxHit::Button(i, b) => {
                 let k = at(i)?;
                 self.select(&listed, k, page, now);
-                let actions = actions(&listed.items[k], self.show_hidden);
-                (k, *row_actions(&actions).get(b)?)
+                let buttons = self.row_buttons(&listed.items[k], armed.as_ref());
+                (k, *buttons.get(b)?)
             }
             InboxHit::DetailButton(b) => {
                 let k = selected?;
@@ -1577,6 +1619,9 @@ impl Panel {
             }
         };
         let item = listed.items[item].clone();
+        if self.arms(&item, action, armed) {
+            return None;
+        }
         self.act(&item, action, list)
     }
 
@@ -1649,6 +1694,7 @@ impl Panel {
             A::Restore,
             A::Done,
             A::Dismiss,
+            A::Forget,
             A::Snooze,
             A::SnoozeLong,
             A::Edit,
@@ -1662,7 +1708,8 @@ impl Panel {
         .filter(|a| actions.contains(a))
         // Delete does one of them.
         .filter(|a| {
-            !matches!(a, A::Restore | A::Done | A::Dismiss) || delete_action(actions) == Some(*a)
+            !matches!(a, A::Restore | A::Done | A::Dismiss | A::Forget)
+                || delete_action(actions) == Some(*a)
         })
         .map(|a| {
             let (k, what) = action_hint(a);
@@ -1737,17 +1784,23 @@ impl Panel {
                 Entry::Item(k) => {
                     let item = &listed.items[k];
                     let buttons = if selected == Some(k) || hovered == Some(first + n) {
-                        row_actions(&actions(item, self.show_hidden))
+                        self.row_buttons(item, self.armed.as_ref())
                             .into_iter()
                             .map(ItemAction::button)
                             .collect()
                     } else {
                         Vec::new()
                     };
+                    // A first Delete says what the second does.
+                    let subtitle = if self.armed.as_ref() == Some(&item.id) {
+                        "Press Del again to forget it".to_owned()
+                    } else {
+                        item.subtitle.clone()
+                    };
                     InboxRow::Item(InboxLine {
                         id: item.id.0.clone(),
                         title: item.title.clone(),
-                        subtitle: item.subtitle.clone(),
+                        subtitle,
                         icon: item.icon(),
                         tone: item.tone,
                         age: item.age.map(age_text).unwrap_or_default(),
@@ -2845,6 +2898,70 @@ mod tests {
             InboxRow::Item(_) => true,
         }));
         assert_eq!(panel.click(InboxHit::Button(0, 0), &list), None);
+    }
+
+    #[test]
+    fn del_twice_forgets_an_ignored_error() {
+        let mut ignored = item("i1", Section::Ignored, Some(0));
+        ignored.actions = vec![A::GoTo, A::Unignore, A::Forget];
+        let items = vec![ignored, item("r1", Section::Repos, Some(0))];
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::new(None);
+        let view = panel.view(&list);
+        assert!(view.hints.iter().any(|(k, w)| k == "Del" && w == "forget"));
+        let subtitle = |panel: &Panel| {
+            panel.view(&list).rows.iter().find_map(|r| match r {
+                InboxRow::Item(line) if line.id == "i1" => Some(line.subtitle.clone()),
+                _ => None,
+            })
+        };
+        let forget = Some(Outcome::Act(ItemId("i1".into()), A::Forget));
+        // The first arms it, and says so; the second forgets.
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
+        assert_eq!(
+            subtitle(&panel).as_deref(),
+            Some("Press Del again to forget it")
+        );
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), forget);
+        assert_eq!(subtitle(&panel).as_deref(), Some("w · status"));
+        // Esc, or any other key, takes it back; Esc doesn't close then.
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
+        assert_eq!(press(&mut panel, Keysym::Escape, &list), None);
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
+        press(&mut panel, Keysym::Down, &list);
+        press(&mut panel, Keysym::Up, &list);
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), forget);
+        // Armed, its row's only button forgets it.
+        assert_eq!(press(&mut panel, Keysym::Delete, &list), None);
+        let view = panel.view(&list);
+        let buttons: Vec<_> = view
+            .rows
+            .iter()
+            .find_map(|r| match r {
+                InboxRow::Item(line) if line.id == "i1" => Some(line.buttons.clone()),
+                _ => None,
+            })
+            .unwrap()
+            .into_iter()
+            .map(|b| b.label)
+            .collect();
+        assert_eq!(buttons, ["Forget"]);
+        assert_eq!(panel.click(InboxHit::Button(1, 0), &list), forget);
+        // Its Forget button the same: twice.
+        let view = panel.view(&list);
+        let at = view
+            .detail
+            .as_ref()
+            .unwrap()
+            .buttons
+            .iter()
+            .position(|b| b.label == "Forget");
+        let at = at.unwrap();
+        assert_eq!(panel.click(InboxHit::DetailButton(at), &list), None);
+        assert_eq!(panel.click(InboxHit::DetailButton(at), &list), forget);
     }
 
     #[test]

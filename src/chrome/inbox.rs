@@ -789,6 +789,23 @@ pub fn inbox_field(view: &InboxView, size: Size<i32, Logical>, scale: f64) -> Fi
     }
 }
 
+/// The title's, the subtitle's and the mark's colours of a row listed
+/// light (hidden, or an ignored error): faded on the panel's ground; on
+/// a selected or hovered one (`lit`), where faded ones would read under
+/// 4.5:1 (text) or 3:1 (marks), the title and subtitle as any row's and
+/// the mark in the neutral muted.
+fn dim_colors(p: &Palette, lit: bool) -> (Rgb, Rgb, Rgb) {
+    if lit {
+        (p.text, p.muted, p.muted)
+    } else {
+        (
+            p.placeholder,
+            p.placeholder,
+            mix(p.elevated, p.placeholder, 0.8),
+        )
+    }
+}
+
 /// The colour of an item's mark of `tone` in `p`.
 fn tone_color(tone: InboxTone, p: &Palette) -> Rgb {
     match tone {
@@ -1380,7 +1397,7 @@ impl Painter {
     /// title and count, under a rule unless first), or an item's mark,
     /// title and age over its subtitle, on the selection's ground when
     /// selected and a lighter one under the pointer; a hidden item's
-    /// muted.
+    /// faded (see `dim_colors`).
     fn inbox_row(&self, c: &mut Canvas, key: &RowKey, rect: Rect, scale: f64, p: &Palette) {
         let buttons: Vec<Rect> = key
             .buttons
@@ -1510,11 +1527,8 @@ impl Painter {
             (t, Some(st))
         };
         let tone = tone_color(line.tone, p);
-        let mark_color = if line.hidden {
-            mix(p.elevated, p.placeholder, 0.8)
-        } else {
-            tone
-        };
+        let dim = dim_colors(p, key.selected || key.hovered);
+        let mark_color = if line.hidden { dim.2 } else { tone };
         // A hidden line's dot doesn't blink: nothing is composed over it.
         let icon = match line.icon {
             InboxIcon::Badge(badge) if line.hidden => InboxIcon::Badge(Badge {
@@ -1539,7 +1553,7 @@ impl Painter {
             None => px(dot_slot(item_dot_line(rect)).loc.x) as f32,
         };
         let (title_color, subtitle_color) = if line.hidden {
-            (p.placeholder, p.placeholder)
+            (dim.0, dim.1)
         } else {
             (p.text, p.muted)
         };
@@ -2262,6 +2276,34 @@ mod tests {
         .into_iter()
         .map(|(k, a)| (k.into(), a.into()))
         .collect()
+    }
+
+    #[test]
+    fn rows_listed_light_read_on_every_ground() {
+        use crate::chrome::sidebar::contrast;
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = theme.palette();
+            // On the panel, and lit: selected, or hovered.
+            for (what, ground, lit) in [
+                ("panel", p.panel, false),
+                ("elevated", p.elevated, false),
+                ("selected", p.selected, true),
+                ("element", p.element, true),
+            ] {
+                let (title, subtitle, mark) = dim_colors(p, lit);
+                let ratio = contrast(title, ground);
+                assert!(ratio >= 4.5, "{theme:?}: title on {what} {ratio:.2}:1");
+                let ratio = contrast(mark, ground);
+                assert!(ratio >= 3.0, "{theme:?}: mark on {what} {ratio:.2}:1");
+                if lit {
+                    // As any lit row's.
+                    assert_eq!(subtitle, p.muted, "{theme:?}: subtitle on {what}");
+                } else {
+                    let ratio = contrast(subtitle, ground);
+                    assert!(ratio >= 4.5, "{theme:?}: subtitle on {what} {ratio:.2}:1");
+                }
+            }
+        }
     }
 
     #[test]

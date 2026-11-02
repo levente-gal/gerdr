@@ -58,6 +58,8 @@ const DISCOVER_EVERY: Duration = Duration::from_secs(30);
 const SHOW_WAIT: Duration = Duration::from_secs(20);
 /// The most errors kept, the newest.
 const MAX_GROUPS: usize = 200;
+/// The most ignored errors kept, the last to come.
+const MAX_IGNORED: usize = 100;
 
 /// An error a service printed (or its stopping), and how many times since.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +81,10 @@ pub struct ErrorGroup {
     /// Whether it was looked at since it last came.
     #[serde(default)]
     pub seen: bool,
+    /// Whether its pane was closed since it last came: an ignored error's
+    /// record outlives its pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pane_gone: bool,
 }
 
 impl ErrorGroup {
@@ -287,7 +293,10 @@ impl Gerdr {
         self.projects
             .service_errors
             .retain(|g| g.project != project || live.contains(&g.pane_id));
-        if self.projects.service_errors.len() != before {
+        let gone = mark_panes_gone(&mut self.projects.ignored_errors, project, |pane| {
+            !live.iter().any(|l| l == pane)
+        });
+        if self.projects.service_errors.len() != before || gone {
             self.projects.save();
         }
     }
@@ -568,6 +577,7 @@ impl Gerdr {
                 first_secs: now,
                 last_secs: now,
                 seen: false,
+                pane_gone: false,
             },
         };
         group.title = title.clone();
@@ -621,10 +631,16 @@ impl Gerdr {
         let at = |g: &&ErrorGroup| {
             g.project == project && g.pane_id == pane_id && g.fingerprint == fingerprint
         };
-        let found = self.projects.service_errors.iter().any(|g| at(&g))
-            || self.projects.ignored_errors.iter().any(|g| at(&g));
-        if !found {
+        let found = (self.projects.service_errors.iter())
+            .chain(&self.projects.ignored_errors)
+            .find(|g| at(g));
+        let Some(found) = found else {
             return self.show_warning("That error is gone".into());
+        };
+        // Its pane is closed: nothing to switch to, nor to wait for.
+        let closed = found.pane_gone;
+        if closed && !self.show_herdr_pane(pane_id) {
+            return self.show_warning("Its pane is closed".into());
         }
         if self.project.as_deref() != Some(project) {
             self.service_errors.pending = Some((
@@ -658,7 +674,12 @@ impl Gerdr {
             },
         };
         if !self.show_herdr_pane(pane_id) {
-            return self.show_warning("Its pane isn't shown".into());
+            let why = if closed {
+                "Its pane is closed"
+            } else {
+                "Its pane isn't shown"
+            };
+            return self.show_warning(why.into());
         }
         let Some(id) = self.tab().and_then(|tab| tab.focused_id()) else {
             return;
@@ -757,8 +778,9 @@ impl Gerdr {
         }
     }
 
-    /// The shown project's herdr pane `pane_id` is gone: so are its errors,
-    /// and where its output was read to.
+    /// The shown project's herdr pane `pane_id` is gone: so are its errors
+    /// (an ignored one's record is kept, its pane marked gone), and where
+    /// its output was read to.
     pub fn forget_service_pane(&mut self, pane_id: &str) {
         let Some(project) = self.project.clone() else {
             return;
@@ -767,11 +789,15 @@ impl Gerdr {
         self.projects
             .service_errors
             .retain(|g| !(g.project == project && g.pane_id == pane_id));
+        // An ignored error's record stays, its pane known to be closed.
+        let gone = mark_panes_gone(&mut self.projects.ignored_errors, &project, |pane| {
+            pane == pane_id
+        });
         if let Some(watcher) = self.service_errors.watchers.get(&project) {
             let key = anchor_key(&watcher.session, pane_id);
             self.projects.service_anchors.remove(&key);
         }
-        if self.projects.service_errors.len() != before {
+        if self.projects.service_errors.len() != before || gone {
             self.projects.save();
         }
     }
@@ -833,7 +859,7 @@ impl Gerdr {
 }
 
 /// An error's state across both lists, by project and fingerprint, before
-/// it was ignored or ignored no more: what an Undo puts back.
+/// it was ignored, ignored no more or forgotten: what an Undo puts back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErrorsSnapshot {
     /// The project's id.
@@ -843,6 +869,20 @@ pub struct ErrorsSnapshot {
     pub groups: Vec<ErrorGroup>,
     /// Its record, when it was ignored.
     pub ignored: Option<ErrorGroup>,
+    /// How many times it had come, across both lists, right after: what
+    /// is over that came since.
+    pub after: u32,
+}
+
+impl ErrorsSnapshot {
+    /// How many times it had come, across both lists.
+    fn total(&self) -> u32 {
+        self.groups
+            .iter()
+            .chain(&self.ignored)
+            .map(|g| g.count)
+            .sum()
+    }
 }
 
 /// Whether `g` is project `project`'s error `fingerprint`, of any pane.
@@ -851,14 +891,15 @@ fn same_error(g: &ErrorGroup, project: &str, fingerprint: &str) -> bool {
 }
 
 /// Project `project`'s error `fingerprint` as `groups` and `ignored` hold
-/// it.
+/// it, `after` its count as it is: what ignoring it or ignoring it no
+/// more leaves.
 fn snapshot(
     groups: &[ErrorGroup],
     ignored: &[ErrorGroup],
     project: &str,
     fingerprint: &str,
 ) -> ErrorsSnapshot {
-    ErrorsSnapshot {
+    let mut snap = ErrorsSnapshot {
         project: project.to_owned(),
         fingerprint: fingerprint.to_owned(),
         groups: groups
@@ -870,7 +911,10 @@ fn snapshot(
             .iter()
             .find(|g| same_error(g, project, fingerprint))
             .cloned(),
-    }
+        after: 0,
+    };
+    snap.after = snap.total();
+    snap
 }
 
 /// Ignore project `project`'s error `fingerprint`: its groups (one per
@@ -894,11 +938,7 @@ fn ignore_in(
         ..newest.clone()
     });
     if record.last_secs <= newest.last_secs {
-        record.pane_id = newest.pane_id.clone();
-        record.title = newest.title.clone();
-        record.lines = newest.lines.clone();
-        record.service = newest.service.clone();
-        record.last_secs = newest.last_secs;
+        take_last(&mut record, newest);
     }
     record.count += before.groups.iter().map(|g| g.count).sum::<u32>();
     record.first_secs = before
@@ -909,7 +949,7 @@ fn ignore_in(
     record.seen = true;
     groups.retain(|g| !same_error(g, project, fingerprint));
     ignored.retain(|g| !same_error(g, project, fingerprint));
-    ignored.insert(0, record);
+    insert_newest_first(ignored, record, MAX_IGNORED);
     Some(before)
 }
 
@@ -929,56 +969,141 @@ fn unignore_in(
     record.seen = true;
     // A group of the same pane can't be there: ignored errors make none.
     groups.retain(|g| !(same_error(g, project, fingerprint) && g.pane_id == record.pane_id));
-    insert_newest_first(groups, record);
+    insert_newest_first(groups, record, MAX_GROUPS);
+    Some(before)
+}
+
+/// Forget project `project`'s ignored error `fingerprint`: its record
+/// leaves `ignored`, so the next time it comes it is told of as new.
+/// `None` if it wasn't ignored.
+fn forget_in(
+    groups: &[ErrorGroup],
+    ignored: &mut Vec<ErrorGroup>,
+    project: &str,
+    fingerprint: &str,
+) -> Option<ErrorsSnapshot> {
+    let mut before = snapshot(groups, ignored, project, fingerprint);
+    before.after -= before.ignored.as_ref()?.count;
+    ignored.retain(|g| !same_error(g, project, fingerprint));
     Some(before)
 }
 
 /// Put project `snap.project`'s error `snap.fingerprint` back in `groups`
-/// and `ignored` as `snap` holds it.
+/// and `ignored` as `snap` holds it, with what came of it since: counted
+/// on its record when that is put back, else on its group of the pane it
+/// last came in (a new one if none), as not looked at.
 fn restore_in(groups: &mut Vec<ErrorGroup>, ignored: &mut Vec<ErrorGroup>, snap: ErrorsSnapshot) {
-    let (project, fingerprint) = (&snap.project, &snap.fingerprint);
-    groups.retain(|g| !same_error(g, project, fingerprint));
-    ignored.retain(|g| !same_error(g, project, fingerprint));
-    for group in snap.groups {
-        insert_newest_first(groups, group);
+    let (project, fingerprint) = (snap.project.clone(), snap.fingerprint.clone());
+    let now = snapshot(groups, ignored, &project, &fingerprint);
+    let came = now.total().saturating_sub(snap.after);
+    let newest = (now.groups.iter())
+        .chain(&now.ignored)
+        .max_by_key(|g| g.last_secs)
+        .cloned()
+        .filter(|_| came > 0);
+    groups.retain(|g| !same_error(g, &project, &fingerprint));
+    ignored.retain(|g| !same_error(g, &project, &fingerprint));
+    let ErrorsSnapshot {
+        groups: mut kept,
+        ignored: mut record,
+        ..
+    } = snap;
+    if let Some(newest) = newest {
+        match record.as_mut() {
+            Some(record) => {
+                record.count += came;
+                if record.last_secs <= newest.last_secs {
+                    take_last(record, &newest);
+                }
+            }
+            None => match kept.iter_mut().find(|g| g.pane_id == newest.pane_id) {
+                Some(group) => {
+                    group.count += came;
+                    take_last(group, &newest);
+                    group.seen = false;
+                }
+                None => kept.push(ErrorGroup {
+                    count: came,
+                    first_secs: newest.last_secs,
+                    seen: false,
+                    ..newest
+                }),
+            },
+        }
     }
-    if let Some(record) = snap.ignored {
-        ignored.insert(0, record);
+    for group in kept {
+        insert_newest_first(groups, group, MAX_GROUPS);
+    }
+    if let Some(record) = record {
+        insert_newest_first(ignored, record, MAX_IGNORED);
     }
 }
 
-/// Put `group` into `groups` (the newest first) where its last time goes.
-fn insert_newest_first(groups: &mut Vec<ErrorGroup>, group: ErrorGroup) {
+/// Take `newest`'s last time (when, where, what) onto `g`.
+fn take_last(g: &mut ErrorGroup, newest: &ErrorGroup) {
+    g.pane_id = newest.pane_id.clone();
+    g.title = newest.title.clone();
+    g.lines = newest.lines.clone();
+    g.service = newest.service.clone();
+    g.last_secs = newest.last_secs;
+    g.pane_gone = newest.pane_gone;
+}
+
+/// Put `group` into `groups` (the newest first) where its last time goes,
+/// keeping at most `max`.
+fn insert_newest_first(groups: &mut Vec<ErrorGroup>, group: ErrorGroup, max: usize) {
     let at = groups
         .iter()
         .position(|g| g.last_secs <= group.last_secs)
         .unwrap_or(groups.len());
     groups.insert(at, group);
-    groups.truncate(MAX_GROUPS);
+    groups.truncate(max);
+}
+
+/// Mark the records in `ignored` of project `project` whose pane `closed`
+/// says is closed as such; whether one was not yet.
+fn mark_panes_gone(
+    ignored: &mut [ErrorGroup],
+    project: &str,
+    closed: impl Fn(&str) -> bool,
+) -> bool {
+    let mut changed = false;
+    for record in ignored
+        .iter_mut()
+        .filter(|g| g.project == project && !g.pane_gone && closed(&g.pane_id))
+    {
+        record.pane_gone = true;
+        changed = true;
+    }
+    changed
 }
 
 /// Count `error` of project `project`'s pane `pane_id` (service `label`)
-/// on its record in `ignored`, at `now`: whether it is ignored.
+/// on its record in `ignored`, at `now`, the record then first: whether
+/// it is ignored.
 fn record_ignored(
-    ignored: &mut [ErrorGroup],
+    ignored: &mut Vec<ErrorGroup>,
     project: &str,
     pane_id: &str,
     label: &str,
     error: &ServiceError,
     now: u64,
 ) -> bool {
-    let Some(record) = ignored
-        .iter_mut()
-        .find(|g| same_error(g, project, &error.fingerprint))
+    let Some(at) = ignored
+        .iter()
+        .position(|g| same_error(g, project, &error.fingerprint))
     else {
         return false;
     };
+    let mut record = ignored.remove(at);
     record.count += 1;
     record.pane_id = pane_id.to_owned();
     record.title = error.title.clone();
     record.lines = error.lines.clone();
     record.service = label.to_owned();
     record.last_secs = now;
+    record.pane_gone = false;
+    ignored.insert(0, record);
     true
 }
 
@@ -1019,8 +1144,26 @@ impl Gerdr {
         Some(before)
     }
 
-    /// Put an error back as `snap` holds it: an Undo of ignoring it, or of
-    /// ignoring it no more.
+    /// Forget project `project`'s ignored error `fingerprint` (see
+    /// `forget_in`), saved; what an Undo puts back.
+    pub fn forget_ignored_error(
+        &mut self,
+        project: &str,
+        fingerprint: &str,
+    ) -> Option<ErrorsSnapshot> {
+        let store = &mut self.projects;
+        let before = forget_in(
+            &store.service_errors,
+            &mut store.ignored_errors,
+            project,
+            fingerprint,
+        )?;
+        store.save();
+        Some(before)
+    }
+
+    /// Put an error back as `snap` holds it, with what came of it since:
+    /// an Undo of ignoring it, of ignoring it no more, or of forgetting it.
     pub fn restore_service_errors(&mut self, snap: ErrorsSnapshot) {
         let store = &mut self.projects;
         restore_in(&mut store.service_errors, &mut store.ignored_errors, snap);
@@ -1045,10 +1188,19 @@ mod tests {
             first_secs: 1,
             last_secs: 2,
             seen: false,
+            pane_gone: false,
         };
         let text = serde_json::to_string(&g).unwrap();
+        // Not written while its pane is there.
+        assert!(!text.contains("pane_gone"));
         assert_eq!(serde_json::from_str::<ErrorGroup>(&text).unwrap(), g);
         assert!(g.is_stop());
+        let gone = ErrorGroup {
+            pane_gone: true,
+            ..g
+        };
+        let text = serde_json::to_string(&gone).unwrap();
+        assert_eq!(serde_json::from_str::<ErrorGroup>(&text).unwrap(), gone);
     }
 
     fn group(pane: &str, fingerprint: &str, count: u32, first: u64, last: u64) -> ErrorGroup {
@@ -1063,6 +1215,7 @@ mod tests {
             first_secs: first,
             last_secs: last,
             seen: false,
+            pane_gone: false,
         }
     }
 
@@ -1157,6 +1310,148 @@ mod tests {
         assert!(groups[1].seen);
         assert!(before.ignored.is_some());
         assert!(unignore_in(&mut groups, &mut ignored, "api", "f").is_none());
+    }
+
+    fn error(fingerprint: &str, line: &str) -> ServiceError {
+        ServiceError {
+            fingerprint: fingerprint.into(),
+            title: format!("ValueError: {line}"),
+            lines: vec![line.into()],
+        }
+    }
+
+    #[test]
+    fn undo_of_ignoring_keeps_what_came_since() {
+        let mut groups = vec![
+            group("w1:p1", "f", 3, 10, 50),
+            group("w2:p1", "f", 2, 5, 30),
+        ];
+        let mut ignored = Vec::new();
+        let before = ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        // Twice more while ignored, in the second pane.
+        for at in [60, 70] {
+            assert!(record_ignored(
+                &mut ignored,
+                "api",
+                "w2:p1",
+                "dev",
+                &error("f", "late"),
+                at
+            ));
+        }
+        restore_in(&mut groups, &mut ignored, before);
+        assert!(ignored.is_empty());
+        assert_eq!(groups.len(), 2);
+        // Counted on the pane it came in, as not looked at, the newest now.
+        let late = &groups[0];
+        assert_eq!(late.pane_id, "w2:p1");
+        assert_eq!((late.count, late.first_secs, late.last_secs), (4, 5, 70));
+        assert_eq!(late.lines, vec!["late".to_owned()]);
+        assert!(!late.seen);
+        assert_eq!((groups[1].pane_id.as_str(), groups[1].count), ("w1:p1", 3));
+
+        // Come in a pane it had no group of: a group of its own.
+        let mut groups = vec![group("w1:p1", "f", 3, 10, 50)];
+        let before = ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        record_ignored(&mut ignored, "api", "w9:p1", "dev", &error("f", "new"), 80);
+        restore_in(&mut groups, &mut ignored, before);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            (
+                groups[0].pane_id.as_str(),
+                groups[0].count,
+                groups[0].first_secs
+            ),
+            ("w9:p1", 1, 80)
+        );
+        assert_eq!(groups[1].count, 3);
+    }
+
+    #[test]
+    fn undo_of_ignoring_no_more_keeps_what_came_since() {
+        let mut groups = vec![group("w1:p1", "f", 3, 10, 50)];
+        let mut ignored = Vec::new();
+        ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        let before = unignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        // Since: once more in its pane, once in another (told of, a
+        // group of its own).
+        groups[0].count += 1;
+        groups[0].last_secs = 60;
+        groups.insert(
+            0,
+            ErrorGroup {
+                lines: vec!["other".into()],
+                ..group("w2:p1", "f", 1, 90, 90)
+            },
+        );
+        restore_in(&mut groups, &mut ignored, before);
+        assert!(groups.is_empty());
+        assert_eq!(ignored.len(), 1);
+        let record = &ignored[0];
+        assert_eq!((record.count, record.last_secs), (5, 90));
+        assert_eq!(record.pane_id, "w2:p1");
+        assert_eq!(record.lines, vec!["other".to_owned()]);
+    }
+
+    #[test]
+    fn a_forgotten_record_comes_back_with_an_undo() {
+        let mut groups = vec![group("w1:p1", "f", 3, 10, 50)];
+        let mut ignored = Vec::new();
+        ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        let kept = ignored.clone();
+        let before = forget_in(&groups, &mut ignored, "api", "f").unwrap();
+        assert!(ignored.is_empty());
+        assert!(forget_in(&groups, &mut ignored, "api", "f").is_none());
+        restore_in(&mut groups, &mut ignored, before);
+        assert_eq!(ignored, kept);
+        // One that came while forgotten made a group: back on the record.
+        let before = forget_in(&groups, &mut ignored, "api", "f").unwrap();
+        groups.push(group("w1:p1", "f", 1, 70, 70));
+        restore_in(&mut groups, &mut ignored, before);
+        assert!(groups.is_empty());
+        assert_eq!((ignored[0].count, ignored[0].last_secs), (4, 70));
+    }
+
+    #[test]
+    fn ignored_records_are_kept_the_last_to_come_first_and_capped() {
+        let mut groups = Vec::new();
+        let mut ignored = Vec::new();
+        for k in 0..MAX_IGNORED as u64 + 5 {
+            let fingerprint = format!("f{k}");
+            groups.push(group("w1:p1", &fingerprint, 1, k, k));
+            ignore_in(&mut groups, &mut ignored, "api", &fingerprint).unwrap();
+        }
+        assert_eq!(ignored.len(), MAX_IGNORED);
+        assert_eq!(ignored[0].fingerprint, format!("f{}", MAX_IGNORED + 4));
+        // The oldest went.
+        assert!(ignored.iter().all(|g| g.fingerprint != "f0"));
+        // One coming again goes first.
+        let last = ignored.last().unwrap().fingerprint.clone();
+        record_ignored(&mut ignored, "api", "w1:p1", "dev", &error(&last, "x"), 999);
+        assert_eq!(ignored[0].fingerprint, last);
+    }
+
+    #[test]
+    fn a_closed_panes_record_stays_marked_until_it_comes_again() {
+        let mut groups = vec![group("w1:p1", "f", 1, 1, 1), group("w2:p1", "g", 1, 1, 1)];
+        let mut ignored = Vec::new();
+        ignore_in(&mut groups, &mut ignored, "api", "f").unwrap();
+        ignore_in(&mut groups, &mut ignored, "api", "g").unwrap();
+        assert!(mark_panes_gone(&mut ignored, "api", |p| p == "w1:p1"));
+        // Once only; another project's untouched.
+        assert!(!mark_panes_gone(&mut ignored, "api", |p| p == "w1:p1"));
+        assert!(!mark_panes_gone(&mut ignored, "web", |_| true));
+        let gone = |ignored: &[ErrorGroup], f: &str| {
+            ignored
+                .iter()
+                .find(|g| g.fingerprint == f)
+                .unwrap()
+                .pane_gone
+        };
+        assert!(gone(&ignored, "f"));
+        assert!(!gone(&ignored, "g"));
+        record_ignored(&mut ignored, "api", "w3:p1", "dev", &error("f", "x"), 9);
+        assert!(!gone(&ignored, "f"));
     }
 
     #[test]
