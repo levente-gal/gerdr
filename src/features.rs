@@ -1561,6 +1561,17 @@ impl Gerdr {
                 self.show_warning(text);
             }
             Stage::AiReview => self.tick_feature(project, slug, Some(&reading.patch), "gerdr"),
+            Stage::Verify => {
+                // Marked by hand, as when no checks are set: AI review
+                // starts as on a pass, its last run's findings checked again.
+                self.tick_feature(project, slug, Some(&reading.patch), "you");
+                let reviewing = self.feature(project, slug).is_some_and(|f| {
+                    f.status == Status::Open && f.current() == Some(Stage::AiReview)
+                });
+                if reviewing {
+                    self.launch_stage_agent(project, slug, Stage::AiReview, &[]);
+                }
+            }
             _ => self.tick_feature(project, slug, Some(&reading.patch), "you"),
         }
         self.probe_feature(project, slug);
