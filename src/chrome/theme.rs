@@ -304,6 +304,16 @@ impl Palette {
     }
 }
 
+impl Palette {
+    /// A plain button under the pointer: a step past `selected` toward
+    /// the text, so it shows on a selected row too (in One Dark the
+    /// border is as dark as `selected`, and a button lit in `selected`
+    /// would vanish into the row).
+    pub(super) fn button_hover(&self) -> Rgb {
+        mix(self.selected, self.text, 0.12)
+    }
+}
+
 /// `a` moved `t` of the way to `b`.
 pub(super) fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
@@ -348,6 +358,23 @@ mod tests {
                 );
             }
             assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent");
+        }
+    }
+
+    #[test]
+    fn a_hovered_button_shows_on_a_selected_row_and_its_label_reads() {
+        for (name, p) in [("One Dark", &ONE_DARK), ("One Light", &ONE_LIGHT)] {
+            let p: &Palette = p;
+            let hover = p.button_hover();
+            let label = contrast(p.text, hover);
+            assert!(
+                label >= 4.5,
+                "{name}: label on a lit button is {label:.2}:1"
+            );
+            for (what, under) in [("selected row", p.selected), ("button", p.element)] {
+                let apart = contrast(hover, under);
+                assert!(apart >= 1.2, "{name}: lit button on {what} is {apart:.2}:1");
+            }
         }
     }
 

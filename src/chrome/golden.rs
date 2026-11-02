@@ -758,9 +758,9 @@ const GOLDEN: [[u64; 11]; 4] = [
         0x378d0ffdb2449b77, // menu
         0xfc09c643c2d57ae1, // switcher
         0xe4d55e0a322e116f, // welcome
-        0x56b2fabb54864c87, // quit
+        0x1fac2c9284ad07fa, // quit
         0x92a49c766cb37d1c, // project_menu
-        0x8ee98ca10770cddc, // project_form
+        0xaf72881e8b741219, // project_form
         0xbd0d423ca3de12bd, // toast
     ],
     // Dark at 2
@@ -772,9 +772,9 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xd724a365fa94d169, // menu
         0x1a39f33e0a29f83b, // switcher
         0xc6a2b9324f6b7b75, // welcome
-        0x4205477c855eafb1, // quit
+        0x91306b9e268dc79d, // quit
         0x68b0b29c55156a50, // project_menu
-        0x8d221a9b0c1b93a2, // project_form
+        0x1d108a7b493c0cd1, // project_form
         0x8a9a152ce2a17651, // toast
     ],
     // Light at 1
@@ -786,9 +786,9 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xf82050c3b2848862, // menu
         0x422064c274f92b90, // switcher
         0x232afdce7d51101b, // welcome
-        0x53f1ae22c4d0706b, // quit
+        0xc9fc61e2fab1872e, // quit
         0xaf88a1744cdd63ab, // project_menu
-        0x60183ec03327c57f, // project_form
+        0xe2e62fecf8cb83c6, // project_form
         0x3023720e0af5627f, // toast
     ],
     // Light at 2
@@ -800,9 +800,9 @@ const GOLDEN: [[u64; 11]; 4] = [
         0xc17d1e64d3c77f97, // menu
         0x77eb0acf1f4d4fd5, // switcher
         0xc5b0dff47ac46d40, // welcome
-        0x63d86bf4462a3379, // quit
+        0x0a88810aa7ad751e, // quit
         0xad9c7bc5aa554ff4, // project_menu
-        0xf75ddc7c5bea7b27, // project_form
+        0x527909807a17afb5, // project_form
         0xd1410a8fb372b973, // toast
     ],
 ];
@@ -813,7 +813,7 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     [
         0x639ee0c7e0afc916, // full_menu
         0x833a9487b45a04b1, // help_pinned
-        0xc6c3778480e13765, // toast_action
+        0xcb41240819a1115b, // toast_action
         0x6960fb479b40da3d, // tooltip
         0xd5b2438c44e2d360, // placeholder
         0x0b01f4540b304877, // placeholder_timed_out
@@ -824,7 +824,7 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     [
         0x642484e32b14644f, // full_menu
         0xa52ac88120332539, // help_pinned
-        0xbe46498ec5ce75b6, // toast_action
+        0x73d72308b6d3d979, // toast_action
         0xad169f115b70c54c, // tooltip
         0x94bf628b2c8d8e61, // placeholder
         0x430bc916e7ac895b, // placeholder_timed_out
@@ -835,7 +835,7 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     [
         0x33da81c85d2c4485, // full_menu
         0x50daf004ca030b63, // help_pinned
-        0x3b334e05c8789bd9, // toast_action
+        0x7fe278dd9779e673, // toast_action
         0x46ec14c3018cfa90, // tooltip
         0x848913a059883552, // placeholder
         0xe7444f2e3fd03c3f, // placeholder_timed_out
@@ -846,7 +846,7 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
     [
         0x7d8b5365601ae144, // full_menu
         0x357c8c2ee4c38806, // help_pinned
-        0xeb0197cd8185dc12, // toast_action
+        0xe5cceb11e9d0de1d, // toast_action
         0x647ba732cdd8bd58, // tooltip
         0x9bc50d6953da1fd5, // placeholder
         0x2a2964b70d0b1b41, // placeholder_timed_out
@@ -1263,22 +1263,22 @@ const GOLDEN_STATUS: [[u64; 2]; 4] = [
     // Dark at 1
     [
         0x3821a1cf1a7fe182, // footer
-        0x96a4d754d97eb9ae, // tasks_panel
+        0x7b7eaff2a33d9052, // tasks_panel
     ],
     // Dark at 2
     [
         0x910ba2519163ffe3, // footer
-        0x769d4263ca0b0ddf, // tasks_panel
+        0x53a939dcd1f191bc, // tasks_panel
     ],
     // Light at 1
     [
         0x8a8087fd34aec460, // footer
-        0x2dd90e0e19595929, // tasks_panel
+        0x4ccf9615670317c4, // tasks_panel
     ],
     // Light at 2
     [
         0x28f7c3f0d800d54e, // footer
-        0xd482adba2192cecc, // tasks_panel
+        0x2864d1396204ac44, // tasks_panel
     ],
 ];
 
