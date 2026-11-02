@@ -28,6 +28,10 @@ const POLL: Duration = Duration::from_millis(150);
 /// How long the panes are waited for, all together. A pane whose shell
 /// didn't start by then is left alone.
 const DEADLINE: Duration = Duration::from_secs(10);
+/// How long a pane that looks busy is asked about again before it's left
+/// alone: a shell just started runs its rc files' commands in the
+/// foreground for a moment, and a command typed then would be lost.
+const START_GRACE: Duration = Duration::from_secs(3);
 /// How long `poetry` or `pipenv` may take to say where a venv is.
 const TOOL_TIME: Duration = Duration::from_secs(3);
 /// Shells that can lead a pane's foreground without anything else running
@@ -602,7 +606,8 @@ pub fn spawn_prepare(socket: PathBuf, preps: Vec<Prep>) {
                 .filter(|(_, plan)| !plan.is_empty())
                 .collect();
             let mut herdr = Herdr::on_socket(socket);
-            let deadline = Instant::now() + DEADLINE;
+            let started = Instant::now();
+            let deadline = started + DEADLINE;
             while !pending.is_empty() && Instant::now() < deadline {
                 pending.retain(|(pane, plan)| {
                     // A slow server mustn't keep it going much longer.
@@ -624,6 +629,7 @@ pub fn spawn_prepare(socket: PathBuf, preps: Vec<Prep>) {
                             }
                             false
                         }
+                        Step::Busy if started.elapsed() < START_GRACE => true,
                         Step::Busy => {
                             tracing::debug!("pane {pane} is busy, not preparing it");
                             false
