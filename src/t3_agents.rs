@@ -818,6 +818,9 @@ pub struct T3 {
     dirs: Arc<Mutex<Vec<PathBuf>>>,
     /// What gerdr decided about T3 Code's versions (see `t3_update`).
     pub updates: crate::t3_update::Updates,
+    /// Whether newer versions are taken as soon as they fit, else only
+    /// when asked: Settings' `[t3] updates`.
+    pub auto_update: bool,
     /// Whether a newer version is being looked for.
     pub checking: bool,
     /// The version the server restarts at once its threads are idle.

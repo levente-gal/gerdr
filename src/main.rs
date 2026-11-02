@@ -6380,6 +6380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         keep: keep_apps,
         agents: agent_config,
         services: service_settings,
+        t3: t3_settings,
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
@@ -6560,6 +6561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_shape_state: CursorShapeManagerState::new::<Gerdr>(&dh),
         seat,
     };
+    state.t3.auto_update = t3_settings.updates;
 
     event_loop
         .handle()

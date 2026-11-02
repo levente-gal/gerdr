@@ -998,18 +998,19 @@ impl Gerdr {
         if let crate::t3_agents::Source::Cli(_) = self.t3.source {
             detail.push_str(" · gerdr reads it in part");
         }
-        let auto = if updates.manual {
+        // Settings' `[t3] updates`, written there.
+        let auto = if self.t3.auto_update {
             Item::new(
                 ItemIcon::Command,
-                "Update T3 Code automatically",
-                "to each newer version gerdr reads, checked every 6 hours",
+                "Turn off T3 Code updates in Settings",
+                "update only when asked \u{b7} [t3] updates = false",
                 Target::T3Updates,
             )
         } else {
             Item::new(
                 ItemIcon::Command,
-                "Stop updating T3 Code automatically",
-                "update only when asked",
+                "Turn on T3 Code updates in Settings",
+                "to each newer version gerdr reads, checked every 6 hours \u{b7} [t3] updates",
                 Target::T3Updates,
             )
         };

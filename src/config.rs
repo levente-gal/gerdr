@@ -63,6 +63,12 @@
 //! notify = false
 //! # Tell when a service's command stops by itself; on by default.
 //! stopped = false
+//!
+//! [t3]
+//! # Take each newer T3 Code that gerdr reads as soon as it is out
+//! # (checked every 6 hours); false updates it only when asked. On by
+//! # default. The launcher's row turning it on or off writes this key.
+//! updates = false
 //! ```
 //!
 //! Each table is read on its own, and a key that can't be read on its
@@ -107,6 +113,85 @@ struct Config {
     /// Agent CLI commands by name (see `cli_agents`).
     agents: BTreeMap<String, String>,
     services: ServicesConfig,
+    t3: T3Config,
+}
+
+/// The `[t3]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct T3Config {
+    updates: Option<bool>,
+}
+
+/// How T3 Code is kept up to date, from the `[t3]` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct T3Settings {
+    /// Whether each newer version gerdr reads is taken as soon as it is
+    /// out, instead of only when asked (see `t3_update`).
+    pub updates: bool,
+}
+
+impl Default for T3Settings {
+    fn default() -> Self {
+        Self { updates: true }
+    }
+}
+
+/// The `[t3]` settings `text` describes. What is wrong with them is
+/// `from_text`'s to say.
+pub fn t3_from_text(text: &str) -> T3Settings {
+    let table = Config::read(text, &mut Vec::new()).t3;
+    T3Settings {
+        updates: table.updates.unwrap_or(T3Settings::default().updates),
+    }
+}
+
+/// Whether `text` sets `key` of table `table` itself, whatever to.
+pub fn sets(text: &str, table: &str, key: &str) -> bool {
+    text.parse::<toml::Table>()
+        .ok()
+        .and_then(|file| file.get(table)?.get(key).cloned())
+        .is_some()
+}
+
+/// `text` with `key` of table `table` set to `value`: the table added at
+/// the end when it isn't there, everything else (comments, other keys,
+/// their order and spacing) as it was.
+pub fn with_bool(text: &str, table: &str, key: &str, value: bool) -> Result<String, String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|err: toml_edit::TomlError| {
+        err.message().to_owned() + &line_of(text, err.span())
+    })?;
+    match doc.get(table) {
+        Some(item) if !item.is_table_like() => return Err(format!("[{table}] isn't a table")),
+        Some(_) => {}
+        None => {
+            // After what the file ends with (the template's comments), not
+            // above it, a blank line between.
+            let mut new = toml_edit::Table::new();
+            let trailing = doc.trailing().as_str().unwrap_or_default().to_owned();
+            let gap = if text.trim().is_empty() || trailing.ends_with("\n\n") {
+                ""
+            } else {
+                "\n"
+            };
+            new.decor_mut().set_prefix(format!("{trailing}{gap}"));
+            doc.set_trailing("");
+            doc.insert(table, toml_edit::Item::Table(new));
+        }
+    }
+    doc[table][key] = toml_edit::value(value);
+    Ok(doc.to_string())
+}
+
+/// Set `key` of table `table` to `value` in the config file, made from
+/// the template first when there is none, keeping the rest of it as it
+/// was (see `with_bool`).
+pub fn write_bool(table: &str, key: &str, value: bool) -> Result<(), String> {
+    let path = config_file();
+    ensure_file(&path).map_err(|err| err.to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let text = with_bool(&text, table, key, value)?;
+    crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
 }
 
 /// The `[services]` table, as written.
@@ -177,8 +262,8 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
 const KEYS_PROBLEM: &str = "[keys] ";
 
 /// The tables the file may have.
-const TABLES: [&str; 8] = [
-    "keys", "apps", "ui", "git", "keep", "inbox", "agents", "services",
+const TABLES: [&str; 9] = [
+    "keys", "apps", "ui", "git", "keep", "inbox", "agents", "services", "t3",
 ];
 
 impl Config {
@@ -199,7 +284,7 @@ impl Config {
         let mut take = |name: &str| file.remove(name);
         let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
         let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
-        let services = take("services");
+        let (services, t3) = (take("services"), take("t3"));
         Self {
             keys: table("keys", keys, problems),
             apps: table("apps", apps, problems),
@@ -209,6 +294,7 @@ impl Config {
             inbox: table("inbox", inbox, problems),
             agents: table("agents", agents, problems),
             services: table("services", services, problems),
+            t3: table("t3", t3, problems),
         }
     }
 }
@@ -394,6 +480,8 @@ pub struct Settings {
     pub agents: BTreeMap<String, String>,
     /// How the services' errors are found and told (see `services`).
     pub services: Services,
+    /// How T3 Code is kept up to date.
+    pub t3: T3Settings,
     /// What is wrong with the file, as sentences for the user.
     pub problems: Vec<String>,
 }
@@ -401,9 +489,10 @@ pub struct Settings {
 /// The shortcuts, apps, look and git settings in the config file, how
 /// the inbox reads Linear (`LINEAR_API_KEY` in the environment over the
 /// file's key), the programs whose apps keep running (see `keep`) and the
-/// agent CLI commands by name (see `cli_agents`) and how the services'
-/// errors are found (see `services`). What is wrong with the file is kept in the problems list under `"config"` (and logged), in
-/// place of what was there before.
+/// agent CLI commands by name (see `cli_agents`), how the services'
+/// errors are found (see `services`) and whether T3 Code updates itself.
+/// What is wrong with the file is kept in the problems list under
+/// `"config"` (and logged), in place of what was there before.
 pub fn load() -> Settings {
     let path = config_file();
     let mut problems = Vec::new();
@@ -420,6 +509,7 @@ pub fn load() -> Settings {
     problems.extend(found);
     let (services, service_problems) = services_from_text(&text);
     problems.extend(service_problems);
+    let t3 = t3_from_text(&text);
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
     for problem in problems.iter().filter(|p| !p.starts_with(KEYS_PROBLEM)) {
@@ -435,6 +525,7 @@ pub fn load() -> Settings {
         keep,
         agents,
         services,
+        t3,
         problems,
     }
 }
@@ -664,6 +755,12 @@ const TEMPLATE: &str = "\
 # notify = false
 # # Tell when a service's command stops by itself; on by default.
 # stopped = false
+#
+# [t3]
+# # Take each newer T3 Code that gerdr reads as soon as it is out
+# # (checked every 6 hours); false updates it only when asked. On by
+# # default. The launcher's row turning it on or off writes this key.
+# updates = false
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -704,10 +801,19 @@ impl Gerdr {
         }
     }
 
-    /// Read the config file again and use what it says now: the keys,
-    /// apps, look, git, inbox, kept apps, agents, notifications and how the
-    /// services' errors are found. Says so, with what is wrong with it.
+    /// Read the config file again and use what it says now (see
+    /// `apply_settings`). Says so, with what is wrong with it.
     pub fn reload_settings(&mut self) {
+        let problems = self.apply_settings();
+        self.settings_problems(&problems, true);
+    }
+
+    /// Read the config file again and use what it says now: the keys,
+    /// apps, look, git, inbox, kept apps, agents, notifications, how the
+    /// services' errors are found and whether T3 Code updates itself.
+    /// What is wrong with it.
+    pub fn apply_settings(&mut self) -> Vec<String> {
+        self.settings_modified = modified();
         let settings = load();
         self.keymap = settings.keymap;
         self.apps = settings.apps;
@@ -732,8 +838,9 @@ impl Gerdr {
             }
         }
         self.set_service_settings(settings.services);
+        self.t3.auto_update = settings.t3.updates;
         self.arrange();
-        self.settings_problems(&settings.problems, true);
+        settings.problems
     }
 
     /// Say what is wrong with the config file, `problems`, in an error
@@ -804,6 +911,68 @@ mod tests {
         assert!(services.patterns.is_error("an ERROR"));
         assert!(!services.patterns.is_error("ERROR DeprecationWarning"));
         assert!(!services.patterns.is_error("a 500 FATAL"));
+        assert!(!super::t3_from_text(&examples).updates);
+        assert!(super::t3_from_text(TEMPLATE).updates);
+    }
+
+    #[test]
+    fn t3_updates_are_on_unless_the_file_turns_them_off() {
+        use super::{T3Settings, t3_from_text};
+        assert_eq!(t3_from_text(""), T3Settings { updates: true });
+        assert!(t3_from_text("[t3]\n").updates);
+        assert!(t3_from_text("[t3]\nupdates = true\n").updates);
+        assert!(!t3_from_text("[t3]\nupdates = false\n").updates);
+        // A wrong value is told, and the default stands.
+        let text = "[t3]\nupdates = \"no\"\n";
+        assert!(t3_from_text(text).updates);
+        assert_eq!(from_text(text).5.len(), 1, "{:?}", from_text(text).5);
+        assert_eq!(from_text("[t3]\nupdate = false\n").5.len(), 1);
+        assert!(from_text("[t3]\nupdates = false\n").5.is_empty());
+    }
+
+    #[test]
+    fn writing_a_key_keeps_the_rest_of_the_file() {
+        use super::{sets, with_bool};
+        // An existing table: its other keys and every comment stay.
+        let text = "\
+# My settings.
+[ui]
+density = \"compact\"  # tight
+
+[t3]
+# Off while on the train.
+updates = true
+other = 1
+";
+        let out = with_bool(text, "t3", "updates", false).unwrap();
+        assert_eq!(out, text.replace("updates = true", "updates = false"));
+        // A missing table: added at the end, after the comments the file
+        // ends with.
+        let text =
+            "# My settings.\n[ui]\ndensity = \"compact\" # tight\n\n# [t3]\n# updates = false\n";
+        let out = with_bool(text, "t3", "updates", false).unwrap();
+        assert_eq!(out, format!("{text}\n[t3]\nupdates = false\n"));
+        assert!(!sets(text, "t3", "updates") && sets(&out, "t3", "updates"));
+        assert!(!super::t3_from_text(&out).updates);
+        assert_eq!(from_text(&out).2.density, Density::Compact);
+        // The template: still all its comments, then the key.
+        let out = with_bool(TEMPLATE, "t3", "updates", true).unwrap();
+        assert!(out.starts_with(TEMPLATE), "{out}");
+        assert!(out.ends_with("\n[t3]\nupdates = true\n"), "{out}");
+        assert!(from_text(&out).5.is_empty());
+        // An empty file, one of tables only.
+        assert_eq!(
+            with_bool("", "t3", "updates", false).unwrap(),
+            "[t3]\nupdates = false\n"
+        );
+        let out = with_bool("[ui]\nnotify = false\n", "t3", "updates", true).unwrap();
+        assert_eq!(out, "[ui]\nnotify = false\n\n[t3]\nupdates = true\n");
+        // A table without the key, written inline: the key joins it.
+        let out = with_bool("t3 = { }\n", "t3", "updates", false).unwrap();
+        assert!(!super::t3_from_text(&out).updates, "{out}");
+        // What can't be written says why.
+        assert!(with_bool("t3 = 1\n", "t3", "updates", false).is_err());
+        assert!(with_bool("[t3\n", "t3", "updates", false).is_err());
     }
 
     #[test]

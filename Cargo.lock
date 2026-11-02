@@ -618,6 +618,7 @@ dependencies = [
  "serde_json",
  "smithay",
  "toml",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
