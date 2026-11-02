@@ -14,7 +14,8 @@ const BOOT = chrome.runtime.getURL("open.html");
 // The pane of each tab gerdr opened, by the tab's id. Kept in the
 // session's storage too: the worker comes and goes.
 let panes = {};
-// The folders whose T3 Code projects each tab's app shows, by tab id.
+// The folders whose T3 Code projects each tab's app shows, and the
+// app's origin, by tab id: `{ origin, dirs }`.
 let scopes = {};
 const loaded = chrome.storage.session.get(["panes", "scopes"]).then((stored) => {
   panes = stored.panes || {};
@@ -119,9 +120,10 @@ function tabOf(pane) {
 //
 // None of that is T3 Code's API: a version that changes it is told of,
 // as null where the filter is set, else `{ reason, detail }` (see
-// gerdr's `t3_unscoped`). The page loading again ends it unanswered.
+// gerdr's `t3_unscoped`). The page loading again ends it unanswered, as
+// does a page asked for the same folders already (undefined).
 function scopeT3(dirs) {
-  if (window.__gerdrScope === JSON.stringify(dirs)) return null;
+  if (window.__gerdrScope === JSON.stringify(dirs)) return undefined;
   window.__gerdrScope = JSON.stringify(dirs);
   const trim = (path) => path.replace(/\/+$/, "") || "/";
   const want = dirs.map(trim);
@@ -220,6 +222,8 @@ function scopeT3(dirs) {
         // Not loaded yet, or the project not added yet.
         if (++looks < LOOKS) return void setTimeout(look, EVERY);
         if (!root()) return fail("no-react", "no React root (__reactContainer$) on #root");
+        // An app without projects shows no groups either: gerdr tells that
+        // apart by T3 Code's database.
         if (!seen) return fail("no-groups", "no arrays of {projectKey, memberProjects} in React's tree");
         const all = seen.all.filter((g) => !g.isScratch);
         if (all.length && all.every((g) => !roots(g).length)) {
@@ -258,21 +262,26 @@ function scopeT3(dirs) {
   });
 }
 
-// Apply `tab`'s folders to its T3 Code app; a version that doesn't take
-// them is told to gerdr.
+// Apply `tab`'s folders to its T3 Code app, while the tab is at that
+// app's origin; whether it took them is told to gerdr.
 async function scope(tab) {
-  const dirs = scopes[tab];
-  if (!dirs) return;
-  let failed;
+  const scoped = scopes[tab];
+  if (!scoped?.origin) return;
+  let result;
   try {
-    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: scopeT3, args: [dirs] });
-    failed = frame?.result;
+    const { url } = await chrome.tabs.get(tab);
+    // At another site since: not T3 Code's app.
+    if (!url || new URL(url).origin !== scoped.origin) return;
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: scopeT3, args: [scoped.dirs] });
+    result = frame?.result;
   } catch {
     // Not a page the extension reaches, or one that loaded again.
     return;
   }
   const pane = panes[tab];
-  if (failed && pane !== undefined) send({ type: "unscoped", pane, reason: failed.reason, detail: failed.detail });
+  if (pane === undefined) return;
+  if (result === null) send({ type: "scoped", pane });
+  else if (result?.reason) send({ type: "unscoped", pane, reason: result.reason, detail: result.detail });
 }
 
 async function command(message) {
@@ -300,7 +309,7 @@ async function command(message) {
         await chrome.tabs.reload(tab);
         break;
       case "scope":
-        scopes[tab] = message.dirs;
+        scopes[tab] = { origin: message.origin, dirs: message.dirs };
         await save();
         await scope(tab);
         break;
@@ -345,9 +354,10 @@ chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
   await loaded;
   await boot(tab);
   if (change.status === "complete") await retry(tab);
-  if (change.status === "complete") await scope(id);
   // A load done is when the page's history can be asked for sure.
   if (change.url || change.title || change.status === "complete") await report(tab);
+  // Not waited for: setting the filter can take a minute.
+  if (change.status === "complete") scope(id).catch(() => {});
 });
 
 chrome.tabs.onRemoved.addListener(async (id) => {

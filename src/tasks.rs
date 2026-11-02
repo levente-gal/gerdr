@@ -239,7 +239,8 @@ impl Gerdr {
                 .as_ref()
                 .filter(|(version, _)| *version == server.version);
             if let Some((_, reason)) = broken {
-                detail.insert(0, format!("Project filter broken ({reason})"));
+                let why = crate::t3_agents::unscoped_words(reason);
+                detail.insert(0, format!("Project filter broken: {why}"));
                 actions.push(("gerdr log", MenuAction::OpenLog));
             }
             Task {

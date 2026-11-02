@@ -84,6 +84,8 @@ enum FromBrowser {
         reason: String,
         detail: String,
     },
+    /// T3 Code's app in the pane's tab took its project filter.
+    Scoped { pane: String },
 }
 
 /// What gerdr asks the extension to do with a pane's tab.
@@ -103,9 +105,11 @@ enum ToBrowser<'a> {
     Reload {
         pane: String,
     },
-    /// Keep T3 Code's app in the pane's tab to the projects under `dirs`.
+    /// Keep T3 Code's app at `origin` in the pane's tab to the projects
+    /// under `dirs`: the tab at another site is let be.
     Scope {
         pane: String,
+        origin: &'a str,
         dirs: Vec<String>,
     },
 }
@@ -427,6 +431,11 @@ impl Gerdr {
                     self.t3_unscoped(pane, &reason, &detail);
                 }
             }
+            Event::Message(_, FromBrowser::Scoped { pane }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.t3_scoped(pane);
+                }
+            }
             Event::Message(
                 id,
                 FromBrowser::Page {
@@ -490,11 +499,12 @@ impl Gerdr {
         sent
     }
 
-    /// Keep T3 Code's app in `pane`'s tab to the projects under `dirs`, if
-    /// the extension follows it; whether it was asked to.
-    pub fn scope_web_pane(&mut self, pane: u32, dirs: &[PathBuf]) -> bool {
+    /// Keep T3 Code's app at `origin` in `pane`'s tab to the projects
+    /// under `dirs`, if the extension follows it; whether it was asked to.
+    pub fn scope_web_pane(&mut self, pane: u32, origin: &str, dirs: &[PathBuf]) -> bool {
         let message = ToBrowser::Scope {
             pane: pane_token(pane),
+            origin,
             dirs: dirs
                 .iter()
                 .map(|d| d.to_string_lossy().into_owned())
@@ -613,6 +623,19 @@ mod tests {
                 reason: "no-groups".into(),
                 detail: "d".into(),
             }
+        );
+        let scoped: FromBrowser =
+            serde_json::from_str(r#"{"type":"scoped","pane":"1.2"}"#).unwrap();
+        assert_eq!(scoped, FromBrowser::Scoped { pane: "1.2".into() });
+        let scope = serde_json::to_string(&ToBrowser::Scope {
+            pane: "1.2".into(),
+            origin: "http://app-1.localhost:3773",
+            dirs: vec!["/w/app".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            scope,
+            r#"{"type":"scope","pane":"1.2","origin":"http://app-1.localhost:3773","dirs":["/w/app"]}"#
         );
         let message = serde_json::to_string(&ToBrowser::Navigate {
             pane: "1.2".into(),

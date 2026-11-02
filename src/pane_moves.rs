@@ -246,6 +246,7 @@ impl Gerdr {
         self.switch_workspace(to);
         self.prune();
         self.focus_pane(|_| Some(id));
+        self.t3_pane_moved(id);
     }
 
     /// The shown tab, to change.
