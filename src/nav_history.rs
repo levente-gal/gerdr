@@ -117,6 +117,12 @@ impl<T: Clone + PartialEq> NavHistory<T> {
         }
     }
 
+    /// The latest tab shown that `f` matches: the one shown now, else the
+    /// last on the back list.
+    pub fn latest(&self, f: impl Fn(&T) -> bool) -> Option<&T> {
+        self.at.iter().chain(self.back.iter().rev()).find(|t| f(t))
+    }
+
     /// Whether any tab is listed that `f` matches.
     pub fn any(&self, f: impl Fn(&T) -> bool) -> bool {
         self.at.iter().chain(&self.back).chain(&self.forward).any(f)
@@ -340,6 +346,15 @@ mod tests {
         h.visit(Some(2), all);
         h.visit(Some(9), all);
         assert_eq!(h.forwards(all), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn the_latest_tab_is_the_one_shown_else_the_last_left() {
+        let h = visited(&[1, 12, 2, 13, 3]);
+        let tens = |t: &u64| *t >= 10;
+        assert_eq!(h.latest(tens), Some(&13));
+        assert_eq!(h.latest(|t| *t < 10), Some(&3));
+        assert_eq!(h.latest(|t| *t > 20), None);
     }
 
     #[test]
