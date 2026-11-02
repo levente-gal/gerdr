@@ -89,8 +89,8 @@ use crate::{
     keys::{Keymap, KeysConfig},
     launch::App,
     menu::MenuAction,
-    toast::Level,
     service_errors::{DEFAULT_ERRORS, Patterns},
+    toast::Level,
 };
 
 /// The file's tables, as written; each read on its own (see `read`).
