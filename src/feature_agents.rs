@@ -279,6 +279,12 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
         let first = feature.current().map_or("", Stage::label);
         return Err(format!("Mark {first} done first"));
     }
+    // These pass by their own checks, not by their file alone.
+    match stage {
+        Stage::AiReview => return Err("AI review is done once its findings are decided".into()),
+        Stage::CodeReview => return Err("Approve Code review from the feature's diff".into()),
+        _ => {}
+    }
     let name = artifacts::name(stage).unwrap_or("its file");
     let Some(text) = text else {
         return Err(format!("There's no {name} yet"));
@@ -391,23 +397,38 @@ enum Pick {
 /// Where the user names AI review's agent, or lets Build's review itself.
 const REVIEWER_SETTING: &str = "add \"workflow\": {\"agents\": {\"ai-review\": \u{2026}}} with another agent to the project's file, or \"allow_same_reviewer\": true in its \"workflow\"";
 
-/// The agent to review the code built by `builder` (Build's agent, by
-/// name): `configured` if set, else the first installed CLI agent other
-/// than the builder. The builder reviewing its own code is refused unless
-/// `allow_same`: a model misses what it missed.
+/// The program a command line runs, without its folder: `claude` for
+/// `/usr/bin/claude --yes`.
+fn program(command: &str) -> &str {
+    let first = command.split_whitespace().next().unwrap_or("");
+    first.rsplit('/').next().unwrap_or(first)
+}
+
+/// The agent to review the code built by `builder` (Build's agent: its
+/// name and command): `configured` if set, else the first installed CLI
+/// agent other than the builder. The same agent is the same name, or the
+/// same program, so `claude` set as a command is Claude Code. The builder
+/// reviewing its own code is refused unless `allow_same`: a model misses
+/// what it missed.
 fn pick_reviewer(
     configured: Option<&str>,
-    builder: Option<&str>,
+    builder: Option<(&str, &str)>,
     installed: &[CliAgent],
     allow_same: bool,
 ) -> Pick {
-    let same = |name: &str| builder.is_some_and(|b| b.eq_ignore_ascii_case(name));
+    let same = |name: &str, command: &str| {
+        builder.is_some_and(|(b_name, b_command)| {
+            let (prog, b_prog) = (program(command), program(b_command));
+            b_name.eq_ignore_ascii_case(name)
+                || (!prog.is_empty() && prog.eq_ignore_ascii_case(b_prog))
+        })
+    };
     let configured = configured.map(str::trim).filter(|c| !c.is_empty());
     if configured.is_some() {
         let Some((name, command)) = pick_agent(configured, installed) else {
             return Pick::NoCli;
         };
-        if same(&name) && !allow_same {
+        if same(&name, &command) && !allow_same {
             return Pick::Refused(format!(
                 "AI review is set to {name}, which built the code; {REVIEWER_SETTING}"
             ));
@@ -416,8 +437,8 @@ fn pick_reviewer(
     }
     let other = installed
         .iter()
-        .filter(|a| !same(&a.name))
-        .find_map(|a| Some((a.name.clone(), a.command()?.to_owned())));
+        .filter_map(|a| Some((a.name.clone(), a.command()?.to_owned())))
+        .find(|(name, command)| !same(name, command));
     if let Some((name, command)) = other {
         return Pick::Agent(name, command);
     }
@@ -658,7 +679,8 @@ impl Gerdr {
         let configured = workflow.and_then(|w| w.agents.get(&stage).cloned());
         let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
         let picked = if stage == Stage::AiReview {
-            let builder = feature.runs.get(&Stage::Build).map(|r| r.agent.as_str());
+            let builder =
+                (feature.runs.get(&Stage::Build)).map(|r| (r.agent.as_str(), r.command.as_str()));
             pick_reviewer(configured.as_deref(), builder, &self.cli_agents, allow_same)
         } else {
             pick_agent(configured.as_deref(), &self.cli_agents)
@@ -1368,6 +1390,20 @@ mod tests {
         let mut gone = planned.clone();
         gone.status = Status::Abandoned;
         assert!(approval(&gone, Stage::Plan, Some(PLAN)).is_err());
+        // AI review and Code review pass by their own checks only.
+        let reviewing = feature("a", vec![repo("api", true)], 4);
+        assert_eq!(reviewing.current(), Some(Stage::AiReview));
+        let review = "{\"findings\": []}";
+        assert_eq!(
+            approval(&reviewing, Stage::AiReview, Some(review)),
+            Err("AI review is done once its findings are decided".into())
+        );
+        let coding = feature("a", vec![repo("api", true)], 5);
+        assert_eq!(coding.current(), Some(Stage::CodeReview));
+        assert_eq!(
+            approval(&coding, Stage::CodeReview, None),
+            Err("Approve Code review from the feature's diff".into())
+        );
     }
 
     #[test]
@@ -1417,6 +1453,7 @@ mod tests {
 
     #[test]
     fn the_reviewer_is_not_the_builder() {
+        const CODEX: (&str, &str) = ("Codex", "codex --add-dir /d \"$(cat /d/p.md)\"");
         let installed = [
             agent("T3 Code", Start::T3),
             agent("Codex", Start::Command("codex".into())),
@@ -1425,37 +1462,47 @@ mod tests {
         let codex = Pick::Agent("Codex".into(), "codex".into());
         let claude = Pick::Agent("Claude Code".into(), "claude".into());
         assert_eq!(pick_reviewer(None, None, &installed, false), codex);
+        assert_eq!(pick_reviewer(None, Some(CODEX), &installed, false), claude);
         assert_eq!(
-            pick_reviewer(None, Some("Codex"), &installed, false),
-            claude
-        );
-        assert_eq!(
-            pick_reviewer(Some("claude code"), Some("Codex"), &installed, false),
+            pick_reviewer(Some("claude code"), Some(CODEX), &installed, false),
             claude
         );
         // Set to the builder: refused, unless allowed.
-        let Pick::Refused(why) = pick_reviewer(Some("Codex"), Some("Codex"), &installed, false)
+        let Pick::Refused(why) = pick_reviewer(Some("Codex"), Some(CODEX), &installed, false)
         else {
             panic!("not refused");
         };
         assert!(why.starts_with("AI review is set to Codex, which built the code"));
         assert!(why.contains("allow_same_reviewer"));
         assert_eq!(
-            pick_reviewer(Some("Codex"), Some("Codex"), &installed, true),
+            pick_reviewer(Some("Codex"), Some(CODEX), &installed, true),
             codex
         );
         // No other agent: refused, or the builder when allowed.
         let only = &installed[..2];
-        let Pick::Refused(why) = pick_reviewer(None, Some("Codex"), only, false) else {
+        let Pick::Refused(why) = pick_reviewer(None, Some(CODEX), only, false) else {
             panic!("not refused");
         };
         assert!(why.starts_with("No agent but Codex, which built the code, is installed"));
         assert!(why.contains("allow_same_reviewer"));
-        assert_eq!(pick_reviewer(None, Some("Codex"), only, true), codex);
+        assert_eq!(pick_reviewer(None, Some(CODEX), only, true), codex);
         assert_eq!(
             pick_reviewer(None, None, &installed[..1], false),
             Pick::NoCli
         );
+        // Built by Claude Code set as a command: the same agent.
+        let by_claude = Some(("claude", "/usr/bin/claude --add-dir /d \"$(cat /d/p.md)\""));
+        assert_eq!(pick_reviewer(None, by_claude, &installed, false), codex);
+        let Pick::Refused(why) = pick_reviewer(Some("Claude Code"), by_claude, &installed, false)
+        else {
+            panic!("not refused");
+        };
+        assert!(why.starts_with("AI review is set to Claude Code, which built the code"));
+        // Set as a command, the same program as the builder's.
+        assert!(matches!(
+            pick_reviewer(Some("codex --yes"), Some(CODEX), &installed, false),
+            Pick::Refused(_)
+        ));
     }
 
     #[test]
