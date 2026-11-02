@@ -1873,7 +1873,10 @@ impl Gerdr {
     /// Ship was asked for on feature `slug`: say what stops it, or ask
     /// with what shipping does, as its latest Ship check has it.
     fn ask_ship_feature(&mut self, project: &str, slug: &str) {
-        let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
+        let Some((title, branch)) = self
+            .feature(project, slug)
+            .map(|f| (f.title.clone(), f.branch()))
+        else {
             return;
         };
         if self.feature_busy(project, slug) {
@@ -1897,7 +1900,7 @@ impl Gerdr {
             ShipAsk::Ready(asked) => {
                 let steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
                 self.features.asked.insert(key, asked);
-                self.ask_ship(project.to_owned(), slug.to_owned(), &title, &steps);
+                self.ask_ship(project.to_owned(), slug.to_owned(), &title, &branch, &steps);
             }
         }
     }

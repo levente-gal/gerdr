@@ -240,10 +240,14 @@ fn import_question(name: &str) -> (String, String) {
     )
 }
 
-/// What the Ship sheet for feature `title` says: its title, and the steps
-/// shipping takes, a line each.
-fn ship_question(title: &str, steps: &[String]) -> (String, String) {
-    (format!("Ship \u{201c}{title}\u{201d}?"), steps.join("\n"))
+/// What the Ship sheet for feature `title` on `branch` says: its title,
+/// the branch once, and the steps shipping takes, a line each.
+fn ship_question(title: &str, branch: &str, steps: &[String]) -> (String, String) {
+    let body = std::iter::once(format!("From {branch}:"))
+        .chain(steps.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (format!("Ship \u{201c}{title}\u{201d}?"), body)
 }
 
 impl Gerdr {
@@ -446,9 +450,16 @@ impl Gerdr {
     }
 
     /// The Ship sheet: ship feature `slug` of `project`, called `title`,
-    /// doing `steps` in order (see `Gerdr::ship_feature`).
-    pub fn ask_ship(&mut self, project: String, slug: String, title: &str, steps: &[String]) {
-        let (question, body) = ship_question(title, steps);
+    /// from `branch`, doing `steps` in order (see `Gerdr::ship_feature`).
+    pub fn ask_ship(
+        &mut self,
+        project: String,
+        slug: String,
+        title: &str,
+        branch: &str,
+        steps: &[String],
+    ) {
+        let (question, body) = ship_question(title, branch, steps);
         self.ask(question, body, "Ship", Then::ShipFeature { project, slug });
     }
 
@@ -722,10 +733,13 @@ mod tests {
     #[test]
     fn the_ship_sheet_lists_the_steps_a_line_each() {
         let steps = ["Push api".to_owned(), "Open a pull request".to_owned()];
-        let (title, body) = ship_question("Bulk export", &steps);
+        let (title, body) = ship_question("Bulk export", "feature/bulk-export", &steps);
         assert_eq!(title, "Ship \u{201c}Bulk export\u{201d}?");
-        assert_eq!(body, "Push api\nOpen a pull request");
-        assert_eq!(chrome::confirm_body_lines(&body), 2);
+        assert_eq!(
+            body,
+            "From feature/bulk-export:\nPush api\nOpen a pull request"
+        );
+        assert_eq!(chrome::confirm_body_lines(&body), 3);
     }
 
     #[test]
