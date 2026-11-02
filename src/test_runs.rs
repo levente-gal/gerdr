@@ -59,9 +59,19 @@ pub struct Found {
     pub short: String,
 }
 
-/// Whether `word` names tests: it has "test" in it.
+/// `word` without a package's version, as in `t2@latest` or
+/// `vitest@1.2.3`; a scope's leading `@` stays.
+fn unversioned(word: &str) -> &str {
+    match word.rfind('@') {
+        Some(at) if at > 0 => &word[..at],
+        _ => word,
+    }
+}
+
+/// Whether `word` names tests: it has "test" in it, not counting a
+/// package's version (`latest`).
 fn testy(word: &str) -> bool {
-    word.to_lowercase().contains("test")
+    unversioned(word).to_lowercase().contains("test")
 }
 
 /// The test command `info` has in the foreground, if any: one whose
@@ -116,7 +126,7 @@ pub fn test_command(info: &ProcessInfo) -> Option<Found> {
         let at = named
             .iter()
             .take(2)
-            .position(|a| testy(&base(a)) && !base(a).contains('.'))?;
+            .position(|a| testy(&base(a)) && !unversioned(&base(a)).contains('.'))?;
         // A script run by its path (`python3 /usr/bin/pytest`) is named alone.
         if named[at].contains('/') {
             let script = args.iter().position(|a| *a == named[at]).unwrap_or(0);
@@ -484,6 +494,13 @@ mod tests {
         assert_eq!(short(&["nvim", "test_foo.py"]), None);
         assert_eq!(short(&["nvim", "src/tests/mod.rs"]), None);
         assert_eq!(short(&["cargo", "build"]), None);
+        // A package's version isn't its name: `latest` names no tests.
+        assert_eq!(short(&["npm", "exec", "t2@latest"]), None);
+        assert_eq!(short(&["npm exec t2@latest"]), None);
+        assert_eq!(
+            short(&["npx", "vitest@1.2.3", "run"]).as_deref(),
+            Some("npx vitest@1.2.3")
+        );
         let mut idle = info(&["cargo", "test"]);
         idle.foreground_process_group_id = Some(10);
         assert_eq!(test_command(&idle), None);
