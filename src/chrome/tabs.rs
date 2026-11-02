@@ -336,6 +336,10 @@ pub enum TabHit {
     Inbox,
     /// The button listing what went wrong (see `crate::problems`).
     Problems,
+    /// The back button, to the tab shown before (see `crate::nav_history`).
+    Back,
+    /// The forward button, undoing a step back.
+    Forward,
 }
 
 /// Everything the tab strip is drawn from.
@@ -368,6 +372,9 @@ pub struct TabStripView {
     /// A workspace is shown, so the "+" can open a tab in it, even with
     /// no tabs left.
     pub plus: bool,
+    /// Whether going back, and going forward, would show a tab: else the
+    /// back or forward button is greyed.
+    pub nav: (bool, bool),
 }
 
 impl TabStripView {
@@ -387,6 +394,7 @@ impl TabStripView {
             inbox: None,
             problems: None,
             plus: true,
+            nav: (false, false),
         }
     }
 
@@ -423,6 +431,13 @@ const PILL: i32 = NEW_TAB_SIZE;
 const PILL_RADIUS: f32 = 6.0;
 /// Room between the last tab and the "+".
 const PLUS_GAP: i32 = 4;
+/// Room between the back and forward buttons, at the strip's left end.
+const NAV_GAP: i32 = 2;
+/// Where the first tab starts: right of the back and forward buttons.
+const NAV_WIDTH: i32 = EDGE + PILL + NAV_GAP + PILL + EDGE;
+/// How far a greyed back or forward button's icon goes from the strip's
+/// colour to the placeholder colour.
+const NAV_GREYED: f32 = 0.45;
 /// Room between the chips at the right end, and the room left of them.
 const CHIP_GAP: i32 = 6;
 /// Inset of the theme switch from the strip's right edge.
@@ -457,7 +472,8 @@ const RENAME_INSET: i32 = 4;
 /// sidebar's GitHub card.
 const GITHUB_ICON_SIZE: i32 = 12;
 
-/// Where everything in a strip sits (strip coordinates): the tabs (each
+/// Where everything in a strip sits (strip coordinates): the back and
+/// forward buttons at the left end, the tabs right of them (each
 /// one's rect runs up to and including its 1 px border on the right, so
 /// the strip has no dead gaps; an empty one for a tab that doesn't fit),
 /// their "×" buttons (empty rects on tabs too narrow for one), the "more
@@ -467,6 +483,8 @@ const GITHUB_ICON_SIZE: i32 = 12;
 /// right end.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabLayout {
+    pub back: Rect,
+    pub forward: Rect,
     pub tabs: Vec<Rect>,
     pub closes: Vec<Rect>,
     /// The chip holding the tabs that don't fit, while some don't.
@@ -496,6 +514,12 @@ impl TabLayout {
         let inside = |r: &Rect| r.contains((x, y));
         if inside(&self.toggle) {
             return Some(TabHit::Toggle);
+        }
+        if inside(&self.back) {
+            return Some(TabHit::Back);
+        }
+        if inside(&self.forward) {
+            return Some(TabHit::Forward);
         }
         if self.inbox.as_ref().is_some_and(inside) {
             return Some(TabHit::Inbox);
@@ -554,7 +578,8 @@ pub fn tab_layout(
 /// them, with the "+" when `plus`, the PREFIX badge when `prefix`, the
 /// overflow chip when `overflow`, the watch button when `watch`, the
 /// inbox button, by the switch, when `inbox` and the problems button left
-/// of it when `problems`. The chips, the buttons and
+/// of it when `problems`. The back and forward buttons keep the left
+/// end. The chips, the buttons and
 /// the switch keep the right end, the PREFIX badge's room kept whether it
 /// shows or not, so it moves nothing; the tabs share what is left of the
 /// "+", at most `TAB_MAX_WIDTH` each. Past `TAB_MIN_WIDTH` each, those
@@ -575,6 +600,8 @@ pub fn tab_layout_at(
     let (width, height) = (size.w, size.h);
     let top = (height - PILL) / 2;
     let toggle = Rectangle::new((width - EDGE - PILL, top).into(), (PILL, PILL).into());
+    let back = Rectangle::new((EDGE, top).into(), (PILL, PILL).into());
+    let forward = Rectangle::new((EDGE + PILL + NAV_GAP, top).into(), (PILL, PILL).into());
     let mut right = toggle.loc.x;
     let inbox = inbox.then(|| {
         right -= CHIP_GAP + PILL;
@@ -599,7 +626,7 @@ pub fn tab_layout_at(
         right -= CHIP_GAP + WATCH_WIDTH;
         Rectangle::new((right, top).into(), (WATCH_WIDTH, PILL).into())
     });
-    let room = (right - CHIP_GAP - PILL - PLUS_GAP).max(0);
+    let room = (right - CHIP_GAP - PILL - PLUS_GAP - NAV_WIDTH).max(0);
     // How many show, from which: all, or as many as fit at the narrowest
     // beside the "more tabs" chip, the active one last if it is past them.
     let all_fit = count as i32 * TAB_MIN_WIDTH <= room;
@@ -616,15 +643,15 @@ pub fn tab_layout_at(
     } else {
         (room / shown as i32).min(TAB_MAX_WIDTH)
     };
-    let end = shown as i32 * tab_w;
+    let end = NAV_WIDTH + shown as i32 * tab_w;
     let tabs: Vec<Rect> = (0..count)
         .map(|i| {
             if (first..first + shown).contains(&i) {
-                let x = (i - first) as i32 * tab_w;
+                let x = NAV_WIDTH + (i - first) as i32 * tab_w;
                 Rectangle::new((x, 0).into(), (tab_w, height).into())
             } else {
                 // Not shown: no room, before or after those that are.
-                let x = if i < first { 0 } else { end };
+                let x = if i < first { NAV_WIDTH } else { end };
                 Rectangle::new((x, 0).into(), (0, height).into())
             }
         })
@@ -651,6 +678,8 @@ pub fn tab_layout_at(
         if plus { (PILL, PILL) } else { (0, 0) }.into(),
     );
     TabLayout {
+        back,
+        forward,
         tabs,
         closes,
         more,
@@ -754,6 +783,29 @@ impl Painter {
         c.fill(0, c.h - line, c.w, line, p.border);
 
         let layout = view.layout(size);
+        // Back and forward at the left end, greyed with nowhere to go,
+        // and the line between them and the first tab.
+        for (button, hit, can, left) in [
+            (layout.back, TabHit::Back, view.nav.0, true),
+            (layout.forward, TabHit::Forward, view.nav.1, false),
+        ] {
+            let lit = can && lit(hit);
+            if lit {
+                let fill = mix(p.tab_bar, p.element, alpha);
+                self.pill(&mut c, button, PILL_RADIUS, fill, scale);
+            }
+            // Greyed well below the muted icons: the placeholder colour
+            // alone is too close to them to tell.
+            let color = match (can, lit) {
+                (false, _) => mix(p.tab_bar, p.placeholder, NAV_GREYED),
+                (true, true) => p.text,
+                (true, false) => p.muted,
+            };
+            icon_sdf(&mut c, button, scale, color, |x, y| {
+                chevron_side(left, x, y, s)
+            });
+        }
+        c.fill(px(NAV_WIDTH) - line, 0, line, c.h, p.border);
         let band = (0, c.h);
         for (i, (rect, tab)) in layout.tabs.iter().zip(&view.tabs).enumerate() {
             if rect.size.w == 0 {
@@ -1215,9 +1267,9 @@ pub fn tab_zoom_rect(view: &TabStripView, layout: &TabLayout, i: usize, h: i32) 
 #[cfg(test)]
 mod tests {
     use super::{
-        CHIP_GAP, CLOSE, EDGE, PILL, PLUS_GAP, TAB_MAX_WIDTH, TAB_MIN_WIDTH, TabHit, TabStripView,
-        TabView, WATCH_WIDTH, tab_blinkers, tab_layout, tab_layout_at, tab_rename_field, tab_slot,
-        tab_strip_hit, tab_zoom_rect,
+        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PLUS_GAP, TAB_MAX_WIDTH, TAB_MIN_WIDTH, TabHit,
+        TabStripView, TabView, WATCH_WIDTH, tab_blinkers, tab_layout, tab_layout_at,
+        tab_rename_field, tab_slot, tab_strip_hit, tab_zoom_rect,
     };
     use crate::agent_icons::AgentIcon;
     use crate::chrome::{
@@ -1408,7 +1460,7 @@ mod tests {
             let h = size.h;
             // Tabs run from the left edge, each straight after the last,
             // the full height of the strip.
-            assert_eq!(l.tabs[0].loc.x, 0);
+            assert_eq!(l.tabs[0].loc.x, NAV_WIDTH);
             for pair in l.tabs.windows(2) {
                 assert_eq!(pair[1].loc.x, pair[0].loc.x + pair[0].size.w);
             }
@@ -1531,7 +1583,7 @@ mod tests {
                 assert!(l.tabs[i].size.w >= TAB_MIN_WIDTH);
                 assert!(l.closes[i].size.w > 0);
             }
-            assert_eq!(l.tabs[shown[0]].loc.x, 0);
+            assert_eq!(l.tabs[shown[0]].loc.x, NAV_WIDTH);
             let mid = |r: Rect| (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2);
             assert_eq!(l.hit(mid(l.tabs[active]).0, 10), Some(TabHit::Tab(active)));
             // The chip after them, then the "+", clear of the switch.
@@ -1558,6 +1610,10 @@ mod tests {
         let at = |(x, y)| l.hit(x, y);
         assert_eq!(at(mid(l.tabs[0])), Some(TabHit::Tab(0)));
         assert_eq!(at(mid(l.tabs[1])), Some(TabHit::Tab(1)));
+        // Back and forward at the left end, before the first tab.
+        assert_eq!(at(mid(l.back)), Some(TabHit::Back));
+        assert_eq!(at(mid(l.forward)), Some(TabHit::Forward));
+        assert!(l.forward.loc.x + l.forward.size.w < l.tabs[0].loc.x);
         // The border pixel belongs to the tab on its left.
         assert_eq!(at((l.tabs[1].loc.x - 1, 1)), Some(TabHit::Tab(0)));
         assert_eq!(at(mid(l.closes[1])), Some(TabHit::Close(1)));
@@ -1622,7 +1678,19 @@ mod tests {
         assert_eq!(at(&view, tab.loc.x + tab.size.w - 1, 2), p.border);
         assert_eq!(at(&view, tab.loc.x - 1, 2), p.border);
         // The active tab stays its own colour.
-        assert_eq!(at(&view, 2, 2), p.tab_active);
+        assert_eq!(at(&view, l.tabs[0].loc.x + 2, 2), p.tab_active);
+
+        // The back button lights while it can go back, not while greyed.
+        view.hover = Some(TabHit::Back);
+        let b = l.back;
+        assert_eq!(at(&view, b.loc.x + 3, b.loc.y + 3), p.tab_bar);
+        view.nav = (true, false);
+        assert_eq!(
+            at(&view, b.loc.x + 3, b.loc.y + 3),
+            mix(p.tab_bar, p.element, 1.0)
+        );
+        assert_eq!(at(&view, b.loc.x - 1, b.loc.y + 10), p.tab_bar);
+        view.nav = (false, false);
 
         // The switch and the overflow chip light inside their rects only.
         view.hover = Some(TabHit::Toggle);

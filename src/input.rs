@@ -91,6 +91,9 @@ pub enum RegionHit {
 pub(crate) const BTN_LEFT: u32 = 0x110;
 pub(crate) const BTN_RIGHT: u32 = 0x111;
 pub(crate) const BTN_MIDDLE: u32 = 0x112;
+/// The mouse's back and forward (side) buttons.
+pub(crate) const BTN_SIDE: u32 = 0x113;
+pub(crate) const BTN_EXTRA: u32 = 0x114;
 /// Presses closer together than this, in time and place, count as a
 /// double (or triple) click.
 pub(crate) const MULTI_CLICK: Duration = Duration::from_millis(400);
@@ -595,6 +598,23 @@ impl Gerdr {
             self.overlay_press(hit, location, button);
             return true;
         }
+        // The mouse's back and forward buttons over gerdr's own parts go
+        // back and forward through the tabs shown; a window under the
+        // pointer (a browser, Zed) gets them itself.
+        let (x, y) = (location.x as i32, location.y as i32);
+        if matches!(button, BTN_SIDE | BTN_EXTRA)
+            && (x < self.sidebar_width
+                || y < self.tab_strip_height()
+                || self.on_footer(location)
+                || self.pane_bar_at(location).is_some())
+        {
+            if button == BTN_SIDE {
+                self.go_back();
+            } else {
+                self.go_forward();
+            }
+            return true;
+        }
         // The button floating over a zoomed pane unzooms it.
         if let Some(id) = self.unzoom_button_at(location) {
             if button == BTN_LEFT {
@@ -630,7 +650,6 @@ impl Gerdr {
                 return true;
             }
         }
-        let (x, y) = (location.x as i32, location.y as i32);
         if x < self.sidebar_width {
             match button {
                 BTN_RIGHT => {

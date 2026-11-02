@@ -148,6 +148,14 @@ fn many_agents() -> Vec<Vec<AgentView>> {
     vec![cards, vec![]]
 }
 
+/// The tab strip of `tabs`, the second shown, the prefix armed, and
+/// back to go to but nothing forward.
+fn strip_view() -> TabStripView {
+    let mut view = TabStripView::plain(tabs(), 1, true, ThemeMode::System);
+    view.nav = (true, false);
+    view
+}
+
 fn tabs() -> Vec<TabView> {
     vec![
         TabView {
@@ -731,12 +739,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
             scale,
             p,
         )),
-        hash(painter.tab_strip_view(
-            &TabStripView::plain(tabs(), 1, true, ThemeMode::System),
-            theme,
-            strip,
-            scale,
-        )),
+        hash(painter.tab_strip_view(&strip_view(), theme, strip, scale)),
         hash(painter.pane_bar(&pane_bar(), scale, p)),
         hash(painter.help_panel(&help, &help_layout, None, scale, p)),
         hash(painter.menu(&menu(), scale, p)),
@@ -827,7 +830,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     // Dark at 1
     [
         0x742820c5c927d818, // sidebar
-        0x6f51308dd7cdce6c, // tab_strip
+        0xed1972252f36590d, // tab_strip
         0x5fee9efd7b4d90d0, // pane_bar
         0x866d59a70ebe252d, // help
         0x378d0ffdb2449b77, // menu
@@ -842,7 +845,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     // Dark at 2
     [
         0x9ddccb37c80d489b, // sidebar
-        0x16e4f5440b99562b, // tab_strip
+        0x75280e3af24f953f, // tab_strip
         0x45306f6b0cd01731, // pane_bar
         0x56045b72862ed173, // help
         0xd724a365fa94d169, // menu
@@ -857,7 +860,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     // Light at 1
     [
         0x4833c6a51e833328, // sidebar
-        0x979ae0979da03949, // tab_strip
+        0xf5c707c6dab41293, // tab_strip
         0x16f9e0cb60272263, // pane_bar
         0x8c0302567b35f0c3, // help
         0xf82050c3b2848862, // menu
@@ -872,7 +875,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     // Light at 2
     [
         0xe9feefcbe02c7ed6, // sidebar
-        0x0f133010f45d3831, // tab_strip
+        0x65c73e85a9732c79, // tab_strip
         0x1d9ebaa9665f8db5, // pane_bar
         0x22f444d49649f855, // help
         0xc17d1e64d3c77f97, // menu
@@ -1261,12 +1264,7 @@ fn dump_overlays() {
         dump(
             &dir,
             &format!("tab_strip_{tag}"),
-            painter.tab_strip_view(
-                &TabStripView::plain(tabs(), 1, true, ThemeMode::System),
-                theme,
-                (900, strip_h).into(),
-                scale,
-            ),
+            painter.tab_strip_view(&strip_view(), theme, (900, strip_h).into(), scale),
             px(900),
         );
         dump(

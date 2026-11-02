@@ -272,6 +272,26 @@ pub fn hidden_tab_items(w: usize, hidden: &[(usize, &str)]) -> Vec<MenuItem> {
         .collect()
 }
 
+/// How many tabs the back or forward button's menu lists.
+const VISITED_ITEMS: usize = 15;
+
+/// A tab in the back or forward button's menu: its workspace, its
+/// number and its title.
+pub fn visited_label(workspace: &str, t: usize, title: &str) -> String {
+    format!("{workspace} › {} {title}", t + 1)
+}
+
+/// The back (`back`) or forward button's tooltip, while it can go (`can`)
+/// or not.
+pub fn visited_tooltip(back: bool, can: bool) -> String {
+    match (back, can) {
+        (true, true) => "Back to the tab shown before · right click for more".into(),
+        (false, true) => "Forward to the tab gone back from · right click for more".into(),
+        (true, false) => "Back · nothing to go back to".into(),
+        (false, false) => "Forward · nothing to go forward to".into(),
+    }
+}
+
 /// Which of `among` (in order) comes after `from`, round to the first:
 /// the next blocked workspace, or the next tab that doesn't fit.
 pub fn next_after(among: &[usize], from: usize) -> Option<usize> {
@@ -346,6 +366,7 @@ impl Gerdr {
             inbox: Some(inbox),
             problems: Some(crate::problems::list().len()).filter(|n| *n > 0),
             plus: self.workspace().is_some(),
+            nav: self.can_go(),
         };
         view.hover = self.tab_hover.over();
         view.hover_alpha = self.tab_hover.alpha_over(Instant::now());
@@ -424,6 +445,30 @@ impl Gerdr {
         }
     }
 
+    /// The back (`back`) or forward button's menu, at `anchor` (window
+    /// coordinates): the tabs going that way would show, the next first,
+    /// each by its workspace and title.
+    fn visited_menu(&self, anchor: Rectangle<i32, Logical>, back: bool) -> Option<MenuSpec> {
+        let exists = |id| self.tab_place(id).is_some();
+        let ids = if back {
+            self.nav.backs(exists)
+        } else {
+            self.nav.forwards(exists)
+        };
+        let items: Vec<MenuItem> = ids
+            .into_iter()
+            .take(VISITED_ITEMS)
+            .filter_map(|id| {
+                let (w, t) = self.tab_place(id)?;
+                let ws = &self.workspaces[w];
+                let title = self.tab_views(ws).get(t)?.title.clone();
+                let label = visited_label(&ws.name, t, &title);
+                Some(MenuItem::new(&label, MenuAction::GoToVisited(id, back)))
+            })
+            .collect();
+        (!items.is_empty()).then_some(MenuSpec { anchor, items })
+    }
+
     /// The problems button's menu, at `anchor` (window coordinates): the
     /// problems kept now, and where to fix them.
     fn problems_menu(&self, anchor: Rectangle<i32, Logical>) -> MenuSpec {
@@ -489,6 +534,8 @@ impl Gerdr {
         let size = self.tab_strip_rect().size;
         let hit = chrome::tab_strip_hit(&view, size, (x, y).into());
         match (button, hit) {
+            (BTN_LEFT, Some(TabHit::Back)) => self.go_back(),
+            (BTN_LEFT, Some(TabHit::Forward)) => self.go_forward(),
             (BTN_LEFT, Some(TabHit::Toggle)) => self.set_theme_mode(next_mode(self.theme_mode)),
             (BTN_LEFT, Some(TabHit::Overflow)) => {
                 let blocked: Vec<usize> = self
@@ -555,6 +602,14 @@ impl Gerdr {
             None => tip,
         };
         Some(match hit {
+            TabHit::Back => keyed(
+                Tooltip::new(&visited_tooltip(true, view.nav.0), anchor(layout.back)),
+                &self.keymap.help().key_of(Action::GoBack, 0),
+            ),
+            TabHit::Forward => keyed(
+                Tooltip::new(&visited_tooltip(false, view.nav.1), anchor(layout.forward)),
+                &self.keymap.help().key_of(Action::GoForward, 0),
+            ),
             TabHit::Tab(i) => keyed(
                 Tooltip::new(&view.tabs.get(i)?.tooltip(), anchor(layout.tabs[i])),
                 &tab_key(&self.keymap.help(), i),
@@ -634,6 +689,8 @@ impl Gerdr {
         let hints = self.tab_key_hints();
         let w = self.active_workspace;
         match hit {
+            TabHit::Back => self.visited_menu(anchor(layout.back), true),
+            TabHit::Forward => self.visited_menu(anchor(layout.forward), false),
             TabHit::Tab(t) | TabHit::Close(t) | TabHit::Unzoom(t) => {
                 let pane = (t == view.active)
                     .then(|| self.tab()?.focused_id())
