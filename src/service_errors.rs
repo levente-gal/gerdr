@@ -30,6 +30,14 @@ pub struct Patterns {
     herdr: String,
 }
 
+/// The same patterns, as written.
+impl PartialEq for Patterns {
+    fn eq(&self, other: &Self) -> bool {
+        self.errors.as_str() == other.errors.as_str()
+            && self.ignore.as_ref().map(Regex::as_str) == other.ignore.as_ref().map(Regex::as_str)
+    }
+}
+
 impl Default for Patterns {
     fn default() -> Self {
         let errors: Vec<String> = DEFAULT_ERRORS.iter().map(|p| (*p).to_owned()).collect();
@@ -418,6 +426,15 @@ fn shorten(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patterns_are_the_same_as_written() {
+        let errors = ["ERROR".to_owned()];
+        let a = Patterns::new(&errors, &[]).unwrap();
+        assert_eq!(a, Patterns::new(&errors, &[]).unwrap());
+        assert_ne!(a, Patterns::new(&errors, &["Deprecat".to_owned()]).unwrap());
+        assert_ne!(a, Patterns::default());
+    }
 
     const DJANGO: &str = "\
 Watching for file changes with StatReloader

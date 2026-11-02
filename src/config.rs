@@ -58,7 +58,8 @@
 //! extra_errors = ['level=error']
 //! # Lines never taken for errors, though they match.
 //! ignore = ['DeprecationWarning']
-//! # Desktop notifications of the errors; on by default.
+//! # Desktop notifications of the errors; on by default ([ui] notify
+//! # = false turns them off too).
 //! notify = false
 //! # Tell when a service's command stops by itself; on by default.
 //! stopped = false
@@ -139,17 +140,6 @@ impl Default for Services {
             stopped: true,
         }
     }
-}
-
-/// How the services' errors are found and told, as the config file says.
-pub fn load_services() -> Services {
-    let path = config_file();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let (services, problems) = services_from_text(&text);
-    for problem in problems {
-        crate::problems::report("config", problem);
-    }
-    services
 }
 
 /// The `[services]` settings `text` describes, and what's wrong with them
@@ -402,6 +392,8 @@ pub struct Settings {
     pub keep: Vec<String>,
     /// The agent CLI commands by name (see `cli_agents`).
     pub agents: BTreeMap<String, String>,
+    /// How the services' errors are found and told (see `services`).
+    pub services: Services,
     /// What is wrong with the file, as sentences for the user.
     pub problems: Vec<String>,
 }
@@ -409,8 +401,8 @@ pub struct Settings {
 /// The shortcuts, apps, look and git settings in the config file, how
 /// the inbox reads Linear (`LINEAR_API_KEY` in the environment over the
 /// file's key), the programs whose apps keep running (see `keep`) and the
-/// agent CLI commands by name (see `cli_agents`). What is wrong with the
-/// file is kept in the problems list under `"config"` (and logged), in
+/// agent CLI commands by name (see `cli_agents`) and how the services'
+/// errors are found (see `services`). What is wrong with the file is kept in the problems list under `"config"` (and logged), in
 /// place of what was there before.
 pub fn load() -> Settings {
     let path = config_file();
@@ -426,6 +418,8 @@ pub fn load() -> Settings {
     };
     let (keymap, apps, ui, git, inbox, found, keep, agents) = from_text(&text);
     problems.extend(found);
+    let (services, service_problems) = services_from_text(&text);
+    problems.extend(service_problems);
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
     for problem in problems.iter().filter(|p| !p.starts_with(KEYS_PROBLEM)) {
@@ -440,6 +434,7 @@ pub fn load() -> Settings {
         linear,
         keep,
         agents,
+        services,
         problems,
     }
 }
@@ -664,7 +659,8 @@ const TEMPLATE: &str = "\
 # extra_errors = ['level=error']
 # # Lines never taken for errors, though they match.
 # ignore = ['DeprecationWarning']
-# # Desktop notifications of the errors; on by default.
+# # Desktop notifications of the errors; on by default ([ui] notify
+# # = false turns them off too).
 # notify = false
 # # Tell when a service's command stops by itself; on by default.
 # stopped = false
@@ -735,13 +731,9 @@ impl Gerdr {
                 false => self.notifier = None,
             }
         }
-        let text = std::fs::read_to_string(config_file()).unwrap_or_default();
-        let (services, service_problems) = services_from_text(&text);
-        self.service_errors.settings = services;
+        self.set_service_settings(settings.services);
         self.arrange();
-        let mut problems = settings.problems;
-        problems.extend(service_problems);
-        self.settings_problems(&problems, true);
+        self.settings_problems(&settings.problems, true);
     }
 
     /// Say what is wrong with the config file, `problems`, in an error
