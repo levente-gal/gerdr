@@ -288,12 +288,16 @@ impl Gerdr {
         self.doc_write_review(&comments_path(&dir, stage), &Review::default());
         let open = self
             .doc_of()
-            .is_some_and(|d| d.project == project && d.slug == slug && d.stage == stage);
-        if open {
+            .filter(|d| d.project == project && d.slug == slug && d.stage == stage)
+            .map(|d| d.back);
+        if let Some(back) = open {
             if let Some(wd) = self.repos.worktree.as_mut() {
                 wd.diff.review_dirty = false;
             }
             self.close_worktree_diff();
+            if back {
+                self.open_feature(project, slug);
+            }
         }
     }
 }
