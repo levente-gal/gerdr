@@ -30,9 +30,21 @@ pub enum MenuAction {
     /// The agent picker, for an agent CLI in a new tab of workspace `.0`
     /// (see `Gerdr::open_agent_picker`).
     NewAgent(usize),
-    /// T3 Code's server, started in a new tab of workspace `.0` (see
-    /// `Gerdr::start_t3`).
-    StartT3(usize),
+    /// T3 Code's server, started in the background (see
+    /// `Gerdr::spawn_t3`).
+    StartT3,
+    /// T3 Code's server, stopped (see `Gerdr::stop_t3`).
+    StopT3,
+    /// T3 Code's server, stopped and started again.
+    RestartT3,
+    /// T3 Code's app, in the shown workspace.
+    OpenT3,
+    /// Look for a newer T3 Code now (see `Gerdr::check_t3`).
+    CheckT3,
+    /// A log file, in a new tab.
+    OpenLog(std::path::PathBuf),
+    /// The apps project `.0` keeps running, stopped (see `keep::stop`).
+    StopKept(String),
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
     UpdateT3(Option<String>),
@@ -320,7 +332,13 @@ impl Gerdr {
             MenuAction::RestartWorkspace(w) => self.restart_workspace(w),
             MenuAction::ChooseRestarts(w) => self.choose_restarts(w),
             MenuAction::NewAgent(w) => self.open_agent_picker(w),
-            MenuAction::StartT3(w) => self.start_t3(w),
+            MenuAction::StartT3 => self.spawn_t3(None),
+            MenuAction::StopT3 => self.stop_t3(|_| {}),
+            MenuAction::RestartT3 => self.restart_t3(),
+            MenuAction::OpenT3 => self.open_t3(self.active_workspace, None),
+            MenuAction::CheckT3 => self.check_t3(true),
+            MenuAction::OpenLog(path) => self.open_log(path),
+            MenuAction::StopKept(id) => self.stop_kept(&id),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

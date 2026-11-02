@@ -109,6 +109,8 @@ enum Intercepted {
     Inbox(inbox::Outcome),
     /// The scrollback viewer asked for this.
     Scrollback(scrollback::Outcome),
+    /// The tasks panel asked for this.
+    Tasks(crate::tasks::Outcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -203,6 +205,7 @@ impl Gerdr {
                             || state.repos.is_open()
                             || state.inbox.is_open()
                             || state.scrollback.is_some()
+                            || state.tasks_panel.is_some()
                             || state.switcher.is_some();
                         if overlay {
                             state.tooltip.hide();
@@ -226,6 +229,11 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             let out = state.confirm_key(mods, sym);
                             return FilterResult::Intercept(out.map(Intercepted::Confirm));
+                        }
+                        if state.tasks_panel.is_some() {
+                            state.suppressed_keys.push(code);
+                            let out = state.tasks_key(sym);
+                            return FilterResult::Intercept(out.map(Intercepted::Tasks));
                         }
                         // A menu over the repositories panel takes its
                         // keys; any other closes it and goes on.
@@ -483,7 +491,8 @@ impl Gerdr {
                         || self.worktrees.is_open()
                         || self.repos.is_open()
                         || self.inbox.is_open()
-                        || self.scrollback.is_some())
+                        || self.scrollback.is_some()
+                        || self.tasks_panel.is_some())
                 {
                     if pointer.is_grabbed() {
                         pointer.button(
@@ -577,6 +586,8 @@ impl Gerdr {
                     || self.checkout.is_some()
                     || self.confirm.is_some()
                     || self.welcome.is_some()
+                    || self.tasks_panel.is_some()
+                    || self.on_footer(self.pointer)
                 {
                     return;
                 }
@@ -651,6 +662,12 @@ impl Gerdr {
         if self.confirm.is_some() {
             if button == BTN_LEFT {
                 self.confirm_click(location);
+            }
+            return true;
+        }
+        if self.tasks_panel.is_some() {
+            if button == BTN_LEFT {
+                self.tasks_click(location);
             }
             return true;
         }
@@ -739,6 +756,13 @@ impl Gerdr {
         if let Some(id) = self.unzoom_button_at(location) {
             if button == BTN_LEFT {
                 self.zoom_pane(id);
+            }
+            return true;
+        }
+        // The footer: a task opens the tasks panel.
+        if self.on_footer(location) {
+            if button == BTN_LEFT {
+                self.footer_press(location);
             }
             return true;
         }
@@ -848,6 +872,9 @@ impl Gerdr {
     /// hover, tooltip and cursor shape share it.
     pub fn regions_at(&self, pos: Point<f64, Logical>) -> Regions {
         let mut regions = Regions::default();
+        if self.on_footer(pos) {
+            return regions;
+        }
         if pos.x < self.sidebar_width as f64 {
             regions.sidebar = Some(self.sidebar_layout());
         } else if pos.y < self.tab_strip_height() as f64 {
@@ -890,6 +917,14 @@ impl Gerdr {
         }
         if self.confirm.is_some() {
             let controls = self.confirm_controls();
+            return if controls.iter().any(|rect| rect.to_f64().contains(pos)) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
+        if self.tasks_panel.is_some() {
+            let controls = self.tasks_controls();
             return if controls.iter().any(|rect| rect.to_f64().contains(pos)) {
                 RegionHit::Control
             } else {
@@ -959,6 +994,13 @@ impl Gerdr {
             };
         }
         let inside = |rect: &chrome::Rect| rect.to_f64().contains(pos);
+        if self.on_footer(pos) {
+            return if self.footer_hit(pos).is_some() {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
         // The sidebar: the header and its "+", the rows and the cards.
         if pos.x < self.sidebar_width as f64 {
             let hit = match &regions.sidebar {
@@ -1068,7 +1110,8 @@ impl Gerdr {
             || self.worktrees.is_open()
             || self.repos.is_open()
             || self.inbox.is_open()
-            || self.scrollback.is_some();
+            || self.scrollback.is_some()
+            || self.tasks_panel.is_some();
         // An overlay's icons have tooltips of their own.
         let mut overlay_tip = None;
         if self.quit.is_some() {
@@ -1079,6 +1122,8 @@ impl Gerdr {
             self.checkout_hover(pos);
         } else if self.confirm.is_some() {
             self.confirm_hover(pos);
+        } else if self.tasks_panel.is_some() {
+            self.tasks_hover(pos);
         } else if self.welcome.is_some() {
             overlay_tip = self.welcome_hover(pos);
         } else if self.project_menu.is_some() {
@@ -1110,8 +1155,14 @@ impl Gerdr {
         if covered || regions.sidebar.is_none() {
             self.agent_strip = None;
         }
+        let on_footer = !covered && self.on_footer(pos);
+        if !on_footer {
+            self.footer_motion(None);
+        }
         let tip = if covered {
             overlay_tip
+        } else if on_footer {
+            self.footer_motion(Some(pos))
         } else if let Some(layout) = &regions.sidebar {
             self.sidebar_motion(layout, pos)
         } else if let Some(view) = &regions.strip {
@@ -1196,6 +1247,7 @@ impl Gerdr {
             Intercepted::Repos(outcome) => self.apply_repos(outcome),
             Intercepted::Inbox(outcome) => self.apply_inbox(outcome),
             Intercepted::Scrollback(outcome) => self.apply_scrollback(outcome),
+            Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
         }
     }
 
@@ -1206,6 +1258,7 @@ impl Gerdr {
             || self.restart.is_some()
             || self.checkout.is_some()
             || self.confirm.is_some()
+            || self.tasks_panel.is_some()
         {
             None
         } else if self.welcome.is_some() {

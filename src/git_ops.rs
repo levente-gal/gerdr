@@ -361,6 +361,11 @@ static TURNS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
 /// Told when a turn is over.
 static TURN_OVER: Condvar = Condvar::new();
 
+/// What runs in each repository now, by shared git folder: `"a fetch"`.
+pub fn turns() -> Vec<(PathBuf, String)> {
+    TURNS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// A repository's turn to be written in, by one thread, until dropped.
 /// Taken around every operation the panel runs, in the background too.
 #[must_use]

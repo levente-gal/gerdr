@@ -87,7 +87,7 @@ impl Gerdr {
             .scrolled_over(
                 self.sidebar_scroll.pos(),
                 self.sidebar_scroll.overscroll(),
-                self.output_size().h,
+                self.sidebar_height(),
             )
     }
 
@@ -155,7 +155,7 @@ impl Gerdr {
     /// What the sidebar's rows scroll within, laid out as `layout`: by
     /// pixels, under the header.
     fn sidebar_bounds(&self, layout: &SidebarLayout) -> Bounds {
-        let height = self.output_size().h;
+        let height = self.sidebar_height();
         Bounds {
             max: layout.max_scroll(height) as f64,
             notch: SIDEBAR_NOTCH,
@@ -222,7 +222,7 @@ impl Gerdr {
         workspaces: &[WorkspaceView],
         agents: &[Vec<AgentView>],
     ) -> SidebarState {
-        let height = self.output_size().h;
+        let height = self.sidebar_height();
         let layout =
             chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density);
         // Held to what the rows now take, and moved to show the active

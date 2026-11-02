@@ -85,7 +85,7 @@ impl Gerdr {
     /// Where pane `id` of the shown tab, dragged to `pos`, would land.
     /// `None` over itself or nothing it can land on.
     pub fn pane_drop_at(&self, id: u32, pos: Point<f64, Logical>) -> Option<PaneDrop> {
-        if pos.x < self.sidebar_width as f64 {
+        if pos.x < self.sidebar_width as f64 || self.on_footer(pos) {
             return None;
         }
         if pos.y < self.tab_strip_height() as f64 {

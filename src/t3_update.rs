@@ -3,7 +3,7 @@
 //! gerdr reads T3 Code's database, which T3 Code changes as it likes; a
 //! version gerdr can't read shows its threads with basic status only (see
 //! `t3_agents::Source`). So gerdr starts T3 Code's server at a version of
-//! its choosing (`Updates::pin`, see `Gerdr::start_t3`), and moves it on
+//! its choosing (`Updates::pin`, see `Gerdr::spawn_t3`), and moves it on
 //! only to versions it read:
 //!
 //! - every `CHECK_EVERY` (one gerdr at a time) it asks npm for the newest
@@ -57,8 +57,6 @@ const TRY_TIME: Duration = Duration::from_secs(90);
 const SETTLE: Duration = Duration::from_secs(3);
 /// How long a process asked to stop has before it is killed.
 const STOP_TIME: Duration = Duration::from_secs(5);
-/// How long a server asked to stop for a restart has before it is killed.
-const RESTART_STOP_TIME: Duration = Duration::from_secs(10);
 /// How many versions' verdicts are kept.
 const VERDICTS: usize = 30;
 
@@ -524,7 +522,7 @@ fn fetch(home: &Path, version: &str) -> Result<Found, String> {
 }
 
 /// Whether process `pid` is a T3 Code server: its program is a `t3`.
-fn is_t3(pid: u32) -> bool {
+pub(crate) fn is_t3(pid: u32) -> bool {
     std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
         let program = cmdline.split(|b| *b == 0).next().unwrap_or_default();
         Path::new(std::str::from_utf8(program).unwrap_or_default())
@@ -685,7 +683,7 @@ impl crate::Gerdr {
     }
 
     /// How many of T3 Code's threads work or wait for the user.
-    fn t3_busy(&self) -> usize {
+    pub(crate) fn t3_busy(&self) -> usize {
         self.t3
             .rows
             .iter()
@@ -725,45 +723,6 @@ impl crate::Gerdr {
     pub fn t3_maybe_restart(&mut self) {
         if self.t3.restart_at.is_some() && self.t3.alive && self.t3_busy() == 0 {
             self.restart_t3();
-        }
-    }
-
-    /// Stop T3 Code's server, then start it again at the version pinned,
-    /// in the workspace showing its app (else the shown one).
-    pub fn restart_t3(&mut self) {
-        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-        let Some(version) = self.t3.restart_at.take() else {
-            return;
-        };
-        let Some(server) = self.t3.server.clone().filter(|_| self.t3.alive) else {
-            return;
-        };
-        if !is_t3(server.pid) {
-            tracing::warn!("t3 code's server: pid {} isn't t3's", server.pid);
-            return;
-        }
-        let w = self.t3_pane().map_or(self.active_workspace, |(w, ..)| w);
-        let port = server.port();
-        self.toast(format!("Restarting T3 Code at {version}"), Level::Info);
-        let Ok(pid) = i32::try_from(server.pid) else {
-            return;
-        };
-        // Safety: a signal to the server's process, checked to be t3's.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
-        let asked_at = Instant::now();
-        let wait = move |_, _: &mut (), state: &mut crate::Gerdr| {
-            if server.alive() {
-                if asked_at.elapsed() < RESTART_STOP_TIME {
-                    return TimeoutAction::ToDuration(Duration::from_millis(250));
-                }
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
-            state.start_t3_at(w, port);
-            TimeoutAction::Drop
-        };
-        let timer = Timer::from_duration(Duration::from_millis(250));
-        if let Err(err) = self.loop_handle.insert_source(timer, wait) {
-            tracing::warn!("t3 code's server: {err}");
         }
     }
 }

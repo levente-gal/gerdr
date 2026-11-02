@@ -21,6 +21,7 @@ mod checkout;
 mod confirm;
 mod consts;
 mod drop;
+mod footer;
 #[cfg(test)]
 mod golden;
 mod help;
@@ -65,6 +66,7 @@ pub use checkout::*;
 pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
+pub use footer::*;
 pub use help::*;
 pub use hints::*;
 pub use inbox::*;
@@ -97,6 +99,10 @@ pub(crate) type Rect = Rectangle<i32, Logical>;
 const SLIDE: i32 = 4;
 /// The environment variable that outlines every hit rect in red.
 pub const DEBUG_HITS: &str = "GERDR_DEBUG_HITS";
+
+/// What the tasks panel's drawing depends on: it, the output, the
+/// footer's height, the theme and the scale.
+type TasksKey = (TasksView, Size<i32, Logical>, i32, Theme, f64);
 
 /// What a placeholder's drawing depends on: it, its button under the
 /// pointer, the theme and the scale.
@@ -159,6 +165,10 @@ pub struct ChromeView {
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
     pub pane_bars: Vec<PaneBarView>,
+    /// The footer along the bottom, unless the config file hides it.
+    pub footer: Option<FooterView>,
+    /// Set while the tasks panel is open over the footer.
+    pub tasks: Option<TasksView>,
     /// Where the button unzooming the zoomed pane floats, if one is.
     pub unzoom: Option<Rect>,
     pub theme: Theme,
@@ -176,6 +186,8 @@ pub struct Chrome {
     debug_hits: bool,
     sidebar: SidebarLayers,
     tabs: Cached<(TabStripView, Theme, i32, f64)>,
+    footer: Cached<(FooterView, Theme, i32, f64)>,
+    tasks: Overlay<TasksKey>,
     help: Overlay<(HelpLayout, Option<HelpHit>, Theme, f64)>,
     menu: Overlay<(MenuView, Theme, f64)>,
     tooltip: Overlay<(TooltipView, i32, Theme, f64)>,
@@ -230,6 +242,8 @@ impl Chrome {
             debug_hits: std::env::var_os(DEBUG_HITS).is_some_and(|v| v == "1"),
             sidebar: SidebarLayers::default(),
             tabs: Cached::default(),
+            footer: Cached::default(),
+            tasks: Overlay::default(),
             help: Overlay::default(),
             menu: Overlay::default(),
             tooltip: Overlay::default(),
@@ -308,10 +322,17 @@ impl Chrome {
         let strip_h = tab_strip_height(view.density);
         let output: Size<i32, Logical> = (view.size.w.max(1), view.size.h.max(1)).into();
         let strip_size: Size<i32, Logical> = ((view.size.w - sidebar_w).max(1), strip_h).into();
+        let footer_h = if view.footer.is_some() {
+            status_bar_height(view.density)
+        } else {
+            0
+        };
+        // Over the footer: the sidebar's height, and the app area's bottom.
+        let above: Size<i32, Logical> = (output.w, (output.h - footer_h).max(1)).into();
         // The app area, under the tab strip and right of the sidebar.
         let area = Rectangle::new(
             (sidebar_w, strip_h).into(),
-            (strip_size.w, (view.size.h - strip_h).max(1)).into(),
+            (strip_size.w, (view.size.h - strip_h - footer_h).max(1)).into(),
         );
         let pointer = view.pointer;
         let painter = &self.painter;
@@ -329,7 +350,7 @@ impl Chrome {
 
         // The hit rects, outlined for checking them against the drawing.
         if self.debug_hits {
-            let rects = hit_rects(&view, output, area);
+            let rects = hit_rects(&view, output, area, footer_h);
             let buffer = self.hits.get((rects, output, scale), |(rects, output, _)| {
                 hit_outlines(rects, *output, scale)
             });
@@ -420,6 +441,18 @@ impl Chrome {
         parts.extend(self.menu.part(menu, now, true, |(menu, ..)| {
             painter.menu(menu, scale, theme.palette())
         }));
+
+        // The tasks panel, over the footer.
+        let tasks = view.tasks.map(|tasks| {
+            let (loc, size) = shadowed(tasks_layout(&tasks, output, footer_h).panel);
+            ((tasks, output, footer_h, theme, scale), loc, size)
+        });
+        parts.extend(
+            self.tasks
+                .part(tasks, now, true, |(tasks, output, footer, ..)| {
+                    painter.tasks_panel(tasks, *output, *footer, scale, theme.palette())
+                }),
+        );
 
         // The worktrees popup, over the sidebar and the apps.
         parts.extend(
@@ -604,12 +637,26 @@ impl Chrome {
             (view.tab_strip, theme, strip_size.w, scale),
             |(strip, ..)| painter.tab_strip_view(strip, theme, strip_size, scale),
         );
+        if let Some(footer) = view.footer {
+            let size: Size<i32, Logical> = (output.w, footer_h).into();
+            let top = output.h - footer_h;
+            let dots = footer_blinkers(&footer, size)
+                .into_iter()
+                .map(|dot| Rectangle::new(dot.loc + Point::from((0, top)), dot.size));
+            push_dots(&mut parts, dot, dots, blink);
+            let buffer = self
+                .footer
+                .get((footer, theme, output.w, scale), |(footer, ..)| {
+                    painter.footer(footer, size, scale, theme.palette())
+                });
+            parts.push(Part::new(buffer, Point::from((0, top)), size, 1.0));
+        }
         parts.extend(self.sidebar.parts(
             view.sidebar,
             sidebar_w,
             view.pulse,
             view.density,
-            output,
+            above,
             theme,
             scale,
             painter,
@@ -828,15 +875,42 @@ impl<K: PartialEq> Overlay<K> {
 }
 
 /// Every rect the chrome hit-tests, in window coordinates, for `view`.
-fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<Rect> {
+fn hit_rects(
+    view: &ChromeView,
+    output: Size<i32, Logical>,
+    area: Rect,
+    footer_h: i32,
+) -> Vec<Rect> {
     let mut rects = Vec::new();
+    if let Some(footer) = &view.footer {
+        let top = output.h - footer_h;
+        let layout = footer_layout(footer, (output.w, footer_h).into());
+        rects.extend(
+            layout
+                .chips
+                .iter()
+                .chain([&layout.count])
+                .map(|r| Rectangle::new(r.loc + Point::from((0, top)), r.size)),
+        );
+    }
+    if let Some(tasks) = &view.tasks {
+        let layout = tasks_layout(tasks, output, footer_h);
+        rects.push(layout.panel);
+        rects.extend(layout.rows.iter().copied());
+        rects.extend(layout.controls());
+    }
+
     let sidebar = sidebar_layout_at(
         &view.sidebar.workspaces,
         &view.sidebar.agents,
         view.sidebar_width,
         view.density,
     )
-    .scrolled_over(view.sidebar.state.scroll, view.sidebar.state.over, output.h);
+    .scrolled_over(
+        view.sidebar.state.scroll,
+        view.sidebar.state.over,
+        output.h - footer_h,
+    );
     rects.extend([sidebar.header, sidebar.plus, sidebar.repos]);
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);

@@ -16,6 +16,7 @@
 //! density = "compact"   # or "comfortable", the default
 //! theme = "light"       # or "dark" or "system"; else the last choice
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
+//! footer = false        # hide the footer with the background tasks; shown by default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -178,6 +179,7 @@ struct UiConfig {
     density: Option<String>,
     theme: Option<String>,
     needs_you: Option<bool>,
+    footer: Option<bool>,
 }
 
 /// The `[git]` table, as written.
@@ -279,6 +281,8 @@ pub struct Ui {
     /// Whether the sidebar gathers the blocked and done agents of the
     /// other workspaces in a "Needs you" list at its top.
     pub needs_you: bool,
+    /// Whether the footer with the background tasks shows.
+    pub footer: bool,
 }
 
 impl Default for Ui {
@@ -287,6 +291,7 @@ impl Default for Ui {
             density: Density::default(),
             theme: None,
             needs_you: true,
+            footer: true,
         }
     }
 }
@@ -372,6 +377,9 @@ pub fn from_text(
     }
     if let Some(needs_you) = config.ui.needs_you {
         ui.needs_you = needs_you;
+    }
+    if let Some(footer) = config.ui.footer {
+        ui.footer = footer;
     }
     let mut git = Git::default();
     if let Some(groups) = config.git.same_branches {
@@ -705,6 +713,7 @@ mod tests {
                 density: Density::Compact,
                 theme: Some(ThemeMode::Light),
                 needs_you: true,
+                footer: true,
             }
         );
         assert!(problems.is_empty());
@@ -715,6 +724,14 @@ mod tests {
         assert!(ui("").0.needs_you);
         let (parsed, problems) = ui("[ui]\nneeds_you = false\n");
         assert!(!parsed.needs_you);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn the_footer_shows_unless_the_file_hides_it() {
+        assert!(ui("").0.footer);
+        let (parsed, problems) = ui("[ui]\nfooter = false\n");
+        assert!(!parsed.footer);
         assert!(problems.is_empty());
     }
 
