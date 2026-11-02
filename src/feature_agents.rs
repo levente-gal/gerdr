@@ -32,7 +32,9 @@ use crate::{
     prompts::{self, render::Vars},
 };
 
-/// A gate waiting for the user: an agent stage's file is ready to review.
+/// A gate waiting for the user: an agent stage's file is ready to review,
+/// a Build agent stopped after a milestone, or Verify failed more often
+/// than gerdr sends to the Build agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gate {
     pub project: String,
@@ -42,6 +44,21 @@ pub struct Gate {
     pub stage: Stage,
     /// When it got ready (unix seconds).
     pub since: u64,
+    pub kind: GateKind,
+}
+
+/// What a gate waits for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GateKind {
+    /// The stage's file is ready: Approve or Send back.
+    #[default]
+    Review,
+    /// The Build agent ticked `done` of `total` milestones and waits:
+    /// Continue.
+    Milestone { done: u32, total: u32 },
+    /// Verify failed `fixes` times in a row; gerdr stopped sending the
+    /// failures to the Build agent (stage: Verify).
+    VerifyFailed { fixes: u32 },
 }
 
 /// How long a file must stay good and unchanged to count as done when
@@ -222,6 +239,7 @@ fn gates(all: &BTreeMap<String, Vec<Feature>>) -> Vec<Gate> {
                     title: f.title.clone(),
                     stage,
                     since,
+                    kind: GateKind::Review,
                 })
             })
         })
@@ -470,6 +488,7 @@ impl Gerdr {
             nudged: false,
             ready: None,
             sent_back: last.map_or(0, |r| r.sent_back),
+            stop: None,
         };
         let Some(feature) = self.feature_mut(project, slug) else {
             return;

@@ -857,6 +857,8 @@ mod tests {
             marks: Default::default(),
             shipping: Default::default(),
             runs: Default::default(),
+            setup: None,
+            verify: None,
             history: Vec::new(),
         }
     }

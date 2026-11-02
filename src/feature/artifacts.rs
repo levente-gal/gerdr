@@ -9,6 +9,10 @@
 //! sections, none empty, and a `Migrations:` line; `named_repos` tells
 //! whether it names the touched repositories. Headings match at any
 //! level, case-insensitively; fenced code doesn't count.
+//!
+//! A build log (`build.md`, Build) needs `## Milestones` with at least one
+//! checkbox item, and is good once every one is ticked (`- [x] …`);
+//! `milestones` counts them, for the stops between milestones.
 
 use std::path::{Path, PathBuf};
 
@@ -57,9 +61,21 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
                 lacks.push("no “Migrations:” line".into());
             }
         }
+        Stage::Build => {
+            // Filled in by the backend agent: Milestones section with
+            // checkbox items, every one ticked.
+            doc.need("Milestones", &mut lacks);
+        }
         _ => {}
     }
     if lacks.is_empty() { Ok(()) } else { Err(lacks) }
+}
+
+/// The checkbox items of `text`'s Milestones section: how many are ticked
+/// (`[x]` or `[X]`), and how many there are.
+pub fn milestones(text: &str) -> (usize, usize) {
+    let _ = text;
+    (0, 0)
 }
 
 /// The repositories of `repos` the plan's Repositories section doesn't

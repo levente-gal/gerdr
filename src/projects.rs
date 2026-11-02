@@ -318,11 +318,29 @@ pub struct Workflow {
     /// or command (`claude`); without one, the first agent CLI installed.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub agents: std::collections::BTreeMap<crate::feature::Stage, String>,
+    /// The commands that set up a new feature's worktree, by repository
+    /// folder name (see `feature::setup`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub setup: std::collections::BTreeMap<String, Vec<String>>,
+    /// The checks Verify runs, by repository folder name or `_feature`
+    /// (see `feature::verify`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub verify: std::collections::BTreeMap<String, Vec<String>>,
+    /// How long one Verify check may run, in seconds; without it,
+    /// `feature::verify::TIMEOUT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_timeout: Option<u64>,
 }
 
 impl Workflow {
     pub fn is_empty(&self) -> bool {
-        self.ignore.is_empty() && self.base.is_empty() && self.ship.is_none() && self.agents.is_empty()
+        self.ignore.is_empty()
+            && self.base.is_empty()
+            && self.ship.is_none()
+            && self.agents.is_empty()
+            && self.setup.is_empty()
+            && self.verify.is_empty()
+            && self.verify_timeout.is_none()
     }
 }
 

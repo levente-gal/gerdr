@@ -105,6 +105,12 @@ fn read(path: &Path, name: &str) -> Result<String, String> {
 }
 
 impl Gerdr {
+    /// Show feature `slug`'s `evidence.md` (see `feature::verify`) in the
+    /// same view, read-only, without Approve or Send back.
+    pub fn open_evidence(&mut self, project: &str, slug: &str) {
+        let _ = (project, slug);
+    }
+
     /// Show `stage`'s file of feature `slug` for review.
     pub fn open_doc_review(&mut self, project: &str, slug: &str, stage: Stage) {
         let Some(name) = crate::feature::artifacts::name(stage) else {

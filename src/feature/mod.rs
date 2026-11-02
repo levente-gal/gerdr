@@ -32,8 +32,10 @@ pub mod artifacts;
 pub mod hook;
 pub mod layout;
 pub mod patch;
+pub mod setup;
 pub mod ship;
 pub mod store;
+pub mod verify;
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -234,6 +236,12 @@ pub struct Feature {
     /// The agent stages' latest runs (see `agents`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<Stage, agents::StageRun>,
+    /// Its worktrees' setup, once started (see `setup`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<setup::SetupRun>,
+    /// Its latest Verify run (see `verify`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<verify::VerifyRun>,
 }
 
 impl Feature {
@@ -434,6 +442,8 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
+            setup: None,
+            verify: None,
         }
     }
 
@@ -453,6 +463,8 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Shipping::default(),
             runs: BTreeMap::new(),
+            setup: None,
+            verify: None,
         }
     }
 

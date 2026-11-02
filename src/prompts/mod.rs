@@ -13,6 +13,9 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
         "discover" => (include_str!("../../assets/prompts/discover.md"), 1),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 1),
+        "build" => (include_str!("../../assets/prompts/build.md"), 1),
+        "fix" => (include_str!("../../assets/prompts/fix.md"), 1),
+        "continue" => (include_str!("../../assets/prompts/continue.md"), 1),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),

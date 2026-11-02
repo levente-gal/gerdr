@@ -1309,6 +1309,7 @@ mod tests {
                 title: format!("{slug} title"),
                 stage,
                 since,
+                kind: Default::default(),
             },
             project: format!("{project} name"),
         }

@@ -29,6 +29,7 @@ mod diff_view;
 mod feature;
 mod features;
 mod feature_agents;
+mod feature_build;
 mod doc_review;
 mod frecency;
 mod find;

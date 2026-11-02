@@ -1,7 +1,7 @@
 //! The agents that run a feature's stages: which CLI, started how, and what
 //! gerdr keeps of each run (`StageRun`).
 //!
-//! An agent stage (Discover, Plan; later Build and AI review) starts its
+//! An agent stage (Discover, Plan, Build; later AI review) starts its
 //! agent in a new tab of the feature's workspace, in the feature folder,
 //! with the stage's prompt rendered to `<feature data dir>/prompts/<stage>-<n>.md`
 //! (see `crate::prompts`). The agent is told to write its stage's file
@@ -83,6 +83,11 @@ pub fn needs(stage: Stage) -> Option<Needs> {
             artifact: Some("plan.md"),
             template: "plan",
         }),
+        Stage::Build => Some(Needs {
+            read_only: false,
+            artifact: Some("build.md"),
+            template: "build",
+        }),
         _ => None,
     }
 }
@@ -135,6 +140,20 @@ pub struct StageRun {
     /// How many times it was sent back.
     #[serde(default)]
     pub sent_back: u32,
+    /// A Build agent stopped after a milestone, waiting for the user to
+    /// let it go on (see `Stop`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Stop>,
+}
+
+/// A Build agent's stop after a milestone: `build.md` ticks `done` of
+/// `total` milestones, and the agent waits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stop {
+    pub done: u32,
+    pub total: u32,
+    /// Unix seconds.
+    pub at: u64,
 }
 
 #[cfg(test)]
@@ -176,11 +195,14 @@ mod tests {
     }
 
     #[test]
-    fn only_discover_and_plan_have_agents_yet() {
+    fn discover_plan_and_build_have_agents() {
         assert_eq!(needs(Stage::Discover).unwrap().artifact, Some("brief.md"));
         let plan = needs(Stage::Plan).unwrap();
         assert!(plan.read_only);
         assert_eq!(plan.template, "plan");
+        let build = needs(Stage::Build).unwrap();
+        assert!(!build.read_only);
+        assert_eq!(build.artifact, Some("build.md"));
         assert_eq!(needs(Stage::Verify), None);
     }
 }

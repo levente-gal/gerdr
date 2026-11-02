@@ -120,7 +120,7 @@ struct Asked {
 
 /// What a feature's work off the thread is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Job {
+pub(crate) enum Job {
     Create,
     Touch,
     Losses,
@@ -128,23 +128,27 @@ enum Job {
     /// Reading the patch-id to mark a stage done.
     Read,
     Ship,
+    /// Setting up its worktrees (see `feature::setup`).
+    Setup,
+    /// Running Verify's checks (see `feature::verify`).
+    Verify,
 }
 
 /// Work on a feature running off the UI thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Busy {
-    project: String,
+pub(crate) struct Busy {
+    pub(crate) project: String,
     /// The feature's slug; for one being created, the slug it gets.
-    slug: String,
-    job: Job,
+    pub(crate) slug: String,
+    pub(crate) job: Job,
     /// The repository being touched, if that is the work.
-    repo: Option<String>,
+    pub(crate) repo: Option<String>,
     /// What it does, for the tasks panel: "Creating “Bulk export”".
-    what: String,
+    pub(crate) what: String,
 }
 
 /// What the work off the thread came to.
-enum Done {
+pub(crate) enum Done {
     Found {
         serial: u64,
         result: Result<Root, String>,
@@ -203,6 +207,29 @@ enum Done {
         /// unchanged: then done once merged, not now.
         squash: Vec<Action>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
+    },
+    /// Work under way says what it does now, for the tasks panel.
+    #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
+    Progress {
+        project: String,
+        slug: String,
+        job: Job,
+        what: String,
+    },
+    /// The setup of feature `slug`'s worktrees ended.
+    #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
+    SetUp {
+        project: String,
+        slug: String,
+        result: Result<(), String>,
+    },
+    /// Verify's checks of feature `slug` ran: run `n`.
+    #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
+    Verified {
+        project: String,
+        slug: String,
+        n: u32,
+        evidence: feature::verify::Evidence,
     },
 }
 
@@ -429,6 +456,12 @@ pub enum PanelOutcome {
     ShowAgent(Stage),
     /// Review this agent stage's file.
     ReviewDoc(Stage),
+    /// Let this agent stage's agent go on after a milestone stop.
+    Continue(Stage),
+    /// Run Verify's checks (again).
+    RunChecks,
+    /// Show Verify's `evidence.md`.
+    Evidence,
     /// Open this pull request's page.
     OpenPr(String),
     /// Clear this stage's mark and the later ones'.
@@ -979,7 +1012,11 @@ impl Gerdr {
 
     /// Run `work` off the thread, its result sent back as a `Done`; `busy`
     /// shows in the tasks panel meanwhile.
-    fn feature_work(&mut self, busy: Option<Busy>, work: impl FnOnce() -> Done + Send + 'static) {
+    pub(crate) fn feature_work(
+        &mut self,
+        busy: Option<Busy>,
+        work: impl FnOnce(channel::Sender<Done>) -> Done + Send + 'static,
+    ) {
         let Some(tx) = self.feature_sender() else {
             return;
         };
@@ -987,7 +1024,8 @@ impl Gerdr {
         std::thread::spawn(move || {
             // It fails only once the loop is gone: gerdr is quitting, and
             // nothing is left to show the result in.
-            let _ = tx.send(work());
+            let done = work(tx.clone());
+            let _ = tx.send(done);
         });
     }
 
@@ -1076,18 +1114,50 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Ship);
                 self.feature_shipped(&project, &slug, patch.as_deref(), &squash, result);
             }
+            Done::Progress {
+                project,
+                slug,
+                job,
+                what,
+            } => {
+                if let Some(busy) = self
+                    .features
+                    .busy
+                    .iter_mut()
+                    .find(|b| b.project == project && b.slug == slug && b.job == job)
+                {
+                    busy.what = what;
+                }
+            }
+            Done::SetUp {
+                project,
+                slug,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Setup);
+                self.setup_done(&project, &slug, result);
+            }
+            Done::Verified {
+                project,
+                slug,
+                n,
+                evidence,
+            } => {
+                self.unbusy(&project, &slug, Job::Verify);
+                self.verify_done(&project, &slug, n, evidence);
+            }
         }
     }
 
     /// `job` on feature `slug` of `project` is over.
-    fn unbusy(&mut self, project: &str, slug: &str, job: Job) {
+    pub(crate) fn unbusy(&mut self, project: &str, slug: &str, job: Job) {
         self.features
             .busy
             .retain(|b| !(b.project == project && b.slug == slug && b.job == job));
     }
 
     /// Whether feature `slug` of `project` has work running off the thread.
-    fn feature_busy(&self, project: &str, slug: &str) -> bool {
+    pub(crate) fn feature_busy(&self, project: &str, slug: &str) -> bool {
         self.features
             .busy
             .iter()
@@ -1141,7 +1211,7 @@ impl Gerdr {
 
     /// Probe open feature `slug` of `project` off the thread (see
     /// `ship::probe`); one running already goes again once it is back.
-    fn probe_feature(&mut self, project: &str, slug: &str) {
+    pub(crate) fn probe_feature(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -1161,7 +1231,7 @@ impl Gerdr {
         probed.running = true;
         probed.at = Some(Instant::now());
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(None, move || Done::Probed {
+        self.feature_work(None, move |_| Done::Probed {
             probe: ship::probe(&feature, mode),
             project,
             slug,
@@ -1243,7 +1313,7 @@ impl Gerdr {
             return;
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(None, move || Done::PlanChecked {
+        self.feature_work(None, move |_| Done::PlanChecked {
             result: patch::read(&feature),
             project,
             slug,
@@ -1272,7 +1342,7 @@ impl Gerdr {
             what: format!("Checking \u{201c}{}\u{201d}", feature.title),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move || Done::Read {
+        self.feature_work(Some(busy), move |_| Done::Read {
             result: patch::read(&feature),
             project,
             slug,
@@ -1384,7 +1454,7 @@ impl Gerdr {
         self.context_menu = None;
         self.stop_key_repeat();
         self.features.dialog = Some(NewFeatureDialog::new(id, serial, from.clone()));
-        self.feature_work(None, move || Done::Found {
+        self.feature_work(None, move |_| Done::Found {
             serial,
             result: layout::find_root(&from, &workspace_dirs, &ignore, &bases),
         });
@@ -1443,7 +1513,7 @@ impl Gerdr {
             repo: None,
             what: format!("Creating \u{201c}{title}\u{201d}"),
         };
-        self.feature_work(Some(busy), move || {
+        self.feature_work(Some(busy), move |_| {
             let result = layout::create(&root, &slug, &touched);
             Done::Created {
                 project,
@@ -1492,6 +1562,8 @@ impl Gerdr {
             }],
             shipping: Default::default(),
             runs: Default::default(),
+            setup: None,
+            verify: None,
         };
         self.features
             .all
@@ -1503,6 +1575,7 @@ impl Gerdr {
             self.open_feature(&project, &slug);
         }
         self.show_success(text);
+        self.start_setup(&project, &slug);
     }
 
     /// A left click while the new feature dialog is open.
@@ -1710,6 +1783,9 @@ impl Gerdr {
             }
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
             PanelOutcome::ReviewDoc(stage) => self.open_doc_review(&project, &slug, stage),
+            PanelOutcome::Continue(stage) => self.continue_stage_agent(&project, &slug, stage),
+            PanelOutcome::RunChecks => self.run_verify(&project, &slug),
+            PanelOutcome::Evidence => self.open_evidence(&project, &slug),
             PanelOutcome::OpenPr(url) => {
                 self.close_feature_panel();
                 let w = self.active_workspace;
@@ -1823,7 +1899,7 @@ impl Gerdr {
             what: format!("Touching {repo} for \u{201c}{}\u{201d}", feature.title),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move || {
+        self.feature_work(Some(busy), move |_| {
             let result = layout::touch(&feature, &repo);
             Done::Touched {
                 project,
@@ -1891,7 +1967,7 @@ impl Gerdr {
             ),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move || Done::Losses {
+        self.feature_work(Some(busy), move |_| Done::Losses {
             losses: layout::losses(&feature),
             project,
             slug,
@@ -1935,7 +2011,7 @@ impl Gerdr {
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // The code is read again first: a commit since the Ship check
         // would ship what no gate saw.
-        self.feature_work(Some(busy), move || {
+        self.feature_work(Some(busy), move |_| {
             let result = still_checked(&feature, patch.as_deref())
                 .map_err(|why| (why, Vec::new()))
                 .and_then(|()| {
@@ -2124,7 +2200,7 @@ impl Gerdr {
             ),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move || Done::Removed {
+        self.feature_work(Some(busy), move |_| Done::Removed {
             result: layout::remove(&feature, force),
             project,
             slug,
@@ -2605,6 +2681,8 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
+            setup: None,
+            verify: None,
         }
     }
 
