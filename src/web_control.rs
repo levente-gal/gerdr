@@ -86,6 +86,14 @@ enum FromBrowser {
     },
     /// T3 Code's app in the pane's tab took its project filter.
     Scoped { pane: String },
+    /// T3 Code's app in the pane's tab started no new thread (see
+    /// `Gerdr::t3_no_thread`): what went wrong, as a short word, and what
+    /// the page showed.
+    NoThread {
+        pane: String,
+        reason: String,
+        detail: String,
+    },
 }
 
 /// What gerdr asks the extension to do with a pane's tab.
@@ -108,6 +116,13 @@ enum ToBrowser<'a> {
     /// Keep T3 Code's app at `origin` in the pane's tab to the projects
     /// under `dirs`: the tab at another site is let be.
     Scope {
+        pane: String,
+        origin: &'a str,
+        dirs: Vec<String>,
+    },
+    /// Start a new thread in T3 Code's app at `origin` in the pane's tab,
+    /// in a project in `dirs`, once the tab shows it.
+    NewThread {
         pane: String,
         origin: &'a str,
         dirs: Vec<String>,
@@ -431,6 +446,18 @@ impl Gerdr {
                     self.t3_unscoped(pane, &reason, &detail);
                 }
             }
+            Event::Message(
+                _,
+                FromBrowser::NoThread {
+                    pane,
+                    reason,
+                    detail,
+                },
+            ) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.t3_no_thread(pane, &reason, &detail);
+                }
+            }
             Event::Message(_, FromBrowser::Scoped { pane }) => {
                 if let Some(pane) = token_pane(&pane) {
                     self.t3_scoped(pane);
@@ -505,10 +532,19 @@ impl Gerdr {
         let message = ToBrowser::Scope {
             pane: pane_token(pane),
             origin,
-            dirs: dirs
-                .iter()
-                .map(|d| d.to_string_lossy().into_owned())
-                .collect(),
+            dirs: strings(dirs),
+        };
+        self.send_to_browser(pane, &message)
+    }
+
+    /// Start a new thread in T3 Code's app at `origin` in `pane`'s tab, in
+    /// a project under `dirs` (now, or once the tab shows the app), if the
+    /// extension follows it; whether it was asked to.
+    pub fn new_thread_in_web_pane(&mut self, pane: u32, origin: &str, dirs: &[PathBuf]) -> bool {
+        let message = ToBrowser::NewThread {
+            pane: pane_token(pane),
+            origin,
+            dirs: strings(dirs),
         };
         self.send_to_browser(pane, &message)
     }
@@ -539,6 +575,13 @@ impl Gerdr {
             .get_mut(&id)
             .is_some_and(|stream| stream.write_all(&framed(&message)).is_ok())
     }
+}
+
+/// `dirs` as the extension takes them.
+fn strings(dirs: &[PathBuf]) -> Vec<String> {
+    dirs.iter()
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -627,6 +670,28 @@ mod tests {
         let scoped: FromBrowser =
             serde_json::from_str(r#"{"type":"scoped","pane":"1.2"}"#).unwrap();
         assert_eq!(scoped, FromBrowser::Scoped { pane: "1.2".into() });
+        let no_thread: FromBrowser = serde_json::from_str(
+            r#"{"type":"nothread","pane":"1.2","reason":"no-match","detail":"d"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            no_thread,
+            FromBrowser::NoThread {
+                pane: "1.2".into(),
+                reason: "no-match".into(),
+                detail: "d".into(),
+            }
+        );
+        let new_thread = serde_json::to_string(&ToBrowser::NewThread {
+            pane: "1.2".into(),
+            origin: "http://app-1.localhost:3773",
+            dirs: vec!["/w/app".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            new_thread,
+            r#"{"type":"newthread","pane":"1.2","origin":"http://app-1.localhost:3773","dirs":["/w/app"]}"#
+        );
         let scope = serde_json::to_string(&ToBrowser::Scope {
             pane: "1.2".into(),
             origin: "http://app-1.localhost:3773",

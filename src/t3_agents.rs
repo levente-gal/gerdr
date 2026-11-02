@@ -74,6 +74,9 @@ const PAIR_AGAIN: Duration = Duration::from_secs(30);
 /// How many pairing links a web pane is sent in a row, back at the
 /// sign-in page each time, before gerdr gives up and says so.
 const PAIR_TRIES: u32 = 3;
+/// How long a new thread asked of a workspace without T3 Code's app open
+/// waits for its pane to show the app (signing in included).
+const NEW_THREAD_WAIT: Duration = Duration::from_secs(120);
 /// The run states of a thread at work.
 const WORKING: [&str; 4] = ["preparing", "queued", "starting", "running"];
 /// The run state of a thread waiting for the user.
@@ -96,7 +99,7 @@ enum Page<'a> {
     App,
     /// A thread, by id.
     Thread(&'a str),
-    /// A new thread: the home page, where the app opens a draft.
+    /// A new thread, in the workspace's project.
     New,
 }
 
@@ -1094,6 +1097,9 @@ pub struct T3 {
     pub threads: Vec<T3Thread>,
     /// The link to show once a pane's browser is signed in.
     pending: Option<String>,
+    /// The folder of the workspace a new thread was asked of, and when,
+    /// started once a pane of it shows the app (see `new_t3_thread`).
+    new_thread: Option<(PathBuf, Instant)>,
     /// Whether a pairing link is being asked for.
     pairing: bool,
     /// The web panes the extension was told the folders of, for T3 Code's
@@ -1547,6 +1553,94 @@ impl crate::Gerdr {
         }
     }
 
+    /// The workspace web pane `pane` is in.
+    fn web_pane_workspace(&self, pane: u32) -> Option<usize> {
+        self.workspaces.iter().position(|ws| {
+            ws.tabs.iter().any(|tab| {
+                tab.panes.iter().any(|p| p.id == pane)
+                    || tab.expected.iter().any(|e| e.pane == pane)
+            })
+        })
+    }
+
+    /// Web pane `pane` shows T3 Code's app at `origin`: start the new
+    /// thread asked of its workspace before it had the app open, if any.
+    fn t3_start_asked(&mut self, pane: u32, origin: &str) {
+        let Some((dir, at)) = self.t3.new_thread.clone() else {
+            return;
+        };
+        if at.elapsed() > NEW_THREAD_WAIT {
+            self.t3.new_thread = None;
+            return;
+        }
+        let Some(w) = self.web_pane_workspace(pane) else {
+            return;
+        };
+        if self.workspaces[w].dir != dir {
+            return;
+        }
+        self.t3.new_thread = None;
+        let dirs = self.t3_scope(w);
+        if !self.new_thread_in_web_pane(pane, origin, &dirs) {
+            self.t3_unsteered(w);
+        }
+    }
+
+    /// A new thread for workspace `w` was left to T3 Code's own choice of
+    /// project: gerdr's extension doesn't follow the pane (see
+    /// `web_control`).
+    fn t3_unsteered(&mut self, w: usize) {
+        let name = self.workspaces.get(w).map_or("", |ws| ws.name.as_str());
+        tracing::warn!("t3 code: web pane of {name} can't be steered: new thread left to T3 Code");
+        let text = format!(
+            "T3 Code's new thread may be in another project than {name}'s: gerdr can't steer \
+             its web pane"
+        );
+        self.toast(text, crate::toast::Level::Warning);
+    }
+
+    /// T3 Code's app in web pane `pane` started no new thread in its
+    /// workspace's project (see `inT3` in the extension's worker.js):
+    /// `reason` says why in a word, `detail` what the page showed.
+    pub fn t3_no_thread(&mut self, pane: u32, reason: &str, detail: &str) {
+        let version = self.t3.server.as_ref().and_then(|s| s.version.as_deref());
+        let version = version.unwrap_or("unknown");
+        let name = self.web_pane_workspace(pane).map_or_else(
+            || "this workspace".to_owned(),
+            |w| self.workspaces[w].name.clone(),
+        );
+        let where_ = format!("web pane {pane} ({name}), T3 Code {version}");
+        let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+        match reason {
+            // T3 Code works: the folder isn't one of its projects (yet).
+            "no-match" => {
+                tracing::warn!("t3 code: no new thread in {where_}: {detail}");
+                let text = format!(
+                    "T3 Code started no thread in {name}: none of its projects is in its folder"
+                );
+                self.toast_with(text, crate::toast::Level::Warning, Some(open_log));
+            }
+            // The app went elsewhere each time it was asked.
+            "refused" => {
+                tracing::warn!("t3 code: no new thread in {where_}: {detail}");
+                let text = format!("T3 Code didn't start a thread in {name}: try again");
+                self.toast(text, crate::toast::Level::Warning);
+            }
+            _ => {
+                tracing::error!(
+                    "t3 code: no new thread in {where_}: {reason}: {detail}. gerdr starts it in \
+                     assets/web-extension/worker.js `inT3`, which reads the app's React tree, \
+                     not T3 Code's API: this T3 Code version likely changed it"
+                );
+                let text = format!(
+                    "Couldn't start a T3 Code thread in {name}: gerdr can't find how in \
+                     T3 Code {version}"
+                );
+                self.toast_with(text, crate::toast::Level::Error, Some(open_log));
+            }
+        }
+    }
+
     /// Web pane `pane` moved to another workspace: one showing T3 Code's
     /// app shows that one's projects now.
     pub(crate) fn t3_pane_moved(&mut self, pane: u32) {
@@ -1742,8 +1836,10 @@ impl crate::Gerdr {
     }
 
     /// Start a new thread in T3 Code's app for workspace `w`, as a new
-    /// agent: its home page, where the app opens a draft (in the project
-    /// it used last), in the workspace's pane showing it or a new tab.
+    /// agent: a draft of the workspace's project, in its pane showing the
+    /// app or a new tab, by gerdr's extension (see `inT3` in its
+    /// worker.js); without it, the app's home page, which opens a draft in
+    /// the project it likes.
     pub fn new_t3_thread(&mut self, w: usize) {
         self.show_t3(w, Page::New);
     }
@@ -1768,21 +1864,36 @@ impl crate::Gerdr {
             // One at another host (opened before workspaces had their
             // own) moves to the workspace's: its filter is its own there.
             let moves = origin_of(&url) != Some(own.as_str());
-            if moves && page == Page::App {
+            if moves && matches!(page, Page::App | Page::New) {
                 let target = at_origin(&url, &own);
                 self.navigate_web_pane(pane, &target);
+                if page == Page::App {
+                    return;
+                }
+            }
+            if page == Page::New {
+                let dirs = self.t3_scope(w);
+                if !self.new_thread_in_web_pane(pane, &own, &dirs) {
+                    // Without gerdr's extension in its browser it can't be
+                    // told to: a tab of its own at the app's home page,
+                    // which opens a draft where the app likes.
+                    self.launch(&link(&own), crate::launch::Place::Tab);
+                    self.t3_unsteered(w);
+                }
                 return;
             }
             let target = link(&own);
-            // At its home page already, the app left it for a draft: a
-            // new thread loads it again all the same.
-            let goes = page == Page::New || url != target;
-            if page != Page::App && goes && !self.navigate_web_pane(pane, &target) {
+            if page != Page::App && url != target && !self.navigate_web_pane(pane, &target) {
                 // Without gerdr's extension in its browser it can't be
                 // told where to go: a tab of its own then.
                 self.launch(&target, crate::launch::Place::Tab);
             }
             return;
+        }
+        if page == Page::New
+            && let Some(ws) = self.workspaces.get(w)
+        {
+            self.t3.new_thread = Some((ws.dir.clone(), Instant::now()));
         }
         if w != self.active_workspace && w < self.workspaces.len() {
             self.switch_workspace(w);
@@ -1920,6 +2031,7 @@ impl crate::Gerdr {
         if !path.starts_with("/pair") {
             self.t3.paired_panes.remove(&pane);
             self.scope_t3(pane, origin);
+            self.t3_start_asked(pane, origin);
         }
         if self.t3.pending.is_none() || path.starts_with("/pair") {
             return;
