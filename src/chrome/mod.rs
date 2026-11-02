@@ -215,6 +215,7 @@ pub struct Chrome {
     blink_dot: Cached<(Theme, f64)>,
     /// One per bar over a terminal pane.
     pane_bars: Vec<Cached<(PaneBarView, Theme, f64)>>,
+    pane_grips: Vec<Cached<GripKey>>,
     /// The button over a zoomed pane: lit or not, theme, scale.
     unzoom: Cached<(bool, Theme, f64)>,
     /// The strip along the focused pane's top edge.
@@ -266,6 +267,7 @@ impl Chrome {
             spinner: Cached::default(),
             blink_dot: Cached::default(),
             pane_bars: Vec::new(),
+            pane_grips: Vec::new(),
             unzoom: Cached::default(),
             focus_strip: Cached::default(),
             pane_drop: Cached::default(),
@@ -628,8 +630,34 @@ impl Chrome {
             parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
         }
 
-        // The strip marking the focused pane, then the pane bars, both on
-        // the apps and under everything else.
+        // The pane bars, on the apps and under everything else.
+        self.pane_bars
+            .resize_with(view.pane_bars.len(), Cached::default);
+        self.pane_grips
+            .resize_with(view.pane_bars.len(), Cached::default);
+        let bars = self.pane_bars.iter_mut().zip(self.pane_grips.iter_mut());
+        for ((cached, grip_cache), bar) in bars.zip(view.pane_bars) {
+            let (loc, size, alpha) = bar.placement();
+            if size.w > 0 && size.h > 0 {
+                push_dots(&mut parts, dot, bar.blinker(), alpha * blink);
+                let buffer = cached.get((bar.still(), theme, scale), |(bar, ..)| {
+                    painter.pane_bar(bar, scale, theme.palette())
+                });
+                parts.push(Part::new(buffer, loc, size, alpha));
+            }
+            // A floating bar's grip stays, under its pill while it shows.
+            if let Some(grip) = bar.grip() {
+                let buffer = grip_cache.get(
+                    (grip.size, bar.focused, theme, scale),
+                    |(size, focused, ..)| {
+                        painter.pane_handle(*size, *focused, scale, theme.palette())
+                    },
+                );
+                parts.push(Part::new(buffer, grip.loc, grip.size, 1.0));
+            }
+        }
+        // The strip marking the focused pane, on the apps and under the
+        // pane bars, whose pills hang over it.
         if let Some(pane) = view.focused_pane {
             let strip = focus_strip_rect(pane);
             if strip.size.w > 0 && strip.size.h > 0 {
@@ -640,19 +668,6 @@ impl Chrome {
                     });
                 parts.push(Part::new(buffer, strip.loc, strip.size, 1.0));
             }
-        }
-        self.pane_bars
-            .resize_with(view.pane_bars.len(), Cached::default);
-        for (cached, bar) in self.pane_bars.iter_mut().zip(view.pane_bars) {
-            let (loc, size, alpha) = bar.placement();
-            if size.w <= 0 || size.h <= 0 {
-                continue;
-            }
-            push_dots(&mut parts, dot, bar.blinker(), alpha * blink);
-            let buffer = cached.get((bar.still(), theme, scale), |(bar, ..)| {
-                painter.pane_bar(bar, scale, theme.palette())
-            });
-            parts.push(Part::new(buffer, loc, size, alpha));
         }
         // Where a pane held by its bar would land: over the apps and the
         // tab strip, after the bars so it goes under them.
@@ -742,6 +757,10 @@ fn push_dots(
         }
     }
 }
+
+/// What a floating bar's grip is drawn from: its size, whether its pane
+/// is focused, the theme and the scale.
+type GripKey = (Size<i32, Logical>, bool, Theme, f64);
 
 /// A buffer plus the inputs it was drawn from.
 struct Cached<K> {

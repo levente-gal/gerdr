@@ -175,6 +175,7 @@ fn tabs() -> Vec<TabView> {
 fn pane_bar() -> PaneBarView {
     PaneBarView {
         rect: Rect::new((0, 0).into(), (600, super::PANE_BAR_HEIGHT).into()),
+        grip: Rect::default(),
         label: "npm run dev -- --port 3000".into(),
         note: Some("exited"),
         status: BarStatus::Exited,
@@ -711,7 +712,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 /// The surfaces the motion work added, apart so the table above keeps
 /// its shape: a menu with hints, a pinned help panel, a toast with a
 /// button, a tooltip, the placeholder waiting and timed out, the spinner.
-const OVERLAYS: [&str; 8] = [
+const OVERLAYS: [&str; 10] = [
     "full_menu",
     "help_pinned",
     "toast_action",
@@ -720,6 +721,8 @@ const OVERLAYS: [&str; 8] = [
     "placeholder_timed_out",
     "spinner",
     "blink_dot",
+    "pane_pill",
+    "pane_handle",
 ];
 
 fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -737,7 +740,28 @@ fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.placeholder(&placeholder(true), Some(PlaceholderButton::Retry), scale, p)),
         hash(painter.spinner(5, scale, p)),
         hash(super::blink_dot(super::Dot::Working, scale, p)),
+        hash(painter.pane_bar(&pane_pill(), scale, p)),
+        hash(painter.pane_handle((600, super::PANE_GRIP).into(), true, scale, p)),
     ]
+}
+
+/// A web page's bar out as its pill, the copy button hovered.
+fn pane_pill() -> PaneBarView {
+    let pane = Rect::new((0, 0).into(), (900, 400).into());
+    let buttons = BarButtons::Web { history: true };
+    PaneBarView {
+        rect: super::pane_bar_rect(pane, buttons),
+        grip: super::pane_grip_rect(pane),
+        label: "http://localhost:3773/7a88cf7d-c216-4867/d0734377-8eac".into(),
+        note: None,
+        status: BarStatus::Idle,
+        can_restart: true,
+        can_back: true,
+        buttons,
+        zoom: Some(false),
+        hover: Some(BarButton::CopyUrl),
+        ..pane_bar()
+    }
 }
 
 const CASES: [(Theme, f64); 4] = [
@@ -808,7 +832,7 @@ const GOLDEN: [[u64; 11]; 4] = [
 ];
 
 /// The recorded hashes of `OVERLAYS`, per case in `CASES`.
-const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
+const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
     // Dark at 1
     [
         0x639ee0c7e0afc916, // full_menu
@@ -819,6 +843,8 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
         0x0b01f4540b304877, // placeholder_timed_out
         0x7a426c6be23d66a6, // spinner
         0x5f7da883de161583, // blink_dot
+        0x693a761f12f44c57, // pane_pill
+        0x14c1b5fef3447fe5, // pane_handle
     ],
     // Dark at 2
     [
@@ -830,6 +856,8 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
         0x430bc916e7ac895b, // placeholder_timed_out
         0x2f28c94a7002e520, // spinner
         0x3938d7cb530659b5, // blink_dot
+        0xeb8497a128455a3a, // pane_pill
+        0x190a245af3371715, // pane_handle
     ],
     // Light at 1
     [
@@ -841,6 +869,8 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
         0xe7444f2e3fd03c3f, // placeholder_timed_out
         0x6cb91debc8d3c473, // spinner
         0x55c89cc3e0120adb, // blink_dot
+        0x384a5c439f6867e7, // pane_pill
+        0x64ee76af43172b3d, // pane_handle
     ],
     // Light at 2
     [
@@ -852,6 +882,8 @@ const GOLDEN_OVERLAYS: [[u64; 8]; 4] = [
         0x2a2964b70d0b1b41, // placeholder_timed_out
         0x5ad35f5c0797002e, // spinner
         0x349f0f6edf45454d, // blink_dot
+        0x9f76f3470b72f011, // pane_pill
+        0x3973c1a54dd3decd, // pane_handle
     ],
 ];
 
