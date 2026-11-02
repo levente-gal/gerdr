@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{Feature, Repo};
+use super::{Feature, Repo, hook};
 
 /// The folder features' worktrees go in, under a root.
 pub const FEATURES_DIR: &str = ".features";
@@ -323,6 +323,9 @@ fn build(
         Vec::new()
     };
     let ignores = keep_out(root)?;
+    for repo in repos.iter().filter(|r| r.touched) {
+        guard_worktree(repo, branch);
+    }
     Ok(Created {
         repos,
         dir: dir.to_path_buf(),
@@ -351,7 +354,7 @@ fn commit_of(main: &Path, base: &str) -> Result<String, String> {
 
 /// The ref `losses` and `remove` count commits from for `repo`: its base
 /// branch if it is there, else origin's, else the commit it started at.
-fn base_ref(repo: &Repo) -> String {
+pub(super) fn base_ref(repo: &Repo) -> String {
     for name in [repo.base.clone(), format!("origin/{}", repo.base)] {
         let spec = format!("{name}^{{commit}}");
         if git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok() {
@@ -526,11 +529,28 @@ pub fn touch(feature: &Feature, repo: &str) -> Result<Repo, String> {
     let branch = feature.branch();
     git(&found.worktree, &["switch", "-q", "-c", &branch])
         .map_err(|err| format!("{repo}: {err}"))?;
-    Ok(Repo {
+    let repo = Repo {
         touched: true,
-        branch: Some(branch),
+        branch: Some(branch.clone()),
         ..found.clone()
-    })
+    };
+    guard_worktree(&repo, &branch);
+    Ok(repo)
+}
+
+/// Guard `branch` of `repo` and make sure of the `pre-push` hook in its
+/// worktree's hooks folder. Best effort: a feature can be made without
+/// it, and `ship::probe` makes sure of both again; a failure is logged.
+fn guard_worktree(repo: &Repo, branch: &str) {
+    if let Err(err) = hook::guard(&repo.main, branch) {
+        tracing::warn!("guarding {branch} of {}: {err}", repo.name);
+    }
+    if let hook::Guard::Off(why) = hook::ensure(&repo.worktree) {
+        tracing::warn!(
+            "pushes from {} aren't guarded: {why}",
+            repo.worktree.display()
+        );
+    }
 }
 
 /// What taking `feature`'s worktrees down would lose, one line per
@@ -614,7 +634,13 @@ pub fn remove(feature: &Feature, force: bool) -> Result<(), String> {
         } else if let Err(err) = git(&repo.main, &["worktree", "prune"]) {
             failed.push(format!("{}: {err}", repo.name));
         }
-        if !repo.touched || !branch_exists(&repo.main, &branch) {
+        if !repo.touched {
+            continue;
+        }
+        if let Err(err) = hook::unguard(&repo.main, &branch) {
+            tracing::warn!("unguarding {branch} of {}: {err}", repo.name);
+        }
+        if !branch_exists(&repo.main, &branch) {
             continue;
         }
         if !force {
@@ -677,7 +703,7 @@ fn clear_dir(dir: &Path, force: bool) -> Result<(), String> {
 }
 
 /// `path` as the user reads it: `~/…` under the home folder.
-fn shown(path: &Path) -> String {
+pub(super) fn shown(path: &Path) -> String {
     crate::paths::tilde(path, crate::home_dir().as_deref())
 }
 
@@ -693,12 +719,27 @@ fn folder_name(path: &Path) -> String {
 /// no `GIT_DIR`-style variables of a caller in the way. Like
 /// `git_ops::exec` but synchronous and short: features run it off the UI
 /// thread already.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(super) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_bytes(dir, args, None).map(|out| String::from_utf8_lossy(&out).into_owned())
+}
+
+/// `git`, fed `input` on its stdin, printing bytes.
+pub(super) fn git_bytes(
+    dir: &Path,
+    args: &[&str],
+    input: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
@@ -713,11 +754,27 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t");
-    let out = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|err| format!("couldn't run git: {err}"))?;
+    // Fed from a thread of its own, so a git printing while it reads can't
+    // block on a full pipe.
+    let feed = input.zip(child.stdin.take()).map(|(input, mut stdin)| {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            // A git that stops reading early says why itself.
+            let _ = stdin.write_all(&input);
+        })
+    });
+    let out = child
+        .wait_with_output()
+        .map_err(|err| format!("couldn't run git: {err}"))?;
+    if let Some(feed) = feed {
+        // A feeder that panicked fed less: git said so already.
+        let _ = feed.join();
+    }
     if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        return Ok(out.stdout);
     }
     let err = String::from_utf8_lossy(&out.stderr);
     // The last line says why; the ones before it are hints.
@@ -839,6 +896,10 @@ mod tests {
         );
         // The main worktree doesn't see the feature folder.
         assert_eq!(run(&repo, &["status", "--porcelain"]), "");
+        // Its branch is guarded, and pushes go through gerdr's hook.
+        assert!(hook::guarded(&repo, "feature/login"));
+        let pre_push = std::fs::read_to_string(repo.join(".git/hooks/pre-push")).unwrap();
+        assert_eq!(pre_push, hook::HOOK);
 
         let f = feature_of(&root, created, "login");
         assert!(losses(&f).is_empty());
@@ -858,6 +919,7 @@ mod tests {
         assert!(branch_exists(&repo, "feature/login"));
 
         remove(&f, true).unwrap();
+        assert!(!hook::guarded(&repo, "feature/login"));
         assert!(!dir.exists());
         assert!(!repo.join(".features").exists());
         assert!(!branch_exists(&repo, "feature/login"));
@@ -1043,8 +1105,10 @@ mod tests {
                 .unwrap_err()
                 .contains("no repository nope")
         );
+        assert!(!hook::guarded(&api, "feature/auth"));
         let touched = touch(&f, "api").unwrap();
         assert!(touched.touched);
+        assert!(hook::guarded(&api, "feature/auth"));
         assert_eq!(touched.branch.as_deref(), Some("feature/auth"));
         assert_eq!(
             run(&touched.worktree, &["branch", "--show-current"]).trim(),

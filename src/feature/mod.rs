@@ -284,8 +284,11 @@ impl Feature {
     /// The first bound stage marked on other code than `patch`'s: from it
     /// on, the marks no longer hold.
     pub fn stale(&self, patch: &str) -> Option<Stage> {
-        let _ = patch;
-        None
+        Stage::ALL.into_iter().filter(|s| s.bound()).find(|s| {
+            self.marks
+                .get(s)
+                .is_some_and(|m| m.patch.as_deref() != Some(patch))
+        })
     }
 
     /// The code is now `patch`'s: clear the marks that no longer hold, from
@@ -293,8 +296,13 @@ impl Feature {
     /// again"). A done feature is left as it is: it shipped. Returns the
     /// stage it goes back to.
     pub fn invalidate(&mut self, patch: &str, now: u64) -> Option<Stage> {
-        let _ = (patch, now);
-        None
+        if matches!(self.status, Status::Done | Status::Abandoned) {
+            return None;
+        }
+        let stage = self.stale(patch)?;
+        self.marks.retain(|s, _| *s < stage);
+        self.log(now, format!("Code changed: {} to do again", stage.label()));
+        Some(stage)
     }
 
     /// Add `what` to its history at `now`.
@@ -322,8 +330,106 @@ pub fn now() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::{
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
+
+    /// A folder of its own under the system's temporary folder, removed
+    /// when dropped.
+    pub(crate) struct Temp(pub(crate) PathBuf);
+
+    impl Temp {
+        pub(crate) fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "gerdr-feature-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir.canonicalize().unwrap())
+        }
+
+        /// A repository `name` in it on branch `branch`, with a commit.
+        pub(crate) fn repo(&self, name: &str, branch: &str) -> PathBuf {
+            let dir = self.0.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            run(&dir, &["init", "-q", "-b", branch]);
+            commit(&dir, "a", "first");
+            dir
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `git -C dir args`, as features run it.
+    pub(crate) fn try_run(dir: &Path, args: &[&str]) -> Result<String, String> {
+        layout::git(dir, args)
+    }
+
+    pub(crate) fn run(dir: &Path, args: &[&str]) -> String {
+        try_run(dir, args).unwrap_or_else(|err| panic!("git {args:?}: {err}"))
+    }
+
+    /// Write `text` to `file` in `dir` and commit it.
+    pub(crate) fn commit(dir: &Path, file: &str, text: &str) {
+        std::fs::write(dir.join(file), text).unwrap();
+        run(dir, &["add", file]);
+        run(dir, &["commit", "-q", "-m", text]);
+    }
+
+    /// A feature over repositories `names` under `t`, all of them touched
+    /// but those in `untouched`, each worktree on `feature/f` from main.
+    pub(crate) fn feature_over(t: &Temp, names: &[&str], untouched: &[&str]) -> Feature {
+        let dir = t.0.join(".features/f");
+        std::fs::create_dir_all(&dir).unwrap();
+        let repos = names
+            .iter()
+            .map(|name| {
+                let main = t.repo(name, "main");
+                let worktree = dir.join(name);
+                let touched = !untouched.contains(name);
+                let w = worktree.to_str().unwrap();
+                if touched {
+                    run(&main, &["worktree", "add", "-q", "-b", "feature/f", w]);
+                } else {
+                    run(&main, &["worktree", "add", "-q", "--detach", w]);
+                }
+                Repo {
+                    name: (*name).into(),
+                    base_commit: run(&main, &["rev-parse", "main"]).trim().into(),
+                    main,
+                    base: "main".into(),
+                    worktree,
+                    touched,
+                    branch: touched.then(|| "feature/f".into()),
+                }
+            })
+            .collect();
+        Feature {
+            version: VERSION,
+            slug: "f".into(),
+            title: "Log in".into(),
+            project: "p".into(),
+            created: 1,
+            root: t.0.clone(),
+            dir,
+            multi: true,
+            repos,
+            status: Status::Open,
+            marks: Default::default(),
+            history: Vec::new(),
+            shipping: Default::default(),
+        }
+    }
 
     pub(crate) fn feature(slug: &str, created: u64) -> Feature {
         Feature {
@@ -380,6 +486,44 @@ mod tests {
         let len = f.history.len();
         assert!(!f.untick(Stage::Ship, 6));
         assert_eq!(f.history.len(), len);
+    }
+
+    #[test]
+    fn a_code_change_sends_bound_marks_back() {
+        let mut f = feature("a", 1);
+        f.tick(1, "you", Some("p1"));
+        f.tick(1, "you", Some("p1"));
+        // Discover and Plan keep no patch: they hold whatever the code.
+        assert!(f.marks[&Stage::Plan].patch.is_none());
+        assert_eq!(f.stale("p2"), None);
+        f.tick(2, "you", Some("p1"));
+        f.tick(3, "you", Some("p2"));
+        assert_eq!(f.stale("p1"), Some(Stage::Verify));
+        assert_eq!(f.stale("p2"), Some(Stage::Build));
+        assert_eq!(f.invalidate("p1", 5), Some(Stage::Verify));
+        assert_eq!(f.current(), Some(Stage::Verify));
+        assert!(f.is_done(Stage::Build));
+        assert_eq!(
+            f.history.last().unwrap().what,
+            "Code changed: Verify to do again"
+        );
+        assert_eq!(f.invalidate("p1", 6), None);
+        // A mark without a patch never held for any code.
+        f.marks.get_mut(&Stage::Build).unwrap().patch = None;
+        assert_eq!(f.stale("p1"), Some(Stage::Build));
+    }
+
+    #[test]
+    fn a_done_feature_is_not_invalidated() {
+        let mut f = feature("a", 1);
+        for _ in 0..8 {
+            f.tick(1, "you", Some("p1"));
+        }
+        assert_eq!(f.status, Status::Done);
+        assert_eq!(f.invalidate("p2", 2), None);
+        assert_eq!(f.current(), None);
+        f.status = Status::Abandoned;
+        assert_eq!(f.invalidate("p2", 2), None);
     }
 
     #[test]
