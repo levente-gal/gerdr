@@ -311,6 +311,7 @@ impl Gerdr {
         tasks.extend(git_tasks(&git_ops::turns()));
         tasks.extend(import_task(crate::profile_import::importing()));
         tasks.extend(kept_tasks(&self.kept));
+        tasks.extend(self.feature_tasks());
         tasks
     }
 
@@ -410,6 +411,7 @@ impl Gerdr {
         self.worktrees.close();
         self.project_menu = None;
         self.scrollback = None;
+        self.features.panel = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }

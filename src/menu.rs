@@ -118,6 +118,13 @@ pub enum MenuAction {
     Repos,
     /// Open the inbox.
     Inbox,
+    /// Open the feature panel (the new feature dialog without features).
+    Features,
+    /// The new feature dialog, from the folder of workspace `.0` (else the
+    /// active one's; see `Gerdr::open_new_feature`).
+    NewFeature(Option<usize>),
+    /// The feature panel on feature `.1` of project `.0`.
+    OpenFeature(String, String),
     /// A toast's "Undo" after inbox items were dismissed or snoozed: list
     /// the items (by `inbox::ItemId`) of project `project` (by id) again,
     /// and mark the service errors `unsee` as not looked at again.
@@ -430,6 +437,9 @@ impl Gerdr {
             MenuAction::DeleteWorktree(path) => self.delete_merged_worktree(&path),
             MenuAction::Repos => self.open_repos(),
             MenuAction::Inbox => self.open_inbox(None),
+            MenuAction::Features => self.open_features(),
+            MenuAction::NewFeature(at) => self.open_new_feature(at),
+            MenuAction::OpenFeature(project, slug) => self.open_feature(&project, &slug),
             MenuAction::InboxRestore {
                 project,
                 ids,

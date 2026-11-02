@@ -2094,6 +2094,7 @@ mod tests {
                             active: None,
                             project: name.map(str::to_owned),
                             header_lit: lit,
+                            features: Vec::new(),
                             state: SidebarState::default(),
                         };
                         painter.sidebar_view(&view, size, scale, theme.palette());

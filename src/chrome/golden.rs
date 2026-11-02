@@ -726,6 +726,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
                 active: Some(0),
                 project: Some("aft".into()),
                 header_lit: true,
+                features: Vec::new(),
                 state: SidebarState::default(),
             },
             (200, 400).into(),
@@ -1181,6 +1182,7 @@ fn dump_overlays() {
                     active: Some(0),
                     project: Some("aft".into()),
                     header_lit: false,
+                    features: Vec::new(),
                     state: SidebarState::default(),
                 },
                 (260, 520).into(),
@@ -1205,6 +1207,7 @@ fn dump_overlays() {
                     active: Some(0),
                     project: Some("aft".into()),
                     header_lit: false,
+                    features: Vec::new(),
                     state: SidebarState {
                         rows: vec![hovered],
                         ..SidebarState::default()
@@ -1239,6 +1242,7 @@ fn dump_overlays() {
                     active: Some(0),
                     project: Some("aft".into()),
                     header_lit: false,
+                    features: Vec::new(),
                     state: SidebarState {
                         rows: vec![RowState {
                             pick: Some(1),
@@ -1398,6 +1402,224 @@ fn dump_status() {
             &format!("tasks_panel_{tag}"),
             painter.tasks_panel(&status_panel(), STATUS_OUTPUT.into(), footer, scale, p),
             px(panel.size.w + 2 * super::SHADOW),
+        );
+    }
+}
+
+/// The new feature dialog over three repositories, the second unticked,
+/// the keyboard on the title.
+fn new_feature() -> super::NewFeatureView {
+    let repo = |name: &str, base: &str, touched| super::NewFeatureRepo {
+        name: name.into(),
+        base: base.into(),
+        touched,
+        fixed: false,
+    };
+    super::NewFeatureView {
+        project: "aft".into(),
+        title: Line::from("Bulk export of invoices"),
+        focus: None,
+        root: "~/Work/aft".into(),
+        root_failed: false,
+        repos: vec![
+            repo("api", "dev", true),
+            repo("shared", "main", false),
+            repo("web", "dev", true),
+        ],
+        top: 0,
+        error: None,
+        hover: Some(super::NewFeatureHit::Button(1)),
+        keys: vec![("Space", "tick"), ("Esc", "close")],
+    }
+}
+
+/// The feature panel on a feature over `repos` repositories (one alone
+/// is the single-repository case), two stages done, Build current.
+fn feature_panel(repos: usize) -> super::FeaturePanelView {
+    use super::{FeatureRepoRow, StageMark, StageRow};
+    use crate::feature::Stage;
+    let names = ["api", "shared", "web"];
+    let repos = (0..repos)
+        .map(|i| FeatureRepoRow {
+            name: names[i % names.len()].into(),
+            line: if i == 1 {
+                "context at dev".into()
+            } else {
+                "feature/bulk-export".into()
+            },
+            touched: i != 1,
+            busy: false,
+        })
+        .collect();
+    let stages = Stage::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, stage)| {
+            let (mark, detail) = match i {
+                0 | 1 => (StageMark::Done, "done 2h ago by you".to_owned()),
+                2 => (StageMark::Current, stage.about().to_owned()),
+                _ => (StageMark::Later, stage.about().to_owned()),
+            };
+            StageRow {
+                label: stage.label().into(),
+                detail,
+                mark,
+            }
+        })
+        .collect();
+    let hints = [
+        ("Enter", "mark done"),
+        ("Ctrl+O", "open tab"),
+        ("Ctrl+C", "copy path"),
+        ("Ctrl+N", "new"),
+        ("Del", "abandon"),
+        ("Esc", "close"),
+    ];
+    super::FeaturePanelView {
+        title: "Bulk export of invoices".into(),
+        sub: "bulk-export \u{b7} ~/Work/aft/.features/bulk-export".into(),
+        which: Some((0, 2)),
+        repos,
+        stages,
+        cursor: 0,
+        repo_top: 0,
+        remove: "Abandon\u{2026}",
+        hover: None,
+        hints: hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into(),
+    }
+}
+
+/// The sidebar with two open features under its workspaces, the second
+/// under the pointer.
+fn features_sidebar() -> SidebarView {
+    use super::{FeatureRowView, StageMark};
+    let marks = |done: usize| {
+        (0..8)
+            .map(|i| match i {
+                i if i < done => StageMark::Done,
+                i if i == done => StageMark::Current,
+                _ => StageMark::Later,
+            })
+            .collect()
+    };
+    SidebarView {
+        workspaces: workspaces(),
+        agents: agents(),
+        active: Some(0),
+        project: Some("aft".into()),
+        header_lit: false,
+        features: vec![
+            FeatureRowView {
+                title: "Bulk export of invoices".into(),
+                marks: marks(2),
+            },
+            FeatureRowView {
+                title: "A feature with a title far too long to fit".into(),
+                marks: marks(6),
+            },
+        ],
+        state: SidebarState {
+            features: vec![0, 16],
+            ..SidebarState::default()
+        },
+    }
+}
+
+const FEATURE_OUTPUT: (i32, i32) = (870, 720);
+
+fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = FEATURE_OUTPUT.into();
+    vec![
+        hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
+        hash(painter.feature_panel(&feature_panel(1), size, scale, p)),
+        hash(painter.feature_panel(&feature_panel(3), size, scale, p)),
+        hash(painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p)),
+    ]
+}
+
+const FEATURES: [&str; 4] = [
+    "new_feature",
+    "feature_panel",
+    "feature_panel_multi",
+    "sidebar_features",
+];
+
+/// The recorded hashes of `FEATURES`, per case in `CASES`.
+const GOLDEN_FEATURES: [[u64; 4]; 4] = [
+    // Dark at 1
+    [
+        0x3971f123590282cf, // new_feature
+        0x869764fa3d9048d7, // feature_panel
+        0xde9d2405310235e7, // feature_panel_multi
+        0xa9c315b7044804cf, // sidebar_features
+    ],
+    // Dark at 2
+    [
+        0xe31b862ecc9c736c, // new_feature
+        0x31307a3926bbc629, // feature_panel
+        0x5437f7692eaeff36, // feature_panel_multi
+        0x16881e74e80d5fee, // sidebar_features
+    ],
+    // Light at 1
+    [
+        0x97058170077917ea, // new_feature
+        0x3abb7fb4ebb6164f, // feature_panel
+        0x0608e5100d8d1171, // feature_panel_multi
+        0xd73830a02a3b09da, // sidebar_features
+    ],
+    // Light at 2
+    [
+        0xa777fc8159717dcc, // new_feature
+        0x0dcda199b0dbc637, // feature_panel
+        0x71310a3466763ea3, // feature_panel_multi
+        0x5dde9940ceb74f62, // sidebar_features
+    ],
+];
+
+#[test]
+fn the_feature_surfaces_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_FEATURES.iter().map(|row| row.as_slice()).collect();
+    check(&FEATURES, &golden, paint_features);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the feature surfaces there.
+#[test]
+fn dump_features() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = FEATURE_OUTPUT.into();
+    let shadow = 2 * super::SHADOW;
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        let dialog = super::new_feature_layout(size, 3, false).panel;
+        dump(
+            &dir,
+            &format!("new_feature_{tag}"),
+            painter.new_feature_dialog(&new_feature(), size, scale, p),
+            px(dialog.size.w + shadow),
+        );
+        for (name, n) in [("feature_panel", 1), ("feature_panel_multi", 3)] {
+            let view = feature_panel(n);
+            let panel = super::feature_panel_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.feature_panel(&view, size, scale, p),
+                px(panel.size.w + shadow),
+            );
+        }
+        dump(
+            &dir,
+            &format!("sidebar_features_{tag}"),
+            painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p),
+            px(260),
         );
     }
 }
