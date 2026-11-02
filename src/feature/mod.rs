@@ -13,14 +13,24 @@
 //!   repository: the ones the feature changes ("touched") on branch
 //!   `feature/<slug>`, the others detached at their base, as context.
 //!
-//! In this first increment every stage is a manual tick: the user marks it
-//! done in the feature panel and gerdr records when. Later increments run
-//! the stages' agents and checks, and fill the ticks themselves; the record
-//! keeps its shape.
+//! Stages are manual ticks for now: the user marks one done in the feature
+//! panel and gerdr records when. Later increments run the stages' agents
+//! and checks, and fill the ticks themselves; the record keeps its shape.
+//!
+//! The ticks from Build on are bound to the code they were given on: the
+//! feature's patch-id (see `patch`). When the code changes, those ticks no
+//! longer hold, and the feature goes back to Build (`Feature::invalidate`).
+//! Ship is never a tick: gerdr ships the feature (see `ship`) once every
+//! other stage holds, by opening pull requests or by squashing it into the
+//! base branch, and a `pre-push` hook (see `hook`) refuses to push a
+//! feature's branch that gerdr didn't clear.
 
 #![allow(dead_code)]
 
+pub mod hook;
 pub mod layout;
+pub mod patch;
+pub mod ship;
 pub mod store;
 
 use std::{collections::BTreeMap, path::PathBuf};
@@ -83,6 +93,25 @@ impl Stage {
             Self::Ship => "Merge into main, or open the pull requests",
         }
     }
+
+    /// Whether its mark is bound to the code: holds only while the
+    /// feature's patch-id is the one it was given on. Build and every
+    /// stage after it.
+    pub fn bound(self) -> bool {
+        self >= Self::Build
+    }
+}
+
+/// How a project's features ship, from its store file's
+/// `"workflow": {"ship": ...}`; without it, per repository: a pull request
+/// when its `origin` is on GitHub, else a squash into its base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShipMode {
+    /// Push `feature/<slug>` and open a pull request into the base.
+    Pr,
+    /// Squash `feature/<slug>` into the base in the main worktree.
+    Squash,
 }
 
 /// Where a feature stands as a whole.
@@ -107,6 +136,36 @@ pub struct Mark {
     pub by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// The feature's patch-id when it was marked, for a bound stage (see
+    /// `Stage::bound`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+}
+
+/// A pull request a feature opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pr {
+    /// The repository's name, as in `Repo::name`.
+    pub repo: String,
+    pub url: String,
+}
+
+/// How far shipping a feature got.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shipping {
+    /// The pull requests opened, in the order they were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prs: Vec<Pr>,
+    /// When a squash into the base started in a tab (unix seconds): the
+    /// feature is done once its branches read as merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squash_at: Option<u64>,
+}
+
+impl Shipping {
+    pub fn is_empty(&self) -> bool {
+        self.prs.is_empty() && self.squash_at.is_none()
+    }
 }
 
 /// One of the project's repositories, as the feature has it.
@@ -168,6 +227,8 @@ pub struct Feature {
     pub marks: BTreeMap<Stage, Mark>,
     #[serde(default)]
     pub history: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Shipping::is_empty")]
+    pub shipping: Shipping,
 }
 
 impl Feature {
@@ -182,10 +243,11 @@ impl Feature {
         self.marks.contains_key(&stage)
     }
 
-    /// Mark the current stage done at `now`, by `by`; when it is Ship, the
-    /// feature is done. Only the current stage can be ticked: stages go in
-    /// order. Returns the stage ticked, or `None` when there is none.
-    pub fn tick(&mut self, now: u64, by: &str) -> Option<Stage> {
+    /// Mark the current stage done at `now`, by `by`, on the code whose
+    /// patch-id is `patch` (kept for a bound stage only); when it is Ship,
+    /// the feature is done. Only the current stage can be ticked: stages
+    /// go in order. Returns the stage ticked, or `None` when there is none.
+    pub fn tick(&mut self, now: u64, by: &str, patch: Option<&str>) -> Option<Stage> {
         let stage = self.current()?;
         self.marks.insert(
             stage,
@@ -193,6 +255,7 @@ impl Feature {
                 at: now,
                 by: by.to_owned(),
                 note: String::new(),
+                patch: patch.filter(|_| stage.bound()).map(str::to_owned),
             },
         );
         if stage == Stage::Ship {
@@ -216,6 +279,22 @@ impl Feature {
         }
         self.log(now, format!("{} to do again", stage.label()));
         true
+    }
+
+    /// The first bound stage marked on other code than `patch`'s: from it
+    /// on, the marks no longer hold.
+    pub fn stale(&self, patch: &str) -> Option<Stage> {
+        let _ = patch;
+        None
+    }
+
+    /// The code is now `patch`'s: clear the marks that no longer hold, from
+    /// the first stale stage on, and log it ("Code changed: Build to do
+    /// again"). A done feature is left as it is: it shipped. Returns the
+    /// stage it goes back to.
+    pub fn invalidate(&mut self, patch: &str, now: u64) -> Option<Stage> {
+        let _ = (patch, now);
+        None
     }
 
     /// Add `what` to its history at `now`.
@@ -260,6 +339,7 @@ mod tests {
             status: Status::Open,
             marks: BTreeMap::new(),
             history: Vec::new(),
+            shipping: Shipping::default(),
         }
     }
 
@@ -267,20 +347,20 @@ mod tests {
     fn ticks_go_in_order_and_ship_finishes() {
         let mut f = feature("a", 1);
         assert_eq!(f.current(), Some(Stage::Discover));
-        assert_eq!(f.tick(10, "you"), Some(Stage::Discover));
-        assert_eq!(f.tick(11, "you"), Some(Stage::Plan));
+        assert_eq!(f.tick(10, "you", None), Some(Stage::Discover));
+        assert_eq!(f.tick(11, "you", None), Some(Stage::Plan));
         assert!(f.is_done(Stage::Plan));
         assert_eq!(f.current(), Some(Stage::Build));
         assert_eq!(f.marks[&Stage::Plan].at, 11);
         assert_eq!(f.marks[&Stage::Plan].by, "you");
         assert_eq!(f.history.last().unwrap().what, "Plan ticked");
         for _ in 2..7 {
-            f.tick(12, "you").unwrap();
+            f.tick(12, "you", None).unwrap();
             assert_eq!(f.status, Status::Open);
         }
-        assert_eq!(f.tick(13, "you"), Some(Stage::Ship));
+        assert_eq!(f.tick(13, "you", None), Some(Stage::Ship));
         assert_eq!(f.status, Status::Done);
-        assert_eq!(f.tick(14, "you"), None);
+        assert_eq!(f.tick(14, "you", None), None);
         assert_eq!(f.history.len(), 8);
     }
 
@@ -288,7 +368,7 @@ mod tests {
     fn untick_clears_later_stages_and_reopens() {
         let mut f = feature("a", 1);
         for _ in 0..8 {
-            f.tick(1, "you");
+            f.tick(1, "you", None);
         }
         assert_eq!(f.status, Status::Done);
         assert!(f.untick(Stage::AiReview, 5));

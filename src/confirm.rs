@@ -71,6 +71,9 @@ pub enum Then {
         abandon: bool,
         force: bool,
     },
+    /// Ship this project's feature as its Ship check said (see
+    /// `Gerdr::ship_feature`).
+    ShipFeature { project: String, slug: String },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -510,6 +513,7 @@ impl Gerdr {
                 abandon,
                 force,
             } => self.remove_feature(&project, &slug, abandon, force),
+            Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs

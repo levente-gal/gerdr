@@ -310,11 +310,15 @@ pub struct Workflow {
     /// `origin/HEAD` isn't the one.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub base: std::collections::BTreeMap<String, String>,
+    /// How features ship, for every repository; without it, per
+    /// repository by its `origin` (see `feature::ship::mode_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship: Option<crate::feature::ShipMode>,
 }
 
 impl Workflow {
     pub fn is_empty(&self) -> bool {
-        self.ignore.is_empty() && self.base.is_empty()
+        self.ignore.is_empty() && self.base.is_empty() && self.ship.is_none()
     }
 }
 

@@ -857,6 +857,7 @@ impl Gerdr {
                 at: now,
                 what: "created".into(),
             }],
+            shipping: Default::default(),
         };
         self.features
             .all
@@ -1066,7 +1067,7 @@ impl Gerdr {
                 let Some(feature) = self.feature_mut(&project, &slug) else {
                     return;
                 };
-                match feature.tick(now, "you") {
+                match feature.tick(now, "you", None) {
                     Some(stage) => {
                         let shipped = feature.status == Status::Done;
                         let title = feature.title.clone();
@@ -1233,6 +1234,13 @@ impl Gerdr {
             project,
             slug,
         });
+    }
+
+    /// Ship feature `slug` of `project` as its last Ship check said, once
+    /// the Ship sheet is confirmed: open its pull requests off the thread,
+    /// or start its squash in a tab.
+    pub fn ship_feature(&mut self, project: &str, slug: &str) {
+        let _ = (project, slug);
     }
 
     /// Ask before removing feature `slug`'s worktrees, naming what goes
@@ -1667,11 +1675,13 @@ pub(crate) mod tests {
                         at: 2_000,
                         by: "you".into(),
                         note: String::new(),
+                        patch: None,
                     };
                     (*s, mark)
                 })
                 .collect(),
             history: Vec::new(),
+            shipping: Default::default(),
         }
     }
 

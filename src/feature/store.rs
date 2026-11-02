@@ -109,7 +109,7 @@ mod tests {
         let t = Temp::new();
         let mut b = feature("b", 5);
         b.version = 0;
-        b.tick(6, "you");
+        b.tick(6, "you", None);
         let a = feature("a", 5);
         let c = feature("c", 1);
         for f in [&b, &a, &c] {

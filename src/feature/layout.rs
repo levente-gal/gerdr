@@ -798,6 +798,7 @@ mod tests {
             repos: created.repos,
             status: Status::Open,
             marks: Default::default(),
+            shipping: Default::default(),
             history: Vec::new(),
         }
     }
