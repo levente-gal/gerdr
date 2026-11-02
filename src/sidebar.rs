@@ -193,13 +193,17 @@ impl Gerdr {
     }
 
     /// The agent whose pane has the keyboard in the shown tab: herdr's in
-    /// it, or the Cursor chat last shown from its card in Cursor.
+    /// it, the T3 Code thread its app shows, or the Cursor chat last shown
+    /// from its card in Cursor.
     fn focused_agent(&self) -> Option<AgentKey> {
         let tab = self.tab()?;
         let id = tab.focused_id()?;
         let pane = tab.panes.iter().find(|p| p.id == id)?;
         if let Some(herdr) = &pane.herdr {
             return Some(AgentKey::Herdr(herdr.pane_id.clone()));
+        }
+        if let Some(thread) = self.shown_t3_thread() {
+            return Some(AgentKey::T3(thread));
         }
         let cursor = pane.app_command.as_deref().and_then(launch::program_name);
         let chat = self
