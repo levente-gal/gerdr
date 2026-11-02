@@ -23,7 +23,7 @@
 //! `Hidden`); one closed while it runs, until that run is over.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -62,6 +62,9 @@ const RUNTIME: &str = "userdata/server-runtime.json";
 const ENVIRONMENT: &str = "userdata/environment-id";
 /// What `t3 pair` prints before the link that pairs a browser.
 const PAIRING_URL: &str = "Pairing URL:";
+/// How long before a web pane back at T3 Code's sign-in page is sent
+/// another pairing link.
+const PAIR_AGAIN: Duration = Duration::from_secs(30);
 /// The run states of a thread at work.
 const WORKING: [&str; 4] = ["preparing", "queued", "starting", "running"];
 /// The run state of a thread waiting for the user.
@@ -751,6 +754,13 @@ fn t3_binary(home: &Path, server: &Server) -> Option<PathBuf> {
     kept.or_else(|| crate::desktop::installed("t3").then(|| PathBuf::from("t3")))
 }
 
+/// Whether `path` (of a T3 Code page) is its sign-in page waiting for a
+/// token: not a pairing link, which brings its own.
+fn asks_to_pair(path: &str) -> bool {
+    let page = path.split(['?', '#']).next().unwrap_or_default();
+    page.trim_end_matches('/') == "/pair" && !path.contains("token=")
+}
+
 /// A one-time link that signs a browser in to `server` (by `t3 pair`).
 fn pairing_link(home: &Path, server: &Server) -> Result<String, String> {
     let binary = t3_binary(home, server).ok_or_else(|| "no t3 command found".to_owned())?;
@@ -816,6 +826,9 @@ pub struct T3 {
     pending: Option<String>,
     /// Whether a pairing link is being asked for.
     pairing: bool,
+    /// When each web pane last landed on T3 Code's sign-in page and was
+    /// sent a pairing link: once in a while only, should one not take.
+    paired_panes: HashMap<u32, Instant>,
     /// Where the threads are read from.
     pub source: Source,
     /// The migration the database is at, if it says.
@@ -1130,7 +1143,7 @@ impl crate::Gerdr {
             return self.launch(&link(&origin), crate::launch::Place::Tab);
         }
         let then = link(&server.origin);
-        self.pair_t3(server, then, marker);
+        self.pair_t3(server, Some(then), marker, None);
     }
 
     /// Where gerdr notes that the project's browser was signed in to
@@ -1145,8 +1158,15 @@ impl crate::Gerdr {
     }
 
     /// Sign the project's browser in to `server` by a one-time link (off
-    /// the event loop: `t3 pair` takes a moment), then show `then`.
-    fn pair_t3(&mut self, server: Server, then: String, marker: Option<PathBuf>) {
+    /// the event loop: `t3 pair` takes a moment), then show `then`. The
+    /// link opens in web pane `pane` when given, else in a new tab.
+    fn pair_t3(
+        &mut self,
+        server: Server,
+        then: Option<String>,
+        marker: Option<PathBuf>,
+        pane: Option<u32>,
+    ) {
         use smithay::reexports::calloop::channel;
         let Some(home) = self.t3.home.clone() else {
             return;
@@ -1168,14 +1188,19 @@ impl crate::Gerdr {
                     {
                         tracing::warn!("{}: {err}", marker.display());
                     }
-                    state.t3.pending = Some(then.clone());
-                    state.launch(&pairing, crate::launch::Place::Tab);
+                    state.t3.pending = then.clone();
+                    let sent = pane.is_some_and(|pane| state.navigate_web_pane(pane, &pairing));
+                    if !sent {
+                        state.launch(&pairing, crate::launch::Place::Tab);
+                    }
                 }
                 Err(err) => {
                     tracing::warn!("t3 code: {err}");
                     let text = format!("Couldn't sign in to T3 Code: {err}");
                     state.toast(text, crate::toast::Level::Error);
-                    state.launch(&then, crate::launch::Place::Tab);
+                    if let Some(then) = &then {
+                        state.launch(then, crate::launch::Place::Tab);
+                    }
                 }
             }
         });
@@ -1195,12 +1220,29 @@ impl crate::Gerdr {
         let Some(server) = &self.t3.server else {
             return;
         };
-        if self.t3.pending.is_none() || !is_app(url, server) {
+        if !is_app(url, server) {
             return;
         }
         let origin = origin_of(url).unwrap_or_default();
         let path = &url[origin.len()..];
-        if path.starts_with("/pair") {
+        if asks_to_pair(path) {
+            // Signed out (a browser never paired, or the server forgot
+            // it): sign it in, whichever way it got here.
+            let now = Instant::now();
+            let recent = self
+                .t3
+                .paired_panes
+                .get(&pane)
+                .is_some_and(|at| now.duration_since(*at) < PAIR_AGAIN);
+            if !recent && !self.t3.pairing {
+                self.t3.paired_panes.insert(pane, now);
+                let server = server.clone();
+                let marker = self.t3_paired_marker(&server);
+                self.pair_t3(server, None, marker, Some(pane));
+            }
+            return;
+        }
+        if self.t3.pending.is_none() || path.starts_with("/pair") {
             return;
         }
         if let Some(then) = self.t3.pending.take() {
@@ -1409,6 +1451,17 @@ mod tests {
         assert!(!is_app("http://localhost:3000/", &server));
         assert!(!is_app("https://example.com:3773/", &server));
         assert_eq!(origin_of(&link), Some("http://localhost:3773"));
+    }
+
+    #[test]
+    fn only_the_sign_in_page_without_a_token_asks_to_pair() {
+        assert!(asks_to_pair("/pair"));
+        assert!(asks_to_pair("/pair/"));
+        assert!(asks_to_pair("/pair?next=%2F"));
+        assert!(!asks_to_pair("/pair#token=WQ99"));
+        assert!(!asks_to_pair("/"));
+        assert!(!asks_to_pair("/pairing-help"));
+        assert!(!asks_to_pair("/env/thread"));
     }
 
     #[test]
