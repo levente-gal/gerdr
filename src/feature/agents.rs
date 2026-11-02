@@ -37,13 +37,24 @@ pub enum Flavor {
 
 impl Flavor {
     /// The flavor of `command`, by its program's name.
+    /// `env`, `exec` and `VAR=value` before it are skipped.
     pub fn of(command: &str) -> Flavor {
-        todo!("agents: Flavor::of {command}")
+        let program = command
+            .split_whitespace()
+            .find(|word| !matches!(*word, "env" | "exec") && !word.contains('='))
+            .unwrap_or("");
+        let program = program.trim_matches(|c| c == '\'' || c == '"');
+        match program.rsplit('/').next().unwrap_or(program) {
+            "claude" => Flavor::Claude,
+            "codex" => Flavor::Codex,
+            "cursor-agent" => Flavor::Cursor,
+            _ => Flavor::Other,
+        }
     }
 
     /// Whether it takes `--add-dir`.
     pub fn adds_dirs(self) -> bool {
-        todo!()
+        self != Flavor::Other
     }
 }
 
@@ -61,13 +72,39 @@ pub struct Needs {
 
 /// What `stage` needs of its agent; `None` for a stage no agent runs (yet).
 pub fn needs(stage: Stage) -> Option<Needs> {
-    todo!("agents: needs {stage:?}")
+    match stage {
+        Stage::Discover => Some(Needs {
+            read_only: false,
+            artifact: Some("brief.md"),
+            template: "discover",
+        }),
+        Stage::Plan => Some(Needs {
+            read_only: true,
+            artifact: Some("plan.md"),
+            template: "plan",
+        }),
+        _ => None,
+    }
 }
 
 /// The shell command that starts `base` (an `[agents]` command such as
 /// `claude`) on the prompt in `prompt`, allowed into `dirs` too.
+/// The prompt goes in as `"$(cat '<prompt>')"`, so a long one with quotes
+/// and newlines arrives whole.
 pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
-    todo!("agents: command_line {base} {prompt:?} {dirs:?}")
+    use crate::desktop::shell_quote;
+    let mut line = base.trim().to_owned();
+    if Flavor::of(base).adds_dirs() {
+        for dir in dirs {
+            line.push_str(" --add-dir ");
+            line.push_str(&shell_quote(&dir.to_string_lossy()));
+        }
+    }
+    line.push_str(&format!(
+        " \"$(cat {})\"",
+        shell_quote(&prompt.to_string_lossy())
+    ));
+    line
 }
 
 /// One run of a stage's agent, kept in the feature record.
@@ -98,4 +135,52 @@ pub struct StageRun {
     /// How many times it was sent back.
     #[serde(default)]
     pub sent_back: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flavors_go_by_program_name() {
+        assert_eq!(Flavor::of("claude"), Flavor::Claude);
+        assert_eq!(Flavor::of("/usr/bin/claude --model opus"), Flavor::Claude);
+        assert_eq!(Flavor::of("env FOO=1 codex"), Flavor::Codex);
+        assert_eq!(Flavor::of("cursor-agent"), Flavor::Cursor);
+        assert_eq!(Flavor::of("aider"), Flavor::Other);
+        assert_eq!(Flavor::of(""), Flavor::Other);
+        assert!(Flavor::Cursor.adds_dirs());
+        assert!(!Flavor::Other.adds_dirs());
+    }
+
+    #[test]
+    fn command_lines_per_flavor() {
+        let prompt = Path::new("/d/my feature/prompts/plan-1.md");
+        let dirs = [PathBuf::from("/d/my feature")];
+        for base in ["claude", "codex", "cursor-agent"] {
+            assert_eq!(
+                command_line(base, prompt, &dirs),
+                format!(
+                    "{base} --add-dir '/d/my feature' \"$(cat '/d/my feature/prompts/plan-1.md')\""
+                )
+            );
+        }
+        assert_eq!(
+            command_line("aider --yes", prompt, &dirs),
+            "aider --yes \"$(cat '/d/my feature/prompts/plan-1.md')\""
+        );
+        assert_eq!(
+            command_line("claude", Path::new("/p.md"), &[]),
+            "claude \"$(cat /p.md)\""
+        );
+    }
+
+    #[test]
+    fn only_discover_and_plan_have_agents_yet() {
+        assert_eq!(needs(Stage::Discover).unwrap().artifact, Some("brief.md"));
+        let plan = needs(Stage::Plan).unwrap();
+        assert!(plan.read_only);
+        assert_eq!(plan.template, "plan");
+        assert_eq!(needs(Stage::Verify), None);
+    }
 }
