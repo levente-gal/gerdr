@@ -86,6 +86,8 @@ pub struct Features {
     done: Option<channel::Sender<Done>>,
     /// The stage agents being watched (see `feature_agents`).
     pub(crate) agents: BTreeMap<crate::feature_agents::WatchKey, crate::feature_agents::Watch>,
+    /// What Build and Verify keep while gerdr runs (see `feature_build`).
+    pub(crate) build: crate::feature_build::BuildState,
 }
 
 /// How often the patch watch looks: the feature shown, and one whose
@@ -207,6 +209,16 @@ pub(crate) enum Done {
         /// unchanged: then done once merged, not now.
         squash: Vec<Action>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
+    },
+    /// The code read once run `n` of the Build agent was done, its
+    /// `build.md` at `stamp`: whether Build holds (see `feature_build`).
+    #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
+    BuildChecked {
+        project: String,
+        slug: String,
+        n: u32,
+        stamp: crate::feature_agents::Stamp,
+        result: Result<Reading, String>,
     },
     /// Work under way says what it does now, for the tasks panel.
     #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
@@ -1114,6 +1126,13 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Ship);
                 self.feature_shipped(&project, &slug, patch.as_deref(), &squash, result);
             }
+            Done::BuildChecked {
+                project,
+                slug,
+                n,
+                stamp,
+                result,
+            } => self.build_code_checked(&project, &slug, n, stamp, result),
             Done::Progress {
                 project,
                 slug,

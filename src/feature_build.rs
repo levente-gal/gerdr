@@ -21,9 +21,31 @@
 //! back to Build (the patch watch), and the loop goes round. A project
 //! without checks keeps Verify a manual mark.
 
-use crate::{Gerdr, feature::Stage, feature::verify::Evidence};
+use crate::{
+    Gerdr,
+    feature::{Stage, patch::Reading, verify::Evidence},
+    feature_agents::Stamp,
+};
+
+/// What Build and Verify keep while gerdr runs; not saved.
+#[derive(Debug, Default)]
+pub(crate) struct BuildState {}
 
 impl Gerdr {
+    /// The code of feature `slug` was read for run `n` of its Build agent,
+    /// whose `build.md` had `stamp`: Build is marked done on it if it
+    /// holds, and Verify runs; else the agent is told what is missing.
+    pub(crate) fn build_code_checked(
+        &mut self,
+        project: &str,
+        slug: &str,
+        n: u32,
+        stamp: Stamp,
+        result: Result<Reading, String>,
+    ) {
+        let _ = (project, slug, n, stamp, result);
+    }
+
     /// Set up feature `slug`'s worktrees off the thread, if its project
     /// gives setup commands and it isn't set up or being set up.
     pub fn start_setup(&mut self, project: &str, slug: &str) {
