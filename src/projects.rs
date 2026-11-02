@@ -842,17 +842,28 @@ impl Store {
         self.projects.iter_mut().find(|p| p.id == id)
     }
 
-    /// Put project `project`'s workspaces in `order` (record ids), those
-    /// not in it last; whether that moved any.
+    /// Put project `project`'s workspaces in `order` (record ids) among the
+    /// places they hold; those not in it (a workspace not open just now,
+    /// such as the Cursor one between two windows) keep theirs, to come
+    /// back there. Whether that moved any.
     pub fn order_workspaces(&mut self, project: &str, order: &[&str]) -> bool {
         let Some(project) = self.project_mut(project) else {
             return false;
         };
-        let place = |id: &str| order.iter().position(|o| *o == id).unwrap_or(usize::MAX);
-        if project.workspaces.is_sorted_by_key(|r| place(&r.id)) {
+        let records = &mut project.workspaces;
+        let place = |id: &str| order.iter().position(|o| *o == id);
+        let slots: Vec<usize> = (0..records.len())
+            .filter(|&i| place(&records[i].id).is_some())
+            .collect();
+        let mut sorted = slots.clone();
+        sorted.sort_by_key(|&i| place(&records[i].id));
+        if sorted == slots {
             return false;
         }
-        project.workspaces.sort_by_key(|r| place(&r.id));
+        let moved: Vec<WorkspaceRecord> = sorted.iter().map(|&i| records[i].clone()).collect();
+        for (slot, record) in slots.into_iter().zip(moved) {
+            records[slot] = record;
+        }
         true
     }
 
@@ -1748,7 +1759,8 @@ mod tests {
             .iter()
             .map(|r| r.id.as_str())
             .collect();
-        assert_eq!(ids, ["w3", "w1", "w2"]);
+        // w2, not open, keeps its place between them.
+        assert_eq!(ids, ["w3", "w2", "w1"]);
         assert!(!store.order_workspaces("api", &["w3", "w1"]));
     }
 
