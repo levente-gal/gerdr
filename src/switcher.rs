@@ -996,7 +996,7 @@ impl Gerdr {
             detail.push_str(&format!(", {pin} next"));
         }
         if let crate::t3_agents::Source::Cli(_) = self.t3.source {
-            detail.push_str(" · gerdr reads it in part");
+            detail.push_str(" · gerdr shows basic status only");
         }
         // Settings' `[t3] updates`, written there.
         let auto = if self.t3.auto_update {
@@ -1010,7 +1010,7 @@ impl Gerdr {
             Item::new(
                 ItemIcon::Command,
                 "Turn on T3 Code updates in Settings",
-                "to each newer version gerdr reads, checked every 6 hours \u{b7} [t3] updates",
+                "to each newer version gerdr fully reads, checked every 6 hours \u{b7} [t3] updates",
                 Target::T3Updates,
             )
         };

@@ -661,7 +661,7 @@ impl crate::Gerdr {
                     // Pinned back on purpose: the newest is there to take.
                     let text = format!("T3 Code {newest} is out");
                     let action = (
-                        "Take it".to_owned(),
+                        "Update".to_owned(),
                         crate::menu::MenuAction::UpdateT3(Some(newest)),
                     );
                     self.toast_with(text, Level::Info, Some(action));
@@ -678,7 +678,9 @@ impl crate::Gerdr {
                 self.t3.updates.told.insert(version.clone());
                 self.t3.updates.save();
                 // The version is in the log: nightlies' names are long.
-                let text = "Newer T3 Code isn't readable yet".to_owned();
+                // Taken anyway, its threads show with basic status only.
+                let text =
+                    "A newer T3 Code is out, but gerdr can't fully read its threads yet".to_owned();
                 let action = (
                     "Update anyway".to_owned(),
                     crate::menu::MenuAction::UpdateT3(Some(version)),
@@ -764,7 +766,7 @@ impl crate::Gerdr {
         self.t3.updates.save();
         let server = self.t3.server.clone().filter(|_| self.t3.alive);
         let Some(server) = server else {
-            let text = "Newer T3 Code is ready to start".to_owned();
+            let text = "A newer T3 Code is ready for its next start".to_owned();
             return self.toast(text, Level::Success);
         };
         if server.version.as_deref() == Some(version.as_str()) {

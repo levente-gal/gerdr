@@ -478,8 +478,9 @@ fn partial_problem(source: &Source) -> Vec<String> {
     match source {
         Source::Database => Vec::new(),
         Source::Cli(why) => vec![format!(
-            "T3 Code's database can't be read ({why}): its threads show basic status only. \
-             \u{201c}Update T3 Code\u{201d} in the launcher can take a version gerdr reads"
+            "gerdr can't read T3 Code's database ({why}), so its threads show basic status \
+             only. \u{201c}Update T3 Code\u{201d} in the launcher can switch to a version gerdr \
+             fully reads"
         )],
     }
 }
@@ -903,7 +904,7 @@ impl crate::Gerdr {
     fn t3_reads_in_part(&mut self) {
         let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
         // Short, as a toast is; the launcher's "Update T3 Code" says more.
-        let text = "T3 Code changed its data: basic status only".to_owned();
+        let text = "T3 Code changed, so gerdr shows only basic status for its threads".to_owned();
         let updates = crate::t3_update::Updates::load();
         let back = updates.pin.filter(|pin| {
             Some(pin) != running.as_ref()
