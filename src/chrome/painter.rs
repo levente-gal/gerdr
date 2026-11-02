@@ -769,7 +769,7 @@ impl Painter {
                 p.on_accent
             }
             ButtonStyle::Plain | ButtonStyle::Off => {
-                let fill = if hovered { p.selected } else { p.element };
+                let fill = if hovered { p.button_hover() } else { p.element };
                 c.rounded(x, y, w, h, r, p.border);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
                 if style == ButtonStyle::Off {
