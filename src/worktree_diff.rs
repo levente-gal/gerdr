@@ -302,8 +302,18 @@ impl WorktreeDiff {
 
     /// The keys sheet's lines: a file under review's own keys first.
     fn help_lines(&self) -> Vec<(String, String, crate::chrome::Tone)> {
+        // A read-only diff refuses the keys that edit the files.
+        let edits = |what: &str| {
+            what.contains("delete from the file")
+                || what.contains("yank")
+                || what.contains("restore the change")
+        };
+        let read_only = self.doc.is_some() || self.commit.is_some();
+        let diff = diff_help_lines()
+            .into_iter()
+            .filter(|(_, what, _)| !(read_only && edits(what)));
         if self.doc.is_none() {
-            return diff_help_lines();
+            return diff.collect();
         }
         let own = [
             ("Esc", "close the review"),
@@ -319,7 +329,7 @@ impl WorktreeDiff {
             )
         });
         // The diff's, but its Esc and F1.
-        own.chain(diff_help_lines().into_iter().skip(2)).collect()
+        own.chain(diff.skip(2)).collect()
     }
 
     /// Call `f` with the diff and its `Ctx`.
@@ -1582,6 +1592,12 @@ mod tests {
         let help = wd.help_lines();
         assert_eq!(help[2].0, APPROVE_KEY);
         assert_eq!(help[3].0, SEND_BACK_KEY);
+        // The keys it refuses aren't listed.
+        let keys: Vec<&str> = help.iter().map(|(key, ..)| key.as_str()).collect();
+        assert!(keys.contains(&"c / Del Del"), "{keys:?}");
+        for refused in ["x X D dd dw de d$ 3dd", "yy yw y$ Y, p / P", "Shift+R"] {
+            assert!(!keys.contains(&refused), "{refused} in {keys:?}");
+        }
     }
 
     #[test]
