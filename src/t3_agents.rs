@@ -184,7 +184,9 @@ pub fn is_app(url: &str, server: &Server) -> bool {
 /// its own under `localhost`, which browsers take to this machine. Each
 /// host has its own storage and sign-in in the browser, so each
 /// workspace's app keeps its own project filter (see `Gerdr::scope_t3`);
-/// workspaces in one folder share one.
+/// workspaces in one folder share one. The name is the folder's, then a
+/// short hash of its whole path, so two folders of one name (`/w/a/app`,
+/// `/w/b/app`) have hosts of their own: one DNS label, 59 bytes at most.
 pub fn app_host(dir: &Path) -> String {
     let name = dir
         .file_name()
@@ -201,11 +203,20 @@ pub fn app_host(dir: &Path) -> String {
     let label = label.trim_end_matches('-');
     let label = label.get(..label.len().min(50)).unwrap_or(label);
     let label = label.trim_end_matches('-');
-    if label.is_empty() {
-        "root.localhost".to_owned()
-    } else {
-        format!("{label}.localhost")
+    let label = if label.is_empty() { "root" } else { label };
+    format!("{label}-{:08x}.localhost", path_hash(dir))
+}
+
+/// A hash of `dir`'s path that stays the same from one run, and Rust
+/// version, to the next (FNV-1a, folded to 32 bits): a host named by it
+/// keeps its browser storage.
+fn path_hash(dir: &Path) -> u32 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in dir.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
+    (hash ^ (hash >> 32)) as u32
 }
 
 /// `link` at `origin` in place of its own.
@@ -519,6 +530,10 @@ pub enum Source {
 /// Where the problem of reading T3 Code in part comes from, for
 /// `problems::set`.
 const T3_PROBLEMS: &str = "t3";
+
+/// Where the problem of a project filter the app didn't take is kept (see
+/// `Gerdr::t3_unscoped`).
+const FILTER_PROBLEMS: &str = "t3 code";
 
 /// What the problems list says while gerdr reads T3 Code from `source`:
 /// nothing while it reads the database.
@@ -847,24 +862,56 @@ fn pairing_link(home: &Path, server: &Server) -> Result<String, String> {
     }
 }
 
-/// Whether T3 Code at `home` has a project at folder `dir`; `None` when
+/// Whether T3 Code at `home` has a project at folder `dir`; why not, when
 /// its database can't say.
-fn has_project(home: &Path, dir: &Path) -> Option<bool> {
-    use rusqlite::OpenFlags;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(home.join(DB), flags).ok()?;
+fn has_project(home: &Path, dir: &Path) -> Result<bool, String> {
+    let conn = open_read_only(&home.join(DB)).map_err(|err| err.to_string())?;
     let found = conn.query_row(
         "SELECT 1 FROM projection_projects WHERE workspace_root = ?1 AND deleted_at IS NULL",
         [dir.to_string_lossy()],
         |_| Ok(()),
     );
     match found {
-        Ok(()) => Some(true),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Some(false),
-        Err(err) => {
-            tracing::warn!("t3 code: looking for project {}: {err}", dir.display());
-            None
-        }
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// How many projects T3 Code at `home` has, if its database says (why
+/// not is logged).
+fn project_count(home: &Path) -> Option<i64> {
+    let sql = "SELECT COUNT(*) FROM projection_projects WHERE deleted_at IS NULL";
+    let count =
+        open_read_only(&home.join(DB)).and_then(|conn| conn.query_row(sql, [], |row| row.get(0)));
+    count
+        .map_err(|err| tracing::warn!("t3 code: counting its projects: {err}"))
+        .ok()
+}
+
+/// What came of looking for a workspace's folder in T3 Code's projects
+/// (see `Gerdr::add_t3_project`).
+enum ProjectAdd {
+    /// It was one already.
+    Known,
+    Added,
+    Failed(String),
+    /// T3 Code's database couldn't say whether it was one.
+    Unreadable,
+}
+
+/// What went wrong for `reason` (of the extension's `scopeT3`) when T3
+/// Code's app didn't take its project filter, in plain words: the reason
+/// itself is for the log.
+pub fn unscoped_words(reason: &str) -> &'static str {
+    match reason {
+        "no-react" => "gerdr can't find T3 Code's app in its page",
+        "no-groups" => "gerdr can't find T3 Code's project list",
+        "no-roots" => "T3 Code's projects don't say their folders",
+        "ignored" => "T3 Code doesn't follow the filter gerdr sets",
+        "overwritten" => "T3 Code undoes the filter gerdr sets",
+        "error" => "gerdr's filter failed in T3 Code's page",
+        _ => "T3 Code's page changed",
     }
 }
 
@@ -946,10 +993,16 @@ pub struct T3 {
     /// Whether a pairing link is being asked for.
     pairing: bool,
     /// The web panes the extension was told the folders of, for T3 Code's
-    /// project filter (see `Gerdr::scope_t3`).
-    scoped: HashSet<u32>,
-    /// The folders looked at for T3 Code projects, once each.
+    /// project filter (see `Gerdr::scope_t3`): the app's origin and the
+    /// folders each was told, told again once they change.
+    scoped: HashMap<u32, (String, Vec<PathBuf>)>,
+    /// The folders T3 Code has as projects, or that gerdr added: looked
+    /// at once each.
     checked: HashSet<PathBuf>,
+    /// The folders being looked at, or added, now.
+    adding: HashSet<PathBuf>,
+    /// Whether the user heard that gerdr can't read T3 Code's projects.
+    told_unreadable: bool,
     /// Why the app didn't take its project filter, each told once (see
     /// `Gerdr::t3_unscoped`).
     unscoped: HashSet<String>,
@@ -1017,6 +1070,13 @@ impl crate::Gerdr {
             let server = Server::read(&home);
             let alive = server.as_ref().is_some_and(Server::alive);
             if server != state.t3.server || alive != state.t3.alive {
+                // The footer shows a broken filter while its version runs:
+                // the problem goes with it.
+                let version = server.as_ref().and_then(|s| s.version.as_ref());
+                let broken = state.t3.unscoped_in.as_ref().map(|(v, _)| v.as_ref());
+                if broken.is_some_and(|v| v != version) {
+                    state.t3_forget_unscoped();
+                }
                 state.t3.server = server;
                 state.t3.alive = alive;
                 state.t3_changed();
@@ -1251,31 +1311,117 @@ impl crate::Gerdr {
             .unwrap_or_default()
     }
 
-    /// Keep web pane `pane`, showing T3 Code's app, to its workspace's
-    /// projects: told to the extension once per pane, which applies it
-    /// at each load.
-    fn scope_t3(&mut self, pane: u32) {
-        if self.t3.scoped.contains(&pane) {
-            return;
-        }
-        let Some(w) = self
-            .workspaces
+    /// The link web pane `pane` shows, if gerdr knows of it.
+    fn web_pane_link(&self, pane: u32) -> Option<&str> {
+        self.workspaces
             .iter()
-            .position(|ws| ws.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == pane)))
-        else {
+            .flat_map(|ws| &ws.tabs)
+            .find_map(|tab| {
+                let shown = tab.panes.iter().find(|p| p.id == pane);
+                match shown {
+                    Some(p) => Some(p.app_command.as_deref()),
+                    None => tab
+                        .expected
+                        .iter()
+                        .find(|e| e.pane == pane)
+                        .map(|e| e.app_command.as_deref()),
+                }
+            })
+            .flatten()
+    }
+
+    /// Whether web pane `pane` shows T3 Code's app now.
+    fn shows_t3_app(&self, pane: u32) -> bool {
+        let (Some(server), Some(link)) = (&self.t3.server, self.web_pane_link(pane)) else {
+            return false;
+        };
+        crate::is_web_link(link) && is_app(link, server)
+    }
+
+    /// Keep web pane `pane`, showing T3 Code's app at `origin`, to its
+    /// workspace's projects: told to the extension, which applies it at
+    /// each load at that origin, again once the pane is at another or in
+    /// another workspace.
+    fn scope_t3(&mut self, pane: u32, origin: &str) {
+        let mut panes = HashSet::new();
+        let mut place = None;
+        for (w, ws) in self.workspaces.iter().enumerate() {
+            for tab in &ws.tabs {
+                let ids = tab.panes.iter().map(|p| p.id);
+                for id in ids.chain(tab.expected.iter().map(|e| e.pane)) {
+                    panes.insert(id);
+                    if id == pane {
+                        place = Some(w);
+                    }
+                }
+            }
+        }
+        // Panes gone are forgotten.
+        self.t3.scoped.retain(|id, _| panes.contains(id));
+        let Some(w) = place else {
             return;
         };
-        let dirs = self.t3_scope(w);
-        if self.scope_web_pane(pane, &dirs) {
-            self.t3.scoped.insert(pane);
+        let told = (origin.to_owned(), self.t3_scope(w));
+        if self.t3.scoped.get(&pane) == Some(&told) {
+            return;
         }
+        if self.scope_web_pane(pane, &told.0, &told.1) {
+            self.t3.scoped.insert(pane, told);
+        }
+    }
+
+    /// Web pane `pane` moved to another workspace: one showing T3 Code's
+    /// app shows that one's projects now.
+    pub(crate) fn t3_pane_moved(&mut self, pane: u32) {
+        if !self.shows_t3_app(pane) {
+            return;
+        }
+        let link = self.web_pane_link(pane).unwrap_or_default();
+        let origin = origin_of(link).unwrap_or_default().to_owned();
+        self.scope_t3(pane, &origin);
+    }
+
+    /// T3 Code's app in web pane `pane` took its project filter: the
+    /// filter works in this version again.
+    pub fn t3_scoped(&mut self, pane: u32) {
+        if !self.shows_t3_app(pane) || self.t3.unscoped_in.is_none() {
+            return;
+        }
+        tracing::info!("t3 code: project filter set in web pane {pane}");
+        self.t3_forget_unscoped();
+    }
+
+    /// Let go of a project filter the app didn't take: it does now, or
+    /// another version runs.
+    fn t3_forget_unscoped(&mut self) {
+        self.t3.unscoped_in = None;
+        // A workspace without projects is told of once still.
+        self.t3.unscoped.retain(|reason| reason == "no-match");
+        crate::problems::clear(FILTER_PROBLEMS);
+    }
+
+    /// Whether T3 Code has no projects at all, as its database says.
+    fn t3_has_no_projects(&self) -> bool {
+        let home = self.t3.home.as_deref();
+        home.and_then(project_count) == Some(0)
     }
 
     /// T3 Code's app in web pane `pane` didn't take its project filter,
     /// for `reason` (see the extension's `scopeT3`): logged in full, for
     /// whoever fixes gerdr for the T3 Code version that changed it, and
-    /// told once per reason.
+    /// told once per reason. A pane that left the app since, or the
+    /// extension's late word of a page it left, is let be.
     pub fn t3_unscoped(&mut self, pane: u32, reason: &str, detail: &str) {
+        if !self.shows_t3_app(pane) {
+            tracing::info!("t3 code: web pane {pane} left the app: {reason} let be: {detail}");
+            return;
+        }
+        // An app without projects shows no list of them.
+        let reason = if reason == "no-groups" && self.t3_has_no_projects() {
+            "no-match"
+        } else {
+            reason
+        };
         let version = self.t3.server.as_ref().and_then(|s| s.version.as_deref());
         let version = version.unwrap_or("unknown");
         let place = self
@@ -1304,9 +1450,10 @@ impl crate::Gerdr {
         let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
         self.t3.unscoped_in = Some((running, reason.to_owned()));
         crate::problems::report(
-            "t3 code",
+            FILTER_PROBLEMS,
             format!(
-                "T3 Code {version} doesn't take gerdr's project filter ({reason}): see the log"
+                "T3 Code {version} doesn't take gerdr's project filter: {} (see the log)",
+                unscoped_words(reason)
             ),
         );
         if !self.t3.unscoped.insert(reason.to_owned()) {
@@ -1331,29 +1478,70 @@ impl crate::Gerdr {
         if !dir.join(".git").exists() || Some(dir.as_path()) == crate::home_dir().as_deref() {
             return;
         }
-        if !self.t3.checked.insert(dir.clone()) {
+        // Looked at again until T3 Code has it.
+        if self.t3.checked.contains(&dir) || !self.t3.adding.insert(dir.clone()) {
             return;
         }
+        use crate::toast::Level;
         use smithay::reexports::calloop::channel;
-        let (tx, rx) = channel::channel::<String>();
+        let (tx, rx) = channel::channel::<(PathBuf, ProjectAdd)>();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
-            if let channel::Event::Msg(text) = event {
-                let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
-                state.toast_with(text, crate::toast::Level::Error, Some(open_log));
+            let channel::Event::Msg((dir, done)) = event else {
+                return;
+            };
+            state.t3.adding.remove(&dir);
+            let name = dir.file_name().unwrap_or_default().to_string_lossy();
+            let name = name.into_owned();
+            let open_log = || Some(("Open log".to_owned(), crate::menu::MenuAction::OpenLog));
+            match done {
+                ProjectAdd::Known => {
+                    state.t3.checked.insert(dir);
+                }
+                ProjectAdd::Added => {
+                    state.t3.checked.insert(dir);
+                    state.toast(
+                        format!("Added {name} to T3 Code's projects"),
+                        Level::Success,
+                    );
+                }
+                ProjectAdd::Failed(err) => {
+                    let text = format!("Couldn't add {name} to T3 Code's projects: {err}");
+                    state.toast_with(text, Level::Error, open_log());
+                }
+                ProjectAdd::Unreadable => {
+                    if !std::mem::replace(&mut state.t3.told_unreadable, true) {
+                        let text = format!(
+                            "Couldn't read T3 Code's projects, so gerdr didn't add {name} to them"
+                        );
+                        state.toast_with(text, Level::Warning, open_log());
+                    }
+                }
             }
         });
         if let Err(err) = inserted {
+            self.t3.adding.remove(&dir);
             return tracing::warn!("t3 code: {err}");
         }
         let server = server.clone();
         std::thread::spawn(move || {
-            if has_project(&home, &dir) == Some(false)
-                && let Err(err) = add_project(&home, &server, &dir)
-            {
-                tracing::warn!("t3 code: adding {}: {err}", dir.display());
-                let name = dir.file_name().unwrap_or_default().to_string_lossy();
-                let _ = tx.send(format!("Couldn't add {name} to T3 Code's projects: {err}"));
-            }
+            let done = match has_project(&home, &dir) {
+                Ok(true) => ProjectAdd::Known,
+                Ok(false) => match add_project(&home, &server, &dir) {
+                    Ok(()) => {
+                        tracing::info!("t3 code: added project {}", dir.display());
+                        ProjectAdd::Added
+                    }
+                    Err(err) => {
+                        tracing::warn!("t3 code: adding {}: {err}", dir.display());
+                        ProjectAdd::Failed(err)
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!("t3 code: reading its projects for {}: {err}", dir.display());
+                    ProjectAdd::Unreadable
+                }
+            };
+            let _ = tx.send((dir, done));
         });
     }
 
@@ -1539,7 +1727,7 @@ impl crate::Gerdr {
         // Past the sign-in page: signed in, so a later sign-out tries again.
         if !path.starts_with("/pair") {
             self.t3.paired_panes.remove(&pane);
-            self.scope_t3(pane);
+            self.scope_t3(pane, origin);
         }
         if self.t3.pending.is_none() || path.starts_with("/pair") {
             return;
@@ -1804,6 +1992,47 @@ mod tests {
     }
 
     #[test]
+    fn projects_are_looked_up_and_an_unreadable_database_says_so() {
+        use super::{has_project, project_count};
+        let home = std::env::temp_dir().join(format!("gerdr-t3-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        // No database: it can't say, rather than "no project".
+        assert!(has_project(&home, Path::new("/src/app")).is_err());
+        assert_eq!(project_count(&home), None);
+        std::fs::create_dir_all(home.join("userdata")).unwrap();
+        let conn = rusqlite::Connection::open(home.join(DB)).unwrap();
+        conn.execute_batch(include_str!("t3_schema.sql")).unwrap();
+        assert_eq!(project_count(&home), Some(0));
+        conn.execute_batch(
+            "INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+                created_at, updated_at) VALUES ('p1', 'app', '/src/app', '[]', '', '');",
+        )
+        .unwrap();
+        assert_eq!(has_project(&home, Path::new("/src/app")), Ok(true));
+        assert_eq!(has_project(&home, Path::new("/src/other")), Ok(false));
+        assert_eq!(project_count(&home), Some(1));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_filter_not_taken_is_told_in_plain_words() {
+        use super::unscoped_words;
+        for reason in [
+            "no-react",
+            "no-groups",
+            "no-roots",
+            "ignored",
+            "overwritten",
+            "error",
+        ] {
+            let words = unscoped_words(reason);
+            assert_ne!(words, unscoped_words("something new"), "{reason}");
+            assert!(!words.contains(reason) && !words.ends_with('.'), "{reason}");
+        }
+    }
+
+    #[test]
     fn rows_are_read_from_the_database() {
         let conn = database();
         let now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -1938,13 +2167,31 @@ mod tests {
     fn each_folder_has_a_host_of_its_own() {
         use super::app_host;
         let host = |dir: &str| app_host(std::path::Path::new(dir));
-        assert_eq!(host("/w/ao-app/services-api"), "services-api.localhost");
-        assert_eq!(host("/w/ao-app/aft_backend"), "aft-backend.localhost");
-        assert_eq!(host("/w/ao-app"), "ao-app.localhost");
-        assert_eq!(host("/home/Me/My Repo!"), "my-repo.localhost");
-        assert_eq!(host("/"), "root.localhost");
-        assert_eq!(host("/w/__"), "root.localhost");
-        assert!(host(&format!("/w/{}", "a".repeat(80))).len() <= 50 + ".localhost".len());
+        // The folder's name, then its path's hash.
+        let api = host("/w/ao-app/services-api");
+        assert!(api.starts_with("services-api-") && api.ends_with(".localhost"));
+        assert!(host("/w/ao-app/aft_backend").starts_with("aft-backend-"));
+        assert!(host("/w/ao-app").starts_with("ao-app-"));
+        assert!(host("/home/Me/My Repo!").starts_with("my-repo-"));
+        assert!(host("/").starts_with("root-"));
+        assert!(host("/w/__").starts_with("root-"));
+        // The same folder, the same host, run after run.
+        assert_eq!(host("/w/front/app"), host("/w/front/app"));
+        assert_eq!(host("/w/front/app"), "app-dcc5975d.localhost");
+        // Folders of one name apart.
+        assert_ne!(host("/w/front/app"), host("/w/back/app"));
+        // One DNS label of letters, digits and hyphens.
+        for dir in ["/w/ao-app", "/", &format!("/w/{}", "a-".repeat(80))] {
+            let h = host(dir);
+            let label = h.strip_suffix(".localhost").unwrap();
+            assert!(label.len() <= 63, "{h}");
+            assert!(!label.starts_with('-') && !label.ends_with('-'), "{h}");
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            );
+        }
     }
 
     #[test]
