@@ -1084,12 +1084,16 @@ fn dump_overlays() {
             painter.inbox(&inbox(), inbox_size, scale, p),
             px(inbox_panel.size.w + shadow),
         );
+        // Its first workspace with a blocked agent and errors of its
+        // services: both pills on its header.
+        let mut erring = workspaces();
+        erring[0].errors = 3;
         dump(
             &dir,
             &format!("sidebar_agents_{tag}"),
             painter.sidebar_view(
                 &SidebarView {
-                    workspaces: workspaces(),
+                    workspaces: erring,
                     agents: many_agents(),
                     active: Some(0),
                     project: Some("aft".into()),

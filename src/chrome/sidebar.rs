@@ -103,6 +103,8 @@ const STATUS_SLOT: i32 = 16;
 const COUNT_GAP: i32 = 2;
 /// The gap between a header's name and what is right of it.
 const NAME_GAP: i32 = 4;
+/// The gap between a header's pill of errors and its status right of it.
+const PILL_GAP: i32 = 3;
 /// Room for the count of other worktrees on the header.
 const WORKTREE_COUNT_WIDTH: i32 = 30;
 /// How far a hover pill on the header's count or CI mark reaches past it.
@@ -286,7 +288,6 @@ pub fn sidebar_blinkers(view: &SidebarView, layout: &SidebarLayout, height: i32)
         if let Some(slot) = row.chip
             && ws.status == Some(AgentStatus::Working)
             && blocked_count(cards) == 0
-            && ws.errors == 0
         {
             dots.push(centred_dot(header_status_mark(slot)));
         }
@@ -728,8 +729,7 @@ pub struct WorkspaceView {
     /// (the pointer on its AI button or the strip); else none.
     pub picks: Vec<AgentIcon>,
     /// How many errors its services printed that weren't looked at: a
-    /// badge counting them on its header (after one counting blocked
-    /// agents).
+    /// pill counting them on its header, left of its status.
     pub errors: usize,
 }
 
@@ -1158,6 +1158,9 @@ pub struct RowLayout {
     pub fold: Option<Rect>,
     /// Its status, when it shows: folded, or an agent blocked.
     pub chip: Option<Rect>,
+    /// The pill counting its services' errors not looked at, when it has
+    /// any: left of its status.
+    pub errors: Option<Rect>,
     /// The mark of its CI, while that shows on the header: at the right
     /// end of the branch's line, else of the name's band.
     pub ci: Option<Rect>,
@@ -1206,7 +1209,7 @@ impl RowLayout {
     pub fn rename_field(&self) -> Rect {
         let x = self.name.loc.x - RENAME_INSET;
         let y = self.title.loc.y + (self.title.size.h - RENAME_HEIGHT) / 2;
-        let end = [self.worktrees, self.ci, self.chip]
+        let end = [self.worktrees, self.ci, self.errors, self.chip]
             .into_iter()
             .flatten()
             .filter(|r| r.loc.y == self.title.loc.y)
@@ -1288,11 +1291,13 @@ pub enum SidebarHit {
     /// The repositories button.
     Repos,
     /// Workspace `i`: its header off any part below, its name, its status,
-    /// its "×", its restart button, its agent button, the count of its
-    /// other worktrees, its fold chevron, the mark of its CI.
+    /// the count of its services' errors, its "×", its restart button, its
+    /// agent button, the count of its other worktrees, its fold chevron,
+    /// the mark of its CI.
     Row(usize),
     Name(usize),
     Chip(usize),
+    Errors(usize),
     Close(usize),
     Restart(usize),
     NewAgent(usize),
@@ -1330,6 +1335,7 @@ impl SidebarHit {
             Self::Row(i)
             | Self::Name(i)
             | Self::Chip(i)
+            | Self::Errors(i)
             | Self::Close(i)
             | Self::Restart(i)
             | Self::NewAgent(i)
@@ -1433,6 +1439,8 @@ impl SidebarLayout {
             SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
         } else if row.chip.is_some_and(inside) {
             SidebarHit::Chip(i)
+        } else if row.errors.is_some_and(inside) {
+            SidebarHit::Errors(i)
         } else if inside(row.name) {
             SidebarHit::Name(i)
         } else {
@@ -1510,6 +1518,7 @@ impl SidebarLayout {
                 &mut row.branch,
                 &mut row.fold,
                 &mut row.chip,
+                &mut row.errors,
                 &mut row.ci,
                 &mut row.worktrees,
                 &mut row.attention,
@@ -1556,16 +1565,20 @@ pub fn sidebar_layout(
 /// and how many agents it hides.
 fn status_extent(ws: &WorkspaceView, cards: &[AgentView]) -> Option<i32> {
     let blocked = blocked_count(cards);
-    let count = if blocked > 0 { blocked } else { ws.errors };
-    if count > 0 {
-        let w = text_extent(&count.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
-        return Some(w.max(PILL_HEIGHT));
+    if blocked > 0 {
+        return Some(pill_extent(blocked));
     }
     ws.status.filter(|_| ws.folded)?;
     Some(match cards.len() {
         0 => STATUS_SLOT,
         n => STATUS_SLOT + COUNT_GAP + text_extent(&n.to_string(), TINY_FONT_SIZE),
     })
+}
+
+/// The width of a header pill counting `count`.
+fn pill_extent(count: usize) -> i32 {
+    let w = text_extent(&count.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+    w.max(PILL_HEIGHT)
 }
 
 /// Where the header's parts sit in a sidebar `width` wide: the project's
@@ -1649,7 +1662,8 @@ pub fn sidebar_layout_at(
         let folded = ws.folded && foldable;
 
         // The header: from the right, its "×", its restart button, its
-        // agent button, its status, its CI mark and its worktree count, its name in the rest. With a branch, the
+        // agent button, its status, its count of errors, its CI mark and
+        // its worktree count, its name in the rest. With a branch, the
         // branch goes on a line under the name, with the CI mark and the
         // count at that line's right end.
         let h = ws.height(density);
@@ -1672,6 +1686,14 @@ pub fn sidebar_layout_at(
         });
         let mut end = buttons;
         let chip = status_extent(ws, cards).map(|w| {
+            end -= w;
+            slot(end, w)
+        });
+        let errors = (ws.errors > 0).then(|| {
+            if chip.is_some() {
+                end -= PILL_GAP;
+            }
+            let w = pill_extent(ws.errors);
             end -= w;
             slot(end, w)
         });
@@ -1711,6 +1733,7 @@ pub fn sidebar_layout_at(
             branch,
             fold,
             chip,
+            errors,
             ci: ci_mark,
             close,
             restart,
@@ -2287,14 +2310,13 @@ impl Painter {
             }
         }
 
-        if let Some(chip) = row.chip {
+        if let Some(pill) = row.errors {
+            self.header_pill(c, ws.errors, pill, p.error, scale, p);
+        }
+        if let (Some(chip), Some(status)) = (row.chip, ws.status) {
+            let hidden = if ws.folded { cards.len() } else { 0 };
             let blocked = blocked_count(cards);
-            if blocked == 0 && ws.errors > 0 {
-                self.header_pill(c, ws.errors, chip, p.error, scale, p);
-            } else if let Some(status) = ws.status {
-                let hidden = if ws.folded { cards.len() } else { 0 };
-                self.header_status(c, status, blocked, hidden, chip, scale, p);
-            }
+            self.header_status(c, status, blocked, hidden, chip, scale, p);
         }
         if buttons > 0.0 {
             let color = if row_state.close {
@@ -3420,9 +3442,10 @@ mod tests {
         AgentView, BLOCK_GAP, BRANCH_LINE, BRANCH_LINE_COMPACT, CARD_LINE, CHILD_GAP, CHILD_TEXT_X,
         CHILD_X, CI_CHIP_GAP, CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip, CiLayout, CiView,
         DETAIL_FONT_SIZE, Density, FOLDER, GAP, HEADER_BUTTON, HEADER_ROW, HEADER_ROW_COMPACT,
-        INBOX_GAP, INBOX_TITLE, NAME_LINE, NAME_LINE_COMPACT, NAME_X, ROW_INSET, ROWS_TOP,
-        SCROLL_END, SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView, card_order, ci_chip_width,
-        inbox_order, sentence_case, sidebar_layout, sidebar_layout_at, text_extent, workspace_slot,
+        INBOX_GAP, INBOX_TITLE, NAME_GAP, NAME_LINE, NAME_LINE_COMPACT, NAME_X, PILL_GAP,
+        ROW_INSET, ROWS_TOP, SCROLL_END, SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView,
+        card_order, ci_chip_width, inbox_order, sentence_case, sidebar_layout, sidebar_layout_at,
+        text_extent, workspace_slot,
     };
     use crate::WorkspaceKind;
     use crate::chrome::{BAR_HEIGHT, Rect, TabView};
@@ -4111,6 +4134,75 @@ mod tests {
         let layout = sidebar_layout(&workspaces, &blocked, 200);
         let chip = layout.rows[0].chip.unwrap();
         assert_eq!(layout.hit(mid(chip)), Some(SidebarHit::Chip(0)));
+    }
+
+    #[test]
+    fn errors_and_blocked_agents_each_get_a_pill() {
+        let long = "a-workspace-with-a-very-long-name-indeed";
+        let mut ws = workspace(long, Some(AgentStatus::Blocked), Some("main"));
+        ws.errors = 3;
+        let blocked = vec![vec![agent("p1", AgentStatus::Blocked, None)]];
+        for density in [Density::Comfortable, Density::Compact] {
+            // Both: the errors left of the blocked badge, a gap between,
+            // the name ending before the errors.
+            let layout = sidebar_layout_at(std::slice::from_ref(&ws), &blocked, 200, density);
+            let row = layout.rows[0];
+            let (chip, errors) = (row.chip.unwrap(), row.errors.unwrap());
+            assert_eq!(errors.loc.x + errors.size.w + PILL_GAP, chip.loc.x);
+            assert_eq!(chip.loc.x + chip.size.w, row.agent.loc.x);
+            assert_eq!((errors.loc.y, errors.size.h), (chip.loc.y, chip.size.h));
+            assert_eq!(row.name.loc.x + row.name.size.w, errors.loc.x - NAME_GAP);
+            assert!(row.rename_field().loc.x + row.rename_field().size.w < errors.loc.x);
+            assert_eq!(layout.hit(mid(chip)), Some(SidebarHit::Chip(0)));
+            assert_eq!(layout.hit(mid(errors)), Some(SidebarHit::Errors(0)));
+            assert_eq!(SidebarHit::Errors(0).pill(), SidebarHit::Row(0));
+            // The errors alone: where the badge would be, the name up to
+            // them.
+            let mut quiet = ws.clone();
+            quiet.status = Some(AgentStatus::Idle);
+            let idle = vec![vec![agent("p1", AgentStatus::Idle, None)]];
+            let layout = sidebar_layout_at(&[quiet], &idle, 200, density);
+            let row = layout.rows[0];
+            assert_eq!(row.chip, None);
+            let alone = row.errors.unwrap();
+            assert_eq!(alone.loc.x + alone.size.w, row.agent.loc.x);
+            assert_eq!(row.name.loc.x + row.name.size.w, alone.loc.x - NAME_GAP);
+            // The blocked badge alone: no errors, the name up to it.
+            let mut none = ws.clone();
+            none.errors = 0;
+            let layout = sidebar_layout_at(&[none], &blocked, 200, density);
+            let row = layout.rows[0];
+            assert_eq!(row.errors, None);
+            let chip = row.chip.unwrap();
+            assert_eq!(row.name.loc.x + row.name.size.w, chip.loc.x - NAME_GAP);
+            // Folded: the status and how many it hides, the errors left
+            // of them.
+            let mut folded = ws.clone();
+            folded.status = Some(AgentStatus::Working);
+            folded.folded = true;
+            let working = vec![vec![agent("p1", AgentStatus::Working, None)]];
+            let layout = sidebar_layout_at(&[folded.clone()], &working, 200, density);
+            let row = layout.rows[0];
+            let (chip, errors) = (row.chip.unwrap(), row.errors.unwrap());
+            assert_eq!(errors.loc.x + errors.size.w + PILL_GAP, chip.loc.x);
+            if density == Density::Comfortable {
+                // Its working dot still blinks in the status, not on the
+                // errors (`blinkers` lays out 240 wide).
+                let layout = sidebar_layout_at(&[folded.clone()], &working, 240, density);
+                let (chip, errors) = (layout.rows[0].chip, layout.rows[0].errors);
+                let dots = blinkers(vec![folded], working);
+                assert_eq!(dots.len(), 1);
+                assert!(chip.unwrap().contains(dots[0].loc));
+                assert!(!errors.unwrap().contains(dots[0].loc));
+            }
+        }
+        // A wider count, a wider pill.
+        let mut many = ws.clone();
+        many.errors = 120;
+        let layout = sidebar_layout(&[many], &blocked, 200);
+        let wide = layout.rows[0].errors.unwrap();
+        let layout = sidebar_layout(&[ws], &blocked, 200);
+        assert!(wide.size.w > layout.rows[0].errors.unwrap().size.w);
     }
 
     #[test]

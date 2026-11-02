@@ -519,7 +519,7 @@ impl Gerdr {
                 self.open_worktrees(dir);
             }
             // Its count of errors: the newest one not looked at.
-            (SidebarHit::Chip(i), BTN_LEFT) if self.chip_shows_errors(i) => {
+            (SidebarHit::Errors(i), BTN_LEFT) => {
                 self.show_workspace_service_error(i);
             }
             (SidebarHit::More(i), BTN_LEFT) => {
@@ -558,17 +558,6 @@ impl Gerdr {
             }
             _ => {}
         }
-    }
-
-    /// Whether workspace `i`'s header chip counts its services' errors
-    /// (see `WorkspaceView::errors`): it has some not looked at, and no
-    /// blocked agent, whose count goes first.
-    fn chip_shows_errors(&self, i: usize) -> bool {
-        let blocked = self
-            .agent_views()
-            .get(i)
-            .is_some_and(|cards| chrome::blocked_count(cards) > 0);
-        !blocked && self.workspace_service_errors(i).iter().any(|g| !g.seen)
     }
 
     /// The pointer moved to `pos` with nothing open over the sidebar, laid
@@ -675,7 +664,7 @@ impl Gerdr {
                 let tip = Tooltip::new(&text, rect).fields(fields);
                 Some(tip.key("right click to choose which"))
             }
-            SidebarHit::Chip(i) if self.chip_shows_errors(i) => {
+            SidebarHit::Errors(i) => {
                 let errors = self.workspace_service_errors(i);
                 let unseen = errors.iter().filter(|g| !g.seen).count();
                 let text = match unseen {
@@ -688,20 +677,22 @@ impl Gerdr {
                     .take(6)
                     .map(|g| (g.service.clone(), g.title.clone()))
                     .collect();
-                let tip = Tooltip::new(&text, layout.rows[i].chip?).fields(fields);
+                let tip = Tooltip::new(&text, layout.rows[i].errors?).fields(fields);
                 Some(tip.key("click to show the newest"))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
-                let text = match cards.len() {
-                    1 => "1 agent".to_owned(),
-                    n => format!("{n} agents"),
+                let blocked = chrome::blocked_count(cards);
+                let text = match (cards.len(), blocked) {
+                    (1, 0) => "1 agent".to_owned(),
+                    (n, 0) => format!("{n} agents"),
+                    (1, _) => "1 agent, blocked".to_owned(),
+                    (n, b) => format!("{b} of {n} agents blocked"),
                 };
                 let fields = cards
                     .iter()
                     .map(|c| (c.label(), chrome::status_meaning(c.status).to_owned()))
                     .collect();
-                let blocked = chrome::blocked_count(cards);
                 let click = if blocked == 1 {
                     "click to show the blocked one"
                 } else {

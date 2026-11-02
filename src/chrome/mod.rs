@@ -884,7 +884,7 @@ fn hit_rects(view: &ChromeView, output: Size<i32, Logical>, area: Rect) -> Vec<R
     for row in &sidebar.rows {
         rects.extend([row.rect, row.close]);
         rects.extend(
-            [row.chip, row.fold, row.ci, row.worktrees]
+            [row.chip, row.errors, row.fold, row.ci, row.worktrees]
                 .into_iter()
                 .flatten(),
         );
