@@ -5,8 +5,9 @@
 // place of itself: going back never lands on it. gerdr is told where
 // each pane's tab is whenever it changes, whether it can go back or
 // forward, and when it closes, over the native messaging host; it can send
-// a pane's tab to another page, back, forward, or load it again, and keep
-// T3 Code's app in it to the projects under some folders (see `scopeT3`).
+// a pane's tab to another page, back, forward, or load it again, keep T3
+// Code's app in it to the projects under some folders, and start a thread
+// there in one of them (see `inT3`).
 
 const HOST = "dev.gerdr.web";
 const BOOT = chrome.runtime.getURL("open.html");
@@ -17,13 +18,17 @@ let panes = {};
 // The folders whose T3 Code projects each tab's app shows, and the
 // app's origin, by tab id: `{ origin, dirs }`.
 let scopes = {};
-const loaded = chrome.storage.session.get(["panes", "scopes"]).then((stored) => {
+// The new threads asked of each tab's T3 Code app, by tab id, until
+// started: `{ origin, dirs, at }` (see `startThread`).
+let threads = {};
+const loaded = chrome.storage.session.get(["panes", "scopes", "threads"]).then((stored) => {
   panes = stored.panes || {};
   scopes = stored.scopes || {};
+  threads = stored.threads || {};
 });
 
 function save() {
-  return chrome.storage.session.set({ panes, scopes });
+  return chrome.storage.session.set({ panes, scopes, threads });
 }
 
 let port = null;
@@ -111,20 +116,33 @@ function tabOf(pane) {
   return tab === undefined ? undefined : Number(tab);
 }
 
-// In T3 Code's app: show the projects under `dirs` only, by its sidebar's
-// own project filter. That filter is kept in the page's localStorage by
-// project key, which the app works out from each repository's remote: the
-// keys are read from the app's own project groups, found in React's tree
-// by their fields. The app reads the filter as it starts, so the page
-// loads again once it changed, once per page session. Runs in the page.
+// In T3 Code's app, for the folders `dirs`: `job` "scope" shows their
+// projects only, "thread" starts a new thread in one of them. Runs in the
+// page, in its own world.
+//
+// Scope: by the app's sidebar's own project filter. That filter is kept
+// in the page's localStorage by project key, which the app works out from
+// each repository's remote: the keys are read from the app's own project
+// groups, found in React's tree by their fields. The app reads the filter
+// as it starts, so the page loads again once it changed, once per page
+// session.
+//
+// Thread: by the app's own `handleNewThread`, which its new-thread
+// buttons call, found in React's tree next to the fields it comes with,
+// given the project: the one the shown thread or draft is of when it is
+// in the folders, else the one at a folder, else the app's default when
+// it is in them, else the first. It opens a draft of that project.
 //
 // None of that is T3 Code's API: a version that changes it is told of,
-// as `{ ok: true }` where the filter is set, else `{ reason, detail }` (see
-// gerdr's `t3_unscoped`). The page loading again ends it unanswered, as
-// does a page asked for the same folders already (undefined).
-function scopeT3(dirs) {
-  if (window.__gerdrScope === JSON.stringify(dirs)) return undefined;
-  window.__gerdrScope = JSON.stringify(dirs);
+// as `{ ok: true }` where it worked, else `{ reason, detail }` (see
+// gerdr's `t3_unscoped` and `t3_no_thread`). The page loading again ends
+// it unanswered, as does a page asked to scope to the same folders
+// already (undefined).
+function inT3(job, dirs) {
+  if (job === "scope") {
+    if (window.__gerdrScope === JSON.stringify(dirs)) return undefined;
+    window.__gerdrScope = JSON.stringify(dirs);
+  }
   const trim = (path) => path.replace(/\/+$/, "") || "/";
   const want = dirs.map(trim);
   const inside = (path, dir) => path === dir || path.startsWith(dir === "/" ? dir : dir + "/");
@@ -137,18 +155,11 @@ function scopeT3(dirs) {
     const key = host && Object.keys(host).find((k) => k.startsWith("__reactContainer$"));
     return key ? host[key] : null;
   }
-  // Every list of project groups in the tree: merged by key (one may be
-  // the sidebar's, filtered already), and each list's keys.
-  function groups() {
+  // Give `take` every value React's tree holds in its props, hooks and
+  // memo caches; whether the page has a tree.
+  function walk(take) {
     const top = root();
-    if (!top) return null;
-    const found = new Map();
-    const lists = [];
-    const take = (v) => {
-      if (!isGroups(v)) return;
-      for (const g of v) found.set(g.projectKey, g);
-      lists.push(v.filter((g) => !g.isScratch).map((g) => g.projectKey).sort());
-    };
+    if (!top) return false;
     const stack = [top];
     for (let seen = 0; stack.length && seen < 500000; seen++) {
       const fiber = stack.pop();
@@ -164,6 +175,18 @@ function scopeT3(dirs) {
       if (fiber.sibling) stack.push(fiber.sibling);
       if (fiber.child) stack.push(fiber.child);
     }
+    return true;
+  }
+  // Every list of project groups in the tree: merged by key (one may be
+  // the sidebar's, filtered already), and each list's keys.
+  function groups() {
+    const found = new Map();
+    const lists = [];
+    walk((v) => {
+      if (!isGroups(v)) return;
+      for (const g of v) found.set(g.projectKey, g);
+      lists.push(v.filter((g) => !g.isScratch).map((g) => g.projectKey).sort());
+    });
     return found.size ? { all: [...found.values()], lists } : null;
   }
   const roots = (g) => g.memberProjects.map((p) => p.workspaceRoot).filter((r) => typeof r === "string").map(trim);
@@ -183,6 +206,75 @@ function scopeT3(dirs) {
     }
     return best.sort();
   }
+  // How long the app may take to start, and to show the projects.
+  const LOOKS = 120, EVERY = 500;
+  // The page without its hash: a sign-in link's token is there.
+  const failing = (done) => (reason, detail) =>
+    done({ reason, detail: `${detail} (page ${location.origin}${location.pathname}, folders ${want.join(", ")})` });
+  if (job === "thread") {
+    const isProject = (p) =>
+      p && typeof p.workspaceRoot === "string" && p.id != null && p.environmentId != null;
+    const ref = (p) => ({ environmentId: p.environmentId, projectId: p.id });
+    const same = (a, p) => a && a.environmentId === p.environmentId && a.projectId === p.id;
+    return new Promise((done) => {
+      const fail = failing(done);
+      let looks = 0, refused = 0;
+      function look() {
+        try {
+          step();
+        } catch (err) {
+          fail("error", String(err?.stack || err).slice(0, 800));
+        }
+      }
+      function step() {
+        if (location.pathname.startsWith("/pair")) return void setTimeout(look, EVERY);
+        let app = null;
+        const projects = new Map();
+        const tree = walk((v) => {
+          if (!v || typeof v !== "object") return;
+          if (!app && typeof v.handleNewThread === "function" && "defaultProjectRef" in v) app = v;
+          if (!isGroups(v)) return;
+          for (const g of v) {
+            if (g.isScratch) continue;
+            for (const p of g.memberProjects) if (isProject(p)) projects.set(`${p.environmentId}\n${p.id}`, p);
+          }
+        });
+        const all = [...projects.values()];
+        let picks = all.filter((p) => want.some((d) => inside(trim(p.workspaceRoot), d)));
+        if (!picks.length) {
+          // A folder inside a project: the nearest project holding it.
+          const holding = all.filter((p) => want.some((d) => inside(d, trim(p.workspaceRoot))));
+          const depth = Math.max(-1, ...holding.map((p) => trim(p.workspaceRoot).length));
+          picks = holding.filter((p) => trim(p.workspaceRoot).length === depth);
+        }
+        if (!app || !picks.length) {
+          // Not loaded yet, or the project not added yet.
+          if (++looks < LOOKS) return void setTimeout(look, EVERY);
+          if (!tree) return fail("no-react", "no React root (__reactContainer$) on #root");
+          if (!app) return fail("no-handler", "no object with handleNewThread and defaultProjectRef in React's tree");
+          return fail("no-match", `no project at or around the folders; roots: ${all.map((p) => p.workspaceRoot).join(", ") || "none"}`);
+        }
+        picks.sort((a, b) => a.workspaceRoot.localeCompare(b.workspaceRoot));
+        const shown = [app.activeThread, app.activeDraftThread];
+        const project =
+          picks.find((p) => shown.some((t) => same(t, p))) ||
+          picks.find((p) => want.includes(trim(p.workspaceRoot))) ||
+          picks.find((p) => same(app.defaultProjectRef, p)) ||
+          picks[0];
+        Promise.resolve(app.handleNewThread(ref(project))).then(
+          (made) => {
+            if (made) return done({ ok: true });
+            // The app gives none when the page went elsewhere meanwhile,
+            // as its home page does as it opens its own draft.
+            if (++refused < 5) return void setTimeout(look, EVERY);
+            fail("refused", `handleNewThread(${JSON.stringify(ref(project))}) gave ${made}`);
+          },
+          (err) => fail("error", String(err?.stack || err).slice(0, 800)),
+        );
+      }
+      look();
+    });
+  }
   const name =
     Object.keys(localStorage)
       .filter((k) => /^t3code:ui-state:v\d+$/.test(k))
@@ -196,14 +288,11 @@ function scopeT3(dirs) {
   };
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const mark = "gerdr-t3-scope";
-  // How long the app may take to start, and to show the projects; how
-  // long ago a filter set and loaded again counts as just set.
-  const LOOKS = 120, EVERY = 500, FRESH = 15000;
+  // How long ago a filter set and loaded again counts as just set.
+  const FRESH = 15000;
   return new Promise((done) => {
     let looks = 0;
-    // The page without its hash: a sign-in link's token is there.
-    const fail = (reason, detail) =>
-      done({ reason, detail: `${detail} (page ${location.origin}${location.pathname}, folders ${want.join(", ")}, storage ${name})` });
+    const fail = (reason, detail) => failing(done)(reason, `${detail}, storage ${name}`);
     // A change that breaks the reading itself is told too.
     function look() {
       try {
@@ -262,26 +351,70 @@ function scopeT3(dirs) {
   });
 }
 
+// The tabs whose T3 Code app is being scoped, or starting a thread, now.
+const scoping = new Set();
+const starting = new Set();
+
 // Apply `tab`'s folders to its T3 Code app, while the tab is at that
 // app's origin; whether it took them is told to gerdr.
 async function scope(tab) {
   const scoped = scopes[tab];
   if (!scoped?.origin) return;
   let result;
+  scoping.add(tab);
   try {
     const { url } = await chrome.tabs.get(tab);
     // At another site since: not T3 Code's app.
     if (!url || new URL(url).origin !== scoped.origin) return;
-    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: scopeT3, args: [scoped.dirs] });
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args: ["scope", scoped.dirs] });
     result = frame?.result;
   } catch {
     // Not a page the extension reaches, or one that loaded again.
     return;
+  } finally {
+    scoping.delete(tab);
   }
   const pane = panes[tab];
   if (pane === undefined) return;
   if (result?.ok) send({ type: "scoped", pane });
   else if (result?.reason) send({ type: "unscoped", pane, reason: result.reason, detail: result.detail });
+}
+
+// How long a new thread asked of a tab waits for its app.
+const THREAD_WAIT = 120000;
+
+// Start the new thread asked of `tab`'s T3 Code app, once the tab is done
+// loading at the app and its folders are applied (a page loaded again for
+// them would end it); one that failed is told to gerdr.
+async function startThread(tab) {
+  const asked = threads[tab];
+  if (!asked || scoping.has(tab) || starting.has(tab)) return;
+  if (Date.now() - asked.at > THREAD_WAIT) {
+    delete threads[tab];
+    await save();
+    return;
+  }
+  let result;
+  starting.add(tab);
+  try {
+    const { url, status } = await chrome.tabs.get(tab);
+    // Still loading, or at another page: tried again at its next load.
+    if (status !== "complete" || !url || new URL(url).origin !== asked.origin) return;
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args: ["thread", asked.dirs] });
+    result = frame?.result;
+  } catch {
+    return;
+  } finally {
+    starting.delete(tab);
+  }
+  // The page loaded again meanwhile: tried again at its next load.
+  if (!result) return;
+  delete threads[tab];
+  await save();
+  const pane = panes[tab];
+  if (pane !== undefined && result.reason) {
+    send({ type: "nothread", pane, reason: result.reason, detail: result.detail });
+  }
 }
 
 async function command(message) {
@@ -312,6 +445,12 @@ async function command(message) {
         scopes[tab] = { origin: message.origin, dirs: message.dirs };
         await save();
         await scope(tab);
+        await startThread(tab);
+        break;
+      case "newthread":
+        threads[tab] = { origin: message.origin, dirs: message.dirs, at: Date.now() };
+        await save();
+        await startThread(tab);
         break;
     }
   } catch {
@@ -337,6 +476,9 @@ async function connect() {
   for (const id of Object.keys(scopes)) {
     if (!open.has(id)) delete scopes[id];
   }
+  for (const id of Object.keys(threads)) {
+    if (!open.has(id)) delete threads[id];
+  }
   await save();
   for (const tab of tabs) {
     await boot(tab);
@@ -357,13 +499,18 @@ chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
   // A load done is when the page's history can be asked for sure.
   if (change.url || change.title || change.status === "complete") await report(tab);
   // Not waited for: setting the filter can take a minute.
-  if (change.status === "complete") scope(id).catch(() => {});
+  if (change.status === "complete") {
+    scope(id)
+      .then(() => startThread(id))
+      .catch(() => {});
+  }
 });
 
 chrome.tabs.onRemoved.addListener(async (id) => {
   await loaded;
   const pane = panes[id];
   delete scopes[id];
+  delete threads[id];
   if (pane === undefined) return;
   delete panes[id];
   await save();
