@@ -739,18 +739,12 @@ impl Gerdr {
                     None => tip,
                 })
             }
-            // With its strip open under it, the strip's own tips say it.
-            SidebarHit::NewAgent(i)
-                if self.agent_strip == Some(i) && !self.cli_agents.is_empty() =>
-            {
-                None
-            }
+            // No tip of its own while it has agents: the strip it opens
+            // under it says each one, and a tip shown before the strip
+            // opens would sit in the way of the pointer moving onto it.
+            SidebarHit::NewAgent(_) if !self.cli_agents.is_empty() => None,
             SidebarHit::NewAgent(i) => {
-                let text = if self.cli_agents.is_empty() {
-                    "No agent CLI found on PATH · add yours under [agents] in Settings"
-                } else {
-                    "New agent"
-                };
+                let text = "No agent CLI found on PATH · add yours under [agents] in Settings";
                 let tip = Tooltip::new(text, layout.rows[i].agent);
                 Some(match self.keymap.help().key_of(Action::NewAgent, 0) {
                     Some(key) => tip.key(&key),
