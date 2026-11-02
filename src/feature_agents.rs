@@ -10,6 +10,12 @@
 //! unchanged for `STABLE`. Its file only counts when written since the run
 //! started (or was sent back). A Plan agent's run is ready only once the
 //! code reads unchanged: no uncommitted changes and no commits.
+//!
+//! A Build agent has no review gate: its `build.md` may be older than the
+//! run (a fresh agent goes on from it), it stops after each milestone (the
+//! milestone gate, `continue_stage_agent`), and once every milestone is
+//! ticked gerdr reads the code and marks Build done itself (see
+//! `feature_build`).
 
 use std::{
     collections::BTreeMap,
@@ -22,10 +28,10 @@ use crate::{
     cli_agents::CliAgent,
     feature::{
         self, Feature, Stage, Status,
-        agents::{StageRun, command_line, needs},
+        agents::{StageRun, Stop, command_line, needs},
         artifacts,
         patch::Reading,
-        store,
+        store, verify,
     },
     herdr::AgentStatus,
     projects,
@@ -78,24 +84,36 @@ pub(crate) type Stamp = (u64, u64);
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Watch {
     /// The run watched: a new one starts the watch again.
-    n: u32,
+    pub(crate) n: u32,
     /// herdr saw it working since it started or was sent back.
-    worked: bool,
+    pub(crate) worked: bool,
     /// Unix seconds its file must be written at or after to count.
-    after: u64,
+    pub(crate) after: u64,
     /// Its file's stamp, good, and since when unchanged.
     stable: Option<(Stamp, Instant)>,
     /// Since when its pane is gone.
     gone: Option<Instant>,
     /// What its file lacks, as last read.
     pub(crate) missing: Vec<String>,
-    /// The code is being read for a Plan file with this stamp.
-    checking: Option<Stamp>,
-    /// The Plan file with this stamp was refused: the code changed, as
-    /// the text says.
+    /// The code is being read for a Plan or Build file with this stamp.
+    pub(crate) checking: Option<Stamp>,
+    /// The Plan or Build file with this stamp was refused: the code
+    /// isn't as it should be, as the text says ("uncommitted changes in
+    /// api").
     pub(crate) refused: Option<(Stamp, String)>,
-    /// When the code was last read for the refused Plan file.
-    refused_at: Option<Instant>,
+    /// When the code was last read for the refused file.
+    pub(crate) refused_at: Option<Instant>,
+}
+
+impl Watch {
+    /// A watch of run `n` from its start: it waits for the agent to work,
+    /// and any file counts.
+    pub(crate) fn of(n: u32) -> Self {
+        Self {
+            n,
+            ..Self::default()
+        }
+    }
 }
 
 /// The watch's key: project, slug and stage.
@@ -108,7 +126,32 @@ enum File {
     /// Written before the run started: not its work.
     Old,
     Bad(Stamp, Vec<String>),
+    /// A build log with `done` of `total` milestones ticked, some but not
+    /// all: the Build agent stops there.
+    Partial(Stamp, u32, u32),
     Good(Stamp),
+}
+
+impl File {
+    /// Its stamp, when it counts as the run's work so far.
+    fn finished(&self) -> Option<Stamp> {
+        match self {
+            Self::Good(stamp) | Self::Partial(stamp, ..) => Some(*stamp),
+            _ => None,
+        }
+    }
+
+    /// What a done agent with this file comes to, if it is enough.
+    fn verdict(&self) -> Option<Verdict> {
+        match self {
+            Self::Good(stamp) => Some(Verdict::Ready(*stamp)),
+            Self::Partial(_, done, total) => Some(Verdict::Stop {
+                done: *done,
+                total: *total,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// What the watch makes of a run.
@@ -123,6 +166,11 @@ enum Verdict {
     },
     /// Its pane is gone, and with it the agent.
     Gone,
+    /// A Build agent stopped after milestone `done` of `total`.
+    Stop {
+        done: u32,
+        total: u32,
+    },
 }
 
 /// Judge a run: `status` is herdr's for its pane (`None`: herdr doesn't
@@ -140,7 +188,7 @@ fn judge(
         File::Bad(_, lacks) => watch.missing = lacks.clone(),
         _ => watch.missing.clear(),
     }
-    if !matches!(file, File::Good(_)) {
+    if file.finished().is_none() {
         watch.stable = None;
     }
     if matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked)) {
@@ -154,16 +202,16 @@ fn judge(
         if now.duration_since(since) < STABLE {
             return Verdict::Wait;
         }
-        return match file {
-            File::Good(stamp) => Verdict::Ready(*stamp),
-            _ => Verdict::Gone,
-        };
+        return file.verdict().unwrap_or(Verdict::Gone);
     }
     watch.gone = None;
     let done = matches!(status, Some(AgentStatus::Done | AgentStatus::Idle)) && watch.worked;
     if done {
+        if let Some(verdict) = file.verdict() {
+            return verdict;
+        }
         return match file {
-            File::Good(stamp) => Verdict::Ready(*stamp),
+            File::Good(_) | File::Partial(..) => Verdict::Wait,
             // A chat: the brief comes when the user and it agree.
             File::Absent | File::Old if discover => Verdict::Wait,
             _ if nudged => Verdict::Wait,
@@ -172,15 +220,15 @@ fn judge(
         };
     }
     if matches!(status, None | Some(AgentStatus::Unknown))
-        && let File::Good(stamp) = file
+        && let Some(stamp) = file.finished()
     {
         match watch.stable {
-            Some((seen, since)) if seen == *stamp => {
+            Some((seen, since)) if seen == stamp => {
                 if now.duration_since(since) >= STABLE {
-                    return Verdict::Ready(*stamp);
+                    return file.verdict().unwrap_or(Verdict::Wait);
                 }
             }
-            _ => watch.stable = Some((*stamp, now)),
+            _ => watch.stable = Some((stamp, now)),
         }
     }
     Verdict::Wait
@@ -221,25 +269,53 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
         .map_err(|lacks| format!("{name} isn't ready: {}", lacks.join("; ")))
 }
 
+/// The gate `f` waits at, if any: its stage, since when, and what for.
+/// A file to review (Discover, Plan), a Build agent stopped after a
+/// milestone, or Verify failed once gerdr stopped sending its failures
+/// to the Build agent. A Build run's `ready` says Build was marked done,
+/// not that anything waits for review.
+fn gate_of(f: &Feature) -> Option<(Stage, u64, GateKind)> {
+    if f.status != Status::Open {
+        return None;
+    }
+    let stage = f.current()?;
+    match stage {
+        Stage::Discover | Stage::Plan => {
+            let since = f.runs.get(&stage)?.ready?;
+            Some((stage, since, GateKind::Review))
+        }
+        Stage::Build => {
+            let stop = f.runs.get(&stage)?.stop?;
+            let kind = GateKind::Milestone {
+                done: stop.done,
+                total: stop.total,
+            };
+            Some((stage, stop.at, kind))
+        }
+        Stage::Verify => {
+            let run = f.verify.as_ref()?;
+            let failed = run.passed == Some(false) && run.fixes >= verify::MAX_FIXES;
+            let since = run.finished.filter(|_| failed)?;
+            Some((stage, since, GateKind::VerifyFailed { fixes: run.fixes }))
+        }
+        _ => None,
+    }
+}
+
 /// The gates waiting in `all` (features by project), oldest first.
 fn gates(all: &BTreeMap<String, Vec<Feature>>) -> Vec<Gate> {
     let mut gates: Vec<Gate> = all
         .iter()
         .flat_map(|(project, features)| {
             features.iter().filter_map(move |f| {
-                if f.status != Status::Open {
-                    return None;
-                }
-                let stage = f.current()?;
-                needs(stage)?;
-                let since = f.runs.get(&stage)?.ready?;
+                let (stage, since, kind) = gate_of(f)?;
                 Some(Gate {
                     project: project.clone(),
                     slug: f.slug.clone(),
                     title: f.title.clone(),
                     stage,
                     since,
-                    kind: GateKind::Review,
+                    kind,
                 })
             })
         })
@@ -278,7 +354,7 @@ fn stage_key(stage: Stage) -> String {
 }
 
 /// The values the stage templates are rendered with.
-fn vars(feature: &Feature, project_name: &str, data: &Path, stage: Stage) -> Vars {
+pub(crate) fn vars(feature: &Feature, project_name: &str, data: &Path, stage: Stage) -> Vars {
     let path = |p: Option<PathBuf>| p.map(|p| p.display().to_string()).unwrap_or_default();
     let repos = if feature.multi {
         feature
@@ -309,6 +385,13 @@ fn vars(feature: &Feature, project_name: &str, data: &Path, stage: Stage) -> Var
         ("project.name", project_name.to_owned()),
         ("artifact.path", path(artifacts::path(data, stage))),
         ("brief.path", path(artifacts::path(data, Stage::Discover))),
+        ("plan.path", path(artifacts::path(data, Stage::Plan))),
+        (
+            "evidence.path",
+            data.join(verify::EVIDENCE).display().to_string(),
+        ),
+        ("evidence", String::new()),
+        ("branch", feature.branch()),
         (
             "multi_repo",
             if feature.multi { "yes" } else { "" }.to_owned(),
@@ -334,7 +417,18 @@ pub(crate) fn agent_line(
     now: u64,
 ) -> String {
     let file = artifacts::name(stage).unwrap_or("its file");
-    if run.ready.is_some() {
+    if stage == Stage::Build {
+        // Its `ready` says Build was marked done: never a review.
+        if let Some(stop) = run.stop {
+            return format!(
+                "milestone {} of {} done \u{b7} Enter to continue",
+                stop.done, stop.total
+            );
+        }
+        if watch.is_some_and(|w| w.checking.is_some()) {
+            return "checking the code".into();
+        }
+    } else if run.ready.is_some() {
         return format!("{file} ready for review");
     }
     if let Some((_, why)) = watch.and_then(|w| w.refused.as_ref()) {
@@ -372,7 +466,8 @@ fn stamp(path: &Path) -> Option<Stamp> {
 }
 
 /// How the watch finds `feature`'s `stage` file at `path`, written at or
-/// after `after` to count.
+/// after `after` to count. A build log with some milestones ticked but not
+/// all is `Partial`.
 fn read_file(feature: &Feature, stage: Stage, path: &Path, after: u64) -> File {
     let Some(stamp) = stamp(path) else {
         return File::Absent;
@@ -383,10 +478,24 @@ fn read_file(feature: &Feature, stage: Stage, path: &Path, after: u64) -> File {
     match std::fs::read_to_string(path) {
         Ok(text) => match validate(feature, stage, &text) {
             Ok(()) => File::Good(stamp),
-            Err(lacks) => File::Bad(stamp, lacks),
+            Err(lacks) => match partial(stage, &text) {
+                Some((done, total)) => File::Partial(stamp, done, total),
+                None => File::Bad(stamp, lacks),
+            },
         },
         Err(_) => File::Absent,
     }
+}
+
+/// The milestones ticked and in all of a `stage` file reading `text` that
+/// isn't good, when it is a build log with some ticked but not all.
+fn partial(stage: Stage, text: &str) -> Option<(u32, u32)> {
+    if stage != Stage::Build {
+        return None;
+    }
+    let (done, total) = artifacts::milestones(text);
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    (done > 0 && done < total).then(|| (count(done), count(total)))
 }
 
 /// What the stage is called in "<Stage> of “Title”" and approvals.
@@ -416,23 +525,28 @@ impl Gerdr {
             self.close_feature_panel();
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
-        self.launch_stage_agent(project, slug, stage, None);
+        if stage == Stage::Build && self.setup_before_build(project, slug, fresh) {
+            return;
+        }
+        self.launch_stage_agent(project, slug, stage, &[]);
     }
 
-    /// Start a new run of `stage`'s agent, its prompt with `comments` if
-    /// it is sent back with them.
-    fn launch_stage_agent(
+    /// Start a new run of `stage`'s agent, its prompt rendered with `extra`
+    /// over the feature's values (`comments` when it is sent back with
+    /// them, `evidence` for a Build agent fixing Verify's failures).
+    /// Whether it started.
+    pub(crate) fn launch_stage_agent(
         &mut self,
         project: &str,
         slug: &str,
         stage: Stage,
-        comments: Option<String>,
-    ) {
+        extra: &[(&str, String)],
+    ) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
-            return;
+            return false;
         };
         let Some(need) = needs(stage) else {
-            return;
+            return false;
         };
         let project_name = self
             .projects
@@ -445,7 +559,8 @@ impl Gerdr {
         let Some((agent, base)) = pick_agent(configured.as_deref(), &self.cli_agents) else {
             let why = "No coding agent CLI is installed: install Claude Code, Codex or Cursor Agent, or set one under [agents] in Settings";
             crate::problems::report("features", why);
-            return self.show_error(why.to_owned());
+            self.show_error(why.to_owned());
+            return false;
         };
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
@@ -454,23 +569,27 @@ impl Gerdr {
             .join("prompts")
             .join(format!("{}-{n}.md", stage_key(stage)));
         let mut values = vars(&feature, &project_name, &data, stage);
-        values.insert("comments".into(), comments.unwrap_or_default());
+        for (key, value) in extra {
+            values.insert((*key).to_owned(), value.clone());
+        }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
         let text = match prompts::render_builtin(need.template, &values) {
             Ok(text) => text,
             Err(err) => {
                 tracing::warn!("rendering the {} prompt: {err}", need.template);
-                return self.show_error(format!(
+                self.show_error(format!(
                     "Couldn't write the {} prompt: {err}",
                     stage.label()
                 ));
+                return false;
             }
         };
         let written = std::fs::create_dir_all(data.join("prompts"))
             .and_then(|()| std::fs::write(&prompt, text));
         if let Err(err) = written {
             tracing::warn!("writing {}: {err}", prompt.display());
-            return self.show_error(format!("Couldn't write {}: {err}", prompt.display()));
+            self.show_error(format!("Couldn't write {}: {err}", prompt.display()));
+            return false;
         }
         let command = command_line(&base, &prompt, std::slice::from_ref(&data));
         self.close_feature_panel();
@@ -491,7 +610,7 @@ impl Gerdr {
             stop: None,
         };
         let Some(feature) = self.feature_mut(project, slug) else {
-            return;
+            return false;
         };
         feature.runs.insert(stage, run);
         feature.log(
@@ -507,15 +626,19 @@ impl Gerdr {
             "Started {agent} on {} of \u{201c}{title}\u{201d}",
             stage.label()
         ));
+        true
     }
 
     /// Look at every running stage agent: done with a good file makes its
-    /// gate wait; done without one is nudged once. Called after each read
-    /// of herdr's agents.
+    /// gate wait (a Build agent's code is read, see `feature_build`); a
+    /// Build agent done after a milestone waits at the milestone gate;
+    /// done without a good file is nudged once. Called after each read of
+    /// herdr's agents.
     pub fn stage_agents_tick(&mut self) {
         let Some(project) = self.project.clone() else {
             return;
         };
+        self.fixing_tick(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
@@ -526,7 +649,9 @@ impl Gerdr {
                 let stage = f.current()?;
                 needs(stage)?;
                 let run = f.runs.get(&stage)?;
-                run.ready.is_none().then(|| (f.clone(), stage, run.clone()))
+                // A Build run marked done before is back: its code changed.
+                (run.ready.is_none() || stage == Stage::Build)
+                    .then(|| (f.clone(), stage, run.clone()))
             })
             .collect();
         let now = Instant::now();
@@ -546,16 +671,40 @@ impl Gerdr {
             let Some(path) = artifacts::path(&data, stage) else {
                 continue;
             };
+            let build = stage == Stage::Build;
+            let back = build && run.ready.is_some();
+            let working = matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked));
+            if back || (build && working && run.stop.is_some()) {
+                // Back at Build, or going on past its stop: nothing waits.
+                if let Some(r) = self
+                    .feature_mut(&project, &feature.slug)
+                    .and_then(|f| f.runs.get_mut(&stage))
+                {
+                    r.ready = None;
+                    r.stop = None;
+                    self.save_feature(&project, &feature.slug);
+                }
+            }
             let watch = self.features.agents.entry(key.clone()).or_default();
             if watch.n != run.n {
                 // Seen first now: after a restart, a file there already
-                // stands for the work done.
+                // stands for the work done. A build log of any age counts:
+                // a fresh Build agent goes on from it.
                 *watch = Watch {
                     n: run.n,
-                    after: run.started,
+                    after: if build { 0 } else { run.started },
                     worked: stamp(&path).is_some_and(|s| s.0 >= run.started),
                     ..Watch::default()
                 };
+            }
+            if back {
+                // Its code changed after it was done: read it again once
+                // the agent rests, whatever it did since.
+                watch.worked = true;
+            }
+            if build && working {
+                // What it was told it lacked is its to mend: read anew.
+                watch.refused = None;
             }
             let file = read_file(&feature, stage, &path, watch.after);
             let alive = placed || status.is_some();
@@ -570,38 +719,85 @@ impl Gerdr {
             );
             match verdict {
                 Verdict::Wait => {}
-                Verdict::Ready(stamp) if stage == Stage::Plan => {
+                Verdict::Ready(stamp) if matches!(stage, Stage::Plan | Stage::Build) => {
                     // A refused file is read again now and then: the
-                    // user may have undone the agent's changes.
+                    // user may have undone the agent's changes, or
+                    // committed them.
                     let refused = watch.refused.as_ref().is_some_and(|(s, _)| *s == stamp)
                         && watch
                             .refused_at
                             .is_some_and(|at| now.duration_since(at) < RECHECK);
                     if watch.checking.is_none() && !refused {
                         watch.checking = Some(stamp);
-                        self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                        if build {
+                            self.check_build_code(&project, &feature.slug, run.n, stamp);
+                        } else {
+                            self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                        }
                     }
                 }
                 Verdict::Ready(_) => self.stage_ready(&project, &feature.slug, stage),
+                Verdict::Stop { done, total } => {
+                    self.milestone_stop(&project, &feature.slug, run.n, done, total);
+                    if !alive && run.pane.is_some() {
+                        self.forget_pane(&project, &feature.slug, stage);
+                    }
+                }
                 Verdict::Nudge { absent } => {
                     let missing = watch.missing.join("; ");
                     self.nudge_stage_agent(&feature, stage, &run, absent, missing);
                 }
                 Verdict::Gone if run.pane.is_some() => {
-                    if let Some(f) = self.feature_mut(&project, &feature.slug)
-                        && let Some(r) = f.runs.get_mut(&stage)
-                    {
-                        r.pane = None;
-                        f.log(
-                            feature::now(),
-                            format!("{} agent's tab closed", stage.label()),
-                        );
-                        self.save_feature(&project, &feature.slug);
-                    }
+                    self.forget_pane(&project, &feature.slug, stage);
                 }
                 Verdict::Gone => {}
             }
         }
+    }
+
+    /// The tab of `stage`'s agent of feature `slug` is gone: its run
+    /// forgets it.
+    fn forget_pane(&mut self, project: &str, slug: &str, stage: Stage) {
+        if let Some(f) = self.feature_mut(project, slug)
+            && let Some(r) = f.runs.get_mut(&stage)
+        {
+            r.pane = None;
+            f.log(
+                feature::now(),
+                format!("{} agent's tab closed", stage.label()),
+            );
+            self.save_feature(project, slug);
+        }
+    }
+
+    /// The Build agent of feature `slug` (run `n`) stopped after milestone
+    /// `done` of `total`: the milestone gate waits, and the user is told.
+    /// The same stop again is nothing new.
+    fn milestone_stop(&mut self, project: &str, slug: &str, n: u32, done: u32, total: u32) {
+        let at = feature::now();
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.current() != Some(Stage::Build) {
+            return;
+        }
+        let Some(run) = feature.runs.get_mut(&Stage::Build).filter(|r| r.n == n) else {
+            return;
+        };
+        if !stop_is_new(run.stop, done, total) {
+            return;
+        }
+        run.stop = Some(Stop { done, total, at });
+        let pane = run.pane.clone();
+        feature.log(
+            at,
+            format!("Build stopped after milestone {done} of {total}"),
+        );
+        let title = feature.title.clone();
+        self.save_feature(project, slug);
+        let summary = format!("Build of \u{201c}{title}\u{201d}: milestone {done} of {total} done");
+        self.notify_feature(project, slug, pane, &summary);
+        self.show_success(summary);
     }
 
     /// Tell `run`'s agent once that its file isn't there (`absent`) or
@@ -694,6 +890,19 @@ impl Gerdr {
             "{} of \u{201c}{title}\u{201d} is ready for review",
             doc_word(stage)
         );
+        self.notify_feature(project, slug, pane, &summary);
+        self.show_success(summary);
+    }
+
+    /// Notify `summary` of feature `slug`, unless its agent's tab (`pane`)
+    /// is in sight.
+    pub(crate) fn notify_feature(
+        &mut self,
+        project: &str,
+        slug: &str,
+        pane: Option<String>,
+        summary: &str,
+    ) {
         let in_sight = self.host_focused
             && pane
                 .as_deref()
@@ -708,9 +917,8 @@ impl Gerdr {
                 .projects
                 .project(project)
                 .map_or_else(String::new, |p| p.name.clone());
-            notifier.send(&key, &summary, &body);
+            notifier.send(&key, summary, &body);
         }
-        self.show_success(summary);
     }
 
     /// The code of feature `slug` was read for run `n` of its Plan agent,
@@ -787,14 +995,42 @@ impl Gerdr {
 
     /// Approve `stage` of feature `slug`: its file as it is now. Marks
     /// the stage done. False when it isn't approved, the user told why.
+    ///
+    /// Build isn't approved: with its `build.md` good, its code is read now
+    /// as if the agent were done, and gerdr marks it done if it holds (see
+    /// `build_code_checked`); false.
     pub fn approve_stage(&mut self, project: &str, slug: &str, stage: Stage) -> bool {
         let Some(feature) = self.feature(project, slug) else {
             return false;
         };
         let data = store::dir(None, project, slug);
-        let text = artifacts::path(&data, stage).and_then(|p| std::fs::read_to_string(p).ok());
+        let path = artifacts::path(&data, stage);
+        let text = path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok());
         if let Err(why) = approval(feature, stage, text.as_deref()) {
             self.show_warning(why);
+            return false;
+        }
+        if stage == Stage::Build {
+            let n = feature.runs.get(&stage).map_or(0, |r| r.n);
+            let title = feature.title.clone();
+            let stamp = path.as_deref().and_then(stamp).unwrap_or_default();
+            let key = (project.to_owned(), slug.to_owned(), stage);
+            let watch = self.features.agents.entry(key).or_default();
+            if watch.n != n {
+                *watch = Watch::of(n);
+            }
+            if watch.checking.is_some() {
+                self.show_warning(format!(
+                    "Checking the code of \u{201c}{title}\u{201d} already"
+                ));
+                return false;
+            }
+            // Asked for: what it finds is said again.
+            watch.refused = None;
+            watch.checking = Some(stamp);
+            self.check_build_code(project, slug, n, stamp);
             return false;
         }
         let now = feature::now();
@@ -828,7 +1064,8 @@ impl Gerdr {
             return self.show_warning(format!("{} isn't waiting for review", stage.label()));
         }
         let Some(run) = feature.runs.get(&stage).cloned() else {
-            return self.launch_stage_agent(project, slug, stage, Some(comments));
+            self.launch_stage_agent(project, slug, stage, &[("comments", comments)]);
+            return;
         };
         let data = store::dir(None, project, slug);
         let back = run.sent_back + 1;
@@ -889,10 +1126,16 @@ impl Gerdr {
                     tracing::warn!("sending {project}/{slug} back to its agent: {why}");
                 }
                 self.features.agents.remove(&key);
-                self.launch_stage_agent(project, slug, stage, Some(comments));
+                self.launch_stage_agent(project, slug, stage, &[("comments", comments)]);
             }
         }
     }
+}
+
+/// Whether a Build agent's stop after milestone `done` of `total` is new:
+/// none yet, or another one.
+fn stop_is_new(stop: Option<Stop>, done: u32, total: u32) -> bool {
+    stop.is_none_or(|s| (s.done, s.total) != (done, total))
 }
 
 /// Whether `stage`'s agent can start for `feature`; else why not.
@@ -1219,5 +1462,174 @@ mod tests {
         let text = prompts::render_builtin("plan", &v).unwrap();
         assert!(text.contains("Feature a") && text.contains("Acme"));
         assert_eq!(stage_key(Stage::AiReview), "ai-review");
+    }
+
+    #[test]
+    fn a_build_agent_done_after_some_milestones_stops() {
+        let t = Instant::now();
+        let partial = File::Partial((5, 9), 2, 4);
+        let mut w = watch();
+        let idle = Some(AgentStatus::Idle);
+        // Not before it worked.
+        assert_eq!(
+            judge(&mut w, idle, true, &partial, false, false, t),
+            Verdict::Wait
+        );
+        assert_eq!(
+            judge(
+                &mut w,
+                Some(AgentStatus::Working),
+                true,
+                &partial,
+                false,
+                false,
+                t
+            ),
+            Verdict::Wait
+        );
+        let stop = Verdict::Stop { done: 2, total: 4 };
+        assert_eq!(judge(&mut w, idle, true, &partial, false, false, t), stop);
+        // A stop isn't a nudge, nudged before or not.
+        assert_eq!(judge(&mut w, idle, true, &partial, false, true, t), stop);
+        assert!(w.missing.is_empty());
+        // herdr doesn't know it: once the log stays as it is.
+        let mut w = watch();
+        assert_eq!(
+            judge(&mut w, None, true, &partial, false, false, t),
+            Verdict::Wait
+        );
+        assert_eq!(
+            judge(&mut w, None, true, &partial, false, false, t + STABLE),
+            stop
+        );
+        // Its tab gone: stopped there too.
+        let mut w = watch();
+        judge(&mut w, None, false, &partial, false, false, t);
+        assert_eq!(
+            judge(&mut w, None, false, &partial, false, false, t + STABLE),
+            stop
+        );
+    }
+
+    #[test]
+    fn only_another_milestone_is_a_new_stop() {
+        let stop = |done, total| Stop { done, total, at: 5 };
+        assert!(stop_is_new(None, 1, 3));
+        assert!(!stop_is_new(Some(stop(1, 3)), 1, 3));
+        assert!(stop_is_new(Some(stop(1, 3)), 2, 3));
+        assert!(stop_is_new(Some(stop(1, 3)), 1, 4));
+        assert_eq!(
+            partial(Stage::Plan, "## Milestones\n- [x] a\n- [ ] b\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn gates_wait_for_reviews_milestones_and_verify_failing_too_often() {
+        let mut review = feature("a", vec![repo("api", true)], 1);
+        review.runs.insert(Stage::Plan, run(Some(400)));
+        // Build's ready says it was marked done: no review.
+        let mut built = feature("b", vec![repo("api", true)], 2);
+        built.runs.insert(Stage::Build, run(Some(100)));
+        let mut stopped = feature("c", vec![repo("api", true)], 2);
+        let mut r = run(None);
+        r.stop = Some(Stop {
+            done: 2,
+            total: 4,
+            at: 300,
+        });
+        stopped.runs.insert(Stage::Build, r);
+        let failed = |slug: &str, fixes: u32| {
+            let mut f = feature(slug, vec![repo("api", true)], 3);
+            f.verify = Some(verify::VerifyRun {
+                n: 4,
+                started: 150,
+                finished: Some(200),
+                passed: Some(false),
+                fixes,
+                ..verify::VerifyRun::default()
+            });
+            f
+        };
+        let all = BTreeMap::from([(
+            "one".to_owned(),
+            vec![review, built, stopped, failed("d", 3), failed("e", 2)],
+        )]);
+        let gates = gates(&all);
+        let got: Vec<(&str, Stage, u64, GateKind)> = gates
+            .iter()
+            .map(|g| (g.slug.as_str(), g.stage, g.since, g.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("d", Stage::Verify, 200, GateKind::VerifyFailed { fixes: 3 }),
+                (
+                    "c",
+                    Stage::Build,
+                    300,
+                    GateKind::Milestone { done: 2, total: 4 }
+                ),
+                ("a", Stage::Plan, 400, GateKind::Review),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_build_agent_line_says_milestones_checks_and_what_is_missing() {
+        let now = 1_000 + 180;
+        let mut r = run(None);
+        let checking = Watch {
+            checking: Some((1, 1)),
+            ..Watch::default()
+        };
+        assert_eq!(
+            agent_line(&r, Stage::Build, None, Some(&checking), now),
+            "checking the code"
+        );
+        let refused = Watch {
+            refused: Some(((1, 1), "uncommitted changes in api".into())),
+            ..Watch::default()
+        };
+        assert_eq!(
+            agent_line(&r, Stage::Build, None, Some(&refused), now),
+            "not ready: uncommitted changes in api"
+        );
+        // Ready from before its code changed isn't a review.
+        r.ready = Some(1_100);
+        assert_eq!(
+            agent_line(&r, Stage::Build, Some(AgentStatus::Idle), None, now),
+            "Claude Code waiting for you \u{b7} started 3m ago"
+        );
+        r.stop = Some(Stop {
+            done: 2,
+            total: 4,
+            at: 1_150,
+        });
+        assert_eq!(
+            agent_line(&r, Stage::Build, None, Some(&checking), now),
+            "milestone 2 of 4 done \u{b7} Enter to continue"
+        );
+    }
+
+    #[test]
+    fn the_build_prompt_gets_the_plan_evidence_and_branch() {
+        let f = feature("a", vec![repo("api", true)], 2);
+        let v = vars(&f, "Acme", Path::new("/data/a"), Stage::Build);
+        assert_eq!(v["artifact.path"], "/data/a/build.md");
+        assert_eq!(v["plan.path"], "/data/a/plan.md");
+        assert_eq!(v["evidence.path"], "/data/a/evidence.md");
+        assert_eq!(v["evidence"], "");
+        assert_eq!(v["branch"], "feature/a");
+        let text = prompts::render_builtin("build", &v).unwrap();
+        assert!(text.contains("Feature a") && !text.contains("npm test"));
+        let mut fix = v.clone();
+        fix.insert("evidence".into(), "api: `npm test` exited with 1".into());
+        let text = prompts::render_builtin("build", &fix).unwrap();
+        assert!(text.contains("npm test"));
+        let line = prompts::render_builtin("fix", &v).unwrap();
+        assert!(line.contains("/data/a/evidence.md") && !line.trim().contains('\n'));
+        let line = prompts::render_builtin("continue", &v).unwrap();
+        assert!(line.contains("/data/a/build.md") && !line.trim().contains('\n'));
     }
 }
