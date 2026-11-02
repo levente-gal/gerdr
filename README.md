@@ -137,3 +137,8 @@ cargo test
 
 `docs/ux-conventions.md` gives the UX rules gerdr follows.
 `docs/feature-checklist.md` turns them into a checklist for each new feature.
+
+## License
+
+MIT. See [LICENSE](LICENSE). The agent logos in `assets/agents/` keep their
+own license (see `assets/agents/LICENSE`).
