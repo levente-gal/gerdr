@@ -516,6 +516,7 @@ fn inbox() -> InboxView {
         title: title.into(),
         count,
         hidden,
+        buttons: Vec::new(),
     };
     let button = |label: &str, key: &str| InboxButton {
         label: label.into(),
@@ -549,6 +550,29 @@ fn inbox() -> InboxView {
             "aft · working",
             badge(AgentIcon::Claude, super::Dot::Working),
             T::Working,
+            "1h",
+        ),
+        {
+            let mut row = label(I::Failed, "Services", 2, 0);
+            if let InboxRow::Label { buttons, .. } = &mut row {
+                *buttons = vec![button("Dismiss all", "Ctrl+Del")];
+            }
+            row
+        },
+        inbox_item(
+            "s1",
+            "TypeError: cannot read 'id' of undefined",
+            "api · npm run dev · 3 times",
+            I::Failed,
+            T::Failed,
+            "4m",
+        ),
+        inbox_item(
+            "s2",
+            "worker stopped",
+            "api · cargo run --bin worker",
+            I::Failed,
+            T::Failed,
             "1h",
         ),
         label(I::Repo, "Repos", 3, 1),

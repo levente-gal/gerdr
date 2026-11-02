@@ -118,11 +118,13 @@ pub enum MenuAction {
     Repos,
     /// Open the inbox.
     Inbox,
-    /// A toast's "Undo" after an inbox item was dismissed or snoozed: list
-    /// the item (by `inbox::ItemId`) of project `project` (by id) again.
+    /// A toast's "Undo" after inbox items were dismissed or snoozed: list
+    /// the items (by `inbox::ItemId`) of project `project` (by id) again,
+    /// and mark the service errors `unsee` as not looked at again.
     InboxRestore {
         project: String,
-        id: String,
+        ids: Vec<String>,
+        unsee: Vec<crate::services::ServiceErrorKey>,
     },
     /// A toast's "Undo" after an inbox todo was deleted: put `todo` back
     /// in project `project`'s file (by id), at index `at` of its todos,
@@ -421,7 +423,14 @@ impl Gerdr {
             MenuAction::DeleteWorktree(path) => self.delete_merged_worktree(&path),
             MenuAction::Repos => self.open_repos(),
             MenuAction::Inbox => self.open_inbox(None),
-            MenuAction::InboxRestore { project, id } => self.inbox_restore(&project, id),
+            MenuAction::InboxRestore {
+                project,
+                ids,
+                unsee,
+            } => {
+                self.inbox_restore(&project, &ids);
+                self.unsee_service_errors(&unsee);
+            }
             MenuAction::InboxUndelete {
                 project,
                 todo,

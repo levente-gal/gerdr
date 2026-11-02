@@ -9,9 +9,11 @@
 //! then gerdr's own todos.
 //!
 //! Typing filters the list. Up/Down (or Ctrl+J and Ctrl+K) select, Enter
-//! goes to the item, Delete dismisses it (until it changes), Ctrl+H hides
-//! it for an hour, Ctrl+Shift+H until tomorrow morning, Alt+H lists the
-//! hidden ones (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits
+//! goes to the item, Delete dismisses it (until it changes), Ctrl+Delete
+//! (or the label's "Dismiss all") dismisses its section's items as listed,
+//! where the section has that (Services). Ctrl+H hides it for an hour,
+//! Ctrl+Shift+H until tomorrow morning, Alt+H lists the hidden ones
+//! (Delete restores one). Ctrl+N writes a todo, Ctrl+E edits
 //! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
 //! repository (`owner/repo`) to the shown project; Delete marks a todo
 //! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
@@ -87,6 +89,12 @@ impl Section {
             Section::PullRequests => "Pull requests",
             Section::Tickets => "Tickets",
         }
+    }
+
+    /// Whether its label has a "Dismiss all" button (Ctrl+Del): its
+    /// items come in bursts, and are looked at together.
+    pub fn dismisses_all(self) -> bool {
+        self == Section::Services
     }
 
     /// Its label's icon.
@@ -268,6 +276,14 @@ impl ItemAction {
     }
 }
 
+/// A section label's button that dismisses all its items as listed.
+fn dismiss_all_button() -> chrome::InboxButton {
+    chrome::InboxButton {
+        label: "Dismiss all".to_owned(),
+        key: "Ctrl+Del".to_owned(),
+    }
+}
+
 /// What the detail pane shows of an item, by kind.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Detail {
@@ -355,6 +371,8 @@ pub enum Outcome {
     GoTo(ItemId),
     /// Do this to the item.
     Act(ItemId, ItemAction),
+    /// Dismiss these items (a section's, as listed) until they change.
+    DismissAll(Vec<ItemId>),
     /// Save the todo written: a new one (`id: None`) or an edit, linked to
     /// the workspace at this index.
     SaveTodo {
@@ -1213,6 +1231,26 @@ impl Panel {
         })
     }
 
+    /// Whether `section`'s label, listing `count` items, has its "Dismiss
+    /// all" button: not over the hidden items (Alt+H).
+    fn dismisses_all(&self, section: Section, count: usize) -> bool {
+        section.dismisses_all() && count > 0 && !self.show_hidden
+    }
+
+    /// Dismiss every item of `section` as `listed` (filtered, in scope)
+    /// that can be dismissed; `None` if none can.
+    fn dismiss_all(&self, listed: &Listed, section: Section) -> Option<Outcome> {
+        let ids: Vec<ItemId> = listed
+            .items
+            .iter()
+            .filter(|i| i.section == section)
+            .filter(|i| actions(i, self.show_hidden).contains(&ItemAction::Dismiss))
+            .map(|i| i.id.clone())
+            .collect();
+        let count = ids.len();
+        (self.dismisses_all(section, count)).then_some(Outcome::DismissAll(ids))
+    }
+
     /// Write a new todo, linked to the selected item's workspace, else the
     /// active one.
     fn write(&mut self, item: Option<&InboxItem>, list: &Listing) {
@@ -1438,6 +1476,9 @@ impl Panel {
             Keysym::e | Keysym::E if ctrl => ItemAction::Edit,
             Keysym::o | Keysym::O if ctrl => ItemAction::OpenLink,
             Keysym::c | Keysym::C if ctrl => ItemAction::CopyLink,
+            Keysym::Delete | Keysym::KP_Delete if ctrl && !shift => {
+                return self.dismiss_all(&listed, item?.section);
+            }
             Keysym::Delete | Keysym::KP_Delete if !ctrl && shift => ItemAction::Delete,
             Keysym::Delete | Keysym::KP_Delete if !ctrl => {
                 delete_action(&actions(item?, self.show_hidden))?
@@ -1464,6 +1505,13 @@ impl Panel {
             Some(Entry::Item(k)) if i < shown => Some(*k),
             _ => None,
         };
+        // A section label's button.
+        if let InboxHit::Button(i, 0) = hit
+            && i < shown
+            && let Some(Entry::Label(section, ..)) = listed.rows.get(first + i)
+        {
+            return self.dismiss_all(&listed, *section);
+        }
         // A row cut by the list's edge glides into view.
         let now = Some(Instant::now());
         let (item, action) = match hit {
@@ -1544,8 +1592,14 @@ impl Panel {
         moving
     }
 
-    /// The footer's hints, for what is selected (`actions`) over `list`.
-    fn hints(&self, actions: &[ItemAction], list: &Listing) -> Vec<(String, String)> {
+    /// The footer's hints, for what is selected (`actions`, an item of
+    /// `section`) over `list`.
+    fn hints(
+        &self,
+        actions: &[ItemAction],
+        section: Option<Section>,
+        list: &Listing,
+    ) -> Vec<(String, String)> {
         let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
         if let Some(compose) = &self.compose {
             let mut hints = vec![hint("Enter", if compose.tickets { "add" } else { "save" })];
@@ -1579,6 +1633,13 @@ impl Panel {
             hint(k, what)
         })
         .collect();
+        if section.is_some_and(|s| self.dismisses_all(s, 1)) {
+            let at = hints
+                .iter()
+                .position(|(k, _)| k == "Del")
+                .map_or(0, |k| k + 1);
+            hints.insert(at, hint("Ctrl+Del", "dismiss all"));
+        }
         hints.push(hint("Ctrl+N", "new todo"));
         hints.push(hint("Ctrl+T", "add ticket repo"));
         hints.push(hint(
@@ -1631,6 +1692,11 @@ impl Panel {
                     title: section.title().to_owned(),
                     count,
                     hidden,
+                    buttons: if self.dismisses_all(section, count) {
+                        vec![dismiss_all_button()]
+                    } else {
+                        Vec::new()
+                    },
                 },
                 Entry::Item(k) => {
                     let item = &listed.items[k];
@@ -1707,7 +1773,11 @@ impl Panel {
                 .map(|r| r - first),
             hover: self.hover,
             detail,
-            hints: self.hints(&item_actions, list),
+            hints: self.hints(
+                &item_actions,
+                selected.map(|k| listed.items[k].section),
+                list,
+            ),
             empty: empty.into(),
             show_hidden: self.show_hidden,
             part,
@@ -2411,6 +2481,7 @@ mod tests {
                 title: "Pull requests".into(),
                 count: 0,
                 hidden: 2,
+                buttons: Vec::new(),
             }));
     }
 
@@ -2670,5 +2741,66 @@ mod tests {
         );
         assert_eq!(age_text(Duration::from_secs(4 * 3600 + 5)), "4h");
         assert_eq!(age_text(Duration::from_secs(3 * 86400)), "3d");
+    }
+
+    #[test]
+    fn services_dismiss_all_as_listed() {
+        let items = vec![
+            item("s1", Section::Services, Some(0)),
+            item("s2", Section::Services, Some(1)),
+            item("s3", Section::Services, Some(0)),
+            item("r1", Section::Repos, Some(0)),
+        ];
+        let triage = BTreeMap::from([("s3".to_owned(), dismissed("f1", None))]);
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let mut panel = Panel::new(None);
+        let view = panel.view(&list);
+        let buttons: Vec<_> = view
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                InboxRow::Label { title, buttons, .. } => Some((title.as_str(), buttons.len())),
+                InboxRow::Item(_) => None,
+            })
+            .collect();
+        // Only Services has it.
+        assert_eq!(buttons, [("Services", 1), ("Repos", 0)]);
+        assert!(
+            view.hints
+                .iter()
+                .any(|(k, w)| k == "Ctrl+Del" && w == "dismiss all")
+        );
+        // Its hint, clicked, is that key.
+        let (hint_mods, hint_sym) = crate::keys::hint_key("Ctrl+Del").unwrap();
+        assert!(hint_mods.ctrl && !hint_mods.shift && hint_sym == Keysym::Delete);
+        // The label's button, and Ctrl+Del on one of its items: the
+        // section's listed items, not the hidden one.
+        let all = Some(Outcome::DismissAll(vec![
+            ItemId("s1".into()),
+            ItemId("s2".into()),
+        ]));
+        assert_eq!(panel.click(InboxHit::Button(0, 0), &list), all);
+        assert_eq!(ctrl(&mut panel, Keysym::Delete, &list), all);
+        // Only this workspace's (Tab).
+        press(&mut panel, Keysym::Tab, &list);
+        assert_eq!(
+            ctrl(&mut panel, Keysym::Delete, &list),
+            Some(Outcome::DismissAll(vec![ItemId("s1".into())]))
+        );
+        // On a repo, nothing; no hint.
+        press(&mut panel, Keysym::Down, &list);
+        assert_eq!(panel.selected(), Some(&ItemId("r1".into())));
+        assert_eq!(ctrl(&mut panel, Keysym::Delete, &list), None);
+        let view = panel.view(&list);
+        assert!(!view.hints.iter().any(|(k, _)| k == "Ctrl+Del"));
+        // Not over the hidden ones.
+        alt(&mut panel, Keysym::h, &list);
+        let view = panel.view(&list);
+        assert!(view.rows.iter().all(|r| match r {
+            InboxRow::Label { buttons, .. } => buttons.is_empty(),
+            InboxRow::Item(_) => true,
+        }));
+        assert_eq!(panel.click(InboxHit::Button(0, 0), &list), None);
     }
 }

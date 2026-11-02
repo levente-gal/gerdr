@@ -93,6 +93,16 @@ struct Watcher {
 
 /// What gerdr keeps of the watching (the errors themselves are in the
 /// store, `Store::service_errors`).
+/// Which error of which pane of which project: what an Undo marks as not
+/// looked at again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceErrorKey {
+    /// The project's id.
+    pub project: String,
+    pub pane_id: String,
+    pub fingerprint: String,
+}
+
 #[derive(Default)]
 pub struct ServiceErrors {
     /// By project id.
@@ -693,6 +703,24 @@ impl Gerdr {
             });
         if let Some(g) = found.filter(|g| !g.seen) {
             g.seen = true;
+            self.projects.save();
+        }
+    }
+
+    /// Mark errors `keys` as not looked at again (an Undo of looking): those
+    /// still there.
+    pub fn unsee_service_errors(&mut self, keys: &[ServiceErrorKey]) {
+        let mut changed = false;
+        for g in &mut self.projects.service_errors {
+            let key = keys.iter().any(|k| {
+                k.project == g.project && k.pane_id == g.pane_id && k.fingerprint == g.fingerprint
+            });
+            if key && g.seen {
+                g.seen = false;
+                changed = true;
+            }
+        }
+        if changed {
             self.projects.save();
         }
     }

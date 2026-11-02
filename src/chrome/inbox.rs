@@ -67,6 +67,9 @@ const DETAIL_BADGE: i32 = 36;
 /// of the number.
 const COUNT_HEIGHT: i32 = 18;
 const COUNT_PAD: i32 = 7;
+/// How far above a section label's bottom its line sits: low, near the
+/// items it heads.
+const LABEL_LOW: i32 = 6;
 /// The lines of an item's row: the title's band from the top, then the
 /// subtitle's.
 const ROW_TITLE_TOP: i32 = 6;
@@ -158,6 +161,9 @@ pub enum InboxRow {
         title: String,
         count: usize,
         hidden: usize,
+        /// What can be done to the whole section ("Dismiss all"), always
+        /// shown at its right.
+        buttons: Vec<InboxButton>,
     },
     Item(InboxLine),
 }
@@ -275,7 +281,7 @@ pub struct InboxDetailView {
 pub enum InboxHit {
     /// A row, by index into `InboxView::rows`.
     Row(usize),
-    /// Button `k` on row `i`.
+    /// Button `k` on row `i`: an item's, or a section label's.
     Button(usize, usize),
     /// Button `k` of the detail.
     DetailButton(usize),
@@ -701,6 +707,7 @@ pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
                 InboxRow::Item(line) if with_buttons(i) => {
                     row_buttons(&line.buttons, item_line(rect))
                 }
+                InboxRow::Label { buttons, .. } => row_buttons(buttons, label_line(rect)),
                 _ => Vec::new(),
             };
             (rect, buttons)
@@ -823,6 +830,17 @@ fn row_badge(rect: Rect) -> Rect {
 fn item_line(rect: Rect) -> Rect {
     let keep = DOT_SLOT + PADDING as i32 - ROW_BUTTON_INSET;
     Rectangle::new(rect.loc, ((rect.size.w - keep).max(0), rect.size.h).into())
+}
+
+/// What of the label row at `rect` its buttons take: as far across as
+/// an item's (see `item_line`), a button high round the label's line.
+fn label_line(rect: Rect) -> Rect {
+    let mid = rect.loc.y + rect.size.h - LABEL_LOW - COUNT_HEIGHT / 2;
+    let w = item_line(rect).size.w;
+    Rectangle::new(
+        (rect.loc.x, mid - ROW_BUTTON / 2).into(),
+        (w, ROW_BUTTON).into(),
+    )
 }
 
 /// Where the dot of the agent's item row at `rect` goes: at its right
@@ -1381,6 +1399,7 @@ impl Painter {
                 title,
                 count,
                 hidden,
+                buttons: labels,
             } => {
                 if !key.top {
                     let border = px(1).max(1);
@@ -1395,9 +1414,23 @@ impl Painter {
                 }
                 // The label sits low, near the items it heads.
                 let low = Rectangle::new(
-                    (rect.loc.x, rect.loc.y + rect.size.h - COUNT_HEIGHT - 6).into(),
+                    (
+                        rect.loc.x,
+                        rect.loc.y + rect.size.h - COUNT_HEIGHT - LABEL_LOW,
+                    )
+                        .into(),
                     (rect.size.w, COUNT_HEIGHT).into(),
                 );
+                for (k, &button) in buttons.iter().enumerate() {
+                    let label = labels.get(k).map_or("", |b| b.label.as_str());
+                    let hot = key.hot == Some(k);
+                    self.button(c, label, button, (hot, false), false, scale, p);
+                }
+                // The text stops short of the buttons.
+                let right = match buttons.first() {
+                    Some(first) => px(first.loc.x) as f32 - gap,
+                    None => right,
+                };
                 let mark = Rectangle::new(
                     (rect.loc.x + BADGE_INSET, low.loc.y).into(),
                     (BADGE, low.size.h).into(),
@@ -2014,6 +2047,7 @@ mod tests {
             title: title.into(),
             count,
             hidden,
+            buttons: Vec::new(),
         }
     }
 
@@ -2514,6 +2548,25 @@ mod tests {
         }
         assert!(inbox_page((1280, 800).into()) >= 10);
         assert_eq!(inbox_page((300, 120).into()), 1);
+    }
+
+    #[test]
+    fn a_label_has_its_buttons_always() {
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let mut v = view();
+        let InboxRow::Label { buttons, .. } = &mut v.rows[0] else {
+            panic!("row 0 is a label");
+        };
+        *buttons = vec![button("Dismiss all", "Ctrl+Del")];
+        let l = inbox_layout(&v, size);
+        let (label, label_buttons) = &l.rows[0];
+        assert_eq!(label_buttons.len(), 1);
+        let b = label_buttons[0];
+        assert!(inside(*label, b));
+        assert_eq!(inbox_hit(&v, &l, centre(b)), Some(InboxHit::Button(0, 0)));
+        // At the right, where the items' buttons end.
+        let item_end = l.rows[1].1.last().map(|r| r.loc.x + r.size.w);
+        assert_eq!(Some(b.loc.x + b.size.w), item_end);
     }
 
     #[test]

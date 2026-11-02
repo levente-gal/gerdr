@@ -25,13 +25,15 @@ use crate::{
     chrome::{self, AgentView, InboxHit, InboxRow, InboxView, WorkspaceView},
     herdr,
     inbox::{
-        self, InboxItem, ItemAction, ItemId, Listing, Outcome, PaneText, Panel, Section, Target,
+        self, Detail, InboxItem, ItemAction, ItemId, Listing, Outcome, PaneText, Panel, Section,
+        Target,
     },
     inbox_sources::{self, Sources},
     inbox_store::{self, InboxFile, Todo, TodoId, Triage},
     input::Overlay,
     issues::{self, GhRepo, IssuesRead, TicketRepo},
     menu::MenuAction,
+    services::ServiceErrorKey,
     toast::{Level, ToastHit},
     tooltip::Tooltip,
 };
@@ -379,10 +381,11 @@ impl Gerdr {
         let hit = self.inbox.panel.as_mut()?.hover(hit, Instant::now());
         let (button, rect) = match hit? {
             InboxHit::Button(i, k) => {
-                let InboxRow::Item(line) = view.rows.get(i)? else {
-                    return None;
+                let buttons = match view.rows.get(i)? {
+                    InboxRow::Item(line) => &line.buttons,
+                    InboxRow::Label { buttons, .. } => buttons,
                 };
-                (line.buttons.get(k)?, *layout.rows.get(i)?.1.get(k)?)
+                (buttons.get(k)?, *layout.rows.get(i)?.1.get(k)?)
             }
             InboxHit::DetailButton(k) => (
                 view.detail.as_ref()?.buttons.get(k)?,
@@ -468,9 +471,10 @@ impl Gerdr {
             Outcome::Notice(text) => self.show_notice(text),
             Outcome::Restore(id) => {
                 if let Some(project) = self.project.clone() {
-                    self.inbox_restore(&project, id.0);
+                    self.inbox_restore(&project, &[id.0]);
                 }
             }
+            Outcome::DismissAll(ids) => self.inbox_dismiss_all(&ids),
         }
     }
 
@@ -503,14 +507,7 @@ impl Gerdr {
                     ),
                     _ => (None, "Dismissed until it changes"),
                 };
-                if let Target::ServiceError {
-                    project,
-                    pane_id,
-                    fingerprint,
-                } = &item.target
-                {
-                    self.see_service_error(project, pane_id, fingerprint);
-                }
+                let unsee = self.see_inbox_service(&item);
                 let Some(file) = self.inbox_file_mut() else {
                     return;
                 };
@@ -521,7 +518,7 @@ impl Gerdr {
                 };
                 file.triage.insert(id.0.clone(), triage);
                 self.save_inbox();
-                self.toast_undo(format!("{text}: {}", item.title), id);
+                self.toast_undo(format!("{text}: {}", item.title), vec![id.0.clone()], unsee);
             }
             ItemAction::Restore => {}
             ItemAction::Done => {
@@ -534,7 +531,11 @@ impl Gerdr {
                 };
                 found.done = Some(now);
                 self.save_inbox();
-                self.toast_undo(format!("Done: {}", item.title), id);
+                self.toast_undo(
+                    format!("Done: {}", item.title),
+                    vec![id.0.clone()],
+                    Vec::new(),
+                );
             }
             ItemAction::Delete => {
                 let Some(todo) = todo else { return };
@@ -574,17 +575,82 @@ impl Gerdr {
         }
     }
 
-    /// `text`, in a toast whose "Undo" lists item `id` of the shown
-    /// project again.
-    fn toast_undo(&mut self, text: String, id: &ItemId) {
+    /// `text`, in a toast whose "Undo" lists items `ids` of the shown
+    /// project again, and marks the service errors `unsee` as not looked
+    /// at again.
+    fn toast_undo(&mut self, text: String, ids: Vec<String>, unsee: Vec<ServiceErrorKey>) {
         let Some(project) = self.project.clone() else {
             return self.toast(text, Level::Info);
         };
         let restore = MenuAction::InboxRestore {
             project,
-            id: id.0.clone(),
+            ids,
+            unsee,
         };
         self.toast_with(text, Level::Info, Some(("Undo".to_owned(), restore)));
+    }
+
+    /// Mark `item`'s service error, if it is one, as looked at; the error,
+    /// if it wasn't, for an Undo to mark it not looked at again.
+    fn see_inbox_service(&mut self, item: &InboxItem) -> Vec<ServiceErrorKey> {
+        let Target::ServiceError {
+            project,
+            pane_id,
+            fingerprint,
+        } = &item.target
+        else {
+            return Vec::new();
+        };
+        self.see_service_error(project, pane_id, fingerprint);
+        match item.detail {
+            Detail::Service { seen: false, .. } => vec![ServiceErrorKey {
+                project: project.clone(),
+                pane_id: pane_id.clone(),
+                fingerprint: fingerprint.clone(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Dismiss items `ids` until they change (a section's "Dismiss all"),
+    /// with one Undo for all.
+    fn inbox_dismiss_all(&mut self, ids: &[ItemId]) {
+        let items: Vec<InboxItem> = self
+            .inbox_parts()
+            .items
+            .into_iter()
+            .filter(|item| ids.contains(&item.id))
+            .collect();
+        if let [item] = &items[..] {
+            return self.inbox_act(&item.id, ItemAction::Dismiss);
+        }
+        let Some(section) = items.first().map(|i| i.section) else {
+            return;
+        };
+        let mut unsee = Vec::new();
+        for item in &items {
+            unsee.extend(self.see_inbox_service(item));
+        }
+        let now = inbox_store::now_secs();
+        let Some(file) = self.inbox_file_mut() else {
+            return;
+        };
+        for item in &items {
+            let triage = Triage {
+                fingerprint: item.fingerprint.clone(),
+                until: None,
+                seen: now,
+            };
+            file.triage.insert(item.id.0.clone(), triage);
+        }
+        self.save_inbox();
+        let text = format!(
+            "Dismissed {} in {} until they change",
+            items.len(),
+            section.title()
+        );
+        let ids = items.into_iter().map(|i| i.id.0).collect();
+        self.toast_undo(text, ids, unsee);
     }
 
     /// Go where `item` leads (see `Target`), the panel closed first. A
@@ -677,13 +743,16 @@ impl Gerdr {
         self.refresh_issues();
     }
 
-    /// The toast's "Undo" after a dismiss or snooze: list item `id` of
+    /// The toast's "Undo" after a dismiss or snooze: list items `ids` of
     /// project `project` (by id) again. After a todo was marked done, it
     /// isn't any more. The project needn't be the shown one any more: the
     /// file loaded is changed if it is that project's, else that project's
     /// is loaded, changed and saved on its own.
-    pub fn inbox_restore(&mut self, project: &str, id: String) {
-        self.change_inbox_of(project, |file| restore(file, &id));
+    pub fn inbox_restore(&mut self, project: &str, ids: &[String]) {
+        self.change_inbox_of(project, |file| {
+            // Every one, not only up to the first changed.
+            ids.iter().filter(|id| restore(file, id)).count() > 0
+        });
     }
 
     /// The toast's "Undo" after a todo was deleted: put `todo` back in

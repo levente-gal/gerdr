@@ -24,6 +24,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
 | Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. |
+| Ctrl+Del | Dismiss every listed row of the selected row's group (inbox Services; also its label's "Dismiss all" button). One Undo toast brings them all back. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
 | Ctrl+C | Copy. Never closes anything. |
 
