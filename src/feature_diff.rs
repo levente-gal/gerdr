@@ -555,6 +555,19 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// The record of `project`'s `slug` changed: its code review, if
+    /// open, reads where its stage stands again.
+    pub(crate) fn feature_diff_changed(&mut self, project: &str, slug: &str) {
+        let Some(wd) = self.repos.worktree.as_mut() else {
+            return;
+        };
+        if !(wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug) {
+            return;
+        }
+        wd.again |= wd.reading;
+        self.worktree_diff_read();
+    }
+
     /// The feature code review open, if one is.
     fn feature_of(&self) -> Option<&FeatureOf> {
         self.repos.worktree.as_ref()?.feature.as_ref()

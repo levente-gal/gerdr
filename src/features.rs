@@ -1544,12 +1544,14 @@ impl Gerdr {
         let still = self
             .feature(project, slug)
             .is_some_and(|f| f.status == Status::Open && f.current() == Some(stage));
-        let open = self
-            .feature(project, slug)
-            .and_then(|f| f.review.as_ref())
-            .map_or(0, |r| r.open());
+        let review = self.feature(project, slug).and_then(|f| f.review.as_ref());
+        let read_in = review.is_some();
+        let open = review.map_or(0, |r| r.open());
         match stage {
             _ if !still => {}
+            Stage::AiReview if !read_in => {
+                self.show_warning("AI review has no findings read in yet".into());
+            }
             Stage::AiReview if open > 0 => {
                 let title = self.feature(project, slug).map_or("", |f| f.title.as_str());
                 let text = format!(
@@ -1582,6 +1584,7 @@ impl Gerdr {
             format!("{} marked done", stage.label())
         });
         self.feature_cursor_to_current_of(project, slug);
+        self.feature_diff_changed(project, slug);
     }
 
     /// The tasks running on features, for the tasks panel.
