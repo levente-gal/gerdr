@@ -2673,15 +2673,18 @@ fn inline(what: &str) -> String {
 
 /// The detail of Build's row, not marked done, beside `agent`, its
 /// agent's line when Build is current: setup first, while it runs (`setup`
-/// says what it does) or once it failed.
+/// says what it does), or why it failed before an agent started. With an
+/// agent, its line comes first: what it waits for matters more.
 fn build_line(feature: &Feature, setup: Option<&str>, agent: Option<&str>) -> Option<String> {
     if let Some(what) = setup {
         return Some(format!("setting up: {}", inline(what)));
     }
-    if let Some(why) = feature.setup.as_ref().and_then(|s| s.failed.as_deref()) {
-        return Some(format!("setup failed: {why}"));
+    let failed = feature.setup.as_ref().and_then(|s| s.failed.as_deref());
+    match (agent, failed) {
+        (Some(agent), Some(_)) => Some(format!("{agent} \u{b7} setup failed")),
+        (None, Some(why)) => Some(format!("setup failed: {why}")),
+        (agent, None) => agent.map(str::to_owned),
     }
-    agent.map(str::to_owned)
 }
 
 /// The detail of Verify's row, not marked done: what its checks do while
@@ -3389,8 +3392,14 @@ pub(crate) mod tests {
             failed: Some("api: `npm ci` exited with 1".into()),
         });
         assert_eq!(
-            build_line(&f, None, agent).as_deref(),
+            build_line(&f, None, None).as_deref(),
             Some("setup failed: api: `npm ci` exited with 1")
+        );
+        // An agent started anyway: what it waits for comes first.
+        let stopped = Some("milestone 1 of 3 done \u{b7} Enter to continue");
+        assert_eq!(
+            build_line(&f, None, stopped).as_deref(),
+            Some("milestone 1 of 3 done \u{b7} Enter to continue \u{b7} setup failed")
         );
         // In the view, on Build's row only; a done Build says when.
         let panel = FeaturePanel {
