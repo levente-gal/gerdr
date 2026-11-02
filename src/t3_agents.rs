@@ -930,6 +930,9 @@ pub struct T3 {
     /// Why the app didn't take its project filter, each told once (see
     /// `Gerdr::t3_unscoped`).
     unscoped: HashSet<String>,
+    /// The T3 Code version whose app last didn't take its project filter,
+    /// and why: the footer shows it while that version runs.
+    pub unscoped_in: Option<(Option<String>, String)>,
     /// When each web pane last landed on T3 Code's sign-in page and was
     /// sent a pairing link: once in a while only, should one not take.
     /// How many links it was sent since it last got past the sign-in page.
@@ -1275,6 +1278,8 @@ impl crate::Gerdr {
              React tree and its localStorage, neither of them T3 Code's API: this T3 Code \
              version likely changed them"
         );
+        let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
+        self.t3.unscoped_in = Some((running, reason.to_owned()));
         if !self.t3.unscoped.insert(reason.to_owned()) {
             return;
         }

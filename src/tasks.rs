@@ -231,11 +231,30 @@ impl Gerdr {
             if started.is_some() && has_log {
                 actions.push(("Log", MenuAction::ShowLog(log.clone())));
             }
+            // This version's app didn't take a workspace's project filter
+            // (see `t3_unscoped`): kept in sight until another runs.
+            let broken = self
+                .t3
+                .unscoped_in
+                .as_ref()
+                .filter(|(version, _)| *version == server.version);
+            if let Some((_, reason)) = broken {
+                detail.insert(0, format!("Project filter broken ({reason})"));
+                actions.push(("gerdr log", MenuAction::OpenLog));
+            }
             Task {
                 title: "T3 Code server".to_owned(),
-                chip: "T3 Code".to_owned(),
+                chip: if broken.is_some() {
+                    "T3 Code: filter broken".to_owned()
+                } else {
+                    "T3 Code".to_owned()
+                },
                 detail: detail.join(" · "),
-                dot: Dot::Done,
+                dot: if broken.is_some() {
+                    Dot::Failed
+                } else {
+                    Dot::Done
+                },
                 actions,
             }
         } else if started.is_some() || self.t3.started_at.is_some() {
