@@ -518,7 +518,7 @@ impl Gerdr {
                 let dir = picked.or_else(|| self.workspaces.get(i).map(|ws| ws.dir.clone()));
                 self.open_worktrees(dir);
             }
-            // Its count of errors: the newest one not looked at.
+            // Its count of errors: the inbox on the newest not looked at.
             (SidebarHit::Errors(i), BTN_LEFT) => {
                 self.show_workspace_service_error(i);
             }
@@ -678,7 +678,7 @@ impl Gerdr {
                     .map(|g| (g.service.clone(), g.title.clone()))
                     .collect();
                 let tip = Tooltip::new(&text, layout.rows[i].errors?).fields(fields);
-                Some(tip.key("click to show the newest"))
+                Some(tip.key("click to see the newest in the inbox"))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;

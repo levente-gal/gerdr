@@ -657,6 +657,12 @@ pub fn todo_items(src: &Sources) -> Vec<InboxItem> {
     .collect()
 }
 
+/// The inbox item of project `project`'s error `fingerprint` in pane
+/// `pane_id`.
+pub fn service_item_id(project: &str, pane_id: &str, fingerprint: &str) -> ItemId {
+    ItemId(format!("service:{project}|{pane_id}|{fingerprint}"))
+}
+
 /// The services' errors, each with how many times it came, and the
 /// services stopped.
 pub fn service_items(src: &Sources) -> Vec<InboxItem> {
@@ -669,10 +675,7 @@ pub fn service_items(src: &Sources) -> Vec<InboxItem> {
                 n => format!(" · ×{n}"),
             };
             InboxItem {
-                id: ItemId(format!(
-                    "service:{}|{}|{}",
-                    group.project, group.pane_id, group.fingerprint
-                )),
+                id: service_item_id(&group.project, &group.pane_id, &group.fingerprint),
                 section: Section::Services,
                 // Back from a dismissal when it comes again.
                 fingerprint: group.count.to_string(),

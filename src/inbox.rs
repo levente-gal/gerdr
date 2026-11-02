@@ -800,12 +800,14 @@ impl Inbox {
         self.panel.is_some()
     }
 
-    /// Open the panel on `focus`'s first item, else the first; what was
-    /// being written when it last closed is taken up again by writing it.
-    pub fn open(&mut self, focus: Option<Section>) {
+    /// Open the panel on item `item` while it is listed, else on
+    /// `focus`'s first item, else the first; what was being written when it
+    /// last closed is taken up again by writing it.
+    pub fn open(&mut self, focus: Option<Section>, item: Option<ItemId>) {
         let drafts = std::mem::take(&mut self.drafts);
         self.panel = Some(Panel {
             drafts,
+            item,
             ..Panel::new(focus)
         });
     }
@@ -840,6 +842,8 @@ pub struct Panel {
     hover: Option<InboxHit>,
     /// The section to select the first item of, on opening.
     focus: Option<Section>,
+    /// The item to select on opening, before `focus`, while it is listed.
+    item: Option<ItemId>,
     /// The selected item; `None` until one is (the panel just opened, the
     /// list empty).
     selected: Option<ItemId>,
@@ -866,6 +870,7 @@ impl Default for Panel {
             drafts: Vec::new(),
             hover: None,
             focus: None,
+            item: None,
             selected: None,
             selected_at: 0,
             scroll: Scroll::default(),
@@ -1041,7 +1046,8 @@ impl Panel {
 
     /// The selected item, by index into `items`: the one selected while
     /// it is listed, else the one that took its place, else (just opened)
-    /// the focused section's first, else the first.
+    /// the item asked for, else the focused section's first, else the
+    /// first.
     fn current(&self, items: &[InboxItem]) -> Option<usize> {
         let last = items.len().checked_sub(1)?;
         match &self.selected {
@@ -1052,8 +1058,13 @@ impl Panel {
                     .unwrap_or(self.selected_at.min(last)),
             ),
             None => Some(
-                self.focus
-                    .and_then(|s| items.iter().position(|i| i.section == s))
+                self.item
+                    .as_ref()
+                    .and_then(|id| items.iter().position(|i| &i.id == id))
+                    .or_else(|| {
+                        self.focus
+                            .and_then(|s| items.iter().position(|i| i.section == s))
+                    })
                     .unwrap_or(0),
             ),
         }
@@ -1972,6 +1983,15 @@ mod tests {
         // A section with nothing in it: the first item.
         let panel = Panel::new(Some(Section::Agents));
         assert_eq!(selected_id(&panel.view(&list)).as_deref(), Some("a"));
+        // An item asked for: it, before the section's first; one not
+        // listed: the section's first.
+        let mut inbox = Inbox::default();
+        inbox.open(Some(Section::Tickets), Some(ItemId("todo:t2".into())));
+        let panel = inbox.panel.as_ref().unwrap();
+        assert_eq!(selected_id(&panel.view(&list)).as_deref(), Some("todo:t2"));
+        inbox.open(Some(Section::Tickets), Some(ItemId("gone".into())));
+        let panel = inbox.panel.as_ref().unwrap();
+        assert_eq!(selected_id(&panel.view(&list)).as_deref(), Some("todo:t1"));
     }
 
     #[test]
@@ -2056,7 +2076,7 @@ mod tests {
             ..Inbox::default()
         };
         inbox.close();
-        inbox.open(None);
+        inbox.open(None, None);
         let panel = inbox.panel.as_mut().unwrap();
         ctrl(panel, Keysym::t, &list);
         assert_eq!(panel.view(&list).compose.unwrap().text, "o/t");

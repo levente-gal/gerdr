@@ -82,6 +82,12 @@ impl Gerdr {
     /// Open the inbox panel, the first item of section `focus` selected
     /// (else the first item).
     pub fn open_inbox(&mut self, focus: Option<Section>) {
+        self.open_inbox_on(focus, None);
+    }
+
+    /// Open the inbox panel with item `item` selected while it is listed,
+    /// else the first item of section `focus`, else the first item.
+    pub fn open_inbox_on(&mut self, focus: Option<Section>, item: Option<ItemId>) {
         self.switcher = None;
         self.repos.close();
         self.worktrees.close();
@@ -91,7 +97,7 @@ impl Gerdr {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
         self.scrollback = None;
-        self.inbox.open(focus);
+        self.inbox.open(focus, item);
         self.inbox_mark_seen();
         if self.issues_due(ISSUES_OPEN) {
             self.refresh_issues();

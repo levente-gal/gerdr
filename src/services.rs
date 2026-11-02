@@ -31,7 +31,9 @@ use smithay::reexports::calloop::{
 use crate::{
     Gerdr, Tab, chrome,
     config::Services,
-    herdr, inbox_store, project_lock,
+    herdr,
+    inbox::Section,
+    inbox_sources, inbox_store, project_lock,
     service_errors::ServiceError,
     service_watch::{self, Report, Service},
 };
@@ -747,19 +749,16 @@ impl Gerdr {
             .collect()
     }
 
-    /// Show the newest error of workspace `w` not looked at, else its
-    /// newest.
+    /// Open the inbox on workspace `w`'s newest error not looked at, else
+    /// its newest; on its Services section if that one is hidden.
     pub fn show_workspace_service_error(&mut self, w: usize) {
         let errors = self.workspace_service_errors(w);
-        let Some(group) = errors.iter().find(|g| !g.seen).or(errors.first()) else {
-            return;
-        };
-        let (project, pane_id, fingerprint) = (
-            group.project.clone(),
-            group.pane_id.clone(),
-            group.fingerprint.clone(),
-        );
-        self.show_service_error(&project, &pane_id, &fingerprint);
+        let item = errors
+            .iter()
+            .find(|g| !g.seen)
+            .or(errors.first())
+            .map(|g| inbox_sources::service_item_id(&g.project, &g.pane_id, &g.fingerprint));
+        self.open_inbox_on(Some(Section::Services), item);
     }
 
     /// What a project's service in pane `pane_id` is called, for the inbox.
