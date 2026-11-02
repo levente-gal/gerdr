@@ -585,18 +585,11 @@ fn inbox() -> InboxView {
             T::Failed,
             "1h",
         ),
-        label(I::Failed, "Ignored errors", 1, 0),
+        // Folded to its count until shown (Alt+I).
         {
-            let mut row = inbox_item(
-                "i1",
-                "ValueError: tool 2 is already in use",
-                "backend · bash ./runlocal.sh · ×55",
-                I::Failed,
-                T::Failed,
-                "3m",
-            );
-            if let InboxRow::Item(line) = &mut row {
-                line.hidden = true;
+            let mut row = label(I::Failed, "Ignored errors", 3, 0);
+            if let InboxRow::Label { buttons, .. } = &mut row {
+                *buttons = vec![button("Show", "Alt+I")];
             }
             row
         },

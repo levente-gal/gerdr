@@ -14,9 +14,10 @@
 //! where the section has that (Services). Ctrl+H hides it for an hour,
 //! Ctrl+Shift+H until tomorrow morning, Alt+H lists the hidden ones
 //! (Delete restores one). Ctrl+I ignores a service's error: it goes to
-//! the Ignored errors group, listed light, counted but never told of, until
-//! Ctrl+I there stops ignoring it; Delete there, twice, forgets it (it is
-//! told of as new when it comes again). Ctrl+N writes a todo, Ctrl+E edits
+//! the Ignored errors group, folded to its label and count (Alt+I, or the
+//! label's Show button, lists them, light), counted but never told of,
+//! until Ctrl+I there stops ignoring it; Delete there, twice, forgets it
+//! (it is told of as new when it comes again). Ctrl+N writes a todo, Ctrl+E edits
 //! one (Tab cycles the workspace it is linked to); Ctrl+T adds a ticket
 //! repository (`owner/repo`) to the shown project; Delete marks a todo
 //! done, Shift+Delete deletes it. Ctrl+O opens an item's link, Ctrl+C
@@ -69,7 +70,8 @@ pub struct ItemId(pub String);
 pub enum Section {
     Agents,
     Services,
-    /// The services' errors the user ignores: listed dim, never counted.
+    /// The services' errors the user ignores: folded to a count until
+    /// shown (Alt+I), then listed dim; never counted.
     Ignored,
     Repos,
     PullRequests,
@@ -102,6 +104,12 @@ impl Section {
     /// items come in bursts, and are looked at together.
     pub fn dismisses_all(self) -> bool {
         self == Section::Services
+    }
+
+    /// Whether it is folded to its label and count until shown (Alt+I):
+    /// its items are there to be found again, not to be looked at.
+    pub fn folds(self) -> bool {
+        self == Section::Ignored
     }
 
     /// Its label's icon.
@@ -296,11 +304,27 @@ impl ItemAction {
     }
 }
 
-/// A section label's button that dismisses all its items as listed.
-fn dismiss_all_button() -> chrome::InboxButton {
-    chrome::InboxButton {
-        label: "Dismiss all".to_owned(),
-        key: "Ctrl+Del".to_owned(),
+/// What a section label's button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabelAction {
+    /// Dismiss all its items as listed (Ctrl+Del).
+    DismissAll,
+    /// List its folded items, or fold them again (Alt+I).
+    Fold,
+}
+
+impl LabelAction {
+    /// Its button; `shown`, whether the folded section is listed.
+    fn button(self, shown: bool) -> chrome::InboxButton {
+        let (label, key) = match self {
+            LabelAction::DismissAll => ("Dismiss all", "Ctrl+Del"),
+            LabelAction::Fold if shown => ("Hide", "Alt+I"),
+            LabelAction::Fold => ("Show", "Alt+I"),
+        };
+        chrome::InboxButton {
+            label: label.to_owned(),
+            key: key.to_owned(),
+        }
     }
 }
 
@@ -912,6 +936,8 @@ pub struct Panel {
     all: bool,
     /// Only the hidden items are listed (Alt+H).
     show_hidden: bool,
+    /// The folded sections' items are listed (Alt+I), not just counted.
+    show_folded: bool,
     /// The item a first Delete (or Forget click) was on, to forget on the
     /// second; any other key takes it back.
     armed: Option<ItemId>,
@@ -939,6 +965,7 @@ impl Default for Panel {
             }),
             all: true,
             show_hidden: false,
+            show_folded: false,
             armed: None,
         }
     }
@@ -1072,7 +1099,14 @@ impl Panel {
             .filter_map(|item| Some((score(&item)?, item)))
             .collect();
         kept.sort_by_key(|(score, item)| (item.section, Reverse(*score)));
-        let items: Vec<InboxItem> = kept.into_iter().map(|(_, item)| item).collect();
+        let mut items: Vec<InboxItem> = kept.into_iter().map(|(_, item)| item).collect();
+        // A folded section's items are counted on its label, not listed.
+        let folded: Vec<Section> = items
+            .iter()
+            .map(|i| i.section)
+            .filter(|&s| self.folded(s))
+            .collect();
+        items.retain(|i| !self.folded(i.section));
         // What else the sections hold, hidden.
         let hidden = |section: Section| {
             if self.show_hidden {
@@ -1090,14 +1124,46 @@ impl Panel {
             let listed: Vec<usize> = (0..items.len())
                 .filter(|&k| items[k].section == section)
                 .collect();
+            let count = listed.len() + folded.iter().filter(|&&s| s == section).count();
             let hidden = hidden(section);
-            if listed.is_empty() && hidden == 0 {
+            if count == 0 && hidden == 0 {
                 continue;
             }
-            rows.push(Entry::Label(section, listed.len(), hidden));
+            rows.push(Entry::Label(section, count, hidden));
             rows.extend(listed.into_iter().map(Entry::Item));
         }
         Listed { items, rows }
+    }
+
+    /// Whether `section` is folded to its label now.
+    fn folded(&self, section: Section) -> bool {
+        section.folds() && !self.show_folded
+    }
+
+    /// What `section`'s label, listing `count` items, has buttons for.
+    fn label_actions(&self, section: Section, count: usize) -> Vec<LabelAction> {
+        let mut actions = Vec::new();
+        if self.dismisses_all(section, count) {
+            actions.push(LabelAction::DismissAll);
+        }
+        if section.folds() && count > 0 {
+            actions.push(LabelAction::Fold);
+        }
+        actions
+    }
+
+    /// List the folded sections' items, or fold them again (Alt+I). Shown,
+    /// the first of them is selected, so they come into view.
+    fn toggle_folded(&mut self, list: &Listing) {
+        self.show_folded = !self.show_folded;
+        let listed = self.listed(list);
+        let first = self
+            .show_folded
+            .then(|| listed.items.iter().position(|i| i.section.folds()));
+        match first.flatten() {
+            Some(k) => self.select(&listed, k, list.page, Some(Instant::now())),
+            None => self.settle(&listed, list.page),
+        }
     }
 
     /// The selected item, by index into `items`: the one selected while
@@ -1444,6 +1510,10 @@ impl Panel {
             self.refilter(list);
             return None;
         }
+        if alt_only && matches!(sym, Keysym::i | Keysym::I) {
+            self.toggle_folded(list);
+            return None;
+        }
         if mods.alt || mods.logo {
             return None;
         }
@@ -1581,12 +1651,22 @@ impl Panel {
             Some(Entry::Item(k)) if i < shown => Some(*k),
             _ => None,
         };
-        // A section label's button.
-        if let InboxHit::Button(i, 0) = hit
+        // A section label's button; a folding label, clicked, folds.
+        if let InboxHit::Button(i, _) | InboxHit::Row(i) = hit
             && i < shown
-            && let Some(Entry::Label(section, ..)) = listed.rows.get(first + i)
+            && let Some(&Entry::Label(section, count, _)) = listed.rows.get(first + i)
         {
-            return self.dismiss_all(&listed, *section);
+            let action = match hit {
+                InboxHit::Button(_, b) => self.label_actions(section, count).get(b).copied(),
+                _ => (section.folds() && count > 0).then_some(LabelAction::Fold),
+            };
+            return match action? {
+                LabelAction::DismissAll => self.dismiss_all(&listed, section),
+                LabelAction::Fold => {
+                    self.toggle_folded(list);
+                    None
+                }
+            };
         }
         // A row cut by the list's edge glides into view.
         let now = Some(Instant::now());
@@ -1672,11 +1752,13 @@ impl Panel {
     }
 
     /// The footer's hints, for what is selected (`actions`, an item of
-    /// `section`) over `list`.
+    /// `section`) over `list`; `folds`, whether a folding section's label
+    /// is listed.
     fn hints(
         &self,
         actions: &[ItemAction],
         section: Option<Section>,
+        folds: bool,
         list: &Listing,
     ) -> Vec<(String, String)> {
         let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
@@ -1725,6 +1807,14 @@ impl Panel {
         }
         hints.push(hint("Ctrl+N", "new todo"));
         hints.push(hint("Ctrl+T", "add ticket repo"));
+        if folds {
+            let what = if self.show_folded {
+                "hide ignored"
+            } else {
+                "show ignored"
+            };
+            hints.push(hint("Alt+I", what));
+        }
         hints.push(hint(
             "Alt+H",
             if self.show_hidden {
@@ -1775,11 +1865,11 @@ impl Panel {
                     title: section.title().to_owned(),
                     count,
                     hidden,
-                    buttons: if self.dismisses_all(section, count) {
-                        vec![dismiss_all_button()]
-                    } else {
-                        Vec::new()
-                    },
+                    buttons: self
+                        .label_actions(section, count)
+                        .into_iter()
+                        .map(|a| a.button(self.show_folded))
+                        .collect(),
                 },
                 Entry::Item(k) => {
                     let item = &listed.items[k];
@@ -1866,6 +1956,10 @@ impl Panel {
             hints: self.hints(
                 &item_actions,
                 selected.map(|k| listed.items[k].section),
+                listed
+                    .rows
+                    .iter()
+                    .any(|e| matches!(e, Entry::Label(s, n, _) if s.folds() && *n > 0)),
                 list,
             ),
             empty: empty.into(),
@@ -2909,6 +3003,7 @@ mod tests {
         let names = names();
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
+        alt(&mut panel, Keysym::i, &list);
         let view = panel.view(&list);
         assert!(view.hints.iter().any(|(k, w)| k == "Del" && w == "forget"));
         let subtitle = |panel: &Panel| {
@@ -2975,26 +3070,41 @@ mod tests {
         let names = names();
         let list = listing(&items, &triage, &names);
         let mut panel = Panel::new(None);
-        let view = panel.view(&list);
-        // The ignored group, right after Services, listed light.
-        let rows: Vec<_> = view
-            .rows
-            .iter()
-            .map(|r| match r {
-                InboxRow::Label { title, .. } => title.clone(),
-                InboxRow::Item(line) => format!("{} {}", line.id, line.hidden),
-            })
-            .collect();
+        let rows = |panel: &Panel| -> Vec<String> {
+            panel
+                .view(&list)
+                .rows
+                .iter()
+                .map(|r| match r {
+                    InboxRow::Label {
+                        title,
+                        count,
+                        buttons,
+                        ..
+                    } => {
+                        let buttons: Vec<_> = buttons.iter().map(|b| b.label.as_str()).collect();
+                        format!("{title} {count} {}", buttons.join(","))
+                    }
+                    InboxRow::Item(line) => format!("{} {}", line.id, line.hidden),
+                })
+                .collect()
+        };
+        // The ignored group, right after Services, folded to its count.
         assert_eq!(
-            rows,
+            rows(&panel),
             [
-                "Services",
+                "Services 1 Dismiss all",
                 "s1 false",
-                "Ignored errors",
-                "i1 true",
-                "Repos",
+                "Ignored errors 1 Show",
+                "Repos 1 ",
                 "r1 false"
             ]
+        );
+        let view = panel.view(&list);
+        assert!(
+            view.hints
+                .iter()
+                .any(|(k, w)| k == "Alt+I" && w == "show ignored")
         );
         assert!(
             view.hints
@@ -3007,8 +3117,23 @@ mod tests {
             ctrl(&mut panel, Keysym::i, &list),
             Some(Outcome::Act(ItemId("s1".into()), A::Ignore))
         );
+        // Down skips the folded group.
         press(&mut panel, Keysym::Down, &list);
+        assert_eq!(panel.selected(), Some(&ItemId("r1".into())));
+        // Alt+I lists it, light, and selects its first.
+        alt(&mut panel, Keysym::i, &list);
         assert_eq!(panel.selected(), Some(&ItemId("i1".into())));
+        assert_eq!(
+            rows(&panel),
+            [
+                "Services 1 Dismiss all",
+                "s1 false",
+                "Ignored errors 1 Hide",
+                "i1 true",
+                "Repos 1 ",
+                "r1 false"
+            ]
+        );
         let view = panel.view(&list);
         assert!(
             view.hints
@@ -3022,5 +3147,13 @@ mod tests {
         // Neither on a repo.
         press(&mut panel, Keysym::Down, &list);
         assert_eq!(ctrl(&mut panel, Keysym::i, &list), None);
+        // Its label's Hide button, or a click on the label, folds it again.
+        assert_eq!(panel.click(InboxHit::Button(2, 0), &list), None);
+        assert_eq!(rows(&panel)[2], "Ignored errors 1 Show");
+        assert_eq!(panel.selected(), Some(&ItemId("r1".into())));
+        assert_eq!(panel.click(InboxHit::Row(2), &list), None);
+        assert_eq!(rows(&panel)[3], "i1 true");
+        let (hint_mods, hint_sym) = crate::keys::hint_key("Alt+I").unwrap();
+        assert!(hint_mods.alt && !hint_mods.ctrl && matches!(hint_sym, Keysym::i | Keysym::I));
     }
 }

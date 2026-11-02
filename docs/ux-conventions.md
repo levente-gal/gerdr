@@ -25,7 +25,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+F or / | Search within what has focus. |
 | Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. |
 | Ctrl+Del | Dismiss every listed row of the selected row's group (inbox Services; also its label's "Dismiss all" button). One Undo toast brings them all back. |
-| Ctrl+I | Ignore the selected service error, or stop ignoring it (inbox). An ignored error stays listed, dim, under "Ignored errors", and sends no notifications or counts. Del there forgets it (armed first). Undo toast. |
+| Ctrl+I | Ignore the selected service error, or stop ignoring it (inbox). An ignored error goes under "Ignored errors", folded to its count; Alt+I (or the label's Show button, or a click on the label) lists them, dim. It sends no notifications or counts. Del there forgets it (armed first). Undo toast. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
 | Ctrl+C | Copy. Never closes anything. |
 
