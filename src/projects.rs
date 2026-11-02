@@ -5,7 +5,8 @@
 //! launched outside herdr are remembered here, a file per project in
 //! `~/.local/share/gerdr/projects/<id>.json`; the rest (the project shown
 //! last, the quit choice, which of Cursor's idle chats stay shown, how the
-//! repositories panel lists files) in
+//! repositories panel lists files, the tabs to go back and forward
+//! through) in
 //! `~/.local/share/gerdr/state.json`.
 
 use std::{
@@ -19,7 +20,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    cursor_agents::History, desktop::shell_quote, herdr, home_dir, layout::SavedNode,
+    cursor_agents::History,
+    desktop::shell_quote,
+    herdr, home_dir,
+    layout::SavedNode,
+    nav_history::{NavHistory, Visit},
     repos::Grouping,
 };
 
@@ -86,6 +91,10 @@ pub struct Store {
     /// fingerprint, still counted as they come (see `services`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_errors: Vec<crate::services::ErrorGroup>,
+    /// The tabs shown, to go back and forward through, each parked (see
+    /// `nav_history`).
+    #[serde(default, skip_serializing_if = "NavHistory::is_empty")]
+    pub nav: NavHistory<Visit>,
     #[serde(skip)]
     books: Books,
 }
@@ -124,6 +133,8 @@ struct State {
     service_errors: Vec<crate::services::ErrorGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ignored_errors: Vec<crate::services::ErrorGroup>,
+    #[serde(default, skip_serializing_if = "NavHistory::is_empty")]
+    nav: NavHistory<Visit>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -473,6 +484,7 @@ impl Store {
         self.service_anchors = state.service_anchors;
         self.service_errors = state.service_errors;
         self.ignored_errors = state.ignored_errors;
+        self.nav = state.nav;
     }
 
     fn state(&self) -> State {
@@ -491,6 +503,7 @@ impl Store {
             service_anchors: self.service_anchors.clone(),
             service_errors: self.service_errors.clone(),
             ignored_errors: self.ignored_errors.clone(),
+            nav: self.nav.clone(),
         }
     }
 
@@ -1619,6 +1632,20 @@ mod tests {
             service_anchors: BTreeMap::new(),
             service_errors: Vec::new(),
             ignored_errors: Vec::new(),
+            nav: {
+                let mut nav = NavHistory::default();
+                nav.visit(
+                    Some(Visit::Parked {
+                        project: "api".into(),
+                        workspace: "w1".into(),
+                        herdr_tab: Some("w1:t1".into()),
+                        index: 0,
+                        label: "api › 1 zsh".into(),
+                    }),
+                    |_| true,
+                );
+                nav
+            },
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

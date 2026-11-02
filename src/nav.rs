@@ -3,11 +3,17 @@
 //! its workspace's record id and its herdr tab (else its place among the
 //! tabs without one); going back to it shows its project, the way the
 //! last-project key does (asking first when that asks), and then the tab,
-//! once the project's tabs are back.
+//! once the project's tabs are back. The history, parked, is kept in the
+//! store every `RECORDS_INTERVAL` and when gerdr quits, and taken back as
+//! gerdr starts.
 
 use std::time::{Duration, Instant};
 
-use crate::{Gerdr, nav_history::Visit, tab_strip::visited_label};
+use crate::{
+    Gerdr,
+    nav_history::{NavHistory, Visit},
+    tab_strip::visited_label,
+};
 
 /// How long a tab of another project gone to is waited for once that
 /// project shows: its tabs come back from herdr a moment after. Past it,
@@ -231,16 +237,49 @@ impl Gerdr {
 
     /// Park the shown project's tabs in the history, as it is let go of:
     /// each by ids that outlive its windows.
-    pub fn park_visits(&mut self) {
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        let mut nav = std::mem::take(&mut self.nav);
-        nav.rebind(|v| match v {
-            Visit::Tab(id) => self.park(&project, *id),
-            parked => Some(parked.clone()),
+    /// Whether the store's copy changed.
+    pub fn park_visits(&mut self) -> bool {
+        let kept = self.keep_nav(true);
+        self.nav = self.parked_nav();
+        kept
+    }
+
+    /// The history with the shown project's tabs parked, as it outlives
+    /// them.
+    fn parked_nav(&self) -> NavHistory<Visit> {
+        let mut nav = self.nav.clone();
+        let project = self.project.as_deref();
+        nav.rebind(|v| match (v, project) {
+            (Visit::Tab(id), Some(project)) => self.park(project, *id),
+            (Visit::Tab(_), None) => None,
+            (parked, _) => Some(parked.clone()),
         });
-        self.nav = nav;
+        nav
+    }
+
+    /// Put the history, parked, in the store to save with it, if it
+    /// changed since it was last put there, or anyway when `fresh` (a tab
+    /// may have moved, or got its herdr tab, since); whether the store's
+    /// copy changed.
+    pub fn keep_nav(&mut self, fresh: bool) -> bool {
+        if !fresh && self.nav_kept.as_ref() == Some(&self.nav) {
+            return false;
+        }
+        self.nav_kept = Some(self.nav.clone());
+        let parked = self.parked_nav();
+        if self.projects.nav == parked {
+            return false;
+        }
+        self.projects.nav = parked;
+        true
+    }
+
+    /// Take the history kept in the store, as gerdr starts: its tabs are
+    /// all parked (a `Tab::id` of an earlier run means nothing now).
+    pub fn restore_nav(&mut self) {
+        let mut nav = self.projects.nav.clone();
+        nav.rebind(|v| matches!(v, Visit::Parked { .. }).then(|| v.clone()));
+        self.nav = nav.restored();
     }
 
     /// Tab `id` of `project`, the shown one, parked; `None` if it is gone.

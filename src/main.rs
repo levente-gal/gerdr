@@ -1499,6 +1499,8 @@ pub struct Gerdr {
     /// A step back or forward to a tab of another project, waiting for it
     /// to show (see `nav`).
     pub nav_pending: Option<nav::PendingVisit>,
+    /// The history as it was last put in the store (see `Gerdr::keep_nav`).
+    pub nav_kept: Option<nav_history::NavHistory<nav_history::Visit>>,
     /// The notes shown over the apps, oldest first (see `toast`).
     pub toasts: VecDeque<Toast>,
     /// The quit dialog, while it is open.
@@ -2587,6 +2589,7 @@ impl Gerdr {
             changed |= self.record_tabs();
         }
         changed |= self.record_workspace_order();
+        changed |= self.keep_nav(false);
         let mirrored: Vec<(String, String)> = self
             .workspaces
             .iter()
@@ -5487,8 +5490,8 @@ impl Gerdr {
     /// still reaped.
     fn detach_project(&mut self) {
         // Its tabs go: the history keeps them under ids that outlive them.
-        self.park_visits();
-        if self.record_tabs() {
+        let kept = self.park_visits();
+        if self.record_tabs() | kept {
             self.projects.save();
         }
         for token in std::mem::take(&mut self.herdr_sources) {
@@ -5934,6 +5937,7 @@ impl Gerdr {
         let size = self.output_size();
         self.projects.window_size = Some((size.w, size.h));
         self.projects.sidebar_width = Some(self.sidebar_width);
+        self.keep_nav(true);
         self.projects.save();
         self.close_cursor_socket();
         self.loop_signal.stop();
@@ -6640,6 +6644,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         previous_project: None,
         nav: Default::default(),
         nav_pending: None,
+        nav_kept: None,
         toasts: VecDeque::new(),
         quit: None,
         restart: None,
@@ -6793,6 +6798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The first run turns the session gerdr used before projects into one.
     state.projects = store;
+    state.restore_nav();
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
     }
