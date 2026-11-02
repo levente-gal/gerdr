@@ -87,6 +87,7 @@ pub struct Features {
     /// The stage agents being watched (see `feature_agents`).
     pub(crate) agents: BTreeMap<crate::feature_agents::WatchKey, crate::feature_agents::Watch>,
     /// What Build and Verify keep while gerdr runs (see `feature_build`).
+    #[allow(dead_code)] // read by `feature_build` (inc 4 contract)
     pub(crate) build: crate::feature_build::BuildState,
 }
 
