@@ -72,15 +72,15 @@ struct KeptApp {
 
 /// A process gerdr started, told apart from one that took its pid later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Process {
-    pid: u32,
+pub struct Process {
+    pub pid: u32,
     /// When it started, in clock ticks after boot (see `start_time`).
-    start: u64,
+    pub start: u64,
 }
 
 impl Process {
     /// `pid`, started a moment ago.
-    fn new(pid: u32) -> Self {
+    pub fn new(pid: u32) -> Self {
         Self {
             pid,
             start: start_time(pid).unwrap_or_default(),
@@ -88,7 +88,7 @@ impl Process {
     }
 
     /// Whether it still runs.
-    fn runs(&self) -> bool {
+    pub fn runs(&self) -> bool {
         start_time(self.pid) == Some(self.start)
     }
 }
@@ -111,7 +111,7 @@ fn slug(id: &str) -> String {
         .collect()
 }
 
-fn runtime_dir() -> Option<PathBuf> {
+pub fn runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

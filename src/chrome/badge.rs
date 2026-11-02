@@ -116,7 +116,7 @@ pub fn centred_dot(mark: Rect) -> Rect {
 
 /// Signed distance to the dot `d` physical pixels across, centred on the
 /// origin: a disc, or a ring for `Dot::Idle`.
-fn dot_shape(dot: Dot, x: f32, y: f32, d: f32) -> f32 {
+pub(super) fn dot_shape(dot: Dot, x: f32, y: f32, d: f32) -> f32 {
     let r = d / 2.0;
     match dot {
         Dot::Idle => (x.hypot(y) - 0.75 * r).abs() - 0.25 * r,

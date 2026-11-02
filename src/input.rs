@@ -159,6 +159,8 @@ enum Intercepted {
     Scrollback(scrollback::Outcome),
     /// The switcher's key, pressed after the prefix over it, closes it.
     CloseSwitcher,
+    /// The tasks panel asked for this.
+    Tasks(crate::tasks::Outcome),
 }
 
 /// An overlay with text fields, which takes pastes (see `text_field`).
@@ -280,8 +282,10 @@ impl Gerdr {
                         if state.grabbing_overlay().is_some() {
                             state.tooltip.hide();
                         }
-                        // A dialog takes every key.
-                        if let Some(dialog) = top.filter(|o| o.is_dialog()) {
+                        // A dialog takes every key, as does the tasks panel.
+                        if let Some(dialog) =
+                            top.filter(|o| o.is_dialog() || *o == overlay::Overlay::Tasks)
+                        {
                             state.suppressed_keys.push(code);
                             let out = state.dialog_key(dialog, mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out);
@@ -506,8 +510,9 @@ impl Gerdr {
                     }
                     return;
                 }
-                // Over a toast or the help panel, nothing moves.
-                if at.is_some() {
+                // Over a toast, the help panel or the footer, nothing
+                // moves.
+                if at.is_some() || self.on_footer(self.pointer) {
                     return;
                 }
                 // Over the sidebar, its rows scroll.
@@ -572,6 +577,13 @@ impl Gerdr {
         if let Some(id) = self.unzoom_button_at(location) {
             if button == BTN_LEFT {
                 self.zoom_pane(id);
+            }
+            return true;
+        }
+        // The footer: a task opens the tasks panel.
+        if self.on_footer(location) {
+            if button == BTN_LEFT {
+                self.footer_press(location);
             }
             return true;
         }
@@ -679,6 +691,7 @@ impl Gerdr {
             O::Restart => _ = self.restart_click(pos),
             O::Checkout => _ = self.checkout_click(pos),
             O::Confirm => _ = self.confirm_click(pos),
+            O::Tasks => self.tasks_click(pos),
             // A click on a toast dismisses it, on its button does what the
             // button says.
             O::Toasts => {
@@ -725,6 +738,7 @@ impl Gerdr {
             O::Restart => self.restart_controls().iter().any(on),
             O::Checkout => self.checkout_controls().iter().any(on),
             O::Confirm => self.confirm_controls().iter().any(on),
+            O::Tasks => self.tasks_controls().iter().any(on),
             O::ContextMenu => self
                 .context_menu
                 .as_ref()
@@ -790,6 +804,7 @@ impl Gerdr {
             O::Restart => self.restart_key(mods, sym).map(Intercepted::Restart),
             O::Checkout => self.checkout_key(mods, sym).map(Intercepted::Checkout),
             O::Confirm => self.confirm_key(mods, sym).map(Intercepted::Confirm),
+            O::Tasks => self.tasks_key(sym).map(Intercepted::Tasks),
             _ => None,
         }
     }
@@ -849,6 +864,9 @@ impl Gerdr {
     /// hover, tooltip and cursor shape share it.
     pub fn regions_at(&self, pos: Point<f64, Logical>) -> Regions {
         let mut regions = Regions::default();
+        if self.on_footer(pos) {
+            return regions;
+        }
         if pos.x < self.sidebar_width as f64 {
             regions.sidebar = Some(self.sidebar_layout());
         } else if pos.y < self.tab_strip_height() as f64 {
@@ -865,6 +883,14 @@ impl Gerdr {
         // Over an overlay, only its own controls count.
         if let Some(overlay) = self.overlay_at(pos) {
             return if self.overlay_control_at(overlay, pos) {
+                RegionHit::Control
+            } else {
+                RegionHit::Nothing
+            };
+        }
+        // The footer: its chips and its count.
+        if self.on_footer(pos) {
+            return if self.footer_hit(pos).is_some() {
                 RegionHit::Control
             } else {
                 RegionHit::Nothing
@@ -986,8 +1012,14 @@ impl Gerdr {
         if covered || regions.sidebar.is_none() {
             self.agent_strip = None;
         }
+        let on_footer = !covered && self.on_footer(pos);
+        if !on_footer {
+            self.footer_motion(None);
+        }
         let tip = if covered {
             overlay_tip
+        } else if on_footer {
+            self.footer_motion(Some(pos))
         } else if let Some(layout) = &regions.sidebar {
             self.sidebar_motion(layout, pos)
         } else if let Some(view) = &regions.strip {
@@ -1086,6 +1118,7 @@ impl Gerdr {
                 self.switcher = None;
                 self.refresh_pointer_focus();
             }
+            Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
         }
     }
 

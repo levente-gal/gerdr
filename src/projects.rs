@@ -208,12 +208,18 @@ pub struct Stops {
     /// Its apps kept running (see `keep`), Cursor by default.
     #[serde(default)]
     pub apps: bool,
+    /// T3 Code's server, which every project shares (see `t3_server`):
+    /// asked only when quitting.
+    #[serde(default)]
+    pub t3: bool,
 }
 
 impl Stops {
+    /// All of the project's own: not T3 Code's server, which others use.
     pub const ALL: Self = Self {
         session: true,
         apps: true,
+        t3: false,
     };
 
     /// Whether it stops anything.
@@ -1572,10 +1578,12 @@ mod tests {
             quit_choice: Some(QuitChoice::Stops(Stops {
                 session: false,
                 apps: true,
+                t3: false,
             })),
             stop_picks: Some(Stops {
                 session: true,
                 apps: false,
+                t3: false,
             }),
             cursor_history: History::default(),
             t3_hidden: Default::default(),
@@ -2713,7 +2721,8 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
             read(r#"{"stops":{"apps":true}}"#),
             Stops {
                 session: false,
-                apps: true
+                apps: true,
+                t3: false,
             }
         );
     }

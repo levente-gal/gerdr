@@ -78,6 +78,8 @@ mod switcher;
 mod syntax;
 mod system_theme;
 mod t3_agents;
+mod t3_server;
+mod tasks;
 mod t3_update;
 mod tab_strip;
 mod test_runs;
@@ -1200,6 +1202,18 @@ pub struct Gerdr {
     /// `Gerdr::watch_settings`).
     pub settings_modified: Option<std::time::SystemTime>,
     /// How wide the sidebar is, kept in `state.json` for the next start.
+    /// Whether the footer shows, from the config file.
+    pub show_footer: bool,
+    /// What of the footer the pointer is on.
+    pub footer_hover: Option<chrome::FooterHit>,
+    /// The tasks panel, while it is open over the footer.
+    pub tasks_panel: Option<tasks::TasksPanel>,
+    /// The apps projects keep running, as last looked at (see `tasks`).
+    pub kept: Vec<tasks::Kept>,
+    /// T3 Code's server gerdr started, as last looked at.
+    pub t3_started: Option<t3_server::Started>,
+    /// Whether T3 Code's server has a log, as last looked at.
+    pub t3_log: bool,
     pub sidebar_width: i32,
     /// The next pane id to hand out.
     pub next_pane: u32,
@@ -1570,14 +1584,18 @@ impl Gerdr {
         chrome::tab_strip_height(self.density)
     }
 
-    /// Where the panes go: right of the sidebar, below the tab strip.
+    /// Where the panes go: right of the sidebar, below the tab strip,
+    /// above the footer.
     fn content_rect(&self) -> Rectangle<i32, Logical> {
         let size = self.output_size();
         let (x, y) = (self.sidebar_width, self.tab_strip_height());
-        Rectangle::new(
-            (x, y).into(),
-            ((size.w - x).max(1), (size.h - y).max(1)).into(),
-        )
+        let h = size.h - y - self.footer_height();
+        Rectangle::new((x, y).into(), ((size.w - x).max(1), h.max(1)).into())
+    }
+
+    /// How high the sidebar is: down to the footer.
+    pub fn sidebar_height(&self) -> i32 {
+        (self.output_size().h - self.footer_height()).max(1)
     }
 
     /// The divider within grabbing distance of `pos`, if any.
@@ -1592,7 +1610,10 @@ impl Gerdr {
                 && self.context_menu.is_none();
             return on.then_some(Drag::ReposSplit);
         }
-        if (pos.x - self.sidebar_width as f64).abs() <= GRAB && !self.on_sidebar_bar(pos) {
+        if (pos.x - self.sidebar_width as f64).abs() <= GRAB
+            && !self.on_sidebar_bar(pos)
+            && !self.on_footer(pos)
+        {
             return Some(Drag::Sidebar);
         }
         // A zoomed pane covers the dividers.
@@ -4433,6 +4454,7 @@ impl Gerdr {
             }
         });
         self.kept_client_exited(&exited);
+        self.t3_child_exited(&exited);
         let now = Instant::now();
         let mut dropped = false;
         // A Zed that exited without a window: the next queued one may start.
@@ -5071,6 +5093,9 @@ impl Gerdr {
         if self.grabbing_overlay().is_some() {
             return None;
         }
+        if self.on_footer(pos) {
+            return None;
+        }
         if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
             return None;
         }
@@ -5299,6 +5324,7 @@ impl Gerdr {
         self.restart = None;
         self.checkout = None;
         self.confirm = None;
+        self.tasks_panel = None;
         self.project = Some(id.to_owned());
         let instance = if alongside {
             format!("{id}@{}", self.socket_name.to_string_lossy())
@@ -5809,6 +5835,9 @@ impl Gerdr {
         self.record_tabs();
         self.close_web_control();
         let stopped = stops.session && self.stop_session();
+        if stops.t3 {
+            self.stop_t3_now();
+        }
         // Its apps kept running go if asked: their windows close with the
         // others (see `close_windows`).
         if stops.apps
@@ -6070,6 +6099,7 @@ impl Gerdr {
             .as_deref()
             .and_then(|id| self.projects.project(id))
             .map(|p| p.name.clone());
+        let tasks = self.tasks();
         ChromeView {
             now,
             pointer: self.pointer,
@@ -6106,6 +6136,8 @@ impl Gerdr {
             scrollback: self.scrollback_view(),
             toasts: self.toast_views(),
             pane_bars: self.pane_bar_views(),
+            footer: self.footer_view(&tasks),
+            tasks: self.tasks_view(&tasks),
             unzoom: self.unzoom_button().map(|(_, rect)| rect),
             theme: self.theme(),
             density: self.density,
@@ -6426,6 +6458,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .sidebar_width
             .unwrap_or(SIDEBAR_WIDTH)
             .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
+        show_footer: ui.footer,
+        footer_hover: None,
+        tasks_panel: None,
+        kept: Vec::new(),
+        t3_started: None,
+        t3_log: false,
         next_pane: 0,
         drag: None,
         reorder: None,
@@ -6708,6 +6746,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_records();
     state.watch_cursor_agents();
     state.watch_t3_agents();
+    state.watch_tasks();
     state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();

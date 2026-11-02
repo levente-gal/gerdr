@@ -88,6 +88,9 @@ impl Gerdr {
     /// Where pane `id` of the shown tab, dragged to `pos`, would land.
     /// `None` over itself or nothing it can land on.
     pub fn pane_drop_at(&self, id: u32, pos: Point<f64, Logical>) -> Option<PaneDrop> {
+        if self.on_footer(pos) {
+            return None;
+        }
         if pos.x < self.sidebar_width as f64 {
             // Under the sidebar's header, the block of another workspace.
             if pos.y < chrome::BAR_HEIGHT as f64 {

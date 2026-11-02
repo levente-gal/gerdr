@@ -17,6 +17,7 @@
 //! theme = "light"       # or "dark" or "system"; else the last choice
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
 //! motion = "reduced"    # or "off": no blinking dots or pulses; "full", the default
+//! footer = false        # hide the footer with the background tasks; shown by default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -425,6 +426,7 @@ struct UiConfig {
     theme: Option<String>,
     needs_you: Option<bool>,
     motion: Option<String>,
+    footer: Option<bool>,
 }
 
 /// The `[git]` table, as written.
@@ -528,6 +530,8 @@ pub struct Ui {
     pub needs_you: bool,
     /// How much the chrome moves (see `anim::Motion`).
     pub motion: Motion,
+    /// Whether the footer with the background tasks shows.
+    pub footer: bool,
 }
 
 impl Default for Ui {
@@ -537,6 +541,7 @@ impl Default for Ui {
             theme: None,
             needs_you: true,
             motion: Motion::Full,
+            footer: true,
         }
     }
 }
@@ -669,6 +674,9 @@ pub fn from_text(
     }
     if let Some(needs_you) = config.ui.needs_you {
         ui.needs_you = needs_you;
+    }
+    if let Some(footer) = config.ui.footer {
+        ui.footer = footer;
     }
     let mut git = Git::default();
     if let Some(groups) = config.git.same_branches {
@@ -1208,6 +1216,7 @@ other = 1
                 theme: Some(ThemeMode::Light),
                 needs_you: true,
                 motion: crate::anim::Motion::Full,
+                footer: true,
             }
         );
         assert!(problems.is_empty());
@@ -1218,6 +1227,14 @@ other = 1
         assert!(ui("").0.needs_you);
         let (parsed, problems) = ui("[ui]\nneeds_you = false\n");
         assert!(!parsed.needs_you);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn the_footer_shows_unless_the_file_hides_it() {
+        assert!(ui("").0.footer);
+        let (parsed, problems) = ui("[ui]\nfooter = false\n");
+        assert!(!parsed.footer);
         assert!(problems.is_empty());
     }
 

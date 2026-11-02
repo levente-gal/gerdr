@@ -1185,3 +1185,125 @@ fn dump_overlays() {
         );
     }
 }
+
+/// A footer and its tasks panel with a task of each kind.
+fn status_tasks() -> Vec<super::TaskView> {
+    let task = |title: &str, chip: &str, detail: &str, dot, buttons: &[&str]| super::TaskView {
+        title: title.into(),
+        chip: chip.into(),
+        detail: detail.into(),
+        dot,
+        buttons: buttons.iter().map(|b| (*b).to_owned()).collect(),
+    };
+    vec![
+        task(
+            "T3 Code server",
+            "T3 Code",
+            "0.1.6 · http://127.0.0.1:3773 · up 2h 5m",
+            super::Dot::Done,
+            &["Open", "Restart", "Stop", "Log"],
+        ),
+        task(
+            "Git: fetch in gerdr",
+            "gerdr: fetch",
+            "/home/me/gerdr/.git",
+            super::Dot::Working,
+            &["Repositories"],
+        ),
+        task(
+            "T3 Code 0.1.7 waits to start",
+            "T3 Code 0.1.7 waits",
+            "Restarts once 2 threads are done",
+            super::Dot::Blocked,
+            &["Restart now"],
+        ),
+    ]
+}
+
+fn status_footer() -> super::FooterView {
+    super::FooterView {
+        tasks: status_tasks(),
+        hover: Some(super::FooterHit::Task(0)),
+    }
+}
+
+fn status_panel() -> super::TasksView {
+    super::TasksView {
+        rows: status_tasks(),
+        selected: Some(0),
+        hover: Some(super::TasksHit::Button(0, 1)),
+    }
+}
+
+const STATUS_OUTPUT: (i32, i32) = (1200, 700);
+
+fn paint_status(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let footer = super::status_bar_height(super::Density::Comfortable);
+    vec![
+        hash(painter.footer(&status_footer(), (STATUS_OUTPUT.0, footer).into(), scale, p)),
+        hash(painter.tasks_panel(&status_panel(), STATUS_OUTPUT.into(), footer, scale, p)),
+    ]
+}
+
+const STATUS: [&str; 2] = ["footer", "tasks_panel"];
+
+/// The recorded hashes of `STATUS`, per case in `CASES`.
+const GOLDEN_STATUS: [[u64; 2]; 4] = [
+    // Dark at 1
+    [
+        0x3821a1cf1a7fe182, // footer
+        0x02042cb93d8554b1, // tasks_panel
+    ],
+    // Dark at 2
+    [
+        0x910ba2519163ffe3, // footer
+        0x659863499acdfa36, // tasks_panel
+    ],
+    // Light at 1
+    [
+        0x8a8087fd34aec460, // footer
+        0x5d58872415bfdb21, // tasks_panel
+    ],
+    // Light at 2
+    [
+        0x28f7c3f0d800d54e, // footer
+        0xc86f0dac85713891, // tasks_panel
+    ],
+];
+
+#[test]
+fn the_footer_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_STATUS.iter().map(|row| row.as_slice()).collect();
+    check(&STATUS, &golden, paint_status);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the footer and the tasks panel there.
+#[test]
+fn dump_status() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let footer = super::status_bar_height(super::Density::Comfortable);
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        dump(
+            &dir,
+            &format!("footer_{tag}"),
+            painter.footer(&status_footer(), (STATUS_OUTPUT.0, footer).into(), scale, p),
+            px(STATUS_OUTPUT.0),
+        );
+        let panel = super::tasks_layout(&status_panel(), STATUS_OUTPUT.into(), footer).panel;
+        dump(
+            &dir,
+            &format!("tasks_panel_{tag}"),
+            painter.tasks_panel(&status_panel(), STATUS_OUTPUT.into(), footer, scale, p),
+            px(panel.size.w + 2 * super::SHADOW),
+        );
+    }
+}

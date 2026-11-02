@@ -45,6 +45,9 @@ pub enum Check {
     Session,
     /// Stop the apps kept running.
     Apps,
+    /// Stop T3 Code's server, which runs in the background for every
+    /// project (see `t3_server`).
+    T3,
     DontAsk,
 }
 
@@ -60,6 +63,8 @@ pub struct QuitDialog {
     /// The apps the project keeps running, as named for people: no row
     /// for them when there are none.
     pub apps: Vec<String>,
+    /// Whether T3 Code's server runs: a row for it when quitting.
+    pub t3: bool,
     /// The row under the keyboard's cursor.
     pub cursor: usize,
     /// What the pointer is over.
@@ -77,6 +82,7 @@ impl QuitDialog {
             stops,
             dont_ask,
             apps,
+            t3: false,
             cursor: 0,
             hover: None,
             switch: None,
@@ -92,11 +98,20 @@ impl QuitDialog {
         }
     }
 
+    /// With a row for T3 Code's server, if `runs`.
+    fn with_t3(mut self, runs: bool) -> Self {
+        self.t3 = runs;
+        self
+    }
+
     /// The checkboxes, in order.
     fn rows(&self) -> Vec<Check> {
         let mut rows = vec![Check::Session];
         if !self.apps.is_empty() {
             rows.push(Check::Apps);
+        }
+        if self.t3 && self.switch.is_none() {
+            rows.push(Check::T3);
         }
         if self.switch.is_none() {
             rows.push(Check::DontAsk);
@@ -108,6 +123,7 @@ impl QuitDialog {
         match check {
             Check::Session => self.stops.session,
             Check::Apps => self.stops.apps,
+            Check::T3 => self.stops.t3,
             Check::DontAsk => self.dont_ask,
         }
     }
@@ -117,6 +133,7 @@ impl QuitDialog {
         match self.rows().get(i) {
             Some(Check::Session) => self.stops.session = !self.stops.session,
             Some(Check::Apps) => self.stops.apps = !self.stops.apps,
+            Some(Check::T3) => self.stops.t3 = !self.stops.t3,
             Some(Check::DontAsk) => self.dont_ask = !self.dont_ask,
             None => {}
         }
@@ -219,6 +236,7 @@ impl Gerdr {
                 .project(id)
                 .is_some_and(|p| herdr::is_running(&p.session))
             && keep::app_names(id).is_empty()
+            && !self.t3_runs()
         {
             self.quit_app(Stops::default());
             return;
@@ -232,11 +250,14 @@ impl Gerdr {
     /// Ask, even if a choice was remembered.
     pub fn open_quit(&mut self) {
         self.project_menu = None;
-        self.quit = Some(QuitDialog::quitting(
-            self.stop_picks(),
-            self.shown_apps(),
-            self.projects.quit_choice.is_some(),
-        ));
+        self.quit = Some(
+            QuitDialog::quitting(
+                self.stop_picks(),
+                self.shown_apps(),
+                self.projects.quit_choice.is_some(),
+            )
+            .with_t3(self.t3_runs()),
+        );
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
     }
@@ -437,6 +458,7 @@ impl Gerdr {
                         "the project's session".into(),
                     ),
                     Check::Apps => (dialog.apps.join(", "), "kept running".into()),
+                    Check::T3 => ("T3 Code server".into(), "every project's".into()),
                     Check::DontAsk => ("Don't ask again".into(), ask_again.clone()),
                 };
                 QuitRow {
@@ -497,6 +519,7 @@ mod tests {
         let stops = Stops {
             session: true,
             apps: false,
+            t3: false,
         };
         let mut dialog = QuitDialog::quitting(stops, cursor(), false);
         // It stops the session: Enter cancels, Q quits.
@@ -531,7 +554,8 @@ mod tests {
             dialog.stops,
             Stops {
                 session: false,
-                apps: true
+                apps: true,
+                t3: false,
             }
         );
         press(&mut dialog, Keysym::Down);
@@ -549,6 +573,25 @@ mod tests {
                 remember: true
             })
         );
+    }
+
+    #[test]
+    fn a_t3_row_only_when_it_runs_and_quitting() {
+        let quitting = QuitDialog::quitting(Stops::default(), Vec::new(), false);
+        assert!(!quitting.rows().contains(&Check::T3));
+        let mut dialog = quitting.with_t3(true);
+        assert_eq!(
+            dialog.rows(),
+            vec![Check::Session, Check::T3, Check::DontAsk]
+        );
+        dialog.cursor = 1;
+        dialog.toggle(1);
+        let Outcome::Go { stops, .. } = dialog.press(GO) else {
+            panic!("quits");
+        };
+        assert!(stops.t3 && !stops.session);
+        let switching = QuitDialog::switching(Stops::default(), Vec::new(), switch()).with_t3(true);
+        assert!(!switching.rows().contains(&Check::T3));
     }
 
     #[test]
@@ -580,6 +623,7 @@ mod tests {
         let stops = Stops {
             session: false,
             apps: true,
+            t3: false,
         };
         let mut dialog = QuitDialog::switching(stops, cursor(), switch());
         assert_eq!(press(&mut dialog, Keysym::Return), Some(Outcome::Cancel));

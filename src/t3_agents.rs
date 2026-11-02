@@ -117,7 +117,12 @@ impl Server {
 
     /// Whether it still runs: its process is there.
     pub fn alive(&self) -> bool {
-        Path::new(&format!("/proc/{}", self.pid)).exists()
+        Self::alive_pid(self.pid)
+    }
+
+    /// Whether process `pid` is there.
+    pub fn alive_pid(pid: u32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
     }
 
     /// Its port.
@@ -828,6 +833,11 @@ pub struct T3 {
     pub restart_at: Option<String>,
     /// Whether the user heard that gerdr reads T3 Code in part.
     told_partial: bool,
+    /// When gerdr last started the server, while it may yet fail to (see
+    /// `t3_server`).
+    pub started_at: Option<std::time::Instant>,
+    /// Whether the server is being stopped.
+    pub stopping: bool,
 }
 
 impl crate::Gerdr {
@@ -921,7 +931,7 @@ impl crate::Gerdr {
     }
 
     /// Take in what T3 Code's threads do now, and notify of what is news.
-    fn t3_changed(&mut self) {
+    pub(crate) fn t3_changed(&mut self) {
         let all = threads(&self.t3.rows, self.t3.alive);
         if self.projects.t3_hidden.settle(&all) {
             self.projects.save();
@@ -1082,7 +1092,7 @@ impl crate::Gerdr {
     pub fn open_t3(&mut self, w: usize, thread: Option<&str>) {
         use crate::toast::Level;
         let Some(server) = self.t3.server.clone().filter(|_| self.t3.alive) else {
-            let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3(w));
+            let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3);
             let text = "T3 Code's server isn't running".to_owned();
             return self.toast_with(text, Level::Warning, Some(action));
         };
@@ -1203,25 +1213,16 @@ impl crate::Gerdr {
         }
     }
 
-    /// Start T3 Code's server in a new tab of workspace `w` (see
-    /// `start_command`).
-    pub fn start_t3(&mut self, w: usize) {
-        self.start_t3_at(w, None);
-    }
-
-    /// The same, at `port` if any: where a server restarted ran.
-    pub fn start_t3_at(&mut self, w: usize, port: Option<u16>) {
-        let Some(dir) = self.workspaces.get(w).map(|ws| ws.dir.clone()) else {
-            return;
-        };
+    /// The command starting T3 Code's server, at `port` if any (see
+    /// `Start::command`), without opening a browser: gerdr shows its app.
+    pub fn t3_command(&self, port: Option<u16>) -> String {
         let pin = crate::t3_update::Updates::load().pin;
         let start = Start {
             home: self.t3.home.as_deref(),
             pin: pin.as_deref(),
             port,
         };
-        let command = start.command(crate::desktop::installed);
-        self.new_tab_running(w, &dir, command);
+        format!("{} --no-browser", start.command(crate::desktop::installed))
     }
 }
 

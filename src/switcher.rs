@@ -102,6 +102,8 @@ pub enum Target {
     UpdateT3,
     /// Taking newer versions of T3 Code without asking, turned on or off.
     T3Updates,
+    /// The tasks running in the background (see `tasks`).
+    Tasks,
 }
 
 impl Target {
@@ -121,6 +123,7 @@ impl Target {
             | Target::T3(_)
             | Target::UpdateT3
             | Target::T3Updates
+            | Target::Tasks
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -146,6 +149,7 @@ impl Target {
             | Target::T3(_)
             | Target::UpdateT3
             | Target::T3Updates
+            | Target::Tasks
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -756,6 +760,7 @@ fn frecency_key(
         | Target::ReloadProjects
         | Target::UpdateT3
         | Target::T3Updates
+        | Target::Tasks
         | Target::ImportProfile(_) => return None,
     })
 }
@@ -933,6 +938,7 @@ impl Gerdr {
         items.extend(self.agent_entries(self.active_workspace));
         items.extend(self.t3_update_entries());
         items.push(self.inbox_entry());
+        items.push(self.tasks_entry());
         let home = home_dir();
         if let Some(home) = &home {
             items.extend(profile_import::sources(home).into_iter().map(|source| {
@@ -1033,6 +1039,15 @@ impl Gerdr {
             n => format!("{n} need you"),
         };
         Item::new(ItemIcon::Command, "Inbox", detail, Target::Inbox)
+    }
+
+    fn tasks_entry(&self) -> Item {
+        let detail = match self.tasks().len() {
+            0 => "nothing runs".to_owned(),
+            1 => "1 runs".to_owned(),
+            n => format!("{n} run"),
+        };
+        Item::new(ItemIcon::Command, "Background tasks", detail, Target::Tasks)
     }
 
     /// `items` with their frecency.
@@ -1255,6 +1270,7 @@ impl Gerdr {
             Target::T3(w) => self.open_t3(w, None),
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
+            Target::Tasks => self.open_tasks(0),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),

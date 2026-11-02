@@ -35,6 +35,8 @@ pub enum Overlay {
     Welcome,
     /// The key help: up while the prefix is armed, or pinned open.
     Help,
+    /// The background tasks, over the footer (see `tasks`).
+    Tasks,
     ProjectMenu,
     Worktrees,
     Repos,
@@ -45,7 +47,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 15] = [
+    pub const ORDER: [Self; 16] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -55,6 +57,7 @@ impl Overlay {
         Self::Toasts,
         Self::Welcome,
         Self::Help,
+        Self::Tasks,
         Self::ProjectMenu,
         Self::Worktrees,
         Self::Repos,
@@ -88,7 +91,7 @@ impl Overlay {
     /// Whether, while it is open, every key, press and scroll goes to it,
     /// wherever the pointer is, and no client has the pointer.
     pub fn grabs(self) -> bool {
-        self.is_dialog() || self.is_panel() || self == Self::Welcome
+        self.is_dialog() || self.is_panel() || matches!(self, Self::Welcome | Self::Tasks)
     }
 
     /// Whether, while it is open, the keys go to it rather than the apps
@@ -130,6 +133,7 @@ impl Overlay {
             Self::Toasts => "the notices",
             Self::Welcome => "the welcome screen",
             Self::Help => "the help",
+            Self::Tasks => "the background tasks",
             Self::ProjectMenu => "the project menu",
             Self::Worktrees => "the worktrees popup",
             Self::Repos => "the repositories panel",
@@ -157,6 +161,7 @@ impl Gerdr {
             }
             Overlay::Welcome => self.welcome.is_some(),
             Overlay::Help => self.prefix_armed || self.help_pinned,
+            Overlay::Tasks => self.tasks_panel.is_some(),
             Overlay::ProjectMenu => self.project_menu.is_some(),
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),
@@ -220,6 +225,7 @@ impl Gerdr {
             Overlay::Restart => self.restart_hover(pos),
             Overlay::Checkout => self.checkout_hover(pos),
             Overlay::Confirm => self.confirm_hover(pos),
+            Overlay::Tasks => self.tasks_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
             Overlay::Welcome => return self.welcome_hover(pos),
             Overlay::ProjectMenu => return self.project_menu_hover(pos),
@@ -311,7 +317,7 @@ mod tests {
         for o in Overlay::ORDER {
             assert_eq!(
                 o.grabs(),
-                o.is_dialog() || o.is_panel() || o == Overlay::Welcome
+                o.is_dialog() || o.is_panel() || o == Overlay::Welcome || o == Overlay::Tasks
             );
             if o.grabs() {
                 assert!(o.takes_keys());
