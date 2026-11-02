@@ -49,8 +49,10 @@ pub fn problems_tooltip(count: usize) -> String {
 
 /// How many characters of a problem's text a line of its menu holds.
 const PROBLEM_LINE: usize = 30;
-/// How many lines of its menu a problem takes at most.
-const PROBLEM_LINES: usize = 3;
+/// How many lines of its menu a problem takes at most: enough for a
+/// problem's text and the fix it names (a longer one ends in "…", and the
+/// log holds all of it).
+const PROBLEM_LINES: usize = 8;
 
 /// `text` in lines of at most `width` characters, broken between words
 /// (a longer word is cut), at most `most` of them: the last one ends in
@@ -884,6 +886,20 @@ mod tests {
             ["~/.confi", "g/gerdr/", "x"]
         );
         assert!(wrap_lines("  ", 8, 3).is_empty());
+    }
+
+    #[test]
+    fn a_problem_shows_the_fix_it_names_in_full() {
+        let text = "The tickets of AdvancedFreightTrading/optics aren't in their board's order: \
+                    the GitHub token lacks the read:project scope. Run gh auth refresh -s \
+                    read:project.";
+        let items = problems_menu_items(&[text], "config.toml", "gerdr.log");
+        let shown: Vec<&str> = items
+            .iter()
+            .filter(|i| !i.enabled)
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(shown.join(" "), text);
     }
 
     #[test]
