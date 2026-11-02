@@ -21,6 +21,7 @@ mod checkout;
 mod confirm;
 mod consts;
 mod drop;
+mod features;
 mod footer;
 #[cfg(test)]
 mod golden;
@@ -69,6 +70,7 @@ pub use checkout::*;
 pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
+pub use features::*;
 pub use footer::*;
 pub use help::*;
 pub use hints::*;
@@ -154,6 +156,10 @@ pub struct ChromeView {
     pub checkout: Option<CheckoutView>,
     /// Set while the confirm dialog is open, over all but the quit dialog.
     pub confirm: Option<ConfirmView>,
+    /// Set while the new feature dialog is open.
+    pub new_feature: Option<NewFeatureView>,
+    /// Set while the feature panel is open.
+    pub features: Option<FeaturePanelView>,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
     /// Set while the worktrees popup is open.
@@ -200,6 +206,8 @@ pub struct Chrome {
     restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
     checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
+    new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
+    features: Overlay<(FeaturePanelView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
     repos: ReposLayers,
@@ -257,6 +265,8 @@ impl Chrome {
             restart: Overlay::default(),
             checkout: Overlay::default(),
             confirm: Overlay::default(),
+            new_feature: Overlay::default(),
+            features: Overlay::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
@@ -421,6 +431,17 @@ impl Chrome {
                         });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
+                Kind::NewFeature => {
+                    let dialog = view.new_feature.take().map(|v| {
+                        let layout = new_feature_layout(output, v.repos.len(), v.error.is_some());
+                        let (loc, size) = shadowed(layout.panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.new_feature.part(dialog, now, true, |(v, output, ..)| {
+                        painter.new_feature_dialog(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
                 Kind::Confirm => {
                     let confirm = view.confirm.take().map(|confirm| {
                         let (loc, size) = shadowed(confirm_layout(output).panel);
@@ -532,6 +553,16 @@ impl Chrome {
                             painter.tasks_panel(tasks, *output, *footer, scale, theme.palette())
                         },
                     ));
+                }
+                // The feature panel, centred over the apps.
+                Kind::Features => {
+                    let panel = view.features.take().map(|v| {
+                        let (loc, size) = shadowed(feature_panel_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    parts.extend(self.features.part(panel, now, true, |(v, output, ..)| {
+                        painter.feature_panel(v, *output, scale, theme.palette())
+                    }));
                 }
                 // The project menu reaches over the sidebar and the apps.
                 Kind::ProjectMenu => parts.extend(self.project_menu.parts(
@@ -971,6 +1002,11 @@ fn hit_rects(
         view.sidebar_width,
         view.density,
     )
+    .with_features(
+        view.sidebar.features.len(),
+        view.sidebar_width,
+        view.density,
+    )
     .scrolled_over(
         view.sidebar.state.scroll,
         view.sidebar.state.over,
@@ -988,6 +1024,8 @@ fn hit_rects(
     rects.extend(sidebar.cards.iter().flatten().map(|(_, rect)| *rect));
     rects.extend(sidebar.inbox_title);
     rects.extend(sidebar.inbox.iter().map(|(_, _, rect)| *rect));
+    rects.extend(sidebar.features_title);
+    rects.extend(sidebar.features.iter().copied());
     let strip_w = output.w - view.sidebar_width;
     let shift = |rect: Rect| {
         Rectangle::new(

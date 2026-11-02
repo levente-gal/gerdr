@@ -26,6 +26,8 @@ mod desktop;
 mod diff;
 mod diff_edit;
 mod diff_view;
+mod feature;
+mod features;
 mod frecency;
 mod find;
 mod fuzzy;
@@ -1163,6 +1165,9 @@ pub enum Action {
     /// Open the background tasks (T3 Code's server, git operations, kept
     /// apps), or close them again.
     Tasks,
+    /// Open the feature panel on the project's features, or the new
+    /// feature dialog when it has none; close the panel again.
+    Features,
     /// Open the scrollback viewer over the focused terminal, to select
     /// and copy more of its output than a screen.
     Scrollback,
@@ -1243,6 +1248,8 @@ pub struct Gerdr {
     pub footer_hover: Option<chrome::FooterHit>,
     /// The tasks panel, while it is open over the footer.
     pub tasks_panel: Option<tasks::TasksPanel>,
+    /// The features of every project, and the dialog and panel on them.
+    pub features: features::Features,
     /// The apps projects keep running, as last looked at (see `tasks`).
     pub kept: Vec<tasks::Kept>,
     /// T3 Code's server gerdr started, as last looked at.
@@ -4214,6 +4221,8 @@ impl Gerdr {
             Action::Inbox => self.open_inbox(None),
             Action::Tasks if self.is_open(Overlay::Tasks) => self.close_tasks(),
             Action::Tasks => self.open_tasks(0),
+            Action::Features if self.is_open(Overlay::Features) => self.close_feature_panel(),
+            Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
             // Nothing to keep running without a project.
@@ -5388,6 +5397,8 @@ impl Gerdr {
         self.checkout = None;
         self.confirm = None;
         self.tasks_panel = None;
+        self.features.dialog = None;
+        self.features.panel = None;
         self.project = Some(id.to_owned());
         let instance = if alongside {
             format!("{id}@{}", self.socket_name.to_string_lossy())
@@ -5681,6 +5692,7 @@ impl Gerdr {
             before_start: String::new(),
             after_stop: String::new(),
             tickets: Vec::new(),
+            workflow: projects::Workflow::default(),
         });
         self.projects.save();
         id
@@ -6181,6 +6193,7 @@ impl Gerdr {
                 active,
                 project,
                 header_lit: self.header_hover || self.project_menu.is_some(),
+                features: self.feature_rows(),
                 state: sidebar_state,
             },
             pulse: anim::pulse(self.start_time, now),
@@ -6197,6 +6210,8 @@ impl Gerdr {
             restart: self.restart_view(),
             checkout: self.checkout_view(),
             confirm: self.confirm_view(),
+            new_feature: self.new_feature_view(),
+            features: self.feature_panel_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
             repos: self.repos_view(),
@@ -6529,6 +6544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         show_footer: ui.footer,
         footer_hover: None,
         tasks_panel: None,
+        features: features::Features::default(),
         kept: Vec::new(),
         t3_started: None,
         t3_log: false,
@@ -6800,6 +6816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The first run turns the session gerdr used before projects into one.
     state.projects = store;
     state.restore_nav();
+    state.load_features();
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
     }

@@ -295,6 +295,27 @@ pub struct Project {
     /// user show in the inbox's Tickets, in the order of their board.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tickets: Vec<crate::issues::TicketRepo>,
+    /// How features are made in it (see `feature`).
+    #[serde(default, skip_serializing_if = "Workflow::is_empty")]
+    pub workflow: Workflow,
+}
+
+/// A project's feature settings, in its store file under `"workflow"`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workflow {
+    /// Repositories features leave out, by folder name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+    /// The branch features start from, by repository folder name, where
+    /// `origin/HEAD` isn't the one.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub base: std::collections::BTreeMap<String, String>,
+}
+
+impl Workflow {
+    pub fn is_empty(&self) -> bool {
+        self.ignore.is_empty() && self.base.is_empty()
+    }
 }
 
 /// What gerdr kept of a workspace of a project.
@@ -1489,6 +1510,7 @@ pub fn migrate(
         before_start: String::new(),
         after_stop: String::new(),
         tickets: Vec::new(),
+        workflow: Workflow::default(),
     })
 }
 
@@ -1681,6 +1703,7 @@ mod tests {
                 before_start: "docker compose up -d".into(),
                 after_stop: "docker compose down".into(),
                 tickets: Vec::new(),
+                workflow: Default::default(),
             }],
         }
     }

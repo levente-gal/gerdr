@@ -1065,6 +1065,9 @@ pub struct SidebarState {
     /// The hover alpha of each row of the "Needs you" list, as
     /// `inbox_order` lists them.
     pub inbox: Vec<u8>,
+    /// The hover alpha of each feature row, as `SidebarView::features`
+    /// lists them.
+    pub features: Vec<u8>,
     /// The "+" button's hover alpha, and whether its menu is open.
     pub plus: u8,
     pub plus_open: bool,
@@ -1108,6 +1111,10 @@ impl SidebarState {
     fn inbox(&self, n: usize) -> u8 {
         self.inbox.get(n).copied().unwrap_or(0)
     }
+
+    fn feature(&self, n: usize) -> u8 {
+        self.features.get(n).copied().unwrap_or(0)
+    }
 }
 
 /// Everything the sidebar is drawn from.
@@ -1121,6 +1128,8 @@ pub struct SidebarView {
     /// pointer, or its menu open).
     pub project: Option<String>,
     pub header_lit: bool,
+    /// The project's open features, under its workspaces.
+    pub features: Vec<super::FeatureRowView>,
     pub state: SidebarState,
 }
 
@@ -1265,6 +1274,10 @@ pub struct SidebarLayout {
     /// with its agent's workspace and index among that workspace's agents.
     pub inbox_title: Option<Rect>,
     pub inbox: Vec<(usize, usize, Rect)>,
+    /// The "Features" heading under the workspaces, when the project has
+    /// open features, and a row per feature (see `with_features`).
+    pub features_title: Option<Rect>,
+    pub features: Vec<Rect>,
     /// One per workspace.
     pub rows: Vec<RowLayout>,
     /// Per workspace, its agent rows as drawn (the most pressing first):
@@ -1351,6 +1364,10 @@ pub enum SidebarHit {
     Inbox(usize, usize),
     /// The "+N more" line after workspace `i`'s agent rows.
     More(usize),
+    /// The "Features" heading: it opens the feature panel.
+    FeaturesTitle,
+    /// Feature `n` of `SidebarView::features`.
+    Feature(usize),
     /// Workspace `i`'s GitHub section off its chips and count (its mark,
     /// its line labels, the gaps), chip `k` of it (as `CiView::chips` lists
     /// them), and its count of other pull requests.
@@ -1425,6 +1442,12 @@ impl SidebarLayout {
         if let Some((i, k, _)) = self.inbox.iter().find(|(_, _, rect)| inside(*rect)) {
             return Some(SidebarHit::Inbox(*i, *k));
         }
+        if self.features_title.is_some_and(inside) {
+            return Some(SidebarHit::FeaturesTitle);
+        }
+        if let Some(n) = self.features.iter().position(|r| inside(*r)) {
+            return Some(SidebarHit::Feature(n));
+        }
         for (i, closes) in self.card_closes.iter().enumerate() {
             if let Some((k, _)) = closes.iter().find(|(_, rect)| inside(*rect)) {
                 return Some(SidebarHit::CardClose(i, *k));
@@ -1486,11 +1509,38 @@ impl SidebarLayout {
     /// How far the rows can scroll in a sidebar `height` tall: what of
     /// them (and the room after the last) does not fit under the header.
     pub fn max_scroll(&self, height: i32) -> i32 {
-        let end = self
-            .blocks
-            .last()
-            .map_or(ROWS_TOP, |b| b.loc.y + b.size.h + self.scroll);
+        let end = self.content_end() + self.scroll;
         (end + SCROLL_END - height).max(0)
+    }
+
+    /// Where what the rows hold ends, as this layout has them: past the
+    /// feature rows, else the last block, else the "Needs you" list.
+    fn content_end(&self) -> i32 {
+        if let Some(last) = self.features.last() {
+            return last.loc.y + last.size.h + CHILD_GAP + INBOX_GAP;
+        }
+        self.blocks_end()
+    }
+
+    /// Where the workspaces' blocks end (the "Needs you" list's end, or
+    /// the top of the rows, without any), as this layout has them.
+    fn blocks_end(&self) -> i32 {
+        if let Some(b) = self.blocks.last() {
+            return b.loc.y + b.size.h;
+        }
+        match self.inbox.last() {
+            Some((_, _, r)) => r.loc.y + r.size.h + CHILD_GAP + INBOX_GAP,
+            None => ROWS_TOP - self.scroll,
+        }
+    }
+
+    /// This layout with `n` feature rows under the workspaces, a heading
+    /// over them, in a sidebar `width` wide.
+    pub fn with_features(mut self, n: usize, width: i32, density: Density) -> Self {
+        let (title, rows, _) = inbox_rects(n, self.blocks_end(), width, density);
+        self.features_title = title;
+        self.features = rows;
+        self
     }
 
     /// The scroll nearest `scroll` showing all of workspace `i`'s block (its
@@ -1559,6 +1609,8 @@ impl SidebarLayout {
         }
         let up = |r: &mut Rect| r.loc.y -= by;
         self.inbox_title.iter_mut().for_each(up);
+        self.features_title.iter_mut().for_each(up);
+        self.features.iter_mut().for_each(up);
         for (_, _, r) in &mut self.inbox {
             up(r);
         }
@@ -1873,6 +1925,8 @@ pub fn sidebar_layout_at(
         repos,
         inbox_title,
         inbox,
+        features_title: None,
+        features: Vec::new(),
         rows,
         cards: card_rects,
         card_closes,
@@ -1994,8 +2048,15 @@ impl Painter {
         let state = &view.state;
         let density = state.density;
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
+            .with_features(view.features.len(), size.w, density)
             .scrolled_over(state.scroll, state.over, size.h);
         self.sidebar_inbox(&mut c, view, &layout, scale, p);
+        if let Some(title) = layout.features_title {
+            let rows: Vec<_> = (view.features.iter().zip(&layout.features).enumerate())
+                .map(|(n, (row, rect))| (row, state.feature(n), *rect))
+                .collect();
+            self.feature_rows(&mut c, title, &rows, scale, p);
+        }
         for i in 0..layout.rows.len().min(view.workspaces.len()) {
             self.workspace_block(&mut c, view, &layout, i, scale, p);
         }
@@ -2144,6 +2205,55 @@ impl Painter {
                 density,
                 scale,
                 p,
+            );
+        }
+    }
+
+    /// The "Features" heading at `title`, then its `rows`: each a feature,
+    /// its hover alpha and where it goes. A row has the feature's title
+    /// cut to fit, and a dot per stage at its right.
+    fn feature_rows(
+        &self,
+        c: &mut Canvas,
+        title: Rect,
+        rows: &[(&super::FeatureRowView, u8, Rect)],
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        self.text(
+            c,
+            "Features",
+            TINY_FONT_SIZE,
+            px(NAME_X - CHILD_PAD) as f32,
+            px(title.loc.x + title.size.w - ROW_INSET) as f32,
+            band(title, scale),
+            scale,
+            p.muted,
+        );
+        for (row, hover, rect) in rows {
+            let hover = alpha(*hover);
+            if hover > 0.0 {
+                let (x, y, w, h) = rect_px(*rect, scale);
+                c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
+            }
+            let marks = Rectangle::new(
+                (rect.loc.x, rect.loc.y).into(),
+                (rect.size.w - CHILD_PAD, rect.size.h).into(),
+            );
+            self.stage_marks(c, &row.marks, marks, scale, p);
+            let dots = super::stage_marks_width(row.marks.len());
+            let end = rect.loc.x + rect.size.w - CHILD_PAD - dots - CHILD_PAD;
+            self.text(
+                c,
+                &row.title,
+                SMALL_FONT_SIZE,
+                px(rect.loc.x + CHILD_PAD) as f32,
+                px(end) as f32,
+                band(*rect, scale),
+                scale,
+                p.text,
             );
         }
     }
@@ -3236,6 +3346,7 @@ impl BlockKey {
             active: self.active.then_some(0),
             project: None,
             header_lit: false,
+            features: Vec::new(),
             state: SidebarState {
                 density: self.density,
                 rows: vec![self.row],
@@ -3253,6 +3364,17 @@ impl BlockKey {
 #[derive(Clone, Debug, PartialEq)]
 struct InboxKey {
     rows: Vec<(AgentView, String, u8)>,
+    density: Density,
+    width: i32,
+    theme: super::Theme,
+    scale: f64,
+}
+
+/// What the feature rows are drawn from: each row and its hover alpha;
+/// then as `BlockKey`.
+#[derive(Clone, Debug, PartialEq)]
+struct FeaturesKey {
+    rows: Vec<(super::FeatureRowView, u8)>,
     density: Density,
     width: i32,
     theme: super::Theme,
@@ -3316,6 +3438,24 @@ impl Painter {
         self.inbox_rows(&mut c, title, &rows, key.density, scale, p);
         c.into_buffer(true)
     }
+
+    /// The feature rows `key` has, from their heading's top, as the
+    /// sidebar draws them.
+    fn sidebar_features_part(&self, key: &FeaturesKey) -> MemoryRenderBuffer {
+        let (scale, p) = (key.scale, key.theme.palette());
+        let (title, rects, end) = inbox_rects(key.rows.len(), 0, key.width, key.density);
+        let Some(title) = title else {
+            return MemoryRenderBuffer::default();
+        };
+        let mut c = Canvas::new(physical((key.width, end).into(), scale));
+        c.fill(0, 0, c.w, c.h, p.panel);
+        sidebar_edge(&mut c, scale, p);
+        let rows: Vec<_> = (key.rows.iter().zip(rects))
+            .map(|((row, hover), rect)| (row, *hover, rect))
+            .collect();
+        self.feature_rows(&mut c, title, &rows, scale, p);
+        c.into_buffer(true)
+    }
 }
 
 /// The sidebar as the chrome shows it: its frame (the header and what
@@ -3327,6 +3467,7 @@ impl Painter {
 pub(super) struct SidebarLayers {
     frame: super::Cached<FrameKey>,
     inbox: RowCache<InboxKey>,
+    features: RowCache<FeaturesKey>,
     blocks: RowCache<BlockKey>,
     /// The open strip of agents, in front of the rows.
     strip: super::Cached<StripKey>,
@@ -3356,7 +3497,8 @@ impl SidebarLayers {
     ) -> Vec<Part> {
         let size: Size<i32, Logical> = (width, output.h).into();
         let state = &sidebar.state;
-        let mut layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density);
+        let mut layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density)
+            .with_features(sidebar.features.len(), width, density);
         let max = layout.max_scroll(output.h);
         let scroll = state.scroll.clamp(0.0, max as f64);
         // How far the rows go down from where the layout has them.
@@ -3458,6 +3600,28 @@ impl SidebarLayers {
             }
         }
 
+        if let Some(title) = layout.features_title {
+            let n = layout.features.len();
+            let (.., end) = inbox_rects(n, title.loc.y, width, density);
+            let h = end - title.loc.y;
+            if shows(title.loc.y, h) {
+                let rows = (sidebar.features.iter().enumerate())
+                    .map(|(n, row)| (row.clone(), state.feature(n)))
+                    .collect();
+                let key = FeaturesKey {
+                    rows,
+                    density,
+                    width,
+                    theme,
+                    scale,
+                };
+                let buffer = self.features.get(key, (width, h).into(), scale, |key| {
+                    painter.sidebar_features_part(key)
+                });
+                parts.push(moved(&buffer, (0, title.loc.y), (width, h).into()));
+            }
+        }
+
         if let Some(title) = layout.inbox_title {
             let (.., end) = inbox_rects(layout.inbox.len(), title.loc.y, width, density);
             let h = end - title.loc.y;
@@ -3517,6 +3681,7 @@ impl SidebarLayers {
             parts.push(moved(&buffer, (0, top), (width, h).into()));
         }
         self.inbox.sweep();
+        self.features.sweep();
         self.blocks.sweep();
 
         let head = SidebarHead::of(&sidebar);
@@ -3726,6 +3891,7 @@ mod tests {
             active: Some(0),
             project: None,
             header_lit: false,
+            features: Vec::new(),
             state: SidebarState {
                 cards: vec![
                     open.map(|open| CardState {
@@ -4793,6 +4959,7 @@ mod tests {
             active: None,
             project: None,
             header_lit: false,
+            features: Vec::new(),
             state: SidebarState::default(),
         };
         let size = smithay::utils::Size::from((240, 300));
@@ -4957,6 +5124,7 @@ mod tests {
             active: Some(0),
             project: Some("gerdr".into()),
             header_lit: false,
+            features: Vec::new(),
             state: super::SidebarState {
                 scroll,
                 ..super::SidebarState::default()
@@ -5238,6 +5406,7 @@ mod tests {
             active: Some(0),
             project: None,
             header_lit: false,
+            features: Vec::new(),
             state: super::SidebarState::default(),
         };
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, 240, Density::Comfortable)

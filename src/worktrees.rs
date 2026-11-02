@@ -1284,18 +1284,20 @@ impl Gerdr {
     /// The pane or workspace still in worktree `wt`, by its name, if any:
     /// an agent may be working there.
     fn in_use(&self, wt: &Worktree) -> Option<String> {
-        if let Some(ws) = self
-            .workspaces
-            .iter()
-            .find(|ws| ws.dir.starts_with(&wt.path))
-        {
+        self.folder_in_use(&wt.path)
+    }
+
+    /// What is in folder `path`, if anything: a workspace (by name) or a
+    /// terminal. A folder in use isn't deleted under it.
+    pub fn folder_in_use(&self, path: &Path) -> Option<String> {
+        if let Some(ws) = self.workspaces.iter().find(|ws| ws.dir.starts_with(path)) {
             return Some(format!("workspace {}", ws.name));
         }
         let mut panes = self.herdr_tabs.values().flat_map(|t| &t.panes);
         panes
             .find(|pane| {
                 let dir = pane.foreground_cwd.as_ref().or(pane.cwd.as_ref());
-                dir.is_some_and(|d| d.starts_with(&wt.path))
+                dir.is_some_and(|d| d.starts_with(path))
             })
             .map(|_| "a terminal".to_owned())
     }

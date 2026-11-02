@@ -403,6 +403,8 @@ impl Gerdr {
             Some(name) => format!("Reloaded the project files · {name} shown again as edited"),
             None => "Reloaded the project files".to_owned(),
         };
+        // Features of projects added or edited, read again with them.
+        self.load_features();
         self.refresh_project_menu();
         self.refresh_switcher();
         // What couldn't be read is told before what couldn't be done.
@@ -479,6 +481,7 @@ mod tests {
             before_start: String::new(),
             after_stop: String::new(),
             tickets: Vec::new(),
+            workflow: Default::default(),
         }
     }
 

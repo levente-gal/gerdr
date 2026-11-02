@@ -306,6 +306,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("repos", Action::Repos, "Open repositories", "g"),
     ("inbox", Action::Inbox, "Open inbox", "i"),
     ("tasks", Action::Tasks, "Open background tasks", "b"),
+    ("features", Action::Features, "Open features", "Shift+F"),
     // tmux's copy-mode.
     (
         "scrollback",
@@ -417,6 +418,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("Open repositories", &["repos"]),
     ("Open inbox", &["inbox"]),
     ("Open background tasks", &["tasks"]),
+    ("Open features, or start one", &["features"]),
     ("Select and copy the scrollback", &["scrollback"]),
     ("Reload the project files", &["reload-projects"]),
     ("Quit…", &["quit"]),
@@ -1218,6 +1220,7 @@ mod tests {
                 "G: Open repositories",
                 "I: Open inbox",
                 "B: Open background tasks",
+                "Shift+F: Open features, or start one",
                 "[: Select and copy the scrollback",
                 "Alt+R: Reload the project files",
                 "Shift+Q: Quit…",

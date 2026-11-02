@@ -3,9 +3,10 @@
 //! paints in the same order, so what takes a click is always what shows.
 //!
 //! From the top: the tooltip, the modal dialogs (quit, restart, checkout,
-//! confirm), the context menu, the toasts, the welcome screen, the help
-//! panel, then the panels (the project menu, the worktrees popup, the
-//! repositories and inbox panels, the scrollback viewer, the switcher).
+//! new feature, confirm), the context menu, the toasts, the welcome screen,
+//! the help panel, then the panels (the tasks, the feature panel, the
+//! project menu, the worktrees popup, the repositories and inbox panels,
+//! the scrollback viewer, the switcher).
 //! The toasts are over every popup but the menu and the dialogs, so what
 //! a panel reports shows while it is open; the help panel is under them,
 //! over the panels it may be pinned over.
@@ -29,6 +30,8 @@ pub enum Overlay {
     Quit,
     Restart,
     Checkout,
+    /// The new feature dialog (see `features`).
+    NewFeature,
     Confirm,
     ContextMenu,
     Toasts,
@@ -37,6 +40,8 @@ pub enum Overlay {
     Help,
     /// The background tasks, over the footer (see `tasks`).
     Tasks,
+    /// The feature panel: a feature's stages (see `features`).
+    Features,
     ProjectMenu,
     Worktrees,
     Repos,
@@ -47,17 +52,19 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 16] = [
+    pub const ORDER: [Self; 18] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
         Self::Checkout,
+        Self::NewFeature,
         Self::Confirm,
         Self::ContextMenu,
         Self::Toasts,
         Self::Welcome,
         Self::Help,
         Self::Tasks,
+        Self::Features,
         Self::ProjectMenu,
         Self::Worktrees,
         Self::Repos,
@@ -71,7 +78,7 @@ impl Overlay {
     pub fn is_dialog(self) -> bool {
         matches!(
             self,
-            Self::Quit | Self::Restart | Self::Checkout | Self::Confirm
+            Self::Quit | Self::Restart | Self::Checkout | Self::NewFeature | Self::Confirm
         )
     }
 
@@ -86,6 +93,7 @@ impl Overlay {
                 | Self::Scrollback
                 | Self::Switcher
                 | Self::Tasks
+                | Self::Features
         )
     }
 
@@ -119,6 +127,7 @@ impl Overlay {
             Self::Switcher => Action::Switcher,
             Self::Help => Action::Shortcuts,
             Self::Tasks => Action::Tasks,
+            Self::Features => Action::Features,
             _ => return None,
         })
     }
@@ -130,12 +139,14 @@ impl Overlay {
             Self::Quit => "the quit dialog",
             Self::Restart => "the restart dialog",
             Self::Checkout => "the checkout dialog",
+            Self::NewFeature => "the new feature dialog",
             Self::Confirm => "the dialog",
             Self::ContextMenu => "the menu",
             Self::Toasts => "the notices",
             Self::Welcome => "the welcome screen",
             Self::Help => "the help",
             Self::Tasks => "the background tasks",
+            Self::Features => "the feature panel",
             Self::ProjectMenu => "the project menu",
             Self::Worktrees => "the worktrees popup",
             Self::Repos => "the repositories panel",
@@ -155,6 +166,7 @@ impl Gerdr {
             Overlay::Quit => self.quit.is_some(),
             Overlay::Restart => self.restart.is_some(),
             Overlay::Checkout => self.checkout.is_some(),
+            Overlay::NewFeature => self.features.dialog.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
             Overlay::ContextMenu => self.context_menu.is_some(),
             Overlay::Toasts => {
@@ -164,6 +176,7 @@ impl Gerdr {
             Overlay::Welcome => self.welcome.is_some(),
             Overlay::Help => self.prefix_armed || self.help_pinned,
             Overlay::Tasks => self.tasks_panel.is_some(),
+            Overlay::Features => self.features.panel.is_some(),
             Overlay::ProjectMenu => self.project_menu.is_some(),
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),
@@ -228,6 +241,8 @@ impl Gerdr {
             Overlay::Checkout => self.checkout_hover(pos),
             Overlay::Confirm => self.confirm_hover(pos),
             Overlay::Tasks => self.tasks_hover(pos),
+            Overlay::NewFeature => self.new_feature_hover(pos),
+            Overlay::Features => self.feature_panel_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
             Overlay::Welcome => return self.welcome_hover(pos),
             Overlay::ProjectMenu => return self.project_menu_hover(pos),
@@ -267,6 +282,18 @@ impl Gerdr {
             Overlay::Inbox => self.inbox_scroll(motion),
             Overlay::Scrollback => self.scrollback_scroll(motion),
             Overlay::Switcher => self.switcher_scroll(motion),
+            Overlay::NewFeature => {
+                let rows = self.motion_rows(motion, row_pitch(&self.new_feature_rows()));
+                if rows != 0 {
+                    self.new_feature_scroll(rows);
+                }
+            }
+            Overlay::Features => {
+                let rows = self.motion_rows(motion, row_pitch(&self.feature_repo_rows()));
+                if rows != 0 {
+                    self.feature_panel_scroll(rows);
+                }
+            }
             Overlay::Tasks => {
                 let rows = self.motion_rows(motion, row_pitch(&self.tasks_rows()));
                 if rows != 0 {
