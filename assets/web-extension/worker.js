@@ -200,7 +200,15 @@ function scopeT3(dirs) {
   return new Promise((done) => {
     let looks = 0;
     const fail = (reason, detail) => done({ reason, detail: `${detail} (page ${location.href}, folders ${want.join(", ")}, storage ${name})` });
+    // A change that breaks the reading itself is told too.
     function look() {
+      try {
+        step();
+      } catch (err) {
+        fail("error", String(err?.stack || err).slice(0, 800));
+      }
+    }
+    function step() {
       const seen = groups();
       const wanted = seen ? keys(seen.all) : [];
       if (!wanted.length) {
