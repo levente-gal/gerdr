@@ -103,6 +103,10 @@ pub(crate) struct Watch {
     pub(crate) refused: Option<(Stamp, String)>,
     /// When the code was last read for the refused file.
     pub(crate) refused_at: Option<Instant>,
+    /// The Build agent was told to go on after this many milestones. A
+    /// build log still at that many is the stop it went on from: when
+    /// herdr can't say whether the agent rests, it isn't a stop again.
+    pub(crate) went_on: Option<u32>,
 }
 
 impl Watch {
@@ -219,7 +223,12 @@ fn judge(
             File::Bad(..) => Verdict::Nudge { absent: false },
         };
     }
+    let went_on = match file {
+        File::Partial(_, done, _) => watch.went_on.is_some_and(|after| *done <= after),
+        _ => false,
+    };
     if matches!(status, None | Some(AgentStatus::Unknown))
+        && !went_on
         && let Some(stamp) = file.finished()
     {
         match watch.stable {
@@ -1508,6 +1517,47 @@ mod tests {
         assert_eq!(
             judge(&mut w, None, false, &partial, false, false, t + STABLE),
             stop
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_told_to_go_on_is_not_stopped_again() {
+        let t = Instant::now();
+        let mut w = Watch {
+            went_on: Some(2),
+            ..watch()
+        };
+        // Still at the milestone it went on from, however long.
+        let partial = File::Partial((5, 9), 2, 4);
+        judge(&mut w, None, true, &partial, false, false, t);
+        assert_eq!(
+            judge(&mut w, None, true, &partial, false, false, t + STABLE * 3),
+            Verdict::Wait
+        );
+        // The next one ticked: a stop.
+        let next = File::Partial((6, 9), 3, 4);
+        judge(&mut w, None, true, &next, false, false, t + STABLE * 3);
+        assert_eq!(
+            judge(&mut w, None, true, &next, false, false, t + STABLE * 4),
+            Verdict::Stop { done: 3, total: 4 }
+        );
+        // herdr seeing it rest after working still stops it where it is.
+        let mut w = Watch {
+            went_on: Some(2),
+            worked: true,
+            ..watch()
+        };
+        assert_eq!(
+            judge(
+                &mut w,
+                Some(AgentStatus::Idle),
+                true,
+                &partial,
+                false,
+                false,
+                t
+            ),
+            Verdict::Stop { done: 2, total: 4 }
         );
     }
 

@@ -603,7 +603,9 @@ impl Gerdr {
         }
         // It waits for the agent to work again.
         let key = (project.to_owned(), slug.to_owned(), stage);
-        self.features.agents.insert(key, Watch::of(run.n));
+        let mut watch = Watch::of(run.n);
+        watch.went_on = Some(stop.done);
+        self.features.agents.insert(key, watch);
         self.show_success(format!(
             "{} of \u{201c}{title}\u{201d} goes on with milestone {} of {}",
             stage.label(),
