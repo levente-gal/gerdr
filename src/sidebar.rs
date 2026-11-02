@@ -3,9 +3,15 @@
 //! its context menus, and what moves in it (see `chrome::sidebar` for what
 //! it shows).
 
-use std::{path::Path, time::Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
-use smithay::utils::{Logical, Point};
+use smithay::{
+    reexports::calloop::timer::{TimeoutAction, Timer},
+    utils::{Logical, Point},
+};
 
 use crate::{
     Action, Gerdr, Reorderable, WorkspaceKind,
@@ -34,6 +40,32 @@ use crate::{
 /// How far a notch of the wheel scrolls the sidebar's rows, in logical
 /// pixels.
 const SIDEBAR_NOTCH: f64 = 48.0;
+
+/// How long the pointer rests on a header's AI button before the strip
+/// of agents opens under it, so passing over the button opens nothing.
+const STRIP_DELAY: Duration = Duration::from_millis(300);
+
+/// Which workspace's strip of agents shows with the pointer on `hit` at
+/// `now`, and which waits to open and until when, after `open` showed
+/// and `due` waited: on the AI button it opens once it rested there
+/// `STRIP_DELAY`; on the strip an open one stays; elsewhere none does.
+fn strip_after(
+    hit: Option<SidebarHit>,
+    open: Option<usize>,
+    due: Option<(usize, Instant)>,
+    now: Instant,
+) -> (Option<usize>, Option<(usize, Instant)>) {
+    match hit {
+        Some(SidebarHit::NewAgent(i)) if open == Some(i) => (open, None),
+        Some(SidebarHit::NewAgent(i)) => match due.filter(|(w, _)| *w == i) {
+            Some((_, at)) if now >= at => (Some(i), None),
+            Some(waiting) => (None, Some(waiting)),
+            None => (None, Some((i, now + STRIP_DELAY))),
+        },
+        Some(SidebarHit::PickAgent(i, _)) => (open.filter(|w| *w == i), None),
+        _ => (None, None),
+    }
+}
 
 /// The tooltip listing a workspace's other `worktrees`, about `anchor`:
 /// how many, then a line each with its state and where it is, from `root`
@@ -375,15 +407,47 @@ impl Gerdr {
         }
     }
 
-    /// Open the strip of agents on workspace `i`'s header while `hit` is on
-    /// its AI button, and keep it open while on the strip; close it off
-    /// them. Opening looks for the installed agents again.
+    /// Open the strip of agents on workspace `i`'s header once `hit` has
+    /// rested `STRIP_DELAY` on its AI button, and keep it open while on
+    /// the button or the strip; close it off them. Opening looks for the
+    /// installed agents again.
     pub(crate) fn track_agent_strip(&mut self, hit: Option<SidebarHit>) {
-        let open = match hit {
-            Some(SidebarHit::NewAgent(i)) => Some(i),
-            Some(SidebarHit::PickAgent(i, _)) => self.agent_strip.filter(|w| *w == i),
-            _ => None,
+        let now = Instant::now();
+        let (open, due) = strip_after(hit, self.agent_strip, self.agent_strip_due, now);
+        self.agent_strip_due = due;
+        self.set_agent_strip(open);
+        let Some((_, at)) = due else {
+            return;
         };
+        if self.agent_strip_timed {
+            return;
+        }
+        // Open it when due, unless the pointer moved off since.
+        let show = move |_, _: &mut (), state: &mut Gerdr| {
+            let now = Instant::now();
+            match state.agent_strip_due {
+                Some((i, at)) if now >= at => {
+                    state.agent_strip_due = None;
+                    state.set_agent_strip(Some(i));
+                }
+                Some((_, at)) => return TimeoutAction::ToInstant(at),
+                None => {}
+            }
+            state.agent_strip_timed = false;
+            TimeoutAction::Drop
+        };
+        match self
+            .loop_handle
+            .insert_source(Timer::from_deadline(at), show)
+        {
+            Ok(_) => self.agent_strip_timed = true,
+            Err(err) => tracing::warn!("timing the strip of agents: {err}"),
+        }
+    }
+
+    /// Show the strip of agents on workspace `open`'s header (none when
+    /// `None`), looking for the installed agents again as it opens.
+    fn set_agent_strip(&mut self, open: Option<usize>) {
         if open.is_some() && open != self.agent_strip {
             self.refresh_cli_agents();
         }
@@ -608,6 +672,12 @@ impl Gerdr {
                     None => tip,
                 })
             }
+            // With its strip open under it, the strip's own tips say it.
+            SidebarHit::NewAgent(i)
+                if self.agent_strip == Some(i) && !self.cli_agents.is_empty() =>
+            {
+                None
+            }
             SidebarHit::NewAgent(i) => {
                 let text = if self.cli_agents.is_empty() {
                     "No agent CLI found on PATH · add yours under [agents] in Settings"
@@ -622,13 +692,18 @@ impl Gerdr {
             }
             SidebarHit::PickAgent(i, k) => {
                 let rect = layout.rows.get(i)?.pick(k)?;
-                Some(match self.picked_agent(layout, i, k) {
+                let tip = match self.picked_agent(layout, i, k) {
                     Some(command) => {
                         let agent = self.cli_agents.iter().find(|a| a.command == command)?;
                         Tooltip::new(&format!("New {} agent", agent.name), rect)
                             .fields(vec![("Runs".to_owned(), command)])
                     }
                     None => Tooltip::new("More agents…", rect),
+                };
+                // The AI button's key, its own tip hidden under the strip.
+                Some(match self.keymap.help().key_of(Action::NewAgent, 0) {
+                    Some(key) => tip.key(&key),
+                    None => tip,
                 })
             }
             SidebarHit::Restart(i) => {
@@ -1003,7 +1078,40 @@ impl Gerdr {
 
 #[cfg(test)]
 mod tests {
-    use super::{VenvSetting, workspace_tooltip};
+    use std::time::Instant;
+
+    use super::{STRIP_DELAY, SidebarHit, VenvSetting, strip_after, workspace_tooltip};
+
+    #[test]
+    fn the_strip_of_agents_opens_once_the_pointer_rests_on_the_ai_button() {
+        let start = Instant::now();
+        let on = Some(SidebarHit::NewAgent(1));
+        // Passing over the button opens nothing yet.
+        let (open, due) = strip_after(on, None, None, start);
+        assert_eq!((open, due), (None, Some((1, start + STRIP_DELAY))));
+        let (open, due2) = strip_after(on, None, due, start + STRIP_DELAY / 2);
+        assert_eq!((open, due2), (None, due));
+        assert_eq!(
+            strip_after(Some(SidebarHit::Row(1)), None, due, start),
+            (None, None)
+        );
+        // Resting there, it opens.
+        let (open, due) = strip_after(on, None, due, start + STRIP_DELAY);
+        assert_eq!((open, due), (Some(1), None));
+        // It stays on the button and on its strip, and closes off them.
+        assert_eq!(strip_after(on, open, None, start), (Some(1), None));
+        let pick = Some(SidebarHit::PickAgent(1, 2));
+        assert_eq!(strip_after(pick, open, None, start), (Some(1), None));
+        assert_eq!(strip_after(pick, None, None, start), (None, None));
+        let errors = Some(SidebarHit::Errors(1));
+        assert_eq!(strip_after(errors, open, None, start), (None, None));
+        // Another header's button starts its own wait.
+        let other = Some(SidebarHit::NewAgent(2));
+        assert_eq!(
+            strip_after(other, open, None, start),
+            (None, Some((2, start + STRIP_DELAY)))
+        );
+    }
     use crate::{WorkspaceKind, chrome::Rect, chrome::WorkspaceView};
 
     #[test]

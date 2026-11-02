@@ -95,6 +95,8 @@ const RESTART_SLOT: i32 = 22;
 /// The AI button starting an agent, left of the restart button, else of
 /// the "×"; and each agent of the strip it opens.
 const AGENT_SLOT: i32 = 22;
+/// The height of the strip of agents the AI button opens under itself.
+const STRIP_HEIGHT: i32 = 24;
 /// The room of the header's CI mark.
 const CI_SLOT: i32 = 18;
 /// The room of the header's status mark, and the gap before the count of
@@ -1141,6 +1143,11 @@ impl SidebarView {
     }
 }
 
+/// How many agents a strip of agents laid out as `strip` has slots for.
+fn strip_slots(strip: Rect) -> usize {
+    (strip.size.w / AGENT_SLOT).max(0) as usize
+}
+
 /// Where the parts of a workspace header sit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowLayout {
@@ -1172,9 +1179,10 @@ pub struct RowLayout {
     /// Its AI button, starting an agent in its folder, left of the restart
     /// button, else of the "×".
     pub agent: Rect,
-    /// The strip of agents to start left of the AI button while it is
-    /// open, an `AGENT_SLOT` each, over the name: as many as fit, the
-    /// last an ellipsis when not all do (see `pick_slots`).
+    /// The strip of agents to start while it is open: floating right
+    /// under the AI button, its right end at the button's, so it covers
+    /// nothing on the name's band; an `AGENT_SLOT` each, as many as fit,
+    /// the last an ellipsis when not all do (see `pick_slots`).
     pub picks: Option<Rect>,
     /// The count of its other worktrees, when it has any.
     pub worktrees: Option<Rect>,
@@ -1185,14 +1193,14 @@ pub struct RowLayout {
 
 impl RowLayout {
     /// Where the buttons showing only under the pointer start: the AI
-    /// button, or the strip of agents it opens.
+    /// button.
     pub fn buttons_x(&self) -> i32 {
-        self.picks.unwrap_or(self.agent).loc.x
+        self.agent.loc.x
     }
 
     /// How many slots its strip of agents has.
     pub fn pick_slots(&self) -> usize {
-        self.picks.map_or(0, |r| (r.size.w / AGENT_SLOT) as usize)
+        self.picks.map_or(0, strip_slots)
     }
 
     /// Slot `k` of its strip of agents, from the left.
@@ -1381,6 +1389,13 @@ impl SidebarLayout {
         if pos.y < BAR_HEIGHT as f64 {
             return None;
         }
+        // An open strip of agents floats over what is under its header.
+        for (i, row) in self.rows.iter().enumerate() {
+            if let Some(strip) = row.picks.filter(|r| inside(*r)) {
+                let k = ((pos.x - strip.loc.x as f64) / AGENT_SLOT as f64) as usize;
+                return Some(SidebarHit::PickAgent(i, k));
+            }
+        }
         if self.inbox_title.is_some_and(inside) {
             return Some(SidebarHit::InboxTitle);
         }
@@ -1424,11 +1439,6 @@ impl SidebarLayout {
             SidebarHit::Restart(i)
         } else if inside(row.agent) {
             SidebarHit::NewAgent(i)
-        } else if let Some(strip) = row.picks.filter(|r| inside(*r)) {
-            SidebarHit::PickAgent(
-                i,
-                ((pos.x - strip.loc.x as f64) / AGENT_SLOT as f64) as usize,
-            )
         } else if row.fold.is_some_and(inside) {
             SidebarHit::Fold(i)
         } else if row.worktrees.is_some_and(inside) {
@@ -1678,11 +1688,16 @@ pub fn sidebar_layout_at(
             .then(|| slot(close.loc.x - RESTART_SLOT, RESTART_SLOT));
         let agent = slot(restart.unwrap_or(close).loc.x - AGENT_SLOT, AGENT_SLOT);
         let buttons = agent.loc.x;
-        // The strip of agents, over the name: as many slots as fit.
-        let room = ((buttons - NAME_X) / AGENT_SLOT).max(1) as usize;
+        // The strip of agents, right under the AI button, so it hides
+        // nothing on the header's band: as many slots as fit.
+        let strip_end = agent.loc.x + agent.size.w;
+        let room = ((strip_end - NAME_X) / AGENT_SLOT).max(1) as usize;
         let picks = (!ws.picks.is_empty()).then(|| {
             let w = ws.picks.len().min(room) as i32 * AGENT_SLOT;
-            slot(buttons - w, w)
+            Rectangle::new(
+                (strip_end - w, y + title_h).into(),
+                (w, STRIP_HEIGHT).into(),
+            )
         });
         let mut end = buttons;
         let chip = status_extent(ws, cards).map(|w| {
@@ -1932,6 +1947,12 @@ impl Painter {
         self.sidebar_inbox(&mut c, view, &layout, scale, p);
         for i in 0..layout.rows.len().min(view.workspaces.len()) {
             self.workspace_block(&mut c, view, &layout, i, scale, p);
+        }
+        // An open strip of agents, over what is under its header.
+        for (i, (row, ws)) in layout.rows.iter().zip(&view.workspaces).enumerate() {
+            if let Some(strip) = row.picks {
+                self.agent_strip(&mut c, &ws.picks, strip, state.row(i).pick, scale, p);
+            }
         }
 
         // The header over the rows scrolled under it.
@@ -2342,9 +2363,6 @@ impl Painter {
             };
             icon_sdf(c, row.agent, scale, color, |x, y| sparkle(x, y, s));
         }
-        if let Some(strip) = row.picks {
-            self.agent_strip(c, ws, row, strip, row_state.pick, surface, scale, p);
-        }
 
         // Under the header, a line per worktree that needs a look: its
         // name, a dot when changed, and why ("unmerged", "gone").
@@ -2408,35 +2426,40 @@ impl Painter {
         }
     }
 
-    /// The strip of agents to start over header `row`, on a pill hiding
-    /// what is under it: a logo each, lit under the pointer (`pick`), the
-    /// last an ellipsis when not all of `ws.picks` fit.
-    #[allow(clippy::too_many_arguments)]
+    /// The strip of agents `picks` to start, floating at `strip` over
+    /// what is under its header: a bordered pill with a logo each, lit
+    /// under the pointer (`pick`), the last an ellipsis when not all of
+    /// `picks` fit.
     fn agent_strip(
         &self,
         c: &mut Canvas,
-        ws: &WorkspaceView,
-        row: &RowLayout,
+        picks: &[AgentIcon],
         strip: Rect,
         pick: Option<usize>,
-        surface: Rgb,
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
-        let h = PILL_HEIGHT + 4;
-        let pill = Rectangle::new(
-            (strip.loc.x, strip.loc.y + (strip.size.h - h) / 2).into(),
-            (strip.size.w, h).into(),
+        let (x, y, w, h) = rect_px(strip, scale);
+        c.rounded(x, y, w, h, ROW_RADIUS * s, p.border);
+        let edge = s.max(1.0);
+        c.rounded(
+            x + edge,
+            y + edge,
+            w - 2.0 * edge,
+            h - 2.0 * edge,
+            ROW_RADIUS * s - edge,
+            p.elevated,
         );
-        let (x, y, w, h) = rect_px(pill, scale);
-        c.rounded(x, y, w, h, 4.0 * s, mix(surface, p.text, 0.1));
-        let slots = row.pick_slots();
-        let cut = ws.picks.len() > slots;
+        let slots = strip_slots(strip);
+        let cut = picks.len() > slots;
         for k in 0..slots {
-            let Some(slot) = row.pick(k) else { continue };
+            let slot = Rectangle::new(
+                (strip.loc.x + k as i32 * AGENT_SLOT, strip.loc.y).into(),
+                (AGENT_SLOT, strip.size.h).into(),
+            );
             let color = if pick == Some(k) { p.text } else { p.muted };
-            match ws.picks.get(k) {
+            match picks.get(k) {
                 Some(_) if cut && k + 1 == slots => {
                     icon_sdf(c, slot, scale, color, |x, y| ellipsis(x, y, 0.8 * s));
                 }
@@ -2444,6 +2467,16 @@ impl Painter {
                 None => {}
             }
         }
+    }
+
+    /// The strip of agents `key` has, alone in its buffer, as the sidebar
+    /// floats it over the rows.
+    pub(super) fn agent_strip_part(&self, key: &StripKey) -> MemoryRenderBuffer {
+        let (scale, p) = (key.scale, key.theme.palette());
+        let mut c = Canvas::new(physical(key.size, scale));
+        let strip = Rectangle::from_size(key.size);
+        self.agent_strip(&mut c, &key.picks, strip, key.pick, scale, p);
+        c.into_buffer(false)
     }
 
     /// The pill lighting a header part from `x` to `end` under the
@@ -3121,6 +3154,17 @@ const BLOCK_OVER: i32 = 2;
 /// whether it is the active one, what moves in it, the name typed while
 /// it is renamed, the density, the sidebar's width, the theme and the
 /// scale. Not where it is.
+/// What an open strip of agents shows: its agents, the one lit, its
+/// size, the theme and the scale. Not where it is.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct StripKey {
+    pub(super) picks: Vec<AgentIcon>,
+    pub(super) pick: Option<usize>,
+    pub(super) size: Size<i32, Logical>,
+    pub(super) theme: super::Theme,
+    pub(super) scale: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct BlockKey {
     ws: WorkspaceView,
@@ -3237,6 +3281,8 @@ pub(super) struct SidebarLayers {
     frame: super::Cached<FrameKey>,
     inbox: RowCache<InboxKey>,
     blocks: RowCache<BlockKey>,
+    /// The open strip of agents, in front of the rows.
+    strip: super::Cached<StripKey>,
     thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
     /// The band (one size fits all the cards).
     pulse: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
@@ -3282,6 +3328,23 @@ impl SidebarLayers {
                 .clipped(area)
         };
         let mut parts = Vec::new();
+
+        // An open strip of agents, in front of everything on the rows.
+        let open = (layout.rows.iter().zip(&sidebar.workspaces).enumerate())
+            .find_map(|(i, (row, ws))| row.picks.map(|strip| (i, strip, ws)));
+        if let Some((i, strip, ws)) = open
+            && shows(strip.loc.y, strip.size.h)
+        {
+            let key = StripKey {
+                picks: ws.picks.clone(),
+                pick: state.row(i).pick,
+                size: strip.size,
+                theme,
+                scale,
+            };
+            let buffer = self.strip.get(key, |key| painter.agent_strip_part(key));
+            parts.push(moved(buffer, strip.loc.into(), strip.size));
+        }
 
         // The dots of what runs, blinking in front of the rows they are on.
         if let Some((dot, alpha)) = blink.filter(|(_, alpha)| *alpha > 0.0)
@@ -3859,19 +3922,31 @@ mod tests {
     }
 
     #[test]
-    fn the_open_strip_of_agents_sits_left_of_the_ai_button() {
+    fn the_open_strip_of_agents_floats_under_the_ai_button() {
         let mut ws = workspace("gerdr", None, Some("main"));
+        ws.errors = 2;
         let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 240);
         assert_eq!(layout.rows[0].picks, None);
         assert_eq!(layout.rows[0].pick_slots(), 0);
+        let closed = layout.rows[0];
         ws.picks = vec![AgentIcon::Claude, AgentIcon::Cursor, AgentIcon::OpenCode];
         let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 240);
         let row = layout.rows[0];
         let strip = row.picks.expect("a strip");
-        assert_eq!(strip.loc.x + strip.size.w, row.agent.loc.x);
-        assert_eq!(strip.loc.y, row.agent.loc.y);
+        // Right under the button, its right end at the button's.
+        assert_eq!(
+            strip.loc.x + strip.size.w,
+            row.agent.loc.x + row.agent.size.w
+        );
+        assert_eq!(strip.loc.y, row.title.loc.y + row.title.size.h);
         assert_eq!(row.pick_slots(), 3);
-        assert_eq!(row.buttons_x(), strip.loc.x);
+        // Nothing on the header's band moves or hides under it.
+        assert_eq!(row.buttons_x(), row.agent.loc.x);
+        assert_eq!(row.name, closed.name);
+        assert_eq!(row.errors, closed.errors);
+        assert!(!strip.overlaps(row.title));
+        let errors = row.errors.expect("an errors pill");
+        assert_eq!(layout.hit(mid(errors)), Some(SidebarHit::Errors(0)));
         for k in 0..3 {
             let slot = row.pick(k).unwrap();
             assert_eq!(slot.loc.x, strip.loc.x + k as i32 * AGENT_SLOT);
@@ -3886,11 +3961,15 @@ mod tests {
         let row = layout.rows[0];
         assert!(row.pick_slots() < 20);
         assert!(row.picks.unwrap().loc.x >= NAME_X);
-        // It moves with its header.
+        // It moves with its header, and is hit over the next header.
         let mut many = vec![workspace("x", None, None); 40];
         many[1].picks = vec![AgentIcon::Claude];
-        let row = sidebar_layout(&many, &[], 200).scrolled(50, 300).rows[1];
-        assert_eq!(row.picks.unwrap().loc.y, row.agent.loc.y);
+        let layout = sidebar_layout(&many, &[], 200).scrolled(50, 300);
+        let row = layout.rows[1];
+        let strip = row.picks.unwrap();
+        assert_eq!(strip.loc.y, row.title.loc.y + row.title.size.h);
+        assert!(strip.overlaps(layout.rows[2].rect));
+        assert_eq!(layout.hit(mid(strip)), Some(SidebarHit::PickAgent(1, 0)));
     }
 
     #[test]
