@@ -785,6 +785,12 @@ impl Gerdr {
     /// `done` of `total`: the milestone gate waits, and the user is told.
     /// The same stop again is nothing new.
     fn milestone_stop(&mut self, project: &str, slug: &str, n: u32, done: u32, total: u32) {
+        // A fresh agent waits on the setup to take over from this one: its
+        // stop is over (see `setup_before_build`).
+        let key = (project.to_owned(), slug.to_owned());
+        if self.features.build.pending.contains(&key) {
+            return;
+        }
         let at = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;

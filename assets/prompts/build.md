@@ -51,7 +51,10 @@ stop:
 {{comments}}
 {{/if}}
 
-Besides {{artifact.path}}, the files you write are the code the plan
-changes.
+Rules from gerdr, which runs this feature's stages:
 
-{{> rules}}
+- Write only {{artifact.path}} and the code the plan changes.
+- Use plain words and short sentences in {{artifact.path}}. Say what is
+  unknown rather than guess.
+- When a milestone or a fix is committed, say so in one line and stop:
+  gerdr reads the code, and the user lets you go on.

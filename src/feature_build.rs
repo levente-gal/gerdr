@@ -44,7 +44,7 @@ type Key = (String, String);
 #[derive(Debug, Default)]
 pub(crate) struct BuildState {
     /// Features whose Build agent starts once their setup ends.
-    pending: BTreeSet<Key>,
+    pub(crate) pending: BTreeSet<Key>,
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
@@ -279,6 +279,17 @@ impl Gerdr {
             return false;
         }
         self.features.build.pending.insert(key);
+        // A fresh agent takes over once the setup ends, carrying on from
+        // build.md: the old agent's milestone stop is over, so the row
+        // stops offering Continue meanwhile.
+        if let Some(run) = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.runs.get_mut(&Stage::Build))
+            .filter(|r| r.stop.is_some())
+        {
+            run.stop = None;
+            self.save_feature(project, slug);
+        }
         if first == SetupFirst::Run {
             self.start_setup(project, slug);
         }
