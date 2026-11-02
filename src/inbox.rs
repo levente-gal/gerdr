@@ -211,11 +211,13 @@ impl InboxItem {
 /// Where going to an item leads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// Review a feature stage's file (`Gerdr::open_doc_review`).
+    /// A feature's gate: a file to review (`Gerdr::open_doc_review`), else
+    /// the feature panel on the stage's row (`Gerdr::open_feature_at`).
     Gate {
         project: String,
         slug: String,
         stage: crate::feature::Stage,
+        kind: crate::feature_agents::GateKind,
     },
     /// Show the agent (`Gerdr::focus_agent`).
     Agent(AgentKey),
@@ -422,14 +424,16 @@ pub enum Detail {
         /// Whether the user ignores it: counted, never told of.
         ignored: bool,
     },
-    /// A feature stage's file, ready for the user to review.
+    /// A feature gate waiting for the user: a stage's file to review, a
+    /// Build stopped after a milestone, or Verify failing.
     Gate {
         /// Its project's name.
         project: String,
         /// The feature's title.
         feature: String,
         stage: crate::feature::Stage,
-        /// The file to review: `brief.md`, `plan.md`.
+        kind: crate::feature_agents::GateKind,
+        /// The file to look at: `brief.md`, `plan.md`, `evidence.md`.
         file: Option<&'static str>,
         /// When it got ready, in seconds since the epoch.
         since: u64,
@@ -832,17 +836,26 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             project,
             feature,
             stage,
+            kind,
             file,
             since,
         } => {
+            use crate::feature_agents::GateKind as K;
             field("Feature", feature.clone());
             field("Stage", stage.label().to_owned());
             field("Project", project.clone());
             if let Some(file) = file {
                 field("File", (*file).to_owned());
             }
-            field("Ready", crate::projects::ago(now, *since));
-            field("Next", "Enter opens it to approve or send back".to_owned());
+            let (when, next) = match kind {
+                K::Review => ("Ready", "Enter opens it to approve or send back"),
+                K::Milestone { .. } => ("Stopped", "Enter opens the feature to continue"),
+                K::VerifyFailed { .. } => {
+                    ("Failed", "Enter opens the feature: fix it, then run checks")
+                }
+            };
+            field(when, crate::projects::ago(now, *since));
+            field("Next", next.to_owned());
         }
     }
     InboxDetailView {
@@ -2083,10 +2096,38 @@ mod tests {
             project: "gerdr".into(),
             feature: "Log in".into(),
             stage: crate::feature::Stage::Discover,
+            kind: Default::default(),
             file: Some("brief.md"),
             since: 0,
         };
         item
+    }
+
+    #[test]
+    fn a_gates_detail_says_what_enter_does_for_its_kind() {
+        use crate::feature_agents::GateKind;
+        let next = |kind: GateKind| {
+            let mut it = gate("gate:p|log-in");
+            if let Detail::Gate { kind: k, .. } = &mut it.detail {
+                *k = kind;
+            }
+            let detail = detail_view(&it, &it.actions, 0);
+            assert_eq!(detail.icon, chrome::InboxIcon::Gate);
+            detail.fields
+        };
+        let field = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        assert!(
+            next(GateKind::Review)
+                .contains(&field("Next", "Enter opens it to approve or send back"))
+        );
+        let milestone = next(GateKind::Milestone { done: 2, total: 4 });
+        assert!(milestone.contains(&field("Next", "Enter opens the feature to continue")));
+        assert!(milestone.iter().any(|(k, _)| k == "Stopped"));
+        let failed = next(GateKind::VerifyFailed { fixes: 3 });
+        assert!(failed.contains(&field(
+            "Next",
+            "Enter opens the feature: fix it, then run checks"
+        )));
     }
 
     #[test]

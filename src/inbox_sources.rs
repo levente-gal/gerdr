@@ -15,7 +15,7 @@ use crate::{
     ci::{self, CiState, Group, RepoCi, Subject},
     cursor_agents::CursorChat,
     feature::Stage,
-    feature_agents::Gate,
+    feature_agents::{Gate, GateKind},
     git::{GitStatus, InProgress, Worktree},
     herdr::{AgentInfo, AgentStatus},
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
@@ -775,8 +775,34 @@ fn gate_file(stage: Stage) -> (&'static str, Option<&'static str>) {
     }
 }
 
+/// What gate `gate` says: its title, what to do next for the subtitle,
+/// and the file it is about.
+fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
+    let title = &gate.title;
+    match gate.kind {
+        GateKind::Review => {
+            let (kind, file) = gate_file(gate.stage);
+            let review = file.map_or_else(|| "review it".to_owned(), |f| format!("review {f}"));
+            (format!("{kind} ready: “{title}”"), review, file)
+        }
+        GateKind::Milestone { done, total } => (
+            format!("Build of “{title}”: milestone {done} of {total} done"),
+            "continue".to_owned(),
+            crate::feature::artifacts::name(Stage::Build),
+        ),
+        GateKind::VerifyFailed { fixes } => (
+            match fixes {
+                1 => format!("Verify of “{title}” failed once"),
+                n => format!("Verify of “{title}” failed {n} times"),
+            },
+            "fix it, then run checks".to_owned(),
+            Some(crate::feature::verify::EVIDENCE),
+        ),
+    }
+}
+
 /// The gates waiting for the user, the oldest first, at `now_secs`: each
-/// says which file is ready, in which project, and what Enter does.
+/// says what waits, in which project, and what Enter does.
 pub fn gate_items(gates: &[GateItem], now_secs: u64) -> Vec<InboxItem> {
     let mut gates: Vec<&GateItem> = gates.iter().collect();
     gates.sort_by_key(|g| g.gate.since);
@@ -784,29 +810,33 @@ pub fn gate_items(gates: &[GateItem], now_secs: u64) -> Vec<InboxItem> {
         .into_iter()
         .map(|item| {
             let gate = &item.gate;
-            let (kind, file) = gate_file(gate.stage);
-            let review = file.map_or_else(|| "review it".to_owned(), |f| format!("review {f}"));
+            let (title, next, file) = gate_words(gate);
             InboxItem {
                 id: gate_item_id(&gate.project, &gate.slug),
                 section: Section::Gates,
                 // Back from a dismissal when the next stage waits, or
                 // this one again after it was sent back.
-                fingerprint: format!("{}|{:?}|{}", gate.slug, gate.stage, gate.since),
+                fingerprint: format!(
+                    "{}|{:?}|{:?}|{}",
+                    gate.slug, gate.stage, gate.kind, gate.since
+                ),
                 workspace: None,
-                title: format!("{kind} ready: “{}”", gate.title),
-                subtitle: format!("{} · {review}", item.project),
+                title,
+                subtitle: format!("{} · {next}", item.project),
                 tone: Tone::Blocked,
                 age: Some(Duration::from_secs(now_secs.saturating_sub(gate.since))),
                 target: Target::Gate {
                     project: gate.project.clone(),
                     slug: gate.slug.clone(),
                     stage: gate.stage,
+                    kind: gate.kind,
                 },
                 actions: TRIAGE.to_vec(),
                 detail: Detail::Gate {
                     project: item.project.clone(),
                     feature: gate.title.clone(),
                     stage: gate.stage,
+                    kind: gate.kind,
                     file,
                     since: gate.since,
                 },
@@ -1346,6 +1376,7 @@ mod tests {
                 project: "p1".into(),
                 slug: "log-in".into(),
                 stage: Stage::Discover,
+                kind: GateKind::Review,
             }
         );
         // The next stage, or the same one ready again, brings back a
@@ -1359,6 +1390,61 @@ mod tests {
             assert_eq!(other.id, gate.id);
             assert_ne!(other.fingerprint, gate.fingerprint);
         }
+    }
+
+    #[test]
+    fn build_and_verify_gates_say_what_waits() {
+        let mut milestone = gate_of("p1", "log-in", Stage::Build, 990_000);
+        milestone.gate.kind = GateKind::Milestone { done: 2, total: 4 };
+        let mut failed = gate_of("p2", "export", Stage::Verify, 995_000);
+        failed.gate.kind = GateKind::VerifyFailed { fixes: 3 };
+        let items = gate_items(&[failed.clone(), milestone.clone()], 1_000_000);
+        let lines: Vec<_> = items
+            .iter()
+            .map(|i| (i.title.as_str(), i.subtitle.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (
+                    "Build of “log-in title”: milestone 2 of 4 done",
+                    "p1 name · continue"
+                ),
+                (
+                    "Verify of “export title” failed 3 times",
+                    "p2 name · fix it, then run checks"
+                ),
+            ]
+        );
+        assert_eq!(items[0].section, Section::Gates);
+        assert_eq!(items[0].tone, Tone::Blocked);
+        assert_eq!(
+            items[1].target,
+            Target::Gate {
+                project: "p2".into(),
+                slug: "export".into(),
+                stage: Stage::Verify,
+                kind: GateKind::VerifyFailed { fixes: 3 },
+            }
+        );
+        assert!(matches!(
+            items[1].detail,
+            Detail::Gate {
+                file: Some("evidence.md"),
+                ..
+            }
+        ));
+        // The next milestone brings a dismissed gate back.
+        let mut next = milestone.clone();
+        next.gate.kind = GateKind::Milestone { done: 3, total: 4 };
+        let next = gate_items(&[next], 1_000_000);
+        assert_eq!(next[0].id, items[0].id);
+        assert_ne!(next[0].fingerprint, items[0].fingerprint);
+        failed.gate.kind = GateKind::VerifyFailed { fixes: 1 };
+        assert_eq!(
+            gate_items(&[failed], 1_000_000)[0].title,
+            "Verify of “export title” failed once"
+        );
     }
 
     #[test]
