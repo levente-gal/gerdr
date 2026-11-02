@@ -8,6 +8,7 @@
 //! other Wayland app can be launched into a split too (see `launch`); some,
 //! Cursor by default, keep running when gerdr quits as well (see `keep`).
 
+mod activate;
 mod agent_icons;
 mod agents;
 mod anim;
@@ -1304,6 +1305,9 @@ pub struct Gerdr {
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
+    /// The host's xdg-activation for gerdr's window, made at the first
+    /// notification click; `None` until then or on a host without it.
+    pub activation: Option<activate::Activation>,
     /// Since when each blocked agent was last notified of (or seen to be
     /// blocked): a reminder goes after `BLOCKED_REMINDER`.
     pub blocked_since: HashMap<agents::AgentKey, Instant>,
@@ -2847,10 +2851,25 @@ impl Gerdr {
         }
     }
 
+    /// Show and focus gerdr's window on the host, with `token` from the
+    /// notification daemon if it sent one (see `activate`).
+    fn raise_window(&mut self, token: Option<&str>) {
+        if token.is_none() && activate::niri_focus() {
+            return;
+        }
+        if self.activation.is_none() {
+            self.activation = activate::Activation::new(self.backend.window());
+        }
+        match self.activation.as_mut() {
+            Some(activation) => activation.activate(token),
+            None => self.backend.window().focus_window(),
+        }
+    }
+
     /// Connect to the host's notification daemon, and show the agent of
     /// each notification the user clicks.
     fn connect_notifier(&mut self) {
-        let notifier = match notify::Notifier::connect() {
+        let notifier = match notify::Notifier::connect(config::load_notifications()) {
             Ok(notifier) => notifier,
             Err(err) => return tracing::warn!("notifications: {err}"),
         };
@@ -2865,14 +2884,13 @@ impl Gerdr {
             };
             match notifier.dispatch() {
                 Ok(clicked) => {
-                    for key in clicked {
-                        if let Some(key) = key.strip_prefix(services::NOTIFY_PREFIX) {
+                    for click in clicked {
+                        if let Some(key) = click.key.strip_prefix(services::NOTIFY_PREFIX) {
                             state.service_notification_clicked(key);
-                            state.backend.window().focus_window();
-                            continue;
+                        } else {
+                            state.focus_agent(&agents::AgentKey::parse(&click.key));
                         }
-                        state.focus_agent(&agents::AgentKey::parse(&key));
-                        state.backend.window().focus_window();
+                        state.raise_window(click.token.as_deref());
                     }
                     Ok(PostAction::Continue)
                 }
@@ -6459,6 +6477,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_pending: false,
         web_control: web_control::WebControl::default(),
         notifier: None,
+        activation: None,
         blocked_since: HashMap::new(),
         agent_statuses: HashMap::new(),
         agent_since: HashMap::new(),

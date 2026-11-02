@@ -69,6 +69,10 @@
 //! # (checked every 6 hours); false updates it only when asked. On by
 //! # default. The launcher's row turning it on or off writes this key.
 //! updates = false
+//! [notifications]
+//! # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
+//! # until dismissed, -1 leaves it to the notification daemon. By default 30.
+//! timeout = 0
 //! ```
 //!
 //! Each table is read on its own, and a key that can't be read on its
@@ -114,6 +118,7 @@ struct Config {
     agents: BTreeMap<String, String>,
     services: ServicesConfig,
     t3: T3Config,
+    notifications: NotificationsConfig,
 }
 
 /// The `[t3]` table, as written.
@@ -194,6 +199,57 @@ pub fn write_bool(table: &str, key: &str, value: bool) -> Result<(), String> {
     crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
 }
 
+/// The `[notifications]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct NotificationsConfig {
+    timeout: Option<i64>,
+}
+
+/// How gerdr's desktop notifications show, from the `[notifications]`
+/// table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notifications {
+    /// Seconds each stays on screen: 0 until dismissed, below 0 as long as
+    /// the notification daemon likes.
+    pub timeout: i64,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { timeout: 30 }
+    }
+}
+
+impl Notifications {
+    /// The timeout as the notification spec has it: milliseconds, 0 for
+    /// never, -1 for the daemon's choice.
+    pub fn expire_ms(self) -> i32 {
+        if self.timeout < 0 {
+            -1
+        } else {
+            i32::try_from(self.timeout.saturating_mul(1000)).unwrap_or(i32::MAX)
+        }
+    }
+}
+
+/// How gerdr's desktop notifications show, as the config file says.
+pub fn load_notifications() -> Notifications {
+    let text = std::fs::read_to_string(config_file()).unwrap_or_default();
+    notifications_from_text(&text)
+}
+
+/// The `[notifications]` settings `text` describes; the rest of the file is
+/// `from_text`'s, which tells its mistakes.
+pub fn notifications_from_text(text: &str) -> Notifications {
+    let table = Config::read(text, &mut Vec::new()).notifications;
+    let mut settings = Notifications::default();
+    if let Some(timeout) = table.timeout {
+        settings.timeout = timeout;
+    }
+    settings
+}
+
 /// The `[services]` table, as written.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -262,8 +318,17 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
 const KEYS_PROBLEM: &str = "[keys] ";
 
 /// The tables the file may have.
-const TABLES: [&str; 9] = [
-    "keys", "apps", "ui", "git", "keep", "inbox", "agents", "services", "t3",
+const TABLES: [&str; 10] = [
+    "keys",
+    "apps",
+    "ui",
+    "git",
+    "keep",
+    "inbox",
+    "agents",
+    "services",
+    "t3",
+    "notifications",
 ];
 
 impl Config {
@@ -284,7 +349,7 @@ impl Config {
         let mut take = |name: &str| file.remove(name);
         let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
         let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
-        let (services, t3) = (take("services"), take("t3"));
+        let (services, t3, notifications) = (take("services"), take("t3"), take("notifications"));
         Self {
             keys: table("keys", keys, problems),
             apps: table("apps", apps, problems),
@@ -295,6 +360,7 @@ impl Config {
             agents: table("agents", agents, problems),
             services: table("services", services, problems),
             t3: table("t3", t3, problems),
+            notifications: table("notifications", notifications, problems),
         }
     }
 }
@@ -761,6 +827,10 @@ const TEMPLATE: &str = "\
 # # (checked every 6 hours); false updates it only when asked. On by
 # # default. The launcher's row turning it on or off writes this key.
 # updates = false
+# [notifications]
+# # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
+# # until dismissed, -1 leaves it to the notification daemon. By default 30.
+# timeout = 0
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -1186,5 +1256,18 @@ other = 1
         let (parsed, problems) = ui("[ui]\ncolour = \"red\"\ntheme = \"dark\"\n");
         assert_eq!(parsed.theme, Some(ThemeMode::Dark));
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn notifications_last_30_seconds_unless_told() {
+        use super::{Notifications, notifications_from_text};
+        assert_eq!(notifications_from_text(""), Notifications { timeout: 30 });
+        assert_eq!(notifications_from_text("").expire_ms(), 30_000);
+        let never = notifications_from_text("[notifications]\ntimeout = 0\n");
+        assert_eq!(never.expire_ms(), 0);
+        let daemon = notifications_from_text("[notifications]\ntimeout = -1\n");
+        assert_eq!(daemon.expire_ms(), -1);
+        let long = notifications_from_text("[notifications]\ntimeout = 99999999\n");
+        assert_eq!(long.expire_ms(), i32::MAX);
     }
 }

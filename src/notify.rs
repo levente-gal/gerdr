@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use crate::config::Notifications;
 use dbus::{
     Message,
     arg::PropMap,
@@ -28,15 +29,28 @@ pub struct Notifier {
     sent: HashMap<u32, String>,
     /// Notifications on screen, by the daemon's id.
     shown: HashMap<u32, String>,
+    /// How long each stays on screen, as the daemon is told.
+    expire: i32,
+    /// The xdg-activation token the daemon sent for a click on a
+    /// notification, by id: it comes just before the click.
+    tokens: HashMap<u32, String>,
+}
+
+/// A click on one of gerdr's notifications.
+pub struct Click {
+    /// The notification's key.
+    pub key: String,
+    /// The daemon's token to raise gerdr's window with, if it sent one.
+    pub token: Option<String>,
 }
 
 impl Notifier {
     /// Connect to the session bus and listen for clicks. Blocks until the bus
     /// has answered, which it does at once.
-    pub fn connect() -> Result<Self, dbus::Error> {
+    pub fn connect(settings: Notifications) -> Result<Self, dbus::Error> {
         let mut channel = Channel::get_private(BusType::Session)?;
         channel.set_watch_enabled(true);
-        for member in ["ActionInvoked", "NotificationClosed"] {
+        for member in ["ActionInvoked", "ActivationToken", "NotificationClosed"] {
             let rule = format!("type='signal',interface='{DEST}',member='{member}'");
             let add = Message::new_method_call(
                 "org.freedesktop.DBus",
@@ -55,6 +69,8 @@ impl Notifier {
             channel,
             sent: HashMap::new(),
             shown: HashMap::new(),
+            expire: settings.expire_ms(),
+            tokens: HashMap::new(),
         })
     }
 
@@ -78,7 +94,7 @@ impl Notifier {
         let msg = msg
             .append3("gerdr", replaces, "gerdr")
             .append3(summary, body, vec!["default", "Show"])
-            .append2(PropMap::new(), -1i32);
+            .append2(PropMap::new(), self.expire);
         match self.channel.send(msg) {
             Ok(serial) => {
                 tracing::debug!("notification for {key}: {summary}");
@@ -90,9 +106,9 @@ impl Notifier {
         self.channel.flush();
     }
 
-    /// Take in what the daemon sent, and return the keys of the
-    /// notifications the user clicked since. `Err` once the bus is gone.
-    pub fn dispatch(&mut self) -> Result<Vec<String>, ()> {
+    /// Take in what the daemon sent, and return the clicks on gerdr's
+    /// notifications since. `Err` once the bus is gone.
+    pub fn dispatch(&mut self) -> Result<Vec<Click>, ()> {
         self.channel.read_write(Some(Duration::ZERO))?;
         let mut clicked = Vec::new();
         while let Some(mut msg) = self.channel.pop_message() {
@@ -126,7 +142,12 @@ impl Notifier {
                             && action == "default"
                             && let Some(key) = self.shown.get(&id)
                         {
-                            clicked.push(key.clone());
+                            clicked.push((id, key.clone()));
+                        }
+                    }
+                    Some("ActivationToken") => {
+                        if let Ok((id, token)) = msg.read2::<u32, String>() {
+                            self.tokens.insert(id, token);
                         }
                     }
                     Some("NotificationClosed") => {
@@ -139,6 +160,17 @@ impl Notifier {
                 MessageType::MethodCall => {}
             }
         }
-        Ok(clicked)
+        // A token is only good for the click it came with, which may be in
+        // this batch on either side of it; one left for a notification gone
+        // has nothing to come.
+        let clicks = clicked
+            .into_iter()
+            .map(|(id, key)| Click {
+                key,
+                token: self.tokens.remove(&id),
+            })
+            .collect();
+        self.tokens.retain(|id, _| self.shown.contains_key(id));
+        Ok(clicks)
     }
 }
