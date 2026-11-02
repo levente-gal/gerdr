@@ -504,6 +504,7 @@ impl Gerdr {
     /// or a key, as the tooltip hides.
     pub(crate) fn drop_agent_strip(&mut self) {
         self.agent_strip = None;
+        self.agent_strip_record = None;
         self.agent_strip_due = None;
     }
 
@@ -514,6 +515,9 @@ impl Gerdr {
             self.refresh_cli_agents();
         }
         self.agent_strip = open;
+        self.agent_strip_record = open
+            .and_then(|i| self.workspaces.get(i))
+            .map(|ws| ws.record.clone());
     }
 
     /// The command of the agent in slot `k` of workspace `i`'s strip, as

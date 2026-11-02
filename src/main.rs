@@ -1391,6 +1391,9 @@ pub struct Gerdr {
     /// The workspace whose header shows the strip of agents to start,
     /// while the pointer is on its AI button or the strip.
     pub agent_strip: Option<usize>,
+    /// The record of the workspace `agent_strip` opened on: a strip whose
+    /// workspace moved or closed since isn't shown on another's header.
+    pub agent_strip_record: Option<String>,
     /// The workspace whose strip of agents opens, and when, while the
     /// pointer rests on its AI button; whether a timer waits for it.
     pub agent_strip_due: Option<(usize, std::time::Instant)>,
@@ -5185,7 +5188,9 @@ impl Gerdr {
                     .count();
                 // Not under what covers the sidebar, where it cannot be
                 // clicked.
-                if self.agent_strip == Some(w) && !self.sidebar_covered() {
+                let strip_here = self.agent_strip == Some(w)
+                    && self.agent_strip_record.as_deref() == Some(ws.record.as_str());
+                if strip_here && !self.sidebar_covered() {
                     view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
                 }
                 view.more_agents = self
@@ -6558,6 +6563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli_agents: cli_agents::installed(&agent_config),
         agent_config,
         agent_strip: None,
+        agent_strip_record: None,
         agent_strip_due: None,
         agent_strip_timed: false,
         projects: projects::Store::default(),
