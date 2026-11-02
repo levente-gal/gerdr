@@ -1,6 +1,12 @@
 ## Feature review
 
-Before merging a feature branch, review its diff against `docs/feature-checklist.md` (closing, errors, keys, overlays, look, words, settings, state). Name findings by item id, like `E2 src/foo.rs:120`. The rules behind it are in `docs/ux-conventions.md`.
+`docs/feature-checklist.md` lists where new features break gerdr's UX rules (closing, errors, keys, overlays, look, words, settings, disk edits, state). The rules behind it are in `docs/ux-conventions.md`.
+
+- Before you build a feature or change a surface, read the checklist sections it touches, and build to them.
+- Before you merge a branch, and before you commit directly to main, review the diff against the checklist: run its quick greps, then go over it section by section. This includes small direct commits.
+- Name findings by item id and place, like `E2 src/foo.rs:120`. Fix them, or list them in your report with why they stay.
+- End the report with the keys that changed (K6) and what was not tried in a live gerdr (G3).
+- A project hook (`.claude/hooks/checklist-gate.sh`) reminds you before `git merge` and before `git commit` on main. It doesn't block: the review is still yours to do.
 
 ## graphify
 
