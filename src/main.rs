@@ -5183,7 +5183,9 @@ impl Gerdr {
                     .iter()
                     .filter(|g| !g.seen)
                     .count();
-                if self.agent_strip == Some(w) {
+                // Not under what covers the sidebar, where it cannot be
+                // clicked.
+                if self.agent_strip == Some(w) && !self.sidebar_covered() {
                     view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
                 }
                 view.more_agents = self

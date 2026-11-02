@@ -299,6 +299,7 @@ impl Gerdr {
                         // its tooltip.
                         if state.grabbing_overlay().is_some() {
                             state.tooltip.hide();
+                            state.drop_agent_strip();
                         }
                         // A dialog takes every key.
                         if let Some(dialog) = top.filter(|o| o.is_dialog()) {
@@ -391,6 +392,7 @@ impl Gerdr {
                         // leaves a mode there.
                         if sym == Keysym::Escape {
                             state.tooltip.hide();
+                            state.drop_agent_strip();
                             state.help_pinned = false;
                         }
                         // What it interrupts stopped on purpose.
@@ -571,6 +573,10 @@ impl Gerdr {
     fn press(&mut self, location: Point<f64, Logical>, button: u32) -> bool {
         self.tooltip.hide();
         self.chrome.drop_tooltip();
+        // A press stops the wait for the strip of agents, as for the
+        // tooltip: a click on the AI button opens the agent picker, and
+        // the strip must not open beside it.
+        self.agent_strip_due = None;
         // A press in the name being typed moves its caret; anywhere else
         // keeps the name.
         if self.rename.is_some() {
@@ -633,6 +639,10 @@ impl Gerdr {
                     }
                 }
                 _ => self.sidebar_press(x, y, button),
+            }
+            // What the press opened over the sidebar closes its strip.
+            if self.sidebar_covered() {
+                self.drop_agent_strip();
             }
             return true;
         }
