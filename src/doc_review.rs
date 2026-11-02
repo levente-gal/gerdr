@@ -18,7 +18,7 @@ use std::{
 use crate::{
     Gerdr,
     diff::{self, FileDiff, Hunk, Line, LineKind},
-    feature::{Feature, Stage, store},
+    feature::{Feature, Stage, Status, store},
     review::{self, Review},
     toast::Level,
     worktree_diff::{DocOf, WorktreeDiff},
@@ -255,11 +255,13 @@ impl Gerdr {
         self.approve_doc_now(&doc.project, &doc.slug, doc.stage);
     }
 
-    /// Approve `stage` of feature `slug`: its review comments deleted, its
-    /// review closed if open, the stage marked done.
+    /// Approve `stage` of feature `slug`: the stage marked done, then its
+    /// review comments deleted and its review closed if open. A refused
+    /// approval keeps both.
     pub(crate) fn approve_doc_now(&mut self, project: &str, slug: &str, stage: Stage) {
-        self.doc_done(project, slug, stage);
-        self.approve_stage(project, slug, stage);
+        if self.approve_stage(project, slug, stage) {
+            self.doc_done(project, slug, stage);
+        }
     }
 
     /// Send the file under review back to its agent with `comments`
@@ -268,12 +270,19 @@ impl Gerdr {
         let Some(doc) = self.doc_of().cloned() else {
             return;
         };
-        self.doc_done(&doc.project, &doc.slug, doc.stage);
+        // One no longer waiting is refused there: the comments stay.
+        let waiting = self
+            .feature(&doc.project, &doc.slug)
+            .is_some_and(|f| f.status == Status::Open && f.current() == Some(doc.stage));
+        if waiting {
+            self.doc_done(&doc.project, &doc.slug, doc.stage);
+        }
         self.send_back_stage(&doc.project, &doc.slug, doc.stage, comments);
     }
 
     /// `stage` of feature `slug` is approved or sent back: its comments
-    /// deleted, and its review, if open, closed.
+    /// deleted, and its review, if open, closed, back to the feature panel
+    /// when it was opened from there.
     fn doc_done(&mut self, project: &str, slug: &str, stage: Stage) {
         let dir = store::dir(None, project, slug);
         self.doc_write_review(&comments_path(&dir, stage), &Review::default());

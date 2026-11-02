@@ -767,19 +767,20 @@ impl Gerdr {
     }
 
     /// Approve `stage` of feature `slug`: its file as it is now. Marks
-    /// the stage done.
-    pub fn approve_stage(&mut self, project: &str, slug: &str, stage: Stage) {
+    /// the stage done. False when it isn't approved, the user told why.
+    pub fn approve_stage(&mut self, project: &str, slug: &str, stage: Stage) -> bool {
         let Some(feature) = self.feature(project, slug) else {
-            return;
+            return false;
         };
         let data = store::dir(None, project, slug);
         let text = artifacts::path(&data, stage).and_then(|p| std::fs::read_to_string(p).ok());
         if let Err(why) = approval(feature, stage, text.as_deref()) {
-            return self.show_warning(why);
+            self.show_warning(why);
+            return false;
         }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
-            return;
+            return false;
         };
         feature.tick(now, "you", None);
         let done = format!("{} approved", doc_word(stage));
@@ -790,6 +791,7 @@ impl Gerdr {
             .remove(&(project.to_owned(), slug.to_owned(), stage));
         self.feature_cursor_to_current_of(project, slug);
         self.show_success(done);
+        true
     }
 
     /// Send `stage` of feature `slug` back to its agent with `comments`

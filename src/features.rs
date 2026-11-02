@@ -1694,7 +1694,9 @@ impl Gerdr {
         match outcome {
             PanelOutcome::Close => self.close_feature_panel(),
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
-                Some(stage) if needs(stage).is_some() => self.approve_stage(&project, &slug, stage),
+                Some(stage) if needs(stage).is_some() => {
+                    self.approve_stage(&project, &slug, stage);
+                }
                 Some(stage) if stage.bound() => self.read_and_tick(&project, &slug, stage),
                 Some(_) => {
                     self.tick_feature(&project, &slug, None);
