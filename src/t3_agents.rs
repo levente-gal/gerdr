@@ -9,8 +9,14 @@
 //! Code sets itself when its app shows the thread). Where the server runs
 //! is in `userdata/server-runtime.json`.
 //!
-//! The database is T3 Code's own, not an interface: a read that fails (its
-//! tables changed) shows no threads and says why in the log, once.
+//! The database is T3 Code's own, not an interface, and changes as T3 Code
+//! likes. While it can't be read (its tables changed: the query no longer
+//! prepares), gerdr asks the server instead, by `t3 thread list --json`
+//! for each workspace's folder (`Source::Cli`): slower, and with less in
+//! it (working, waiting or idle; no side chats, no news since the user
+//! looked), but T3 Code's own interface. The database is tried again
+//! every `RETRY_DATABASE`. Which version of T3 Code runs, and moving it
+//! only to versions gerdr reads, is `t3_update`'s.
 //!
 //! Side chats and subagents show as lines on their parent's card. A card
 //! closed is hidden from gerdr until its thread changes again (see
@@ -19,7 +25,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -35,8 +42,20 @@ const DB_RETRY: Duration = Duration::from_secs(5);
 const SERVER_INTERVAL: Duration = Duration::from_secs(5);
 /// How many idle threads a workspace shows at most.
 pub const HISTORY_CARDS: usize = 5;
+/// How often the database is tried again while gerdr asks the server.
+const RETRY_DATABASE: Duration = Duration::from_secs(30);
+/// How often the server is asked at least, while the database can't be
+/// read.
+const CLI_INTERVAL: Duration = Duration::from_secs(30);
+/// How soon after the last ask the server is asked again when the
+/// database changed.
+const CLI_SOON: Duration = Duration::from_secs(5);
+/// How long `t3 thread list` may take.
+const CLI_TIME: Duration = Duration::from_secs(20);
+/// How many idle threads of a folder's project the server's list gives.
+const CLI_IDLE: usize = 20;
 /// The database, under T3 Code's home.
-const DB: &str = "userdata/statev2.sqlite";
+pub const DB: &str = "userdata/statev2.sqlite";
 /// Where the server says it runs, under T3 Code's home.
 const RUNTIME: &str = "userdata/server-runtime.json";
 /// The server's environment's id, under T3 Code's home.
@@ -439,15 +458,50 @@ pub fn read_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<ThreadRow>
     rows.collect()
 }
 
-/// Read the threads in the database at `db` every `DB_INTERVAL`, on a
-/// thread of its own, and hand them to `send` whenever they changed.
-/// Stops once `send` returns false.
-pub fn watch_db(db: PathBuf, mut send: impl FnMut(Vec<ThreadRow>) -> bool + Send + 'static) {
+/// Where gerdr reads T3 Code's threads from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// The database, in full.
+    #[default]
+    Database,
+    /// The server's `t3 thread list`, as the database can't be read: why.
+    Cli(String),
+}
+
+/// What the watcher read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    pub rows: Vec<ThreadRow>,
+    pub source: Source,
+    /// The migration the database is at, if it says.
+    pub migration: Option<i64>,
+}
+
+/// Read the threads of T3 Code at home `home` every `DB_INTERVAL`, on a
+/// thread of its own, and hand them to `send` whenever they changed: from
+/// the database, else from the server for the folders in `dirs` (see
+/// `Source`). Stops once `send` returns false.
+pub fn watch_db(
+    home: PathBuf,
+    dirs: Arc<Mutex<Vec<PathBuf>>>,
+    mut send: impl FnMut(Snapshot) -> bool + Send + 'static,
+) {
     std::thread::spawn(move || {
+        let db = home.join(DB);
         let mut conn: Option<rusqlite::Connection> = None;
-        let mut version = None;
-        let mut last: Option<Vec<ThreadRow>> = None;
-        let mut failed = false;
+        let mut version: Option<i64> = None;
+        let mut last: Option<Snapshot> = None;
+        // Why the database isn't read, while it isn't.
+        let mut broken: Option<String> = None;
+        let mut asked: Option<Instant> = None;
+        let mut tried = Instant::now();
+        let mut emit = |snapshot: Snapshot| {
+            if last.as_ref() == Some(&snapshot) {
+                return true;
+            }
+            last = Some(snapshot.clone());
+            send(snapshot)
+        };
         loop {
             if conn.is_none() && db.exists() {
                 conn = open_read_only(&db)
@@ -455,67 +509,213 @@ pub fn watch_db(db: PathBuf, mut send: impl FnMut(Vec<ThreadRow>) -> bool + Send
                     .ok();
                 version = None;
             }
-            let wait = match &conn {
-                None => DB_RETRY,
-                Some(c) => {
-                    match read_if_changed(c, &mut version) {
-                        Ok(Some(rows)) => {
-                            failed = false;
-                            if last.as_ref() != Some(&rows) {
-                                if !send(rows.clone()) {
-                                    return;
-                                }
-                                last = Some(rows);
+            let now_version = conn
+                .as_ref()
+                .and_then(|c| c.query_row("PRAGMA data_version", [], |r| r.get(0)).ok());
+            let changed = now_version.is_none() || now_version != version;
+            if broken.is_none() {
+                match &conn {
+                    None if db.exists() => {}
+                    None => broken = Some(format!("no database at {}", db.display())),
+                    Some(_) if !changed => {}
+                    Some(c) => match read_rows(c) {
+                        Ok(rows) => {
+                            version = now_version;
+                            let migration = migration(c);
+                            let source = Source::Database;
+                            if !emit(Snapshot {
+                                rows,
+                                source,
+                                migration,
+                            }) {
+                                return;
                             }
                         }
-                        Ok(None) => {}
+                        Err(err) if busy(&err) => {}
                         Err(err) => {
-                            let busy = matches!(
-                                err.sqlite_error_code(),
-                                Some(rusqlite::ErrorCode::DatabaseBusy)
-                            );
-                            if !busy && !failed {
-                                // Its tables changed, likely: said once.
-                                tracing::warn!("t3 code's database, {}: {err}", db.display());
-                                failed = true;
-                                if last.take().is_some_and(|_| !send(Vec::new())) {
-                                    return;
-                                }
-                            }
-                            if !busy {
-                                conn = None;
-                            }
+                            // Its tables changed, likely: said once.
+                            tracing::warn!("t3 code's database, {}: {err}", db.display());
+                            broken = Some(err.to_string());
+                            asked = None;
+                            tried = Instant::now();
                         }
-                    }
-                    DB_INTERVAL
+                    },
                 }
-            };
-            std::thread::sleep(wait);
+            }
+            if let Some(why) = &broken {
+                // Back to the database once it reads again.
+                if tried.elapsed() >= RETRY_DATABASE {
+                    tried = Instant::now();
+                    conn = db.exists().then(|| open_read_only(&db).ok()).flatten();
+                    if let Some(c) = &conn
+                        && let Ok(rows) = read_rows(c)
+                    {
+                        tracing::info!("t3 code's database reads again");
+                        broken = None;
+                        version = None;
+                        let migration = migration(c);
+                        let source = Source::Database;
+                        if !emit(Snapshot {
+                            rows,
+                            source,
+                            migration,
+                        }) {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+                let due = asked.is_none_or(|at| {
+                    at.elapsed() >= CLI_INTERVAL || (changed && at.elapsed() >= CLI_SOON)
+                });
+                if due {
+                    asked = Some(Instant::now());
+                    version = now_version;
+                    let dirs = dirs.lock().map(|d| d.clone()).unwrap_or_default();
+                    let rows = cli_rows(&home, &dirs);
+                    let migration = conn.as_ref().and_then(migration);
+                    let source = Source::Cli(why.clone());
+                    if !emit(Snapshot {
+                        rows,
+                        source,
+                        migration,
+                    }) {
+                        return;
+                    }
+                }
+            }
+            std::thread::sleep(if conn.is_none() && broken.is_none() {
+                DB_RETRY
+            } else {
+                DB_INTERVAL
+            });
         }
     });
 }
 
+/// Whether `err` is only T3 Code writing meanwhile.
+fn busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// The latest migration of the database at `conn`, if it says.
+pub fn migration(conn: &rusqlite::Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT max(migration_id) FROM effect_sql_migrations",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// The threads of the projects of folders `dirs`, as the running server of
+/// T3 Code at home `home` lists them; none without a server.
+fn cli_rows(home: &Path, dirs: &[PathBuf]) -> Vec<ThreadRow> {
+    let Some(server) = Server::read(home).filter(Server::alive) else {
+        return Vec::new();
+    };
+    let Some(binary) = t3_binary(home, &server) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<ThreadRow> = Vec::new();
+    for dir in dirs {
+        let mut list = std::process::Command::new(&binary);
+        list.args(["thread", "list", "--json", "--project"])
+            .arg(dir)
+            .arg("--base-dir")
+            .arg(home)
+            .current_dir(dir);
+        let listed = crate::t3_update::output_within(list, CLI_TIME).and_then(|out| {
+            if out.status.success() {
+                cli_threads(&out.stdout, dir).map_err(|err| err.to_string())
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+            }
+        });
+        match listed {
+            Ok(found) => {
+                for row in found {
+                    if !rows.iter().any(|r| r.id == row.id) {
+                        rows.push(row);
+                    }
+                }
+            }
+            // A folder of no project of T3 Code's, likely.
+            Err(err) => tracing::debug!("t3 thread list, {}: {err}", dir.display()),
+        }
+    }
+    rows
+}
+
+/// A thread as `t3 thread list --json` lists it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Listed {
+    thread_id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    provider_instance_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    settled: Option<bool>,
+    #[serde(default)]
+    parent_thread_id: Option<String>,
+    #[serde(default)]
+    relationship_to_parent: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+/// The threads worth a card in what `t3 thread list --json` printed for
+/// the project of folder `dir` (newest first): those at work or waiting,
+/// then `CLI_IDLE` more; none settled.
+fn cli_threads(json: &[u8], dir: &Path) -> serde_json::Result<Vec<ThreadRow>> {
+    let listed: Vec<Listed> = serde_json::from_slice(json)?;
+    let mut idle = 0;
+    Ok(listed
+        .into_iter()
+        .filter(|t| t.settled != Some(true))
+        .map(|t| ThreadRow {
+            id: t.thread_id,
+            title: t.title.unwrap_or_default(),
+            updated: t.updated_at.unwrap_or_default(),
+            project: Some(dir.to_owned()),
+            worktree: None,
+            branch: None,
+            child: t.relationship_to_parent.as_deref() == Some("subagent")
+                || t.parent_thread_id.is_some(),
+            parent: t.parent_thread_id,
+            provider: t.provider_instance_id,
+            model: t.model,
+            run: t.status,
+            completed: None,
+            visited: None,
+            pending: 0,
+        })
+        .filter(|row| {
+            row.status() != AgentStatus::Idle || {
+                idle += 1;
+                idle <= CLI_IDLE
+            }
+        })
+        .collect())
+}
+
 /// The database at `db`, opened to read only: T3 Code writes it meanwhile.
-fn open_read_only(db: &Path) -> rusqlite::Result<rusqlite::Connection> {
+pub fn open_read_only(db: &Path) -> rusqlite::Result<rusqlite::Connection> {
     use rusqlite::OpenFlags;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = rusqlite::Connection::open_with_flags(db, flags)?;
     conn.busy_timeout(Duration::from_millis(100))?;
     Ok(conn)
-}
-
-/// The threads in `conn`, unless nothing was written since `version`.
-fn read_if_changed(
-    conn: &rusqlite::Connection,
-    version: &mut Option<i64>,
-) -> rusqlite::Result<Option<Vec<ThreadRow>>> {
-    let now: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
-    if *version == Some(now) {
-        return Ok(None);
-    }
-    let rows = read_rows(conn)?;
-    *version = Some(now);
-    Ok(Some(rows))
 }
 
 /// The `t3` that runs `server`, out of T3 Code's home `home`: the version
@@ -594,6 +794,20 @@ pub struct T3 {
     pending: Option<String>,
     /// Whether a pairing link is being asked for.
     pairing: bool,
+    /// Where the threads are read from.
+    pub source: Source,
+    /// The migration the database is at, if it says.
+    pub migration: Option<i64>,
+    /// The workspaces' folders, for asking the server of their threads.
+    dirs: Arc<Mutex<Vec<PathBuf>>>,
+    /// What gerdr decided about T3 Code's versions (see `t3_update`).
+    pub updates: crate::t3_update::Updates,
+    /// Whether a newer version is being looked for.
+    pub checking: bool,
+    /// The version the server restarts at once its threads are idle.
+    pub restart_at: Option<String>,
+    /// Whether the user heard that gerdr reads T3 Code in part.
+    told_partial: bool,
 }
 
 impl crate::Gerdr {
@@ -610,18 +824,22 @@ impl crate::Gerdr {
         self.t3.server = Server::read(&home);
         self.t3.alive = self.t3.server.as_ref().is_some_and(Server::alive);
         self.t3.home = Some(home.clone());
+        self.t3_dirs();
         let (tx, rx) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
-            if let channel::Event::Msg(rows) = event {
-                state.t3.rows = rows;
-                state.t3_changed();
+            if let channel::Event::Msg(snapshot) = event {
+                state.t3_read(snapshot);
             }
         });
         if let Err(err) = inserted {
             return tracing::warn!("t3 code's agents: {err}");
         }
-        watch_db(home.join(DB), move |rows| tx.send(rows).is_ok());
+        watch_db(home.clone(), self.t3.dirs.clone(), move |s| {
+            tx.send(s).is_ok()
+        });
+        self.watch_t3_updates();
         let tick = move |_, _: &mut (), state: &mut crate::Gerdr| {
+            state.t3_dirs();
             let server = Server::read(&home);
             let alive = server.as_ref().is_some_and(Server::alive);
             if server != state.t3.server || alive != state.t3.alive {
@@ -637,6 +855,49 @@ impl crate::Gerdr {
         }
     }
 
+    /// Note the workspaces' folders for the watcher (see `cli_rows`).
+    fn t3_dirs(&self) {
+        let dirs = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
+        if let Ok(mut shared) = self.t3.dirs.lock() {
+            *shared = dirs;
+        }
+    }
+
+    /// Take in what the watcher read; say once when gerdr starts reading
+    /// T3 Code in part.
+    fn t3_read(&mut self, snapshot: Snapshot) {
+        let partial = matches!(snapshot.source, Source::Cli(_));
+        let was = std::mem::replace(&mut self.t3.source, snapshot.source);
+        self.t3.rows = snapshot.rows;
+        self.t3.migration = snapshot.migration;
+        if partial && was == Source::Database && !self.t3.told_partial {
+            self.t3.told_partial = true;
+            self.t3_reads_in_part();
+        }
+        self.t3_changed();
+    }
+
+    /// Say that gerdr shows T3 Code's threads with basic status only,
+    /// offering the version pinned if that one is read in full.
+    fn t3_reads_in_part(&mut self) {
+        let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
+        // Short, as a toast is; the launcher's "Update T3 Code" says more.
+        let text = "T3 Code changed its data: basic status only".to_owned();
+        let updates = crate::t3_update::Updates::load();
+        let back = updates.pin.filter(|pin| {
+            Some(pin) != running.as_ref()
+                && matches!(
+                    updates.verdicts.get(pin),
+                    Some(crate::t3_update::Verdict::Fits { .. })
+                )
+        });
+        let action = back.map(|pin| {
+            let label = format!("Go back to {pin}");
+            (label, crate::menu::MenuAction::UpdateT3(Some(pin)))
+        });
+        self.toast_with(text, crate::toast::Level::Warning, action);
+    }
+
     /// Take in what T3 Code's threads do now, and notify of what is news.
     fn t3_changed(&mut self) {
         let all = threads(&self.t3.rows, self.t3.alive);
@@ -646,6 +907,7 @@ impl crate::Gerdr {
         let hidden = &self.projects.t3_hidden;
         self.t3.threads = all.into_iter().filter(|t| !hidden.hides(t)).collect();
         self.notify_agents();
+        self.t3_maybe_restart();
     }
 
     /// Hide T3 Code thread `id` from gerdr (see `Hidden::hide`).
@@ -762,7 +1024,7 @@ impl crate::Gerdr {
 
     /// The pane showing T3 Code's app (its workspace, tab, leaf and the
     /// link it shows), the shown workspace's first.
-    fn t3_pane(&self) -> Option<(usize, usize, u32, String)> {
+    pub(crate) fn t3_pane(&self) -> Option<(usize, usize, u32, String)> {
         let server = self.t3.server.as_ref()?;
         let mut found = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
@@ -919,18 +1181,66 @@ impl crate::Gerdr {
         }
     }
 
-    /// Start T3 Code's server in a new tab of workspace `w`: `t3 serve`,
-    /// or by npx without a `t3` on PATH.
+    /// Start T3 Code's server in a new tab of workspace `w` (see
+    /// `start_command`).
     pub fn start_t3(&mut self, w: usize) {
+        self.start_t3_at(w, None);
+    }
+
+    /// The same, at `port` if any: where a server restarted ran.
+    pub fn start_t3_at(&mut self, w: usize, port: Option<u16>) {
         let Some(dir) = self.workspaces.get(w).map(|ws| ws.dir.clone()) else {
             return;
         };
-        let command = if crate::desktop::installed("t3") {
-            "t3 serve"
-        } else {
-            "npx t3@latest serve"
+        let pin = crate::t3_update::Updates::load().pin;
+        let start = Start {
+            home: self.t3.home.as_deref(),
+            pin: pin.as_deref(),
+            port,
         };
-        self.new_tab_running(w, &dir, command.to_owned());
+        let command = start.command(crate::desktop::installed);
+        self.new_tab_running(w, &dir, command);
+    }
+}
+
+/// How T3 Code's server is started.
+struct Start<'a> {
+    /// T3 Code's home.
+    home: Option<&'a Path>,
+    /// The version to run (see `t3_update`).
+    pin: Option<&'a str>,
+    /// The port to listen at; T3 Code's own choice without.
+    port: Option<u16>,
+}
+
+impl Start<'_> {
+    /// The command: at version `pin`, from T3 Code's home when downloaded
+    /// there, else by npx; without a pin, `t3 serve` if `installed` says
+    /// there is a `t3`, else the newest by npx. At the home and port
+    /// given.
+    fn command(&self, installed: impl Fn(&str) -> bool) -> String {
+        let quote = |text: &str| crate::desktop::shell_quote(text);
+        let mut command = match self.pin {
+            Some(pin) => match self
+                .home
+                .filter(|home| crate::t3_update::installed(home, pin))
+            {
+                Some(home) => {
+                    let bin = crate::t3_update::runtime(home, pin);
+                    format!("{} serve", quote(&bin.to_string_lossy()))
+                }
+                None => format!("npx --yes t3@{pin} serve"),
+            },
+            None if installed("t3") => "t3 serve".to_owned(),
+            None => "npx t3@latest serve".to_owned(),
+        };
+        if let Some(home) = self.home {
+            command.push_str(&format!(" --base-dir {}", quote(&home.to_string_lossy())));
+        }
+        if let Some(port) = self.port {
+            command.push_str(&format!(" --port {port}"));
+        }
+        command
     }
 }
 
@@ -1078,19 +1388,14 @@ mod tests {
         );
     }
 
-    /// A database with the tables read, as T3 Code 0.1.6 has them.
+    /// A database with the tables read, as T3 Code 0.1.6 makes them (see
+    /// `t3_schema.sql`), and a project.
     fn database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("t3_schema.sql")).unwrap();
         conn.execute_batch(
-            "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT);
-             CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT,
-                title TEXT, updated_at TEXT, archived_at TEXT, deleted_at TEXT,
-                payload_json TEXT, provider_instance_id TEXT);
-             CREATE TABLE orchestration_v2_projection_runs (run_id TEXT, thread_id TEXT,
-                ordinal INTEGER, provider TEXT, status TEXT, completed_at TEXT);
-             CREATE TABLE orchestration_v2_projection_runtime_requests (thread_id TEXT,
-                status TEXT);
-             INSERT INTO projection_projects VALUES ('p1', '/src/app');",
+            "INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+                created_at, updated_at) VALUES ('p1', 'app', '/src/app', '[]', '', '');",
         )
         .unwrap();
         conn
@@ -1100,21 +1405,29 @@ mod tests {
     fn rows_are_read_from_the_database() {
         let conn = database();
         let now = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+        let thread = "INSERT INTO orchestration_v2_projection_threads (thread_id, project_id,
+            title, default_provider, runtime_mode, interaction_mode, created_at, updated_at,
+            archived_at, payload_json, provider_instance_id)";
+        let run = "INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal,
+            provider, status, requested_at, completed_at, payload_json)";
         conn.execute_batch(&format!(
-            "INSERT INTO orchestration_v2_projection_threads VALUES
-               ('t1', 'p1', 'Fix it', {now}, NULL, NULL,
+            "{thread} VALUES
+               ('t1', 'p1', 'Fix it', 'c', 'm', 'i', '', {now}, NULL,
                 '{{\"worktreePath\": \"/src/app-wt\", \"branch\": \"t3/fix\",
                    \"modelSelection\": {{\"model\": \"opus\"}}, \"lastVisitedAt\": null,
                    \"lineage\": {{\"parentThreadId\": null}}}}', 'claudeAgent'),
-               ('old', 'p1', 'Old', '2020-01-01T00:00:00.000Z', NULL, NULL, '{{}}', 'codex'),
-               ('gone', 'p1', 'Gone', {now}, {now}, NULL, '{{}}', 'codex'),
-               ('side', 'p1', 'Aside', {now}, NULL, NULL,
+               ('old', 'p1', 'Old', 'c', 'm', 'i', '', '2020-01-01T00:00:00.000Z', NULL,
+                '{{}}', 'codex'),
+               ('gone', 'p1', 'Gone', 'c', 'm', 'i', '', {now}, {now}, '{{}}', 'codex'),
+               ('side', 'p1', 'Aside', 'c', 'm', 'i', '', {now}, NULL,
                 '{{\"lineage\": {{\"parentThreadId\": \"t1\", \"relationshipToParent\": \"fork\",
                    \"sideChat\": true}}}}', 'claudeAgent');
-             INSERT INTO orchestration_v2_projection_runs VALUES
-               ('r1', 't1', 1, 'claudeAgent', 'completed', '2020-01-01T00:00:00.000Z'),
-               ('r2', 't1', 2, 'claudeAgent', 'running', NULL);
-             INSERT INTO orchestration_v2_projection_runtime_requests VALUES ('side', 'pending');"
+             {run} VALUES
+               ('r1', 't1', 1, 'claudeAgent', 'completed', '', '2020-01-01T00:00:00.000Z', '{{}}'),
+               ('r2', 't1', 2, 'claudeAgent', 'running', '', NULL, '{{}}');
+             INSERT INTO orchestration_v2_projection_runtime_requests (runtime_request_id,
+               thread_id, node_id, kind, status, created_at, payload_json)
+               VALUES ('q1', 'side', 'n', 'approval', 'pending', '', '{{}}');"
         ))
         .unwrap();
         let rows = read_rows(&conn).unwrap();
@@ -1130,5 +1443,92 @@ mod tests {
         assert_eq!(t1.agent(), "claude");
         assert!(rows[1].child);
         assert_eq!(rows[1].status(), AgentStatus::Blocked);
+        assert_eq!(migration(&conn), Some(76));
+    }
+
+    #[test]
+    fn a_changed_table_fails_the_read_instead_of_misreading_it() {
+        let conn = database();
+        conn.execute_batch(
+            "ALTER TABLE orchestration_v2_projection_runs RENAME COLUMN status TO state;",
+        )
+        .unwrap();
+        let err = read_rows(&conn).unwrap_err().to_string();
+        assert!(err.contains("status"), "{err}");
+    }
+
+    #[test]
+    fn the_server_lists_threads_with_basic_status() {
+        let json = br#"[
+            {"threadId":"a","title":"Fix","status":"running","providerInstanceId":"claudeAgent",
+             "model":"opus","settled":false,"parentThreadId":null,"updatedAt":"2026-11-01T21:07:20Z",
+             "itemCount":3},
+            {"threadId":"b","title":"Done","status":"completed","settled":true},
+            {"threadId":"c","title":"Sub","status":"waiting","parentThreadId":"a",
+             "relationshipToParent":"subagent"},
+            {"threadId":"d","status":"idle"}
+        ]"#;
+        let rows = cli_threads(json, Path::new("/src/app")).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a", "c", "d"], "none settled");
+        assert_eq!(rows[0].status(), AgentStatus::Working);
+        assert_eq!(rows[0].paths(), [PathBuf::from("/src/app")]);
+        assert_eq!(rows[0].agent(), "claude");
+        assert!(rows[1].child);
+        assert_eq!(rows[1].status(), AgentStatus::Blocked);
+        assert_eq!(rows[2].status(), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn the_server_starts_at_the_version_pinned() {
+        let none = |_: &str| false;
+        let start = |pin, port| Start {
+            home: None,
+            pin,
+            port,
+        };
+        assert_eq!(start(None, None).command(none), "npx t3@latest serve");
+        assert_eq!(start(None, None).command(|p| p == "t3"), "t3 serve");
+        assert_eq!(
+            start(Some("0.1.6"), Some(3773)).command(none),
+            "npx --yes t3@0.1.6 serve --port 3773"
+        );
+        let home = std::env::temp_dir().join(format!("gerdr-t3-start-{}", std::process::id()));
+        let dir = home.join("runtime/versions/0.1.6");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t3"), "").unwrap();
+        std::fs::write(dir.join(".install-complete"), "0.1.6\n").unwrap();
+        let pinned = Start {
+            home: Some(&home),
+            pin: Some("0.1.6"),
+            port: None,
+        };
+        let command = pinned.command(none);
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(
+            command,
+            format!(
+                "{} serve --base-dir {}",
+                dir.join("t3").display(),
+                home.display()
+            )
+        );
+    }
+
+    /// The running server's threads of this folder's project, as gerdr asks
+    /// while the database can't be read. Needs T3 Code running here; run by
+    /// hand with `T3_PROJECT=<folder> cargo test -- --ignored running_server`.
+    #[test]
+    #[ignore = "asks the T3 Code server running here"]
+    fn the_running_server_lists_this_folder() {
+        let home = home().expect("T3 Code's home");
+        // A folder of a project of T3 Code's: `$T3_PROJECT`, else this one.
+        let dir = std::env::var_os("T3_PROJECT")
+            .map_or_else(|| std::env::current_dir().unwrap(), PathBuf::from);
+        let rows = cli_rows(&home, &[dir]);
+        for row in &rows {
+            eprintln!("{} {:?} {:?} {}", row.id, row.run, row.status(), row.title);
+        }
+        assert!(!rows.is_empty());
     }
 }

@@ -100,6 +100,10 @@ pub enum Target {
     ImportProfile(profile_import::Source),
     /// T3 Code's app, to show for workspace `.0` (see `Gerdr::open_t3`).
     T3(usize),
+    /// T3 Code, updated (see `Gerdr::update_t3`).
+    UpdateT3,
+    /// Taking newer versions of T3 Code without asking, turned on or off.
+    T3Updates,
 }
 
 impl Target {
@@ -117,6 +121,8 @@ impl Target {
             | Target::Inbox
             | Target::NewAgent(..)
             | Target::T3(_)
+            | Target::UpdateT3
+            | Target::T3Updates
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -140,6 +146,8 @@ impl Target {
             | Target::Inbox
             | Target::NewAgent(..)
             | Target::T3(_)
+            | Target::UpdateT3
+            | Target::T3Updates
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -736,6 +744,8 @@ fn frecency_key(
         | Target::Settings
         | Target::ProjectFile(_)
         | Target::ReloadProjects
+        | Target::UpdateT3
+        | Target::T3Updates
         | Target::ImportProfile(_) => return None,
     })
 }
@@ -893,6 +903,7 @@ impl Gerdr {
             )
         }));
         items.extend(self.agent_entries(self.active_workspace));
+        items.extend(self.t3_update_entries());
         items.push(self.inbox_entry());
         let home = home_dir();
         if let Some(home) = &home {
@@ -942,6 +953,50 @@ impl Gerdr {
             })
             .chain(t3)
             .collect()
+    }
+
+    /// The launcher's rows updating T3 Code, once it ran here.
+    fn t3_update_entries(&self) -> Vec<crate::switcher::Item> {
+        if self.t3.home.is_none() {
+            return Vec::new();
+        }
+        let updates = &self.t3.updates;
+        let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
+        let mut detail = running.map_or_else(|| "not running".to_owned(), |v| format!("runs {v}"));
+        if let Some(pin) = updates
+            .pin
+            .as_ref()
+            .filter(|pin| detail != format!("runs {pin}"))
+        {
+            detail.push_str(&format!(", {pin} next"));
+        }
+        if let crate::t3_agents::Source::Cli(_) = self.t3.source {
+            detail.push_str(" · gerdr reads it in part");
+        }
+        let auto = if updates.manual {
+            Item::new(
+                ItemIcon::Command,
+                "Update T3 Code automatically",
+                "to each newer version gerdr reads, checked every 6 hours",
+                Target::T3Updates,
+            )
+        } else {
+            Item::new(
+                ItemIcon::Command,
+                "Stop updating T3 Code automatically",
+                "update only when asked",
+                Target::T3Updates,
+            )
+        };
+        vec![
+            Item::new(
+                ItemIcon::Command,
+                "Update T3 Code",
+                detail,
+                Target::UpdateT3,
+            ),
+            auto,
+        ]
     }
 
     /// The row opening the inbox, saying how many items its button counts.
@@ -1150,6 +1205,8 @@ impl Gerdr {
             Target::Inbox => self.open_inbox(None),
             Target::NewAgent(w, command) => self.new_agent(w, &command),
             Target::T3(w) => self.open_t3(w, None),
+            Target::UpdateT3 => self.update_t3(None),
+            Target::T3Updates => self.toggle_t3_updates(),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),

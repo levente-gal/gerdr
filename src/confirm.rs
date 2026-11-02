@@ -30,6 +30,9 @@ pub enum Then {
     /// Close the tab of the active workspace holding these panes (see
     /// `Gerdr::close_tab`), wherever it is by then.
     CloseTab(Vec<u32>),
+    /// Restart T3 Code's server at the version waiting (see
+    /// `Gerdr::restart_t3`).
+    RestartT3,
 }
 
 /// The confirm dialog's state, while it is open.
@@ -168,6 +171,23 @@ impl Gerdr {
         self.ask(title, body, "Close tab", Then::CloseTab(panes));
     }
 
+    /// Ask before restarting T3 Code's server at `version` while `busy`
+    /// of its threads work or wait: cancelled, it restarts once they're
+    /// done.
+    pub fn ask_restart_t3(&mut self, version: String, busy: usize) {
+        let title = format!("Restart T3 Code at {version}?");
+        let body = match busy {
+            1 => "One of its threads is at work: restarting stops it. \
+                  Otherwise it restarts once the thread is done"
+                .to_owned(),
+            n => format!(
+                "{n} of its threads are at work: restarting stops them. \
+                 Otherwise it restarts once they're done"
+            ),
+        };
+        self.ask(title, body, "Restart now", Then::RestartT3);
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`.
     fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -226,6 +246,7 @@ impl Gerdr {
                 }
             }
             Then::ClosePane(id) => self.close_pane_now(id),
+            Then::RestartT3 => self.restart_t3(),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs

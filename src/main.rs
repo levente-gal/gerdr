@@ -72,6 +72,7 @@ mod switcher;
 mod syntax;
 mod system_theme;
 mod t3_agents;
+mod t3_update;
 mod tab_strip;
 mod test_runs;
 mod text_field;
