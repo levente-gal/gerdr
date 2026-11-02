@@ -54,7 +54,7 @@ pub const KEYS: [(&str, &str); 8] = [
     ("Space", "mark the file viewed, or not"),
     (
         "Alt+Shift+Down / Up",
-        "go to the next or the last file not viewed",
+        "go to the next or the previous file not viewed",
     ),
     ("f", "fix the finding, or take that back"),
     ("Del", "dismiss the finding, saying why, or reopen it"),
