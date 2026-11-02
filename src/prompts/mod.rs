@@ -41,6 +41,12 @@ mod tests {
     use super::*;
 
     fn vars(multi: bool, comments: &str) -> render::Vars {
+        build_vars(multi, comments, "")
+    }
+
+    /// The values a stage's prompt gets, `evidence` the failure lines of
+    /// a failed Verify.
+    fn build_vars(multi: bool, comments: &str, evidence: &str) -> render::Vars {
         [
             ("feature.title", "Bulk edit"),
             ("feature.slug", "bulk-edit"),
@@ -49,6 +55,10 @@ mod tests {
             ("project.name", "Shop"),
             ("artifact.path", "/d/bulk-edit/plan.md"),
             ("brief.path", "/d/bulk-edit/brief.md"),
+            ("plan.path", "/d/bulk-edit/plan.md"),
+            ("evidence.path", "/d/bulk-edit/evidence.md"),
+            ("evidence", evidence),
+            ("branch", "feature/bulk-edit"),
             ("multi_repo", if multi { "yes" } else { "" }),
             ("repos", "- api\n- web"),
             ("comments", comments),
@@ -63,7 +73,17 @@ mod tests {
 
     #[test]
     fn every_builtin_renders() {
-        for name in ["discover", "plan", "nudge", "send-back", "rules", "repos"] {
+        for name in [
+            "discover",
+            "plan",
+            "build",
+            "fix",
+            "continue",
+            "nudge",
+            "send-back",
+            "rules",
+            "repos",
+        ] {
             for multi in [false, true] {
                 for comments in ["", "Fix the scope."] {
                     let text = render_builtin(name, &vars(multi, comments))
@@ -91,5 +111,63 @@ mod tests {
         let text = render_builtin("nudge", &vars(false, "")).unwrap();
         assert_eq!(text.trim().lines().count(), 1, "{text}");
         assert!(text.contains("no Outcome section"));
+    }
+
+    #[test]
+    fn build_words_follow_the_repos_evidence_and_comments() {
+        let build = |multi, comments, evidence| {
+            let mut v = build_vars(multi, comments, evidence);
+            v.insert("artifact.path".into(), "/d/bulk-edit/build.md".into());
+            render_builtin("build", &v).unwrap()
+        };
+        let one = build(false, "", "");
+        for words in [
+            "/d/bulk-edit/brief.md",
+            "/d/bulk-edit/plan.md",
+            "/d/bulk-edit/build.md",
+            "`## Milestones`",
+            "go on from it",
+            "only that one",
+            "feature/bulk-edit, which is already checked out",
+            "never push",
+            "Leave nothing uncommitted and no untracked files",
+            "Then STOP.",
+            "gerdr waits for",
+            "do not start the next milestone on\n   your own",
+        ] {
+            assert!(one.contains(words), "{words}: {one}");
+        }
+        assert!(!one.contains("context only"));
+        assert!(!one.contains("Verify failed"));
+        assert!(!one.contains("comments on the build"));
+
+        let many = build(
+            true,
+            "Name the endpoint bulk.",
+            "api: `npm test` exited with 1",
+        );
+        assert!(many.contains("“context only” are there to read: never edit them"));
+        assert!(many.contains("Verify failed on the code"));
+        assert!(many.contains("api: `npm test` exited with 1"));
+        assert!(many.contains("/d/bulk-edit/evidence.md"));
+        assert!(many.contains("fix the\n   failures, commit the fixes, and stop"));
+        // A fix round builds no milestone.
+        assert!(!many.contains("Build the first unticked milestone"));
+        assert!(many.contains("Name the endpoint bulk."));
+    }
+
+    #[test]
+    fn fix_and_continue_are_one_line() {
+        // Typed into a live terminal, where a newline is Enter.
+        let fix = render_builtin("fix", &build_vars(true, "", "x")).unwrap();
+        assert!(!fix.trim_end().contains('\n'), "{fix}");
+        assert!(fix.contains("Verify failed") && fix.contains("/d/bulk-edit/evidence.md"));
+        assert!(fix.contains("commit") && fix.contains("stop"));
+        let mut v = build_vars(false, "", "");
+        v.insert("artifact.path".into(), "/d/bulk-edit/build.md".into());
+        let go = render_builtin("continue", &v).unwrap();
+        assert!(!go.trim_end().contains('\n'), "{go}");
+        assert!(go.contains("next unticked milestone in /d/bulk-edit/build.md"));
+        assert!(go.contains("stop after it"));
     }
 }

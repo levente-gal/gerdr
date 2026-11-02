@@ -1,6 +1,6 @@
 //! The files agent stages write into the feature data dir, and the checks
-//! that make one good enough to review: `brief.md` (Discover) and
-//! `plan.md` (Plan).
+//! that make one good enough to review: `brief.md` (Discover), `plan.md`
+//! (Plan) and `build.md` (Build).
 //!
 //! A brief needs `## Outcome`, `## In scope`, `## Out of scope` and
 //! `## Acceptance criteria` sections, none empty, and at least one
@@ -12,7 +12,8 @@
 //!
 //! A build log (`build.md`, Build) needs `## Milestones` with at least one
 //! checkbox item, and is good once every one is ticked (`- [x] …`);
-//! `milestones` counts them, for the stops between milestones.
+//! `milestones` counts them, for the stops between milestones. A
+//! checkbox item may be a numbered one too (`1. [ ] …`).
 
 use std::path::{Path, PathBuf};
 
@@ -51,7 +52,7 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
                     .get("Milestones")
                     .unwrap_or_default()
                     .iter()
-                    .any(|l| checkbox(l))
+                    .any(|l| checkbox(l).is_some())
             {
                 lacks.push("no milestone as a checkbox item (“- [ ] …”)".into());
             }
@@ -61,11 +62,14 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
                 lacks.push("no “Migrations:” line".into());
             }
         }
-        Stage::Build => {
-            // Filled in by the backend agent: Milestones section with
-            // checkbox items, every one ticked.
-            doc.need("Milestones", &mut lacks);
-        }
+        Stage::Build if doc.need("Milestones", &mut lacks) => match milestones(text) {
+            (_, 0) => lacks.push("no milestone as a checkbox item (“- [ ] …”)".into()),
+            (ticked, total) if ticked < total => lacks.push(format!(
+                "{} of {total} milestones not ticked",
+                total - ticked
+            )),
+            _ => {}
+        },
         _ => {}
     }
     if lacks.is_empty() { Ok(()) } else { Err(lacks) }
@@ -74,8 +78,10 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
 /// The checkbox items of `text`'s Milestones section: how many are ticked
 /// (`[x]` or `[X]`), and how many there are.
 pub fn milestones(text: &str) -> (usize, usize) {
-    let _ = text;
-    (0, 0)
+    let body = Sections::of(text).get("Milestones").unwrap_or_default();
+    let boxes: Vec<&str> = body.iter().filter_map(|l| checkbox(l)).collect();
+    let ticked = boxes.iter().filter(|b| **b != "[ ]").count();
+    (ticked, boxes.len())
 }
 
 /// The repositories of `repos` the plan's Repositories section doesn't
@@ -189,16 +195,23 @@ fn given_when_then(line: &str) -> bool {
         .is_some()
 }
 
-/// Whether `line` is a checkbox list item.
-fn checkbox(line: &str) -> bool {
-    let rest = line
-        .strip_prefix("- ")
-        .or_else(|| line.strip_prefix("* "))
-        .or_else(|| line.strip_prefix("+ "));
-    rest.is_some_and(|rest| {
-        let rest = rest.trim_start();
-        ["[ ]", "[x]", "[X]"].iter().any(|b| rest.starts_with(b))
-    })
+/// The box of checkbox list item `line` (trimmed): `[ ]`, `[x]` or
+/// `[X]`. A numbered item (`1. [ ] …`, `1) [ ] …`) counts too.
+fn checkbox(line: &str) -> Option<&'static str> {
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let rest = if digits > 0 {
+        line[digits..]
+            .strip_prefix(". ")
+            .or_else(|| line[digits..].strip_prefix(") "))
+    } else {
+        line.strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| line.strip_prefix("+ "))
+    };
+    let rest = rest?.trim_start();
+    ["[ ]", "[x]", "[X]"]
+        .into_iter()
+        .find(|b| rest.starts_with(b))
 }
 
 /// Whether `line` is the `Migrations:` line: as a list item or in bold
@@ -225,7 +238,8 @@ mod tests {
     fn names_follow_the_stages() {
         assert_eq!(name(Stage::Discover), Some("brief.md"));
         assert_eq!(name(Stage::Plan), Some("plan.md"));
-        assert_eq!(name(Stage::Build), None);
+        assert_eq!(name(Stage::Build), Some("build.md"));
+        assert_eq!(name(Stage::Verify), None);
         assert_eq!(
             path(Path::new("/d"), Stage::Plan),
             Some(PathBuf::from("/d/plan.md"))
@@ -280,7 +294,42 @@ mod tests {
                 "no “Migrations:” line".to_owned(),
             ])
         );
-        assert_eq!(check(Stage::Build, ""), Ok(()));
+        // A stage without a file has nothing to check.
+        assert_eq!(check(Stage::Verify, ""), Ok(()));
+    }
+
+    #[test]
+    fn a_build_log_is_good_once_every_milestone_is_ticked() {
+        let log = "# Build\n\n## Milestones\n- [x] API\n  Endpoint added.\n* [X] UI\n1. [ ] Docs\n2) [ ] Tests\n\n## Notes\n- [ ] not a milestone\n";
+        assert_eq!(milestones(log), (2, 4));
+        assert_eq!(
+            check(Stage::Build, log),
+            Err(vec!["2 of 4 milestones not ticked".to_owned()])
+        );
+        let done = log
+            .replace("[ ] Docs", "[x] Docs")
+            .replace("[ ] Tests", "[x] Tests");
+        assert_eq!(milestones(&done), (4, 4));
+        assert_eq!(check(Stage::Build, &done), Ok(()));
+        // Boxes in code don't count.
+        let fenced = "## Milestones\n```\n- [ ] a\n```\n- [x] b\n";
+        assert_eq!(milestones(fenced), (1, 1));
+    }
+
+    #[test]
+    fn a_build_log_needs_milestones_as_checkboxes() {
+        assert_eq!(milestones(""), (0, 0));
+        assert_eq!(
+            check(Stage::Build, ""),
+            Err(vec!["no Milestones section".to_owned()])
+        );
+        assert_eq!(
+            check(Stage::Build, "## Milestones\n- API\n1. UI\n"),
+            Err(vec![
+                "no milestone as a checkbox item (“- [ ] …”)".to_owned()
+            ])
+        );
+        assert_eq!(milestones("## Milestones\n- API\n- [x]API\n"), (1, 1));
     }
 
     #[test]
