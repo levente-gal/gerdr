@@ -1,6 +1,8 @@
 //! The inbox (prefix, i; the sidebar's "+" menu; a click on its "Needs
 //! you" heading): one place to go through what wants the user across the
-//! shown project, a section per kind: agents blocked, done or at work;
+//! shown project, a section per kind: feature gates waiting for the
+//! user to review a stage's file (over every project); agents blocked,
+//! done or at work;
 //! repos needing a look (changes, commits to push or pull, stashes, a
 //! merge stopped half-way, worktrees left behind, a branch's failed CI);
 //! pull requests asking for review or failing CI; and tickets: those
@@ -59,7 +61,8 @@ use crate::{
 /// convert.
 pub type Tone = chrome::InboxTone;
 
-/// An item's stable id, the key of its triage: `agent:<AgentKey>`,
+/// An item's stable id, the key of its triage: `gate:<project>|<slug>`,
+/// `agent:<AgentKey>`,
 /// `git:<dir>`, `worktree:<path>`, `ci:<host/slug>:<subject>`,
 /// `gh:<host/slug>#<n>`, `linear:<uuid>`, `todo:<TodoId>`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -119,7 +122,7 @@ impl Section {
     /// Its label's icon.
     pub fn icon(self) -> chrome::InboxIcon {
         match self {
-            Section::Gates => chrome::InboxIcon::Agent,
+            Section::Gates => chrome::InboxIcon::Gate,
             Section::Agents => chrome::InboxIcon::Agent,
             Section::Services => chrome::InboxIcon::Failed,
             Section::Ignored => chrome::InboxIcon::Failed,
@@ -177,6 +180,7 @@ impl InboxItem {
             Detail::Issue { .. } => I::Ticket,
             Detail::Todo { .. } => I::Todo,
             Detail::Unread { .. } => I::Failed,
+            Detail::Gate { .. } => I::Gate,
         }
     }
 
@@ -418,6 +422,18 @@ pub enum Detail {
         /// Whether the user ignores it: counted, never told of.
         ignored: bool,
     },
+    /// A feature stage's file, ready for the user to review.
+    Gate {
+        /// Its project's name.
+        project: String,
+        /// The feature's title.
+        feature: String,
+        stage: crate::feature::Stage,
+        /// The file to review: `brief.md`, `plan.md`.
+        file: Option<&'static str>,
+        /// When it got ready, in seconds since the epoch.
+        since: u64,
+    },
 }
 
 /// What the panel asked for.
@@ -498,12 +514,13 @@ pub fn visible(
         .collect()
 }
 
-/// Whether the tab strip's inbox button counts `item`: an agent blocked or
-/// done, a service's error not looked at (as its workspace's count in the
+/// Whether the tab strip's inbox button counts `item`: a gate waiting for
+/// the user, an agent blocked or done, a service's error not looked at (as its workspace's count in the
 /// sidebar), a pull request asking for review, a failed CI of `main`,
 /// `master`, `dev` or `develop`.
 pub fn counted(item: &InboxItem) -> bool {
     match &item.detail {
+        Detail::Gate { .. } => true,
         Detail::Agent { status, .. } => {
             matches!(status, AgentStatus::Blocked | AgentStatus::Done)
         }
@@ -810,6 +827,22 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 block_title = Some(title.to_owned());
                 block = lines.clone();
             }
+        }
+        Detail::Gate {
+            project,
+            feature,
+            stage,
+            file,
+            since,
+        } => {
+            field("Feature", feature.clone());
+            field("Stage", stage.label().to_owned());
+            field("Project", project.clone());
+            if let Some(file) = file {
+                field("File", (*file).to_owned());
+            }
+            field("Ready", crate::projects::ago(now, *since));
+            field("Next", "Enter opens it to approve or send back".to_owned());
         }
     }
     InboxDetailView {
@@ -2041,6 +2074,44 @@ mod tests {
             (*seen, *ignored) = (false, true);
         }
         assert!(!counted(&error));
+    }
+
+    fn gate(id: &str) -> InboxItem {
+        let mut item = item(id, Section::Gates, None);
+        item.tone = Tone::Blocked;
+        item.detail = Detail::Gate {
+            project: "gerdr".into(),
+            feature: "Log in".into(),
+            stage: crate::feature::Stage::Discover,
+            file: Some("brief.md"),
+            since: 0,
+        };
+        item
+    }
+
+    #[test]
+    fn a_gate_is_counted_and_listed_first_under_its_flag() {
+        let gate = gate("gate:p|log-in");
+        assert!(counted(&gate));
+        assert_eq!(gate.icon(), chrome::InboxIcon::Gate);
+        assert_eq!(Section::ALL[0], Section::Gates);
+        assert_eq!(Section::Gates.icon(), chrome::InboxIcon::Gate);
+        // Listed before a blocked agent, even an older one.
+        let items = [agent("agent:p1", AgentStatus::Blocked, 900), gate];
+        let ordered: Vec<_> = order(&items).into_iter().map(|i| i.id.0).collect();
+        assert_eq!(ordered, ["gate:p|log-in", "agent:p1"]);
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let view = Panel::new(None).view(&list);
+        assert!(matches!(
+            &view.rows[0],
+            InboxRow::Label { title, icon: chrome::InboxIcon::Gate, count: 1, .. } if title == "Gates"
+        ));
+        assert!(matches!(&view.rows[1], InboxRow::Item(line) if line.id == "gate:p|log-in"));
+        // No gates: no Gates label.
+        let view = Panel::new(None).view(&listing(&items[..1], &triage, &names));
+        assert!(matches!(&view.rows[0], InboxRow::Label { title, .. } if title == "Agents"));
     }
 
     fn agent(id: &str, status: AgentStatus, age: u64) -> InboxItem {

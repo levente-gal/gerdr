@@ -206,6 +206,8 @@ pub struct InboxMarks {
 /// section label's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InboxIcon {
+    /// A feature gate waiting for the user: a flag.
+    Gate,
     /// An agent, as the Agents section's label shows it.
     Agent,
     /// An agent or test run: its badge (see `badge`) on the tinted square.
@@ -958,6 +960,8 @@ fn icon_shape(icon: InboxIcon, x: f32, y: f32, s: f32) -> f32 {
         // A head with two eyes and an antenna.
         // Drawn by `agent_badge` instead; a robot if it ever got here.
         InboxIcon::Agent | InboxIcon::Badge(_) => robot(x, y, s),
+        // A flag on its pole: the feature waits here for the user.
+        InboxIcon::Gate => line(-3.8, -5.6, -3.8, 5.8).min(pennant(x, y, s)),
         InboxIcon::Repo => git_branch(x, y, s),
         InboxIcon::Worktree => folder(x, y, 0.72 * s) - 0.25 * s,
         InboxIcon::Failed => cross(x, y, 1.05 * s) - 0.2 * s,
@@ -978,6 +982,23 @@ fn icon_shape(icon: InboxIcon, x: f32, y: f32, s: f32) -> f32 {
             rounded_rect(x, y, -4.8 * s, -4.8 * s, 9.6 * s, 9.6 * s, 2.2 * s).abs() - STROKE * s
         }
     }
+}
+
+/// Signed distance to a gate's flag, filled: a triangle off the pole at
+/// its left, pointing right.
+fn pennant(x: f32, y: f32, s: f32) -> f32 {
+    let corners = [(-3.8, -5.0), (4.8, -2.4), (-3.8, 0.6)];
+    // Clockwise on screen: inside is left of each edge, at a positive
+    // cross product.
+    (0..3)
+        .map(|k| {
+            let (ax, ay) = corners[k];
+            let (bx, by) = corners[(k + 1) % 3];
+            let (ex, ey) = ((bx - ax) * s, (by - ay) * s);
+            let cross = ex * (y - ay * s) - ey * (x - ax * s);
+            -cross / ex.hypot(ey)
+        })
+        .fold(f32::MIN, f32::max)
 }
 
 /// Signed distance to a right arrow centred on the origin: the compose

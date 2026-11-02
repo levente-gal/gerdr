@@ -1,5 +1,5 @@
-//! The inbox's items, gathered from what gerdr already shows: the agent
-//! cards, the workspaces' Git status and worktrees, the CI cards, the
+//! The inbox's items, gathered from what gerdr already shows: the
+//! feature gates waiting for the user, the agent cards, the workspaces' Git status and worktrees, the CI cards, the
 //! issues and tickets read for the inbox and its own todos. Pure: everything comes in
 //! as `Sources`, so tests build them by hand.
 
@@ -14,6 +14,8 @@ use crate::{
     chrome::{AgentView, WorkspaceView, status_label, status_meaning},
     ci::{self, CiState, Group, RepoCi, Subject},
     cursor_agents::CursorChat,
+    feature::Stage,
+    feature_agents::Gate,
     git::{GitStatus, InProgress, Worktree},
     herdr::{AgentInfo, AgentStatus},
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
@@ -65,6 +67,8 @@ pub struct Sources<'a> {
     /// The services' errors the user ignores, one per project and
     /// fingerprint.
     pub ignored_errors: &'a [ServiceItem],
+    /// The feature gates waiting for the user, over every project.
+    pub gates: &'a [GateItem],
     pub now: Instant,
     /// Now, in seconds since the epoch.
     pub now_secs: u64,
@@ -81,6 +85,14 @@ pub struct ServiceItem {
     pub place: String,
     /// What its pane's bar calls the service.
     pub service: String,
+}
+
+/// A feature gate waiting for the user, with its project's name.
+#[derive(Clone, Debug)]
+pub struct GateItem {
+    pub gate: Gate,
+    /// Its project's name, as the project chooser shows it.
+    pub project: String,
 }
 
 /// What every item but a todo can have done to it.
@@ -748,9 +760,66 @@ pub fn ignored_items(src: &Sources) -> Vec<InboxItem> {
         .collect()
 }
 
+/// The inbox item of feature `slug`'s gate in project `project`: one per
+/// feature, whichever stage waits.
+pub fn gate_item_id(project: &str, slug: &str) -> ItemId {
+    ItemId(format!("gate:{project}|{slug}"))
+}
+
+/// What a gate of `stage` asks the user to review: the file's kind, for
+/// the title, and its name.
+fn gate_file(stage: Stage) -> (&'static str, Option<&'static str>) {
+    match stage {
+        Stage::Discover => ("Brief", Some("brief.md")),
+        Stage::Plan => ("Plan", Some("plan.md")),
+        stage => (stage.label(), None),
+    }
+}
+
+/// The gates waiting for the user, the oldest first, at `now_secs`: each
+/// says which file is ready, in which project, and what Enter does.
+pub fn gate_items(gates: &[GateItem], now_secs: u64) -> Vec<InboxItem> {
+    let mut gates: Vec<&GateItem> = gates.iter().collect();
+    gates.sort_by_key(|g| g.gate.since);
+    gates
+        .into_iter()
+        .map(|item| {
+            let gate = &item.gate;
+            let (kind, file) = gate_file(gate.stage);
+            let review = file.map_or_else(|| "review it".to_owned(), |f| format!("review {f}"));
+            InboxItem {
+                id: gate_item_id(&gate.project, &gate.slug),
+                section: Section::Gates,
+                // Back from a dismissal when the next stage waits, or
+                // this one again after it was sent back.
+                fingerprint: format!("{}|{:?}|{}", gate.slug, gate.stage, gate.since),
+                workspace: None,
+                title: format!("{kind} ready: “{}”", gate.title),
+                subtitle: format!("{} · {review}", item.project),
+                tone: Tone::Blocked,
+                age: Some(Duration::from_secs(now_secs.saturating_sub(gate.since))),
+                target: Target::Gate {
+                    project: gate.project.clone(),
+                    slug: gate.slug.clone(),
+                    stage: gate.stage,
+                },
+                actions: TRIAGE.to_vec(),
+                detail: Detail::Gate {
+                    project: item.project.clone(),
+                    feature: gate.title.clone(),
+                    stage: gate.stage,
+                    file,
+                    since: gate.since,
+                },
+            }
+        })
+        .collect()
+}
+
 /// Every item, each once.
 pub fn collect(src: &Sources) -> Vec<InboxItem> {
-    let mut items = agent_items(src);
+    let mut items = gate_items(src.gates, src.now_secs);
+    items.extend(agent_items(src));
     items.extend(service_items(src));
     items.extend(ignored_items(src));
     items.extend(git_items(src));
@@ -825,6 +894,7 @@ mod tests {
         tickets: Vec<TicketRepo>,
         store: Option<InboxFile>,
         pane_text: HashMap<String, PaneText>,
+        gates: Vec<GateItem>,
     }
 
     impl Fixture {
@@ -857,6 +927,7 @@ mod tests {
                 pane_text: &self.pane_text,
                 service_errors: &[],
                 ignored_errors: &[],
+                gates: &self.gates,
                 now: Instant::now(),
                 now_secs: 1_000_000,
             }
@@ -1229,6 +1300,81 @@ mod tests {
                 "ci:github.com/o/r:#6",
             ]
         );
+    }
+
+    fn gate_of(project: &str, slug: &str, stage: Stage, since: u64) -> GateItem {
+        GateItem {
+            gate: Gate {
+                project: project.into(),
+                slug: slug.into(),
+                title: format!("{slug} title"),
+                stage,
+                since,
+            },
+            project: format!("{project} name"),
+        }
+    }
+
+    #[test]
+    fn gates_say_what_is_ready_where_the_oldest_first() {
+        let gates = [
+            gate_of("p2", "export", Stage::Plan, 999_000),
+            gate_of("p1", "log-in", Stage::Discover, 990_000),
+        ];
+        let items = gate_items(&gates, 1_000_000);
+        let lines: Vec<_> = items
+            .iter()
+            .map(|i| (i.title.as_str(), i.subtitle.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("Brief ready: “log-in title”", "p1 name · review brief.md"),
+                ("Plan ready: “export title”", "p2 name · review plan.md"),
+            ]
+        );
+        let gate = &items[0];
+        assert_eq!(gate.id, gate_item_id("p1", "log-in"));
+        assert_eq!(gate.section, Section::Gates);
+        assert_eq!(gate.tone, Tone::Blocked);
+        assert_eq!(gate.workspace, None);
+        assert_eq!(gate.age, Some(Duration::from_secs(10_000)));
+        assert_eq!(gate.actions, TRIAGE);
+        assert_eq!(
+            gate.target,
+            Target::Gate {
+                project: "p1".into(),
+                slug: "log-in".into(),
+                stage: Stage::Discover,
+            }
+        );
+        // The next stage, or the same one ready again, brings back a
+        // dismissed gate: same id, another fingerprint.
+        let plan = gate_items(&[gate_of("p1", "log-in", Stage::Plan, 990_000)], 1_000_000);
+        let again = gate_items(
+            &[gate_of("p1", "log-in", Stage::Discover, 995_000)],
+            1_000_000,
+        );
+        for other in [&plan[0], &again[0]] {
+            assert_eq!(other.id, gate.id);
+            assert_ne!(other.fingerprint, gate.fingerprint);
+        }
+    }
+
+    #[test]
+    fn gates_come_first_and_count_on_the_inbox_button() {
+        let mut f = Fixture::default();
+        f.workspace("a", "/r", Some(git("/r")));
+        f.agents[0] = vec![agent(AgentKey::Herdr("p1".into()), AgentStatus::Blocked)];
+        f.gates = vec![gate_of("p", "log-in", Stage::Discover, 999_000)];
+        let items = collect(&f.sources());
+        assert_eq!(items[0].section, Section::Gates);
+        let counted: Vec<_> = items
+            .into_iter()
+            .filter(crate::inbox::counted)
+            .map(|i| i.id.0)
+            .collect();
+        assert_eq!(counted, ["gate:p|log-in", "agent:p1"]);
     }
 
     fn issue(source: IssueSource, id: &str) -> Issue {

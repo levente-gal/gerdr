@@ -241,6 +241,17 @@ impl Gerdr {
             .iter()
             .map(service_item)
             .collect();
+        let gates: Vec<_> = self
+            .waiting_gates()
+            .into_iter()
+            .map(|gate| inbox_sources::GateItem {
+                project: self
+                    .projects
+                    .project(&gate.project)
+                    .map_or_else(|| gate.project.clone(), |p| p.name.clone()),
+                gate,
+            })
+            .collect();
         inbox_sources::collect(&Sources {
             workspaces,
             dirs: &dirs,
@@ -259,6 +270,7 @@ impl Gerdr {
             pane_text: &self.inbox.pane_text,
             service_errors: &service_errors,
             ignored_errors: &ignored_errors,
+            gates: &gates,
             now: Instant::now(),
             now_secs: inbox_store::now_secs(),
         })
