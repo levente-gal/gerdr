@@ -36,6 +36,13 @@ pub fn clear(source: &'static str) {
     problems.retain(|p| p.source != source);
 }
 
+/// Forget problem `text` from `source` alone: it was fixed, while the
+/// source's other problems stay.
+pub fn forget(source: &'static str, text: &str) {
+    let mut problems = PROBLEMS.lock().unwrap_or_else(|e| e.into_inner());
+    problems.retain(|p| p.source != source || p.text != text);
+}
+
 /// Make `texts` the problems from `source`, in place of the ones it had:
 /// none when it works again.
 pub fn set(source: &'static str, texts: Vec<String>) {

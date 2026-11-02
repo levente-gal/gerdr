@@ -137,11 +137,14 @@ pub fn run(
                     )
                 }
             };
+            // The log is a help to read, not the result: a line that can't
+            // be written doesn't stop the setup (its error is the result).
             let _ = writeln!(file, "== {} {name}: {note}", super::verify::utc(now()));
         }
         for command in commands_of(commands, name) {
             i += 1;
             progress(format!("{name}: {command} ({i} of {total})"));
+            // As above: a log line lost doesn't stop the setup.
             let _ = writeln!(file, "== {} {name}: {command}", super::verify::utc(now()));
             let _ = file.flush();
             let out = file
@@ -259,6 +262,7 @@ pub(super) fn shell(
             std::thread::sleep(Duration::from_millis(50));
         }
         kill_group(group, libc::SIGKILL);
+        // Only reaps it after SIGKILL: how it ended is already known.
         let _ = child.wait();
         return Exit::TimedOut(timeout);
     };

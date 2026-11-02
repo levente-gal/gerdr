@@ -309,6 +309,11 @@ impl Gerdr {
         }
         let now = feature::now();
         if let Some(f) = self.feature_mut(project, slug) {
+            // A failure an earlier setup put in the problems list goes: this
+            // run fixes it or reports its own.
+            if let Some(old) = f.setup.as_ref().and_then(|s| s.failed.as_deref()) {
+                crate::problems::forget("features", &setup_failed_text(&f.title, old));
+            }
             f.setup = Some(SetupRun {
                 started: now,
                 ..SetupRun::default()

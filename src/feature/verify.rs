@@ -305,6 +305,7 @@ fn run_one(check: &Check, slug: &str, timeout: Duration) -> Outcome {
                         }
                     }
                 }
+                // The other end gave up waiting (`DRAIN`): nobody to tell.
                 let _ = done.send(());
             });
             let exit = match writer.try_clone() {
@@ -318,6 +319,8 @@ fn run_one(check: &Check, slug: &str, timeout: Duration) -> Outcome {
                 ),
                 Err(err) => Exit::Failed(format!("couldn't make a pipe: {err}")),
             };
+            // A timeout means something the check started still holds the
+            // pipe: what was read so far is kept, and the check is done.
             let _ = ended.recv_timeout(DRAIN);
             let kept = kept.lock().unwrap_or_else(|e| e.into_inner());
             (exit, kept.0.clone(), kept.1)
