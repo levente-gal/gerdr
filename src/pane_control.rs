@@ -971,11 +971,11 @@ impl Gerdr {
                     bar_wanted(content.status, near)
                 });
                 flipped |= look.flipped;
-                // Drawn always: hidden, it is its grip.
+                // Its band is drawn always: hidden, it is its grip.
                 let full = chrome::pane_bar_rect(rect, kind);
                 Some(PaneBarView {
                     rect: full,
-                    grip: chrome::pane_grip_rect(rect),
+                    grip: chrome::pane_bar_rects_shown(rect, look.shown).0,
                     label: content.label,
                     note: content.note,
                     status: content.status,
@@ -992,10 +992,9 @@ impl Gerdr {
                         .filter(|(hovered, _)| *hovered == id)
                         .map(|(_, button)| button),
                     visible: look.visible,
-                    // A terminal's grows from its grip, which is always
-                    // there; a pill fades in over its grip.
-                    alpha: if kind.floats() { look.alpha } else { 1.0 },
-                    slide: look.slide.min(full.size.h),
+                    // Its pill fades in over its band.
+                    alpha: look.alpha,
+                    slide: look.slide,
                 })
             })
             .collect();
@@ -1006,9 +1005,8 @@ impl Gerdr {
     }
 
     /// The pane of the active tab whose bar is at `pos`, and what of it.
-    /// A hidden terminal's bar is its grip, with only its close button; a
-    /// floating bar's grip is all label, out or not, and its pill, while
-    /// out, has its buttons.
+    /// A bar's band (its grip, or the room of one kept out) is all label,
+    /// out or not; its pill, while out, has its buttons.
     pub fn pane_bar_at(&self, pos: Point<f64, Logical>) -> Option<(u32, BarHit)> {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
@@ -1016,19 +1014,14 @@ impl Gerdr {
             .find_map(|(id, rect)| {
                 let pane = tab.panes.iter().find(|p| p.id == id)?;
                 let kind = self.pane_bar_of(pane).buttons;
-                let drawn = self.pane_bar_drawn(tab, id);
-                let grip = chrome::pane_grip_rect(rect);
-                let hit = if drawn {
+                let hit = self.pane_bar_drawn(tab, id).then(|| {
                     let bar = chrome::pane_bar_rect(rect, kind);
                     chrome::pane_bar_hit(bar, kind, tab.bar_zoom(id), pos)
-                } else if kind.floats() {
-                    None
-                } else {
-                    chrome::pane_grip_hit(grip, pos)
-                };
-                let hit = hit.or_else(|| {
-                    (kind.floats() && grip.to_f64().contains(pos)).then_some(BarHit::Label)
-                })?;
+                });
+                let band = chrome::pane_bar_rects_shown(rect, self.pane_bar_shown(tab, id)).0;
+                let hit = hit
+                    .flatten()
+                    .or_else(|| band.to_f64().contains(pos).then_some(BarHit::Label))?;
                 Some((id, hit))
             })
     }

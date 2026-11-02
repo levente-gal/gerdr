@@ -180,9 +180,11 @@ fn tabs() -> Vec<TabView> {
     ]
 }
 
+/// A terminal's bar, its command exited, restart hovered.
 fn pane_bar() -> PaneBarView {
+    let pane = Rect::new((0, 0).into(), (700, 400).into());
     PaneBarView {
-        rect: Rect::new((0, 0).into(), (600, super::PANE_BAR_HEIGHT).into()),
+        rect: super::pane_bar_rect(pane, BarButtons::Terminal),
         grip: Rect::default(),
         label: "npm run dev -- --port 3000".into(),
         note: Some("exited"),
@@ -825,7 +827,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     [
         0x742820c5c927d818, // sidebar
         0xed1972252f36590d, // tab_strip
-        0x5fee9efd7b4d90d0, // pane_bar
+        0x0256097578c822a6, // pane_bar
         0x866d59a70ebe252d, // help
         0x378d0ffdb2449b77, // menu
         0xfc09c643c2d57ae1, // switcher
@@ -840,7 +842,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     [
         0x9ddccb37c80d489b, // sidebar
         0x75280e3af24f953f, // tab_strip
-        0x45306f6b0cd01731, // pane_bar
+        0xa1370eef83e29cb5, // pane_bar
         0x56045b72862ed173, // help
         0xd724a365fa94d169, // menu
         0x1a39f33e0a29f83b, // switcher
@@ -855,7 +857,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     [
         0x4833c6a51e833328, // sidebar
         0xf5c707c6dab41293, // tab_strip
-        0x16f9e0cb60272263, // pane_bar
+        0x318e2c2367707445, // pane_bar
         0x8c0302567b35f0c3, // help
         0xf82050c3b2848862, // menu
         0x422064c274f92b90, // switcher
@@ -870,7 +872,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     [
         0xe9feefcbe02c7ed6, // sidebar
         0x65c73e85a9732c79, // tab_strip
-        0x1d9ebaa9665f8db5, // pane_bar
+        0x9778803aecc37fe9, // pane_bar
         0x22f444d49649f855, // help
         0xc17d1e64d3c77f97, // menu
         0x77eb0acf1f4d4fd5, // switcher
