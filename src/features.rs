@@ -186,8 +186,9 @@ enum Done {
         slug: String,
         /// The patch-id the Ship check was on.
         patch: Option<String>,
-        /// A squash was started too: done once it is merged, not now.
-        squash: bool,
+        /// The squash steps, to start in a tab once the code is found
+        /// unchanged: then done once merged, not now.
+        squash: Vec<Action>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
     },
 }
@@ -989,7 +990,7 @@ impl Gerdr {
                 result,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.feature_shipped(&project, &slug, patch.as_deref(), squash, result);
+                self.feature_shipped(&project, &slug, patch.as_deref(), &squash, result);
             }
         }
     }
@@ -1785,33 +1786,6 @@ impl Gerdr {
         let (squash, prs): (Vec<Action>, Vec<Action>) = actions
             .into_iter()
             .partition(|a| matches!(a, Action::Squash { .. }));
-        if !squash.is_empty() {
-            let (dir, command) = ship::squash_command(&feature, &squash);
-            if command.trim().is_empty() {
-                tracing::warn!("shipping feature {project}/{slug}: no squash command");
-                return self.show_error(format!(
-                    "Couldn't ship \u{201c}{title}\u{201d}: no squash command for it"
-                ));
-            }
-            if !dir.exists() {
-                return self.show_error(format!(
-                    "Couldn't ship \u{201c}{title}\u{201d}: {} is gone",
-                    tilde(&dir)
-                ));
-            }
-            self.close_feature_panel();
-            let w = self.active_workspace;
-            self.new_tab_running(w, &dir, command);
-            if let Some(feature) = self.feature_mut(project, slug) {
-                let now = feature::now();
-                feature.shipping.squash_at = Some(now);
-                feature.log(now, "Squash started");
-            }
-            self.save_feature(project, slug);
-        }
-        if prs.is_empty() {
-            return;
-        }
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -1819,15 +1793,58 @@ impl Gerdr {
             repo: None,
             what: format!("Shipping \u{201c}{title}\u{201d}"),
         };
-        let squash = !squash.is_empty();
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move || Done::Shipped {
-            result: ship::open_prs(&feature, &prs, "gh"),
-            project,
-            slug,
-            patch,
-            squash,
+        // The code is read again first: a commit since the Ship check
+        // would ship what no gate saw.
+        self.feature_work(Some(busy), move || {
+            let result = still_checked(&feature, patch.as_deref())
+                .map_err(|why| (why, Vec::new()))
+                .and_then(|()| {
+                    if prs.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        ship::open_prs(&feature, &prs, "gh")
+                    }
+                });
+            Done::Shipped {
+                result,
+                project,
+                slug,
+                patch,
+                squash,
+            }
         });
+    }
+
+    /// Start the squash of feature `slug` (`squash`, its Squash steps) in a
+    /// tab: done once its branches read as merged.
+    fn start_squash(&mut self, project: &str, slug: &str, squash: &[Action]) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let (dir, command) = ship::squash_command(feature, squash);
+        if command.trim().is_empty() {
+            tracing::warn!("shipping feature {project}/{slug}: no squash command");
+            return self.show_error(format!(
+                "Couldn't ship \u{201c}{title}\u{201d}: no squash command for it"
+            ));
+        }
+        if !dir.exists() {
+            return self.show_error(format!(
+                "Couldn't ship \u{201c}{title}\u{201d}: {} is gone",
+                tilde(&dir)
+            ));
+        }
+        self.close_feature_panel();
+        let w = self.active_workspace;
+        self.new_tab_running(w, &dir, command);
+        if let Some(feature) = self.feature_mut(project, slug) {
+            let now = feature::now();
+            feature.shipping.squash_at = Some(now);
+            feature.log(now, "Squash started");
+        }
+        self.save_feature(project, slug);
     }
 
     /// Ship was asked for on feature `slug`: say what stops it, or ask
@@ -1870,9 +1887,12 @@ impl Gerdr {
         project: &str,
         slug: &str,
         patch: Option<&str>,
-        squash: bool,
+        squash: &[Action],
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
     ) {
+        if result.is_ok() && !squash.is_empty() {
+            self.start_squash(project, slug, squash);
+        }
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1896,8 +1916,14 @@ impl Gerdr {
             self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
             return self.probe_feature(project, slug);
         }
+        if n == 0 {
+            return self.probe_feature(project, slug);
+        }
         feature.log(now, opened_text(&title, n));
-        if !squash && feature.status == Status::Open && feature.current() == Some(Stage::Ship) {
+        if squash.is_empty()
+            && feature.status == Status::Open
+            && feature.current() == Some(Stage::Ship)
+        {
             feature.tick(now, "gerdr", patch);
         }
         self.save_feature(project, slug);
@@ -2161,6 +2187,23 @@ fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
         layout::FEATURES_DIR,
         names.join(", ")
     )
+}
+
+/// Whether `feature`'s code is still the code whose patch-id is `patch`,
+/// the one its Ship check was on, with nothing uncommitted; else why not.
+/// Runs git: off the UI thread.
+fn still_checked(feature: &Feature, patch: Option<&str>) -> Result<(), String> {
+    let reading = patch::read(feature)?;
+    if !reading.dirty.is_empty() {
+        return Err(format!(
+            "{} has uncommitted changes",
+            reading.dirty.join(", ")
+        ));
+    }
+    if patch != Some(reading.patch.as_str()) {
+        return Err("its code changed since the check; ship again".into());
+    }
+    Ok(())
 }
 
 /// What a confirm dialog about removing a feature's worktrees says of
