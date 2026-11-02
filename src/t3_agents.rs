@@ -6,8 +6,12 @@
 //! `$T3CODE_HOME`), which a thread reads every `DB_INTERVAL`, read only:
 //! each thread's latest run says whether it works, waits for the user or
 //! finished since the user last looked at it (`lastVisitedAt`, which T3
-//! Code sets itself when its app shows the thread). Where the server runs
-//! is in `userdata/server-runtime.json`.
+//! Code sets itself when its app shows the thread). T3 Code's app marks
+//! the thread it shows visited the moment it finishes, seen or not, so a
+//! thread left open in a pane never reads as done: gerdr holds done those
+//! it saw finish out of the user's sight until the user looks at them in
+//! gerdr, across restarts (`Store::t3_finished`, see `hold_finished`).
+//! Where the server runs is in `userdata/server-runtime.json`.
 //!
 //! The database is T3 Code's own, not an interface, and changes as T3 Code
 //! likes. While it can't be read (its tables changed: the query no longer
@@ -402,30 +406,37 @@ pub fn threads(rows: &[ThreadRow], alive: bool) -> Vec<T3Thread> {
 }
 
 /// Hold done the cards of `threads` that `finished` holds, given the cards
-/// were `before`: a card that stopped working while the server runs and
-/// the user didn't look (`seen` is the thread they look at) is held from
-/// now, one at work again or looked at is let go.
+/// were `before`: a card of `mine` (shown in this gerdr) that stopped
+/// working while the server runs and the user didn't look (`seen` is the
+/// thread they look at) is held from now, one at work again or looked at
+/// is let go, and so is one no longer read. Whether `finished` changed.
 fn hold_finished(
-    finished: &mut HashSet<String>,
+    finished: &mut BTreeSet<String>,
     before: &[T3Thread],
     threads: &mut [T3Thread],
     alive: bool,
     seen: Option<&str>,
-) {
+    mine: &HashSet<String>,
+) -> bool {
     use AgentStatus::{Blocked, Done, Idle, Working};
+    let held = finished.clone();
     let was = |id: &str| before.iter().find(|t| t.row.id == id).map(|t| t.status);
     for thread in threads.iter_mut() {
         let id = thread.row.id.as_str();
         if seen == Some(id) || matches!(thread.status, Working | Blocked) {
             finished.remove(id);
-        } else if alive && matches!(was(id), Some(Working | Blocked)) {
+        } else if alive && mine.contains(id) && matches!(was(id), Some(Working | Blocked)) {
             finished.insert(id.to_owned());
         }
         if thread.status == Idle && finished.contains(id) {
             thread.status = Done;
         }
     }
-    finished.retain(|id| threads.iter().any(|t| t.row.id == *id));
+    // Nothing read yet (as gerdr starts) forgets nothing.
+    if !threads.is_empty() {
+        finished.retain(|id| threads.iter().any(|t| t.row.id == *id));
+    }
+    *finished != held
 }
 
 /// The threads gerdr hides, in `state.json`.
@@ -1062,11 +1073,6 @@ pub struct T3 {
     pub started_at: Option<std::time::Instant>,
     /// Whether the server is being stopped.
     pub stopping: bool,
-    /// The threads gerdr saw finish out of the user's sight, done until
-    /// the user looks at them in gerdr. T3 Code's app marks the thread it
-    /// shows visited the moment it finishes, seen or not, so a thread left
-    /// open in a pane never reads as done.
-    finished: HashSet<String>,
 }
 
 impl crate::Gerdr {
@@ -1169,19 +1175,26 @@ impl crate::Gerdr {
     /// Take in what T3 Code's threads do now, and notify of what is news.
     pub(crate) fn t3_changed(&mut self) {
         let all = threads(&self.t3.rows, self.t3.alive);
-        if self.projects.t3_hidden.settle(&all) {
-            self.projects.save();
-        }
+        let mut changed = self.projects.t3_hidden.settle(&all);
         let hidden = &self.projects.t3_hidden;
         let mut threads: Vec<T3Thread> = all.into_iter().filter(|t| !hidden.hides(t)).collect();
         let seen = self.t3_seen_thread();
-        hold_finished(
-            &mut self.t3.finished,
+        let mine: HashSet<String> = threads
+            .iter()
+            .filter(|t| self.t3_thread_place(t).is_some())
+            .map(|t| t.row.id.clone())
+            .collect();
+        changed |= hold_finished(
+            &mut self.projects.t3_finished,
             &self.t3.threads,
             &mut threads,
             self.t3.alive,
             seen.as_deref(),
+            &mine,
         );
+        if changed {
+            self.projects.save();
+        }
         self.t3.threads = threads;
         self.notify_agents();
         self.t3_maybe_restart();
@@ -1295,16 +1308,17 @@ impl crate::Gerdr {
         self.host_focused.then(|| self.shown_t3_thread()).flatten()
     }
 
-    /// Let a thread held done (see `T3::finished`) go once the user looks
-    /// at it. Taken once per frame.
+    /// Let a thread held done (see `hold_finished`) go once the user
+    /// looks at it. Taken once per frame.
     pub fn t3_seen(&mut self) {
-        if self.t3.finished.is_empty() {
+        if self.projects.t3_finished.is_empty() {
             return;
         }
         let Some(id) = self.t3_seen_thread() else {
             return;
         };
-        if self.t3.finished.remove(&id) {
+        if self.projects.t3_finished.contains(&id) {
+            // `t3_changed` lets it go, and saves.
             self.t3_changed();
         }
     }
@@ -1952,32 +1966,89 @@ mod tests {
         r.visited = r.completed.clone();
         let idle = threads(&[r], true);
         assert_eq!(idle[0].status, AgentStatus::Idle);
-        let mut finished = HashSet::new();
+        let mut finished = BTreeSet::new();
+        let mine = HashSet::from(["t1".to_owned()]);
         let mut now = idle.clone();
-        hold_finished(&mut finished, &working, &mut now, true, None);
+        hold_finished(&mut finished, &working, &mut now, true, None, &mine);
         assert_eq!(now[0].status, AgentStatus::Done, "finished out of sight");
         // Read again unlooked at: still done.
         let mut again = idle.clone();
-        hold_finished(&mut finished, &now, &mut again, true, Some("other"));
+        hold_finished(&mut finished, &now, &mut again, true, Some("other"), &mine);
         assert_eq!(again[0].status, AgentStatus::Done);
         // Looked at: idle.
         let mut looked = idle.clone();
-        hold_finished(&mut finished, &again, &mut looked, true, Some("t1"));
+        hold_finished(&mut finished, &again, &mut looked, true, Some("t1"), &mine);
         assert_eq!(looked[0].status, AgentStatus::Idle);
         assert!(finished.is_empty());
         // Finished in sight, or with the server gone: never held.
         let mut seen = idle.clone();
-        hold_finished(&mut finished, &working, &mut seen, true, Some("t1"));
+        hold_finished(&mut finished, &working, &mut seen, true, Some("t1"), &mine);
         assert_eq!(seen[0].status, AgentStatus::Idle);
         let mut gone = idle.clone();
-        hold_finished(&mut finished, &working, &mut gone, false, None);
+        hold_finished(&mut finished, &working, &mut gone, false, None, &mine);
         assert_eq!(gone[0].status, AgentStatus::Idle);
         // At work again: let go.
         let mut held = idle.clone();
-        hold_finished(&mut finished, &working, &mut held, true, None);
+        hold_finished(&mut finished, &working, &mut held, true, None, &mine);
         let mut rerun = working.clone();
-        hold_finished(&mut finished, &held, &mut rerun, true, None);
+        hold_finished(&mut finished, &held, &mut rerun, true, None, &mine);
         assert_eq!(rerun[0].status, AgentStatus::Working);
+        assert!(finished.is_empty());
+        // Another gerdr's thread: not held here.
+        let mut theirs = idle.clone();
+        let none = HashSet::new();
+        assert!(!hold_finished(
+            &mut finished,
+            &working,
+            &mut theirs,
+            true,
+            None,
+            &none
+        ));
+        assert_eq!(theirs[0].status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn a_held_thread_stays_done_across_restarts() {
+        use super::hold_finished;
+        let mut r = row("t1");
+        r.run = Some("completed".into());
+        r.completed = Some("2026-11-02T12:17:34.441Z".into());
+        r.visited = r.completed.clone();
+        let idle = threads(&[r], true);
+        let mine = HashSet::from(["t1".to_owned()]);
+        // As saved in state.json, with nothing read yet as gerdr starts.
+        let mut finished = BTreeSet::from(["t1".to_owned()]);
+        assert!(!hold_finished(
+            &mut finished,
+            &[],
+            &mut [],
+            true,
+            None,
+            &mine
+        ));
+        assert!(finished.contains("t1"), "kept until the threads are read");
+        // The first read: still done, with no card before it.
+        let mut first = idle.clone();
+        assert!(!hold_finished(
+            &mut finished,
+            &[],
+            &mut first,
+            false,
+            None,
+            &mine
+        ));
+        assert_eq!(first[0].status, AgentStatus::Done);
+        // A thread no longer read is forgotten.
+        let mut other = threads(&[row("t2")], true);
+        assert!(hold_finished(
+            &mut finished,
+            &first,
+            &mut other,
+            true,
+            None,
+            &mine
+        ));
         assert!(finished.is_empty());
     }
 

@@ -55,6 +55,10 @@ pub struct Store {
     /// Which of T3 Code's threads were hidden from gerdr.
     #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
     pub t3_hidden: crate::t3_agents::Hidden,
+    /// The T3 Code threads that finished out of the user's sight, shown
+    /// done until the user looks at them in gerdr (see `t3_agents`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub t3_finished: BTreeSet<String>,
     /// The pull requests whose CI is watched, by repository.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ci_watched: crate::ci::Watched,
@@ -96,6 +100,8 @@ struct State {
     cursor_history: History,
     #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
     t3_hidden: crate::t3_agents::Hidden,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    t3_finished: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
@@ -451,6 +457,7 @@ impl Store {
         self.stop_picks = state.stop_picks;
         self.cursor_history = state.cursor_history;
         self.t3_hidden = state.t3_hidden;
+        self.t3_finished = state.t3_finished;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
         self.sidebar_width = state.sidebar_width;
@@ -468,6 +475,7 @@ impl Store {
             stop_picks: self.stop_picks,
             cursor_history: self.cursor_history.clone(),
             t3_hidden: self.t3_hidden.clone(),
+            t3_finished: self.t3_finished.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
             sidebar_width: self.sidebar_width,
@@ -1595,6 +1603,7 @@ mod tests {
             }),
             cursor_history: History::default(),
             t3_hidden: Default::default(),
+            t3_finished: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
             sidebar_width: Some(280),
