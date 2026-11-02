@@ -52,6 +52,9 @@ pub struct Store {
     /// Which of Cursor's idle chats stay shown and which were deleted.
     #[serde(default, skip_serializing_if = "History::is_empty")]
     pub cursor_history: History,
+    /// Which of T3 Code's threads were hidden from gerdr.
+    #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
+    pub t3_hidden: crate::t3_agents::Hidden,
     /// The pull requests whose CI is watched, by repository.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ci_watched: crate::ci::Watched,
@@ -64,6 +67,13 @@ pub struct Store {
     /// How big gerdr's window was left, in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<(i32, i32)>,
+    /// Where reading each service's output for errors left off, by
+    /// `<herdr session>|<pane id>` (see `service_watch`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_anchors: BTreeMap<String, crate::service_errors::Anchor>,
+    /// The services' errors found, the newest first (see `services`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_errors: Vec<crate::services::ErrorGroup>,
     #[serde(skip)]
     books: Books,
 }
@@ -80,6 +90,8 @@ struct State {
     stop_picks: Option<Stops>,
     #[serde(default, skip_serializing_if = "History::is_empty")]
     cursor_history: History,
+    #[serde(default, skip_serializing_if = "crate::t3_agents::Hidden::is_empty")]
+    t3_hidden: crate::t3_agents::Hidden,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
@@ -88,6 +100,10 @@ struct State {
     sidebar_width: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_size: Option<(i32, i32)>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    service_anchors: BTreeMap<String, crate::service_errors::Anchor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    service_errors: Vec<crate::services::ErrorGroup>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -422,10 +438,13 @@ impl Store {
         self.quit_choice = state.quit_choice;
         self.stop_picks = state.stop_picks;
         self.cursor_history = state.cursor_history;
+        self.t3_hidden = state.t3_hidden;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
         self.sidebar_width = state.sidebar_width;
         self.window_size = state.window_size;
+        self.service_anchors = state.service_anchors;
+        self.service_errors = state.service_errors;
     }
 
     fn state(&self) -> State {
@@ -435,10 +454,13 @@ impl Store {
             quit_choice: self.quit_choice,
             stop_picks: self.stop_picks,
             cursor_history: self.cursor_history.clone(),
+            t3_hidden: self.t3_hidden.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
             sidebar_width: self.sidebar_width,
             window_size: self.window_size,
+            service_anchors: self.service_anchors.clone(),
+            service_errors: self.service_errors.clone(),
         }
     }
 
@@ -1556,10 +1578,13 @@ mod tests {
                 apps: false,
             }),
             cursor_history: History::default(),
+            t3_hidden: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
             sidebar_width: Some(280),
             window_size: Some((1600, 1000)),
+            service_anchors: BTreeMap::new(),
+            service_errors: Vec::new(),
             books: Books::default(),
             projects: vec![Project {
                 id: "api".into(),

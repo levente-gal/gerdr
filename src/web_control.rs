@@ -408,6 +408,7 @@ impl Gerdr {
                 control.panes.insert(pane, id);
                 control.history.insert(pane, WebHistory { back, forward });
                 if crate::is_web_link(&url) {
+                    self.t3_page(pane, &url);
                     self.set_web_page(pane, url);
                 }
                 self.place_booting();

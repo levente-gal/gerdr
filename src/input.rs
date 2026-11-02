@@ -373,6 +373,10 @@ impl Gerdr {
                             state.tooltip.hide();
                             state.help_pinned = false;
                         }
+                        // What it interrupts stopped on purpose.
+                        if mods.ctrl && matches!(sym, Keysym::c | Keysym::C | Keysym::backslash) {
+                            state.note_interrupt();
+                        }
                         FilterResult::Forward
                     },
                 );

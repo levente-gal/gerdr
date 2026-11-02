@@ -69,10 +69,15 @@ mod scrollback;
 mod scrollback_panel;
 mod scrollbars;
 mod scrolling;
+mod service_errors;
+mod service_watch;
+mod services;
 mod sidebar;
 mod switcher;
 mod syntax;
 mod system_theme;
+mod t3_agents;
+mod t3_update;
 mod tab_strip;
 mod test_runs;
 mod text_field;
@@ -1318,6 +1323,8 @@ pub struct Gerdr {
     cursor_poke: Option<std::sync::mpsc::Sender<Vec<String>>>,
     /// Where Cursor's hooks reach this gerdr.
     cursor_socket: Option<PathBuf>,
+    /// What gerdr knows of T3 Code's threads (see `t3_agents`).
+    pub t3: t3_agents::T3,
     /// The programs whose apps keep running when gerdr quits (see `keep`).
     pub keep_apps: Vec<String>,
     /// The shown project's server of apps kept running, while gerdr shows
@@ -1465,6 +1472,8 @@ pub struct Gerdr {
     /// The last command run in each herdr pane, by pane id, to run again
     /// from its bar.
     pub last_commands: HashMap<String, pane_control::Remembered>,
+    /// The errors the services print (see `services`).
+    pub service_errors: services::ServiceErrors,
     /// The panes being stopped or restarted, by herdr pane id.
     pub pane_jobs: HashMap<String, pane_control::Job>,
     /// Where those jobs report; `None` until set up.
@@ -2072,8 +2081,12 @@ impl Gerdr {
         }
         self.refresh_agents();
         // The events' source goes last: it removes itself when the server goes.
-        let tabs = self.watch_herdr_tabs(socket);
+        let tabs = self.watch_herdr_tabs(socket.clone());
         self.herdr_sources.extend(tabs);
+        if let Some(project) = self.project.clone() {
+            let fresh = start != herdr::Start::Attached;
+            self.watch_project_services(&project, socket, fresh);
+        }
         let sub = match subscribed {
             Ok(sub) => sub,
             Err(err) => {
@@ -2103,6 +2116,7 @@ impl Gerdr {
                     state.agents.clear();
                     state.notify_agents();
                     state.herdr_tabs.clear();
+                    state.services_server_gone();
                     // Closed as it went down: they come back with it.
                     state.closed_workspaces.clear();
                     // This source is the last one and removes itself.
@@ -2193,6 +2207,7 @@ impl Gerdr {
             herdr::Event::Created { workspace_id } => self.sync_herdr_workspace(&workspace_id),
             // Its window closes by itself when the attach ends.
             herdr::Event::PaneGone { pane_id } => {
+                self.forget_service_pane(&pane_id);
                 self.forget_herdr_pane(&pane_id);
             }
             herdr::Event::PaneMoved {
@@ -2291,6 +2306,7 @@ impl Gerdr {
             {
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                state.feed_services();
                 state.track_tests();
                 for id in state.projects.take_conflicts() {
                     let name = state
@@ -2784,6 +2800,7 @@ impl Gerdr {
             })
             .collect();
         watched.extend(self.cursor_watched());
+        watched.extend(self.t3_watched());
         watched.extend(self.test_watched());
         let news = agents::agent_news(
             &self.agent_statuses,
@@ -2849,6 +2866,11 @@ impl Gerdr {
             match notifier.dispatch() {
                 Ok(clicked) => {
                     for key in clicked {
+                        if let Some(key) = key.strip_prefix(services::NOTIFY_PREFIX) {
+                            state.service_notification_clicked(key);
+                            state.backend.window().focus_window();
+                            continue;
+                        }
                         state.focus_agent(&agents::AgentKey::parse(&key));
                         state.backend.window().focus_window();
                     }
@@ -2868,7 +2890,7 @@ impl Gerdr {
     }
 
     /// The workspace and tab herdr pane `pane_id` is in.
-    fn herdr_pane_place(&self, pane_id: &str) -> Option<(usize, usize)> {
+    pub(crate) fn herdr_pane_place(&self, pane_id: &str) -> Option<(usize, usize)> {
         self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             Some((
                 w,
@@ -2879,13 +2901,15 @@ impl Gerdr {
         })
     }
 
-    /// Show agent `key`: herdr's in its pane, a Cursor chat in Cursor.
+    /// Show agent `key`: herdr's in its pane, a Cursor chat in Cursor, a T3
+    /// Code thread in its app.
     pub fn focus_agent(&mut self, key: &agents::AgentKey) {
         match key {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
             agents::AgentKey::Ci(link) => self.open_ci_link(link.clone()),
             agents::AgentKey::Test(pane_id) => self.focus_test_run(pane_id),
+            agents::AgentKey::T3(thread) => self.focus_t3_thread(thread),
         }
     }
 
@@ -2958,6 +2982,7 @@ impl Gerdr {
             .map(|(w, ws)| {
                 let mut views = self.herdr_cards(ws);
                 views.extend(self.cursor_cards(w));
+                views.extend(self.t3_cards(w));
                 views.extend(self.test_cards(ws));
                 if self.needs_you && w != self.active_workspace {
                     for view in &mut views {
@@ -5101,6 +5126,11 @@ impl Gerdr {
                 }
                 view.ci = self.ci_view(ws);
                 view.restart = !self.workspace_restarts(w).is_empty();
+                view.errors = self
+                    .workspace_service_errors(w)
+                    .iter()
+                    .filter(|g| !g.seen)
+                    .count();
                 if self.agent_strip == Some(w) {
                     view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
                 }
@@ -5116,6 +5146,7 @@ impl Gerdr {
                     .iter()
                     .filter(|chat| self.cursor_chat_place(chat) == Some(w))
                     .map(|chat| chat.status)
+                    .chain(self.t3_statuses(w))
                     .chain(view.status)
                     .max_by_key(|s| chrome::urgency(*s));
                 if let Some(git) = self.git.get(&ws.dir) {
@@ -6434,6 +6465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_idle: Vec::new(),
         cursor_poke: None,
         cursor_socket: None,
+        t3: Default::default(),
         keep_apps,
         keeper: None,
         keep_warned: false,
@@ -6494,6 +6526,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         order_pending: HashSet::new(),
         pane_leaders: HashMap::new(),
         last_commands: HashMap::new(),
+        service_errors: services::ServiceErrors::new(config::load_services()),
         pane_jobs: HashMap::new(),
         pane_job_tx: None,
         pane_bar_hover: None,
@@ -6651,6 +6684,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_git();
     state.watch_records();
     state.watch_cursor_agents();
+    state.watch_t3_agents();
     state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();
@@ -6659,6 +6693,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.connect_notifier();
     }
     state.watch_settings();
+    state.start_services();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
     state.watch_profile_imports();

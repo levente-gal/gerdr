@@ -51,6 +51,9 @@ pub enum Then {
     /// Stop this project's session and apps, then forget it (see
     /// `Gerdr::forget_project`).
     ForgetProject(String),
+    /// Restart T3 Code's server at the version waiting (see
+    /// `Gerdr::restart_t3`).
+    RestartT3,
 }
 
 /// The confirm dialog's state, while it is open.
@@ -178,7 +181,8 @@ impl Gerdr {
 
     /// Close the agent of card `key`, as its "×" does (see
     /// `AgentView::close_label`): one whose pane still runs asks first. A
-    /// Cursor chat never does: it runs on in Cursor and comes back.
+    /// Cursor chat or T3 Code thread never does: it runs on there and
+    /// comes back.
     pub fn close_agent(&mut self, key: &AgentKey) {
         let Some(card) = self.agent_card(key).filter(|card| card.closable) else {
             return;
@@ -187,7 +191,7 @@ impl Gerdr {
             // Done or idle, the agent still runs in its pane.
             AgentKey::Herdr(pane_id) => card.running() || self.herdr_pane_runs(pane_id),
             AgentKey::Test(_) => card.running(),
-            AgentKey::Cursor(_) | AgentKey::Ci(_) => false,
+            AgentKey::Cursor(_) | AgentKey::T3(_) | AgentKey::Ci(_) => false,
         };
         if !runs {
             return self.close_agent_now(&card);
@@ -301,6 +305,23 @@ impl Gerdr {
         )
     }
 
+    /// Ask before restarting T3 Code's server at `version` while `busy`
+    /// of its threads work or wait: cancelled, it restarts once they're
+    /// done.
+    pub fn ask_restart_t3(&mut self, version: String, busy: usize) {
+        let title = format!("Restart T3 Code at {version}?");
+        let body = match busy {
+            1 => "One of its threads is at work: restarting stops it. \
+                  Otherwise it restarts once the thread is done"
+                .to_owned(),
+            n => format!(
+                "{n} of its threads are at work: restarting stops them. \
+                 Otherwise it restarts once they're done"
+            ),
+        };
+        self.ask(title, body, "Restart now", Then::RestartT3);
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -331,6 +352,7 @@ impl Gerdr {
                 self.dismiss_test(pane_id);
             }
             AgentKey::Cursor(chat) => self.delete_cursor_chat(chat),
+            AgentKey::T3(thread) => self.delete_t3_thread(thread),
             AgentKey::Ci(_) => {}
         }
     }
@@ -358,6 +380,7 @@ impl Gerdr {
                 }
             }
             Then::ClosePane(id) => self.close_pane_now(id),
+            Then::RestartT3 => self.restart_t3(),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs

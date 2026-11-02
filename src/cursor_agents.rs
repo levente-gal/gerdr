@@ -692,18 +692,19 @@ impl History {
 }
 
 /// A workspace as placing a chat sees it: its folder, the other worktrees
-/// of its folder's repository and whether it is the project's Cursor
-/// workspace.
+/// of its folder's repository and whether it is the one chats of the
+/// project no folder holds go under (the project's Cursor workspace): that
+/// one holds none by its folder.
 pub struct Spot<'a> {
     pub dir: &'a Path,
     pub worktrees: Vec<&'a Path>,
-    pub cursor: bool,
+    pub fallback: bool,
 }
 
 /// Which of `spots` a chat working in `paths` goes under: the one whose
 /// folder, or another worktree of whose repository, holds the likeliest
 /// path deepest (one in the home folder holds everything, so it doesn't
-/// count), else the Cursor workspace, if the path is in one of
+/// count), else the fallback workspace, if the path is in one of
 /// `project_dirs` or holds one (a chat at the root of a project whose
 /// workspaces are its subfolders), short of holding the home folder;
 /// `None` for a chat of another project.
@@ -718,7 +719,7 @@ pub fn place(
         let holding = spots
             .iter()
             .enumerate()
-            .filter(|(_, s)| !s.cursor && Some(s.dir) != home)
+            .filter(|(_, s)| !s.fallback && Some(s.dir) != home)
             .flat_map(|(i, s)| {
                 let own = std::iter::once((i, s.dir, true));
                 own.chain(s.worktrees.iter().map(move |dir| (i, *dir, false)))
@@ -735,7 +736,8 @@ pub fn place(
                 .iter()
                 .any(|dir| Some(*dir) != home && (path.starts_with(dir) || dir.starts_with(path)))
     });
-    ours.then(|| spots.iter().position(|s| s.cursor)).flatten()
+    ours.then(|| spots.iter().position(|s| s.fallback))
+        .flatten()
 }
 
 /// The chats read from the database at `conn`, given when each was read
@@ -1288,7 +1290,7 @@ impl crate::Gerdr {
                 worktrees: self.git.get(&ws.dir).map_or_else(Vec::new, |git| {
                     git.worktrees.iter().map(|w| w.path.as_path()).collect()
                 }),
-                cursor: ws.kind == crate::WorkspaceKind::Cursor,
+                fallback: ws.kind == crate::WorkspaceKind::Cursor,
             })
             .collect();
         let records = self
@@ -1767,22 +1769,22 @@ mod tests {
             Spot {
                 dir: home,
                 worktrees: Vec::new(),
-                cursor: false,
+                fallback: false,
             },
             Spot {
                 dir: Path::new("/home/u/app"),
                 worktrees: Vec::new(),
-                cursor: false,
+                fallback: false,
             },
             Spot {
                 dir: Path::new("/home/u/app/api"),
                 worktrees: vec![Path::new("/home/u/app/api-perf")],
-                cursor: false,
+                fallback: false,
             },
             Spot {
                 dir: Path::new("/home/u/app"),
                 worktrees: Vec::new(),
-                cursor: true,
+                fallback: true,
             },
         ];
         let project = [Path::new("/home/u/app")];
@@ -1806,7 +1808,7 @@ mod tests {
         let lone = [Spot {
             dir: Path::new("/home/u/app"),
             worktrees: Vec::new(),
-            cursor: true,
+            fallback: true,
         }];
         let paths = [PathBuf::from("/home/u/app/web")];
         assert_eq!(place(&paths, &lone, &project, Some(home)), Some(0));

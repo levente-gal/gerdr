@@ -46,6 +46,7 @@ use crate::cursor_agents::CursorChat;
 use crate::git::{GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
+use crate::t3_agents::T3Thread;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -285,6 +286,7 @@ pub fn sidebar_blinkers(view: &SidebarView, layout: &SidebarLayout, height: i32)
         if let Some(slot) = row.chip
             && ws.status == Some(AgentStatus::Working)
             && blocked_count(cards) == 0
+            && ws.errors == 0
         {
             dots.push(centred_dot(header_status_mark(slot)));
         }
@@ -486,6 +488,50 @@ impl AgentView {
         }
     }
 
+    /// The view of T3 Code thread `thread`: its side chats and subagents
+    /// at work as its subagent lines.
+    pub fn t3(thread: &T3Thread) -> Self {
+        let row = &thread.row;
+        let field = |label: &str, value: String| AgentLine::Field(label.into(), value);
+        let mut lines = Vec::new();
+        let dir = row.paths().first().cloned();
+        if let Some(dir) = &dir {
+            lines.push(field(FOLDER, short_path(dir, None)));
+        }
+        if let Some(branch) = &row.branch {
+            lines.push(field("Branch", branch.clone()));
+        }
+        if row.worktree.is_some() {
+            lines.push(field("Worktree", "its own".into()));
+        }
+        lines.push(field("thread", row.id.clone()));
+        let subagents = thread
+            .children
+            .iter()
+            .map(|(child, _)| SubagentView {
+                key: Some(AgentKey::T3(child.id.clone())),
+                task: Some(tidy_title(&child.title))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "Working".into()),
+            })
+            .collect();
+        let agent = row.agent();
+        Self {
+            key: AgentKey::T3(row.id.clone()),
+            dir,
+            status: thread.status,
+            icon: AgentIcon::from_agent(&agent),
+            kind: format!("t3 {agent}"),
+            name: Some(tidy_title(&row.title)).filter(|n| !n.trim().is_empty()),
+            model: row.model.clone(),
+            lines,
+            closable: true,
+            subagents,
+            inbox: false,
+            test: None,
+        }
+    }
+
     /// Its badge: its icon, and a dot for how its test run went or else
     /// for its status.
     pub fn badge(&self) -> Badge {
@@ -681,6 +727,10 @@ pub struct WorkspaceView {
     /// The agents its header's strip offers to start, while it is open
     /// (the pointer on its AI button or the strip); else none.
     pub picks: Vec<AgentIcon>,
+    /// How many errors its services printed that weren't looked at: a
+    /// badge counting them on its header (after one counting blocked
+    /// agents).
+    pub errors: usize,
 }
 
 /// What a GitHub section shows: a chip per branch or pull request, a line
@@ -826,6 +876,7 @@ impl WorkspaceView {
             folded: false,
             restart: false,
             picks: Vec::new(),
+            errors: 0,
         }
     }
 
@@ -836,6 +887,7 @@ impl WorkspaceView {
         self.status
             .is_none_or(|s| urgency(s) <= urgency(AgentStatus::Idle))
             && self.ci.as_ref().is_none_or(CiView::quiet)
+            && self.errors == 0
     }
 
     /// Its header's height and the worktree lines under it, at `density`.
@@ -1504,8 +1556,9 @@ pub fn sidebar_layout(
 /// and how many agents it hides.
 fn status_extent(ws: &WorkspaceView, cards: &[AgentView]) -> Option<i32> {
     let blocked = blocked_count(cards);
-    if blocked > 0 {
-        let w = text_extent(&blocked.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+    let count = if blocked > 0 { blocked } else { ws.errors };
+    if count > 0 {
+        let w = text_extent(&count.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
         return Some(w.max(PILL_HEIGHT));
     }
     ws.status.filter(|_| ws.folded)?;
@@ -2234,10 +2287,14 @@ impl Painter {
             }
         }
 
-        if let (Some(chip), Some(status)) = (row.chip, ws.status) {
+        if let Some(chip) = row.chip {
             let blocked = blocked_count(cards);
-            let hidden = if ws.folded { cards.len() } else { 0 };
-            self.header_status(c, status, blocked, hidden, chip, scale, p);
+            if blocked == 0 && ws.errors > 0 {
+                self.header_pill(c, ws.errors, chip, p.error, scale, p);
+            } else if let Some(status) = ws.status {
+                let hidden = if ws.folded { cards.len() } else { 0 };
+                self.header_status(c, status, blocked, hidden, chip, scale, p);
+            }
         }
         if buttons > 0.0 {
             let color = if row_state.close {
@@ -2460,6 +2517,39 @@ impl Painter {
         icon_sdf(c, rect, scale, color, shape);
     }
 
+    /// A pill in `color` counting `count` in header slot `slot`: blocked
+    /// agents, errors of the services.
+    fn header_pill(
+        &self,
+        c: &mut Canvas,
+        count: usize,
+        slot: Rect,
+        color: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let band = band(slot, scale);
+        let h = px(PILL_HEIGHT) as f32;
+        let (x0, _, w, _) = rect_px(slot, scale);
+        let y = (band.0 as f32 + (band.1 as f32 - h) / 2.0).round();
+        c.rounded(x0, y, w, h, h / 2.0, color);
+        let text = count.to_string();
+        let text_w = self.text_width(&text, TINY_FONT_SIZE, scale);
+        let x = (x0 + (w - text_w) / 2.0).round();
+        let pill_band = (y as i32, h as i32);
+        self.text(
+            c,
+            &text,
+            TINY_FONT_SIZE,
+            x,
+            f32::MAX,
+            pill_band,
+            scale,
+            ink_on(color, p),
+        );
+    }
+
     /// A workspace header's status in `slot`, right-aligned: a filled
     /// warning badge counting `blocked` agents; else `status`'s mark in its
     /// colour (none while working: its dot blinks, composed over it), then
@@ -2479,17 +2569,7 @@ impl Painter {
         let s = scale as f32;
         let band = band(slot, scale);
         if blocked > 0 {
-            let h = px(PILL_HEIGHT) as f32;
-            let (x0, _, w, _) = rect_px(slot, scale);
-            let y = (band.0 as f32 + (band.1 as f32 - h) / 2.0).round();
-            c.rounded(x0, y, w, h, h / 2.0, p.warning);
-            let ink = ink_on(p.warning, p);
-            let text = blocked.to_string();
-            let text_w = self.text_width(&text, TINY_FONT_SIZE, scale);
-            let x = (x0 + (w - text_w) / 2.0).round();
-            let pill_band = (y as i32, h as i32);
-            self.text(c, &text, TINY_FONT_SIZE, x, f32::MAX, pill_band, scale, ink);
-            return;
+            return self.header_pill(c, blocked, slot, p.warning, scale, p);
         }
         if status != AgentStatus::Working {
             let mark = header_status_mark(slot);
@@ -3407,6 +3487,7 @@ mod tests {
             folded: false,
             restart: false,
             picks: Vec::new(),
+            errors: 0,
         }
     }
 

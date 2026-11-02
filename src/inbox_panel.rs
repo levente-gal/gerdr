@@ -132,10 +132,16 @@ impl Gerdr {
         let Some(file) = self.inbox_file() else {
             return false;
         };
-        inbox_sources::agent_fingerprint(view, &self.agents, &self.cursor_chats, &self.test_runs)
-            .is_some_and(|print| {
-                inbox::hides(&file.triage, &format!("agent:{}", view.key), &print, now)
-            })
+        inbox_sources::agent_fingerprint(
+            view,
+            &self.agents,
+            &self.cursor_chats,
+            &self.t3.threads,
+            &self.test_runs,
+        )
+        .is_some_and(|print| {
+            inbox::hides(&file.triage, &format!("agent:{}", view.key), &print, now)
+        })
     }
 
     /// Load the shown project's inbox file, so what it hides is hidden
@@ -191,6 +197,35 @@ impl Gerdr {
     ) -> Vec<InboxItem> {
         let dirs: Vec<_> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
         let records: Vec<_> = self.workspaces.iter().map(|ws| ws.record.clone()).collect();
+        let service_errors: Vec<_> = self
+            .projects
+            .service_errors
+            .iter()
+            .map(|group| {
+                let shown = self.project.as_deref() == Some(group.project.as_str());
+                let workspace = shown
+                    .then(|| self.herdr_pane_place(&group.pane_id).map(|(w, _)| w))
+                    .flatten();
+                let place = match workspace {
+                    Some(w) => self.workspaces[w].name.clone(),
+                    None => self
+                        .projects
+                        .project(&group.project)
+                        .map_or_else(|| group.project.clone(), |p| p.name.clone()),
+                };
+                inbox_sources::ServiceItem {
+                    group: group.clone(),
+                    workspace,
+                    place,
+                    // As it was called then; else as it is now.
+                    service: if group.service.is_empty() {
+                        self.service_item_label(&group.project, &group.pane_id)
+                    } else {
+                        group.service.clone()
+                    },
+                }
+            })
+            .collect();
         inbox_sources::collect(&Sources {
             workspaces,
             dirs: &dirs,
@@ -199,6 +234,7 @@ impl Gerdr {
             agents,
             herdr_agents: &self.agents,
             cursor_chats: &self.cursor_chats,
+            t3_threads: &self.t3.threads,
             test_runs: &self.test_runs,
             agent_since: &self.agent_since,
             ci: &self.ci,
@@ -206,6 +242,7 @@ impl Gerdr {
             tickets: self.ticket_repos(),
             store: self.inbox_file(),
             pane_text: &self.inbox.pane_text,
+            service_errors: &service_errors,
             now: Instant::now(),
             now_secs: inbox_store::now_secs(),
         })
@@ -460,6 +497,14 @@ impl Gerdr {
                     ),
                     _ => (None, "Dismissed until it changes"),
                 };
+                if let Target::ServiceError {
+                    project,
+                    pane_id,
+                    fingerprint,
+                } = &item.target
+                {
+                    self.see_service_error(project, pane_id, fingerprint);
+                }
                 let Some(file) = self.inbox_file_mut() else {
                     return;
                 };
@@ -559,6 +604,11 @@ impl Gerdr {
                 }
             }
             Target::Refresh => {}
+            Target::ServiceError {
+                project,
+                pane_id,
+                fingerprint,
+            } => self.show_service_error(&project, &pane_id, &fingerprint),
         }
     }
 

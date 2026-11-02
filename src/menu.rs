@@ -32,6 +32,12 @@ pub enum MenuAction {
     /// The agent picker, for an agent CLI in a new tab of workspace `.0`
     /// (see `Gerdr::open_agent_picker`).
     NewAgent(usize),
+    /// T3 Code's server, started in a new tab of workspace `.0` (see
+    /// `Gerdr::start_t3`).
+    StartT3(usize),
+    /// T3 Code, updated to the newest version gerdr reads, or to this one
+    /// (see `Gerdr::update_t3`).
+    UpdateT3(Option<String>),
     /// A GitHub page in a tab of workspace `.0` (see `Gerdr::open_page`).
     OpenPage(usize, String),
     /// The same in a new tab, even when a tab shows it already.
@@ -340,6 +346,8 @@ impl Gerdr {
             MenuAction::RestartWorkspace(w) => self.restart_workspace(w),
             MenuAction::ChooseRestarts(w) => self.choose_restarts(w),
             MenuAction::NewAgent(w) => self.open_agent_picker(w),
+            MenuAction::StartT3(w) => self.start_t3(w),
+            MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);
                 self.new_tab();

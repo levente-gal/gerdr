@@ -19,6 +19,8 @@ use crate::{
     inbox::{Detail, InboxItem, ItemAction, ItemId, PaneText, Section, Target, Tone},
     inbox_store::InboxFile,
     issues::{Issue, IssueSource, IssuesRead, IssuesState, TicketRepo},
+    services::ErrorGroup,
+    t3_agents::T3Thread,
     test_runs::TestRun,
 };
 
@@ -43,6 +45,8 @@ pub struct Sources<'a> {
     pub herdr_agents: &'a [AgentInfo],
     /// Cursor's chats shown as cards (`Gerdr::cursor_chats`).
     pub cursor_chats: &'a [CursorChat],
+    /// T3 Code's threads shown as cards (`T3::threads`).
+    pub t3_threads: &'a [T3Thread],
     /// The test runs shown as cards (`Gerdr::test_runs`).
     pub test_runs: &'a [TestRun],
     /// Since when each agent has been as it is (`Gerdr::agent_since`).
@@ -56,9 +60,24 @@ pub struct Sources<'a> {
     pub store: Option<&'a InboxFile>,
     /// Agent panes' last lines, by herdr pane id.
     pub pane_text: &'a HashMap<String, PaneText>,
+    /// The services' errors, the newest first.
+    pub service_errors: &'a [ServiceItem],
     pub now: Instant,
     /// Now, in seconds since the epoch.
     pub now_secs: u64,
+}
+
+/// A service's error, with what the inbox says of where it is.
+#[derive(Clone, Debug)]
+pub struct ServiceItem {
+    pub group: ErrorGroup,
+    /// The workspace its pane is in, by index: none for another
+    /// project's.
+    pub workspace: Option<usize>,
+    /// Its workspace's name, else its project's.
+    pub place: String,
+    /// What its pane's bar calls the service.
+    pub service: String,
 }
 
 /// What every item but a todo can have done to it.
@@ -145,13 +164,15 @@ impl<'a> Sources<'a> {
 }
 
 /// An agent card's fingerprint: its status and herdr's count of its
-/// state changes (a Cursor chat's last update, a test run's process), so
+/// state changes (a Cursor chat's or T3 Code thread's last update, a test
+/// run's process), so
 /// it changes whenever the agent moves on. `None` for what is not an agent
 /// (a CI card).
 pub fn agent_fingerprint(
     view: &AgentView,
     herdr_agents: &[AgentInfo],
     cursor_chats: &[CursorChat],
+    t3_threads: &[T3Thread],
     test_runs: &[TestRun],
 ) -> Option<String> {
     let status = status_label(view.status);
@@ -164,6 +185,11 @@ pub fn agent_fingerprint(
         AgentKey::Cursor(chat) => {
             let chat = cursor_chats.iter().find(|c| &c.row.id == chat);
             let updated = chat.map_or(0, |c| c.row.updated_ms);
+            Some(format!("{status}#{updated}"))
+        }
+        AgentKey::T3(thread) => {
+            let thread = t3_threads.iter().find(|t| &t.row.id == thread);
+            let updated = thread.map_or("", |t| t.row.updated.as_str());
             Some(format!("{status}#{updated}"))
         }
         AgentKey::Test(pane_id) => {
@@ -191,9 +217,13 @@ pub fn agent_items(src: &Sources) -> Vec<InboxItem> {
             if !listed.insert(view.key.clone()) {
                 continue;
             }
-            let Some(fingerprint) =
-                agent_fingerprint(view, src.herdr_agents, src.cursor_chats, src.test_runs)
-            else {
+            let Some(fingerprint) = agent_fingerprint(
+                view,
+                src.herdr_agents,
+                src.cursor_chats,
+                src.t3_threads,
+                src.test_runs,
+            ) else {
                 continue;
             };
             let pane = match &view.key {
@@ -627,9 +657,55 @@ pub fn todo_items(src: &Sources) -> Vec<InboxItem> {
     .collect()
 }
 
+/// The services' errors, each with how many times it came, and the
+/// services stopped.
+pub fn service_items(src: &Sources) -> Vec<InboxItem> {
+    src.service_errors
+        .iter()
+        .map(|item| {
+            let group = &item.group;
+            let times = match group.count {
+                1 => String::new(),
+                n => format!(" · ×{n}"),
+            };
+            InboxItem {
+                id: ItemId(format!(
+                    "service:{}|{}|{}",
+                    group.project, group.pane_id, group.fingerprint
+                )),
+                section: Section::Services,
+                // Back from a dismissal when it comes again.
+                fingerprint: group.count.to_string(),
+                workspace: item.workspace,
+                title: group.title.clone(),
+                subtitle: format!("{} · {}{times}", item.place, item.service),
+                tone: Tone::Failed,
+                age: Some(Duration::from_secs(
+                    src.now_secs.saturating_sub(group.last_secs),
+                )),
+                target: Target::ServiceError {
+                    project: group.project.clone(),
+                    pane_id: group.pane_id.clone(),
+                    fingerprint: group.fingerprint.clone(),
+                },
+                actions: TRIAGE.to_vec(),
+                detail: Detail::Service {
+                    service: item.service.clone(),
+                    place: item.place.clone(),
+                    stopped: group.is_stop(),
+                    count: group.count,
+                    first: group.first_secs,
+                    lines: group.lines.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
 /// Every item, each once.
 pub fn collect(src: &Sources) -> Vec<InboxItem> {
     let mut items = agent_items(src);
+    items.extend(service_items(src));
     items.extend(git_items(src));
     items.extend(ci_items(src));
     items.extend(unread_items(src));
@@ -724,6 +800,7 @@ mod tests {
                 agents: &self.agents,
                 herdr_agents: &self.herdr_agents,
                 cursor_chats: &self.cursor_chats,
+                t3_threads: &[],
                 test_runs: &[],
                 agent_since: &self.agent_since,
                 ci: &self.ci,
@@ -731,6 +808,7 @@ mod tests {
                 tickets: &self.tickets,
                 store: self.store.as_ref(),
                 pane_text: &self.pane_text,
+                service_errors: &[],
                 now: Instant::now(),
                 now_secs: 1_000_000,
             }
@@ -887,7 +965,7 @@ mod tests {
         let after = agent_items(&f.sources());
         assert_ne!(before[0].fingerprint, after[0].fingerprint);
         // The sidebar's check of a card agrees with the inbox's item.
-        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats, &[]);
+        let print = agent_fingerprint(&f.agents[0][0], &f.herdr_agents, &f.cursor_chats, &[], &[]);
         assert_eq!(print.as_ref(), Some(&after[0].fingerprint));
     }
 

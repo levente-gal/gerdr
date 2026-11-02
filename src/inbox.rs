@@ -63,14 +63,16 @@ pub struct ItemId(pub String);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Section {
     Agents,
+    Services,
     Repos,
     PullRequests,
     Tickets,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Agents,
+        Section::Services,
         Section::Repos,
         Section::PullRequests,
         Section::Tickets,
@@ -80,6 +82,7 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Section::Agents => "Agents",
+            Section::Services => "Services",
             Section::Repos => "Repos",
             Section::PullRequests => "Pull requests",
             Section::Tickets => "Tickets",
@@ -90,6 +93,7 @@ impl Section {
     pub fn icon(self) -> chrome::InboxIcon {
         match self {
             Section::Agents => chrome::InboxIcon::Agent,
+            Section::Services => chrome::InboxIcon::Failed,
             Section::Repos => chrome::InboxIcon::Repo,
             Section::PullRequests => chrome::InboxIcon::PullRequest,
             Section::Tickets => chrome::InboxIcon::Ticket,
@@ -140,6 +144,7 @@ impl InboxItem {
             Detail::Git { .. } => I::Repo,
             Detail::Ci { .. } if self.section == Section::PullRequests => I::PullRequest,
             Detail::Ci { .. } => I::Failed,
+            Detail::Service { .. } => I::Failed,
             Detail::Issue { .. } => I::Ticket,
             Detail::Todo { .. } => I::Todo,
             Detail::Unread { .. } => I::Failed,
@@ -189,6 +194,13 @@ pub enum Target {
     /// Read the issues and the CI again, the panel left open: an item
     /// saying they couldn't be.
     Refresh,
+    /// A service's error, in its pane's output
+    /// (`Gerdr::show_service_error`).
+    ServiceError {
+        project: String,
+        pane_id: String,
+        fingerprint: String,
+    },
 }
 
 /// What can be done to an item.
@@ -316,6 +328,21 @@ pub enum Detail {
         /// Why, as the source said it.
         why: String,
     },
+    /// An error a service printed, or its stopping.
+    Service {
+        /// What its pane's bar calls the service.
+        service: String,
+        /// Its workspace's name; its project's, for another project's.
+        place: String,
+        /// Whether it is the service having stopped.
+        stopped: bool,
+        /// How many times it came.
+        count: u32,
+        /// When it first came, in seconds since the epoch.
+        first: u64,
+        /// All of it, as last printed.
+        lines: Vec<String>,
+    },
 }
 
 /// What the panel asked for.
@@ -402,6 +429,7 @@ pub fn counted(item: &InboxItem) -> bool {
         Detail::Agent { status, .. } => {
             matches!(status, AgentStatus::Blocked | AgentStatus::Done)
         }
+        Detail::Service { .. } => true,
         Detail::Ci { subject, state, .. } => {
             item.tone == Tone::Review
                 || (*state == CiState::Failed && crate::ci::LONG_LIVED.contains(&subject.as_str()))
@@ -671,6 +699,27 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         Detail::Unread { why } => {
             field("Why", why.clone());
             field("Again", "Enter or Ctrl+R reads it again".to_owned());
+        }
+        Detail::Service {
+            service,
+            place,
+            stopped,
+            count,
+            first,
+            lines,
+        } => {
+            field("Service", service.clone());
+            field("In", place.clone());
+            field("Times", count.to_string());
+            if let Some(age) = item.age {
+                field("Last", format!("{} ago", age_text(age)));
+            }
+            field("First", crate::projects::ago(now, *first));
+            if !lines.is_empty() {
+                let title = if *stopped { "Last output" } else { "Output" };
+                block_title = Some(title.to_owned());
+                block = lines.clone();
+            }
         }
     }
     InboxDetailView {

@@ -238,13 +238,17 @@ impl Gerdr {
     }
 
     /// The agent whose pane has the keyboard in the shown tab: herdr's in
-    /// it, or the Cursor chat last shown from its card in Cursor.
+    /// it, the T3 Code thread its app shows, or the Cursor chat last shown
+    /// from its card in Cursor.
     fn focused_agent(&self) -> Option<AgentKey> {
         let tab = self.tab()?;
         let id = tab.focused_id()?;
         let pane = tab.panes.iter().find(|p| p.id == id)?;
         if let Some(herdr) = &pane.herdr {
             return Some(AgentKey::Herdr(herdr.pane_id.clone()));
+        }
+        if let Some(thread) = self.shown_t3_thread() {
+            return Some(AgentKey::T3(thread));
         }
         let cursor = pane.app_command.as_deref().and_then(launch::program_name);
         let chat = self
@@ -514,6 +518,10 @@ impl Gerdr {
                 let dir = picked.or_else(|| self.workspaces.get(i).map(|ws| ws.dir.clone()));
                 self.open_worktrees(dir);
             }
+            // Its count of errors: the newest one not looked at.
+            (SidebarHit::Chip(i), BTN_LEFT) if self.chip_shows_errors(i) => {
+                self.show_workspace_service_error(i);
+            }
             (SidebarHit::More(i), BTN_LEFT) => {
                 if let Some(line) = layout.more.get(i).copied().flatten() {
                     self.open_menu(self.more_agents_menu(i, line));
@@ -550,6 +558,17 @@ impl Gerdr {
             }
             _ => {}
         }
+    }
+
+    /// Whether workspace `i`'s header chip counts its services' errors
+    /// (see `WorkspaceView::errors`): it has some not looked at, and no
+    /// blocked agent, whose count goes first.
+    fn chip_shows_errors(&self, i: usize) -> bool {
+        let blocked = self
+            .agent_views()
+            .get(i)
+            .is_some_and(|cards| chrome::blocked_count(cards) > 0);
+        !blocked && self.workspace_service_errors(i).iter().any(|g| !g.seen)
     }
 
     /// The pointer moved to `pos` with nothing open over the sidebar, laid
@@ -655,6 +674,22 @@ impl Gerdr {
                 };
                 let tip = Tooltip::new(&text, rect).fields(fields);
                 Some(tip.key("right click to choose which"))
+            }
+            SidebarHit::Chip(i) if self.chip_shows_errors(i) => {
+                let errors = self.workspace_service_errors(i);
+                let unseen = errors.iter().filter(|g| !g.seen).count();
+                let text = match unseen {
+                    1 => "1 service error".to_owned(),
+                    n => format!("{n} service errors"),
+                };
+                let fields = errors
+                    .iter()
+                    .filter(|g| !g.seen)
+                    .take(6)
+                    .map(|g| (g.service.clone(), g.title.clone()))
+                    .collect();
+                let tip = Tooltip::new(&text, layout.rows[i].chip?).fields(fields);
+                Some(tip.key("click to show the newest"))
             }
             SidebarHit::Chip(i) => {
                 let cards = agents.get(i).filter(|cards| !cards.is_empty())?;
