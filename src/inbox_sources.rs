@@ -770,9 +770,8 @@ pub fn gate_item_id(project: &str, slug: &str) -> ItemId {
 /// the title, and its name.
 fn gate_file(stage: Stage) -> (&'static str, Option<&'static str>) {
     match stage {
-        Stage::Discover => ("Brief", Some("brief.md")),
-        Stage::Plan => ("Plan", Some("plan.md")),
-        stage => (stage.label(), None),
+        Stage::Discover => ("Brief", crate::feature::artifacts::name(stage)),
+        stage => (stage.label(), crate::feature::artifacts::name(stage)),
     }
 }
 

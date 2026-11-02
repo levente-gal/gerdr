@@ -17,7 +17,8 @@ rules, for reviewing a branch before it merges.
 | Ctrl+O | Open (in a tab, in the browser, the file). |
 | Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature panel: a repository's pull request). |
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
-| Ctrl+R | Refresh / reload. |
+| Ctrl+R | Refresh / reload (feature panel: start the stage's agent afresh). |
+| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review). |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
