@@ -279,7 +279,7 @@ impl Gerdr {
     pub fn restore_nav(&mut self) {
         let mut nav = self.projects.nav.clone();
         nav.rebind(|v| matches!(v, Visit::Parked { .. }).then(|| v.clone()));
-        self.nav = nav;
+        self.nav = nav.restored();
     }
 
     /// Tab `id` of `project`, the shown one, parked; `None` if it is gone.

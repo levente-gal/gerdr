@@ -42,9 +42,20 @@ pub struct NavHistory<T> {
     /// The tab shown now, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     at: Option<T>,
+    /// Read back from disk (see `restored`), and no tab shown since.
+    #[serde(skip)]
+    restored: bool,
 }
 
 impl<T> NavHistory<T> {
+    /// This history, read back as gerdr starts: the first tab shown then
+    /// isn't a new visit dropping the forward list, as gerdr may come
+    /// back on another tab than the one it was left on.
+    pub fn restored(mut self) -> Self {
+        self.restored = true;
+        self
+    }
+
     /// Whether no tab is listed.
     pub fn is_empty(&self) -> bool {
         self.back.is_empty() && self.forward.is_empty() && self.at.is_none()
@@ -57,6 +68,7 @@ impl<T> Default for NavHistory<T> {
             back: Vec::new(),
             forward: Vec::new(),
             at: None,
+            restored: false,
         }
     }
 }
@@ -68,6 +80,7 @@ impl<T: Clone + PartialEq> NavHistory<T> {
     /// forgotten. `None` (nothing shown) changes nothing.
     pub fn visit(&mut self, tab: Option<T>, keep: impl Fn(&T) -> bool) {
         let Some(tab) = tab else { return };
+        let restored = std::mem::take(&mut self.restored);
         if self.at.as_ref() == Some(&tab) {
             return;
         }
@@ -79,7 +92,11 @@ impl<T: Clone + PartialEq> NavHistory<T> {
         if self.back.len() > LIMIT {
             self.back.drain(..self.back.len() - LIMIT);
         }
-        self.forward.clear();
+        if restored {
+            self.forward.retain(|t| *t != tab && keep(t));
+        } else {
+            self.forward.clear();
+        }
         self.at = Some(tab);
     }
 
@@ -301,6 +318,28 @@ mod tests {
         assert_eq!(serde_json::from_str::<NavHistory<Visit>>(&json).unwrap(), h);
         let empty: NavHistory<Visit> = serde_json::from_str("{}").unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn a_restored_history_keeps_its_forward_list_on_the_first_tab_shown() {
+        let mut h = visited(&[1, 2, 3, 4]);
+        h.back_to(&2, all);
+        // gerdr comes back on 3, a tab forward of the one it was left on.
+        let mut h = h.restored();
+        h.visit(Some(3), all);
+        assert_eq!(h.backs(all), [2, 1]);
+        assert_eq!(h.forwards(all), [4]);
+        // The next visit is a new one again.
+        h.visit(Some(5), all);
+        assert_eq!(h.forwards(all), Vec::<u64>::new());
+        // Back on the tab it was left on: nothing changes, and the flag
+        // goes all the same.
+        let mut h = visited(&[1, 2, 3]);
+        h.back_to(&2, all);
+        let mut h = h.restored();
+        h.visit(Some(2), all);
+        h.visit(Some(9), all);
+        assert_eq!(h.forwards(all), Vec::<u64>::new());
     }
 
     #[test]
