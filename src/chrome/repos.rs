@@ -551,11 +551,13 @@ pub enum DetailRow {
     /// What isn't a hunk: `Binary file`, an untracked folder's files.
     Note(String),
     /// A row of a review comment: the first and last of its rows round
-    /// its card.
+    /// its card. An AI review finding's card takes its `tone` (by
+    /// severity, muted once dismissed); the user's own have none.
     Comment {
         text: String,
         first: bool,
         last: bool,
+        tone: Option<Tone>,
     },
     /// A row of the comment being written: with the caret on it, its byte
     /// in `text`; the selection on it, by bytes in `text`.
@@ -594,6 +596,8 @@ pub struct DiffFile {
     pub removed: usize,
     /// It is the tree's selected line.
     pub selected: bool,
+    /// Said muted before its counts: `changed since viewed`.
+    pub note: Option<String>,
 }
 
 /// A line of a log, in the monospace font.
@@ -710,6 +714,16 @@ pub enum ReposButton {
     /// approved as it is, or sent back to its agent with the comments.
     Approve,
     SendBack,
+    /// An AI review finding in a feature's code review
+    /// (`feature_diff`): to fix, dismissed (a reason asked first), or
+    /// back to undecided.
+    FixFinding,
+    DismissFinding,
+    ReopenFinding,
+    /// A feature's code review: mark the file at the cursor viewed, or not.
+    MarkViewed,
+    /// A feature's code review: go to the next file not viewed.
+    NextUnviewed,
 }
 
 impl ReposButton {
@@ -766,6 +780,11 @@ impl ReposButton {
             ReposButton::DropOutdated => "Drop outdated",
             ReposButton::Approve => "Approve",
             ReposButton::SendBack => "Send back",
+            ReposButton::FixFinding => "Fix",
+            ReposButton::DismissFinding => "Dismiss…",
+            ReposButton::ReopenFinding => "Reopen",
+            ReposButton::MarkViewed => "Viewed",
+            ReposButton::NextUnviewed => "Next unviewed",
         }
     }
 }
@@ -3691,7 +3710,7 @@ impl Painter {
                 );
                 let counts = self.diff_counts(
                     c,
-                    None,
+                    file.note.as_deref(),
                     (file.added, file.removed),
                     bend,
                     row_band,
@@ -3964,8 +3983,15 @@ impl Painter {
                     p.placeholder,
                 );
             }
-            DetailRow::Comment { text, first, last } => {
-                let fill = mix(p.elevated, p.accent, if lit.is_some() { 0.2 } else { 0.1 });
+            DetailRow::Comment {
+                text,
+                first,
+                last,
+                tone,
+            } => {
+                // A finding's card in its severity's colour.
+                let accent = tone.map_or(p.accent, |t| tone_color(t, p));
+                let fill = mix(p.elevated, accent, if lit.is_some() { 0.2 } else { 0.1 });
                 let tx = self.comment_card(
                     c,
                     (bx + inset, bend),
@@ -3979,13 +4005,18 @@ impl Painter {
                     y,
                     px(2).max(1),
                     h,
-                    mix(p.elevated, p.accent, 0.7),
+                    mix(p.elevated, accent, 0.7),
                 );
                 // What the search found in it, tinted on the card.
                 let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
                 let found = &look.found;
                 self.found_tints(c, text, found, (tx, bend), row_band, width, fill, scale, p);
-                self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, p.text);
+                // A dismissed finding's words dim.
+                let ink = match tone {
+                    Some(Tone::Muted) => p.muted,
+                    _ => p.text,
+                };
+                self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, ink);
             }
             DetailRow::Editor {
                 text,
@@ -5343,11 +5374,13 @@ mod tests {
                         text: "Why -z here? Paths with newlines".into(),
                         first: true,
                         last: false,
+                        tone: None,
                     },
                     DetailRow::Comment {
                         text: "need it, but check the parser.".into(),
                         first: false,
                         last: true,
+                        tone: None,
                     },
                     DetailRow::Editor {
                         text: "And the caller".into(),

@@ -28,6 +28,7 @@ use crate::{
     },
     diff::{FILE_LINES, FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
+    feature::review_import::{Decision, FindingState},
     find,
     git::Change,
     review::{self, Comment, Quoted, Review},
@@ -44,6 +45,26 @@ use search::DiffSearch;
 pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line";
 /// Why an edit, restore or comment does nothing in a read-only diff.
 pub const READ_ONLY: &str = "A commit's diff can't be edited";
+/// Why an AI review finding isn't edited as a comment is.
+pub const FINDING_KEYS: &str = "A finding takes f to fix it or Del to dismiss it";
+/// Why `f` did nothing off a finding.
+pub const NO_FINDING: &str = "Move the cursor to a finding first";
+/// Why a dismissal did nothing.
+pub const NO_REASON: &str = "Not dismissed: say why first";
+/// Why a finding sent to be fixed isn't decided again.
+pub const SENT: &str = "That finding went to the Build agent to fix";
+
+/// How an AI review finding's card is coloured: by severity, muted once
+/// dismissed.
+fn finding_tone(flag: &review::Flag) -> Tone {
+    use crate::feature::review_import::Severity;
+    match (flag.state, flag.severity) {
+        (FindingState::Dismissed | FindingState::Fixed, _) => Tone::Muted,
+        (_, Severity::High) => Tone::Error,
+        (_, Severity::Medium) => Tone::Warning,
+        (_, Severity::Low) => Tone::Normal,
+    }
+}
 
 /// A checkout the diff shows, as its host lends it.
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +96,10 @@ pub enum Keys {
 /// The checkbox of the file at `path` of the checkout at `root`.
 pub type CheckOf<'a> = &'a dyn Fn(&Path, &str) -> Check;
 
+/// What a file's header says of it, muted before its counts, by the
+/// repository's top folder and the file's path: `changed since viewed`.
+pub type NoteOf<'a> = &'a dyn Fn(&Path, &str) -> Option<String>;
+
 /// What the diff's keys, clicks and views need from its host.
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
@@ -94,6 +119,8 @@ pub struct Ctx<'a> {
     pub count_sections: bool,
     /// Each file's checkbox on its header: none without.
     pub check: Option<CheckOf<'a>>,
+    /// What each file's header says of it: none without.
+    pub note: Option<NoteOf<'a>>,
     /// The file the host has selected, its header marked.
     pub selected: Option<(&'a Path, &'a str)>,
     /// What it shows isn't the files as they are (a commit's diff): no
@@ -192,6 +219,9 @@ pub struct Signals {
     /// Why the last key did nothing, or `Some(None)` to clear what was
     /// said.
     pub error: Option<Option<String>>,
+    /// What the user decided of an AI review finding shown as a comment,
+    /// by its id (see `review::Flag`).
+    pub decided: Option<(String, Decision)>,
 }
 
 /// What the diff scrolls to: a checkout's header, a file's, or the first
@@ -285,6 +315,9 @@ pub(crate) struct Editing {
     path: String,
     lines: Vec<Quoted>,
     field: TextField,
+    /// The reason AI review finding `at` (its id here) is dismissed for,
+    /// written in place of a comment.
+    dismiss: Option<String>,
 }
 
 /// A diff row by who it is, to find it again as the rows change.
@@ -649,7 +682,10 @@ impl DiffView {
                 self.push_editor(&mut rows, None);
             }
         }
-        self.outdated = gone.into_iter().collect();
+        // Findings not on a line aren't the user's to drop.
+        self.outdated = (gone.into_iter())
+            .filter(|&c| comments.get(c).is_some_and(|c| c.flag.is_none()))
+            .collect();
         self.noted = noted;
         self.rows = rows;
         self.roots = items.iter().map(|i| i.root.to_path_buf()).collect();
@@ -673,11 +709,16 @@ impl DiffView {
     /// Comment `c`'s rows, in file `at`; the editor's in its place while
     /// it is edited.
     fn push_comment(&self, rows: &mut Vec<DiffRow>, at: Option<(usize, usize)>, c: usize) {
-        if self.editing.as_ref().is_some_and(|e| e.at == Some(c)) {
+        let edited = self.editing.as_ref().filter(|e| e.at == Some(c));
+        if edited.is_some_and(|e| e.dismiss.is_none()) {
             return self.push_editor(rows, at);
         }
         let n = self.comment_wraps.get(c).map_or(1, Vec::len);
         rows.extend((0..n).map(|i| DiffRow::Comment { at, c, i }));
+        // A finding being dismissed: the reason under it.
+        if edited.is_some() {
+            self.push_editor(rows, at);
+        }
     }
 
     /// The editor's rows, in file `at`, and the line saying its keys.
@@ -1017,6 +1058,7 @@ impl DiffView {
             path,
             lines,
             field: TextField::multiline(""),
+            dismiss: None,
         });
         self.build_rows(ctx.sections, self.diff_anchor());
         self.follow_editor(ctx);
@@ -1027,6 +1069,10 @@ impl DiffView {
         let Some(comment) = self.review.comments.get(c) else {
             return;
         };
+        if comment.flag.is_some() {
+            self.signals.error = Some(Some(FINDING_KEYS.into()));
+            return;
+        }
         self.signals.error = Some(None);
         self.signals.focus = true;
         self.editing = Some(Editing {
@@ -1035,6 +1081,7 @@ impl DiffView {
             path: comment.path.clone(),
             lines: comment.lines.clone(),
             field: TextField::multiline(&comment.text),
+            dismiss: None,
         });
         self.build_rows(ctx.sections, self.diff_anchor());
         self.follow_editor(ctx);
@@ -1047,6 +1094,17 @@ impl DiffView {
             return;
         };
         let text = editing.field.trim().to_owned();
+        if let Some(id) = editing.dismiss {
+            // No reason, no dismissal.
+            self.signals.error = Some(match text.is_empty() {
+                true => Some(NO_REASON.into()),
+                false => None,
+            });
+            if !text.is_empty() {
+                self.signals.decided = Some((id, Decision::Dismiss(text)));
+            }
+            return self.build_rows(ctx.sections, self.diff_anchor());
+        }
         match (editing.at, text.is_empty()) {
             (Some(c), true) if c < self.review.comments.len() => {
                 self.review.comments.remove(c);
@@ -1054,12 +1112,21 @@ impl DiffView {
             (Some(c), false) if c < self.review.comments.len() => {
                 self.review.comments[c].text = text;
             }
-            (None, false) => self.review.comments.push(Comment {
-                root: editing.root,
-                path: editing.path,
-                lines: editing.lines,
-                text,
-            }),
+            (None, false) => {
+                // Before the findings: those are the host's, after the
+                // user's.
+                let comments = &self.review.comments;
+                let at = (comments.iter().position(|c| c.flag.is_some())).unwrap_or(comments.len());
+                self.shift_comment_keys(at, 1);
+                let comment = Comment {
+                    root: editing.root,
+                    path: editing.path,
+                    lines: editing.lines,
+                    text,
+                    flag: None,
+                };
+                self.review.comments.insert(at, comment);
+            }
             _ => {}
         }
         self.review_dirty = true;
@@ -1100,6 +1167,140 @@ impl DiffView {
         self.review.comments.remove(c);
         self.review_dirty = true;
         self.build_rows(ctx.sections, self.diff_anchor());
+    }
+
+    /// The cursor's keys on comments from `from` on moved `by` (one was
+    /// put in or taken out before them).
+    fn shift_comment_keys(&mut self, from: usize, by: isize) {
+        if let Some(Cursor { keys, .. }) = &mut self.cursor {
+            for key in [&mut keys.0, &mut keys.1].into_iter().flatten() {
+                if let RowKey::Comment(x) = key
+                    && *x >= from
+                {
+                    *x = x.saturating_add_signed(by);
+                }
+            }
+        }
+    }
+
+    /// The AI review finding the cursor is on, by index into
+    /// `review.comments`, and where it stands.
+    fn finding_here(&self) -> Option<(usize, &review::Flag)> {
+        let c = self.comment_at(self.cursor.as_ref()?.row)?;
+        Some((c, self.review.comments.get(c)?.flag.as_ref()?))
+    }
+
+    /// `f` on a finding: to fix (from undecided or dismissed), or back to
+    /// undecided (from to fix). Off one, it says where to go when there
+    /// are findings; else it isn't the diff's key.
+    fn fix_finding(&mut self) -> bool {
+        let Some((_, flag)) = self.finding_here() else {
+            let any = self.review.comments.iter().any(|c| c.flag.is_some());
+            if any {
+                self.signals.error = Some(Some(NO_FINDING.into()));
+            }
+            return any;
+        };
+        let decision = match flag.state {
+            FindingState::Open | FindingState::Dismissed => Decision::Fix,
+            FindingState::Fix => Decision::Reopen,
+            FindingState::Sent => {
+                self.signals.error = Some(Some(SENT.into()));
+                return true;
+            }
+            FindingState::Fixed => {
+                self.signals.error = Some(Some("That finding is fixed".into()));
+                return true;
+            }
+        };
+        self.signals.decided = Some((flag.id.clone(), decision));
+        true
+    }
+
+    /// Del on a finding: dismissed, its reason asked first (from
+    /// undecided or to fix), or back to undecided (from dismissed).
+    /// Whether the cursor is on one.
+    fn dismiss_finding(&mut self, ctx: &Ctx) -> bool {
+        let Some((c, flag)) = self.finding_here() else {
+            return false;
+        };
+        match flag.state {
+            FindingState::Open | FindingState::Fix => {
+                let (id, comment) = (flag.id.clone(), &self.review.comments[c]);
+                self.signals.error = Some(None);
+                self.signals.focus = true;
+                self.editing = Some(Editing {
+                    at: Some(c),
+                    root: comment.root.clone(),
+                    path: comment.path.clone(),
+                    lines: comment.lines.clone(),
+                    field: TextField::multiline(""),
+                    dismiss: Some(id),
+                });
+                self.build_rows(ctx.sections, self.diff_anchor());
+                self.follow_editor(ctx);
+            }
+            FindingState::Dismissed => {
+                self.signals.decided = Some((flag.id.clone(), Decision::Reopen));
+            }
+            FindingState::Sent => self.signals.error = Some(Some(SENT.into())),
+            FindingState::Fixed => {
+                self.signals.error = Some(Some("That finding is fixed".into()));
+            }
+        }
+        true
+    }
+
+    /// Go to the next file (`by` 1) or the one before (-1) whose
+    /// checkbox isn't checked, round past the end: its header at the top,
+    /// the cursor on it. Whether there was one.
+    pub fn jump_unchecked(&mut self, by: i64, ctx: &Ctx) -> bool {
+        let Some(check) = ctx.check else {
+            return false;
+        };
+        let n = self.rows.len();
+        let from = match &self.cursor {
+            Some(c) => c.row,
+            None => self.diff_window(ctx.page).1.start,
+        };
+        let unchecked = |r: usize| {
+            matches!(self.rows[r], DiffRow::File(..))
+                && self
+                    .diff_path(r)
+                    .is_some_and(|(root, path)| check(&root, &path) != Check::On)
+        };
+        let order: Vec<usize> = match by > 0 {
+            true => (from + 1..n)
+                .chain(0..=from.min(n.saturating_sub(1)))
+                .collect(),
+            false => (0..from).rev().chain((from..n).rev()).collect(),
+        };
+        let Some(to) = order.into_iter().find(|&r| r < n && unchecked(r)) else {
+            return false;
+        };
+        let last = self.diff_last(ctx.page);
+        self.scroll.jump(to.min(last) as f64);
+        self.set_cursor(to, None);
+        self.select_diff_row(to, ctx);
+        true
+    }
+
+    /// Check the file at the cursor (else at the top) or uncheck it, as
+    /// Space does.
+    pub fn toggle_current(&mut self, ctx: &Ctx) -> Option<Outcome> {
+        let head = self.current_file(ctx.page)?;
+        self.toggle_diff_file(head, ctx)
+    }
+
+    /// Put the cursor on comment `c` (by index into `review.comments`),
+    /// the diff scrolled to show it. Whether it is shown.
+    pub fn show_comment(&mut self, c: usize, ctx: &Ctx) -> bool {
+        let Some(r) = self.find_row(&RowKey::Comment(c)) else {
+            return false;
+        };
+        self.set_cursor(r, None);
+        self.follow(r, ctx.page);
+        true
     }
 
     /// Scroll the diff to show the editor's caret, and the line under it
@@ -1238,7 +1439,7 @@ impl DiffView {
 
     /// The review as Markdown for an agent, to copy, else why not.
     pub fn copy_review(&self, ctx: &Ctx) -> Result<Outcome, &'static str> {
-        if self.review.is_empty() {
+        if self.review.own() == 0 {
             return Err(NO_REVIEW);
         }
         let order: Vec<PathBuf> = ctx.sections.iter().map(|i| i.root.to_path_buf()).collect();
@@ -1261,7 +1462,7 @@ impl DiffView {
         };
         Ok(Outcome::Copy {
             text: review::markdown(&self.review, &order, label, outdated),
-            count: comments.len(),
+            count: self.review.own(),
         })
     }
 
@@ -1499,6 +1700,7 @@ impl DiffView {
             (DiffRow::Reading(_), _) => DetailRow::Note("Reading…".into()),
             (DiffRow::File(..), Some((item, file))) => {
                 let check = ctx.check.map(|check| check(item.root, &file.path));
+                let note = ctx.note.and_then(|note| note(item.root, &file.path));
                 let selected = ctx.selected == Some((item.root, file.path.as_str()));
                 let key = (item.root.to_path_buf(), file.path.clone());
                 DetailRow::File(DiffFile {
@@ -1510,6 +1712,7 @@ impl DiffView {
                     added: file.added,
                     removed: file.removed,
                     selected,
+                    note,
                 })
             }
             (DiffRow::Hunk(_, _, h), Some((_, file))) => {
@@ -1541,6 +1744,7 @@ impl DiffView {
                     text: comment.text[range].to_owned(),
                     first: i == 0,
                     last: i + 1 >= wrap.len(),
+                    tone: comment.flag.as_ref().map(finding_tone),
                 }
             }
             (DiffRow::Editor { i, .. }, _) => {
@@ -1560,11 +1764,19 @@ impl DiffView {
                     last: i + 1 >= self.editor_wrap.len(),
                 }
             }
-            (DiffRow::EditorHint { .. }, _) => {
-                DetailRow::Note("Shift+Enter breaks the line · Enter or Esc keeps it".into())
-            }
+            (DiffRow::EditorHint { .. }, _) => DetailRow::Note(
+                match self.editing.as_ref().is_some_and(|e| e.dismiss.is_some()) {
+                    true => "Why dismiss it? Enter dismisses it · Esc with no reason keeps it",
+                    false => "Shift+Enter breaks the line · Enter or Esc keeps it",
+                }
+                .into(),
+            ),
             (DiffRow::Outdated(None), _) => DetailRow::Hunk {
-                context: "Comments on lines no longer in the diff".into(),
+                context: match self.outdated.is_empty() {
+                    true => "Findings not on a line of the diff",
+                    false => "Comments on lines no longer in the diff",
+                }
+                .into(),
                 number: 0,
             },
             (DiffRow::Outdated(Some(c)), _) => {
@@ -1628,6 +1840,14 @@ impl DiffView {
             else {
                 return Vec::new();
             };
+            if editing.dismiss.is_some() {
+                let dismiss = Hint {
+                    key: "Enter".into(),
+                    label: "Dismiss".into(),
+                    ..hint(B::DismissFinding)
+                };
+                return vec![(i, dismiss), (i, hint(B::DiscardComment))];
+            }
             let mut buttons = vec![(i, hint(B::SaveComment)), (i, hint(B::DiscardComment))];
             if editing.at.is_some() {
                 buttons.push((i, hint(B::DeleteComment)));
@@ -1649,6 +1869,33 @@ impl DiffView {
         let Some(cursor) = &self.cursor else {
             return buttons;
         };
+        // On a finding, what can be decided of it, on its first row.
+        if let Some((c, flag)) = self.finding_here() {
+            let first = self.find_row(&RowKey::Comment(c)).and_then(at);
+            let keyed = |button: B, key: &str| Hint {
+                key: key.into(),
+                ..hint(button)
+            };
+            let choices = match flag.state {
+                FindingState::Open => {
+                    vec![keyed(B::FixFinding, "f"), keyed(B::DismissFinding, "Del")]
+                }
+                FindingState::Fix => {
+                    vec![
+                        keyed(B::ReopenFinding, "f"),
+                        keyed(B::DismissFinding, "Del"),
+                    ]
+                }
+                FindingState::Dismissed => {
+                    vec![keyed(B::FixFinding, "f"), keyed(B::ReopenFinding, "Del")]
+                }
+                FindingState::Sent | FindingState::Fixed => Vec::new(),
+            };
+            if let Some(i) = first {
+                buttons.extend(choices.into_iter().map(|h| (i, h)));
+            }
+            return buttons;
+        }
         let lines = self.cursor_lines().is_some_and(|(_, _, l)| !l.is_empty());
         if let Some(i) = at(cursor.row)
             && lines
@@ -1673,7 +1920,7 @@ impl DiffView {
 
     /// The title row's button copying the review, while there is one.
     fn title_buttons(&self) -> Vec<Hint> {
-        let label = match self.review.comments.len() {
+        let label = match self.review.own() {
             0 => return Vec::new(),
             1 => "Copy 1 comment".to_owned(),
             n => format!("Copy {n} comments"),
@@ -1703,6 +1950,7 @@ impl DiffView {
     pub fn clear_sheet(&self, ctx: &Ctx, outdated: bool) -> (String, Vec<(String, String, Tone)>) {
         let mut files: BTreeMap<(String, &str), usize> = BTreeMap::new();
         let taken = (self.review.comments.iter().enumerate())
+            .filter(|(_, c)| c.flag.is_none())
             .filter(|(c, _)| !outdated || self.outdated.contains(c));
         for (_, c) in taken {
             *files
@@ -1719,7 +1967,7 @@ impl DiffView {
                 comments(self.outdated.len())
             ),
             false => {
-                let n = self.review.comments.len();
+                let n = self.review.own();
                 format!("Delete the review's {} for good?", comments(n))
             }
         };
@@ -2006,8 +2254,15 @@ impl DiffView {
             Keysym::c if plain && ctx.read_only => return Some(Some(Outcome::Notice(READ_ONLY))),
             Keysym::c if plain => self.comment_here(ctx),
             Keysym::Delete | Keysym::KP_Delete if plain => {
-                self.delete_comment(ctx);
+                if !self.dismiss_finding(ctx) {
+                    self.delete_comment(ctx);
+                }
                 return Some(None);
+            }
+            Keysym::f if plain => {
+                if !self.fix_finding() {
+                    return None;
+                }
             }
             _ => return None,
         }
@@ -2106,9 +2361,11 @@ impl DiffView {
 
     /// Delete every review comment, and the one being written.
     pub fn clear_review(&mut self, sections: &[Section]) {
-        self.review.comments.clear();
+        // The findings aren't the user's: they stay.
+        self.review.comments.retain(|c| c.flag.is_some());
         self.review_dirty = true;
         self.editing = None;
+        self.cursor = None;
         self.rebuild(sections);
     }
 
@@ -2355,6 +2612,33 @@ impl DiffView {
             self.signals.focus = true;
             return Some(None);
         }
+        // A finding's buttons decide the one the cursor is on; the
+        // dismissal's reason is kept by its Dismiss.
+        if let ReposHit::Button(button @ (ReposButton::FixFinding | ReposButton::ReopenFinding)) =
+            hit
+        {
+            let dismissed =
+                self.finding_here().map(|(_, f)| f.state) == Some(FindingState::Dismissed);
+            match (button, dismissed) {
+                (ReposButton::ReopenFinding, true) => {
+                    self.dismiss_finding(ctx);
+                }
+                _ => {
+                    self.fix_finding();
+                }
+            }
+            return Some(None);
+        }
+        if hit == ReposHit::Button(ReposButton::DismissFinding) {
+            self.signals.focus = true;
+            match self.editing.as_ref().is_some_and(|e| e.dismiss.is_some()) {
+                true => self.save_comment(ctx),
+                false => {
+                    self.dismiss_finding(ctx);
+                }
+            }
+            return Some(None);
+        }
         // The editor's own buttons act on what it holds.
         if let ReposHit::Button(
             button @ (ReposButton::Comment
@@ -2386,7 +2670,13 @@ impl DiffView {
                     self.select_diff_row(r, ctx);
                     // On a comment, it is edited; on a long file's last
                     // row shown, the rest show.
-                    if let Some(c) = self.comment_at(r) {
+                    if let Some(c) = self.comment_at(r)
+                        && self
+                            .review
+                            .comments
+                            .get(c)
+                            .is_some_and(|c| c.flag.is_none())
+                    {
                         self.edit_comment(c, ctx);
                     }
                     self.show_whole(r, ctx);

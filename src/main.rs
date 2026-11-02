@@ -1256,6 +1256,8 @@ pub struct Gerdr {
     pub tasks_panel: Option<tasks::TasksPanel>,
     /// The features of every project, and the dialog and panel on them.
     pub features: features::Features,
+    /// Each feature's code review counts, once read (see `feature_diff`).
+    pub code_reviews: feature_diff::Lines,
     /// The apps projects keep running, as last looked at (see `tasks`).
     pub kept: Vec<tasks::Kept>,
     /// T3 Code's server gerdr started, as last looked at.
@@ -6559,6 +6561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         footer_hover: None,
         tasks_panel: None,
         features: features::Features::default(),
+        code_reviews: Default::default(),
         kept: Vec::new(),
         t3_started: None,
         t3_log: false,

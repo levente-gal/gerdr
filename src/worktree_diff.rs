@@ -16,6 +16,12 @@
 //! `doc_review`) shows the same way too, as one file of added lines: its
 //! comments work as on code, edits don't. Approve and Send back sit on its
 //! header and footer.
+//!
+//! A feature's code review (see `feature_diff`) shows the same way too:
+//! the feature's changes over every repository it touched, one section
+//! each, read-only. Each file's checkbox says whether it was viewed; the
+//! AI review's findings show as comments of their own; Approve and Send
+//! back sit on its header.
 
 use std::{
     path::{Path, PathBuf},
@@ -27,8 +33,10 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use crate::{
     chrome::{Density, DetailView, Hint, ReposButton, ReposHit, SheetView},
     diff::FileDiff,
-    diff_view::{self, DiffView, Keys, Outcome, Section},
+    diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     feature::Stage,
+    feature::review_import::Decision,
+    feature_diff::FeatureOf,
     git::Change,
     git_ops::Since,
     repos::{diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
@@ -76,6 +84,9 @@ pub struct WorktreeDiff {
     /// A feature stage's file under review instead: read again with
     /// every Git status read, not edited.
     pub doc: Option<DocOf>,
+    /// A feature's code review instead: its changes over every repository
+    /// it touched, read again with every Git status read, not edited.
+    pub feature: Option<FeatureOf>,
 }
 
 /// The feature stage's file a diff shows for review
@@ -115,13 +126,19 @@ pub const DOC_READ_ONLY: &str = "A file under review can't be edited here";
 /// Why a comment, an edit, Approve or Send back do nothing on Verify's
 /// evidence.
 pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
+/// Why Alt+Shift+Down did nothing.
+pub const ALL_VIEWED: &str = "Every file is viewed";
 /// Why Send back does nothing yet.
 pub const NO_COMMENT: &str = "Add a comment first";
 /// Why Approve or Send back wait.
 pub const DRAFT_OPEN: &str = "Save or discard the comment first";
+/// Why an edit or a restore does nothing in a feature's code review.
+pub const FEATURE_READ_ONLY: &str = "A feature's code review can't edit the code";
 /// The keys approving the file under review and sending it back.
 pub const APPROVE_KEY: &str = "Ctrl+Enter";
 pub const SEND_BACK_KEY: &str = "Ctrl+Shift+Enter";
+/// The key going to the next file not viewed in a feature's code review.
+pub const NEXT_UNVIEWED_KEY: &str = "Alt+Shift+Down";
 
 /// The commit a diff shows (`WorktreeDiff::commit`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -281,6 +298,7 @@ impl WorktreeDiff {
     }
 
     /// Approve the file under review, unless a comment is being written.
+    /// A feature's code review is checked further by its host.
     fn approve(&self) -> Option<Done> {
         if self.evidence() {
             return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
@@ -293,12 +311,18 @@ impl WorktreeDiff {
 
     /// Send the file under review back with its comments: there must be
     /// one, and none being written.
-    fn send_back(&self) -> Option<Done> {
+    fn send_back(&self, env: Env) -> Option<Done> {
         if self.evidence() {
             return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
         }
         if self.diff.editing.is_some() {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
+        }
+        if self.feature.is_some() {
+            return Some(match self.with_ctx(env, |ctx| self.diff.copy_review(ctx)) {
+                Ok(Outcome::Copy { text, .. }) => Done::SendBack(text),
+                _ => Done::Diff(Outcome::Notice(crate::feature_diff::NO_OWN_COMMENT)),
+            });
         }
         if self.diff.review.is_empty() {
             return Some(Done::Diff(Outcome::Notice(NO_COMMENT)));
@@ -306,9 +330,21 @@ impl WorktreeDiff {
         Some(Done::SendBack(self.doc_markdown()))
     }
 
+    /// Whether it is reviewed: a file under review, not the evidence, or
+    /// a feature's code.
+    fn reviewed(&self) -> bool {
+        (self.doc.is_some() && !self.evidence()) || self.feature.is_some()
+    }
+
     /// What the diff asked for, on a file under review: no edits, and
     /// the review copied as the agent is sent it.
     fn doc_outcome(&self, outcome: Option<Outcome>) -> Option<Outcome> {
+        if self.feature.is_some() {
+            return match outcome {
+                Some(o) if o.edits() => Some(Outcome::Notice(FEATURE_READ_ONLY)),
+                outcome => outcome,
+            };
+        }
         if self.doc.is_none() {
             return outcome;
         }
@@ -334,17 +370,18 @@ impl WorktreeDiff {
         };
         // Evidence takes no comments either.
         let comments = |what: &str| what.contains("comment");
-        let read_only = self.doc.is_some() || self.commit.is_some();
+        let read_only = self.doc.is_some() || self.commit.is_some() || self.feature.is_some();
         let evidence = self.evidence();
         let diff = diff_help_lines()
             .into_iter()
             .filter(|(_, what, _)| !(read_only && edits(what)) && !(evidence && comments(what)));
-        if self.doc.is_none() {
+        if self.doc.is_none() && self.feature.is_none() {
             return diff.collect();
         }
-        let own: &[(&str, &str)] = match evidence {
-            true => &[("Esc", "close the evidence"), ("F1", "list the keys")],
-            false => &[
+        let own: &[(&str, &str)] = match (evidence, &self.feature) {
+            (_, Some(_)) => &crate::feature_diff::KEYS,
+            (true, _) => &[("Esc", "close the evidence"), ("F1", "list the keys")],
+            (false, _) => &[
                 ("Esc", "close the review"),
                 ("F1", "list the keys"),
                 (APPROVE_KEY, "approve the file as it is"),
@@ -363,7 +400,11 @@ impl WorktreeDiff {
     }
 
     /// Call `f` with the diff and its `Ctx`.
-    fn with_diff<R>(&mut self, env: Env, f: impl FnOnce(&mut DiffView, &diff_view::Ctx) -> R) -> R {
+    pub(crate) fn with_diff<R>(
+        &mut self,
+        env: Env,
+        f: impl FnOnce(&mut DiffView, &diff_view::Ctx) -> R,
+    ) -> R {
         let lead = self.lead();
         let empty = self.empty();
         let read_only = self.read_only();
@@ -373,31 +414,59 @@ impl WorktreeDiff {
             branch,
             since,
             diff,
+            feature,
             ..
         } = self;
-        let sections = [Section {
-            root,
-            label,
-            branch: branch.as_deref(),
-            head: None,
-            changes: &since.changes,
-        }];
-        f(diff, &ctx(&sections, env, &lead, empty, read_only))
+        let feature = feature.as_ref();
+        let sections = sections(root, label, branch.as_deref(), since, feature);
+        let check =
+            |root: &Path, path: &str| feature.map(|f| f.check(root, path)).unwrap_or_default();
+        let note = |root: &Path, path: &str| feature.and_then(|f| f.note(root, path));
+        let marks: (Option<CheckOf>, Option<NoteOf>) = match feature {
+            Some(_) => (Some(&check), Some(&note)),
+            None => (None, None),
+        };
+        let mut ctx = ctx(&sections, env, &lead, empty, read_only);
+        (ctx.check, ctx.note) = marks;
+        ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
+        f(diff, &ctx)
     }
 
-    /// The diff's one section: the worktree.
-    fn sections(&self) -> [Section<'_>; 1] {
-        [Section {
-            root: &self.root,
-            label: &self.label,
-            branch: self.branch.as_deref(),
-            head: None,
-            changes: &self.since.changes,
-        }]
+    /// Call `f` with the diff's `Ctx`, to look.
+    fn with_ctx<R>(&self, env: Env, f: impl FnOnce(&diff_view::Ctx) -> R) -> R {
+        let lead = self.lead();
+        let feature = self.feature.as_ref();
+        let sections = self.sections();
+        let check =
+            |root: &Path, path: &str| feature.map(|f| f.check(root, path)).unwrap_or_default();
+        let note = |root: &Path, path: &str| feature.and_then(|f| f.note(root, path));
+        let marks: (Option<CheckOf>, Option<NoteOf>) = match feature {
+            Some(_) => (Some(&check), Some(&note)),
+            None => (None, None),
+        };
+        let mut ctx = ctx(&sections, env, &lead, self.empty(), self.read_only());
+        (ctx.check, ctx.note) = marks;
+        ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
+        f(&ctx)
+    }
+
+    /// The diff's sections: the worktree, or a feature's repositories.
+    fn sections(&self) -> Vec<Section<'_>> {
+        let branch = self.branch.as_deref();
+        sections(
+            &self.root,
+            &self.label,
+            branch,
+            &self.since,
+            self.feature.as_ref(),
+        )
     }
 
     /// Over the diff, before its counts: what it is against.
     fn lead(&self) -> String {
+        if self.feature.is_some() {
+            return "Since its base".into();
+        }
         if self.commit.is_some() {
             return "This commit".into();
         }
@@ -412,6 +481,9 @@ impl WorktreeDiff {
 
     /// What the diff says with nothing to show.
     fn empty(&self) -> &'static str {
+        if let Some(feature) = &self.feature {
+            return feature.empty(self.read);
+        }
         match (&self.error, self.read, &self.target) {
             (Some(_), ..) if self.doc.is_some() => "The file couldn't be read",
             (Some(_), ..) => "Its changes couldn't be read",
@@ -425,6 +497,9 @@ impl WorktreeDiff {
 
     /// The panel's heading: whose diff it is.
     pub fn heading(&self) -> String {
+        if let Some(feature) = &self.feature {
+            return format!("Code review of \u{201c}{}\u{201d}", feature.title);
+        }
         if self.commit.is_some() {
             return format!("Commit · {}", self.label);
         }
@@ -450,6 +525,9 @@ impl WorktreeDiff {
         if !self.read {
             return "reading…".into();
         }
+        if let Some(feature) = &self.feature {
+            return feature.summary(self.diff.review.own());
+        }
         if let Some(doc) = &self.doc {
             if doc.evidence {
                 return doc.state.clone();
@@ -469,13 +547,8 @@ impl WorktreeDiff {
 
     /// The diff, as the panel's detail shows it.
     pub fn view(&self, env: Env) -> DetailView {
-        let sections = self.sections();
-        let lead = self.lead();
-        let read_only = self.read_only();
-        let mut view = self
-            .diff
-            .view(&ctx(&sections, env, &lead, self.empty(), read_only));
-        if self.doc.is_some() {
+        let mut view = self.with_ctx(env, |ctx| self.diff.view(ctx));
+        if self.doc.is_some() || self.feature.is_some() {
             self.doc_view(&mut view);
         }
         view
@@ -484,7 +557,10 @@ impl WorktreeDiff {
     /// A file under review's view: its lines counted in the title, no
     /// Restore buttons, Approve and Send back on the title row.
     fn doc_view(&self, view: &mut DetailView) {
-        if let (Some(doc), Some(file)) = (&self.doc, self.doc_file()) {
+        if let (Some(doc), Some(file)) = (
+            &self.doc,
+            self.doc_file().filter(|_| self.feature.is_none()),
+        ) {
             view.title = match file.added {
                 1 => format!("{} · 1 line", doc.name()),
                 n => format!("{} · {n} lines", doc.name()),
@@ -560,11 +636,27 @@ impl WorktreeDiff {
         // keys.
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
         let typing = self.diff.editing.is_some() || self.diff.search_focused();
-        if self.doc.is_some() && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
+        let keyed = self.doc.is_some() || self.feature.is_some();
+        if keyed && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
             return match mods.shift {
                 false => self.approve(),
-                true => self.send_back(),
+                true => self.send_back(env),
             };
+        }
+        // Alt+Shift+Down and Up: the next file not viewed, and the one
+        // before.
+        let up_down = match sym {
+            Keysym::Down | Keysym::KP_Down => Some(1),
+            Keysym::Up | Keysym::KP_Up => Some(-1),
+            _ => None,
+        };
+        if let Some(by) = up_down.filter(|_| self.feature.is_some() && !typing)
+            && mods.alt
+            && mods.shift
+            && !(mods.ctrl || mods.logo)
+        {
+            let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(by, ctx));
+            return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
         }
         let outcome = self.with_diff(env, |diff, ctx| diff.key(mods, sym, typed, ctx));
         let done = match outcome {
@@ -599,10 +691,13 @@ impl WorktreeDiff {
         if !self.read_only() {
             buttons.push(B::Comment);
         }
-        if self.doc.is_some() && !self.evidence() {
+        if self.feature.is_some() {
+            buttons.extend([B::MarkViewed, B::NextUnviewed]);
+        }
+        if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
-        if !self.diff.review.is_empty() {
+        if self.diff.review.own() > 0 {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
         buttons.extend([B::Help, B::Close]);
@@ -613,12 +708,15 @@ impl WorktreeDiff {
                 label: match button {
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() => "back".into(),
+                    B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
                     button => button.label().to_lowercase(),
                 },
                 key: match button {
                     B::Approve => APPROVE_KEY,
                     B::SendBack => SEND_BACK_KEY,
+                    B::MarkViewed => "Space",
+                    B::NextUnviewed => NEXT_UNVIEWED_KEY,
                     button => key_name(button),
                 }
                 .into(),
@@ -641,10 +739,29 @@ impl WorktreeDiff {
             }
             return None;
         }
+        if self.feature.is_some() {
+            match hit {
+                ReposHit::Button(ReposButton::Approve) => return self.approve(),
+                ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
+                ReposHit::Button(ReposButton::MarkViewed) => {
+                    return self
+                        .with_diff(env, |diff, ctx| diff.toggle_current(ctx))
+                        .map(Done::Diff);
+                }
+                ReposHit::Button(ReposButton::NextUnviewed) => {
+                    let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(1, ctx));
+                    return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
+                }
+                ReposHit::DiffRestore(_) => {
+                    return Some(Done::Diff(Outcome::Notice(FEATURE_READ_ONLY)));
+                }
+                _ => {}
+            }
+        }
         if self.doc.is_some() {
             match hit {
                 ReposHit::Button(ReposButton::Approve) => return self.approve(),
-                ReposHit::Button(ReposButton::SendBack) => return self.send_back(),
+                ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
                 ReposHit::DiffRestore(_) if self.evidence() => {
                     return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
                 }
@@ -704,6 +821,7 @@ impl WorktreeDiff {
             return Some(SheetView {
                 title: help_title(
                     match (&self.commit, &self.doc) {
+                        _ if self.feature.is_some() => "Keys in a feature's code review",
                         (Some(_), _) => "Keys in a commit's diff",
                         (_, Some(doc)) if doc.evidence => "Keys in the evidence",
                         (_, Some(_)) => "Keys in a file under review",
@@ -719,12 +837,8 @@ impl WorktreeDiff {
             });
         }
         let choice = self.clearing?;
-        let sections = self.sections();
-        let lead = self.lead();
         let outdated = self.clearing_outdated;
-        let read_only = self.read_only();
-        let ctx = ctx(&sections, env, &lead, self.empty(), read_only);
-        let (title, lines) = self.diff.clear_sheet(&ctx, outdated);
+        let (title, lines) = self.with_ctx(env, |ctx| self.diff.clear_sheet(ctx, outdated));
         let buttons = clear_buttons(outdated);
         Some(SheetView {
             title,
@@ -783,14 +897,37 @@ impl WorktreeDiff {
         self.diff.scroll.moving(now)
     }
 
-    /// Why the last key or click did nothing, if it says.
-    pub fn take_error(&mut self) -> Option<String> {
-        self.diff.take_signals().error.flatten()
+    /// Why the last key or click did nothing, if it says; and what was
+    /// decided of an AI review finding.
+    pub fn take_error(&mut self) -> (Option<String>, Option<(String, Decision)>) {
+        let signals = self.diff.take_signals();
+        (signals.error.flatten(), signals.decided)
     }
 
     /// Whether `path` is this worktree's.
     pub fn is(&self, path: &Path) -> bool {
         self.root == path
+    }
+}
+
+/// The diff's sections: the worktree at `root` (repository `label`, on
+/// `branch`) with its changes `since`; or `feature`'s repositories.
+fn sections<'a>(
+    root: &'a Path,
+    label: &'a str,
+    branch: Option<&'a str>,
+    since: &'a Since,
+    feature: Option<&'a FeatureOf>,
+) -> Vec<Section<'a>> {
+    match feature {
+        Some(feature) => feature.sections(),
+        None => vec![Section {
+            root,
+            label,
+            branch,
+            head: None,
+            changes: &since.changes,
+        }],
     }
 }
 
@@ -813,6 +950,7 @@ fn ctx<'a>(
         empty,
         count_sections: false,
         check: None,
+        note: None,
         selected: None,
         read_only,
     }
@@ -912,6 +1050,9 @@ impl crate::Gerdr {
         if (self.repos.worktree.as_ref()).is_some_and(|wd| wd.doc.is_some()) {
             return self.doc_save_review();
         }
+        if (self.repos.worktree.as_ref()).is_some_and(|wd| wd.feature.is_some()) {
+            return self.feature_save_review();
+        }
         // A commit's diff has no review.
         let Some(wd) = self
             .repos
@@ -948,10 +1089,10 @@ impl crate::Gerdr {
     /// commit's, back to the repositories panel.
     pub(crate) fn close_worktree_diff(&mut self) {
         self.worktree_save_review();
-        // A commit's diff and a file under review weren't opened from the
-        // worktrees popup.
+        // A commit's diff, a file under review and a feature's code review
+        // weren't opened from the worktrees popup.
         let other = (self.repos.worktree.as_ref())
-            .is_some_and(|wd| wd.commit.is_some() || wd.doc.is_some());
+            .is_some_and(|wd| wd.commit.is_some() || wd.doc.is_some() || wd.feature.is_some());
         self.repos.close_worktree();
         if !other {
             self.worktrees.unpark();
@@ -967,6 +1108,9 @@ impl crate::Gerdr {
         };
         if wd.doc.is_some() {
             return self.doc_review_read();
+        }
+        if wd.feature.is_some() {
+            return self.feature_diff_read();
         }
         if let Some(commit) = &wd.commit {
             // A commit doesn't change: read once.
@@ -1084,17 +1228,38 @@ impl crate::Gerdr {
     /// panel asks it; why it did nothing said briefly.
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
         self.worktree_save_review();
-        let error = self
+        let (error, decided) = self
             .repos
             .worktree
             .as_mut()
-            .and_then(WorktreeDiff::take_error);
+            .map(WorktreeDiff::take_error)
+            .unwrap_or_default();
         if let Some(why) = error {
             self.show_warning(why);
         }
+        if let Some((id, decision)) = decided {
+            self.feature_decide(id, decision);
+        }
         let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
         let doc = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.doc.is_some());
+        let feature = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.feature.is_some());
         match done? {
+            Done::Close if feature => {
+                self.close_feature_review();
+                None
+            }
+            Done::Diff(Outcome::Toggle { root, path }) if feature => {
+                self.feature_toggle(&root, &path);
+                None
+            }
+            Done::Approve if feature => {
+                self.feature_approve();
+                None
+            }
+            Done::SendBack(comments) if feature => {
+                self.feature_send_back(comments);
+                None
+            }
             // Back to the panel it was opened from.
             Done::Close if commit => {
                 self.close_worktree_diff();
@@ -1533,7 +1698,7 @@ mod tests {
         assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(2));
         let copy = ReposHit::Button(ReposButton::CopyReview);
         assert_eq!(wd.click(copy, ENV), None);
-        assert!(wd.take_error().is_some());
+        assert!(wd.take_error().0.is_some());
         // A file header's chevron folds it.
         wd.click(ReposHit::DiffFold(1), ENV);
         assert_eq!(texts(&wd)[1..3], ["file a.rs None", "file new.rs None"]);
