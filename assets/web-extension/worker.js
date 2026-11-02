@@ -5,7 +5,8 @@
 // place of itself: going back never lands on it. gerdr is told where
 // each pane's tab is whenever it changes, whether it can go back or
 // forward, and when it closes, over the native messaging host; it can send
-// a pane's tab to another page, back, forward, or load it again.
+// a pane's tab to another page, back, forward, or load it again, and keep
+// T3 Code's app in it to the projects under some folders (see `scopeT3`).
 
 const HOST = "dev.gerdr.web";
 const BOOT = chrome.runtime.getURL("open.html");
@@ -13,12 +14,15 @@ const BOOT = chrome.runtime.getURL("open.html");
 // The pane of each tab gerdr opened, by the tab's id. Kept in the
 // session's storage too: the worker comes and goes.
 let panes = {};
-const loaded = chrome.storage.session.get("panes").then((stored) => {
+// The folders whose T3 Code projects each tab's app shows, by tab id.
+let scopes = {};
+const loaded = chrome.storage.session.get(["panes", "scopes"]).then((stored) => {
   panes = stored.panes || {};
+  scopes = stored.scopes || {};
 });
 
 function save() {
-  return chrome.storage.session.set({ panes });
+  return chrome.storage.session.set({ panes, scopes });
 }
 
 let port = null;
@@ -106,6 +110,105 @@ function tabOf(pane) {
   return tab === undefined ? undefined : Number(tab);
 }
 
+// In T3 Code's app: show the projects under `dirs` only, by its sidebar's
+// own project filter. That filter is kept in the page's localStorage by
+// project key, which the app works out from each repository's remote: the
+// keys are read from the app's own project groups, found in React's tree
+// by their fields. The app reads the filter as it starts, so the page
+// loads again once it changed, once per page session. Runs in the page.
+function scopeT3(dirs) {
+  if (window.__gerdrScope === JSON.stringify(dirs)) return;
+  window.__gerdrScope = JSON.stringify(dirs);
+  const trim = (path) => path.replace(/\/+$/, "") || "/";
+  const want = dirs.map(trim);
+  const inside = (path, dir) => path === dir || path.startsWith(dir === "/" ? dir : dir + "/");
+  const isGroup = (g) =>
+    g && typeof g === "object" && typeof g.projectKey === "string" && Array.isArray(g.memberProjects);
+  const isGroups = (v) => Array.isArray(v) && v.length > 0 && v.every(isGroup);
+  // Every list of project groups in the tree, merged: one may be the
+  // sidebar's, filtered already.
+  function groups() {
+    const host = document.getElementById("root") || document.body?.firstElementChild;
+    const key = host && Object.keys(host).find((k) => k.startsWith("__reactContainer$"));
+    if (!key) return null;
+    const found = new Map();
+    const take = (v) => {
+      if (isGroups(v)) for (const g of v) found.set(g.projectKey, g);
+    };
+    const stack = [host[key]];
+    for (let seen = 0; stack.length && seen < 500000; seen++) {
+      const fiber = stack.pop();
+      const props = fiber.memoizedProps;
+      if (props && typeof props === "object") for (const k in props) take(props[k]);
+      for (let h = fiber.memoizedState, i = 0; h && typeof h === "object" && i < 200; h = h.next, i++) {
+        take(h.memoizedState);
+        if (Array.isArray(h.memoizedState)) take(h.memoizedState[0]);
+      }
+      for (const slot of fiber.updateQueue?.memoCache?.data || []) {
+        if (Array.isArray(slot)) for (const v of slot) take(v);
+      }
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }
+    return found.size ? [...found.values()] : null;
+  }
+  // The groups with a project in one of the folders; else those holding
+  // one of them, the nearest.
+  function keys(all) {
+    const real = all.filter((g) => !g.isScratch);
+    const roots = (g) => g.memberProjects.map((p) => p.workspaceRoot).filter((r) => typeof r === "string").map(trim);
+    const under = real.filter((g) => roots(g).some((r) => want.some((d) => inside(r, d))));
+    if (under.length) return under.map((g) => g.projectKey).sort();
+    let best = [], depth = -1;
+    for (const g of real) {
+      for (const r of roots(g)) {
+        if (!want.some((d) => inside(d, r)) || r.length < depth) continue;
+        if (r.length > depth) (best = []), (depth = r.length);
+        if (!best.includes(g.projectKey)) best.push(g.projectKey);
+      }
+    }
+    return best.sort();
+  }
+  const name =
+    Object.keys(localStorage)
+      .filter((k) => /^t3code:ui-state:v\d+$/.test(k))
+      .sort((a, b) => Number(b.split(":v")[1]) - Number(a.split(":v")[1]))[0] || "t3code:ui-state:v1";
+  let looks = 0;
+  function look() {
+    const all = groups();
+    const wanted = all ? keys(all) : [];
+    if (!wanted.length) {
+      // Not loaded yet, or the project not added yet.
+      if (++looks < 120) setTimeout(look, 500);
+      return;
+    }
+    let state = {};
+    try {
+      state = JSON.parse(localStorage.getItem(name) || "{}") || {};
+    } catch {}
+    const now = [...(state.sidebarProjectScopeKeys || [])].sort();
+    if (JSON.stringify(now) === JSON.stringify(wanted)) return;
+    const mark = "gerdr-t3-scope";
+    if (sessionStorage.getItem(mark) === JSON.stringify(wanted)) return;
+    sessionStorage.setItem(mark, JSON.stringify(wanted));
+    state.sidebarProjectScopeKeys = wanted;
+    state.sidebarProjectScopeKey = wanted.length === 1 ? wanted[0] : null;
+    localStorage.setItem(name, JSON.stringify(state));
+    location.reload();
+  }
+  look();
+}
+
+async function scope(tab) {
+  const dirs = scopes[tab];
+  if (!dirs) return;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: scopeT3, args: [dirs] });
+  } catch {
+    // Not a page the extension reaches.
+  }
+}
+
 async function command(message) {
   await loaded;
   const tab = tabOf(message.pane);
@@ -130,6 +233,11 @@ async function command(message) {
       case "reload":
         await chrome.tabs.reload(tab);
         break;
+      case "scope":
+        scopes[tab] = message.dirs;
+        await save();
+        await scope(tab);
+        break;
     }
   } catch {
     // Nothing that way: gerdr is told where the tab is anyway.
@@ -151,6 +259,9 @@ async function connect() {
   for (const id of Object.keys(panes)) {
     if (!open.has(id)) delete panes[id];
   }
+  for (const id of Object.keys(scopes)) {
+    if (!open.has(id)) delete scopes[id];
+  }
   await save();
   for (const tab of tabs) {
     await boot(tab);
@@ -168,6 +279,7 @@ chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
   await loaded;
   await boot(tab);
   if (change.status === "complete") await retry(tab);
+  if (change.status === "complete") await scope(id);
   // A load done is when the page's history can be asked for sure.
   if (change.url || change.title || change.status === "complete") await report(tab);
 });
@@ -175,6 +287,7 @@ chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
 chrome.tabs.onRemoved.addListener(async (id) => {
   await loaded;
   const pane = panes[id];
+  delete scopes[id];
   if (pane === undefined) return;
   delete panes[id];
   await save();

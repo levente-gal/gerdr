@@ -82,10 +82,24 @@ enum FromBrowser {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ToBrowser<'a> {
-    Navigate { pane: String, url: &'a str },
-    Back { pane: String },
-    Forward { pane: String },
-    Reload { pane: String },
+    Navigate {
+        pane: String,
+        url: &'a str,
+    },
+    Back {
+        pane: String,
+    },
+    Forward {
+        pane: String,
+    },
+    Reload {
+        pane: String,
+    },
+    /// Keep T3 Code's app in the pane's tab to the projects under `dirs`.
+    Scope {
+        pane: String,
+        dirs: Vec<String>,
+    },
 }
 
 /// A step a web pane's tab takes through its history, or again where it is.
@@ -454,6 +468,19 @@ impl Gerdr {
             self.set_web_page(pane, url.to_owned());
         }
         sent
+    }
+
+    /// Keep T3 Code's app in `pane`'s tab to the projects under `dirs`, if
+    /// the extension follows it; whether it was asked to.
+    pub fn scope_web_pane(&mut self, pane: u32, dirs: &[PathBuf]) -> bool {
+        let message = ToBrowser::Scope {
+            pane: pane_token(pane),
+            dirs: dirs
+                .iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect(),
+        };
+        self.send_to_browser(pane, &message)
     }
 
     /// Take `pane`'s tab a `step`, if the extension follows it; whether it
