@@ -151,7 +151,7 @@ pub enum MenuAction {
     SwitchTab(usize, usize),
     /// Go back (`true`) or forward to tab `id`, as the back or forward
     /// button's menu lists it (see `nav_history`).
-    GoToVisited(u64, bool),
+    GoToVisited(crate::nav_history::Visit, bool),
     /// Fold every workspace in the sidebar (`Some(true)`), unfold every
     /// one (`Some(false)`), or leave each to fold while quiet (`None`).
     FoldAll(Option<bool>),

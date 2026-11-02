@@ -13,6 +13,7 @@ use crate::{
     input::{BTN_LEFT, BTN_MIDDLE},
     layout::Dir,
     menu::{MenuAction, MenuItem, MenuSpec},
+    nav_history::Visit,
     rename::RenameTarget,
     tooltip::Tooltip,
 };
@@ -276,7 +277,7 @@ pub fn hidden_tab_items(w: usize, hidden: &[(usize, &str)]) -> Vec<MenuItem> {
 const VISITED_ITEMS: usize = 15;
 
 /// A tab in the back or forward button's menu: its workspace, its
-/// number and its title.
+/// number and its title (after its project's name, for another project's).
 pub fn visited_label(workspace: &str, t: usize, title: &str) -> String {
     format!("{workspace} › {} {title}", t + 1)
 }
@@ -449,21 +450,18 @@ impl Gerdr {
     /// coordinates): the tabs going that way would show, the next first,
     /// each by its workspace and title.
     fn visited_menu(&self, anchor: Rectangle<i32, Logical>, back: bool) -> Option<MenuSpec> {
-        let exists = |id| self.tab_place(id).is_some();
-        let ids = if back {
-            self.nav.backs(exists)
+        let can = |v: &Visit| self.can_visit(v);
+        let visits = if back {
+            self.nav.backs(can)
         } else {
-            self.nav.forwards(exists)
+            self.nav.forwards(can)
         };
-        let items: Vec<MenuItem> = ids
+        let items: Vec<MenuItem> = visits
             .into_iter()
             .take(VISITED_ITEMS)
-            .filter_map(|id| {
-                let (w, t) = self.tab_place(id)?;
-                let ws = &self.workspaces[w];
-                let title = self.tab_views(ws).get(t)?.title.clone();
-                let label = visited_label(&ws.name, t, &title);
-                Some(MenuItem::new(&label, MenuAction::GoToVisited(id, back)))
+            .filter_map(|visit| {
+                let label = self.visit_label(&visit)?;
+                Some(MenuItem::new(&label, MenuAction::GoToVisited(visit, back)))
             })
             .collect();
         (!items.is_empty()).then_some(MenuSpec { anchor, items })
