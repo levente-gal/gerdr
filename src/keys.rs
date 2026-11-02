@@ -113,6 +113,18 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "Up",
     ),
     (
+        "go-back",
+        Action::GoBack,
+        "Go back to the tab shown before",
+        "Left",
+    ),
+    (
+        "go-forward",
+        Action::GoForward,
+        "Go forward to the tab gone back from",
+        "Right",
+    ),
+    (
         "split-right",
         Action::Split(Dir::Right),
         "Split pane right",
@@ -354,6 +366,10 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     (
         "Go to the next / previous workspace",
         &["next-workspace", "previous-workspace"],
+    ),
+    (
+        "Go back / forward through the tabs shown",
+        &["go-back", "go-forward"],
     ),
     (
         "Open the pane's / workspace's menu…",
@@ -1176,6 +1192,7 @@ mod tests {
                 "Shift+T: Open a terminal workspace in home",
                 "Shift+D: Close workspace",
                 "Down / Up: Go to the next / previous workspace",
+                "Left / Right: Go back / forward through the tabs shown",
                 "M / Shift+M: Open the pane's / workspace's menu…",
                 "V / -: Split pane right / down",
                 "X: Close pane",

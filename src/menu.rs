@@ -149,6 +149,9 @@ pub enum MenuAction {
     OpenLog,
     /// Show tab `t` of workspace `w`.
     SwitchTab(usize, usize),
+    /// Go back (`true`) or forward to tab `id`, as the back or forward
+    /// button's menu lists it (see `nav_history`).
+    GoToVisited(u64, bool),
     /// Fold every workspace in the sidebar (`Some(true)`), unfold every
     /// one (`Some(false)`), or leave each to fold while quiet (`None`).
     FoldAll(Option<bool>),
@@ -417,6 +420,7 @@ impl Gerdr {
                 self.switch_workspace(w);
                 self.switch_tab(t);
             }
+            MenuAction::GoToVisited(id, back) => self.go_to_visited(id, back),
             MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
