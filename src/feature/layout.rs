@@ -856,6 +856,7 @@ mod tests {
             status: Status::Open,
             marks: Default::default(),
             shipping: Default::default(),
+            runs: Default::default(),
             history: Vec::new(),
         }
     }

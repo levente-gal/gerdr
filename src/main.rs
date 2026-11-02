@@ -28,6 +28,8 @@ mod diff_edit;
 mod diff_view;
 mod feature;
 mod features;
+mod feature_agents;
+mod doc_review;
 mod frecency;
 mod find;
 mod fuzzy;
@@ -61,6 +63,7 @@ mod profile_import;
 mod project_list;
 mod project_lock;
 mod project_menu;
+mod prompts;
 mod projects;
 mod quit;
 mod reload;
@@ -3900,21 +3903,27 @@ impl Gerdr {
     /// Open a tab in workspace `w` whose shell starts in `cd`, running
     /// `command` if any, and show it.
     pub fn new_tab_in(&mut self, w: usize, cd: &Path, command: Option<String>) {
+        self.new_tab_pane(w, cd, command);
+    }
+
+    /// `new_tab_in`, saying which herdr pane the tab's terminal is, when
+    /// herdr says.
+    pub fn new_tab_pane(&mut self, w: usize, cd: &Path, command: Option<String>) -> Option<String> {
         if w >= self.workspaces.len() {
-            return;
+            return None;
         }
         if w != self.active_workspace {
             self.switch_workspace(w);
         }
         let run = Some((cd.to_path_buf(), command));
-        let Some((pid, herdr)) = self.start_terminal_running(w, None, Dir::Right, run) else {
-            return;
-        };
+        let (pid, herdr) = self.start_terminal_running(w, None, Dir::Right, run)?;
+        let pane = herdr.as_ref().map(|h| h.pane_id.clone());
         let id = self.new_pane_id();
         let ws = &mut self.workspaces[w];
         ws.tabs.push(Tab::terminal(pid, id, herdr));
         ws.active_tab = ws.tabs.len() - 1;
         self.show_active();
+        pane
     }
 
     /// Open a tab in workspace `w` laid out like a project's first: Zed on

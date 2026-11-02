@@ -27,6 +27,8 @@
 
 #![allow(dead_code)]
 
+pub mod agents;
+pub mod artifacts;
 pub mod hook;
 pub mod layout;
 pub mod patch;
@@ -229,6 +231,9 @@ pub struct Feature {
     pub history: Vec<Event>,
     #[serde(default, skip_serializing_if = "Shipping::is_empty")]
     pub shipping: Shipping,
+    /// The agent stages' latest runs (see `agents`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runs: BTreeMap<Stage, agents::StageRun>,
 }
 
 impl Feature {
@@ -428,6 +433,7 @@ pub(crate) mod tests {
             marks: Default::default(),
             history: Vec::new(),
             shipping: Default::default(),
+            runs: Default::default(),
         }
     }
 
@@ -446,6 +452,7 @@ pub(crate) mod tests {
             marks: BTreeMap::new(),
             history: Vec::new(),
             shipping: Shipping::default(),
+            runs: BTreeMap::new(),
         }
     }
 

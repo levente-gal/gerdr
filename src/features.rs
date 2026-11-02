@@ -411,6 +411,12 @@ pub enum PanelOutcome {
     Tick,
     /// Ship it, after the Ship sheet: the current stage is Ship.
     Ship,
+    /// Start this agent stage's agent (fresh: even if one runs).
+    StartAgent(Stage, bool),
+    /// Show this agent stage's agent.
+    ShowAgent(Stage),
+    /// Review this agent stage's file.
+    ReviewDoc(Stage),
     /// Open this pull request's page.
     OpenPr(String),
     /// Clear this stage's mark and the later ones'.
@@ -1407,6 +1413,7 @@ impl Gerdr {
                 what: "created".into(),
             }],
             shipping: Default::default(),
+            runs: Default::default(),
         };
         self.features
             .all
@@ -1617,6 +1624,11 @@ impl Gerdr {
                 None => self.show_warning("Nothing left to mark done".into()),
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
+            PanelOutcome::StartAgent(stage, fresh) => {
+                self.start_stage_agent(&project, &slug, stage, fresh)
+            }
+            PanelOutcome::ShowAgent(_) => todo!("features: show the stage's agent"),
+            PanelOutcome::ReviewDoc(stage) => self.open_doc_review(&project, &slug, stage),
             PanelOutcome::OpenPr(url) => {
                 self.close_feature_panel();
                 let w = self.active_workspace;
@@ -2461,6 +2473,7 @@ pub(crate) mod tests {
                 .collect(),
             history: Vec::new(),
             shipping: Default::default(),
+            runs: Default::default(),
         }
     }
 

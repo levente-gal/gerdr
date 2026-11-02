@@ -68,6 +68,8 @@ pub struct ItemId(pub String);
 /// The list's sections, in the order they show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Section {
+    /// Feature gates waiting for the user (see `feature_agents::Gate`).
+    Gates,
     Agents,
     Services,
     /// The services' errors the user ignores: folded to a count until
@@ -79,7 +81,8 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
+        Section::Gates,
         Section::Agents,
         Section::Services,
         Section::Ignored,
@@ -91,6 +94,7 @@ impl Section {
     /// Its label's title.
     pub fn title(self) -> &'static str {
         match self {
+            Section::Gates => "Gates",
             Section::Agents => "Agents",
             Section::Services => "Services",
             Section::Ignored => "Ignored errors",
@@ -115,6 +119,7 @@ impl Section {
     /// Its label's icon.
     pub fn icon(self) -> chrome::InboxIcon {
         match self {
+            Section::Gates => chrome::InboxIcon::Agent,
             Section::Agents => chrome::InboxIcon::Agent,
             Section::Services => chrome::InboxIcon::Failed,
             Section::Ignored => chrome::InboxIcon::Failed,
@@ -202,6 +207,12 @@ impl InboxItem {
 /// Where going to an item leads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
+    /// Review a feature stage's file (`Gerdr::open_doc_review`).
+    Gate {
+        project: String,
+        slug: String,
+        stage: crate::feature::Stage,
+    },
     /// Show the agent (`Gerdr::focus_agent`).
     Agent(AgentKey),
     /// Switch to the workspace (`Gerdr::switch_workspace`).

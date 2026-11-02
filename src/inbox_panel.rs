@@ -713,6 +713,11 @@ impl Gerdr {
                 }
             }
             Target::Refresh => {}
+            Target::Gate {
+                project,
+                slug,
+                stage,
+            } => self.open_doc_review(&project, &slug, stage),
             Target::ServiceError {
                 project,
                 pane_id,

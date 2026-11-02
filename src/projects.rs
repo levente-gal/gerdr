@@ -314,11 +314,15 @@ pub struct Workflow {
     /// repository by its `origin` (see `feature::ship::mode_of`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ship: Option<crate::feature::ShipMode>,
+    /// The agent each stage starts, by the picker's name ("Claude Code")
+    /// or command (`claude`); without one, the first agent CLI installed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub agents: std::collections::BTreeMap<crate::feature::Stage, String>,
 }
 
 impl Workflow {
     pub fn is_empty(&self) -> bool {
-        self.ignore.is_empty() && self.base.is_empty() && self.ship.is_none()
+        self.ignore.is_empty() && self.base.is_empty() && self.ship.is_none() && self.agents.is_empty()
     }
 }
 
