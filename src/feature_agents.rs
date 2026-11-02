@@ -48,6 +48,9 @@ pub struct Gate {
 /// herdr can't say what the agent does, and how long a pane must be gone
 /// before its run forgets it.
 const STABLE: Duration = Duration::from_secs(10);
+/// How often a refused Plan's code is read again: undoing the agent's
+/// changes lets the plan go up for review.
+const RECHECK: Duration = Duration::from_secs(10);
 
 /// A file's modification time (unix seconds) and length: whether it
 /// changed.
@@ -74,6 +77,8 @@ pub(crate) struct Watch {
     /// The Plan file with this stamp was refused: the code changed, as
     /// the text says.
     pub(crate) refused: Option<(Stamp, String)>,
+    /// When the code was last read for the refused Plan file.
+    refused_at: Option<Instant>,
 }
 
 /// The watch's key: project, slug and stage.
@@ -547,7 +552,12 @@ impl Gerdr {
             match verdict {
                 Verdict::Wait => {}
                 Verdict::Ready(stamp) if stage == Stage::Plan => {
-                    let refused = watch.refused.as_ref().is_some_and(|(s, _)| *s == stamp);
+                    // A refused file is read again now and then: the
+                    // user may have undone the agent's changes.
+                    let refused = watch.refused.as_ref().is_some_and(|(s, _)| *s == stamp)
+                        && watch
+                            .refused_at
+                            .is_some_and(|at| now.duration_since(at) < RECHECK);
                     if watch.checking.is_none() && !refused {
                         watch.checking = Some(stamp);
                         self.check_plan_code(&project, &feature.slug, run.n, stamp);
@@ -700,13 +710,18 @@ impl Gerdr {
             return;
         };
         watch.checking = None;
+        watch.refused_at = Some(Instant::now());
         let reading = match result {
             Ok(reading) => reading,
             Err(why) => {
-                // Not again every round: once the file changes, or on a
-                // send back or fresh agent.
+                // Read again now and then; said once until it changes.
+                let line = format!("couldn't read the code: {why}");
+                let again = watch.refused.as_ref() == Some(&(stamp, line.clone()));
+                watch.refused = Some((stamp, line));
+                if again {
+                    return;
+                }
                 tracing::warn!("reading the code of feature {project}/{slug}: {why}");
-                watch.refused = Some((stamp, format!("couldn't read the code: {why}")));
                 return self.show_error(format!("Couldn't check the Plan agent's code: {why}"));
             }
         };
@@ -726,9 +741,14 @@ impl Gerdr {
             return self.stage_ready(project, slug, Stage::Plan);
         }
         let repos = changed.join(", ");
-        watch.refused = Some((stamp, format!("the agent changed the code in {repos}")));
+        let why = format!("the agent changed the code in {repos}");
+        let again = watch.refused.as_ref() == Some(&(stamp, why.clone()));
+        watch.refused = Some((stamp, why));
+        if again {
+            return;
+        }
         let text = format!(
-            "The Plan agent changed the code in {repos}; undo its changes, then send the plan back or start a fresh agent"
+            "The Plan agent changed the code in {repos}; undo its changes for the plan to go up for review, or start a fresh agent"
         );
         tracing::warn!("feature {project}/{slug}: {text}");
         if let Some(feature) = self.feature_mut(project, slug) {
