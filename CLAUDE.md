@@ -1,3 +1,7 @@
+## Feature review
+
+Before merging a feature branch, review its diff against `docs/feature-checklist.md` (closing, errors, keys, overlays, look, words, settings, state). Name findings by item id, like `E2 src/foo.rs:120`. The rules behind it are in `docs/ux-conventions.md`.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

@@ -2,6 +2,8 @@
 
 Rules every panel, popup and dialog follows. When a new surface needs a key
 or a look, take it from here; when a rule has to change, change it here.
+`docs/feature-checklist.md` lists where new features tend to break these
+rules, for reviewing a branch before it merges.
 
 ## Keys inside panels and popups
 
