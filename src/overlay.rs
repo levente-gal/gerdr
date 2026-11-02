@@ -85,13 +85,14 @@ impl Overlay {
                 | Self::Inbox
                 | Self::Scrollback
                 | Self::Switcher
+                | Self::Tasks
         )
     }
 
     /// Whether, while it is open, every key, press and scroll goes to it,
     /// wherever the pointer is, and no client has the pointer.
     pub fn grabs(self) -> bool {
-        self.is_dialog() || self.is_panel() || matches!(self, Self::Welcome | Self::Tasks)
+        self.is_dialog() || self.is_panel() || self == Self::Welcome
     }
 
     /// Whether, while it is open, the keys go to it rather than the apps
@@ -117,6 +118,7 @@ impl Overlay {
             Self::Scrollback => Action::Scrollback,
             Self::Switcher => Action::Switcher,
             Self::Help => Action::Shortcuts,
+            Self::Tasks => Action::Tasks,
             _ => return None,
         })
     }
@@ -265,6 +267,12 @@ impl Gerdr {
             Overlay::Inbox => self.inbox_scroll(motion),
             Overlay::Scrollback => self.scrollback_scroll(motion),
             Overlay::Switcher => self.switcher_scroll(motion),
+            Overlay::Tasks => {
+                let rows = self.motion_rows(motion, row_pitch(&self.tasks_rows()));
+                if rows != 0 {
+                    self.tasks_scroll(rows as i32);
+                }
+            }
             _ => {}
         }
     }
@@ -317,7 +325,7 @@ mod tests {
         for o in Overlay::ORDER {
             assert_eq!(
                 o.grabs(),
-                o.is_dialog() || o.is_panel() || o == Overlay::Welcome || o == Overlay::Tasks
+                o.is_dialog() || o.is_panel() || o == Overlay::Welcome
             );
             if o.grabs() {
                 assert!(o.takes_keys());

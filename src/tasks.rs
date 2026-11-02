@@ -11,7 +11,7 @@
 use std::{path::Path, time::Duration};
 
 use smithay::{
-    input::keyboard::Keysym,
+    input::keyboard::{Keysym, ModifiersState},
     utils::{Logical, Point, Rectangle},
 };
 
@@ -39,6 +39,12 @@ pub struct Task {
 }
 
 impl Task {
+    /// Whether it runs: what is only offered (T3 Code's server stopped,
+    /// to start) isn't counted nor shown in the footer.
+    pub fn runs(&self) -> bool {
+        self.dot != Dot::Idle
+    }
+
     fn view(&self) -> TaskView {
         TaskView {
             title: self.title.clone(),
@@ -62,6 +68,10 @@ pub struct Kept {
 #[derive(Debug, Default)]
 pub struct TasksPanel {
     pub selected: usize,
+    /// The selected row's button Enter presses: Tab moves it.
+    pub button: usize,
+    /// The first row shown, when not all fit.
+    pub first: usize,
     pub hover: Option<TasksHit>,
 }
 
@@ -112,6 +122,23 @@ fn git_tasks(turns: &[(std::path::PathBuf, String)]) -> Vec<Task> {
             }
         })
         .collect()
+}
+
+/// A profile being imported as a task (see `profile_import`).
+fn import_task(app: Option<(&'static str, bool)>) -> Option<Task> {
+    let (name, closing) = app?;
+    let detail = if closing {
+        format!("{name} closes for it, and starts again after")
+    } else {
+        "Copying what gerdr keeps of it".to_owned()
+    };
+    Some(Task {
+        title: format!("Importing {name}'s profile"),
+        chip: format!("Importing {name}"),
+        detail,
+        dot: Dot::Working,
+        actions: Vec::new(),
+    })
 }
 
 /// The apps kept running as tasks: one per project.
@@ -262,8 +289,14 @@ impl Gerdr {
     pub fn tasks(&self) -> Vec<Task> {
         let mut tasks = self.t3_tasks();
         tasks.extend(git_tasks(&git_ops::turns()));
+        tasks.extend(import_task(crate::profile_import::importing()));
         tasks.extend(kept_tasks(&self.kept));
         tasks
+    }
+
+    /// How many tasks run: what the footer and the launcher count.
+    pub fn running_tasks(tasks: &[Task]) -> usize {
+        tasks.iter().filter(|t| t.runs()).count()
     }
 
     /// How high the footer is: nothing when the config file hides it.
@@ -287,11 +320,22 @@ impl Gerdr {
         self.show_footer && self.footer_rect().to_f64().contains(pos)
     }
 
+    /// The footer: a chip per task that runs.
     pub fn footer_view(&self, tasks: &[Task]) -> Option<FooterView> {
         self.show_footer.then(|| FooterView {
-            tasks: tasks.iter().map(Task::view).collect(),
+            tasks: tasks.iter().filter(|t| t.runs()).map(Task::view).collect(),
             hover: self.footer_hover,
         })
+    }
+
+    /// Which of `tasks` the footer's chip `chip` is.
+    fn footer_task(tasks: &[Task], chip: usize) -> Option<usize> {
+        tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.runs())
+            .nth(chip)
+            .map(|(i, _)| i)
     }
 
     /// What of the footer is at `pos`, if any.
@@ -308,7 +352,10 @@ impl Gerdr {
     /// A press on the footer: a task or the count opens the tasks panel.
     pub fn footer_press(&mut self, pos: Point<f64, Logical>) {
         match self.footer_hit(pos) {
-            Some(FooterHit::Task(i)) => self.open_tasks(i),
+            Some(FooterHit::Task(chip)) => {
+                let i = Self::footer_task(&self.tasks(), chip).unwrap_or(0);
+                self.open_tasks(i);
+            }
             Some(FooterHit::Count) => self.open_tasks(0),
             None => {}
         }
@@ -319,71 +366,162 @@ impl Gerdr {
     pub fn footer_motion(&mut self, pos: Option<Point<f64, Logical>>) -> Option<Tooltip> {
         let hit = pos.and_then(|pos| self.footer_hit(pos));
         self.footer_hover = hit;
-        let pos = pos?;
         let hit = hit?;
         let rect = self.footer_rect();
         let tasks = self.tasks();
         let view = self.footer_view(&tasks)?;
         let layout = chrome::footer_layout(&view, rect.size);
         let shift = |r: chrome::Rect| Rectangle::new(r.loc + Point::from((0, rect.loc.y)), r.size);
-        let _ = pos;
         match hit {
-            FooterHit::Task(i) => {
-                let task = tasks.get(i)?;
+            FooterHit::Task(chip) => {
+                let task = tasks.get(Self::footer_task(&tasks, chip)?)?;
                 let text = format!("{}: {}", task.title, task.detail);
-                Some(Tooltip::new(&text, shift(*layout.chips.get(i)?)))
+                Some(Tooltip::new(&text, shift(*layout.chips.get(chip)?)))
             }
             FooterHit::Count => Some(Tooltip::new("Background tasks", shift(layout.count))),
         }
     }
 
     /// Open the tasks panel at task `selected`.
+    /// The other panels close: it would cover them.
     pub fn open_tasks(&mut self, selected: usize) {
-        self.context_menu = None;
+        self.switcher = None;
+        self.repos.close();
+        self.worktrees.close();
+        self.project_menu = None;
+        self.scrollback = None;
+        if self.inbox.is_open() {
+            self.close_inbox();
+        }
+        self.stop_key_repeat();
+        self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
         self.tasks_panel = Some(TasksPanel {
             selected,
-            hover: None,
+            ..TasksPanel::default()
         });
+        self.reveal_task();
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
     }
 
+    /// Close the tasks panel.
+    pub fn close_tasks(&mut self) {
+        self.tasks_panel = None;
+        self.refresh_pointer_focus();
+    }
+
+    /// The key hints under the tasks, for task `task` selected with its
+    /// button `button` focused.
+    fn tasks_hints(task: Option<&Task>, button: usize) -> Vec<(String, String)> {
+        let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
+        let mut hints = vec![hint("Up / Down", "move")];
+        if let Some(task) = task {
+            if task.actions.len() > 1 {
+                hints.push(hint("Tab", "next button"));
+            }
+            if let Some((label, _)) = task.actions.get(button.min(task.actions.len() - 1)) {
+                hints.push(hint("Enter", &label.to_lowercase()));
+            }
+        }
+        hints.push(hint("Esc", "close"));
+        hints
+    }
+
     pub fn tasks_view(&self, tasks: &[Task]) -> Option<TasksView> {
         let panel = self.tasks_panel.as_ref()?;
+        let selected = (!tasks.is_empty()).then(|| panel.selected.min(tasks.len() - 1));
         Some(TasksView {
             rows: tasks.iter().map(Task::view).collect(),
-            selected: (!tasks.is_empty()).then(|| panel.selected.min(tasks.len() - 1)),
+            first: panel.first,
+            selected,
+            button: panel.button,
             hover: panel.hover,
+            hints: Self::tasks_hints(selected.and_then(|i| tasks.get(i)), panel.button),
         })
     }
 
-    fn tasks_layout(&self) -> Option<(Vec<Task>, chrome::TasksLayout)> {
+    fn tasks_layout(&self) -> Option<(Vec<Task>, TasksView, chrome::TasksLayout)> {
         let tasks = self.tasks();
         let view = self.tasks_view(&tasks)?;
         let layout = chrome::tasks_layout(&view, self.output_size(), self.footer_height());
-        Some((tasks, layout))
+        Some((tasks, view, layout))
     }
 
-    /// A key while the tasks panel has the keyboard.
-    pub fn tasks_key(&mut self, sym: Keysym) -> Option<Outcome> {
+    /// How many tasks the panel shows at once.
+    fn tasks_page(&self, count: usize) -> usize {
+        chrome::tasks_shown(count, self.output_size(), self.footer_height()).max(1)
+    }
+
+    /// Scroll the tasks panel so the selected task shows.
+    fn reveal_task(&mut self) {
         let count = self.tasks().len();
+        let page = self.tasks_page(count);
+        if let Some(panel) = self.tasks_panel.as_mut() {
+            panel.selected = panel.selected.min(count.saturating_sub(1));
+            if panel.selected < panel.first {
+                panel.first = panel.selected;
+            } else if panel.selected >= panel.first + page {
+                panel.first = panel.selected + 1 - page;
+            }
+            panel.first = panel.first.min(count.saturating_sub(page));
+        }
+    }
+
+    /// A key while the tasks panel has the keyboard: Up/Down (Ctrl+K/J,
+    /// k/j), PgUp/PgDn, Home/End move between the tasks; Tab/Shift+Tab
+    /// (Right/Left) between the selected one's buttons; Enter presses the
+    /// focused button; Esc closes.
+    pub fn tasks_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+        let tasks = self.tasks();
+        let count = tasks.len();
+        let page = self.tasks_page(count);
         let panel = self.tasks_panel.as_mut()?;
         let last = count.saturating_sub(1);
         panel.selected = panel.selected.min(last);
+        let row = panel.selected;
+        let buttons = tasks.get(row).map_or(0, |t| t.actions.len());
+        let plain = !mods.ctrl && !mods.alt && !mods.logo;
+        let mut to = None;
         match sym {
             Keysym::Escape => return Some(Outcome::Close),
-            Keysym::Up | Keysym::KP_Up | Keysym::k => {
-                panel.selected = panel.selected.saturating_sub(1);
-            }
-            Keysym::Down | Keysym::KP_Down | Keysym::j => {
-                panel.selected = (panel.selected + 1).min(last);
+            Keysym::Up | Keysym::KP_Up => to = Some(row.saturating_sub(1)),
+            Keysym::k if plain || (mods.ctrl && !mods.alt) => to = Some(row.saturating_sub(1)),
+            Keysym::Down | Keysym::KP_Down => to = Some((row + 1).min(last)),
+            Keysym::j if plain || (mods.ctrl && !mods.alt) => to = Some((row + 1).min(last)),
+            Keysym::Page_Up | Keysym::KP_Page_Up => to = Some(row.saturating_sub(page)),
+            Keysym::Page_Down | Keysym::KP_Page_Down => to = Some((row + page).min(last)),
+            Keysym::Home | Keysym::KP_Home => to = Some(0),
+            Keysym::End | Keysym::KP_End => to = Some(last),
+            Keysym::Tab
+            | Keysym::ISO_Left_Tab
+            | Keysym::Left
+            | Keysym::Right
+            | Keysym::h
+            | Keysym::l
+                if plain || matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) =>
+            {
+                let back = matches!(sym, Keysym::ISO_Left_Tab | Keysym::Left | Keysym::h)
+                    || (sym == Keysym::Tab && mods.shift);
+                let at = panel.button.min(buttons.saturating_sub(1));
+                panel.button = if back {
+                    at.saturating_sub(1)
+                } else {
+                    (at + 1).min(buttons.saturating_sub(1))
+                };
             }
             Keysym::Return | Keysym::KP_Enter => {
-                let selected = panel.selected;
-                let action = self.tasks().get(selected)?.actions.first()?.1.clone();
-                return Some(Outcome::Run(action));
+                let actions = &tasks.get(row)?.actions;
+                let at = panel.button.min(actions.len().checked_sub(1)?);
+                return Some(Outcome::Run(actions[at].1.clone()));
             }
             _ => {}
+        }
+        if let Some(to) = to.filter(|to| *to != row) {
+            panel.selected = to;
+            panel.button = 0;
+            self.reveal_task();
         }
         None
     }
@@ -392,18 +530,14 @@ impl Gerdr {
     /// what it did.
     pub fn apply_tasks(&mut self, outcome: Outcome) {
         match outcome {
-            Outcome::Close => {
-                self.tasks_panel = None;
-                self.refresh_pointer_focus();
-            }
+            Outcome::Close => self.close_tasks(),
             Outcome::Run(action) => {
                 // What opens elsewhere closes the panel.
                 if matches!(
                     action,
                     MenuAction::OpenT3 | MenuAction::ShowLog(_) | MenuAction::Repos
                 ) {
-                    self.tasks_panel = None;
-                    self.refresh_pointer_focus();
+                    self.close_tasks();
                 }
                 self.menu_action(action);
             }
@@ -411,23 +545,35 @@ impl Gerdr {
     }
 
     /// A left click while the tasks panel is open: off it closes it, on a
-    /// row selects it, on a button presses it.
+    /// row selects it, on a button presses it, on a key hint presses its
+    /// key.
     pub fn tasks_click(&mut self, pos: Point<f64, Logical>) {
-        let Some((tasks, layout)) = self.tasks_layout() else {
+        let Some((tasks, view, layout)) = self.tasks_layout() else {
             return;
         };
         let outcome = match layout.hit(pos) {
             None => Some(Outcome::Close),
             Some(TasksHit::Panel) => None,
+            Some(TasksHit::Hint(i)) => {
+                let keys = view.hints.get(i).map(|(k, _)| k.clone());
+                if let Some(keys) = keys {
+                    self.press_hint(crate::input::Overlay::Tasks, &keys, pos);
+                }
+                None
+            }
             Some(TasksHit::Row(i)) => {
-                if let Some(panel) = self.tasks_panel.as_mut() {
+                if let Some(panel) = self.tasks_panel.as_mut()
+                    && panel.selected != i
+                {
                     panel.selected = i;
+                    panel.button = 0;
                 }
                 None
             }
             Some(TasksHit::Button(i, b)) => {
                 if let Some(panel) = self.tasks_panel.as_mut() {
                     panel.selected = i;
+                    panel.button = b;
                 }
                 tasks
                     .get(i)
@@ -442,16 +588,35 @@ impl Gerdr {
 
     /// The pointer moved while the tasks panel is open.
     pub fn tasks_hover(&mut self, pos: Point<f64, Logical>) {
-        let hit = self.tasks_layout().and_then(|(_, layout)| layout.hit(pos));
+        let hit = self
+            .tasks_layout()
+            .and_then(|(_, _, layout)| layout.hit(pos));
         if let Some(panel) = self.tasks_panel.as_mut() {
             panel.hover = hit;
         }
     }
 
+    /// The wheel or touchpad over the tasks panel: `rows` rows on.
+    pub fn tasks_scroll(&mut self, rows: i32) {
+        let count = self.tasks().len();
+        let page = self.tasks_page(count);
+        if let Some(panel) = self.tasks_panel.as_mut() {
+            let first = panel.first as i64 + rows as i64;
+            panel.first = first.clamp(0, count.saturating_sub(page) as i64) as usize;
+        }
+    }
+
+    /// The rows of the tasks panel, as laid out now: for how far a notch
+    /// of the wheel goes.
+    pub fn tasks_rows(&self) -> Vec<chrome::Rect> {
+        self.tasks_layout()
+            .map_or_else(Vec::new, |(_, _, layout)| layout.rows)
+    }
+
     /// The buttons of the tasks panel, while it is open.
     pub fn tasks_controls(&self) -> Vec<chrome::Rect> {
         self.tasks_layout()
-            .map_or_else(Vec::new, |(_, layout)| layout.controls())
+            .map_or_else(Vec::new, |(_, _, layout)| layout.controls())
     }
 }
 

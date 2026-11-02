@@ -8,9 +8,9 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{
-    BUTTON_RADIUS, DETAIL_FONT_SIZE, DOT, Density, Dot, FONT_SIZE, HELP_RADIUS, LABEL_FONT_SIZE,
-    Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, dot_shape, icon_sdf, measure, mix, phys,
-    physical, rect_px,
+    BUTTON_RADIUS, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Density, Dot, FONT_SIZE, LABEL_FONT_SIZE,
+    ListBar, POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, Thumb, band, dot_shape,
+    hint_spots, hint_strs, icon_sdf, measure, mix, phys, physical, rect_px,
 };
 
 /// How high the footer is at `density`.
@@ -213,8 +213,8 @@ impl Painter {
     }
 }
 
-/// How wide the tasks panel is, at the most.
-const PANEL_WIDTH: i32 = 560;
+/// How wide the tasks panel is, at the most: as wide as a dialog.
+const PANEL_WIDTH: i32 = DIALOG_WIDTH;
 /// Room around its edges, and between it and the footer.
 const PANEL_PAD: i32 = 12;
 const PANEL_MARGIN: i32 = 6;
@@ -229,14 +229,25 @@ const BUTTON_GAP: i32 = 6;
 /// A row's dot column and the gap after it.
 const ROW_INSET: i32 = 8;
 const ROW_DOT: i32 = 14;
+/// The key hints' row under the tasks, and the gap above it.
+const HINTS_H: i32 = 24;
+const HINTS_GAP: i32 = 6;
+/// The scrollbar's room right of the rows, when not all fit.
+const BAR_ROOM: i32 = 8;
 
 /// What the tasks panel shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TasksView {
     pub rows: Vec<TaskView>,
+    /// The first row shown, when not all fit.
+    pub first: usize,
     /// The row under the keyboard's cursor.
     pub selected: Option<usize>,
+    /// The selected row's button Enter presses.
+    pub button: usize,
     pub hover: Option<TasksHit>,
+    /// The key hints under the rows: keys, what they do.
+    pub hints: Vec<(String, String)>,
 }
 
 /// What the pointer is over in the tasks panel.
@@ -246,6 +257,8 @@ pub enum TasksHit {
     Row(usize),
     /// Row `.0`'s button `.1`.
     Button(usize, usize),
+    /// Key hint `.0`: a click presses its key.
+    Hint(usize),
 }
 
 /// Where the tasks panel's parts go, in output coordinates.
@@ -253,9 +266,16 @@ pub enum TasksHit {
 pub struct TasksLayout {
     pub panel: Rect,
     pub title: Rect,
+    /// The row shown first: `rows[0]` is task `first`.
+    pub first: usize,
+    /// The rows shown, from `first`.
     pub rows: Vec<Rect>,
-    /// Each row's buttons, in order.
+    /// Each shown row's buttons, in order.
     pub buttons: Vec<Vec<Rect>>,
+    /// The key hints, as (index into the view's hints, rect).
+    pub hints: Vec<(usize, Rect)>,
+    /// The scrollbar's track, when not all rows fit.
+    pub track: Option<Rect>,
 }
 
 /// How wide a button labelled `label` is.
@@ -263,32 +283,54 @@ fn button_w(label: &str) -> i32 {
     text_w(label, FONT_SIZE) + 2 * BUTTON_PAD
 }
 
+/// How many of `rows` tasks fit on an output of `output` over a footer
+/// `footer` high: at least one.
+pub fn tasks_shown(rows: usize, output: Size<i32, Logical>, footer: i32) -> usize {
+    let fixed = 2 * PANEL_MARGIN + 2 * PANEL_PAD + TITLE_H + TITLE_GAP + HINTS_GAP + HINTS_H;
+    let room = output.h - footer - fixed + ROW_GAP;
+    let fit = (room / (ROW_H + ROW_GAP)).max(1) as usize;
+    rows.min(fit)
+}
+
 /// Where the tasks panel's parts go on an output of `output`, over a
-/// footer `footer` high: at the bottom left, over the footer.
+/// footer `footer` high: at the bottom left, over the footer, as high as
+/// the output lets it; the rows past that scroll.
 pub fn tasks_layout(view: &TasksView, output: Size<i32, Logical>, footer: i32) -> TasksLayout {
-    let rows_h = if view.rows.is_empty() {
+    let total = view.rows.len();
+    let shown = tasks_shown(total, output, footer);
+    let first = view.first.min(total - shown);
+    let rows_h = if total == 0 {
         EMPTY_H
     } else {
-        view.rows.len() as i32 * (ROW_H + ROW_GAP) - ROW_GAP
+        shown as i32 * (ROW_H + ROW_GAP) - ROW_GAP
     };
-    let height = 2 * PANEL_PAD + TITLE_H + TITLE_GAP + rows_h;
+    let height = 2 * PANEL_PAD + TITLE_H + TITLE_GAP + rows_h + HINTS_GAP + HINTS_H;
     let width = PANEL_WIDTH.min(output.w - 2 * PANEL_MARGIN).max(1);
     let y = (output.h - footer - PANEL_MARGIN - height).max(PANEL_MARGIN);
     let panel = Rectangle::new((PANEL_MARGIN, y).into(), (width, height).into());
-    let (x, inner) = (panel.loc.x + PANEL_PAD, width - 2 * PANEL_PAD);
+    let x = panel.loc.x + PANEL_PAD;
+    let inner = width - 2 * PANEL_PAD;
     let title = Rectangle::new((x, y + PANEL_PAD).into(), (inner, TITLE_H).into());
     let rows_y = title.loc.y + TITLE_H + TITLE_GAP;
-    let rows: Vec<Rect> = (0..view.rows.len() as i32)
+    let scrolls = shown < total;
+    let row_w = if scrolls { inner - BAR_ROOM } else { inner };
+    let rows: Vec<Rect> = (0..shown as i32)
         .map(|i| {
             Rectangle::new(
                 (x, rows_y + i * (ROW_H + ROW_GAP)).into(),
-                (inner, ROW_H).into(),
+                (row_w, ROW_H).into(),
             )
         })
         .collect();
+    let track = scrolls.then(|| {
+        super::gutter_track(
+            x + row_w + 1,
+            Rectangle::new((x, rows_y).into(), (row_w, rows_h).into()),
+        )
+    });
     let buttons = rows
         .iter()
-        .zip(&view.rows)
+        .zip(&view.rows[first..])
         .map(|(row, task)| {
             let mut right = row.loc.x + row.size.w - ROW_INSET;
             let by = row.loc.y + (ROW_H - BUTTON_H) / 2;
@@ -308,11 +350,18 @@ pub fn tasks_layout(view: &TasksView, output: Size<i32, Logical>, footer: i32) -
             rects
         })
         .collect();
+    let hints_rect = Rectangle::new(
+        (x, rows_y + rows_h + HINTS_GAP).into(),
+        (inner, HINTS_H).into(),
+    );
     TasksLayout {
         panel,
         title,
+        first,
         rows,
         buttons,
+        hints: hint_spots(&hint_strs(&view.hints), hints_rect),
+        track,
     }
 }
 
@@ -321,18 +370,26 @@ impl TasksLayout {
         if !self.panel.to_f64().contains(pos) {
             return None;
         }
-        for (i, buttons) in self.buttons.iter().enumerate() {
+        if let Some((i, _)) = self.hints.iter().find(|(_, r)| r.to_f64().contains(pos)) {
+            return Some(TasksHit::Hint(*i));
+        }
+        for (k, buttons) in self.buttons.iter().enumerate() {
             if let Some(b) = buttons.iter().position(|r| r.to_f64().contains(pos)) {
-                return Some(TasksHit::Button(i, b));
+                return Some(TasksHit::Button(self.first + k, b));
             }
         }
         let row = self.rows.iter().position(|r| r.to_f64().contains(pos));
-        Some(row.map_or(TasksHit::Panel, TasksHit::Row))
+        Some(row.map_or(TasksHit::Panel, |k| TasksHit::Row(self.first + k)))
     }
 
     /// What the pointer can press.
     pub fn controls(&self) -> Vec<Rect> {
-        self.buttons.iter().flatten().copied().collect()
+        self.buttons
+            .iter()
+            .flatten()
+            .copied()
+            .chain(self.hints.iter().map(|(_, r)| *r))
+            .collect()
     }
 }
 
@@ -349,8 +406,7 @@ impl Painter {
     ) -> MemoryRenderBuffer {
         let layout = tasks_layout(view, output, footer);
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
-        let s = scale as f32;
+        let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let shift = |r: Rect| {
             Rectangle::new(
                 r.loc + Point::from((SHADOW - panel.loc.x, SHADOW - panel.loc.y)),
@@ -368,6 +424,19 @@ impl Painter {
             band(title, scale),
             scale,
             p.text,
+        );
+        let hints: Vec<(usize, Rect)> = layout.hints.iter().map(|(i, r)| (*i, shift(*r))).collect();
+        let hint_hover = match view.hover {
+            Some(TasksHit::Hint(i)) => Some(i),
+            _ => None,
+        };
+        self.hints(
+            &mut c,
+            &hint_strs(&view.hints),
+            &hints,
+            hint_hover,
+            scale,
+            p,
         );
         if view.rows.is_empty() {
             let empty = Rectangle::new(
@@ -387,37 +456,31 @@ impl Painter {
             );
             return c.into_buffer(false);
         }
-        for (i, ((row, task), buttons)) in layout
-            .rows
-            .iter()
-            .zip(&view.rows)
-            .zip(&layout.buttons)
-            .enumerate()
-        {
+        if let Some(track) = layout.track {
+            let bar = ListBar {
+                down: layout.first as f64,
+                total: view.rows.len() as f64,
+            };
+            if let Some(thumb) = Thumb::of(shift(track), layout.rows.len() as f64, bar) {
+                self.thumb_in(&mut c, &thumb, scale, p);
+            }
+        }
+        for (k, (row, buttons)) in layout.rows.iter().zip(&layout.buttons).enumerate() {
+            let i = layout.first + k;
+            let Some(task) = view.rows.get(i) else {
+                continue;
+            };
             let row = shift(*row);
             let lit =
                 matches!(view.hover, Some(TasksHit::Row(r) | TasksHit::Button(r, _)) if r == i);
-            let (x, y, w, h) = rect_px(row, scale);
-            // Softer than `p.selected`, which a lit button takes.
-            if view.selected == Some(i) {
-                c.rounded(
-                    x,
-                    y,
-                    w,
-                    h,
-                    BUTTON_RADIUS * s,
-                    mix(p.elevated, p.selected, 0.6),
-                );
-            } else if lit {
-                c.rounded(
-                    x,
-                    y,
-                    w,
-                    h,
-                    BUTTON_RADIUS * s,
-                    mix(p.elevated, p.selected, 0.3),
-                );
-            }
+            let selected = view.selected == Some(i);
+            self.row_highlight(
+                &mut c,
+                row,
+                (selected, if lit { 1.0 } else { 0.0 }),
+                scale,
+                p,
+            );
             let spot = Rectangle::new(
                 (
                     row.loc.x + ROW_INSET + (ROW_DOT - DOT) / 2,
@@ -430,7 +493,9 @@ impl Painter {
             let text_x = row.loc.x + ROW_INSET + ROW_DOT + 6;
             let text_end = buttons
                 .first()
-                .map_or(row.loc.x + row.size.w - ROW_INSET, |b| b.loc.x - BUTTON_GAP);
+                .map_or(row.loc.x + row.size.w - ROW_INSET, |b| {
+                    shift(*b).loc.x - BUTTON_GAP
+                });
             let line = |top: i32, h: i32| {
                 Rectangle::new((text_x, top).into(), ((text_end - text_x).max(1), h).into())
             };
@@ -458,9 +523,10 @@ impl Painter {
                 scale,
                 p.muted,
             );
+            let focus = view.button.min(task.buttons.len().saturating_sub(1));
             for (b, (rect, label)) in buttons.iter().zip(&task.buttons).enumerate() {
                 let hovered = view.hover == Some(TasksHit::Button(i, b));
-                let focused = view.selected == Some(i) && b == 0;
+                let focused = selected && b == focus;
                 self.button(
                     &mut c,
                     label,
@@ -523,8 +589,11 @@ mod tests {
                 task("T3 Code", &["Open", "Restart", "Stop"]),
                 task("fetch", &[]),
             ],
+            first: 0,
             selected: Some(0),
+            button: 0,
             hover: None,
+            hints: vec![("Esc".into(), "close".into())],
         };
         let output = (1600, 900).into();
         let l = tasks_layout(&view, output, 24);
@@ -547,5 +616,35 @@ mod tests {
         let row = Point::from((l.rows[1].loc.x as f64 + 3.0, l.rows[1].loc.y as f64 + 3.0));
         assert_eq!(l.hit(row), Some(TasksHit::Row(1)));
         assert_eq!(l.hit(Point::from((1500.0, 10.0))), None);
+        assert!(l.track.is_none());
+        let (_, hint) = l.hints[0];
+        let on = Point::from((hint.loc.x as f64 + 3.0, hint.loc.y as f64 + 3.0));
+        assert_eq!(l.hit(on), Some(TasksHit::Hint(0)));
+    }
+
+    #[test]
+    fn rows_past_a_small_output_scroll() {
+        let view = TasksView {
+            rows: (0..30)
+                .map(|i| task(&format!("task {i}"), &["Stop"]))
+                .collect(),
+            first: 25,
+            selected: Some(27),
+            button: 0,
+            hover: None,
+            hints: Vec::new(),
+        };
+        let output = (870, 600).into();
+        let l = tasks_layout(&view, output, 24);
+        assert!(l.panel.loc.y >= PANEL_MARGIN);
+        assert!(l.panel.loc.y + l.panel.size.h <= 600 - 24);
+        let shown = tasks_shown(30, output, 24);
+        assert_eq!(l.rows.len(), shown);
+        assert!(shown < 30 && l.track.is_some());
+        // Held so the last row shows at the bottom.
+        assert_eq!(l.first, 30 - shown);
+        let row = l.rows[0];
+        let on = Point::from((row.loc.x as f64 + 3.0, row.loc.y as f64 + 3.0));
+        assert_eq!(l.hit(on), Some(TasksHit::Row(30 - shown)));
     }
 }

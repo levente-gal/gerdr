@@ -1230,8 +1230,18 @@ fn status_footer() -> super::FooterView {
 fn status_panel() -> super::TasksView {
     super::TasksView {
         rows: status_tasks(),
+        first: 0,
         selected: Some(0),
+        button: 0,
         hover: Some(super::TasksHit::Button(0, 1)),
+        hints: [
+            ("Up / Down", "move"),
+            ("Tab", "next button"),
+            ("Enter", "open"),
+            ("Esc", "close"),
+        ]
+        .map(|(k, a)| (k.to_owned(), a.to_owned()))
+        .into(),
     }
 }
 
@@ -1253,22 +1263,22 @@ const GOLDEN_STATUS: [[u64; 2]; 4] = [
     // Dark at 1
     [
         0x3821a1cf1a7fe182, // footer
-        0x02042cb93d8554b1, // tasks_panel
+        0x96a4d754d97eb9ae, // tasks_panel
     ],
     // Dark at 2
     [
         0x910ba2519163ffe3, // footer
-        0x659863499acdfa36, // tasks_panel
+        0x769d4263ca0b0ddf, // tasks_panel
     ],
     // Light at 1
     [
         0x8a8087fd34aec460, // footer
-        0x5d58872415bfdb21, // tasks_panel
+        0x2dd90e0e19595929, // tasks_panel
     ],
     // Light at 2
     [
         0x28f7c3f0d800d54e, // footer
-        0xc86f0dac85713891, // tasks_panel
+        0xd482adba2192cecc, // tasks_panel
     ],
 ];
 

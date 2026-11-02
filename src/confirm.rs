@@ -55,6 +55,10 @@ pub enum Then {
     /// Restart T3 Code's server at the version waiting (see
     /// `Gerdr::restart_t3`).
     RestartT3,
+    /// Stop T3 Code's server (see `Gerdr::stop_t3`).
+    StopT3,
+    /// Stop the apps this project keeps running (see `Gerdr::stop_kept`).
+    StopKept(String),
     /// Close this profile's app, import it, start the app again (see
     /// `Gerdr::import_profile`).
     ImportProfile(Source),
@@ -174,16 +178,39 @@ fn forget_question(name: &str) -> (String, String) {
     )
 }
 
-/// What a confirm dialog about restarting T3 Code at `version` while
-/// `busy` of its threads work or wait says: its title and the line under
-/// it, short enough for the dialog's one line.
-fn restart_t3_question(version: &str, busy: usize) -> (String, String) {
-    let title = format!("Restart T3 Code at {version}?");
+/// What a confirm dialog about restarting T3 Code (at `version`, if
+/// any) while `busy` of its threads work or wait says: its title and the
+/// line under it, short enough for the dialog's one line.
+fn restart_t3_question(version: Option<&str>, busy: usize) -> (String, String) {
+    let title = match version {
+        Some(version) => format!("Restart T3 Code at {version}?"),
+        None => "Restart T3 Code?".to_owned(),
+    };
     let body = match busy {
         1 => "A thread is at work: restarting now stops it".to_owned(),
         n => format!("{n} threads are at work: restarting now stops them"),
     };
     (title, body)
+}
+
+/// What a confirm dialog about stopping T3 Code's server while `busy` of
+/// its threads work or wait says.
+fn stop_t3_question(busy: usize) -> (String, String) {
+    let body = match busy {
+        1 => "A thread is at work: stopping now stops it".to_owned(),
+        n => format!("{n} threads are at work: stopping now stops them"),
+    };
+    ("Stop T3 Code's server?".to_owned(), body)
+}
+
+/// What a confirm dialog about stopping `apps`, which project `name`
+/// keeps running, says.
+fn stop_kept_question(name: &str, apps: &[String]) -> (String, String) {
+    let apps = apps.join(", ");
+    (
+        format!("Stop {apps} for \u{201c}{name}\u{201d}?"),
+        format!("{apps} closes, with its windows"),
+    )
 }
 
 /// What a confirm dialog about closing app `name`, which runs, to import
@@ -334,8 +361,46 @@ impl Gerdr {
     /// of its threads work or wait: cancelled, it restarts once they're
     /// done, and says so.
     pub fn ask_restart_t3(&mut self, version: String, busy: usize) {
-        let (title, body) = restart_t3_question(&version, busy);
+        let (title, body) = restart_t3_question(Some(&version), busy);
         self.ask(title, body, "Restart now", Then::RestartT3);
+    }
+
+    /// Restart T3 Code's server now (at the version waiting, if any):
+    /// asked first while its threads work or wait.
+    pub fn restart_t3_asking(&mut self) {
+        match self.t3_busy() {
+            0 => self.restart_t3(),
+            busy => {
+                let version = self.t3.restart_at.clone();
+                let (title, body) = restart_t3_question(version.as_deref(), busy);
+                self.ask(title, body, "Restart now", Then::RestartT3);
+            }
+        }
+    }
+
+    /// Stop T3 Code's server: asked first while its threads work or wait.
+    pub fn stop_t3_asking(&mut self) {
+        match self.t3_busy() {
+            0 => self.stop_t3(|_| {}),
+            busy => {
+                let (title, body) = stop_t3_question(busy);
+                self.ask(title, body, "Stop server", Then::StopT3);
+            }
+        }
+    }
+
+    /// Stop the apps project `id` keeps running, after asking: their
+    /// windows close.
+    pub fn ask_stop_kept(&mut self, id: &str) {
+        let apps = keep::app_names(id);
+        let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
+            return tracing::warn!("no project {id} to stop the apps of");
+        };
+        if apps.is_empty() {
+            return self.show_notice(format!("{name} keeps no apps running"));
+        }
+        let (title, body) = stop_kept_question(&name, &apps);
+        self.ask(title, body, "Stop apps", Then::StopKept(id.to_owned()));
     }
 
     /// Ask before closing `source`'s app to import its profile.
@@ -393,7 +458,7 @@ impl Gerdr {
         self.refresh_pointer_focus();
         if outcome == Outcome::Cancel {
             // Not now, but still once its threads are done.
-            if dialog.then == Then::RestartT3 {
+            if dialog.then == Then::RestartT3 && self.t3.restart_at.is_some() {
                 let text = "T3 Code restarts once its threads are done".to_owned();
                 self.show_notice(text);
             }
@@ -408,6 +473,15 @@ impl Gerdr {
             }
             Then::ClosePane(id) => self.close_pane_now(id),
             Then::RestartT3 => self.restart_t3(),
+            Then::StopT3 => self.stop_t3(|_| {}),
+            Then::StopKept(id) => {
+                let apps = keep::app_names(&id).join(", ");
+                let name = self.projects.project(&id).map(|p| p.name.clone());
+                self.stop_kept(&id);
+                if let Some(name) = name.filter(|_| !apps.is_empty()) {
+                    self.show_success(format!("Stopped {apps} for {name}"));
+                }
+            }
             Then::ImportProfile(source) => self.start_import(source, true),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
@@ -583,13 +657,24 @@ mod tests {
 
     #[test]
     fn the_t3_restart_question_fits_the_dialog_line() {
-        let (title, body) = restart_t3_question("0.1.7-nightly.20261102.4066", 1);
+        let (title, body) = restart_t3_question(Some("0.1.7-nightly.20261102.4066"), 1);
         assert_eq!(title, "Restart T3 Code at 0.1.7-nightly.20261102.4066?");
         assert_eq!(body, "A thread is at work: restarting now stops it");
-        let many = restart_t3_question("0.1.7", 12).1;
+        let many = restart_t3_question(Some("0.1.7"), 12).1;
         assert_eq!(many, "12 threads are at work: restarting now stops them");
         // No longer than the longest body the other dialogs have.
         let longest = close_many_question("workspace", "w", &["a".into(), "b".into()]).1;
         assert!(many.chars().count() <= longest.chars().count());
+        assert_eq!(restart_t3_question(None, 2).0, "Restart T3 Code?");
+        let stop = stop_t3_question(12).1;
+        assert_eq!(stop, "12 threads are at work: stopping now stops them");
+        assert!(stop.chars().count() <= longest.chars().count());
+    }
+
+    #[test]
+    fn the_kept_apps_question_names_the_apps_and_the_project() {
+        let (title, body) = stop_kept_question("gerdr", &["Cursor".into()]);
+        assert_eq!(title, "Stop Cursor for \u{201c}gerdr\u{201d}?");
+        assert_eq!(body, "Cursor closes, with its windows");
     }
 }
