@@ -99,6 +99,12 @@ pub enum Outcome {
 }
 
 impl ConfirmDialog {
+    /// Where its parts go on an output of `size`.
+    fn layout(&self, size: smithay::utils::Size<i32, Logical>) -> chrome::ConfirmLayout {
+        let lines = chrome::confirm_body_lines(&self.body);
+        chrome::confirm_lines_layout(size, self.go, lines)
+    }
+
     fn press(&self, button: usize) -> Outcome {
         if button == GO {
             Outcome::Go
@@ -232,6 +238,12 @@ fn import_question(name: &str) -> (String, String) {
         format!("Close {name} to import its profile?"),
         format!("{name} quits, its profile comes in, then it starts again"),
     )
+}
+
+/// What the Ship sheet for feature `title` says: its title, and the steps
+/// shipping takes, a line each.
+fn ship_question(title: &str, steps: &[String]) -> (String, String) {
+    (format!("Ship \u{201c}{title}\u{201d}?"), steps.join("\n"))
 }
 
 impl Gerdr {
@@ -433,6 +445,13 @@ impl Gerdr {
         self.ask(title, body, go, then);
     }
 
+    /// The Ship sheet: ship feature `slug` of `project`, called `title`,
+    /// doing `steps` in order (see `Gerdr::ship_feature`).
+    pub fn ask_ship(&mut self, project: String, slug: String, title: &str, steps: &[String]) {
+        let (question, body) = ship_question(title, steps);
+        self.ask(question, body, "Ship", Then::ShipFeature { project, slug });
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -553,7 +572,7 @@ impl Gerdr {
         let Some(dialog) = self.confirm.as_mut() else {
             return false;
         };
-        let layout = chrome::confirm_dialog_layout(size, dialog.go);
+        let layout = dialog.layout(size);
         let outcome = match button_at(&layout, pos) {
             Some(button) => Some(dialog.press(button)),
             None if layout.panel.to_f64().contains(pos) => None,
@@ -569,7 +588,7 @@ impl Gerdr {
     pub fn confirm_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
         if let Some(dialog) = self.confirm.as_mut() {
-            dialog.hover = button_at(&chrome::confirm_dialog_layout(size, dialog.go), pos);
+            dialog.hover = button_at(&dialog.layout(size), pos);
         }
     }
 
@@ -577,9 +596,7 @@ impl Gerdr {
     /// pointer can press.
     pub fn confirm_controls(&self) -> Vec<chrome::Rect> {
         match &self.confirm {
-            Some(dialog) => chrome::confirm_dialog_layout(self.output_size(), dialog.go)
-                .buttons
-                .to_vec(),
+            Some(dialog) => dialog.layout(self.output_size()).buttons.to_vec(),
             None => Vec::new(),
         }
     }
@@ -700,6 +717,15 @@ mod tests {
         let stop = stop_t3_question(12).1;
         assert_eq!(stop, "12 threads are at work: stopping now stops them");
         assert!(stop.chars().count() <= longest.chars().count());
+    }
+
+    #[test]
+    fn the_ship_sheet_lists_the_steps_a_line_each() {
+        let steps = ["Push api".to_owned(), "Open a pull request".to_owned()];
+        let (title, body) = ship_question("Bulk export", &steps);
+        assert_eq!(title, "Ship \u{201c}Bulk export\u{201d}?");
+        assert_eq!(body, "Push api\nOpen a pull request");
+        assert_eq!(chrome::confirm_body_lines(&body), 2);
     }
 
     #[test]

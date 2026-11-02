@@ -15,6 +15,7 @@ rules, for reviewing a branch before it merges.
 | Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. |
 | Ctrl+N | New / create (project, branch, todo). |
 | Ctrl+O | Open (in a tab, in the browser, the file). |
+| Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature panel: a repository's pull request). |
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
 | Ctrl+R | Refresh / reload. |
 | F2 | Rename. |

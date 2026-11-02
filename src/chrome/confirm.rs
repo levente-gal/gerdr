@@ -34,6 +34,8 @@ pub(super) fn dialog_buttons(panel: Rect, labels: &[&str]) -> Vec<Rect> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfirmView {
     pub title: String,
+    /// What it does: a line, or several split by `\n` (the Ship sheet's
+    /// steps).
     pub body: String,
     /// The label of the button doing it.
     pub go: &'static str,
@@ -55,16 +57,31 @@ pub struct ConfirmLayout {
 
 /// Where the confirm dialog's parts go, centred on an output of `size`,
 /// its button doing it sized for a label as short as Cancel; the dialog
-/// itself is laid out by `confirm_dialog_layout`, for its label.
+/// itself is laid out by `confirm_lines_layout`, for its label.
+#[cfg(test)]
 pub fn confirm_layout(size: Size<i32, Logical>) -> ConfirmLayout {
     confirm_dialog_layout(size, "")
 }
 
 /// Where the confirm dialog's parts go, centred on an output of `size`,
-/// its button doing it labelled `go`.
+/// its button doing it labelled `go`, its body one line.
+#[cfg(test)]
 pub fn confirm_dialog_layout(size: Size<i32, Logical>, go: &str) -> ConfirmLayout {
+    confirm_lines_layout(size, go, 1)
+}
+
+/// How many lines the confirm dialog's `body` takes.
+pub fn confirm_body_lines(body: &str) -> usize {
+    body.lines().count().max(1)
+}
+
+/// Where the confirm dialog's parts go, centred on an output of `size`,
+/// its button doing it labelled `go`, its body `lines` lines high (one
+/// for every dialog but the Ship sheet).
+pub fn confirm_lines_layout(size: Size<i32, Logical>, go: &str, lines: usize) -> ConfirmLayout {
+    let body_h = QUIT_BODY * lines.max(1) as i32;
     let height =
-        2 * QUIT_PADDING + QUIT_TITLE + QUIT_LINE_GAP + QUIT_BODY + 2 * QUIT_LINE_GAP + QUIT_BUTTON;
+        2 * QUIT_PADDING + QUIT_TITLE + QUIT_LINE_GAP + body_h + 2 * QUIT_LINE_GAP + QUIT_BUTTON;
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -78,7 +95,7 @@ pub fn confirm_dialog_layout(size: Size<i32, Logical>, go: &str) -> ConfirmLayou
     let inner = width - 2 * QUIT_PADDING;
     let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
     let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
-    let body = Rectangle::new((x, body_y).into(), (inner, QUIT_BODY).into());
+    let body = Rectangle::new((x, body_y).into(), (inner, body_h).into());
     let buttons = dialog_buttons(panel, &["Cancel", go]);
     ConfirmLayout {
         panel,
@@ -122,7 +139,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = confirm_dialog_layout(size, view.go);
+        let layout = confirm_lines_layout(size, view.go, confirm_body_lines(&view.body));
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
@@ -132,13 +149,20 @@ impl Painter {
                 r.size,
             )
         };
-        for (rect, text, font, color) in [
-            (layout.title, &view.title, LABEL_FONT_SIZE, p.text),
-            (layout.body, &view.body, FONT_SIZE, p.muted),
-        ] {
-            let rect = shift(rect);
+        let title = shift(layout.title);
+        let (x, end) = phys(title, scale);
+        let title_band = band(title, scale);
+        let text = &view.title;
+        self.text(&mut c, text, LABEL_FONT_SIZE, x, end, title_band, scale, p.text);
+        // The body, a line per `QUIT_BODY`.
+        let body = shift(layout.body);
+        for (i, line) in view.body.lines().enumerate() {
+            let rect = Rectangle::new(
+                (body.loc.x, body.loc.y + i as i32 * QUIT_BODY).into(),
+                (body.size.w, QUIT_BODY).into(),
+            );
             let (x, end) = phys(rect, scale);
-            self.text(&mut c, text, font, x, end, band(rect, scale), scale, color);
+            self.text(&mut c, line, FONT_SIZE, x, end, band(rect, scale), scale, p.muted);
         }
 
         for (i, rect) in layout.buttons.iter().enumerate() {
@@ -201,5 +225,18 @@ mod tests {
         let short = confirm_dialog_layout(size, "Close");
         assert!(long.buttons[1].size.w > short.buttons[1].size.w);
         assert_eq!(confirm_layout(size).panel, long.panel);
+    }
+
+    #[test]
+    fn a_body_of_several_lines_makes_the_dialog_taller() {
+        let size = (1920, 1080).into();
+        let one = confirm_dialog_layout(size, "Ship");
+        assert_eq!(one, confirm_lines_layout(size, "Ship", 1));
+        let three = confirm_lines_layout(size, "Ship", 3);
+        assert_eq!(three.body.size.h, 3 * one.body.size.h);
+        assert_eq!(three.panel.size.h - one.panel.size.h, 2 * QUIT_BODY);
+        assert!(three.buttons[0].loc.y >= three.body.loc.y + three.body.size.h);
+        assert_eq!(confirm_body_lines("a\nb\nc"), 3);
+        assert_eq!(confirm_body_lines(""), 1);
     }
 }

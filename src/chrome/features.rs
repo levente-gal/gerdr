@@ -38,6 +38,9 @@ const SWITCH_W: i32 = 28;
 /// How big a stage's mark is, and where its label starts after it.
 const MARK: i32 = 14;
 const MARK_ROOM: i32 = 26;
+/// How high a line of the Ship check is, and how many show at most.
+const CHECK_LINE: i32 = 20;
+pub const MAX_CHECK_LINES: usize = 4;
 /// The feature panel's buttons, before the one removing worktrees.
 pub const FEATURE_BUTTONS: [&str; 3] = ["Open tab", "Copy path", "New feature\u{2026}"];
 
@@ -252,6 +255,9 @@ pub struct FeatureRepoRow {
     pub touched: bool,
     /// Being touched now.
     pub busy: bool,
+    /// The label of its button: Touch for one the feature doesn't change,
+    /// Open PR for one with a pull request; none else.
+    pub button: Option<&'static str>,
 }
 
 /// A stage of the feature panel.
@@ -261,6 +267,37 @@ pub struct StageRow {
     /// When it was done, or what is done in it.
     pub detail: String,
     pub mark: StageMark,
+    /// The label of its button (Reopen, Mark done, Ship…); none for a
+    /// later one.
+    pub button: Option<&'static str>,
+}
+
+/// How a line of the Ship check reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CheckTone {
+    /// What stops shipping: in the warning colour.
+    Blocker,
+    /// It can ship: in the success colour.
+    Ready,
+    /// Worth knowing, or still being checked: muted.
+    Note,
+}
+
+impl CheckTone {
+    pub(super) fn color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Blocker => p.warning,
+            Self::Ready => p.success,
+            Self::Note => p.muted,
+        }
+    }
+}
+
+/// A line of the Ship check, under the Ship row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckLine {
+    pub text: String,
+    pub tone: CheckTone,
 }
 
 /// What the feature panel shows.
@@ -273,6 +310,9 @@ pub struct FeaturePanelView {
     pub which: Option<(usize, usize)>,
     pub repos: Vec<FeatureRepoRow>,
     pub stages: Vec<StageRow>,
+    /// The latest Ship check, under the Ship row, while Ship is the
+    /// current stage: at most `MAX_CHECK_LINES`.
+    pub check: Vec<CheckLine>,
     /// The row with the keyboard: the repositories', then the stages'.
     pub cursor: usize,
     /// The first repository shown, when not all fit.
@@ -313,18 +353,24 @@ pub struct FeaturePanelLayout {
     pub repos: Vec<(Rect, Option<Rect>)>,
     /// Each stage's row and its button, if it has one.
     pub stages: Vec<(Rect, Option<Rect>)>,
+    /// The lines of the Ship check, under the stages.
+    pub check: Vec<Rect>,
     pub buttons: Vec<Rect>,
     pub hints: Vec<(usize, Rect)>,
 }
 
-/// How many of `repos` repositories the feature panel shows on an output
-/// of `output` with `hints`: at least one.
-pub fn feature_repos_shown(
-    repos: usize,
-    stages: usize,
-    hints: usize,
-    output: Size<i32, Logical>,
-) -> usize {
+/// How high the Ship check's `lines` are, with the gap above them.
+fn check_height(lines: usize) -> i32 {
+    match lines.min(MAX_CHECK_LINES) {
+        0 => 0,
+        n => ROW_GAP + n as i32 * CHECK_LINE,
+    }
+}
+
+/// How many of `view`'s repositories the feature panel shows on an output
+/// of `output`: at least one.
+pub fn feature_repos_shown(view: &FeaturePanelView, output: Size<i32, Logical>) -> usize {
+    let (repos, stages, hints) = (view.repos.len(), view.stages.len(), view.hints.len());
     let pitch = PANEL_ROW + PANEL_ROW_GAP;
     let fixed = 2 * QUIT_PADDING
         + QUIT_TITLE
@@ -332,6 +378,7 @@ pub fn feature_repos_shown(
         + SECTION_GAP
         + SECTION_GAP
         + stages as i32 * pitch
+        + check_height(view.check.len())
         + SECTION_GAP
         + QUIT_BUTTON
         + footer_height(hints);
@@ -346,12 +393,8 @@ pub fn feature_panel_layout(
     output: Size<i32, Logical>,
 ) -> FeaturePanelLayout {
     let pitch = PANEL_ROW + PANEL_ROW_GAP;
-    let shown = feature_repos_shown(
-        view.repos.len(),
-        view.stages.len(),
-        view.hints.len(),
-        output,
-    );
+    let shown = feature_repos_shown(view, output);
+    let check_h = check_height(view.check.len());
     let repos_h = if shown == 0 {
         0
     } else {
@@ -364,6 +407,7 @@ pub fn feature_panel_layout(
         + SECTION_GAP
         + repos_h
         + view.stages.len() as i32 * pitch
+        + check_h
         + SECTION_GAP
         + QUIT_BUTTON
         + footer_h;
@@ -423,7 +467,10 @@ pub fn feature_panel_layout(
             (x, y + slot as i32 * pitch).into(),
             (inner, PANEL_ROW).into(),
         );
-        let button = (!repo.touched && !repo.busy).then(|| row_button(row, "Touch"));
+        let button = repo
+            .button
+            .filter(|_| !repo.busy)
+            .map(|label| row_button(row, label));
         repos.push((row, button));
     }
     y += repos_h;
@@ -433,11 +480,22 @@ pub fn feature_panel_layout(
         .enumerate()
         .map(|(i, stage)| {
             let row = Rectangle::new((x, y + i as i32 * pitch).into(), (inner, PANEL_ROW).into());
-            let button = stage_button(stage.mark).map(|label| row_button(row, label));
+            let button = stage.button.map(|label| row_button(row, label));
             (row, button)
         })
         .collect();
-    y += view.stages.len() as i32 * pitch + SECTION_GAP;
+    y += view.stages.len() as i32 * pitch;
+    // The check's lines line up with the stages' labels.
+    let check_x = x + ROW_INSET + MARK_ROOM;
+    let check = (0..view.check.len().min(MAX_CHECK_LINES) as i32)
+        .map(|i| {
+            Rectangle::new(
+                (check_x, y + ROW_GAP + i * CHECK_LINE).into(),
+                (inner - ROW_INSET - MARK_ROOM, CHECK_LINE).into(),
+            )
+        })
+        .collect();
+    y += check_h + SECTION_GAP;
     let mut buttons = Vec::new();
     let mut bx = x;
     for label in FEATURE_BUTTONS {
@@ -460,18 +518,9 @@ pub fn feature_panel_layout(
         switch,
         repos,
         stages,
+        check,
         buttons,
         hints,
-    }
-}
-
-/// The button on a stage's row: reopen a done one, mark the current one
-/// done; a later one has none.
-pub fn stage_button(mark: StageMark) -> Option<&'static str> {
-    match mark {
-        StageMark::Done => Some("Reopen"),
-        StageMark::Current => Some("Mark done"),
-        StageMark::Later => None,
     }
 }
 
@@ -820,9 +869,9 @@ impl Painter {
             } else {
                 repo.line.clone()
             };
-            let button = button.map(|b| {
+            let button = button.zip(repo.button).map(|(b, label)| {
                 let hovered = view.hover == Some(FeatureHit::RepoButton(i));
-                (b, "Touch", ButtonStyle::Plain, hovered)
+                (b, label, ButtonStyle::Plain, hovered)
             });
             let name_color = if repo.touched { p.text } else { p.muted };
             row(
@@ -837,7 +886,7 @@ impl Painter {
         }
         for (i, ((rect, button), stage)) in layout.stages.iter().zip(&view.stages).enumerate() {
             let lit = matches!(view.hover, Some(FeatureHit::Stage(r) | FeatureHit::StageButton(r)) if r == i);
-            let button = button.zip(stage_button(stage.mark)).map(|(b, label)| {
+            let button = button.zip(stage.button).map(|(b, label)| {
                 let hovered = view.hover == Some(FeatureHit::StageButton(i));
                 let style = if stage.mark == StageMark::Current {
                     ButtonStyle::Primary
@@ -858,6 +907,22 @@ impl Painter {
                 Some(stage.mark),
                 (&stage.label, name_color),
                 (&stage.detail, detail_color),
+            );
+        }
+
+        // The Ship check, one line each.
+        for (rect, line) in layout.check.iter().zip(&view.check) {
+            let rect = shift(*rect);
+            let (x, end) = phys(rect, scale);
+            self.text(
+                &mut c,
+                &line.text,
+                FONT_SIZE,
+                x,
+                end,
+                band(rect, scale),
+                scale,
+                line.tone.color(p),
             );
         }
 
@@ -948,6 +1013,7 @@ mod tests {
                     line: "feature/bulk-export".into(),
                     touched: i == 0,
                     busy: false,
+                    button: (i != 0).then_some("Touch"),
                 })
                 .collect(),
             stages: (0..8)
@@ -959,8 +1025,14 @@ mod tests {
                         2 => StageMark::Current,
                         _ => StageMark::Later,
                     },
+                    button: match i {
+                        0 | 1 => Some("Reopen"),
+                        2 => Some("Mark done"),
+                        _ => None,
+                    },
                 })
                 .collect(),
+            check: Vec::new(),
             cursor: 0,
             repo_top: 0,
             remove: "Abandon",
@@ -1055,6 +1127,18 @@ mod tests {
                 for ground in [p.panel, p.elevated, p.selected] {
                     let ratio = contrast(mark.color(p), ground);
                     assert!(ratio >= 3.0, "{mark:?} at {ratio:.2}:1");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_ship_check_reads_on_the_panels_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT] {
+            for tone in [CheckTone::Blocker, CheckTone::Ready, CheckTone::Note] {
+                for ground in [p.panel, p.elevated] {
+                    let ratio = contrast(tone.color(p), ground);
+                    assert!(ratio >= 4.5, "{tone:?} at {ratio:.2}:1");
                 }
             }
         }

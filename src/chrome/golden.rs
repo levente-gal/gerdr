@@ -1449,6 +1449,7 @@ fn feature_panel(repos: usize) -> super::FeaturePanelView {
             },
             touched: i != 1,
             busy: false,
+            button: (i == 1).then_some("Touch"),
         })
         .collect();
     let stages = Stage::ALL
@@ -1463,6 +1464,11 @@ fn feature_panel(repos: usize) -> super::FeaturePanelView {
             StageRow {
                 label: stage.label().into(),
                 detail,
+                button: match mark {
+                    StageMark::Done => Some("Reopen"),
+                    StageMark::Current => Some("Mark done"),
+                    StageMark::Later => None,
+                },
                 mark,
             }
         })
@@ -1486,7 +1492,102 @@ fn feature_panel(repos: usize) -> super::FeaturePanelView {
         remove: "Abandon\u{2026}",
         hover: None,
         hints: hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into(),
+        check: Vec::new(),
     }
+}
+
+/// The feature panel on three repositories with Ship current, the cursor
+/// on it, showing the Ship check `check`; `web`'s push isn't guarded.
+fn ship_panel(check: Vec<super::CheckLine>) -> super::FeaturePanelView {
+    use super::{StageMark, StageRow};
+    use crate::feature::Stage;
+    let mut view = feature_panel(3);
+    view.repos[2].line = "feature/bulk-export \u{b7} push not guarded: hooks path is set".into();
+    view.stages = Stage::ALL
+        .iter()
+        .map(|stage| {
+            let ship = *stage == Stage::Ship;
+            StageRow {
+                label: stage.label().into(),
+                detail: if ship {
+                    stage.about().to_owned()
+                } else {
+                    "done 2h ago by you".to_owned()
+                },
+                mark: if ship { StageMark::Current } else { StageMark::Done },
+                button: Some(if ship { "Ship\u{2026}" } else { "Reopen" }),
+            }
+        })
+        .collect();
+    view.cursor = 3 + Stage::ALL.len() - 1;
+    view.hints[0] = ("Enter".into(), "ship\u{2026}".into());
+    view.check = check;
+    view
+}
+
+/// Ship current, two things stopping it.
+fn feature_ship_blocked() -> super::FeaturePanelView {
+    use super::{CheckLine, CheckTone};
+    ship_panel(vec![
+        CheckLine {
+            text: "api has changes not committed".into(),
+            tone: CheckTone::Blocker,
+        },
+        CheckLine {
+            text: "web is 3 commits behind dev".into(),
+            tone: CheckTone::Blocker,
+        },
+    ])
+}
+
+/// Ship current and ready, with a note.
+fn feature_ship_ready() -> super::FeaturePanelView {
+    use super::{CheckLine, CheckTone};
+    ship_panel(vec![
+        CheckLine {
+            text: "Ready to ship".into(),
+            tone: CheckTone::Ready,
+        },
+        CheckLine {
+            text: "web opens a pull request into dev".into(),
+            tone: CheckTone::Note,
+        },
+    ])
+}
+
+/// A done feature whose pull requests are open, the cursor on one.
+fn feature_done_prs() -> super::FeaturePanelView {
+    use super::{StageMark, StageRow};
+    use crate::feature::Stage;
+    let mut view = feature_panel(3);
+    for (i, repo) in ["api", "web"].into_iter().enumerate() {
+        let row = &mut view.repos[i * 2];
+        row.line = format!("feature/bulk-export \u{b7} PR {repo}/pull/1{i}");
+        row.button = Some("Open PR");
+    }
+    view.stages = Stage::ALL
+        .iter()
+        .map(|stage| StageRow {
+            label: stage.label().into(),
+            detail: "done 2h ago by you".into(),
+            mark: StageMark::Done,
+            button: Some("Reopen"),
+        })
+        .collect();
+    view.sub = format!("done \u{b7} {}", view.sub);
+    view.remove = "Remove worktrees";
+    let hints = [
+        ("Up / Down", "move"),
+        ("Enter", "open tab"),
+        ("Ctrl+Shift+O", "open PR"),
+        ("Ctrl+O", "open tab"),
+        ("Ctrl+C", "copy path"),
+        ("Ctrl+N", "new"),
+        ("Del", "remove worktrees"),
+        ("Esc", "close"),
+    ];
+    view.hints = hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into();
+    view
 }
 
 /// The sidebar with two open features under its workspaces, the second
@@ -1535,24 +1636,33 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.feature_panel(&feature_panel(1), size, scale, p)),
         hash(painter.feature_panel(&feature_panel(3), size, scale, p)),
         hash(painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p)),
+        hash(painter.feature_panel(&feature_ship_blocked(), size, scale, p)),
+        hash(painter.feature_panel(&feature_ship_ready(), size, scale, p)),
+        hash(painter.feature_panel(&feature_done_prs(), size, scale, p)),
     ]
 }
 
-const FEATURES: [&str; 4] = [
+const FEATURES: [&str; 7] = [
     "new_feature",
     "feature_panel",
     "feature_panel_multi",
     "sidebar_features",
+    "feature_ship_blocked",
+    "feature_ship_ready",
+    "feature_done_prs",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 4]; 4] = [
+const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0xe5e4e33f1868788d, // new_feature
         0x869764fa3d9048d7, // feature_panel
         0xde9d2405310235e7, // feature_panel_multi
         0xa9c315b7044804cf, // sidebar_features
+        0xc6d96ee5e01de0da, // feature_ship_blocked
+        0xc16daf60f0e04c88, // feature_ship_ready
+        0x25725cfbc3b3ba91, // feature_done_prs
     ],
     // Dark at 2
     [
@@ -1560,6 +1670,9 @@ const GOLDEN_FEATURES: [[u64; 4]; 4] = [
         0x31307a3926bbc629, // feature_panel
         0x5437f7692eaeff36, // feature_panel_multi
         0x16881e74e80d5fee, // sidebar_features
+        0x96b5aee7e55e893b, // feature_ship_blocked
+        0x55c082e14c28296d, // feature_ship_ready
+        0xc43b3e6d75230966, // feature_done_prs
     ],
     // Light at 1
     [
@@ -1567,6 +1680,9 @@ const GOLDEN_FEATURES: [[u64; 4]; 4] = [
         0x3abb7fb4ebb6164f, // feature_panel
         0x0608e5100d8d1171, // feature_panel_multi
         0xd73830a02a3b09da, // sidebar_features
+        0x566c8cd22fcb3376, // feature_ship_blocked
+        0xb2f69eb40cd2a0e6, // feature_ship_ready
+        0x05cc7d58ebc3d6c6, // feature_done_prs
     ],
     // Light at 2
     [
@@ -1574,6 +1690,9 @@ const GOLDEN_FEATURES: [[u64; 4]; 4] = [
         0x0dcda199b0dbc637, // feature_panel
         0x71310a3466763ea3, // feature_panel_multi
         0x5dde9940ceb74f62, // sidebar_features
+        0x9c492950881672d9, // feature_ship_blocked
+        0x336e04083585dc13, // feature_ship_ready
+        0x0a045e32666be0f4, // feature_done_prs
     ],
 ];
 
@@ -1605,8 +1724,14 @@ fn dump_features() {
             painter.new_feature_dialog(&new_feature(), size, scale, p),
             px(dialog.size.w + shadow),
         );
-        for (name, n) in [("feature_panel", 1), ("feature_panel_multi", 3)] {
-            let view = feature_panel(n);
+        let views = [
+            ("feature_panel", feature_panel(1)),
+            ("feature_panel_multi", feature_panel(3)),
+            ("feature_ship_blocked", feature_ship_blocked()),
+            ("feature_ship_ready", feature_ship_ready()),
+            ("feature_done_prs", feature_done_prs()),
+        ];
+        for (name, view) in views {
             let panel = super::feature_panel_layout(&view, size).panel;
             dump(
                 &dir,
