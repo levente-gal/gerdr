@@ -23,6 +23,7 @@ use crate::{
     },
     ci::{self, Subject},
     ci_watch::ci_state_word,
+    cli_agents::CliAgent,
     git::Worktree,
     home_dir,
     inbox::Section,
@@ -520,15 +521,14 @@ impl Gerdr {
             .map(|ws| ws.record.clone());
     }
 
-    /// The command of the agent in slot `k` of workspace `i`'s strip, as
-    /// `layout` has it; `None` on the ellipsis standing for those that
-    /// don't fit.
-    fn picked_agent(&self, layout: &SidebarLayout, i: usize, k: usize) -> Option<String> {
+    /// The agent in slot `k` of workspace `i`'s strip, as `layout` has
+    /// it; `None` on the ellipsis standing for those that don't fit.
+    fn picked_agent(&self, layout: &SidebarLayout, i: usize, k: usize) -> Option<&CliAgent> {
         let slots = layout.rows.get(i)?.pick_slots();
         if self.cli_agents.len() > slots && k + 1 == slots {
             return None;
         }
-        Some(self.cli_agents.get(k)?.command.clone())
+        self.cli_agents.get(k)
     }
 
     /// The menu listing the Cursor chats of workspace `w` its rows leave
@@ -632,7 +632,7 @@ impl Gerdr {
             (SidebarHit::Restart(i), BTN_LEFT) => self.restart_workspace(i),
             (SidebarHit::NewAgent(i), BTN_LEFT) => self.open_agent_picker(i),
             (SidebarHit::PickAgent(i, k), BTN_LEFT) => match self.picked_agent(&layout, i, k) {
-                Some(command) => self.new_agent(i, &command),
+                Some(agent) => self.start_agent(i, &agent.clone()),
                 None => self.open_agent_picker(i),
             },
             (SidebarHit::Worktrees(i), BTN_LEFT) => {
@@ -764,10 +764,13 @@ impl Gerdr {
                 // The picker the "More agents…" slot opens is the same,
                 // on the shown workspace's strip.
                 Some(match self.picked_agent(layout, i, k) {
-                    Some(command) => {
-                        let agent = self.cli_agents.iter().find(|a| a.command == command)?;
-                        Tooltip::new(&format!("New {} agent", agent.name), rect)
-                            .fields(vec![("Runs".to_owned(), command)])
+                    Some(agent) => {
+                        let tip = Tooltip::new(&format!("New {} agent", agent.name), rect);
+                        let field = match agent.command() {
+                            Some(command) => ("Runs", command),
+                            None => ("Opens", "T3 Code's app, in a web pane"),
+                        };
+                        tip.fields(vec![(field.0.to_owned(), field.1.to_owned())])
                     }
                     None => {
                         let tip = Tooltip::new("More agents…", rect);

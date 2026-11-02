@@ -335,6 +335,15 @@ impl Gerdr {
         Some((w, ws.active_tab))
     }
 
+    /// Start `agent` in workspace `w`: a CLI in a new tab, T3 Code as a
+    /// new thread in its app's pane.
+    pub fn start_agent(&mut self, w: usize, agent: &cli_agents::CliAgent) {
+        match &agent.start {
+            cli_agents::Start::Command(command) => self.new_agent(w, command),
+            cli_agents::Start::T3 => self.new_t3_thread(w),
+        }
+    }
+
     /// Start an agent CLI by `command` in a new tab of workspace `w`, in
     /// its folder: herdr shows it as an agent like any other.
     pub fn new_agent(&mut self, w: usize, command: &str) {
@@ -1218,7 +1227,10 @@ fn with_profile_of(command: &str, pid: u32) -> Option<String> {
     let (_, end, _) = program(command)?;
     let mut command = command.to_owned();
     if let Some(dir) = user_data_dir(&args) {
-        command.insert_str(end, &format!(" --user-data-dir={}", desktop::shell_quote(&dir)));
+        command.insert_str(
+            end,
+            &format!(" --user-data-dir={}", desktop::shell_quote(&dir)),
+        );
     }
     Some(command)
 }

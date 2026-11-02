@@ -87,6 +87,17 @@ pub fn home() -> Option<PathBuf> {
     home.join("userdata").is_dir().then_some(home)
 }
 
+/// Where in T3 Code's app to show (see `Gerdr::show_t3`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page<'a> {
+    /// Wherever the app is, or its home page in a new tab.
+    App,
+    /// A thread, by id.
+    Thread(&'a str),
+    /// A new thread: the home page, where the app opens a draft.
+    New,
+}
+
 /// Where T3 Code's server runs, as it says in its home.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Server {
@@ -1636,15 +1647,27 @@ impl crate::Gerdr {
     /// it already, else in a new tab of workspace `w`, signing the
     /// project's browser in first if it never was.
     pub fn open_t3(&mut self, w: usize, thread: Option<&str>) {
+        self.show_t3(w, thread.map_or(Page::App, Page::Thread));
+    }
+
+    /// Start a new thread in T3 Code's app for workspace `w`, as a new
+    /// agent: its home page, where the app opens a draft (in the project
+    /// it used last), in the workspace's pane showing it or a new tab.
+    pub fn new_t3_thread(&mut self, w: usize) {
+        self.show_t3(w, Page::New);
+    }
+
+    /// Show T3 Code's app at `page` for workspace `w` (see `open_t3`).
+    fn show_t3(&mut self, w: usize, page: Page) {
         use crate::toast::Level;
         let Some(server) = self.t3.server.clone().filter(|_| self.t3.alive) else {
             let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3);
             let text = "T3 Code's server isn't running".to_owned();
             return self.toast_with(text, Level::Warning, Some(action));
         };
-        let link = |origin: &str| match thread {
-            Some(id) => server.thread_link(origin, id),
-            None => format!("{origin}/"),
+        let link = |origin: &str| match page {
+            Page::Thread(id) => server.thread_link(origin, id),
+            Page::App | Page::New => format!("{origin}/"),
         };
         let w = w.min(self.workspaces.len().saturating_sub(1));
         self.add_t3_project(w, &server);
@@ -1654,13 +1677,16 @@ impl crate::Gerdr {
             // One at another host (opened before workspaces had their
             // own) moves to the workspace's: its filter is its own there.
             let moves = origin_of(&url) != Some(own.as_str());
-            if moves && thread.is_none() {
+            if moves && page == Page::App {
                 let target = at_origin(&url, &own);
                 self.navigate_web_pane(pane, &target);
                 return;
             }
             let target = link(&own);
-            if thread.is_some() && url != target && !self.navigate_web_pane(pane, &target) {
+            // At its home page already, the app left it for a draft: a
+            // new thread loads it again all the same.
+            let goes = page == Page::New || url != target;
+            if page != Page::App && goes && !self.navigate_web_pane(pane, &target) {
                 // Without gerdr's extension in its browser it can't be
                 // told where to go: a tab of its own then.
                 self.launch(&target, crate::launch::Place::Tab);
