@@ -1429,7 +1429,7 @@ fn new_feature() -> super::NewFeatureView {
         top: 0,
         error: None,
         hover: Some(super::NewFeatureHit::Button(1)),
-        keys: vec![("Space", "tick"), ("Esc", "close")],
+        keys: vec![("Tab", "next"), ("Space", "tick"), ("Esc", "clear")],
     }
 }
 
@@ -1549,28 +1549,28 @@ const FEATURES: [&str; 4] = [
 const GOLDEN_FEATURES: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x3971f123590282cf, // new_feature
+        0xe5e4e33f1868788d, // new_feature
         0x869764fa3d9048d7, // feature_panel
         0xde9d2405310235e7, // feature_panel_multi
         0xa9c315b7044804cf, // sidebar_features
     ],
     // Dark at 2
     [
-        0xe31b862ecc9c736c, // new_feature
+        0x2f8fa96d6cb9236d, // new_feature
         0x31307a3926bbc629, // feature_panel
         0x5437f7692eaeff36, // feature_panel_multi
         0x16881e74e80d5fee, // sidebar_features
     ],
     // Light at 1
     [
-        0x97058170077917ea, // new_feature
+        0xebea9664a0f6707e, // new_feature
         0x3abb7fb4ebb6164f, // feature_panel
         0x0608e5100d8d1171, // feature_panel_multi
         0xd73830a02a3b09da, // sidebar_features
     ],
     // Light at 2
     [
-        0xa777fc8159717dcc, // new_feature
+        0x1fbf661fb84507e5, // new_feature
         0x0dcda199b0dbc637, // feature_panel
         0x71310a3466763ea3, // feature_panel_multi
         0x5dde9940ceb74f62, // sidebar_features

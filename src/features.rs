@@ -618,6 +618,8 @@ impl Gerdr {
         };
         self.features.busy.extend(busy);
         std::thread::spawn(move || {
+            // It fails only once the loop is gone: gerdr is quitting, and
+            // nothing is left to show the result in.
             let _ = tx.send(work());
         });
     }
@@ -1491,11 +1493,19 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
             (line, false, repos)
         }
     };
-    let keys = if dialog.multi() {
+    let mut keys = if dialog.multi() {
         vec![("Tab", "next"), ("Space", "tick")]
     } else {
         Vec::new()
     };
+    // Esc steps back as `NewFeatureDialog::key` has it.
+    keys.push(if dialog.focus.is_some() {
+        ("Esc", "back")
+    } else if !dialog.title.is_empty() {
+        ("Esc", "clear")
+    } else {
+        ("Esc", "close")
+    });
     NewFeatureView {
         project,
         title: dialog.title.line(),
@@ -1764,7 +1774,8 @@ pub(crate) mod tests {
         d.toggle(0);
         assert_eq!(d.touched, [true]);
         let view = new_feature_view(&d, "Acme".into());
-        assert!(view.repos[0].fixed && view.keys.is_empty());
+        assert!(view.repos[0].fixed);
+        assert_eq!(view.keys, [("Esc", "close")]);
     }
 
     #[test]
