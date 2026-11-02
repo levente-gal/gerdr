@@ -186,21 +186,44 @@ impl Feature {
     /// feature is done. Only the current stage can be ticked: stages go in
     /// order. Returns the stage ticked, or `None` when there is none.
     pub fn tick(&mut self, now: u64, by: &str) -> Option<Stage> {
-        let _ = (now, by);
-        None
+        let stage = self.current()?;
+        self.marks.insert(
+            stage,
+            Mark {
+                at: now,
+                by: by.to_owned(),
+                note: String::new(),
+            },
+        );
+        if stage == Stage::Ship {
+            self.status = Status::Done;
+        }
+        self.log(now, format!("{} ticked", stage.label()));
+        Some(stage)
     }
 
     /// Clear `stage`'s mark and every later one's, as when it has to be
     /// done again. A done feature opens again. Returns whether anything
     /// was cleared.
     pub fn untick(&mut self, stage: Stage, now: u64) -> bool {
-        let _ = (stage, now);
-        false
+        let before = self.marks.len();
+        self.marks.retain(|s, _| *s < stage);
+        if self.marks.len() == before {
+            return false;
+        }
+        if self.status == Status::Done {
+            self.status = Status::Open;
+        }
+        self.log(now, format!("{} to do again", stage.label()));
+        true
     }
 
     /// Add `what` to its history at `now`.
     pub fn log(&mut self, now: u64, what: impl Into<String>) {
-        let _ = (now, what.into());
+        self.history.push(Event {
+            at: now,
+            what: what.into(),
+        });
     }
 
     /// The repositories it changes.
@@ -217,4 +240,78 @@ impl Feature {
 /// Unix seconds now.
 pub fn now() -> u64 {
     crate::review::now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(crate) fn feature(slug: &str, created: u64) -> Feature {
+        Feature {
+            version: VERSION,
+            slug: slug.into(),
+            title: format!("Feature {slug}"),
+            project: "p".into(),
+            created,
+            root: PathBuf::from("/r"),
+            dir: PathBuf::from("/r/.features").join(slug),
+            multi: false,
+            repos: Vec::new(),
+            status: Status::Open,
+            marks: BTreeMap::new(),
+            history: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ticks_go_in_order_and_ship_finishes() {
+        let mut f = feature("a", 1);
+        assert_eq!(f.current(), Some(Stage::Discover));
+        assert_eq!(f.tick(10, "you"), Some(Stage::Discover));
+        assert_eq!(f.tick(11, "you"), Some(Stage::Plan));
+        assert!(f.is_done(Stage::Plan));
+        assert_eq!(f.current(), Some(Stage::Build));
+        assert_eq!(f.marks[&Stage::Plan].at, 11);
+        assert_eq!(f.marks[&Stage::Plan].by, "you");
+        assert_eq!(f.history.last().unwrap().what, "Plan ticked");
+        for _ in 2..7 {
+            f.tick(12, "you").unwrap();
+            assert_eq!(f.status, Status::Open);
+        }
+        assert_eq!(f.tick(13, "you"), Some(Stage::Ship));
+        assert_eq!(f.status, Status::Done);
+        assert_eq!(f.tick(14, "you"), None);
+        assert_eq!(f.history.len(), 8);
+    }
+
+    #[test]
+    fn untick_clears_later_stages_and_reopens() {
+        let mut f = feature("a", 1);
+        for _ in 0..8 {
+            f.tick(1, "you");
+        }
+        assert_eq!(f.status, Status::Done);
+        assert!(f.untick(Stage::AiReview, 5));
+        assert_eq!(f.status, Status::Open);
+        assert_eq!(f.current(), Some(Stage::AiReview));
+        assert!(f.is_done(Stage::Verify));
+        assert!(!f.is_done(Stage::Ship));
+        assert_eq!(f.history.last().unwrap().what, "AI review to do again");
+        let len = f.history.len();
+        assert!(!f.untick(Stage::Ship, 6));
+        assert_eq!(f.history.len(), len);
+    }
+
+    #[test]
+    fn log_adds_an_event() {
+        let mut f = feature("a", 1);
+        f.log(3, "touched x");
+        assert_eq!(
+            f.history,
+            vec![Event {
+                at: 3,
+                what: "touched x".into()
+            }]
+        );
+    }
 }
