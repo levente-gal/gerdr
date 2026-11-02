@@ -8,8 +8,12 @@
 //! same browser or editor, so a profile only goes to the same app.
 
 use std::{
+    ffi::OsString,
+    os::unix::{ffi::OsStringExt, process::CommandExt},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use smithay::reexports::calloop::channel;
@@ -278,7 +282,7 @@ fn running(dir: &Path) -> bool {
     let locked = ["SingletonLock", "lock", "code.lock"]
         .iter()
         .filter_map(|name| lock_pid(&dir.join(name)))
-        .any(|pid| Path::new(&format!("/proc/{pid}")).exists());
+        .any(alive);
     locked
         || std::fs::read_dir(dir).is_ok_and(|entries| {
             entries.flatten().any(|entry| {
@@ -286,6 +290,167 @@ fn running(dir: &Path) -> bool {
                     && std::os::unix::net::UnixStream::connect(entry.path()).is_ok()
             })
         })
+}
+
+/// The process an app runs as on profile folder `dir`, to close: the one
+/// a lock in it names, if that started before the lock was made (not a
+/// later process given the same pid). Zed's socket names none.
+fn lock_holder(dir: &Path) -> Option<u32> {
+    ["SingletonLock", "lock", "code.lock"]
+        .iter()
+        .find_map(|name| {
+            let lock = dir.join(name);
+            let pid = lock_pid(&lock)?;
+            let made = std::fs::symlink_metadata(&lock).ok()?.modified().ok()?;
+            (started(pid)? <= made + Duration::from_secs(5)).then_some(pid)
+        })
+}
+
+/// When process `pid` started, from `/proc`.
+fn started(pid: u32) -> Option<SystemTime> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Its name, in parentheses, may hold spaces: the fields after it
+    // start at the 3rd, and the start time is the 22nd, in clock ticks
+    // since boot.
+    let ticks: u64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(22 - 3)?
+        .parse()
+        .ok()?;
+    let booted: u64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: `sysconf` reads a constant of the system.
+    let per_second = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()
+        .filter(|&hz| hz > 0)?;
+    let since_boot = Duration::from_millis(ticks * 1000 / per_second);
+    Some(UNIX_EPOCH + Duration::from_secs(booted) + since_boot)
+}
+
+/// An app closed for an import, to start again as it was: its command
+/// line, environment and folder.
+#[derive(Debug)]
+struct Closed {
+    argv: Vec<OsString>,
+    env: Vec<(OsString, OsString)>,
+    cwd: Option<PathBuf>,
+}
+
+/// How long an app is given to quit.
+const QUIT_WAIT: Duration = Duration::from_secs(30);
+
+/// Close the app running as `pid`, the way logging out does (`SIGTERM`:
+/// a browser saves its session, an editor its unsaved files), and wait
+/// for it to be gone: how to start it again.
+fn close(pid: u32, name: &str) -> Result<Closed, String> {
+    let read = |what: &str| std::fs::read(format!("/proc/{pid}/{what}")).unwrap_or_default();
+    let fields = |bytes: Vec<u8>| -> Vec<OsString> {
+        bytes
+            .split(|&b| b == 0)
+            .filter(|field| !field.is_empty())
+            .map(|field| OsString::from_vec(field.to_vec()))
+            .collect()
+    };
+    let argv = fields(read("cmdline"));
+    if argv.is_empty() {
+        return Err(format!(
+            "Couldn't tell how {name} was started: quit it first"
+        ));
+    }
+    let env = fields(read("environ"))
+        .into_iter()
+        .filter_map(|pair| {
+            let bytes = pair.into_vec();
+            let eq = bytes.iter().position(|&b| b == b'=')?;
+            Some((
+                OsString::from_vec(bytes[..eq].to_vec()),
+                OsString::from_vec(bytes[eq + 1..].to_vec()),
+            ))
+        })
+        .collect();
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+    // SAFETY: `kill` only sends a signal.
+    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("Couldn't close {name}: {err}"));
+    }
+    let deadline = Instant::now() + QUIT_WAIT;
+    while alive(pid) {
+        if Instant::now() > deadline {
+            return Err(format!("{name} didn't quit: quit it first"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(Closed { argv, env, cwd })
+}
+
+/// Whether process `pid` runs: not gone, nor ended and only waiting to
+/// be reaped.
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(')')?.1.trim_start().chars().next())
+        .is_some_and(|state| state != 'Z')
+}
+
+impl Closed {
+    /// Start the app again, on its own: its output goes to its log.
+    fn reopen(self, key: &str) -> std::io::Result<()> {
+        let log = |file: Option<std::fs::File>| file.map_or_else(Stdio::null, Stdio::from);
+        let mut command = std::process::Command::new(&self.argv[0]);
+        command
+            .args(&self.argv[1..])
+            .env_clear()
+            .envs(self.env)
+            .stdin(Stdio::null())
+            .stdout(log(launch::log_file(key)))
+            .stderr(log(launch::log_file(key)))
+            .process_group(0);
+        if let Some(cwd) = self.cwd.filter(|cwd| cwd.is_dir()) {
+            command.current_dir(cwd);
+        }
+        let mut child = command.spawn()?;
+        // Reaped once it quits.
+        std::thread::Builder::new()
+            .name("reopened app".into())
+            .spawn(move || child.wait())?;
+        Ok(())
+    }
+}
+
+/// Whether `source`'s app runs as a process an import can close and
+/// start again (see `import_closing`).
+pub fn closable(source: &Source) -> bool {
+    lock_holder(&source.from).is_some()
+}
+
+/// `import`, with `source`'s app closed first if it runs, and started
+/// again after, however the import went.
+pub fn import_closing(home: &Path, source: &Source) -> Result<Option<PathBuf>, String> {
+    let name = source.name;
+    // Not closed for nothing.
+    in_no_project(home, source)?;
+    let closed = lock_holder(&source.from)
+        .map(|pid| close(pid, name))
+        .transpose()?;
+    let done = import(home, source);
+    let Some(closed) = closed else {
+        return done;
+    };
+    match (closed.reopen(&source.key), done) {
+        (Ok(()), done) => done,
+        (Err(err), Ok(_)) => Err(format!(
+            "Imported {name}'s profile, but couldn't start {name} again: {err}"
+        )),
+        (Err(err), Err(why)) => Err(format!("{why}. Couldn't start {name} again: {err}")),
+    }
 }
 
 /// The project whose profile of `key` an app runs on, if any (see
@@ -308,11 +473,7 @@ pub fn import(home: &Path, source: &Source) -> Result<Option<PathBuf>, String> {
     if running(&source.from) {
         return Err(format!("{name} is running: quit it first"));
     }
-    if matches!(source.kind, Kind::VsCode | Kind::Zed)
-        && let Some(project) = running_instance(home, &source.key)
-    {
-        return Err(format!("gerdr's {name} runs in {project}: close it first"));
-    }
+    in_no_project(home, source)?;
     let new = suffixed(&source.to, ".new");
     let _ = std::fs::remove_dir_all(&new);
     let done = fill(home, source, &new).and_then(|()| swap(source, &new));
@@ -320,6 +481,18 @@ pub fn import(home: &Path, source: &Source) -> Result<Option<PathBuf>, String> {
         let _ = std::fs::remove_dir_all(&new);
     }
     done.map_err(|err| format!("Couldn't import {name}'s profile: {err}"))
+}
+
+/// Refused while an editor's copy in gerdr (whose projects' profiles link
+/// to the shared one) runs in a project.
+fn in_no_project(home: &Path, source: &Source) -> Result<(), String> {
+    if matches!(source.kind, Kind::VsCode | Kind::Zed)
+        && let Some(project) = running_instance(home, &source.key)
+    {
+        let name = source.name;
+        return Err(format!("gerdr's {name} runs in {project}: close it first"));
+    }
+    Ok(())
 }
 
 /// Copy what of `source` gerdr keeps into the new profile `new`.
@@ -440,9 +613,18 @@ impl Gerdr {
         }
     }
 
-    /// Bring `source` into gerdr's shared profile of its app, off the event
-    /// loop (a profile can be large).
+    /// Bring `source` into gerdr's shared profile of its app: while the
+    /// app runs, after asking to close it and start it again.
     pub fn import_profile(&mut self, source: Source) {
+        if closable(&source) {
+            return self.ask_import_closing(source);
+        }
+        self.start_import(source, false);
+    }
+
+    /// Import `source` off the event loop (a profile can be large):
+    /// `closing` its app first if it runs (see `import_closing`).
+    pub fn start_import(&mut self, source: Source, closing: bool) {
         let (Some(tx), Some(home)) = (self.profile_imports.clone(), home_dir()) else {
             return;
         };
@@ -453,7 +635,11 @@ impl Gerdr {
         let spawned = std::thread::Builder::new()
             .name("import profile".into())
             .spawn(move || {
-                let done = import(&home, &source);
+                let done = if closing {
+                    import_closing(&home, &source)
+                } else {
+                    import(&home, &source)
+                };
                 IMPORTING.store(false, Ordering::Release);
                 let _ = tx.send((source, done));
             });
@@ -564,6 +750,74 @@ mod tests {
         write(&dir.join("code.lock"), &me.to_string());
         assert!(running(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_lock_older_than_its_process_names_none_to_close() {
+        let dir = scratch("holder");
+        let me = std::process::id();
+        std::os::unix::fs::symlink(format!("host-{me}"), dir.join("SingletonLock")).unwrap();
+        assert_eq!(lock_holder(&dir), Some(me));
+        // Made before this process started: its pid was handed on.
+        let lock =
+            std::ffi::CString::new(dir.join("SingletonLock").into_os_string().into_vec()).unwrap();
+        let old = libc::timespec {
+            tv_sec: 1_000_000_000,
+            tv_nsec: 0,
+        };
+        // SAFETY: `lock` is a valid path, `times` two valid times.
+        let set = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                lock.as_ptr(),
+                [old, old].as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(set, 0);
+        assert!(running(&dir));
+        assert_eq!(lock_holder(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_running_app_is_closed_imported_and_started_again() {
+        let home = scratch("closing");
+        write(&home.join("own/User/settings.json"), "{}");
+        let started = home.join("started");
+        let script = format!(
+            "echo $$ >> '{}'; while :; do sleep 0.1; done",
+            started.display()
+        );
+        let mut app = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .spawn()
+            .unwrap();
+        let pids = || -> Vec<i32> {
+            std::fs::read_to_string(&started)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.parse().ok())
+                .collect()
+        };
+        while pids().is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        write(&home.join("own/code.lock"), &app.id().to_string());
+        let source = source(&home, Kind::VsCode, "own", "gerdr");
+        assert!(closable(&source));
+        assert_eq!(import_closing(&home, &source), Ok(None));
+        assert!(home.join("gerdr/User/settings.json").exists());
+        assert!(app.try_wait().unwrap().is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pids().len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pids = pids();
+        assert_eq!(pids.len(), 2, "started again");
+        // SAFETY: `kill` only sends a signal.
+        unsafe { libc::kill(pids[1], libc::SIGKILL) };
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     fn source(home: &Path, kind: Kind, from: &str, to: &str) -> Source {

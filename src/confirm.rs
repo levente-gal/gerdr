@@ -24,6 +24,7 @@ use crate::{
     chrome::{self, AgentView, BarStatus, ConfirmView},
     herdr::{self, AgentStatus},
     keep,
+    profile_import::Source,
     projects::Stops,
 };
 
@@ -54,6 +55,9 @@ pub enum Then {
     /// Restart T3 Code's server at the version waiting (see
     /// `Gerdr::restart_t3`).
     RestartT3,
+    /// Close this profile's app, import it, start the app again (see
+    /// `Gerdr::import_profile`).
+    ImportProfile(Source),
 }
 
 /// The confirm dialog's state, while it is open.
@@ -180,6 +184,15 @@ fn restart_t3_question(version: &str, busy: usize) -> (String, String) {
         n => format!("{n} threads are at work: restarting now stops them"),
     };
     (title, body)
+}
+
+/// What a confirm dialog about closing app `name`, which runs, to import
+/// its profile says: its title and the line under it.
+fn import_question(name: &str) -> (String, String) {
+    (
+        format!("Close {name} to import its profile?"),
+        format!("{name} quits, its profile comes in, then it starts again"),
+    )
 }
 
 impl Gerdr {
@@ -325,6 +338,12 @@ impl Gerdr {
         self.ask(title, body, "Restart now", Then::RestartT3);
     }
 
+    /// Ask before closing `source`'s app to import its profile.
+    pub fn ask_import_closing(&mut self, source: Source) {
+        let (title, body) = import_question(source.name);
+        self.ask(title, body, "Close and import", Then::ImportProfile(source));
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -389,6 +408,7 @@ impl Gerdr {
             }
             Then::ClosePane(id) => self.close_pane_now(id),
             Then::RestartT3 => self.restart_t3(),
+            Then::ImportProfile(source) => self.start_import(source, true),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs
