@@ -5415,6 +5415,7 @@ impl Gerdr {
         self.running.insert(id.to_owned(), true);
         self.place_held(id);
         self.show_active();
+        self.show_last_tab();
         if let Some(left) = left {
             // Asked for when switching (see `ask_switch`).
             let stops = self

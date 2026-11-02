@@ -5,7 +5,8 @@
 //! last-project key does (asking first when that asks), and then the tab,
 //! once the project's tabs are back. The history, parked, is kept in the
 //! store every `RECORDS_INTERVAL` and when gerdr quits, and taken back as
-//! gerdr starts.
+//! gerdr starts. A project shown (gerdr starting, a switch) comes back on
+//! the latest of its tabs in the history, the one it was left on.
 
 use std::time::{Duration, Instant};
 
@@ -20,12 +21,13 @@ use crate::{
 /// the project's own tab shown counts as the visit.
 const PENDING_WAIT: Duration = Duration::from_secs(8);
 
-/// A step back or forward to a tab of another project, taken once that
-/// project shows.
+/// A tab to show once its project's tabs are back: a step back
+/// (`step` true) or forward to it, or (`None`) the tab the project shown
+/// was left on.
 #[derive(Debug)]
 pub struct PendingVisit {
     to: Visit,
-    back: bool,
+    step: Option<bool>,
     since: Instant,
 }
 
@@ -159,7 +161,14 @@ impl Gerdr {
         }
         let to = self.unpark(&pending.to);
         if let Visit::Tab(_) = to {
-            self.step_to(&to, pending.back);
+            match pending.step {
+                Some(back) => self.step_to(&to, back),
+                None => self.show_visit(&to),
+            }
+            return false;
+        }
+        // The tab left on being gone is no news: the project shows another.
+        if waited && pending.step.is_none() {
             return false;
         }
         if waited {
@@ -207,7 +216,7 @@ impl Gerdr {
             let project = project.clone();
             self.nav_pending = Some(PendingVisit {
                 to,
-                back,
+                step: Some(back),
                 since: Instant::now(),
             });
             return self.switch_project(&project);
@@ -227,12 +236,40 @@ impl Gerdr {
             nav.forward_to(to, keep)
         };
         self.nav = nav;
-        let Some((w, t)) = to.and_then(|to| self.visit_place(&to)) else {
+        if let Some(to) = to {
+            self.show_visit(&to);
+        }
+    }
+
+    /// Show `visit`, a tab of the shown project, if it is there.
+    fn show_visit(&mut self, visit: &Visit) {
+        let Some((w, t)) = self.visit_place(visit) else {
             return;
         };
         self.active_workspace = w;
         self.workspaces[w].active_tab = t;
         self.show_active();
+    }
+
+    /// The project just shown comes back on the latest of its tabs in the
+    /// history, once its tabs are back: whichever of its workspaces came
+    /// back first would show else. Not while a step back or forward goes to
+    /// one of its tabs.
+    pub fn show_last_tab(&mut self) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let of = |v: &Visit| matches!(v, Visit::Parked { project: p, .. } if *p == project);
+        if self.nav_pending.as_ref().is_some_and(|p| of(&p.to)) {
+            return;
+        }
+        if let Some(to) = self.nav.latest(of).cloned() {
+            self.nav_pending = Some(PendingVisit {
+                to,
+                step: None,
+                since: Instant::now(),
+            });
+        }
     }
 
     /// Park the shown project's tabs in the history, as it is let go of:
