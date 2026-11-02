@@ -47,8 +47,11 @@ const REPO_DIFF_LINES: usize = 20_000;
 const FOLDER_FILES: usize = 200;
 /// An untracked file bigger than this isn't shown.
 const UNTRACKED_BYTES: u64 = 1 << 20;
-/// How many commits `log_ahead` shows without an upstream.
+/// How many commits `log_upstream` shows when there are none to push or
+/// pull.
 const LOG_LAST: &str = "10";
+/// How many commits to push, and to pull, `log_upstream` lists at most.
+const LOG_MAX: usize = 200;
 /// How long to wait before each new try of a command that found a lock
 /// held: another git (the user's, an editor's) is likely done by then.
 #[cfg(not(test))]
@@ -1372,23 +1375,39 @@ pub fn repo_diff_from(dir: &Path, changes: &[Change], from: Option<&str>) -> Vec
     }
     changes
         .iter()
-        .map(|change| {
-            if change.code == '?' {
-                return untracked(&top, change);
-            }
-            let found = tracked.iter().position(|f| f.path == change.path);
-            let mut file = found.map_or_else(FileDiff::default, |i| tracked.swap_remove(i));
-            if found.is_none() {
-                let why = failed.clone();
-                file.notes
-                    .push(why.unwrap_or_else(|| "No changes to show".into()));
-            }
-            file.path = change.path.clone();
-            file.orig = change.orig.clone();
-            file.code = change.code;
-            file
+        .map(|change| match change.code {
+            '?' => untracked(&top, change),
+            _ => match_file(&mut tracked, change, failed.as_deref()),
         })
         .collect()
+}
+
+/// The diff of each of `changes` out of the files one `git diff` printed,
+/// in their order; a change it hasn't says why (`failed`, else that
+/// there is nothing to show).
+fn match_files(
+    mut tracked: Vec<FileDiff>,
+    changes: &[Change],
+    failed: Option<&str>,
+) -> Vec<FileDiff> {
+    changes
+        .iter()
+        .map(|change| match_file(&mut tracked, change, failed))
+        .collect()
+}
+
+/// `change`'s diff, taken out of `tracked` (see `match_files`).
+fn match_file(tracked: &mut Vec<FileDiff>, change: &Change, failed: Option<&str>) -> FileDiff {
+    let found = tracked.iter().position(|f| f.path == change.path);
+    let mut file = found.map_or_else(FileDiff::default, |i| tracked.swap_remove(i));
+    if found.is_none() {
+        file.notes
+            .push(failed.unwrap_or("No changes to show").to_owned());
+    }
+    file.path = change.path.clone();
+    file.orig = change.orig.clone();
+    file.code = change.code;
+    file
 }
 
 /// What a worktree changed since it forked from `target` (since HEAD for
@@ -1561,20 +1580,160 @@ fn untracked(top: &Path, change: &Change) -> FileDiff {
     file
 }
 
-/// The commits the upstream doesn't have yet, one line each (`log
-/// --oneline @{u}..`), under a line saying so; without an upstream, or
-/// with nothing to push, the last few.
-pub fn log_ahead(dir: &Path) -> String {
-    let base = ["log", "--oneline", "--decorate=short", "--no-color"];
-    let last = || query(dir, &[&base[..], &["-n", LOG_LAST]].concat()).unwrap_or_default();
-    if query(dir, &["rev-parse", "-q", "--verify", "@{upstream}"]).is_none() {
-        return format!("No upstream yet. The last commits:\n{}", last());
+/// One commit of a log: its full id, and the line shown for it (`1a2b3c4
+/// subject · author, 2 hours ago`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub oid: String,
+    pub line: String,
+}
+
+/// The Log tab's lists, each under a line saying what it is: the commits
+/// to pull and the ones to push, else the last few.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitLog {
+    pub sections: Vec<(String, Vec<Commit>)>,
+}
+
+impl CommitLog {
+    /// Its lines, a blank one between lists, each with the commit it
+    /// shows (none for the others).
+    pub fn lines(&self) -> Vec<(String, Option<String>)> {
+        let mut lines = Vec::new();
+        for (i, (header, commits)) in self.sections.iter().enumerate() {
+            if i > 0 {
+                lines.push((String::new(), None));
+            }
+            lines.push((header.clone(), None));
+            for c in commits {
+                lines.push((c.line.clone(), Some(c.oid.clone())));
+            }
+        }
+        lines
     }
-    let ahead = query(dir, &[&base[..], &["@{upstream}.."]].concat()).unwrap_or_default();
-    if ahead.trim().is_empty() {
-        return format!("Nothing to push. The last commits:\n{}", last());
+}
+
+/// The commits git log `args` lists, newest first, at most `LOG_MAX`.
+fn log_commits(dir: &Path, args: &[&str]) -> Vec<Commit> {
+    let format = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%cr";
+    let n = LOG_MAX.to_string();
+    let base = ["log", "--no-color", format, "-n", &n];
+    let out = query(dir, &[&base[..], args].concat()).unwrap_or_default();
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.split('\x1f');
+            let (oid, short) = (f.next()?, f.next()?);
+            let subject = f.next().unwrap_or_default();
+            let author = f.next().unwrap_or_default();
+            let age = f.next().unwrap_or_default();
+            Some(Commit {
+                oid: oid.to_owned(),
+                line: format!("{short} {subject} · {author}, {age}"),
+            })
+        })
+        .collect()
+}
+
+/// How many commits `range` holds.
+fn count_commits(dir: &Path, range: &str) -> usize {
+    query(dir, &["rev-list", "--count", range])
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// The commits in `range` under `header` and how many there are; past
+/// `LOG_MAX`, it says only the newest are listed.
+fn log_section(dir: &Path, range: &str, header: String) -> (String, Vec<Commit>) {
+    let count = count_commits(dir, range);
+    if count == 0 {
+        return (format!("{header}: none"), Vec::new());
     }
-    format!("To push:\n{ahead}")
+    let commits = log_commits(dir, &[range]);
+    let header = match commits.len() {
+        0 => format!("{header} ({count}): they couldn't be read"),
+        shown if shown < count => format!("{header} ({count}, the newest {shown}):"),
+        _ => format!("{header} ({count}):"),
+    };
+    (header, commits)
+}
+
+/// The commits to pull from the upstream and the ones to push to it, each
+/// under a line saying so (`To pull from origin/main (2):`); with neither,
+/// or without an upstream, the last few.
+pub fn log_upstream(dir: &Path) -> CommitLog {
+    let last = |header: &str| CommitLog {
+        sections: vec![(header.to_owned(), log_commits(dir, &["-n", LOG_LAST]))],
+    };
+    let Some(upstream) = query(dir, &["rev-parse", "-q", "--abbrev-ref", "@{upstream}"]) else {
+        return last("No upstream yet. The last commits:");
+    };
+    let upstream = upstream.trim();
+    if count_commits(dir, "@{upstream}...HEAD") == 0 {
+        return last(&format!("Up to date with {upstream}. The last commits:"));
+    }
+    let pull = log_section(dir, "HEAD..@{upstream}", format!("To pull from {upstream}"));
+    let push = log_section(dir, "@{upstream}..HEAD", format!("To push to {upstream}"));
+    CommitLog {
+        sections: vec![pull, push],
+    }
+}
+
+/// The first `n` commits of `range`, newest first, as their short id and
+/// subject, for a tooltip.
+pub fn commits_between(dir: &Path, range: &str, n: usize) -> Vec<(String, String)> {
+    let n = n.to_string();
+    let args = ["log", "--no-color", "--format=%h%x1f%s", "-n", &n, range];
+    let out = query(dir, &args).unwrap_or_default();
+    out.lines()
+        .filter_map(|l| l.split_once('\x1f'))
+        .map(|(h, s)| (h.to_owned(), s.to_owned()))
+        .collect()
+}
+
+/// What commit `oid` changed against its first parent (the empty tree for
+/// a first commit): its files, each with its diff; else why it can't be
+/// read.
+pub fn commit_diff(dir: &Path, oid: &str) -> Result<(Vec<Change>, Vec<FileDiff>), String> {
+    let top = top(dir);
+    let parent = format!("{oid}^");
+    let from = query(
+        &top,
+        &[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("{parent}^{{commit}}"),
+        ],
+    )
+    .map(|p| p.trim().to_owned())
+    .unwrap_or_else(|| empty_tree(&top));
+    let diff = [
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+    ];
+    let out = exec(
+        &top,
+        &[&diff[..], &["--name-status", "-z", "-M", &from, oid]].concat(),
+        Reach::Read,
+    );
+    if out.code != Some(0) {
+        return Err(why(&out.stderr, &out.stdout));
+    }
+    let changes = parse_name_status(&out.stdout);
+    let out = exec(
+        &top,
+        &[&diff[..], &["-M", &from, oid]].concat(),
+        Reach::Read,
+    );
+    if out.code != Some(0) {
+        return Err(why(&out.stderr, &out.stdout));
+    }
+    let tracked = diff::parse(&cap(out.stdout, REPO_DIFF_LINES));
+    let files = match_files(tracked, &changes, None);
+    Ok((changes, files))
 }
 
 /// The repository's stashes, newest first, one line each: `stash@{0} ·
@@ -2834,22 +2993,87 @@ mod tests {
         assert!(changes_since(&wt, Some("no-such-branch")).is_err());
     }
 
+    /// The lines of `log`, without the commits' ids.
+    fn log_text(log: &CommitLog) -> Vec<String> {
+        log.lines().into_iter().map(|(l, _)| l).collect()
+    }
+
     #[test]
-    fn logs_ahead() {
+    fn logs_commits_to_push_and_pull() {
         let fx = Fx::new();
         let dir = &fx.repo;
-        let log = log_ahead(dir);
-        assert!(log.starts_with("Nothing to push."), "{log}");
-        assert_eq!(log.lines().count(), 2);
-        commit(dir, "b", "second");
-        commit(dir, "c", "third");
-        let log = log_ahead(dir);
-        assert_eq!(log.lines().count(), 3);
-        assert!(log.lines().nth(1).unwrap().ends_with("third"), "{log}");
+        let log = log_upstream(dir);
+        let text = log_text(&log);
+        assert_eq!(text[0], "Up to date with origin/main. The last commits:");
+        assert_eq!(text.len(), 2);
+        assert!(text[1].contains(" first · "), "{text:?}");
+        assert_eq!(log.lines()[1].1, Some(rev(dir, "HEAD")));
+        // Someone else pushes two; this one commits one.
+        let other = fx.clone("other");
+        commit(&other, "x", "theirs one");
+        commit(&other, "y", "theirs two");
+        git(&other, &["push", "-q"]);
+        git(dir, &["fetch", "-q"]);
+        commit(dir, "b", "mine");
+        let log = log_upstream(dir);
+        let text = log_text(&log);
+        assert_eq!(text[0], "To pull from origin/main (2):");
+        assert!(
+            text[1].starts_with(&rev(dir, "origin/main")[..7]),
+            "{text:?}"
+        );
+        assert!(text[1].contains(" theirs two · "), "{text:?}");
+        assert!(text[2].contains(" theirs one · "), "{text:?}");
+        assert_eq!(text[3], "");
+        assert_eq!(text[4], "To push to origin/main (1):");
+        assert!(text[5].contains(" mine · "), "{text:?}");
+        let oids: Vec<_> = log.lines().into_iter().map(|(_, o)| o).collect();
+        assert_eq!(oids[0], None);
+        assert_eq!(oids[1], Some(rev(dir, "origin/main")));
+        assert_eq!(oids[3], None);
+        assert_eq!(oids[5], Some(rev(dir, "HEAD")));
+        // Only to push: the other list says there is none.
+        git(dir, &["pull", "-q", "--rebase"]);
+        let text = log_text(&log_upstream(dir));
+        assert_eq!(text[0], "To pull from origin/main: none");
+        assert_eq!(text[2], "To push to origin/main (1):");
+        assert_eq!(
+            commits_between(dir, "@{u}..", 5),
+            [(rev(dir, "HEAD")[..7].to_owned(), "mine".to_owned())]
+        );
         switch_or_create(dir, "lonely").unwrap();
-        let log = log_ahead(dir);
-        assert!(log.starts_with("No upstream yet."), "{log}");
-        assert_eq!(log.lines().count(), 4);
+        let text = log_text(&log_upstream(dir));
+        assert_eq!(text[0], "No upstream yet. The last commits:");
+        assert_eq!(text.len(), 5);
+    }
+
+    #[test]
+    fn reads_a_commits_diff() {
+        let fx = Fx::local();
+        let dir = &fx.repo;
+        // The first commit: all added.
+        let (changes, files) = commit_diff(dir, &rev(dir, "HEAD")).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!((changes[0].path.as_str(), changes[0].code), ("a", 'A'));
+        assert_eq!(files[0].added, 1);
+        // A change, a rename and an add, then a later commit that isn't in it.
+        write(dir, "big", &"line\n".repeat(20));
+        commit(dir, "a", "changed");
+        git(dir, &["add", "big"]);
+        git(dir, &["commit", "-q", "-m", "big"]);
+        git(dir, &["mv", "big", "moved"]);
+        write(dir, "c", "new\n");
+        git(dir, &["add", "c"]);
+        commit(dir, "a", "again");
+        commit(dir, "c", "later");
+        let (changes, files) = commit_diff(dir, &rev(dir, "HEAD~1")).unwrap();
+        let paths: Vec<_> = changes.iter().map(|c| (c.path.as_str(), c.code)).collect();
+        assert_eq!(paths, [("a", 'M'), ("c", 'A'), ("moved", 'R')]);
+        assert_eq!(changes[2].orig.as_deref(), Some("big"));
+        assert_eq!((files[0].added, files[0].removed), (1, 1));
+        assert_eq!(files[1].added, 1);
+        assert_eq!(files[2].path, "moved");
+        assert!(commit_diff(dir, "no-such-commit").is_err());
     }
 
     #[test]

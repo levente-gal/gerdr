@@ -42,6 +42,8 @@ mod vim;
 use search::DiffSearch;
 
 pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line";
+/// Why an edit, restore or comment does nothing in a read-only diff.
+pub const READ_ONLY: &str = "A commit's diff can't be edited";
 
 /// A checkout the diff shows, as its host lends it.
 #[derive(Clone, Copy, Debug)]
@@ -94,6 +96,9 @@ pub struct Ctx<'a> {
     pub check: Option<CheckOf<'a>>,
     /// The file the host has selected, its header marked.
     pub selected: Option<(&'a Path, &'a str)>,
+    /// What it shows isn't the files as they are (a commit's diff): no
+    /// edits, restores or review comments from it.
+    pub read_only: bool,
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -144,6 +149,21 @@ pub enum Outcome {
     /// Ask whether to delete those on lines no longer in the diff, then
     /// `drop_outdated`.
     ClearOutdated,
+}
+
+impl Outcome {
+    /// Whether it changes a file, or takes from one as it is (a yank):
+    /// neither fits a diff that isn't the files as they are.
+    fn edits(&self) -> bool {
+        matches!(
+            self,
+            Outcome::Cut(_)
+                | Outcome::Yank(_)
+                | Outcome::Paste(_)
+                | Outcome::UndoCut(_)
+                | Outcome::RedoCut(_)
+        )
+    }
 }
 
 /// Where in a file Zed opens it: a line (from 1) and, on one in the file
@@ -1983,6 +2003,7 @@ impl DiffView {
                 }
                 return Some(self.open_diff_row(r));
             }
+            Keysym::c if plain && ctx.read_only => return Some(Some(Outcome::Notice(READ_ONLY))),
             Keysym::c if plain => self.comment_here(ctx),
             Keysym::Delete | Keysym::KP_Delete if plain => {
                 self.delete_comment(ctx);
@@ -2108,7 +2129,10 @@ impl DiffView {
         let shown: Vec<usize> = sticky.into_iter().chain(range.clone()).collect();
         let mut marks: Vec<RowMark> = shown.iter().map(|&r| self.row_mark(r)).collect();
         let mut found: Vec<_> = shown.iter().map(|&r| self.found_on(r)).collect();
-        let mut row_buttons = self.row_buttons(&shown);
+        let mut row_buttons = match ctx.read_only {
+            true => Vec::new(),
+            false => self.row_buttons(&shown),
+        };
         let line_h = crate::chrome::repos_detail_line(ctx.density);
         let pin = |h| self.diff_pin(h, page, line_h);
         let (pin, stuck) = sticky.map_or((0.0, false), pin);
@@ -2194,6 +2218,21 @@ impl DiffView {
     /// `*` and `#` searching the word at the caret; then the diff's own
     /// (`detail_press`). `None` when it isn't one of them: the host's.
     pub fn key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        ctx: &Ctx,
+    ) -> Option<Option<Outcome>> {
+        let outcome = self.any_key(mods, sym, typed, ctx);
+        match outcome {
+            Some(Some(o)) if ctx.read_only && o.edits() => Some(Some(Outcome::Notice(READ_ONLY))),
+            outcome => outcome,
+        }
+    }
+
+    /// `key`, read-only or not.
+    fn any_key(
         &mut self,
         mods: &ModifiersState,
         sym: Keysym,
@@ -2289,6 +2328,9 @@ impl DiffView {
         // A hunk's header puts the hunk back; the cursor's row, the change
         // there or the lines selected.
         if let ReposHit::DiffRestore(i) = hit {
+            if ctx.read_only {
+                return Some(Some(Outcome::Notice(READ_ONLY)));
+            }
             let r = self.detail_row_at(i, ctx);
             return Some(match r.map(|r| self.rows[r]) {
                 Some(DiffRow::Hunk(..)) => r.and_then(|r| self.restore_hunk(r)),
