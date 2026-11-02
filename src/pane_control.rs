@@ -421,17 +421,6 @@ fn web_page(pane: &Pane) -> Option<&str> {
     (pane.herdr.is_none() && crate::is_web_link(url)).then_some(url)
 }
 
-/// Which buttons `pane`'s bar has.
-fn bar_buttons(pane: &Pane) -> BarButtons {
-    if pane.herdr.is_some() {
-        BarButtons::Terminal
-    } else if web_page(pane).is_some() {
-        BarButtons::Web
-    } else {
-        BarButtons::None
-    }
-}
-
 /// What the state of `pane`'s bar is kept by: the herdr pane it shows, for
 /// a terminal, else its own leaf.
 fn bar_key(pane: &Pane) -> String {
@@ -584,7 +573,7 @@ fn hint_for(help: &Help, action: Action) -> Option<String> {
 
 /// Why `button` can't be pressed on a bar showing `content`, if it can't.
 pub fn button_unavailable(button: BarButton, content: &BarContent) -> Option<&'static str> {
-    let web = content.buttons == BarButtons::Web;
+    let web = matches!(content.buttons, BarButtons::Web { .. });
     // A web page's reload is there whenever the extension follows it.
     let follows = content.can_restart;
     match button {
@@ -713,7 +702,7 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
         )
     }));
     match content.buttons {
-        BarButtons::Web => items.extend([
+        BarButtons::Web { .. } => items.extend([
             MenuItem::new("Back", MenuAction::WebStep(id, WebStep::Back)).enabled(content.can_back),
             MenuItem::new("Forward", MenuAction::WebStep(id, WebStep::Forward))
                 .enabled(content.can_forward),
@@ -893,12 +882,17 @@ impl Gerdr {
         let follows = self.web_control.follows(pane.id);
         // Where the page couldn't say, the way is left open.
         let history = self.web_control.history(pane.id);
+        let can_back = follows && history.back != Some(false);
+        let can_forward = follows && history.forward != Some(false);
         BarContent {
             label: url.to_owned(),
             can_restart: follows,
-            can_back: follows && history.back != Some(false),
-            can_forward: follows && history.forward != Some(false),
-            buttons: BarButtons::Web,
+            can_back,
+            can_forward,
+            // Back and forward only while there is somewhere to go.
+            buttons: BarButtons::Web {
+                history: can_back || can_forward,
+            },
             ..content
         }
     }
@@ -971,15 +965,17 @@ impl Gerdr {
                 let key = bar_key(pane);
                 let content = self.pane_bar_of(pane);
                 let is_focused = focused == Some(id);
+                let kind = content.buttons;
                 let look = states.update(&key, now, |out| {
-                    let near = chrome::pointer_reveals(rect, out, pointer);
+                    let near = chrome::pointer_reveals(rect, kind, out, pointer);
                     bar_wanted(content.status, near)
                 });
                 flipped |= look.flipped;
                 // Drawn always: hidden, it is its grip.
-                let full = chrome::pane_bar_rects(rect).0;
+                let full = chrome::pane_bar_rect(rect, kind);
                 Some(PaneBarView {
                     rect: full,
+                    grip: chrome::pane_grip_rect(rect),
                     label: content.label,
                     note: content.note,
                     status: content.status,
@@ -996,8 +992,9 @@ impl Gerdr {
                         .filter(|(hovered, _)| *hovered == id)
                         .map(|(_, button)| button),
                     visible: look.visible,
-                    // It grows from its grip, which is always there.
-                    alpha: 1.0,
+                    // A terminal's grows from its grip, which is always
+                    // there; a pill fades in over its grip.
+                    alpha: if kind.floats() { look.alpha } else { 1.0 },
                     slide: look.slide.min(full.size.h),
                 })
             })
@@ -1009,21 +1006,29 @@ impl Gerdr {
     }
 
     /// The pane of the active tab whose bar is at `pos`, and what of it.
-    /// A hidden bar is its grip, with only its close button; so is an
-    /// app's bar.
+    /// A hidden terminal's bar is its grip, with only its close button; a
+    /// floating bar's grip is all label, out or not, and its pill, while
+    /// out, has its buttons.
     pub fn pane_bar_at(&self, pos: Point<f64, Logical>) -> Option<(u32, BarHit)> {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
             .into_iter()
             .find_map(|(id, rect)| {
-                let hit = if self.pane_bar_drawn(tab, id) {
-                    let kind = tab.panes.iter().find(|p| p.id == id).map(bar_buttons)?;
-                    let bar = chrome::pane_bar_rects(rect).0;
-                    chrome::pane_bar_hit(bar, kind, tab.bar_zoom(id), pos)?
+                let pane = tab.panes.iter().find(|p| p.id == id)?;
+                let kind = self.pane_bar_of(pane).buttons;
+                let drawn = self.pane_bar_drawn(tab, id);
+                let grip = chrome::pane_grip_rect(rect);
+                let hit = if drawn {
+                    let bar = chrome::pane_bar_rect(rect, kind);
+                    chrome::pane_bar_hit(bar, kind, tab.bar_zoom(id), pos)
+                } else if kind.floats() {
+                    None
                 } else {
-                    let grip = chrome::pane_bar_rects_shown(rect, false).0;
-                    chrome::pane_bar_hit(grip, BarButtons::None, None, pos)?
+                    chrome::pane_grip_hit(grip, pos)
                 };
+                let hit = hit.or_else(|| {
+                    (kind.floats() && grip.to_f64().contains(pos)).then_some(BarHit::Label)
+                })?;
                 Some((id, hit))
             })
     }
@@ -1060,13 +1065,13 @@ impl Gerdr {
         let (id, hit) = self.pane_bar_at(pos)?;
         let tab = self.tab()?;
         let pane = tab.panes.iter().find(|p| p.id == id)?;
-        let kind = bar_buttons(pane);
+        let content = self.pane_bar_of(pane);
+        let kind = content.buttons;
         let (_, rect) = tab
             .shown_rects(self.content_rect())
             .into_iter()
             .find(|(pane, _)| *pane == id)?;
-        let bar = chrome::pane_bar_rects(rect).0;
-        let content = self.pane_bar_of(pane);
+        let bar = chrome::pane_bar_rect(rect, kind);
         let BarHit::Button(button) = hit else {
             // Whether its command runs again after a reboot: what the
             // toggle's toast said, kept in sight.
@@ -1915,7 +1920,7 @@ mod tests {
         );
         assert_eq!(button_unavailable(BarButton::Scrollback, &idle), None);
         let web = BarContent {
-            buttons: BarButtons::Web,
+            buttons: BarButtons::Web { history: true },
             ..idle.clone()
         };
         let why = button_unavailable(BarButton::Back, &web).unwrap();
@@ -2081,7 +2086,7 @@ mod tests {
             can_restart: true,
             can_back: true,
             can_forward: false,
-            buttons: BarButtons::Web,
+            buttons: BarButtons::Web { history: true },
             ..bar_content(None, None, None)
         };
         let menu = bar_menu((0.0, 0.0).into(), 3, &content, &help);

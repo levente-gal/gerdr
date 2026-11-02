@@ -3081,7 +3081,7 @@ fn blocked_pill(p: &Palette) -> Rgb {
 }
 
 /// How far apart `a` and `b` are in WCAG contrast, 1 to 21.
-fn contrast(a: Rgb, b: Rgb) -> f32 {
+pub(super) fn contrast(a: Rgb, b: Rgb) -> f32 {
     let luminance = |[r, g, b]: Rgb| {
         let lin = |v: u8| {
             let v = v as f32 / 255.0;
