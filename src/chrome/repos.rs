@@ -660,6 +660,8 @@ pub enum ReposButton {
     Stash,
     StashPop,
     StashDrop,
+    /// The commit picked in the Log tab, its diff shown.
+    ShowCommit,
     /// The panel's keys, on a sheet.
     Help,
     /// On a confirm sheet, for a branch picked in the menu.
@@ -732,6 +734,7 @@ impl ReposButton {
             ReposButton::Stash => "Stash",
             ReposButton::StashPop => "Pop stash",
             ReposButton::StashDrop => "Drop stash",
+            ReposButton::ShowCommit => "Show commit",
             ReposButton::Help => "Keys",
             ReposButton::DeleteBranch => "Delete",
             ReposButton::All => "All",
@@ -5851,6 +5854,70 @@ mod tests {
         }
     }
 
+    /// The Log tab: the commits to pull and to push, one picked.
+    fn with_log() -> ReposView {
+        let view = full();
+        let lines = [
+            ("To pull from origin/main (2):", DiffTone::Header),
+            (
+                "4f1c2ab Fold ignored errors · lgal, 3 hours ago",
+                DiffTone::Plain,
+            ),
+            (
+                "9e0d7a1 Show a project on its tab · lgal, 5 hours ago",
+                DiffTone::Plain,
+            ),
+            ("", DiffTone::Plain),
+            ("To push to origin/main (1):", DiffTone::Header),
+            (
+                "c0ffee1 Read the log both ways · lgal, 2 minutes ago",
+                DiffTone::Plain,
+            ),
+        ];
+        let rows: Vec<DetailRow> = (lines.iter())
+            .map(|(text, tone)| DetailRow::Text(crate::diff_view::detail_line(text, *tone)))
+            .collect();
+        let marks = (0..rows.len())
+            .map(|r| RowMark {
+                selected: r == 2,
+                top: true,
+                bottom: true,
+                noted: false,
+            })
+            .collect();
+        let mut hints = view.hints.clone();
+        hints.insert(0, hint(ReposButton::ShowCommit, "Enter", None));
+        ReposView {
+            detail: DetailView {
+                tab: DetailTab::Log,
+                title: "gerdr".into(),
+                total: rows.len(),
+                rows,
+                marks,
+                focused: true,
+                ..DetailView::default()
+            },
+            hints,
+            ..view
+        }
+    }
+
+    /// A commit's diff across the panel.
+    fn commit_only() -> ReposView {
+        ReposView {
+            title: "Commit · gerdr".into(),
+            summary: "c0ffee1 Read the log both ways · lgal, 2 minutes ago".into(),
+            hints: vec![
+                hint(ReposButton::Help, "F1", None),
+                Hint {
+                    label: "back".into(),
+                    ..hint(ReposButton::Close, "Esc", None)
+                },
+            ],
+            ..diff_only()
+        }
+    }
+
     #[test]
     fn the_diff_alone_takes_the_whole_panel() {
         for (w, h) in SIZES {
@@ -6666,6 +6733,8 @@ mod tests {
             ("menu_bad_name", with_bad_name_menu()),
             ("search", with_search()),
             ("diff_only", diff_only()),
+            ("log", with_log()),
+            ("commit", commit_only()),
             (
                 "diff_only_sheet",
                 ReposView {

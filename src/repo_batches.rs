@@ -25,8 +25,8 @@ use crate::menu::{MenuAction, MenuItem, MenuSpec};
 use crate::{
     Drag, Gerdr,
     chrome::{
-        self, Density, DetailTab, Hint, ReposButton, ReposHit, ReposView, SearchPart, Tone,
-        TreeLine, TreeTool,
+        self, Density, DetailTab, Hint, RepoMark, ReposButton, ReposHit, ReposView, SearchPart,
+        Tone, TreeLine, TreeTool,
     },
     desktop,
     diff_edit::{self, Cut, Done, FileEdit, Put},
@@ -34,8 +34,8 @@ use crate::{
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
-        Batch, BatchKind, Ctx, Found, Job, Outcome, Panel, RepoEvent, RepoItem, RepoRun, Repos,
-        RunState,
+        Batch, BatchKind, Ctx, Found, Job, MarkAt, MarkCommits, Outcome, Panel, RepoEvent,
+        RepoItem, RepoRun, Repos, RunState,
     },
     review,
     toast::Level,
@@ -44,6 +44,8 @@ use crate::{
 
 /// How many repositories a batch works in at once.
 const BATCH_THREADS: usize = 4;
+/// How many commits a mark's tooltip lists.
+const MARK_COMMITS: usize = 5;
 /// How many cuts made from the diff can be undone.
 const CUTS: usize = 100;
 
@@ -690,9 +692,13 @@ impl Gerdr {
     /// Close the panel, kept as it is for opening again; the edits made
     /// from its diff can no longer be undone.
     fn close_repos(&mut self) {
+        // A commit's diff closes with the panel it was opened over.
+        let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
         if self.repos.worktree.is_some() {
             self.close_worktree_diff();
-            return self.forget_edits();
+            if !commit {
+                return self.forget_edits();
+            }
         }
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
@@ -874,12 +880,17 @@ impl Gerdr {
         };
         self.repos.reading = Some(key.clone());
         std::thread::spawn(move || {
-            let text = match key.tab {
-                DetailTab::Diff => String::new(),
-                DetailTab::Log => git_ops::log_ahead(&key.root),
-                DetailTab::Stashes => git_ops::stash_list(&key.root),
+            let (text, oids) = match key.tab {
+                DetailTab::Diff => (String::new(), Vec::new()),
+                DetailTab::Log => {
+                    let lines = git_ops::log_upstream(&key.root).lines();
+                    let text = lines.iter().map(|(l, _)| l.as_str());
+                    let text = text.collect::<Vec<_>>().join("\n");
+                    (text, lines.into_iter().map(|(_, oid)| oid).collect())
+                }
+                DetailTab::Stashes => (git_ops::stash_list(&key.root), Vec::new()),
             };
-            let _ = tx.send(RepoEvent::Detail { key, text });
+            let _ = tx.send(RepoEvent::Detail { key, text, oids });
         });
     }
 
@@ -1201,6 +1212,53 @@ impl Gerdr {
         self.repos_detail();
     }
 
+    /// The first commits to push (`ahead`) or pull of repository `k`, as
+    /// a tooltip's lines, `and 3 more` last; read off the event loop when
+    /// not read yet at its HEAD and counts, none meanwhile.
+    fn mark_commits(&mut self, k: usize, ahead: bool) -> Vec<(String, String)> {
+        let Some(item) = self.repos.items.get(k) else {
+            return Vec::new();
+        };
+        let status = &item.status;
+        let at: MarkAt = (status.head.clone(), status.ahead, status.behind);
+        let count = if ahead { status.ahead } else { status.behind } as usize;
+        let root = item.root.clone();
+        let key = (root.clone(), ahead);
+        match self.repos.mark_commits.get(&key) {
+            Some(read) if read.at == at => {
+                let mut lines = read.commits.clone().unwrap_or_default();
+                if count > lines.len() && !lines.is_empty() {
+                    lines.push((String::new(), format!("and {} more", count - lines.len())));
+                }
+                return lines;
+            }
+            _ => {}
+        }
+        let Some(tx) = self.repos_sender() else {
+            return Vec::new();
+        };
+        let reading = MarkCommits {
+            at: at.clone(),
+            commits: None,
+        };
+        self.repos.mark_commits.insert(key, reading);
+        std::thread::spawn(move || {
+            let range = if ahead {
+                "@{upstream}..HEAD"
+            } else {
+                "HEAD..@{upstream}"
+            };
+            let commits = git_ops::commits_between(&root, range, MARK_COMMITS);
+            let _ = tx.send(RepoEvent::MarkCommits {
+                root,
+                ahead,
+                at,
+                commits,
+            });
+        });
+        Vec::new()
+    }
+
     /// The pointer moved while the panel is open.
     pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.repos_view()?;
@@ -1244,7 +1302,16 @@ impl Gerdr {
                     .marks
                     .iter()
                     .find(|(j, m, _)| (*j, *m) == (i, mark))?;
-                Some(Tooltip::new(&mark.tip(repo(i)?), *rect))
+                let tip = Tooltip::new(&mark.tip(repo(i)?), *rect);
+                let ahead = match mark {
+                    RepoMark::Ahead => true,
+                    RepoMark::Behind => false,
+                    _ => return Some(tip),
+                };
+                let page = self.repos_page().0;
+                let panel = self.repos.panel.as_ref()?;
+                let k = panel.line_item(i, &self.repos.items, page)?;
+                Some(tip.fields(self.mark_commits(k, ahead)))
             }
             ReposHit::Expander(i) => {
                 let rect = layout.lines.get(i)?.2?;
@@ -1503,6 +1570,7 @@ impl Gerdr {
             Outcome::Yank(edit) => self.repos_yank(edit),
             Outcome::Paste(put) => self.repos_paste(put),
             Outcome::Stop => self.stop_batches(),
+            Outcome::OpenCommit { root, oid, line } => self.open_commit_diff(root, oid, line),
             Outcome::Refresh => {
                 self.refresh_git();
                 self.repos_read();
@@ -2176,12 +2244,12 @@ impl Gerdr {
                     panel.ask_exists(name, jobs, have);
                 }
             }
-            RepoEvent::Detail { key, text } => {
+            RepoEvent::Detail { key, text, oids } => {
                 if self.repos.reading.as_ref() == Some(&key) {
                     self.repos.reading = None;
                 }
                 if let Some(panel) = self.repos.panel.as_mut() {
-                    panel.set_detail(key, text);
+                    panel.set_detail(key, text, oids);
                 }
                 // The selection may have moved on while it was read.
                 self.repos_detail();
@@ -2230,6 +2298,24 @@ impl Gerdr {
                 self.refresh_git();
             }
             RepoEvent::WorktreeDiff { root, read } => self.worktree_diff_event(root, read),
+            RepoEvent::MarkCommits {
+                root,
+                ahead,
+                at,
+                commits,
+            } => {
+                let read = MarkCommits {
+                    at,
+                    commits: Some(commits),
+                };
+                self.repos.mark_commits.insert((root, ahead), read);
+                // The tooltip waiting or up on the mark gets them.
+                if self.tooltip.is_up()
+                    && let Some(tip) = self.repos_hover(self.pointer)
+                {
+                    self.tooltip.refresh(tip);
+                }
+            }
         }
     }
 

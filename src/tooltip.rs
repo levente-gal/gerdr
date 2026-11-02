@@ -109,6 +109,20 @@ impl TooltipState {
         self.warm_until = None;
     }
 
+    /// `tip` in place of the one waiting or shown at the same place, as
+    /// what it says was read meanwhile: it keeps its time.
+    pub fn refresh(&mut self, tip: Tooltip) {
+        if let Some((pending, _)) = self.pending.as_mut()
+            && pending.anchor == tip.anchor
+        {
+            *pending = tip;
+        } else if let Some(shown) = self.shown.as_mut()
+            && shown.anchor == tip.anchor
+        {
+            *shown = tip;
+        }
+    }
+
     /// Whether a tooltip shows or is about to.
     pub fn is_up(&self) -> bool {
         self.pending.is_some() || self.shown.is_some()
@@ -252,5 +266,23 @@ mod tests {
         let after = much_later + SHOW_DELAY;
         state.offer(Some(Tooltip::new("Stop", anchor)), after);
         assert_eq!(state.due(), Some(after + SHOW_DELAY));
+    }
+
+    #[test]
+    fn a_tooltip_read_meanwhile_keeps_its_time() {
+        let now = Instant::now();
+        let anchor = Rect::new((0, 0).into(), (10, 10).into());
+        let mut state = TooltipState::default();
+        state.offer(Some(Tooltip::new("2 commits", anchor)), now);
+        let due = state.due();
+        let more = Tooltip::new("2 commits", anchor).fields(vec![("a1".into(), "x".into())]);
+        state.refresh(more.clone());
+        assert_eq!(state.due(), due);
+        assert!(state.tick(now + SHOW_DELAY));
+        assert_eq!(state.view().unwrap().fields, more.fields);
+        // Elsewhere, it is let be.
+        let other = Rect::new((20, 0).into(), (10, 10).into());
+        state.refresh(Tooltip::new("other", other));
+        assert_eq!(state.view().unwrap().text, "2 commits");
     }
 }

@@ -45,7 +45,9 @@
 //! the one the cursor is on): Shift+Enter breaks its line, Enter or Esc
 //! keeps it; Delete deletes it, Ctrl+Shift+C copies the review, and
 //! "Clear review" deletes it all, asked first. Alt+1, 2 and 3 show the
-//! diff, the log and the stashes; Ctrl+S opens the branch picker, Ctrl+N
+//! diff, the log and the stashes. The log lists the commits to pull and
+//! to push: the arrows pick one, and Enter or a click shows its diff
+//! across the panel, read-only, Esc going back. Ctrl+S opens the branch picker, Ctrl+N
 //! it to create a branch (in it, Ctrl+Enter creates the one typed), Alt+Del
 //! it to delete one. The actions' chords (`ACTIONS`, which F1 lists with
 //! the rest) work with either focus: Ctrl+Enter commits, Ctrl+P pushes,
@@ -54,8 +56,9 @@
 //! diff, redoes), and so on.
 //! What can't be taken back (a force push, an abort, an undo, a branch or
 //! stash deleted) asks first, on a sheet. On a repository's line, a click
-//! on the arrow up pushes it, on the arrow down pulls it, and on its stash
-//! count lists its stashes; a right click offers the actions.
+//! on the arrow up pushes it, on the arrow down pulls it (their tooltips
+//! list the first commits), and on its stash count lists its stashes; a
+//! right click offers the actions.
 
 use std::{
     cmp::{Ordering, Reverse},
@@ -150,7 +153,23 @@ pub struct Repos {
     /// The review comments written on worktrees' diffs, by worktree, as
     /// saved: read once they are wanted.
     pub(crate) worktree_reviews: Option<crate::review::Worktrees>,
+    /// The first commits to push (`true`) or pull of each repository, for
+    /// the tooltips on its marks, by root: read when first hovered, read
+    /// again once its counts or HEAD moved.
+    pub(crate) mark_commits: HashMap<(PathBuf, bool), MarkCommits>,
 }
+
+/// A repository's first commits to push or pull (`Repos::mark_commits`),
+/// as read at its HEAD and counts `at`; none while read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkCommits {
+    pub at: MarkAt,
+    pub commits: Option<Vec<(String, String)>>,
+}
+
+/// What a repository's commits to push or pull are read at: its HEAD and
+/// its counts to push and to pull.
+pub type MarkAt = (Option<String>, u32, u32);
 
 impl Repos {
     /// The panel, or a worktree's diff in its place, is open.
@@ -358,6 +377,11 @@ pub struct Panel {
     pub(crate) edited: HashSet<(PathBuf, String)>,
     /// The stash picked in the Stashes tab, by line (0 the newest).
     pub(crate) stash_pick: usize,
+    /// The commit each line of the log shows, by line; none for the
+    /// lines saying what a list is.
+    pub(crate) log_oids: Vec<Option<String>>,
+    /// The commit picked in the Log tab, by line.
+    pub(crate) log_pick: usize,
     /// What the agent the review would be sent to is called; `None` while
     /// none runs in its workspaces. Kept up by the host.
     pub(crate) agent: Option<String>,
@@ -955,9 +979,19 @@ pub enum RepoEvent {
         jobs: Vec<Job>,
         have: Vec<(PathBuf, Found)>,
     },
+    /// The first commits to push (`ahead`) or pull of the repository at
+    /// `root`, read at `at`.
+    MarkCommits {
+        root: PathBuf,
+        ahead: bool,
+        at: MarkAt,
+        commits: Vec<(String, String)>,
+    },
     Detail {
         key: DetailKey,
         text: String,
+        /// The Log tab's commit of each line (`Panel::log_oids`).
+        oids: Vec<Option<String>>,
     },
     /// A repository's diff, read for Git status read `generation`.
     Diffs {
@@ -1033,6 +1067,13 @@ pub enum Outcome {
     /// last anywhere); do the last undone there again.
     UndoCut(Option<(PathBuf, String)>),
     RedoCut(Option<(PathBuf, String)>),
+    /// Show what commit `oid` (its log line `line`) of the repository at
+    /// `root` changed.
+    OpenCommit {
+        root: PathBuf,
+        oid: String,
+        line: String,
+    },
     /// Read the repositories' status and diffs again.
     Refresh,
     /// Stop the batches running: their commands killed, the rest not run.
@@ -1213,6 +1254,7 @@ macro_rules! diff_ctx {
             count_sections: true,
             check: Some(&check),
             selected: selected_file(&$panel.selected),
+            read_only: false,
         };
     };
 }
@@ -1566,6 +1608,10 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
         "Up / Down, Enter, Del",
         "in the Stashes tab, pick a stash, pop it, drop it (asked first)",
     ),
+    (
+        "Up / Down, Enter",
+        "in the Log tab, pick a commit to pull or push, show its diff (Esc back)",
+    ),
     ("Alt+F", "list the files by folder, or flat"),
     ("Alt+Left / Alt+Right", "fold everything, unfold everything"),
     (
@@ -1681,6 +1727,7 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
         B::Restore => "Shift+R",
         B::SaveComment => "Enter",
         B::DiscardFile => "Del",
+        B::ShowCommit => "Enter",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
         _ => "",
@@ -3440,6 +3487,8 @@ impl Panel {
                 _ => Err(Why::other("Not checked out elsewhere")),
             },
             B::Help => Err(Why::other("Press F1 for the keys")),
+            // Shown by `act`, when one is picked.
+            B::ShowCommit => Err(Why::other("Pick a commit in the Log tab first")),
             B::Refresh => Ok(Outcome::Refresh),
             B::Stop => {
                 let running = ctx.batch.into_iter().chain(ctx.background);
@@ -3635,6 +3684,9 @@ impl Panel {
             self.branch_menu = None;
             self.sheet = Some(Sheet::Help { choice: 0, top: 0 });
             return None;
+        }
+        if button == ReposButton::ShowCommit {
+            return self.show_commit(ctx);
         }
         {
             diff_ctx!(self, ctx, dctx);
@@ -3986,6 +4038,39 @@ impl Panel {
             };
             return None;
         }
+        // In the log, the arrows (and Ctrl+J/K) pick a commit: Enter shows
+        // its diff.
+        let only_ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
+        let commits = self.log_oids.iter().any(Option::is_some);
+        if self.focus == Focus::Detail
+            && self.tab() == DetailTab::Log
+            && commits
+            && (plain || only_ctrl)
+        {
+            let step = match sym {
+                Keysym::Down | Keysym::KP_Down if plain => Some(1),
+                Keysym::Up | Keysym::KP_Up if plain => Some(-1),
+                Keysym::j | Keysym::J if only_ctrl => Some(1),
+                Keysym::k | Keysym::K if only_ctrl => Some(-1),
+                _ => None,
+            };
+            if let Some(step) = step {
+                let from = self.log_pick as isize + step;
+                let next = (from >= 0)
+                    .then(|| self.commit_row(from as usize, step))
+                    .flatten();
+                match next {
+                    Some(r) => self.pick_commit(r, ctx.page.1),
+                    // Past the first, the list's own line shows again.
+                    None if step < 0 => self.detail_scroll.jump(0.0),
+                    None => self.scroll_by(1, true, ctx),
+                }
+                return None;
+            }
+            if plain && matches!(sym, Keysym::Return | Keysym::KP_Enter) {
+                return self.show_commit(ctx);
+            }
+        }
         // In the stashes, the arrows pick one: Enter pops it, Del drops
         // it (asked first).
         if self.focus == Focus::Detail && self.tab() == DetailTab::Stashes && plain && !mods.shift {
@@ -4249,6 +4334,14 @@ impl Panel {
                     .map_or(0, |i| i.status.stashes as usize);
                 if first + i < count {
                     self.stash_pick = first + i;
+                }
+            }
+            ReposHit::DiffRow(i) if self.tab() == DetailTab::Log => {
+                self.focus = Focus::Detail;
+                let (first, _) = standing(&self.detail_scroll, usize::MAX, ctx.page.1);
+                if self.log_oids.get(first + i).is_some_and(Option::is_some) {
+                    self.log_pick = first + i;
+                    return self.show_commit(ctx);
                 }
             }
             ReposHit::DiffRow(_)
@@ -4837,6 +4930,9 @@ impl Panel {
                     buttons.extend([B::StashPop, B::StashDrop]);
                 }
             }
+            if self.tab() == DetailTab::Log && self.picked_commit().is_some() {
+                buttons.push(B::ShowCommit);
+            }
         }
         if !self.diff.review.is_empty() {
             buttons.extend([B::CopyReview, B::SendReview, B::ClearReview]);
@@ -4901,10 +4997,16 @@ impl Panel {
                 .map(|l| detail_line(l, DiffTone::Plain))
                 .collect(),
             DetailTab::Log => {
+                // A list's own line stands out over its commits.
+                let tone = |r: usize, l: &str| match self.log_oids.get(r) {
+                    Some(None) if !l.is_empty() => DiffTone::Header,
+                    _ => DiffTone::Plain,
+                };
                 let mut lines: Vec<DetailLine> = text
                     .into_iter()
                     .flat_map(str::lines)
-                    .map(|l| detail_line(l, DiffTone::Plain))
+                    .enumerate()
+                    .map(|(r, l)| detail_line(l, tone(r, l)))
                     .collect();
                 let root = &ctx.items[k].root;
                 let Some(run) = ctx.batch.and_then(|b| b.run(root)) else {
@@ -4972,6 +5074,15 @@ impl Panel {
                 DetailTab::Stashes => (first..first + page + usize::from(part > 0.0))
                     .map(|r| RowMark {
                         selected: r == self.stash_pick && focused && stashes > 0,
+                        top: true,
+                        bottom: true,
+                        noted: false,
+                    })
+                    .collect(),
+                // The commit picked, lit the same way.
+                DetailTab::Log => (first..first + page + usize::from(part > 0.0))
+                    .map(|r| RowMark {
+                        selected: r == self.log_pick && focused && self.picked_commit().is_some(),
                         top: true,
                         bottom: true,
                         noted: false,
@@ -5268,16 +5379,77 @@ impl Panel {
     }
 
     /// A detail read came back; kept if it is still the one wanted.
-    pub fn set_detail(&mut self, key: DetailKey, text: String) {
+    pub fn set_detail(&mut self, key: DetailKey, text: String, oids: Vec<Option<String>>) {
         if self.detail_key().as_ref() != Some(&key) {
             return;
         }
+        let picked = self.picked_commit().map(str::to_owned);
         if self.detail.as_ref().is_none_or(|(k, _)| *k != key) {
             self.detail_scroll.jump(0.0);
             self.stash_pick = 0;
+            self.log_pick = 0;
         }
         self.detail = Some((key, text));
+        self.log_oids = oids;
         self.detail_stale = false;
+        // The commit picked stays picked where it went; else the first.
+        let at = |oid: &str| (self.log_oids.iter()).position(|o| o.as_deref() == Some(oid));
+        self.log_pick = match picked.as_deref().and_then(at) {
+            Some(r) => r,
+            None => self.commit_row(self.log_pick, 1).unwrap_or(0),
+        };
+    }
+
+    /// The repository of tree line `i` among those shown, by index into
+    /// `items`, `page` lines fitting.
+    pub fn line_item(&self, i: usize, items: &[RepoItem], page: usize) -> Option<usize> {
+        let rows = self.rows(items);
+        let (first, part) = standing(&self.tree_scroll, rows.len(), page.max(1));
+        let shown = page.max(1) + usize::from(part > 0.0);
+        (i < shown).then(|| rows.get(first + i)?.item()).flatten()
+    }
+
+    /// The commit picked in the Log tab, while it shows one.
+    fn picked_commit(&self) -> Option<&str> {
+        self.detail
+            .as_ref()
+            .filter(|(k, _)| k.tab == DetailTab::Log)?;
+        self.log_oids.get(self.log_pick)?.as_deref()
+    }
+
+    /// The first line of the log from `from` on showing a commit, going
+    /// `step` lines at a time (1 down, -1 up).
+    fn commit_row(&self, from: usize, step: isize) -> Option<usize> {
+        let mut r = from as isize;
+        while r >= 0 && (r as usize) < self.log_oids.len() {
+            if self.log_oids[r as usize].is_some() {
+                return Some(r as usize);
+            }
+            r += step;
+        }
+        None
+    }
+
+    /// Pick the commit on log line `r`, scrolled into view.
+    fn pick_commit(&mut self, r: usize, page: usize) {
+        self.log_pick = r;
+        let pos = showing(self.detail_scroll.pos(), (r, r), page);
+        move_to(&mut self.detail_scroll, pos);
+    }
+
+    /// Show the picked commit's diff.
+    fn show_commit(&mut self, ctx: &Ctx) -> Option<Outcome> {
+        let item = self.selected_item(ctx.items)?;
+        let Some(oid) = self.picked_commit() else {
+            self.error = Some("Pick a commit in the Log tab first".into());
+            return None;
+        };
+        let line = self.detail.as_ref()?.1.lines().nth(self.log_pick)?;
+        Some(Outcome::OpenCommit {
+            root: item.root.clone(),
+            oid: oid.to_owned(),
+            line: line.to_owned(),
+        })
     }
 
     /// Ask about what the check before `kind` found: Enter runs only the
@@ -6457,7 +6629,11 @@ mod tests {
         let mut panel = Panel::new(&items);
         press(&mut panel, alt(), Keysym::_3, &ctx);
         let key = panel.detail_wanted(&ctx).unwrap();
-        panel.set_detail(key, "stash@{0} · a\nstash@{1} · b\nstash@{2} · c".into());
+        panel.set_detail(
+            key,
+            "stash@{0} · a\nstash@{1} · b\nstash@{2} · c".into(),
+            Vec::new(),
+        );
         panel.focus = Focus::Detail;
         press(&mut panel, none(), Keysym::Down, &ctx);
         press(&mut panel, none(), Keysym::Down, &ctx);
@@ -7296,7 +7472,11 @@ mod tests {
         assert_eq!(panel.tab, Some(DetailTab::Stashes));
         let key = panel.detail_wanted(&ctx).unwrap();
         assert_eq!((key.root.clone(), key.file.clone()), (root("herdr"), None));
-        panel.set_detail(key, "stash@{0} · 1 day ago · On main: wip\n".into());
+        panel.set_detail(
+            key,
+            "stash@{0} · 1 day ago · On main: wip\n".into(),
+            Vec::new(),
+        );
         let detail = panel.view("p", &ctx).detail;
         assert_eq!(detail.tab, DetailTab::Stashes);
         assert_eq!(
@@ -7469,7 +7649,7 @@ mod tests {
         };
         assert_eq!(panel.detail_wanted(&ctx), Some(log.clone()));
         assert!(panel.diffs_wanted(&ctx).is_empty());
-        panel.set_detail(log.clone(), "abc1234 Read the branch".into());
+        panel.set_detail(log.clone(), "abc1234 Read the branch".into(), Vec::new());
         assert_eq!(panel.detail_scroll.pos(), 0.0);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!(detail.title, "gerdr");
@@ -7501,6 +7681,74 @@ mod tests {
         press(&mut panel, alt(), Keysym::_1, &ctx);
         assert_eq!(panel.detail_wanted(&ctx), None);
         assert_eq!(panel.diff.scroll.pos(), 1.0);
+    }
+
+    #[test]
+    fn the_log_picks_a_commit_and_shows_it() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "gerdr");
+        press(&mut panel, alt(), Keysym::_2, &ctx);
+        let log = DetailKey {
+            root: root("gerdr"),
+            file: None,
+            tab: DetailTab::Log,
+        };
+        let text = "To pull from origin/main (1):\nb2 theirs\n\nTo push to origin/main (2):\nc3 two\nc1 one";
+        let oid = |o: &str| Some(o.to_owned());
+        let oids = vec![None, oid("b2"), None, None, oid("c3"), oid("c1")];
+        panel.set_detail(log.clone(), text.into(), oids.clone());
+        // The first commit is picked; the lists' own lines stand out.
+        assert_eq!(panel.log_pick, 1);
+        let detail = panel.view("p", &ctx).detail;
+        let tones: Vec<DiffTone> = (detail.rows.iter())
+            .map(|row| match row {
+                DetailRow::Text(l) => l.tone,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        use DiffTone::*;
+        assert_eq!(&tones[..6], [Header, Plain, Plain, Header, Plain, Plain]);
+        // The arrows go from commit to commit, over the others.
+        panel.focus = Focus::Detail;
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.log_pick, 4);
+        press(&mut panel, ctrl(), Keysym::j, &ctx);
+        assert_eq!(panel.log_pick, 5);
+        press(&mut panel, none(), Keysym::Down, &ctx);
+        assert_eq!(panel.log_pick, 5);
+        let marks = panel.view("p", &ctx).detail.marks;
+        assert!(marks[5].selected && !marks[4].selected);
+        // Enter shows it, its footer hint too.
+        let shown = Some(Outcome::OpenCommit {
+            root: root("gerdr"),
+            oid: "c1".into(),
+            line: "c1 one".into(),
+        });
+        assert_eq!(press(&mut panel, none(), Keysym::Return, &ctx), shown);
+        let hints = panel.view("p", &ctx).hints;
+        let hint = hints.iter().find(|h| h.button == ReposButton::ShowCommit);
+        assert_eq!(hint.map(|h| h.key.as_str()), Some("Enter"));
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::ShowCommit), &ctx),
+            shown
+        );
+        // Read again, the commit picked stays picked where it went.
+        let text = format!("New (1):\nd4 new\n{text}");
+        let mut again = vec![None, oid("d4")];
+        again.extend(oids);
+        panel.set_detail(log, text, again);
+        assert_eq!(panel.log_pick, 7);
+        // A click on a commit shows it; on a list's line, nothing.
+        assert_eq!(panel.click(ReposHit::DiffRow(0), &ctx), None);
+        let second = Some(Outcome::OpenCommit {
+            root: root("gerdr"),
+            oid: "d4".into(),
+            line: "d4 new".into(),
+        });
+        assert_eq!(panel.click(ReposHit::DiffRow(1), &ctx), second);
+        assert_eq!(panel.log_pick, 1);
     }
 
     #[test]
@@ -7566,7 +7814,7 @@ mod tests {
             file: None,
             tab: DetailTab::Log,
         };
-        panel.set_detail(log, "a\nb\nc\nd\ne\nf".into());
+        panel.set_detail(log, "a\nb\nc\nd\ne\nf".into(), Vec::new());
         swipe_detail(&mut panel, 0.5, &ctx);
         let detail = panel.view("p", &ctx).detail;
         assert_eq!((detail.first, detail.part, detail.rows.len()), (0, 0.5, 5));

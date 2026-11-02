@@ -7,6 +7,10 @@
 //! It is read again with every Git status read. Its review comments are
 //! saved by worktree (see `review::Worktrees`), and go with it when it is
 //! deleted.
+//!
+//! A commit's diff, from the repositories panel's Log tab, shows the same
+//! way, read-only: what the commit changed against its first parent. Esc
+//! goes back to the panel.
 
 use std::{
     path::{Path, PathBuf},
@@ -59,6 +63,17 @@ pub struct WorktreeDiff {
     pub clearing_outdated: bool,
     /// The keys sheet (F1), while open: the line it is scrolled to.
     pub help: Option<usize>,
+    /// A commit's diff instead, opened from the panel's Log tab: read
+    /// once, not edited, no review.
+    pub commit: Option<CommitOf>,
+}
+
+/// The commit a diff shows (`WorktreeDiff::commit`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitOf {
+    pub oid: String,
+    /// Its line in the log: `1a2b3c4 subject · author, 2 hours ago`.
+    pub line: String,
 }
 
 /// The buttons of the sheet asking whether to delete the review (only the
@@ -116,6 +131,19 @@ impl WorktreeDiff {
         }
     }
 
+    /// The diff of `commit` of the repository at `root` (called `label`,
+    /// in workspace `workspace`), read-only.
+    pub fn of_commit(root: PathBuf, label: String, commit: CommitOf, workspace: usize) -> Self {
+        WorktreeDiff {
+            root,
+            label,
+            workspace,
+            home: Some(workspace),
+            commit: Some(commit),
+            ..WorktreeDiff::default()
+        }
+    }
+
     /// Call `f` with the diff and its `Ctx`.
     fn with_diff<R>(&mut self, env: Env, f: impl FnOnce(&mut DiffView, &diff_view::Ctx) -> R) -> R {
         let lead = self.lead();
@@ -126,6 +154,7 @@ impl WorktreeDiff {
             branch,
             since,
             diff,
+            commit,
             ..
         } = self;
         let sections = [Section {
@@ -135,7 +164,8 @@ impl WorktreeDiff {
             head: None,
             changes: &since.changes,
         }];
-        f(diff, &ctx(&sections, env, &lead, empty))
+        let read_only = commit.is_some();
+        f(diff, &ctx(&sections, env, &lead, empty, read_only))
     }
 
     /// The diff's one section: the worktree.
@@ -151,6 +181,9 @@ impl WorktreeDiff {
 
     /// Over the diff, before its counts: what it is against.
     fn lead(&self) -> String {
+        if self.commit.is_some() {
+            return "This commit".into();
+        }
         match &self.target {
             Some(target) => format!("Since {target}"),
             None => "Not committed".into(),
@@ -162,6 +195,7 @@ impl WorktreeDiff {
         match (&self.error, self.read, &self.target) {
             (Some(_), ..) => "Its changes couldn't be read",
             (None, false, _) => "Reading…",
+            (None, true, _) if self.commit.is_some() => "No changes in this commit",
             (None, true, Some(_)) => "No changes since it forked",
             (None, true, None) => "No changes",
         }
@@ -169,6 +203,9 @@ impl WorktreeDiff {
 
     /// The panel's heading: whose diff it is.
     pub fn heading(&self) -> String {
+        if self.commit.is_some() {
+            return format!("Commit · {}", self.label);
+        }
         let name = self.branch.clone().unwrap_or_else(|| {
             let dir = self.root.file_name().unwrap_or(self.root.as_os_str());
             dir.to_string_lossy().into()
@@ -185,6 +222,9 @@ impl WorktreeDiff {
         if !self.read {
             return "reading…".into();
         }
+        if let Some(commit) = &self.commit {
+            return commit.line.clone();
+        }
         match (&self.target, self.since.commits) {
             (None, _) => "uncommitted changes".into(),
             (Some(target), 0) => format!("no commits of its own on {target}"),
@@ -197,7 +237,9 @@ impl WorktreeDiff {
     pub fn view(&self, env: Env) -> DetailView {
         let sections = self.sections();
         let lead = self.lead();
-        self.diff.view(&ctx(&sections, env, &lead, self.empty()))
+        let read_only = self.commit.is_some();
+        self.diff
+            .view(&ctx(&sections, env, &lead, self.empty(), read_only))
     }
 
     /// Its changes read again (`git_ops::changes_since`), with their diff:
@@ -279,7 +321,10 @@ impl WorktreeDiff {
     /// deleted while there is one, the keys and closing.
     pub fn hints(&self) -> Vec<Hint> {
         use ReposButton as B;
-        let mut buttons = vec![B::Comment];
+        let mut buttons = Vec::new();
+        if self.commit.is_none() {
+            buttons.push(B::Comment);
+        }
         if !self.diff.review.is_empty() {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
@@ -290,6 +335,7 @@ impl WorktreeDiff {
                 button,
                 label: match button {
                     B::Comment => "comment on the lines".into(),
+                    B::Close if self.commit.is_some() => "back".into(),
                     B::Close => "close".into(),
                     button => button.label().to_lowercase(),
                 },
@@ -360,7 +406,14 @@ impl WorktreeDiff {
             let lines = diff_help_lines();
             let top = top.min(lines.len().saturating_sub(1));
             return Some(SheetView {
-                title: help_title("Keys in a worktree's diff", top, lines.len()),
+                title: help_title(
+                    match self.commit {
+                        Some(_) => "Keys in a commit's diff",
+                        None => "Keys in a worktree's diff",
+                    },
+                    top,
+                    lines.len(),
+                ),
                 lines: lines[top..].to_vec(),
                 buttons: vec![ReposButton::Close],
                 default: 0,
@@ -371,9 +424,9 @@ impl WorktreeDiff {
         let sections = self.sections();
         let lead = self.lead();
         let outdated = self.clearing_outdated;
-        let (title, lines) = self
-            .diff
-            .clear_sheet(&ctx(&sections, env, &lead, self.empty()), outdated);
+        let read_only = self.commit.is_some();
+        let ctx = ctx(&sections, env, &lead, self.empty(), read_only);
+        let (title, lines) = self.diff.clear_sheet(&ctx, outdated);
         let buttons = clear_buttons(outdated);
         Some(SheetView {
             title,
@@ -444,12 +497,13 @@ impl WorktreeDiff {
 }
 
 /// The diff's `Ctx` over `sections`, the diff having the keyboard and no
-/// file checked.
+/// file checked; a commit's `read_only`.
 fn ctx<'a>(
     sections: &'a [Section<'a>],
     env: Env,
     lead: &'a str,
     empty: &'a str,
+    read_only: bool,
 ) -> diff_view::Ctx<'a> {
     diff_view::Ctx {
         sections,
@@ -462,6 +516,7 @@ fn ctx<'a>(
         count_sections: false,
         check: None,
         selected: None,
+        read_only,
     }
 }
 
@@ -512,6 +567,23 @@ impl crate::Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Show what commit `oid` (its log line `line`) of the repository at
+    /// `root` changed, across the repositories panel, which it goes back
+    /// to when closed.
+    pub(crate) fn open_commit_diff(&mut self, root: PathBuf, oid: String, line: String) {
+        let Some(item) = self.repos.items.iter().find(|i| i.root == root) else {
+            return;
+        };
+        let (label, workspace) = (item.label.clone(), item.workspace);
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+        let commit = CommitOf { oid, line };
+        let wd = WorktreeDiff::of_commit(root, label, commit, workspace);
+        self.repos.worktree = Some(wd);
+        self.worktree_diff_read();
+        self.refresh_pointer_focus();
+    }
+
     /// The reviews of worktrees' diffs: read when first wanted, those of
     /// worktrees gone, on another branch or too old dropped.
     fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
@@ -539,11 +611,12 @@ impl crate::Gerdr {
     /// Save the worktree diff's review, if it changed: with the others,
     /// pruned.
     fn worktree_save_review(&mut self) {
+        // A commit's diff has no review.
         let Some(wd) = self
             .repos
             .worktree
             .as_mut()
-            .filter(|wd| wd.diff.review_dirty)
+            .filter(|wd| wd.diff.review_dirty && wd.commit.is_none())
         else {
             return;
         };
@@ -570,11 +643,15 @@ impl crate::Gerdr {
         }
     }
 
-    /// Close the worktree's diff, back to the worktrees popup.
+    /// Close the worktree's diff, back to the worktrees popup; a
+    /// commit's, back to the repositories panel.
     pub(crate) fn close_worktree_diff(&mut self) {
         self.worktree_save_review();
+        let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
         self.repos.close_worktree();
-        self.worktrees.unpark();
+        if !commit {
+            self.worktrees.unpark();
+        }
         self.refresh_pointer_focus();
     }
 
@@ -584,6 +661,13 @@ impl crate::Gerdr {
         let Some(wd) = self.repos.worktree.as_ref().filter(|wd| !wd.reading) else {
             return;
         };
+        if let Some(commit) = &wd.commit {
+            // A commit doesn't change: read once.
+            if wd.read {
+                return;
+            }
+            return self.commit_diff_read(wd.root.clone(), commit.oid.clone());
+        }
         let (root, target) = (wd.root.clone(), wd.target.clone());
         let Some(tx) = self.repos_sender() else {
             return;
@@ -601,6 +685,31 @@ impl crate::Gerdr {
         });
     }
 
+    /// Read commit `oid`'s diff of the repository at `root`, off the
+    /// event loop.
+    fn commit_diff_read(&mut self, root: PathBuf, oid: String) {
+        let Some(tx) = self.repos_sender() else {
+            return;
+        };
+        if let Some(wd) = self.repos.worktree.as_mut() {
+            wd.reading = true;
+        }
+        std::thread::spawn(move || {
+            let read = crate::git_ops::commit_diff(&root, &oid).map(|(changes, files)| {
+                let since = Since {
+                    base: format!("{oid}^"),
+                    commits: 1,
+                    changes,
+                };
+                (since, files)
+            });
+            if let Err(why) = &read {
+                tracing::warn!("reading commit {oid} in {}: {why}", root.display());
+            }
+            let _ = tx.send(crate::repos::RepoEvent::WorktreeDiff { root, read });
+        });
+    }
+
     /// A read of a worktree's diff came back: shown if it is still the
     /// one open, the keys typed meanwhile after a cut done now.
     pub(crate) fn worktree_diff_event(
@@ -612,6 +721,12 @@ impl crate::Gerdr {
         let Some(wd) = self.repos.worktree.as_mut().filter(|wd| wd.is(&root)) else {
             return;
         };
+        // Another commit's, opened before this one: not what is shown.
+        if let (Some(commit), Ok((since, _))) = (&wd.commit, &read)
+            && since.base != format!("{}^", commit.oid)
+        {
+            return;
+        }
         // Read from before the edit: the read after it is the one to show.
         if std::mem::take(&mut wd.again) {
             wd.reading = false;
@@ -670,7 +785,13 @@ impl crate::Gerdr {
         if let Some(why) = error {
             self.show_warning(why);
         }
+        let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
         match done? {
+            // Back to the panel it was opened from.
+            Done::Close if commit => {
+                self.close_worktree_diff();
+                None
+            }
             Done::Close => Some(crate::repos::Outcome::Close),
             Done::Diff(outcome) => Some(crate::repos::from_diff(outcome)),
         }
@@ -1037,6 +1158,50 @@ mod tests {
         assert_eq!(texts(&wd)[3], "gone");
         let (_, place) = opened(wd.goto_row(3, ENV));
         assert_eq!(place.map(|at| at.col), Some(None));
+    }
+
+    #[test]
+    fn a_commits_diff_is_read_only() {
+        let commit = CommitOf {
+            oid: "c1".into(),
+            line: "c1 Read the log · lgal, 2 hours ago".into(),
+        };
+        let mut wd = WorktreeDiff::of_commit("/src/gerdr".into(), "gerdr".into(), commit, 3);
+        assert_eq!(wd.heading(), "Commit · gerdr");
+        assert_eq!(wd.summary(), "reading…");
+        let since = Since {
+            base: "c1^".into(),
+            commits: 1,
+            changes: vec![change("a.rs", 'M')],
+        };
+        wd.set_read(Ok((since, vec![added("a.rs", 'M', &["a", "b"])])), ENV);
+        assert_eq!(wd.summary(), "c1 Read the log · lgal, 2 hours ago");
+        assert_eq!((wd.workspace, wd.home), (3, Some(3)));
+        assert_eq!(texts(&wd)[1], "file a.rs None");
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let refused = Some(Done::Diff(Outcome::Notice(diff_view::READ_ONLY)));
+        // On a line: no comment, delete, yank or restore; no buttons for them.
+        wd.click(ReposHit::DiffRow(3), ENV);
+        assert_eq!(texts(&wd)[3], "a");
+        assert_eq!(key(&mut wd, Keysym::c), refused);
+        assert!(wd.diff.editing.is_none());
+        key(&mut wd, Keysym::d);
+        assert_eq!(key(&mut wd, Keysym::d), refused);
+        key(&mut wd, Keysym::y);
+        assert_eq!(key(&mut wd, Keysym::y), refused);
+        assert_eq!(key(&mut wd, Keysym::R), refused);
+        assert_eq!(wd.click(ReposHit::DiffRestore(2), ENV), refused);
+        assert!(wd.view(ENV).row_buttons.is_empty());
+        let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
+        assert_eq!(hints, [ReposButton::Help, ReposButton::Close]);
+        assert_eq!(wd.hints()[1].label, "back");
+        // Searching and opening in Zed still work; Esc closes it.
+        key(&mut wd, Keysym::g);
+        assert!(matches!(
+            key(&mut wd, Keysym::space),
+            Some(Done::Diff(Outcome::OpenInZed { .. }))
+        ));
+        assert_eq!(key(&mut wd, Keysym::Escape), Some(Done::Close));
     }
 
     #[test]
