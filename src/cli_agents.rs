@@ -1,25 +1,50 @@
-//! The agent CLIs a workspace can start in a new tab (see
-//! `Gerdr::new_agent`): the known ones that are installed, as the
-//! `[agents]` table of the config file changes them, and the ones it adds.
+//! The agents a workspace can start (see `Gerdr::start_agent`): the known
+//! agent CLIs that are installed, as the `[agents]` table of the config
+//! file changes them, the ones it adds, and T3 Code once it ran here,
+//! whose threads start in its app in a web pane instead of in a terminal.
 
 use std::collections::BTreeMap;
 
 use crate::{agent_icons::AgentIcon, desktop};
 
-/// An agent CLI to start.
+/// An agent to start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliAgent {
     /// What the picker calls it ("Claude Code").
     pub name: String,
-    /// What runs it, by `sh` in the workspace folder.
-    pub command: String,
+    pub start: Start,
     pub icon: AgentIcon,
 }
 
-/// The agent CLIs gerdr knows, in the order offered: (the `[agents]` key
-/// and command, the name).
+/// How an agent starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// By this command, run by `sh` in the workspace folder in a new tab.
+    Command(String),
+    /// As a new thread of T3 Code's app, in the workspace's web pane
+    /// showing it (see `Gerdr::new_t3_thread`).
+    T3,
+}
+
+impl CliAgent {
+    /// The command it runs, for a CLI.
+    pub fn command(&self) -> Option<&str> {
+        match &self.start {
+            Start::Command(command) => Some(command),
+            Start::T3 => None,
+        }
+    }
+}
+
+/// The `[agents]` key of T3 Code, which isn't a command: `""` hides it,
+/// another value is ignored.
+const T3: &str = "t3";
+
+/// The agents gerdr knows, in the order offered: (the `[agents]` key and,
+/// but for T3 Code, command, the name).
 const KNOWN: &[(&str, &str)] = &[
     ("claude", "Claude Code"),
+    (T3, "T3 Code"),
     ("codex", "Codex"),
     ("gemini", "Gemini CLI"),
     ("cursor-agent", "Cursor"),
@@ -38,31 +63,50 @@ const KNOWN: &[(&str, &str)] = &[
     ("crush", "Crush"),
 ];
 
-/// The agent CLIs installed: the known ones with `config`'s commands for
-/// them (an empty one hides it), then the ones `config` adds, by name.
+/// The agents installed: the known ones with `config`'s commands for them
+/// (an empty one hides it), T3 Code if it ran here, then the ones `config`
+/// adds, by name.
 pub fn installed(config: &BTreeMap<String, String>) -> Vec<CliAgent> {
-    offered(config, desktop::installed)
+    let t3 = crate::t3_agents::home().is_some();
+    offered(config, desktop::installed, t3)
 }
 
-/// `installed`, with `installed` telling whether a program is.
-fn offered(config: &BTreeMap<String, String>, installed: impl Fn(&str) -> bool) -> Vec<CliAgent> {
-    let known = KNOWN.iter().map(|(key, name)| {
-        let command = config.get(*key).map_or(*key, |c| c.trim());
-        (*key, (*name).to_owned(), command)
+/// `installed`, with `installed` telling whether a program is and `t3`
+/// whether T3 Code ran here.
+fn offered(
+    config: &BTreeMap<String, String>,
+    installed: impl Fn(&str) -> bool,
+    t3: bool,
+) -> Vec<CliAgent> {
+    let known = KNOWN.iter().filter_map(|(key, name)| {
+        let set = config.get(*key).map(|c| c.trim());
+        let start = if *key == T3 {
+            (t3 && set != Some("")).then_some(Start::T3)?
+        } else {
+            let command = set.unwrap_or(key);
+            let on_path = program(command).is_some_and(&installed);
+            on_path.then(|| Start::Command(command.to_owned()))?
+        };
+        Some(agent(key, (*name).to_owned(), start))
     });
     let added = config
         .iter()
         .filter(|(key, _)| !KNOWN.iter().any(|(k, _)| k == key))
-        .map(|(key, command)| (key.as_str(), key.clone(), command.trim()));
-    known
-        .chain(added)
-        .filter(|(_, _, command)| program(command).is_some_and(&installed))
-        .map(|(key, name, command)| CliAgent {
-            icon: AgentIcon::from_agent(key),
-            name,
-            command: command.to_owned(),
-        })
-        .collect()
+        .filter(|(_, command)| program(command).is_some_and(&installed))
+        .map(|(key, command)| {
+            let start = Start::Command(command.trim().to_owned());
+            agent(key, key.clone(), start)
+        });
+    known.chain(added).collect()
+}
+
+/// The agent `[agents]` calls `key`, named `name`, started by `start`.
+fn agent(key: &str, name: String, start: Start) -> CliAgent {
+    CliAgent {
+        icon: AgentIcon::from_agent(key),
+        name,
+        start,
+    }
 }
 
 /// The program `command` runs, as written: past `env`, `exec` and the
@@ -86,13 +130,13 @@ mod tests {
     }
 
     fn commands(agents: &[CliAgent]) -> Vec<&str> {
-        agents.iter().map(|a| a.command.as_str()).collect()
+        agents.iter().map(|a| a.command().unwrap_or("T3")).collect()
     }
 
     #[test]
     fn only_the_installed_known_agents_show_in_order() {
         let on_path = |p: &str| ["opencode", "claude", "cursor-agent"].contains(&p);
-        let agents = offered(&BTreeMap::new(), on_path);
+        let agents = offered(&BTreeMap::new(), on_path, false);
         assert_eq!(commands(&agents), ["claude", "cursor-agent", "opencode"]);
         assert_eq!(agents[0].name, "Claude Code");
         assert_eq!(agents[0].icon, AgentIcon::Claude);
@@ -108,7 +152,7 @@ mod tests {
             ("missing", "not-installed"),
         ]);
         let on_path = |p: &str| ["claude", "opencode", "my-agent"].contains(&p);
-        let agents = offered(&config, on_path);
+        let agents = offered(&config, on_path, false);
         assert_eq!(
             commands(&agents),
             [
@@ -118,6 +162,24 @@ mod tests {
         );
         assert_eq!(agents[1].name, "my-agent");
         assert_eq!(agents[1].icon, AgentIcon::Generic);
+    }
+
+    #[test]
+    fn t3_code_shows_once_it_ran_and_only_its_empty_entry_hides_it() {
+        let on_path = |p: &str| ["claude", "opencode"].contains(&p);
+        let agents = offered(&BTreeMap::new(), on_path, true);
+        assert_eq!(commands(&agents), ["claude", "T3", "opencode"]);
+        assert_eq!(agents[1].name, "T3 Code");
+        assert_eq!(agents[1].start, Start::T3);
+        assert_eq!(agents[1].icon, AgentIcon::T3);
+        // A command for it is no command: it still opens the app.
+        let set = config(&[("t3", "t3 serve")]);
+        assert_eq!(commands(&offered(&set, on_path, true))[1], "T3");
+        let hidden = config(&[("t3", " ")]);
+        assert_eq!(
+            commands(&offered(&hidden, on_path, true)),
+            ["claude", "opencode"]
+        );
     }
 
     #[test]

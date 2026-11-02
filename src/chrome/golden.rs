@@ -752,8 +752,8 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.agent_strip_part(&super::sidebar::StripKey {
             picks: vec![
                 crate::agent_icons::AgentIcon::Claude,
+                crate::agent_icons::AgentIcon::T3,
                 crate::agent_icons::AgentIcon::Cursor,
-                crate::agent_icons::AgentIcon::OpenCode,
             ],
             pick: Some(1),
             size: (66, 24).into(),
@@ -840,7 +840,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x92a49c766cb37d1c, // project_menu
         0xaf72881e8b741219, // project_form
         0xbd0d423ca3de12bd, // toast
-        0x027c482de5118d1d, // agent_strip
+        0x1b80b690e340528a, // agent_strip
     ],
     // Dark at 2
     [
@@ -855,7 +855,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x68b0b29c55156a50, // project_menu
         0x1d108a7b493c0cd1, // project_form
         0x8a9a152ce2a17651, // toast
-        0x2d0c586e0eece85f, // agent_strip
+        0x95f9334ab0c42dc0, // agent_strip
     ],
     // Light at 1
     [
@@ -870,7 +870,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0xaf88a1744cdd63ab, // project_menu
         0xe2e62fecf8cb83c6, // project_form
         0x3023720e0af5627f, // toast
-        0x818421f428039355, // agent_strip
+        0xa37db337f4fcec5f, // agent_strip
     ],
     // Light at 2
     [
@@ -885,7 +885,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0xad9c7bc5aa554ff4, // project_menu
         0x527909807a17afb5, // project_form
         0xd1410a8fb372b973, // toast
-        0x14656a2796a8443a, // agent_strip
+        0x8aeabdb50084b1d6, // agent_strip
     ],
 ];
 
@@ -1227,6 +1227,7 @@ fn dump_overlays() {
         let mut picking = workspaces();
         picking[0].picks = vec![
             crate::agent_icons::AgentIcon::Claude,
+            crate::agent_icons::AgentIcon::T3,
             crate::agent_icons::AgentIcon::Cursor,
             crate::agent_icons::AgentIcon::OpenCode,
         ];

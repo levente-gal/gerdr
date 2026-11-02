@@ -25,6 +25,8 @@ pub enum AgentIcon {
     Devin,
     Antigravity,
     Mastra,
+    /// T3 Code, whose threads run the other agents in its own app.
+    T3,
     /// An agent without a logo here: drawn as a robot's head.
     Generic,
     /// A test run (see `test_runs`): drawn as a flask.
@@ -32,7 +34,7 @@ pub enum AgentIcon {
 }
 
 /// The logos, in `AgentIcon`'s order, as `assets/agents` has them.
-const LOGOS: [&[u8]; 15] = [
+const LOGOS: [&[u8]; 16] = [
     include_bytes!("../assets/agents/claude.svg"),
     include_bytes!("../assets/agents/codex.svg"),
     include_bytes!("../assets/agents/gemini.svg"),
@@ -48,6 +50,7 @@ const LOGOS: [&[u8]; 15] = [
     include_bytes!("../assets/agents/devin.svg"),
     include_bytes!("../assets/agents/antigravity.svg"),
     include_bytes!("../assets/agents/mastra.svg"),
+    include_bytes!("../assets/agents/t3.svg"),
 ];
 
 impl AgentIcon {
@@ -75,6 +78,7 @@ impl AgentIcon {
             "devin" => Self::Devin,
             "agy" | "antigravity" | "googleantigravity" => Self::Antigravity,
             "mastra" | "mastracode" => Self::Mastra,
+            "t3" | "t3code" => Self::T3,
             _ => Self::Generic,
         }
     }
@@ -125,6 +129,7 @@ mod tests {
             Devin,
             Antigravity,
             Mastra,
+            T3,
         ]
         .into_iter()
     }
@@ -153,6 +158,8 @@ mod tests {
             ("devin", Devin),
             ("agy", Antigravity),
             ("mastracode", Mastra),
+            ("t3", T3),
+            ("T3 Code", T3),
             // No logo of their own here.
             ("droid", Generic),
             ("pi", Generic),

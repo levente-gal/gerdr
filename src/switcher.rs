@@ -44,6 +44,7 @@ use crate::{
     agents::AgentKey,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
+    cli_agents::Start,
     desktop, fuzzy, git, home_dir,
     input::Overlay,
     launch::{self, Place},
@@ -96,7 +97,8 @@ pub enum Target {
     RepoPage(String),
     /// An app's own profile, to bring into gerdr's shared one of it.
     ImportProfile(profile_import::Source),
-    /// T3 Code's app, to show for workspace `.0` (see `Gerdr::open_t3`).
+    /// A new thread in T3 Code's app, for workspace `.0` (see
+    /// `Gerdr::new_t3_thread`).
     T3(usize),
     /// T3 Code, updated (see `Gerdr::update_t3`).
     UpdateT3,
@@ -954,35 +956,27 @@ impl Gerdr {
         self.weighed(items)
     }
 
-    /// A row per installed agent CLI, starting it in workspace `w`,
-    /// naming it, and one for T3 Code's app once T3 Code ran here; none
-    /// without the workspace.
+    /// A row per installed agent, starting it in workspace `w` (T3 Code
+    /// as a new thread in its app), naming it; none without the workspace.
     fn agent_entries(&self, w: usize) -> Vec<Item> {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
         };
-        let t3 = self.t3.home.is_some().then(|| {
-            Item::new(
-                ItemIcon::Command,
-                "T3 Code",
-                format!("its agents' threads, in {}", ws.name),
-                Target::T3(w),
-            )
-        });
         self.cli_agents
             .iter()
             .map(|agent| {
                 let icon = agent.icon.picture().map_or(ItemIcon::Command, |picture| {
                     ItemIcon::Picture(picture.clone())
                 });
-                Item::new(
-                    icon,
-                    format!("New {} agent", agent.name),
-                    format!("in {}", ws.name),
-                    Target::NewAgent(w, agent.command.clone()),
-                )
+                let (detail, target) = match &agent.start {
+                    Start::Command(command) => (
+                        format!("in {}", ws.name),
+                        Target::NewAgent(w, command.clone()),
+                    ),
+                    Start::T3 => (format!("in {}, in a web pane", ws.name), Target::T3(w)),
+                };
+                Item::new(icon, format!("New {} agent", agent.name), detail, target)
             })
-            .chain(t3)
             .collect()
     }
 
@@ -1267,7 +1261,7 @@ impl Gerdr {
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
             Target::NewAgent(w, command) => self.new_agent(w, &command),
-            Target::T3(w) => self.open_t3(w, None),
+            Target::T3(w) => self.new_t3_thread(w),
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
             Target::Tasks => self.open_tasks(0),
