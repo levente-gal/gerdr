@@ -45,6 +45,7 @@ mod keys;
 mod launch;
 mod layout;
 mod menu;
+mod nav;
 mod nav_history;
 mod notify;
 mod overlay;
@@ -1494,7 +1495,10 @@ pub struct Gerdr {
     /// `Action::LastProject`.
     pub previous_project: Option<String>,
     /// The tabs shown, to go back and forward through.
-    pub nav: nav_history::NavHistory,
+    pub nav: nav_history::NavHistory<nav_history::Visit>,
+    /// A step back or forward to a tab of another project, waiting for it
+    /// to show (see `nav`).
+    pub nav_pending: Option<nav::PendingVisit>,
     /// The notes shown over the apps, oldest first (see `toast`).
     pub toasts: VecDeque<Toast>,
     /// The quit dialog, while it is open.
@@ -4049,57 +4053,6 @@ impl Gerdr {
         tab_place(&self.workspaces, id)
     }
 
-    /// Note the tab shown now as visited (see `nav_history`).
-    pub fn note_visit(&mut self) {
-        let shown = self.tab().map(|tab| tab.id);
-        let workspaces = &self.workspaces;
-        self.nav
-            .visit(shown, |id| tab_place(workspaces, id).is_some());
-    }
-
-    /// Whether going back, and going forward, would show a tab.
-    pub fn can_go(&self) -> (bool, bool) {
-        let exists = |id| self.tab_place(id).is_some();
-        (self.nav.can_back(exists), self.nav.can_forward(exists))
-    }
-
-    /// Show the tab shown before this one, in whatever workspace.
-    pub fn go_back(&mut self) {
-        let workspaces = &self.workspaces;
-        let to = self.nav.back(|id| tab_place(workspaces, id).is_some());
-        self.show_tab(to);
-    }
-
-    /// Undo a step back.
-    pub fn go_forward(&mut self) {
-        let workspaces = &self.workspaces;
-        let to = self.nav.forward(|id| tab_place(workspaces, id).is_some());
-        self.show_tab(to);
-    }
-
-    /// Go back (`back`) or forward to tab `id`, listed in the back or
-    /// forward button's menu.
-    pub fn go_to_visited(&mut self, id: u64, back: bool) {
-        let workspaces = &self.workspaces;
-        let exists = |id| tab_place(workspaces, id).is_some();
-        let to = if back {
-            self.nav.back_to(id, exists)
-        } else {
-            self.nav.forward_to(id, exists)
-        };
-        self.show_tab(to);
-    }
-
-    /// Show tab `id`, if it is still there, in its workspace.
-    fn show_tab(&mut self, id: Option<u64>) {
-        let Some((w, t)) = id.and_then(|id| self.tab_place(id)) else {
-            return;
-        };
-        self.active_workspace = w;
-        self.workspaces[w].active_tab = t;
-        self.show_active();
-    }
-
     /// The keys pressing `action` after the prefix, as the help panel
     /// says them ("Ctrl+B Shift+Q"), if any do.
     pub fn action_keys(&self, action: Action) -> Option<String> {
@@ -5533,8 +5486,8 @@ impl Gerdr {
     /// for when it is shown again, and forget what was shown. Children are
     /// still reaped.
     fn detach_project(&mut self) {
-        // Its tabs go: the next project's history starts over.
-        self.nav = Default::default();
+        // Its tabs go: the history keeps them under ids that outlive them.
+        self.park_visits();
         if self.record_tabs() {
             self.projects.save();
         }
@@ -6686,6 +6639,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         header_hover: false,
         previous_project: None,
         nav: Default::default(),
+        nav_pending: None,
         toasts: VecDeque::new(),
         quit: None,
         restart: None,
