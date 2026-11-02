@@ -1208,6 +1208,12 @@ impl Gerdr {
                 feature.title
             ));
         }
+        if let Some(user) = self.folder_in_use(&feature.dir) {
+            return self.show_warning(format!(
+                "{user} is in \u{201c}{}\u{201d}; close it first",
+                feature.title
+            ));
+        }
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),

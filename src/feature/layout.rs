@@ -465,42 +465,46 @@ fn add_line(text: &str, line: &str) -> Option<String> {
     Some(text)
 }
 
-/// Pyright's excludes when a config names none, which naming one drops.
-const PYRIGHT_DEFAULT_EXCLUDES: [&str; 3] = ["**/node_modules", "**/__pycache__", "**/.*"];
-
 /// `text`, a pyrightconfig.json, with `.features` in its `exclude`, unless
-/// it is there already.
+/// it is there already or there is no `exclude`: pyright's own excludes
+/// (used when a config names none) leave out every dot folder already.
+/// Edited as text, so the file's comments, trailing commas and layout
+/// (pyright reads it as JSONC) stay as they are.
 fn add_pyright_exclude(text: &str) -> Result<Option<String>, String> {
-    let mut config: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let Some(object) = config.as_object_mut() else {
-        return Err("it isn't a JSON object".into());
-    };
-    let exclude = object.entry("exclude").or_insert_with(|| {
-        // Naming excludes drops pyright's own: keep them.
-        serde_json::Value::Array(
-            PYRIGHT_DEFAULT_EXCLUDES
-                .iter()
-                .map(|e| serde_json::Value::from(*e))
-                .collect(),
-        )
-    });
-    let Some(list) = exclude.as_array_mut() else {
-        return Err("its exclude isn't a list".into());
-    };
-    let has = list.iter().any(|v| {
-        matches!(
-            v.as_str()
-                .map(|s| s.trim_start_matches("./").trim_end_matches('/')),
-            Some(".features" | "**/.features")
-        )
-    });
-    if has {
-        return Ok(None);
+    let mut from = 0;
+    while let Some(at) = text[from..].find("\"exclude\"") {
+        let key_end = from + at + "\"exclude\"".len();
+        from = key_end;
+        let rest = &text[key_end..];
+        let Some(rest) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let Some(list) = rest.trim_start().strip_prefix('[') else {
+            return Err("its exclude isn't a list".into());
+        };
+        let open = text.len() - list.len();
+        let Some(close) = list.find(']') else {
+            return Err("its exclude list doesn't end".into());
+        };
+        let items = &list[..close];
+        let has = items.split(',').any(|item| {
+            let item = item.trim().trim_matches('"');
+            let item = item.trim_start_matches("./").trim_end_matches('/');
+            matches!(item, ".features" | "**/.features")
+        });
+        if has {
+            return Ok(None);
+        }
+        let entry = if items.trim().is_empty() {
+            "\".features\""
+        } else {
+            "\".features\", "
+        };
+        let mut new = text.to_owned();
+        new.insert_str(open, entry);
+        return Ok(Some(new));
     }
-    list.push(".features".into());
-    let mut new = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    new.push('\n');
-    Ok(Some(new))
+    Ok(None)
 }
 
 /// Put `repo`'s worktree of `feature` on branch `feature/<slug>` at the
@@ -1014,22 +1018,17 @@ mod tests {
             std::fs::read_link(dir.join("AGENTS.md")).unwrap(),
             t.0.join("AGENTS.md")
         );
-        assert_eq!(
-            created.ignores,
-            vec![t.0.join(".cursorignore"), t.0.join("pyrightconfig.json")]
-        );
+        // pyright leaves dot folders out unless a config names excludes.
+        assert_eq!(created.ignores, vec![t.0.join(".cursorignore")]);
         assert!(!t.0.join(".graphifyignore").exists());
         assert_eq!(
             std::fs::read_to_string(t.0.join(".cursorignore")).unwrap(),
             "target\n.features/\n"
         );
-        let pyright: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(t.0.join("pyrightconfig.json")).unwrap())
-                .unwrap();
-        assert_eq!(pyright["venv"], ".venv");
-        let exclude = pyright["exclude"].as_array().unwrap();
-        assert_eq!(exclude.last().unwrap(), ".features");
-        assert!(exclude.iter().any(|e| e == "**/node_modules"));
+        assert_eq!(
+            std::fs::read_to_string(t.0.join("pyrightconfig.json")).unwrap(),
+            r#"{"venv": ".venv"}"#
+        );
 
         // A second feature changes no ignore file again.
         let second = create(&root, "other", &[]).unwrap();
@@ -1070,6 +1069,25 @@ mod tests {
     }
 
     #[test]
+    fn pyright_excludes_are_edited_as_text() {
+        let jsonc = "{\n  // dev\n  \"exclude\": [\n    \"build\",\n  ],\n}\n";
+        assert_eq!(
+            add_pyright_exclude(jsonc).unwrap().unwrap(),
+            "{\n  // dev\n  \"exclude\": [\".features\", \n    \"build\",\n  ],\n}\n"
+        );
+        assert_eq!(
+            add_pyright_exclude(r#"{"exclude": []}"#).unwrap().unwrap(),
+            r#"{"exclude": [".features"]}"#
+        );
+        assert_eq!(
+            add_pyright_exclude(r#"{"exclude": ["./.features/"]}"#),
+            Ok(None)
+        );
+        assert_eq!(add_pyright_exclude(r#"{"venv": ".v",}"#), Ok(None));
+        assert!(add_pyright_exclude(r#"{"exclude": "x"}"#).is_err());
+    }
+
+    #[test]
     fn ignore_files_are_edited_only_when_there_and_once() {
         let t = Temp::new();
         let repo = t.repo("app", "main");
@@ -1089,13 +1107,9 @@ mod tests {
             std::fs::read_to_string(repo.join(".graphifyignore")).unwrap(),
             "out/\n.features/\n"
         );
-        let pyright: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(repo.join("pyrightconfig.json")).unwrap(),
-        )
-        .unwrap();
         assert_eq!(
-            pyright["exclude"],
-            serde_json::json!(["build", ".features"])
+            std::fs::read_to_string(repo.join("pyrightconfig.json")).unwrap(),
+            r#"{"exclude": [".features", "build"]}"#
         );
         let again = create(&root, "b", &[]).unwrap();
         assert!(again.ignores.is_empty(), "{:?}", again.ignores);
