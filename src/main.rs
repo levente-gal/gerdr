@@ -26,6 +26,7 @@ mod desktop;
 mod diff;
 mod diff_edit;
 mod diff_view;
+mod feature;
 mod frecency;
 mod find;
 mod fuzzy;
@@ -5681,6 +5682,7 @@ impl Gerdr {
             before_start: String::new(),
             after_stop: String::new(),
             tickets: Vec::new(),
+            workflow: projects::Workflow::default(),
         });
         self.projects.save();
         id

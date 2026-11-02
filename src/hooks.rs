@@ -283,6 +283,7 @@ mod tests {
             before_start: " docker compose up -d ".into(),
             after_stop: String::new(),
             tickets: Vec::new(),
+            workflow: Default::default(),
         }
     }
 

@@ -479,6 +479,7 @@ mod tests {
             before_start: String::new(),
             after_stop: String::new(),
             tickets: Vec::new(),
+            workflow: Default::default(),
         }
     }
 
