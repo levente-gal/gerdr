@@ -790,6 +790,7 @@ const TEMPLATE: &str = "\
 # density = \"compact\"   # or \"comfortable\", the default
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
 # needs_you = false     # hide the sidebar's \"Needs you\" list; shown by default
+# footer = false        # hide the footer with the background tasks; shown by default
 # motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
 #
 # [git]
@@ -909,6 +910,12 @@ impl Gerdr {
         self.apps = settings.apps;
         self.density = settings.ui.density;
         self.needs_you = settings.ui.needs_you;
+        // The panes take the footer's room, or give it back (`arrange`).
+        self.show_footer = settings.ui.footer;
+        if !self.show_footer {
+            self.footer_hover = None;
+            self.tasks_panel = None;
+        }
         crate::anim::set_motion(settings.ui.motion);
         if let Some(mode) = settings.ui.theme.filter(|mode| *mode != self.theme_mode) {
             self.set_theme_mode(mode);

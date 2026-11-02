@@ -1042,7 +1042,7 @@ impl Gerdr {
     }
 
     fn tasks_entry(&self) -> Item {
-        let detail = match self.tasks().len() {
+        let detail = match Self::running_tasks(&self.tasks()) {
             0 => "nothing runs".to_owned(),
             1 => "1 runs".to_owned(),
             n => format!("{n} run"),

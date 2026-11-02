@@ -175,6 +175,9 @@ pub enum Overlay {
     Scrollback,
     /// The switcher of this serial: not one opened after it.
     Switcher(u64),
+    /// The background tasks, which has no field: only its key hints come
+    /// this way.
+    Tasks,
 }
 
 /// Whether `action`, picked with the prefix, works over the welcome screen:
@@ -196,6 +199,7 @@ fn over_panel(action: &Action) -> bool {
             | Action::Shortcuts
             | Action::Projects
             | Action::Inbox
+            | Action::Tasks
             | Action::Repos
             | Action::Worktrees
     )
@@ -209,6 +213,19 @@ pub(crate) fn works_over(over: overlay::Overlay, action: &Action) -> bool {
     }
 }
 
+/// Whether `action` opens one of the panels.
+fn opens_panel(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Projects
+            | Action::Inbox
+            | Action::Repos
+            | Action::Worktrees
+            | Action::Switcher
+            | Action::Scrollback
+    )
+}
+
 /// What closes panel `over`, as its own Esc would.
 fn closing(over: overlay::Overlay) -> Option<Intercepted> {
     use crate::overlay::Overlay as O;
@@ -219,6 +236,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Inbox => Intercepted::Inbox(inbox::Outcome::Close),
         O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
         O::Switcher => Intercepted::CloseSwitcher,
+        O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
         _ => return None,
     })
 }
@@ -282,10 +300,8 @@ impl Gerdr {
                         if state.grabbing_overlay().is_some() {
                             state.tooltip.hide();
                         }
-                        // A dialog takes every key, as does the tasks panel.
-                        if let Some(dialog) =
-                            top.filter(|o| o.is_dialog() || *o == overlay::Overlay::Tasks)
-                        {
+                        // A dialog takes every key.
+                        if let Some(dialog) = top.filter(|o| o.is_dialog()) {
                             state.suppressed_keys.push(code);
                             let out = state.dialog_key(dialog, mods, sym, handle.modified_sym());
                             return FilterResult::Intercept(out);
@@ -804,7 +820,6 @@ impl Gerdr {
             O::Restart => self.restart_key(mods, sym).map(Intercepted::Restart),
             O::Checkout => self.checkout_key(mods, sym).map(Intercepted::Checkout),
             O::Confirm => self.confirm_key(mods, sym).map(Intercepted::Confirm),
-            O::Tasks => self.tasks_key(sym).map(Intercepted::Tasks),
             _ => None,
         }
     }
@@ -840,6 +855,10 @@ impl Gerdr {
         if !works_over(over, &action) {
             self.show_warning(format!("{keys} doesn't work over {}", over.name()));
             return None;
+        }
+        // The tasks panel, over the others, makes way for the one asked.
+        if over == overlay::Overlay::Tasks && opens_panel(&action) {
+            self.close_tasks();
         }
         Some(Intercepted::Action(action))
     }
@@ -1134,6 +1153,7 @@ impl Gerdr {
             O::Inbox => Some(Overlay::Inbox),
             O::Scrollback => Some(Overlay::Scrollback),
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
+            O::Tasks => Some(Overlay::Tasks),
             _ => None,
         }
     }
@@ -1176,6 +1196,7 @@ impl Gerdr {
             Overlay::Switcher(_) => self
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
+            Overlay::Tasks => self.tasks_key(mods, sym).map(Intercepted::Tasks),
         }
     }
 
@@ -1218,6 +1239,7 @@ impl Gerdr {
                 self.content_rect(),
                 scale,
             )),
+            Overlay::Tasks => None,
         }
     }
 
@@ -1231,6 +1253,7 @@ impl Gerdr {
             Overlay::Inbox => self.inbox.field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
+            Overlay::Tasks => None,
         }
     }
 

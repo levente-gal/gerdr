@@ -359,12 +359,12 @@ impl Gerdr {
             MenuAction::ChooseRestarts(w) => self.choose_restarts(w),
             MenuAction::NewAgent(w) => self.open_agent_picker(w),
             MenuAction::StartT3 => self.spawn_t3(None),
-            MenuAction::StopT3 => self.stop_t3(|_| {}),
-            MenuAction::RestartT3 => self.restart_t3(),
+            MenuAction::StopT3 => self.stop_t3_asking(),
+            MenuAction::RestartT3 => self.restart_t3_asking(),
             MenuAction::OpenT3 => self.open_t3(self.active_workspace, None),
             MenuAction::CheckT3 => self.check_t3(true),
             MenuAction::ShowLog(path) => self.show_log(path),
-            MenuAction::StopKept(id) => self.stop_kept(&id),
+            MenuAction::StopKept(id) => self.ask_stop_kept(&id),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

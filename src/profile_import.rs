@@ -146,6 +146,19 @@ const ZED_LEFT: &[&str] = &["logs", "hang_traces"];
 
 /// Whether an import runs: one at a time.
 static IMPORTING: AtomicBool = AtomicBool::new(false);
+/// The app whose profile is being imported, and whether it is closed
+/// for it: for the background tasks (see `tasks`).
+static IMPORTING_APP: std::sync::Mutex<Option<(&'static str, bool)>> = std::sync::Mutex::new(None);
+
+/// The app whose profile is being imported now, and whether it is closed
+/// and started again for it.
+pub fn importing() -> Option<(&'static str, bool)> {
+    *IMPORTING_APP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn set_importing(app: Option<(&'static str, bool)>) {
+    *IMPORTING_APP.lock().unwrap_or_else(|e| e.into_inner()) = app;
+}
 
 /// The profiles of the installed apps found in `home`.
 pub fn sources(home: &Path) -> Vec<Source> {
@@ -632,6 +645,7 @@ impl Gerdr {
             return self.toast("A profile is being imported already".into(), Level::Warning);
         }
         self.toast(format!("Importing {}'s profile…", source.name), Level::Info);
+        set_importing(Some((source.name, closing)));
         let spawned = std::thread::Builder::new()
             .name("import profile".into())
             .spawn(move || {
@@ -640,10 +654,12 @@ impl Gerdr {
                 } else {
                     import(&home, &source)
                 };
+                set_importing(None);
                 IMPORTING.store(false, Ordering::Release);
                 let _ = tx.send((source, done));
             });
         if let Err(err) = spawned {
+            set_importing(None);
             IMPORTING.store(false, Ordering::Release);
             self.toast(format!("Couldn't import: {err}"), Level::Error);
         }

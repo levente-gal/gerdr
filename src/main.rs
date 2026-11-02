@@ -1128,6 +1128,9 @@ pub enum Action {
     /// Open the inbox, to go through what wants the user across the
     /// project, or close it again.
     Inbox,
+    /// Open the background tasks (T3 Code's server, git operations, kept
+    /// apps), or close them again.
+    Tasks,
     /// Open the scrollback viewer over the focused terminal, to select
     /// and copy more of its output than a screen.
     Scrollback,
@@ -4155,6 +4158,8 @@ impl Gerdr {
             Action::Repos => self.open_repos(),
             Action::Inbox if self.is_open(Overlay::Inbox) => self.close_inbox(),
             Action::Inbox => self.open_inbox(None),
+            Action::Tasks if self.is_open(Overlay::Tasks) => self.close_tasks(),
+            Action::Tasks => self.open_tasks(0),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
             // Nothing to keep running without a project.

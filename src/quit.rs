@@ -458,7 +458,7 @@ impl Gerdr {
                         "the project's session".into(),
                     ),
                     Check::Apps => (dialog.apps.join(", "), "kept running".into()),
-                    Check::T3 => ("T3 Code server".into(), "every project's".into()),
+                    Check::T3 => ("T3 Code server".into(), "shared by every project".into()),
                     Check::DontAsk => ("Don't ask again".into(), ask_again.clone()),
                 };
                 QuitRow {

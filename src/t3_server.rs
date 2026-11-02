@@ -101,6 +101,18 @@ pub fn last_log_line(path: &std::path::Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A shell script killing `target` (a pid, or a process group as a
+/// negative one) unless it is gone within `STOP_TIME`.
+fn kill_later(target: i32) -> String {
+    let polls = STOP_TIME.as_millis() / STOP_POLL.as_millis();
+    let poll = STOP_POLL.as_secs_f64();
+    format!(
+        "i=0; while kill -0 -- {target} 2>/dev/null; do \
+         i=$((i+1)); [ $i -ge {polls} ] && exec kill -s KILL -- {target}; \
+         sleep {poll}; done"
+    )
+}
+
 /// What to signal to stop the server: the session gerdr started it in
 /// (as a negative pid), else its own process when it is a `t3`.
 fn target(server: Option<&Server>) -> Option<i32> {
@@ -215,15 +227,22 @@ impl Gerdr {
         self.t3.started_at = None;
         forget();
         self.t3_started = None;
-        if at.elapsed() < EARLY {
-            let why = last_log_line(&record.log).unwrap_or_else(|| "it ended".to_owned());
-            let text = format!("T3 Code didn't start: {why}");
-            let action = (
-                "Open log".to_owned(),
-                crate::menu::MenuAction::ShowLog(record.log),
-            );
-            self.toast_with(text, Level::Error, Some(action));
+        // Stopped by gerdr: nothing to tell.
+        if self.t3.stopping {
+            return;
         }
+        let why = last_log_line(&record.log).unwrap_or_else(|| "it ended".to_owned());
+        let text = if at.elapsed() < EARLY {
+            format!("T3 Code didn't start: {why}")
+        } else {
+            format!("T3 Code's server stopped: {why}")
+        };
+        tracing::warn!("{text}");
+        let action = (
+            "Open log".to_owned(),
+            crate::menu::MenuAction::ShowLog(record.log),
+        );
+        self.toast_with(text, Level::Error, Some(action));
     }
 
     /// Stop T3 Code's server: asked, killed after `STOP_TIME`; then `then`.
@@ -232,6 +251,13 @@ impl Gerdr {
         use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
         let server = self.t3.server.clone();
         let Some(target) = target(server.as_ref()) else {
+            // A server gerdr can't tell is T3 Code's is left alone.
+            if self.t3.alive {
+                let text = "Couldn't stop T3 Code's server: it doesn't run as t3. \
+                            Stop it where it was started";
+                let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+                return self.toast_with(text.to_owned(), Level::Error, Some(open_log));
+            }
             return then(self);
         };
         self.t3.stopping = true;
@@ -261,20 +287,30 @@ impl Gerdr {
         }
     }
 
-    /// The same, waiting for it here: gerdr is quitting.
+    /// The same while gerdr quits: asked here, killed after `STOP_TIME`
+    /// by a helper in a session of its own, so quitting doesn't wait.
     pub fn stop_t3_now(&mut self) {
         let server = self.t3.server.clone();
         let Some(target) = target(server.as_ref()) else {
             return;
         };
+        // Safety: as in `stop_t3`.
         unsafe { libc::kill(target, libc::SIGTERM) };
-        let asked_at = Instant::now();
-        while runs(target, server.as_ref()) {
-            if asked_at.elapsed() >= STOP_TIME {
-                unsafe { libc::kill(target, libc::SIGKILL) };
-                break;
-            }
-            std::thread::sleep(STOP_POLL);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(kill_later(target))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Safety: setsid is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        if let Err(err) = cmd.spawn() {
+            tracing::warn!("t3 code's server: no helper to kill it later: {err}");
         }
         self.t3_stopped();
     }
@@ -303,7 +339,7 @@ impl Gerdr {
                 None => "Couldn't restart T3 Code".to_owned(),
             };
             let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
-            return self.toast_with(text, Level::Warning, Some(open_log));
+            return self.toast_with(text, Level::Error, Some(open_log));
         }
         let text = match &version {
             Some(version) => format!("Restarting T3 Code at {version}"),
@@ -342,6 +378,22 @@ mod tests {
         std::fs::write(&path, "--- gerdr starts T3 Code: t3 serve\n").unwrap();
         assert_eq!(last_log_line(&path), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_server_left_running_is_killed_by_the_helper() {
+        let mut group = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let target = -(group.id() as i32);
+        // Ten seconds would make a slow test: the script is the same.
+        let script = kill_later(target).replace("-ge 40", "-ge 1");
+        assert_ne!(script, kill_later(target));
+        let status = Command::new("sh").arg("-c").arg(script).status().unwrap();
+        assert!(status.success());
+        assert!(!group.wait().unwrap().success());
     }
 
     #[test]

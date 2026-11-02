@@ -65,6 +65,9 @@ const PAIRING_URL: &str = "Pairing URL:";
 /// How long before a web pane back at T3 Code's sign-in page is sent
 /// another pairing link.
 const PAIR_AGAIN: Duration = Duration::from_secs(30);
+/// How many pairing links a web pane is sent in a row, back at the
+/// sign-in page each time, before gerdr gives up and says so.
+const PAIR_TRIES: u32 = 3;
 /// The run states of a thread at work.
 const WORKING: [&str; 4] = ["preparing", "queued", "starting", "running"];
 /// The run state of a thread waiting for the user.
@@ -754,6 +757,24 @@ fn t3_binary(home: &Path, server: &Server) -> Option<PathBuf> {
     kept.or_else(|| crate::desktop::installed("t3").then(|| PathBuf::from("t3")))
 }
 
+/// What to do for a web pane back at T3 Code's sign-in page, sent
+/// `tries` pairing links since it last got past it.
+#[derive(Debug, PartialEq, Eq)]
+enum Pairing {
+    Send,
+    /// Say once that it doesn't take.
+    GiveUp,
+    Quiet,
+}
+
+fn pairing_turn(tries: u32) -> Pairing {
+    match tries {
+        t if t < PAIR_TRIES => Pairing::Send,
+        t if t == PAIR_TRIES => Pairing::GiveUp,
+        _ => Pairing::Quiet,
+    }
+}
+
 /// Whether `path` (of a T3 Code page) is its sign-in page waiting for a
 /// token: not a pairing link, which brings its own.
 fn asks_to_pair(path: &str) -> bool {
@@ -828,7 +849,8 @@ pub struct T3 {
     pairing: bool,
     /// When each web pane last landed on T3 Code's sign-in page and was
     /// sent a pairing link: once in a while only, should one not take.
-    paired_panes: HashMap<u32, Instant>,
+    /// How many links it was sent since it last got past the sign-in page.
+    paired_panes: HashMap<u32, (Instant, u32)>,
     /// Where the threads are read from.
     pub source: Source,
     /// The migration the database is at, if it says.
@@ -1189,9 +1211,17 @@ impl crate::Gerdr {
                         tracing::warn!("{}: {err}", marker.display());
                     }
                     state.t3.pending = then.clone();
-                    let sent = pane.is_some_and(|pane| state.navigate_web_pane(pane, &pairing));
-                    if !sent {
-                        state.launch(&pairing, crate::launch::Place::Tab);
+                    match pane {
+                        // A pane that can't be sent it isn't sent a tab
+                        // instead, each time it is back at the page.
+                        Some(pane) => {
+                            if !state.navigate_web_pane(pane, &pairing) {
+                                let text = "Couldn't sign the web pane in to T3 Code: \
+                                            gerdr can't steer it";
+                                state.toast(text.to_owned(), crate::toast::Level::Error);
+                            }
+                        }
+                        None => state.launch(&pairing, crate::launch::Place::Tab),
                     }
                 }
                 Err(err) => {
@@ -1229,18 +1259,34 @@ impl crate::Gerdr {
             // Signed out (a browser never paired, or the server forgot
             // it): sign it in, whichever way it got here.
             let now = Instant::now();
-            let recent = self
-                .t3
-                .paired_panes
-                .get(&pane)
-                .is_some_and(|at| now.duration_since(*at) < PAIR_AGAIN);
-            if !recent && !self.t3.pairing {
-                self.t3.paired_panes.insert(pane, now);
-                let server = server.clone();
-                let marker = self.t3_paired_marker(&server);
-                self.pair_t3(server, None, marker, Some(pane));
+            let sent = self.t3.paired_panes.get(&pane).copied();
+            let recent = sent.is_some_and(|(at, _)| now.duration_since(at) < PAIR_AGAIN);
+            if recent || self.t3.pairing {
+                return;
+            }
+            let tries = sent.map_or(0, |(_, tries)| tries);
+            match pairing_turn(tries) {
+                Pairing::Send => {
+                    self.t3.paired_panes.insert(pane, (now, tries + 1));
+                    let server = server.clone();
+                    let marker = self.t3_paired_marker(&server);
+                    self.pair_t3(server, None, marker, Some(pane));
+                }
+                Pairing::GiveUp => {
+                    self.t3.paired_panes.insert(pane, (now, tries + 1));
+                    let text = "T3 Code keeps asking this web pane to sign in: \
+                                sign in on its page, or see T3 Code's log";
+                    tracing::warn!("{text}");
+                    let open_log = ("Open log".to_owned(), crate::menu::MenuAction::OpenLog);
+                    self.toast_with(text.to_owned(), crate::toast::Level::Error, Some(open_log));
+                }
+                Pairing::Quiet => {}
             }
             return;
+        }
+        // Past the sign-in page: signed in, so a later sign-out tries again.
+        if !path.starts_with("/pair") {
+            self.t3.paired_panes.remove(&pane);
         }
         if self.t3.pending.is_none() || path.starts_with("/pair") {
             return;
@@ -1451,6 +1497,22 @@ mod tests {
         assert!(!is_app("http://localhost:3000/", &server));
         assert!(!is_app("https://example.com:3773/", &server));
         assert_eq!(origin_of(&link), Some("http://localhost:3773"));
+    }
+
+    #[test]
+    fn a_pane_stuck_at_the_sign_in_page_is_told_once() {
+        let turns: Vec<Pairing> = (0..6).map(pairing_turn).collect();
+        assert_eq!(
+            turns,
+            [
+                Pairing::Send,
+                Pairing::Send,
+                Pairing::Send,
+                Pairing::GiveUp,
+                Pairing::Quiet,
+                Pairing::Quiet
+            ]
+        );
     }
 
     #[test]
