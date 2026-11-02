@@ -203,6 +203,84 @@ pub fn markdown(
     out
 }
 
+/// `review`'s comments on document `name` (a feature stage's `brief.md`
+/// or `plan.md`, shown as all added lines) as Markdown for the agent that
+/// wrote it: each quotes its lines as they are in the file, in a fence
+/// longer than any run of backticks in them. Those whose lines `outdated`
+/// says are gone say so. By line.
+pub fn doc_markdown(review: &Review, name: &str, outdated: impl Fn(&Comment) -> bool) -> String {
+    let mut comments: Vec<&Comment> = review.comments.iter().collect();
+    comments.sort_by_key(|c| c.lines.first().map(|q| q.number));
+    let n = comments.len();
+    let mut out = format!(
+        "Review comments on {name} ({n} comment{}). \
+         Each quotes the lines it is about; address each one and write the file again.\n",
+        if n == 1 { "" } else { "s" }
+    );
+    for c in comments {
+        let stale = match outdated(c) {
+            true => " (the file changed since)",
+            false => "",
+        };
+        if c.lines.is_empty() {
+            out.push_str(&format!("\n### `{}` (the whole file){stale}\n\n", place(c)));
+        } else {
+            let fence = fence(c.lines.iter().map(|q| q.text.as_str()));
+            out.push_str(&format!("\n### `{}`{stale}\n\n{fence}\n", place(c)));
+            for q in &c.lines {
+                out.push_str(&q.text);
+                out.push('\n');
+            }
+            out.push_str(&format!("{fence}\n\n"));
+        }
+        out.push_str(c.text.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// A code fence longer than any run of backticks in `lines`: three at
+/// least.
+fn fence<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    let longest = lines
+        .flat_map(|line| line.split(|c| c != '`').map(str::len))
+        .max()
+        .unwrap_or(0);
+    "`".repeat((longest + 1).max(3))
+}
+
+/// The review kept in the file at `path`; empty when there is none or it
+/// can't be read (then set aside, as `load` does).
+pub fn load_file(path: &Path) -> Review {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Review::default(),
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", path.display());
+            crate::projects::set_aside(path);
+            return Review::default();
+        }
+    };
+    serde_json::from_slice(&raw).unwrap_or_else(|err| {
+        tracing::warn!("reading {}: {err}", path.display());
+        crate::projects::set_aside(path);
+        Review::default()
+    })
+}
+
+/// Save `review` to the file at `path`, atomically; an empty one removes
+/// the file.
+pub fn save_file(path: &Path, review: &Review) -> std::io::Result<()> {
+    if review.is_empty() {
+        return match std::fs::remove_file(path) {
+            Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    let bytes = serde_json::to_vec_pretty(review).map_err(std::io::Error::other)?;
+    crate::projects::write_atomic(path, &bytes)
+}
+
 /// Project `project`'s file under `root` (`None`: gerdr's data folder,
 /// `projects::data_dir`).
 pub fn file(root: Option<&Path>, project: &str) -> PathBuf {
@@ -448,6 +526,51 @@ mod tests {
              \n### `src/z.rs:7`\n\n```diff\n-old();\n+new();\n```\n\n\
              Is new right here?\nCheck callers.\n"
         );
+    }
+
+    #[test]
+    fn copies_a_documents_comments_for_the_agent_that_wrote_it() {
+        let mut first = comment(
+            &[
+                line(LineKind::Added, 3, "## Outcome"),
+                line(LineKind::Added, 4, "```sh"),
+            ],
+            "Say who it is for.",
+        );
+        first.path = "brief.md".into();
+        let mut second = comment(&[], "Too long overall");
+        second.path = "brief.md".into();
+        let mut third = comment(&[line(LineKind::Added, 1, "# Title")], "gone");
+        third.path = "brief.md".into();
+        let review = Review {
+            comments: vec![first, second, third],
+            ..Review::default()
+        };
+        let text = doc_markdown(&review, "brief.md", |c| c.text == "gone");
+        assert_eq!(
+            text,
+            "Review comments on brief.md (3 comments). \
+             Each quotes the lines it is about; address each one and write the file again.\n\
+             \n### `brief.md` (the whole file)\n\nToo long overall\n\
+             \n### `brief.md:1` (the file changed since)\n\n```\n# Title\n```\n\ngone\n\
+             \n### `brief.md:3-4`\n\n````\n## Outcome\n```sh\n````\n\nSay who it is for.\n"
+        );
+    }
+
+    #[test]
+    fn a_review_saves_to_and_loads_from_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("gerdr-doc-review-{}", std::process::id()));
+        let path = dir.join("discover-comments.json");
+        let review = Review {
+            comments: vec![comment(&[line(LineKind::Added, 1, "x")], "y")],
+            ..Review::default()
+        };
+        assert!(load_file(&path).is_empty());
+        save_file(&path, &review).unwrap();
+        assert_eq!(load_file(&path), review);
+        save_file(&path, &Review::default()).unwrap();
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

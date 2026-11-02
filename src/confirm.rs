@@ -74,6 +74,13 @@ pub enum Then {
     /// Ship this project's feature as its Ship check said (see
     /// `Gerdr::ship_feature`).
     ShipFeature { project: String, slug: String },
+    /// Approve this stage of this project's feature, its review comments
+    /// deleted unsent (see `Gerdr::approve_doc_now`).
+    ApproveStage {
+        project: String,
+        slug: String,
+        stage: crate::feature::Stage,
+    },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -463,6 +470,32 @@ impl Gerdr {
         self.ask(question, body, "Ship", Then::ShipFeature { project, slug });
     }
 
+    /// Ask before approving `stage` of feature `slug` while `count` review
+    /// comments on its file `name` are unsent (see `Gerdr::doc_approve`).
+    pub fn ask_approve_unsent(
+        &mut self,
+        project: String,
+        slug: String,
+        stage: crate::feature::Stage,
+        name: &str,
+        count: usize,
+    ) {
+        let title = match count {
+            1 => "Approve with 1 comment unsent?".to_owned(),
+            n => format!("Approve with {n} comments unsent?"),
+        };
+        let body = format!(
+            "The comments on {name} are deleted, not sent to its agent. \
+             Send back sends them."
+        );
+        let then = Then::ApproveStage {
+            project,
+            slug,
+            stage,
+        };
+        self.ask(title, body, "Approve", then);
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -544,6 +577,11 @@ impl Gerdr {
                 force,
             } => self.remove_feature(&project, &slug, abandon, force),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
+            Then::ApproveStage {
+                project,
+                slug,
+                stage,
+            } => self.approve_doc_now(&project, &slug, stage),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs

@@ -11,6 +11,11 @@
 //! A commit's diff, from the repositories panel's Log tab, shows the same
 //! way, read-only: what the commit changed against its first parent. Esc
 //! goes back to the panel.
+//!
+//! A feature stage's file under review (`brief.md`, `plan.md`; see
+//! `doc_review`) shows the same way too, as one file of added lines: its
+//! comments work as on code, edits don't. Approve and Send back sit on its
+//! header and footer.
 
 use std::{
     path::{Path, PathBuf},
@@ -22,7 +27,9 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use crate::{
     chrome::{Density, DetailView, Hint, ReposButton, ReposHit, SheetView},
     diff::FileDiff,
-    diff_view::{self, DiffView, Keys, Section},
+    diff_view::{self, DiffView, Keys, Outcome, Section},
+    feature::Stage,
+    git::Change,
     git_ops::Since,
     repos::{diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
     review::Review,
@@ -66,7 +73,49 @@ pub struct WorktreeDiff {
     /// A commit's diff instead, opened from the panel's Log tab: read
     /// once, not edited, no review.
     pub commit: Option<CommitOf>,
+    /// A feature stage's file under review instead: read again with
+    /// every Git status read, not edited.
+    pub doc: Option<DocOf>,
 }
+
+/// The feature stage's file a diff shows for review
+/// (`WorktreeDiff::doc`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocOf {
+    pub project: String,
+    pub slug: String,
+    pub stage: Stage,
+    /// The file: `<feature data dir>/brief.md`.
+    pub path: PathBuf,
+    /// Where its review comments are kept (`doc_review::comments_path`).
+    pub comments: PathBuf,
+    /// The feature's title.
+    pub title: String,
+    /// Where the stage stands, lowercase: `ready for review`.
+    pub state: String,
+    /// The file's text as last read: the same again isn't shown again.
+    pub text: Option<String>,
+    /// Opened from the feature panel, which Esc goes back to.
+    pub back: bool,
+}
+
+impl DocOf {
+    /// The file's name: `brief.md`.
+    pub fn name(&self) -> String {
+        let name = self.path.file_name().unwrap_or(self.path.as_os_str());
+        name.to_string_lossy().into()
+    }
+}
+
+/// Why an edit or a restore does nothing on a file under review.
+pub const DOC_READ_ONLY: &str = "A file under review can't be edited here";
+/// Why Send back does nothing yet.
+pub const NO_COMMENT: &str = "Add a comment first";
+/// Why Approve or Send back wait.
+pub const DRAFT_OPEN: &str = "Save or discard the comment first";
+/// The keys approving the file under review and sending it back.
+pub const APPROVE_KEY: &str = "Ctrl+Enter";
+pub const SEND_BACK_KEY: &str = "Ctrl+Shift+Enter";
 
 /// The commit a diff shows (`WorktreeDiff::commit`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -104,6 +153,11 @@ pub struct Env {
 pub enum Done {
     Close,
     Diff(diff_view::Outcome),
+    /// Approve the file under review as it is.
+    Approve,
+    /// Send it back to its agent with these comments, as Markdown
+    /// (`review::doc_markdown`).
+    SendBack(String),
 }
 
 impl WorktreeDiff {
@@ -142,6 +196,130 @@ impl WorktreeDiff {
             commit: Some(commit),
             ..WorktreeDiff::default()
         }
+    }
+
+    /// Feature stage file `doc` for review, in workspace `workspace`
+    /// (where a Zed tab on it opens); its review comments `review`, kept
+    /// from when it was shown last. Its text is shown once `set_doc` has
+    /// it.
+    pub fn of_doc(doc: DocOf, workspace: usize, review: Review) -> Self {
+        let mut diff = DiffView::default();
+        diff.review = review;
+        let root = doc.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        WorktreeDiff {
+            root,
+            label: doc.title.clone(),
+            workspace,
+            diff,
+            doc: Some(doc),
+            ..WorktreeDiff::default()
+        }
+    }
+
+    /// The file under review read again (`Err`: why it couldn't be): shown
+    /// as all added lines, where it stood; the same text as before left
+    /// as it is.
+    pub fn set_doc(&mut self, read: Result<String, String>, env: Env) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let text = match read {
+            Ok(text) => text,
+            Err(why) => {
+                doc.text = None;
+                return self.set_read(Err(why), env);
+            }
+        };
+        if doc.text.as_ref() == Some(&text) && self.error.is_none() {
+            return;
+        }
+        let name = doc.name();
+        let file = crate::doc_review::added_file(&name, &text);
+        doc.text = Some(text);
+        let since = Since {
+            base: String::new(),
+            commits: 0,
+            changes: vec![Change {
+                path: name,
+                orig: None,
+                code: 'A',
+            }],
+        };
+        self.set_read(Ok((since, vec![file])), env);
+    }
+
+    /// The file under review as the diff has it, if read.
+    fn doc_file(&self) -> Option<&FileDiff> {
+        self.diff.diffs.get(&self.root)?.1.first()
+    }
+
+    /// The review comments as Markdown for the agent that wrote the file
+    /// under review: those whose lines are gone say so.
+    pub fn doc_markdown(&self) -> String {
+        let name = self.doc.as_ref().map(DocOf::name).unwrap_or_default();
+        let file = self.doc_file();
+        let outdated = |c: &crate::review::Comment| {
+            !c.lines.is_empty() && file.is_none_or(|f| crate::review::locate(f, c).is_none())
+        };
+        crate::review::doc_markdown(&self.diff.review, &name, outdated)
+    }
+
+    /// Approve the file under review, unless a comment is being written.
+    fn approve(&self) -> Option<Done> {
+        if self.diff.editing.is_some() {
+            return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
+        }
+        Some(Done::Approve)
+    }
+
+    /// Send the file under review back with its comments: there must be
+    /// one, and none being written.
+    fn send_back(&self) -> Option<Done> {
+        if self.diff.editing.is_some() {
+            return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
+        }
+        if self.diff.review.is_empty() {
+            return Some(Done::Diff(Outcome::Notice(NO_COMMENT)));
+        }
+        Some(Done::SendBack(self.doc_markdown()))
+    }
+
+    /// What the diff asked for, on a file under review: no edits, and
+    /// the review copied as the agent is sent it.
+    fn doc_outcome(&self, outcome: Option<Outcome>) -> Option<Outcome> {
+        if self.doc.is_none() {
+            return outcome;
+        }
+        match outcome {
+            Some(o) if o.edits() => Some(Outcome::Notice(DOC_READ_ONLY)),
+            Some(Outcome::Copy { count, .. }) => Some(Outcome::Copy {
+                text: self.doc_markdown(),
+                count,
+            }),
+            outcome => outcome,
+        }
+    }
+
+    /// The keys sheet's lines: a file under review's own keys first.
+    fn help_lines(&self) -> Vec<(String, String, crate::chrome::Tone)> {
+        if self.doc.is_none() {
+            return diff_help_lines();
+        }
+        let own = [
+            ("Esc", "close the review"),
+            ("F1", "list the keys"),
+            (APPROVE_KEY, "approve the file as it is"),
+            (SEND_BACK_KEY, "send it back to its agent with the comments"),
+        ];
+        let own = own.iter().map(|(key, what)| {
+            (
+                key.to_string(),
+                what.to_string(),
+                crate::chrome::Tone::Normal,
+            )
+        });
+        // The diff's, but its Esc and F1.
+        own.chain(diff_help_lines().into_iter().skip(2)).collect()
     }
 
     /// Call `f` with the diff and its `Ctx`.
@@ -184,6 +362,9 @@ impl WorktreeDiff {
         if self.commit.is_some() {
             return "This commit".into();
         }
+        if let Some(doc) = &self.doc {
+            return doc.name();
+        }
         match &self.target {
             Some(target) => format!("Since {target}"),
             None => "Not committed".into(),
@@ -193,9 +374,11 @@ impl WorktreeDiff {
     /// What the diff says with nothing to show.
     fn empty(&self) -> &'static str {
         match (&self.error, self.read, &self.target) {
+            (Some(_), ..) if self.doc.is_some() => "The file couldn't be read",
             (Some(_), ..) => "Its changes couldn't be read",
             (None, false, _) => "Reading…",
             (None, true, _) if self.commit.is_some() => "No changes in this commit",
+            (None, true, _) if self.doc.is_some() => "The file is empty",
             (None, true, Some(_)) => "No changes since it forked",
             (None, true, None) => "No changes",
         }
@@ -205,6 +388,9 @@ impl WorktreeDiff {
     pub fn heading(&self) -> String {
         if self.commit.is_some() {
             return format!("Commit · {}", self.label);
+        }
+        if let Some(doc) = &self.doc {
+            return format!("{} · {}", doc.stage.label(), doc.name());
         }
         let name = self.branch.clone().unwrap_or_else(|| {
             let dir = self.root.file_name().unwrap_or(self.root.as_os_str());
@@ -222,6 +408,9 @@ impl WorktreeDiff {
         if !self.read {
             return "reading…".into();
         }
+        if let Some(doc) = &self.doc {
+            return format!("\u{201c}{}\u{201d} · {}", doc.title, doc.state);
+        }
         if let Some(commit) = &self.commit {
             return commit.line.clone();
         }
@@ -238,8 +427,35 @@ impl WorktreeDiff {
         let sections = self.sections();
         let lead = self.lead();
         let read_only = self.commit.is_some();
-        self.diff
-            .view(&ctx(&sections, env, &lead, self.empty(), read_only))
+        let mut view = self
+            .diff
+            .view(&ctx(&sections, env, &lead, self.empty(), read_only));
+        if self.doc.is_some() {
+            self.doc_view(&mut view);
+        }
+        view
+    }
+
+    /// A file under review's view: its lines counted in the title, no
+    /// Restore buttons, Approve and Send back on the title row.
+    fn doc_view(&self, view: &mut DetailView) {
+        if let (Some(doc), Some(file)) = (&self.doc, self.doc_file()) {
+            view.title = match file.added {
+                1 => format!("{} · 1 line", doc.name()),
+                n => format!("{} · {n} lines", doc.name()),
+            };
+        }
+        (view.row_buttons).retain(|(_, hint)| hint.button != ReposButton::Restore);
+        let hint = |button: ReposButton, key: &str| Hint {
+            button,
+            label: button.label().into(),
+            key: key.into(),
+            disabled: None,
+        };
+        view.title_buttons.extend([
+            hint(ReposButton::SendBack, SEND_BACK_KEY),
+            hint(ReposButton::Approve, APPROVE_KEY),
+        ]);
     }
 
     /// Its changes read again (`git_ops::changes_since`), with their diff:
@@ -280,8 +496,8 @@ impl WorktreeDiff {
             return None;
         }
         // The keys sheet scrolls; any other key closes it.
+        let len = self.help_lines().len();
         if let Some(top) = self.help.as_mut() {
-            let len = diff_help_lines().len();
             if !scroll_lines(top, len, env.sheet_rows, sym) {
                 self.help = None;
             }
@@ -292,9 +508,19 @@ impl WorktreeDiff {
             self.help = Some(0);
             return None;
         }
+        // Approve and Send back, unless a comment or the search has the
+        // keys.
+        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+        let typing = self.diff.editing.is_some() || self.diff.search_focused();
+        if self.doc.is_some() && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
+            return match mods.shift {
+                false => self.approve(),
+                true => self.send_back(),
+            };
+        }
         let outcome = self.with_diff(env, |diff, ctx| diff.key(mods, sym, typed, ctx));
         let done = match outcome {
-            Some(outcome) => outcome.map(Done::Diff),
+            Some(outcome) => self.doc_outcome(outcome).map(Done::Diff),
             None => (sym == Keysym::Escape && plain).then_some(Done::Close),
         };
         self.asked(done)
@@ -325,6 +551,9 @@ impl WorktreeDiff {
         if self.commit.is_none() {
             buttons.push(B::Comment);
         }
+        if self.doc.is_some() {
+            buttons.extend([B::Approve, B::SendBack]);
+        }
         if !self.diff.review.is_empty() {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
@@ -339,7 +568,12 @@ impl WorktreeDiff {
                     B::Close => "close".into(),
                     button => button.label().to_lowercase(),
                 },
-                key: key_name(button).into(),
+                key: match button {
+                    B::Approve => APPROVE_KEY,
+                    B::SendBack => SEND_BACK_KEY,
+                    button => key_name(button),
+                }
+                .into(),
                 disabled: None,
             })
             .collect()
@@ -359,8 +593,19 @@ impl WorktreeDiff {
             }
             return None;
         }
+        if self.doc.is_some() {
+            match hit {
+                ReposHit::Button(ReposButton::Approve) => return self.approve(),
+                ReposHit::Button(ReposButton::SendBack) => return self.send_back(),
+                ReposHit::DiffRestore(_) => {
+                    return Some(Done::Diff(Outcome::Notice(DOC_READ_ONLY)));
+                }
+                _ => {}
+            }
+        }
         let outcome = self.with_diff(env, |diff, ctx| diff.click(hit, ctx));
-        self.asked(outcome.flatten().map(Done::Diff))
+        let outcome = self.doc_outcome(outcome.flatten());
+        self.asked(outcome.map(Done::Diff))
     }
 
     /// Answer the sheet asking whether to delete the review: it closes,
@@ -403,13 +648,14 @@ impl WorktreeDiff {
     /// delete the review.
     pub fn sheet(&self, env: Env) -> Option<SheetView> {
         if let Some(top) = self.help {
-            let lines = diff_help_lines();
+            let lines = self.help_lines();
             let top = top.min(lines.len().saturating_sub(1));
             return Some(SheetView {
                 title: help_title(
-                    match self.commit {
-                        Some(_) => "Keys in a commit's diff",
-                        None => "Keys in a worktree's diff",
+                    match (&self.commit, &self.doc) {
+                        (Some(_), _) => "Keys in a commit's diff",
+                        (_, Some(_)) => "Keys in a file under review",
+                        (None, None) => "Keys in a worktree's diff",
                     },
                     top,
                     lines.len(),
@@ -522,7 +768,7 @@ fn ctx<'a>(
 
 impl crate::Gerdr {
     /// What the worktree diff's views and keys need of the chrome.
-    fn worktree_env(&self) -> Env {
+    pub(crate) fn worktree_env(&self) -> Env {
         let size = self.output_size();
         Env {
             page: crate::chrome::diff_only_page(size, self.density),
@@ -609,8 +855,11 @@ impl crate::Gerdr {
     }
 
     /// Save the worktree diff's review, if it changed: with the others,
-    /// pruned.
-    fn worktree_save_review(&mut self) {
+    /// pruned; a file under review's in its own file.
+    pub(crate) fn worktree_save_review(&mut self) {
+        if (self.repos.worktree.as_ref()).is_some_and(|wd| wd.doc.is_some()) {
+            return self.doc_save_review();
+        }
         // A commit's diff has no review.
         let Some(wd) = self
             .repos
@@ -647,9 +896,12 @@ impl crate::Gerdr {
     /// commit's, back to the repositories panel.
     pub(crate) fn close_worktree_diff(&mut self) {
         self.worktree_save_review();
-        let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
+        // A commit's diff and a file under review weren't opened from the
+        // worktrees popup.
+        let other = (self.repos.worktree.as_ref())
+            .is_some_and(|wd| wd.commit.is_some() || wd.doc.is_some());
         self.repos.close_worktree();
-        if !commit {
+        if !other {
             self.worktrees.unpark();
         }
         self.refresh_pointer_focus();
@@ -661,6 +913,9 @@ impl crate::Gerdr {
         let Some(wd) = self.repos.worktree.as_ref().filter(|wd| !wd.reading) else {
             return;
         };
+        if wd.doc.is_some() {
+            return self.doc_review_read();
+        }
         if let Some(commit) = &wd.commit {
             // A commit doesn't change: read once.
             if wd.read {
@@ -786,14 +1041,27 @@ impl crate::Gerdr {
             self.show_warning(why);
         }
         let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
+        let doc = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.doc.is_some());
         match done? {
             // Back to the panel it was opened from.
             Done::Close if commit => {
                 self.close_worktree_diff();
                 None
             }
+            Done::Close if doc => {
+                self.close_doc_review();
+                None
+            }
             Done::Close => Some(crate::repos::Outcome::Close),
             Done::Diff(outcome) => Some(crate::repos::from_diff(outcome)),
+            Done::Approve => {
+                self.doc_approve();
+                None
+            }
+            Done::SendBack(comments) => {
+                self.doc_send_back(comments);
+                None
+            }
         }
     }
 
@@ -1260,5 +1528,165 @@ mod tests {
         assert!(wd.sheet(ENV).is_none() && wd.diff.review.is_empty());
         assert!(wd.diff.review_dirty);
         assert!(wd.view(ENV).title_buttons.is_empty());
+    }
+
+    /// Discover's brief of feature "Log in", read: three lines.
+    fn doc() -> WorktreeDiff {
+        let doc = DocOf {
+            project: "p".into(),
+            slug: "login".into(),
+            stage: crate::feature::Stage::Discover,
+            path: "/data/features/p/login/brief.md".into(),
+            comments: "/data/features/p/login/discover-comments.json".into(),
+            title: "Log in".into(),
+            state: "ready for review".into(),
+            text: None,
+            back: false,
+        };
+        let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
+        wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
+        wd
+    }
+
+    #[test]
+    fn a_stage_file_shows_as_added_lines_to_review() {
+        let wd = doc();
+        assert_eq!(wd.heading(), "Discover · brief.md");
+        assert_eq!(wd.summary(), "\u{201c}Log in\u{201d} · ready for review");
+        assert_eq!(wd.root, PathBuf::from("/data/features/p/login"));
+        let rows = texts(&wd);
+        assert!(rows.contains(&"file brief.md None".to_owned()), "{rows:?}");
+        assert!(rows.ends_with(&[
+            "# Brief".into(),
+            "Users log in.".into(),
+            "With a password.".into()
+        ]));
+        let buttons: Vec<ReposButton> = wd
+            .view(ENV)
+            .title_buttons
+            .iter()
+            .map(|h| h.button)
+            .collect();
+        assert_eq!(buttons, [ReposButton::SendBack, ReposButton::Approve]);
+        assert!(wd.view(ENV).row_buttons.is_empty());
+        let hints: Vec<(ReposButton, String)> =
+            wd.hints().into_iter().map(|h| (h.button, h.key)).collect();
+        assert_eq!(
+            hints[..3],
+            [
+                (ReposButton::Comment, "c".into()),
+                (ReposButton::Approve, APPROVE_KEY.into()),
+                (ReposButton::SendBack, SEND_BACK_KEY.into()),
+            ]
+        );
+        let help = wd.help_lines();
+        assert_eq!(help[2].0, APPROVE_KEY);
+        assert_eq!(help[3].0, SEND_BACK_KEY);
+    }
+
+    #[test]
+    fn its_keys_approve_or_send_back() {
+        let mut wd = doc();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let ctrl_shift = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let enter = Keysym::Return;
+        assert_eq!(wd.key(&ctrl, enter, enter, ENV), Some(Done::Approve));
+        // Sending back needs a comment.
+        let none_yet = Some(Done::Diff(Outcome::Notice(NO_COMMENT)));
+        assert_eq!(wd.key(&ctrl_shift, enter, enter, ENV), none_yet);
+        let send = ReposHit::Button(ReposButton::SendBack);
+        assert_eq!(wd.click(send, ENV), none_yet);
+        // A comment on line 2.
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let row = texts(&wd)
+            .iter()
+            .position(|t| t == "Users log in.")
+            .unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        key(&mut wd, Keysym::c);
+        assert!(wd.diff.editing.is_some());
+        // While it is written, Ctrl+Enter saves it, not approves.
+        key(&mut wd, Keysym::o);
+        assert_eq!(
+            wd.click(send, ENV),
+            Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)))
+        );
+        wd.key(&ctrl, enter, enter, ENV);
+        assert!(wd.diff.editing.is_none());
+        assert_eq!(wd.diff.review.comments.len(), 1);
+        let Some(Done::SendBack(text)) = wd.key(&ctrl_shift, enter, enter, ENV) else {
+            panic!("not sent back");
+        };
+        assert!(
+            text.starts_with("Review comments on brief.md (1 comment)."),
+            "{text}"
+        );
+        assert!(text.contains("### `brief.md:2`\n"), "{text}");
+        assert!(text.contains("Users log in."), "{text}");
+        assert_eq!(
+            wd.click(ReposHit::Button(ReposButton::Approve), ENV),
+            Some(Done::Approve)
+        );
+    }
+
+    #[test]
+    fn a_file_under_review_is_read_only_but_takes_comments() {
+        let mut wd = doc();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let refused = Some(Done::Diff(Outcome::Notice(DOC_READ_ONLY)));
+        let row = texts(&wd).iter().position(|t| t == "# Brief").unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        key(&mut wd, Keysym::d);
+        assert_eq!(key(&mut wd, Keysym::d), refused);
+        assert_eq!(key(&mut wd, Keysym::x), refused);
+        assert_eq!(key(&mut wd, Keysym::R), refused);
+        assert_eq!(wd.click(ReposHit::DiffRestore(row), ENV), refused);
+        assert_eq!(texts(&wd)[row], "# Brief");
+        key(&mut wd, Keysym::c);
+        assert!(wd.diff.editing.is_some());
+        assert_eq!(key(&mut wd, Keysym::Escape), None);
+        assert_eq!(key(&mut wd, Keysym::Escape), Some(Done::Close));
+    }
+
+    #[test]
+    fn its_comments_follow_the_file_written_again() {
+        let mut wd = doc();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let row = texts(&wd)
+            .iter()
+            .position(|t| t == "With a password.")
+            .unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        for sym in [Keysym::c, Keysym::o, Keysym::Return] {
+            key(&mut wd, sym);
+        }
+        assert_eq!(wd.diff.review.comments.len(), 1);
+        // A line in front: the comment still finds its line.
+        wd.set_doc(
+            Ok("# Brief\nIntro.\nUsers log in.\nWith a password.\n".into()),
+            ENV,
+        );
+        assert!(
+            wd.doc_markdown().contains("### `brief.md:3`\n"),
+            "{}",
+            wd.doc_markdown()
+        );
+        // Its line gone: it says so.
+        wd.set_doc(Ok("# Brief\nUsers log in.\n".into()), ENV);
+        assert!(
+            wd.doc_markdown().contains("(the file changed since)"),
+            "{}",
+            wd.doc_markdown()
+        );
+        // Gone: it says why.
+        wd.set_doc(Err("brief.md is gone".into()), ENV);
+        assert_eq!(wd.summary(), "brief.md is gone");
     }
 }

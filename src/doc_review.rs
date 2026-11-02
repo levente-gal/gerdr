@@ -1,13 +1,355 @@
 //! Reviewing a stage's file (`brief.md`, `plan.md`) in the diff view: the
 //! file shown as all added lines, so line comments work as on code, with
 //! Approve and Send back on its header (see `feature_agents`).
+//!
+//! It shows across the repositories panel, as a worktree's diff does (see
+//! `worktree_diff::DocOf`), read-only. The file is read again with every
+//! Git status read, so an agent writing it again shows; the comments find
+//! their lines again, or say they are outdated. They are kept in the
+//! feature's data dir (`<stage>-comments.json`), so closing and opening
+//! the review again keeps them, and deleted once the file is approved or
+//! sent back.
 
-use crate::{Gerdr, feature::Stage};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
+
+use crate::{
+    Gerdr,
+    diff::{self, FileDiff, Hunk, Line, LineKind},
+    feature::{Feature, Stage, store},
+    review::{self, Review},
+    toast::Level,
+    worktree_diff::{DocOf, WorktreeDiff},
+};
+
+/// `text`, the file `name`, as a diff adding every line of it: one hunk,
+/// lines numbered from 1, coloured as its language. An empty file has no
+/// hunk.
+pub fn added_file(name: &str, text: &str) -> FileDiff {
+    let lines: Vec<Line> = text
+        .lines()
+        .enumerate()
+        .map(|(i, raw)| {
+            let text = diff::expand(raw);
+            Line {
+                kind: LineKind::Added,
+                raw: (text != raw).then(|| raw.to_owned()),
+                text,
+                number: i + 1,
+                old: 0,
+                words: Vec::new(),
+                syntax: Vec::new(),
+            }
+        })
+        .collect();
+    let added = lines.len();
+    let hunks = match lines.is_empty() {
+        true => Vec::new(),
+        false => vec![Hunk {
+            context: String::new(),
+            lines,
+        }],
+    };
+    let mut file = FileDiff {
+        path: name.to_owned(),
+        code: 'A',
+        hunks,
+        added,
+        ..FileDiff::default()
+    };
+    diff::colour_file(&mut file);
+    file
+}
+
+/// Where the review comments on `stage`'s file are kept, in feature data
+/// dir `dir`: `discover-comments.json`.
+pub fn comments_path(dir: &Path, stage: Stage) -> PathBuf {
+    let stage = stage.label().to_lowercase().replace(' ', "-");
+    dir.join(format!("{stage}-comments.json"))
+}
+
+/// Where `stage` of `feature` stands, as the review's header says it:
+/// lowercase, `ready for review`.
+pub fn state(feature: Option<&Feature>, stage: Stage) -> String {
+    let Some(feature) = feature else {
+        return "feature gone".into();
+    };
+    if feature.marks.contains_key(&stage) {
+        return "approved".into();
+    }
+    let Some(run) = feature.runs.get(&stage) else {
+        return "ready for review".into();
+    };
+    let state = match run.ready {
+        Some(_) => "ready for review",
+        None => "agent still working",
+    };
+    match run.sent_back {
+        0 => state.into(),
+        1 => format!("{state} · sent back once"),
+        n => format!("{state} · sent back {n} times"),
+    }
+}
+
+/// The file `path` read, or why it couldn't be, as the review says it.
+fn read(path: &Path, name: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|err| match err.kind() {
+        ErrorKind::NotFound => format!("{name} is gone"),
+        _ => {
+            tracing::warn!("reading {}: {err}", path.display());
+            format!("Couldn't read {name}: {err}")
+        }
+    })
+}
 
 impl Gerdr {
     /// Show `stage`'s file of feature `slug` for review.
     pub fn open_doc_review(&mut self, project: &str, slug: &str, stage: Stage) {
-        let _ = (project, slug, stage);
-        todo!("doc_review: open_doc_review")
+        let Some(name) = crate::feature::artifacts::name(stage) else {
+            let text = format!("{} has no file to review", stage.label());
+            return self.show_warning(text);
+        };
+        let Some(feature) = self.feature(project, slug) else {
+            return self.show_warning("That feature is gone".into());
+        };
+        let title = feature.title.clone();
+        let state = state(Some(feature), stage);
+        let dir = store::dir(None, project, slug);
+        let path = dir.join(name);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                let text = format!("No {name} yet for \u{201c}{title}\u{201d}");
+                return self.show_error(text);
+            }
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                return self.show_error(format!("Couldn't read {name}: {err}"));
+            }
+        };
+        let back =
+            (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug);
+        // It covers the other panels: they close, the repositories panel
+        // kept as it was.
+        self.switcher = None;
+        self.project_menu = None;
+        self.features.panel = None;
+        self.tasks_panel = None;
+        if self.inbox.is_open() {
+            self.close_inbox();
+        }
+        self.scrollback = None;
+        self.worktrees.close();
+        self.stop_key_repeat();
+        self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+        if self.repos.worktree.is_some() {
+            self.worktree_save_review();
+            self.repos.close_worktree();
+        }
+        if let Some(panel) = self.repos.panel.take() {
+            self.repos.kept = Some((self.project.clone(), panel));
+        }
+        let comments = comments_path(&dir, stage);
+        let review = review::load_file(&comments);
+        let doc = DocOf {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            stage,
+            path,
+            comments,
+            title,
+            state,
+            text: None,
+            back,
+        };
+        let wd = WorktreeDiff::of_doc(doc, self.active_workspace, review);
+        self.repos.worktree = Some(wd);
+        let env = self.worktree_env();
+        if let Some(wd) = self.repos.worktree.as_mut() {
+            wd.set_doc(Ok(text), env);
+        }
+        // It takes the pointer from the client under it.
+        self.refresh_pointer_focus();
+    }
+
+    /// The file under review, if one is open.
+    fn doc_of(&self) -> Option<&DocOf> {
+        self.repos.worktree.as_ref()?.doc.as_ref()
+    }
+
+    /// Read the file under review again, and where its stage stands: a
+    /// new text is shown where it stood, its comments found again.
+    pub(crate) fn doc_review_read(&mut self) {
+        let Some(doc) = self.doc_of() else {
+            return;
+        };
+        let read = read(&doc.path, &doc.name());
+        let state = state(self.feature(&doc.project, &doc.slug), doc.stage);
+        let env = self.worktree_env();
+        let Some(wd) = self.repos.worktree.as_mut() else {
+            return;
+        };
+        if let Some(doc) = wd.doc.as_mut() {
+            doc.state = state;
+        }
+        wd.set_doc(read, env);
+    }
+
+    /// Save the review comments on the file under review, if they
+    /// changed; a failure says so.
+    pub(crate) fn doc_save_review(&mut self) {
+        let Some(wd) =
+            (self.repos.worktree.as_mut()).filter(|wd| wd.diff.review_dirty && wd.doc.is_some())
+        else {
+            return;
+        };
+        wd.diff.review_dirty = false;
+        let path = wd.doc.as_ref().map(|d| d.comments.clone());
+        let review = wd.diff.review.clone();
+        if let Some(path) = path {
+            self.doc_write_review(&path, &review);
+        }
+    }
+
+    /// Write `review` to `path` (an empty one deletes it), saying so when
+    /// that fails.
+    fn doc_write_review(&mut self, path: &Path, review: &Review) {
+        if let Err(err) = review::save_file(path, review) {
+            tracing::warn!("saving {}: {err}", path.display());
+            let what = match review.is_empty() {
+                true => "delete",
+                false => "save",
+            };
+            self.toast(format!("Couldn't {what} the review: {err}"), Level::Error);
+        }
+    }
+
+    /// Close the file under review: back to the feature panel when it
+    /// was opened from there.
+    pub(crate) fn close_doc_review(&mut self) {
+        let back = self.doc_of().filter(|d| d.back).cloned();
+        self.close_worktree_diff();
+        if let Some(doc) = back {
+            self.open_feature(&doc.project, &doc.slug);
+        }
+    }
+
+    /// Approve the file under review: asked first when comments on it
+    /// would go unsent.
+    pub(crate) fn doc_approve(&mut self) {
+        let Some(wd) = self.repos.worktree.as_ref() else {
+            return;
+        };
+        let Some(doc) = wd.doc.clone() else {
+            return;
+        };
+        let count = wd.diff.review.comments.len();
+        if count > 0 {
+            let name = doc.name();
+            return self.ask_approve_unsent(doc.project, doc.slug, doc.stage, &name, count);
+        }
+        self.approve_doc_now(&doc.project, &doc.slug, doc.stage);
+    }
+
+    /// Approve `stage` of feature `slug`: its review comments deleted, its
+    /// review closed if open, the stage marked done.
+    pub(crate) fn approve_doc_now(&mut self, project: &str, slug: &str, stage: Stage) {
+        self.doc_done(project, slug, stage);
+        self.approve_stage(project, slug, stage);
+    }
+
+    /// Send the file under review back to its agent with `comments`
+    /// (Markdown): its comments deleted, the review closed.
+    pub(crate) fn doc_send_back(&mut self, comments: String) {
+        let Some(doc) = self.doc_of().cloned() else {
+            return;
+        };
+        self.doc_done(&doc.project, &doc.slug, doc.stage);
+        self.send_back_stage(&doc.project, &doc.slug, doc.stage, comments);
+    }
+
+    /// `stage` of feature `slug` is approved or sent back: its comments
+    /// deleted, and its review, if open, closed.
+    fn doc_done(&mut self, project: &str, slug: &str, stage: Stage) {
+        let dir = store::dir(None, project, slug);
+        self.doc_write_review(&comments_path(&dir, stage), &Review::default());
+        let open = self
+            .doc_of()
+            .is_some_and(|d| d.project == project && d.slug == slug && d.stage == stage);
+        if open {
+            if let Some(wd) = self.repos.worktree.as_mut() {
+                wd.diff.review_dirty = false;
+            }
+            self.close_worktree_diff();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature::agents::StageRun;
+
+    #[test]
+    fn a_file_shows_as_one_hunk_of_added_lines() {
+        let file = added_file("brief.md", "# Brief\n\n\tTabbed\n");
+        assert_eq!(
+            (file.path.as_str(), file.code, file.added),
+            ("brief.md", 'A', 3)
+        );
+        assert_eq!(file.hunks.len(), 1);
+        let lines = &file.hunks[0].lines;
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.kind == LineKind::Added && l.old == 0)
+        );
+        let numbers: Vec<usize> = lines.iter().map(|l| l.number).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!(lines[2].text, "    Tabbed");
+        assert_eq!(lines[2].raw(), "\tTabbed");
+        assert_eq!(lines[0].raw, None);
+        // Nothing in it: no hunk.
+        let empty = added_file("plan.md", "");
+        assert!(empty.hunks.is_empty() && empty.added == 0);
+    }
+
+    #[test]
+    fn comments_are_kept_per_stage_in_the_feature_dir() {
+        let dir = Path::new("/data/features/p/login");
+        assert_eq!(
+            comments_path(dir, Stage::Discover),
+            dir.join("discover-comments.json")
+        );
+        assert_eq!(
+            comments_path(dir, Stage::Plan),
+            dir.join("plan-comments.json")
+        );
+    }
+
+    #[test]
+    fn the_header_says_where_the_stage_stands() {
+        let mut f = crate::features::tests::feature("login", Vec::new(), 0);
+        assert_eq!(state(None, Stage::Discover), "feature gone");
+        assert_eq!(state(Some(&f), Stage::Discover), "ready for review");
+        let run = StageRun {
+            n: 1,
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Discover, run);
+        assert_eq!(state(Some(&f), Stage::Discover), "agent still working");
+        let run = f.runs.get_mut(&Stage::Discover).unwrap();
+        run.ready = Some(5);
+        run.sent_back = 2;
+        assert_eq!(
+            state(Some(&f), Stage::Discover),
+            "ready for review · sent back 2 times"
+        );
+        let f = crate::features::tests::feature("login", Vec::new(), 1);
+        assert_eq!(state(Some(&f), Stage::Discover), "approved");
     }
 }

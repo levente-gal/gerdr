@@ -3527,6 +3527,8 @@ impl Panel {
             B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment | B::Restore => {
                 Err(Why::other("Done on the diff"))
             }
+            // Only a feature stage's file under review has them.
+            B::Approve | B::SendBack => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly
             | B::Cancel

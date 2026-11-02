@@ -706,6 +706,10 @@ pub enum ReposButton {
     /// Delete the review comments on lines no longer in the diff (asked
     /// first).
     DropOutdated,
+    /// A feature stage's file under review (`worktree_diff::DocOf`):
+    /// approved as it is, or sent back to its agent with the comments.
+    Approve,
+    SendBack,
 }
 
 impl ReposButton {
@@ -760,6 +764,8 @@ impl ReposButton {
             ReposButton::Stop => "Stop",
             ReposButton::DiscardFile => "Discard changes",
             ReposButton::DropOutdated => "Drop outdated",
+            ReposButton::Approve => "Approve",
+            ReposButton::SendBack => "Send back",
         }
     }
 }
