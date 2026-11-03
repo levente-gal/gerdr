@@ -862,7 +862,7 @@ impl Gerdr {
                 .is_some_and(|menu| menu.item_at(pos).is_some()),
             O::Toasts => true,
             O::Repos => self.repos_view().is_some_and(|view| {
-                let layout = chrome::repos_layout(&view, self.repos_size());
+                let layout = chrome::repos_layout(&view, self.repos_rect());
                 let mut controls = layout
                     .lines
                     .iter()
@@ -1356,7 +1356,7 @@ impl Gerdr {
             )),
             Overlay::Repos => Some(chrome::repos_field(
                 &self.repos_view()?,
-                self.repos_size(),
+                self.repos_rect(),
                 scale,
             )),
             Overlay::Inbox => Some(chrome::inbox_field(&self.inbox_view()?, size, scale)),

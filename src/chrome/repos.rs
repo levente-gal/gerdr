@@ -235,6 +235,9 @@ pub struct ReposView {
     /// The diff alone across the panel, `title` its heading: no tree,
     /// branch picker, tabs, field or footer (a worktree's diff).
     pub diff_only: bool,
+    /// Laid flat into a tab rather than floating over the app: no shadow,
+    /// border or rounded corners.
+    pub flat: bool,
 }
 
 /// The header's branch picker: the branch the repositories acted on are
@@ -1124,14 +1127,9 @@ struct Parts {
     sheet_buttons: Vec<(usize, Rect)>,
 }
 
-/// Where the panel is on an output of `size` (see `panel_rect`).
+/// The panel as a popup on an output of `size`: centred, a margin in from
+/// its edges, at most `REPOS_MAX_WIDTH` by `REPOS_MAX_HEIGHT`.
 pub fn repos_panel_rect(size: Size<i32, Logical>) -> Rect {
-    panel_rect(size)
-}
-
-/// The panel on an output of `size`: centred, a margin in from its edges,
-/// at most `REPOS_MAX_WIDTH` by `REPOS_MAX_HEIGHT`.
-fn panel_rect(size: Size<i32, Logical>) -> Rect {
     let w = REPOS_MAX_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let h = REPOS_MAX_HEIGHT.min(size.h - 2 * HELP_MARGIN).max(1);
     Rectangle::new(
@@ -1268,10 +1266,8 @@ fn tree_width(w: i32, share: f64) -> i32 {
 }
 
 /// The tree's share of the panel for a press dragging the line between
-/// the tree and the detail to `x` (output coordinates), on an output of
-/// `size`.
-pub fn repos_share_at(x: f64, size: Size<i32, Logical>) -> f64 {
-    let panel = panel_rect(size);
+/// the tree and the detail to `x` (output coordinates), in `panel`.
+pub fn repos_share_at(x: f64, panel: Rect) -> f64 {
     let share = (x - panel.loc.x as f64) / panel.size.w.max(1) as f64;
     share.clamp(REPOS_TREE_SHARE_MIN, REPOS_TREE_SHARE_MAX)
 }
@@ -1282,11 +1278,9 @@ fn picker_width(label: &str) -> i32 {
     (2 * PICKER_PAD + PICKER_ICON + 2 * PICKER_GAP + text + PICKER_CHEVRON).max(PICKER_MIN)
 }
 
-/// How many tree lines and detail lines the panel shows at once on an
-/// output of `size`: with the error line, the result bar and the footer's
+/// How many tree lines and detail lines `panel` shows at once: with the error line, the result bar and the footer's
 /// rows all there, so that the page doesn't change as they come and go.
-pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) {
-    let panel = panel_rect(size);
+pub fn repos_page(panel: Rect, density: Density) -> (usize, usize) {
     let bottom = REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS);
     let middle = panel.size.h - REPOS_HEADER - bottom;
     let tree = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_row(density);
@@ -1294,12 +1288,10 @@ pub fn repos_page(size: Size<i32, Logical>, density: Density) -> (usize, usize) 
     (tree.max(1) as usize, detail.max(1) as usize)
 }
 
-/// How many lines a sheet over the panel shows at once on an output of
-/// `size`, with the error line, the result bar and the footer all there
+/// How many lines a sheet over `panel` shows at once, with the error line, the result bar and the footer all there
 /// (as `repos_page`); with the diff alone across the panel when
 /// `diff_only`.
-pub fn repos_sheet_rows(size: Size<i32, Logical>, diff_only: bool) -> usize {
-    let panel = panel_rect(size);
+pub fn repos_sheet_rows(panel: Rect, diff_only: bool) -> usize {
     let bottom = match diff_only {
         true => footer_h(REPOS_FOOTER_ROWS),
         false => REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS),
@@ -1310,25 +1302,25 @@ pub fn repos_sheet_rows(size: Size<i32, Logical>, diff_only: bool) -> usize {
 }
 
 /// How many characters of the monospace font a review comment's row of
-/// the diff holds, on an output of `size` with the tree's share `share`.
-pub fn repos_detail_cols(size: Size<i32, Logical>, share: f64) -> usize {
-    let w = panel_rect(size).size.w;
+/// the diff holds, in `panel` with the tree's share `share`.
+pub fn repos_detail_cols(panel: Rect, share: f64) -> usize {
+    let w = panel.size.w;
     detail_cols((w - tree_width(w, share)).max(0))
 }
 
 /// How many diff rows the panel shows at once with the diff alone across
-/// it (`ReposView::diff_only`), on an output of `size`: with the footer's
-/// rows all there, as `repos_page`.
-pub fn diff_only_page(size: Size<i32, Logical>, density: Density) -> usize {
-    let middle = panel_rect(size).size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
+/// it (`ReposView::diff_only`), in `panel`: with the footer's rows all
+/// there, as `repos_page`.
+pub fn diff_only_page(panel: Rect, density: Density) -> usize {
+    let middle = panel.size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
     let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
     detail.max(1) as usize
 }
 
 /// How many characters a review comment's row holds with the diff alone
-/// across the panel, on an output of `size`.
-pub fn diff_only_cols(size: Size<i32, Logical>) -> usize {
-    detail_cols(panel_rect(size).size.w)
+/// across `panel`.
+pub fn diff_only_cols(panel: Rect) -> usize {
+    detail_cols(panel.size.w)
 }
 
 /// The room between the line numbers before a diff line, and between
@@ -1712,16 +1704,15 @@ fn tree_row(view: &ReposView, i: usize) -> TreeRow {
     }
 }
 
-/// Where the parts of the panel showing `view` go on an output of `size`.
-pub fn repos_layout(view: &ReposView, size: Size<i32, Logical>) -> ReposLayout {
-    parts(view, size).layout
+/// Where the parts of the panel showing `view` go in `panel`.
+pub fn repos_layout(view: &ReposView, panel: Rect) -> ReposLayout {
+    parts(view, panel).layout
 }
 
 /// The panel's parts: the header across the top; the tree on the left and
 /// the detail pane on the right under it; then across the bottom the
 /// field, the error line, the result bar and the footer's actions.
-fn parts(view: &ReposView, size: Size<i32, Logical>) -> Parts {
-    let panel = panel_rect(size);
+fn parts(view: &ReposView, panel: Rect) -> Parts {
     let (x, top, w) = (panel.loc.x, panel.loc.y, panel.size.w);
     let bottom_edge = top + panel.size.h;
     let inner_x = x + HELP_PADDING;
@@ -2362,13 +2353,13 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
 }
 
 /// The diff line shown (by index into `DetailView::rows`) and the char of
-/// its text at `pos`, on an output of `size`, if `pos` is on one.
+/// its text at `pos`, in `panel`, if `pos` is on one.
 pub fn repos_diff_char(
     view: &ReposView,
-    size: Size<i32, Logical>,
+    panel: Rect,
     pos: Point<f64, Logical>,
 ) -> Option<(usize, usize)> {
-    let layout = repos_layout(view, size);
+    let layout = repos_layout(view, panel);
     let Some(ReposHit::DiffRow(i)) = repos_hit(&layout, pos) else {
         return None;
     };
@@ -2386,9 +2377,9 @@ pub fn repos_diff_char(
     (x >= 0.0).then(|| (i, (x / advance).floor() as usize + skip))
 }
 
-/// The panel's field, for the caret and selection, on an output of `size`.
-pub fn repos_field(view: &ReposView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
-    let layout = repos_layout(view, size);
+/// The panel's field, for the caret and selection, in `panel`.
+pub fn repos_field(view: &ReposView, panel: Rect, scale: f64) -> FieldSpot {
+    let layout = repos_layout(view, panel);
     // The open branch menu's search has the keyboard, else the diff's
     // while it has.
     let diff_search = layout
@@ -2622,7 +2613,7 @@ impl Painter {
         self.mixed_text(c, &rest, size, pen + gap, max_x, band, scale, rest_color)
     }
 
-    /// The repositories panel for an output of `size`, inside a margin of
+    /// The repositories panel laid out in `panel`, inside a margin of
     /// `SHADOW` holding its drop shadow, in one buffer: its frame with the
     /// lists over it as they show at rest, then the branch menu and the
     /// sheet over all.
@@ -2630,11 +2621,11 @@ impl Painter {
     pub(super) fn repos(
         &self,
         view: &ReposView,
-        size: Size<i32, Logical>,
+        panel: Rect,
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let parts = parts(view, size);
+        let parts = parts(view, panel);
         let layout = &parts.layout;
         let mut c = self.repos_frame(view, &parts, scale, p);
         let by = buffer_origin(layout.panel);
@@ -2666,8 +2657,24 @@ impl Painter {
     fn repos_frame(&self, view: &ReposView, parts: &Parts, scale: f64, p: &Palette) -> Canvas {
         let layout = &parts.layout;
         let panel = layout.panel;
-        let mut c = self.popup(panel.size, HELP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
+        let mut c = match view.flat {
+            // Laid into a tab: no shadow, border or corners. The buffer
+            // keeps the popup's margin, so that everything goes where it
+            // goes in one.
+            true => {
+                let mut c = Canvas::new(physical(super::shadowed(panel).1, scale));
+                c.fill(
+                    px(SHADOW),
+                    px(SHADOW),
+                    px(panel.size.w),
+                    px(panel.size.h),
+                    p.elevated,
+                );
+                c
+            }
+            false => self.popup(panel.size, HELP_RADIUS, scale, p),
+        };
         let s = scale as f32;
         let border = px(1).max(1);
         let by = buffer_origin(panel);
@@ -4890,12 +4897,13 @@ fn frame_view(view: &ReposView) -> ReposView {
         tree_share: view.tree_share,
         grouping: view.grouping,
         diff_only: view.diff_only,
+        flat: view.flat,
     }
 }
 
-/// The frame's inputs: the view as `frame_view` has it, the output's
-/// size, the theme and the scale.
-type FrameKey = (ReposView, Size<i32, Logical>, super::Theme, f64);
+/// The frame's inputs: the view as `frame_view` has it, the panel, the
+/// theme and the scale.
+type FrameKey = (ReposView, Rect, super::Theme, f64);
 /// A tree line's: the line as drawn, its size, the theme and the scale.
 type TreeKey = (TreeRow, Size<i32, Logical>, super::Theme, f64);
 /// A detail row's: the row as drawn, its size, the theme and the scale.
@@ -4920,13 +4928,13 @@ type MenuKey = (
 /// A branch menu line's: the line as drawn, its size, the theme and the
 /// scale.
 type MenuLineKey = (MenuLook, Size<i32, Logical>, super::Theme, f64);
-/// The sheet's: the sheet, what the pointer is over, its card, the
-/// output's size, the theme and the scale.
+/// The sheet's: the sheet, what the pointer is over, its card, the panel,
+/// the theme and the scale.
 type SheetKey = (
     SheetView,
     Option<ReposHit>,
     Option<Rect>,
-    Size<i32, Logical>,
+    Rect,
     super::Theme,
     f64,
 );
@@ -4962,15 +4970,15 @@ impl ReposLayers {
     pub(super) fn parts(
         &mut self,
         view: Option<ReposView>,
-        output: Size<i32, Logical>,
+        panel: Rect,
         theme: super::Theme,
         scale: f64,
         now: std::time::Instant,
         painter: &Painter,
     ) -> Vec<super::Part> {
         let placed = view.as_ref().map(|view| {
-            let (loc, size) = super::shadowed(panel_rect(output));
-            ((frame_view(view), output, theme, scale), loc, size)
+            let (loc, size) = super::shadowed(panel);
+            ((frame_view(view), panel, theme, scale), loc, size)
         });
         let Self {
             overlay,
@@ -4989,12 +4997,12 @@ impl ReposLayers {
             cards,
         } = self;
         let p = theme.palette();
-        let draw = |(view, output, ..): &FrameKey| {
+        let draw = |(view, panel, ..): &FrameKey| {
             #[cfg(test)]
             {
                 *frames += 1;
             }
-            let laid = parts(view, *output);
+            let laid = parts(view, *panel);
             painter
                 .repos_frame(view, &laid, scale, p)
                 .into_buffer(false)
@@ -5003,12 +5011,12 @@ impl ReposLayers {
             let Some(view) = &view else {
                 return Vec::new();
             };
-            let laid = parts(view, output);
+            let laid = parts(view, panel);
             let layout = &laid.layout;
             let mut over = Vec::new();
             if let Some(s) = &view.sheet {
                 let (loc, size) = super::shadowed(layout.panel);
-                let key = (s.clone(), view.hover, layout.sheet, output, theme, scale);
+                let key = (s.clone(), view.hover, layout.sheet, panel, theme, scale);
                 let buffer = sheet.get(key, |_| {
                     let mut c = Canvas::new(physical(size, scale));
                     let by = buffer_origin(layout.panel);
@@ -5465,6 +5473,7 @@ mod tests {
             density: DENSITY,
             tree_share: REPOS_TREE_SHARE,
             diff_only: false,
+            flat: false,
         }
     }
 
@@ -5696,7 +5705,7 @@ mod tests {
                     depth: 1,
                 }),
             );
-            let l = repos_layout(&view, size);
+            let l = repos_layout(&view, repos_panel_rect(size));
             use TreeTool::*;
             let tools: Vec<_> = l.tree_tools.iter().map(|(t, _)| *t).collect();
             assert_eq!(tools, [Expand, Collapse, List, Folders]);
@@ -5729,7 +5738,7 @@ mod tests {
         for (w, h) in SIZES {
             let size: Size<i32, Logical> = (w, h).into();
             for view in views() {
-                let l = repos_layout(&view, size);
+                let l = repos_layout(&view, repos_panel_rect(size));
                 let output = Rectangle::from_size(size);
                 assert!(inside(output, l.panel), "{size:?}");
                 assert_eq!(l.panel.loc.x, w - (l.panel.loc.x + l.panel.size.w));
@@ -5795,7 +5804,10 @@ mod tests {
                     assert!(inside(l.detail, *tab));
                 }
                 // Every line of a page fits (the panel is given no more).
-                let page = view.lines.len().min(repos_page(size, DENSITY).0);
+                let page = view
+                    .lines
+                    .len()
+                    .min(repos_page(repos_panel_rect(size), DENSITY).0);
                 assert!(l.lines.len() >= page, "{size:?}");
                 // The footer's actions stay in the footer and the result
                 // bar's in it; the "more" button in the footer too, with
@@ -5838,7 +5850,7 @@ mod tests {
     #[test]
     fn the_footer_wraps_and_puts_what_does_not_fit_behind_more() {
         let view = full();
-        let l = repos_layout(&view, (2560, 1440).into());
+        let l = repos_layout(&view, repos_panel_rect((2560, 1440).into()));
         let hints = l
             .buttons
             .iter()
@@ -5847,7 +5859,7 @@ mod tests {
         assert_eq!(hints, view.hints.len());
         assert_eq!(l.more, None);
         assert!(l.overflow.is_empty());
-        let narrow = repos_layout(&view, (800, 600).into());
+        let narrow = repos_layout(&view, repos_panel_rect((800, 600).into()));
         assert!(narrow.footer.size.h > footer_h(1));
         assert!(narrow.footer.size.h <= footer_h(REPOS_FOOTER_ROWS));
         let more = narrow.more.expect("a more button");
@@ -5866,17 +5878,23 @@ mod tests {
     #[test]
     fn the_tree_share_is_dragged_within_bounds() {
         let size: Size<i32, Logical> = (1280, 800).into();
-        let panel = panel_rect(size);
+        let panel = repos_panel_rect(size);
         let at = |share: f64| panel.loc.x as f64 + panel.size.w as f64 * share;
-        assert!((repos_share_at(at(0.5), size) - 0.5).abs() < 0.01);
-        assert_eq!(repos_share_at(at(0.05), size), REPOS_TREE_SHARE_MIN);
-        assert_eq!(repos_share_at(at(0.95), size), REPOS_TREE_SHARE_MAX);
+        assert!((repos_share_at(at(0.5), repos_panel_rect(size)) - 0.5).abs() < 0.01);
+        assert_eq!(
+            repos_share_at(at(0.05), repos_panel_rect(size)),
+            REPOS_TREE_SHARE_MIN
+        );
+        assert_eq!(
+            repos_share_at(at(0.95), repos_panel_rect(size)),
+            REPOS_TREE_SHARE_MAX
+        );
         let wide = ReposView {
             tree_share: 0.7,
             ..full()
         };
-        let l = repos_layout(&wide, size);
-        assert!(l.tree.size.w > repos_layout(&full(), size).tree.size.w);
+        let l = repos_layout(&wide, repos_panel_rect(size));
+        assert!(l.tree.size.w > repos_layout(&full(), repos_panel_rect(size)).tree.size.w);
         assert_eq!(repos_hit(&l, centre(l.splitter)), Some(ReposHit::Splitter));
     }
 
@@ -5997,7 +6015,7 @@ mod tests {
         for (w, h) in SIZES {
             let size: Size<i32, Logical> = (w, h).into();
             let view = diff_only();
-            let l = repos_layout(&view, size);
+            let l = repos_layout(&view, repos_panel_rect(size));
             let hit = |r: Rect| repos_hit(&l, centre(r));
             // No tree, picker, tabs or field: the diff across it, over
             // the footer's actions.
@@ -6028,13 +6046,16 @@ mod tests {
                 assert_eq!(hit(*r), Some(ReposHit::Button(*b)));
             }
             // As many rows as fit, which the page says.
-            let page = diff_only_page(size, view.density);
+            let page = diff_only_page(repos_panel_rect(size), view.density);
             let line_h = repos_detail_line(view.density);
             assert_eq!(
                 l.detail_list.size.h / line_h,
                 page.min(view.detail.rows.len() - 1) as i32
             );
-            assert!(diff_only_cols(size) > repos_detail_cols(size, REPOS_TREE_SHARE));
+            assert!(
+                diff_only_cols(repos_panel_rect(size))
+                    > repos_detail_cols(repos_panel_rect(size), REPOS_TREE_SHARE)
+            );
         }
     }
 
@@ -6044,7 +6065,7 @@ mod tests {
             let size: Size<i32, Logical> = (w, h).into();
             let plain = |v: &ReposView| v.sheet.is_none() && v.branch.menu.is_none();
             for view in views().into_iter().filter(plain) {
-                let l = repos_layout(&view, size);
+                let l = repos_layout(&view, repos_panel_rect(size));
                 let hit = |r: Rect| repos_hit(&l, centre(r));
                 assert_eq!(hit(l.branch), Some(ReposHit::BranchButton));
                 for (i, (line, check, expander)) in l.lines.iter().enumerate() {
@@ -6118,7 +6139,7 @@ mod tests {
     #[test]
     fn marks_say_what_they_mean() {
         let view = full();
-        let l = repos_layout(&view, (1600, 1000).into());
+        let l = repos_layout(&view, repos_panel_rect((1600, 1000).into()));
         let marks: Vec<_> = l.marks.iter().map(|&(i, m, _)| (i, m)).collect();
         assert!(marks.contains(&(6, RepoMark::Behind)), "{marks:?}");
         let TreeLine::Repo(repo) = &view.lines[6] else {
@@ -6167,7 +6188,7 @@ mod tests {
         for (w, h) in SIZES {
             let size: Size<i32, Logical> = (w, h).into();
             let view = with_menu();
-            let l = repos_layout(&view, size);
+            let l = repos_layout(&view, repos_panel_rect(size));
             let (menu, rows) = l.branch_menu.clone().expect("a menu");
             for (i, row) in rows.iter().enumerate() {
                 assert_eq!(repos_hit(&l, centre(*row)), Some(ReposHit::BranchRow(i)));
@@ -6196,15 +6217,18 @@ mod tests {
             let search = l.branch_search.expect("a search");
             assert!(within(menu, search) && search.loc.y + search.size.h <= rows[0].loc.y);
             assert_eq!(repos_hit(&l, centre(search)), Some(ReposHit::BranchMenu));
-            assert_eq!(repos_field(&view, size, 1.0).area, search);
+            assert_eq!(repos_field(&view, repos_panel_rect(size), 1.0).area, search);
             // Its text starts after the magnifier, as painted.
-            let text = repos_field(&view, size, 1.0).text;
+            let text = repos_field(&view, repos_panel_rect(size), 1.0).text;
             assert_eq!(text, search_field_text(search, 1.0));
             let closed = ReposView {
                 branch: full().branch,
                 ..view.clone()
             };
-            assert_eq!(repos_field(&closed, size, 1.0).area, l.field);
+            assert_eq!(
+                repos_field(&closed, repos_panel_rect(size), 1.0).area,
+                l.field
+            );
             let pad = (menu.loc.x as f64 + 1.0, menu.loc.y as f64 + 1.0);
             assert_eq!(repos_hit(&l, pad.into()), Some(ReposHit::BranchMenu));
             assert_eq!(
@@ -6222,7 +6246,7 @@ mod tests {
             }
             assert_eq!(repos_hit(&l, (1.0, 1.0).into()), None);
             // The row creating the branch typed.
-            let l = repos_layout(&with_create_menu(), size);
+            let l = repos_layout(&with_create_menu(), repos_panel_rect(size));
             let create = l.branch_create.expect("a row to create");
             assert_eq!(repos_hit(&l, centre(create)), Some(ReposHit::BranchCreate));
         }
@@ -6232,7 +6256,7 @@ mod tests {
     fn scrolled_lists_move_up_and_show_their_last_line_in_part() {
         let size: Size<i32, Logical> = (1280, 800).into();
         let (row_h, line_h) = (repos_row(DENSITY), repos_detail_line(DENSITY));
-        let fits = repos_layout(&full(), size);
+        let fits = repos_layout(&full(), repos_panel_rect(size));
         // As much as fits, then scrolled half a line with one more.
         let mut whole = full();
         whole.lines.truncate(fits.lines.len());
@@ -6242,7 +6266,10 @@ mod tests {
         scrolled.lines.push(whole.lines[1].clone());
         scrolled.detail.part = 0.5;
         scrolled.detail.rows.push(whole.detail.rows[1].clone());
-        let (a, b) = (repos_layout(&whole, size), repos_layout(&scrolled, size));
+        let (a, b) = (
+            repos_layout(&whole, repos_panel_rect(size)),
+            repos_layout(&scrolled, repos_panel_rect(size)),
+        );
         let hit = |p: (i32, i32)| repos_hit(&b, (p.0 as f64, p.1 as f64).into());
         let bottom = |r: Rect| r.loc.y + r.size.h;
 
@@ -6283,7 +6310,7 @@ mod tests {
         // Pushed up by the next file's header, only what shows of it is.
         let mut pushed = scrolled.clone();
         pushed.detail.pin = -(line_h / 4) as f64;
-        let c = repos_layout(&pushed, size);
+        let c = repos_layout(&pushed, repos_panel_rect(size));
         let top = c.detail_list.loc.y;
         assert_eq!(c.detail_rows[0].loc.y, top - line_h / 4);
         assert_eq!(c.detail_rows[1], b.detail_rows[1]);
@@ -6305,7 +6332,10 @@ mod tests {
             menu.part = 0.5;
             menu.rows.push("release/2.2".into());
         }
-        let (a, b) = (repos_layout(&whole, size), repos_layout(&scrolled, size));
+        let (a, b) = (
+            repos_layout(&whole, repos_panel_rect(size)),
+            repos_layout(&scrolled, repos_panel_rect(size)),
+        );
         let hit = |p: (i32, i32)| repos_hit(&b, (p.0 as f64, p.1 as f64).into());
         let (card_a, _) = a.branch_menu.unwrap();
         let (card_b, rows) = b.branch_menu.clone().unwrap();
@@ -6330,11 +6360,11 @@ mod tests {
         }
         for (w, h) in SIZES.into_iter().chain([(640, 480)]) {
             let size: Size<i32, Logical> = (w, h).into();
-            let l = repos_layout(&view, size);
+            let l = repos_layout(&view, repos_panel_rect(size));
             let (menu, rows) = l.branch_menu.expect("a menu");
             assert!(menu.loc.y + menu.size.h <= l.field.loc.y, "{size:?}");
             // As many as the tree's page less the search, whatever the size.
-            let page = (repos_page(size, DENSITY).0 - 1).min(BRANCH_MENU_ROWS);
+            let page = (repos_page(repos_panel_rect(size), DENSITY).0 - 1).min(BRANCH_MENU_ROWS);
             let lines = rows.len() + l.branch_headings.len();
             assert!(lines >= page, "{size:?}: {lines} < {page}");
             assert!(menu.size.w <= BRANCH_MENU_MAX.max(l.branch.size.w));
@@ -6346,7 +6376,7 @@ mod tests {
         for (w, h) in SIZES {
             let size: Size<i32, Logical> = (w, h).into();
             let view = with_sheet();
-            let l = repos_layout(&view, size);
+            let l = repos_layout(&view, repos_panel_rect(size));
             let sheet = l.sheet.expect("a sheet");
             // It lies over the tree and the detail, clear of the bottom.
             assert!(sheet.loc.y >= l.tree.loc.y);
@@ -6388,15 +6418,18 @@ mod tests {
     fn the_page_fits_whatever_shows_and_stays_put() {
         for (w, h) in SIZES.into_iter().chain([(640, 480), (3840, 2160)]) {
             let size: Size<i32, Logical> = (w, h).into();
-            let (tree_rows, detail_rows) = repos_page(size, DENSITY);
+            let (tree_rows, detail_rows) = repos_page(repos_panel_rect(size), DENSITY);
             assert!(tree_rows >= 1 && detail_rows >= 1);
             if h >= 600 {
                 assert!(tree_rows >= 8, "{size:?}: {tree_rows}");
                 assert!(detail_rows >= 8, "{size:?}: {detail_rows}");
             }
-            assert_eq!(repos_page(size, DENSITY), (tree_rows, detail_rows));
+            assert_eq!(
+                repos_page(repos_panel_rect(size), DENSITY),
+                (tree_rows, detail_rows)
+            );
             // Compact rows are shorter: more of them fit.
-            let compact = repos_page(size, Density::Compact);
+            let compact = repos_page(repos_panel_rect(size), Density::Compact);
             assert!(compact.0 >= tree_rows && compact.1 >= detail_rows);
             // A page of lines fits with or without the error and result.
             let filled = |v: ReposView| ReposView {
@@ -6406,7 +6439,7 @@ mod tests {
                 ..v
             };
             for view in views().into_iter().map(filled) {
-                let parts = parts(&view, size);
+                let parts = parts(&view, repos_panel_rect(size));
                 if h >= 600 {
                     assert_eq!(parts.layout.lines.len(), tree_rows, "{size:?}");
                     let (track, _) = detail_bar(&view, &parts.layout);
@@ -6420,8 +6453,8 @@ mod tests {
     fn the_field_spot_is_the_field() {
         let view = full();
         let size = (1280, 800).into();
-        let spot = repos_field(&view, size, 2.0);
-        assert_eq!(spot.area, repos_layout(&view, size).field);
+        let spot = repos_field(&view, repos_panel_rect(size), 2.0);
+        assert_eq!(spot.area, repos_layout(&view, repos_panel_rect(size)).field);
         assert_eq!(spot.line, view.field);
         assert!(spot.text.0 < spot.text.1);
     }
@@ -6430,7 +6463,7 @@ mod tests {
     fn the_pointer_on_a_diff_line_is_a_char_of_its_text() {
         let view = full();
         let size: Size<i32, Logical> = (1280, 800).into();
-        let layout = repos_layout(&view, size);
+        let layout = repos_layout(&view, repos_panel_rect(size));
         let i = view
             .detail
             .rows
@@ -6442,7 +6475,7 @@ mod tests {
         // Its text starts after the line numbers.
         let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter)) as f64;
         let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
-        let at = |x: f64| repos_diff_char(&view, size, (x, y).into());
+        let at = |x: f64| repos_diff_char(&view, repos_panel_rect(size), (x, y).into());
         assert_eq!(at(x0 + 0.5 * advance), Some((i, 0)));
         assert_eq!(at(x0 + 3.5 * advance), Some((i, 3)));
         // Left of its text, or on a row that is no line: none.
@@ -6456,7 +6489,10 @@ mod tests {
             ..view.clone()
         };
         let pos = (x0 + 0.5 * advance, y);
-        assert_eq!(repos_diff_char(&skipped, size, pos.into()), Some((i, 10)));
+        assert_eq!(
+            repos_diff_char(&skipped, repos_panel_rect(size), pos.into()),
+            Some((i, 10))
+        );
         let head = view
             .detail
             .rows
@@ -6465,7 +6501,10 @@ mod tests {
         if let Some(h) = head {
             let r = layout.detail_rows[h];
             let pos = (x0 + advance, r.loc.y as f64 + r.size.h as f64 / 2.0);
-            assert_eq!(repos_diff_char(&view, size, pos.into()), None);
+            assert_eq!(
+                repos_diff_char(&view, repos_panel_rect(size), pos.into()),
+                None
+            );
         }
     }
 
@@ -6475,7 +6514,7 @@ mod tests {
             let size: Size<i32, Logical> = (w, h).into();
             // Closed, its button is left of the title's, over the diff
             // only.
-            let closed = repos_layout(&full(), size);
+            let closed = repos_layout(&full(), repos_panel_rect(size));
             let parts: Vec<SearchPart> = closed.detail_search.iter().map(|p| p.0).collect();
             assert_eq!(parts, [SearchPart::Open]);
             let (_, open) = closed.detail_search[0];
@@ -6489,11 +6528,15 @@ mod tests {
                 },
                 ..full()
             };
-            assert!(repos_layout(&log, size).detail_search.is_empty());
+            assert!(
+                repos_layout(&log, repos_panel_rect(size))
+                    .detail_search
+                    .is_empty()
+            );
             // Open: the field, then the count and the buttons, in a row
             // left of the title's buttons and the tabs.
             let view = with_search();
-            let l = repos_layout(&view, size);
+            let l = repos_layout(&view, repos_panel_rect(size));
             let parts: Vec<SearchPart> = l.detail_search.iter().map(|p| p.0).collect();
             let order = [
                 SearchPart::Field,
@@ -6512,13 +6555,16 @@ mod tests {
             let (_, close) = l.detail_search[3];
             assert!(close.loc.x + close.size.w <= tabs.loc.x);
             assert!(within(l.detail, field));
-            let spot = repos_field(&view, size, 1.0);
+            let spot = repos_field(&view, repos_panel_rect(size), 1.0);
             assert_eq!(spot.area, field);
             assert_eq!(spot.line.text, "git");
             // Without the keys, the commit field has the spot.
             let mut away = with_search();
             away.detail.search.as_mut().unwrap().focused = false;
-            assert_eq!(repos_field(&away, size, 1.0).area, l.field);
+            assert_eq!(
+                repos_field(&away, repos_panel_rect(size), 1.0).area,
+                l.field
+            );
         }
     }
 
@@ -6558,11 +6604,25 @@ mod tests {
             ..full()
         };
         view.lines = view.lines.iter().cycle().take(60).cloned().collect();
-        let fits = repos_page(size, DENSITY).0;
+        let fits = repos_page(repos_panel_rect(size), DENSITY).0;
         view.lines.truncate(fits + 1);
         let mut layers = ReposLayers::default();
-        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
-        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        layers.parts(
+            Some(view.clone()),
+            repos_panel_rect(size),
+            Theme::Dark,
+            1.0,
+            opened,
+            &painter,
+        );
+        let a = layers.parts(
+            Some(view.clone()),
+            repos_panel_rect(size),
+            Theme::Dark,
+            1.0,
+            now,
+            &painter,
+        );
         let (frames, rows) = (layers.frames, layers.tree.drawn());
         // Alike lines share a buffer.
         assert_eq!(frames, 1);
@@ -6575,8 +6635,15 @@ mod tests {
                 over,
                 ..view.clone()
             };
-            let layout = repos_layout(&moved, size);
-            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            let layout = repos_layout(&moved, repos_panel_rect(size));
+            let b = layers.parts(
+                Some(moved.clone()),
+                repos_panel_rect(size),
+                Theme::Dark,
+                1.0,
+                now,
+                &painter,
+            );
             assert_eq!((layers.frames, layers.tree.drawn()), (frames, rows));
             let (ys_a, ys_b) = (tree_parts(&a, &layout), tree_parts(&b, &layout));
             assert!(ys_b.len() >= fits);
@@ -6607,18 +6674,32 @@ mod tests {
             hover: None,
             ..full()
         };
-        let fits = repos_page(size, DENSITY).1;
+        let fits = repos_page(repos_panel_rect(size), DENSITY).1;
         let detail = &mut view.detail;
         detail.rows = detail.rows.iter().cycle().take(60).cloned().collect();
         detail.rows.truncate(1 + fits + 1);
         detail.part = 0.2;
         let mut layers = ReposLayers::default();
-        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
-        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        layers.parts(
+            Some(view.clone()),
+            repos_panel_rect(size),
+            Theme::Dark,
+            1.0,
+            opened,
+            &painter,
+        );
+        let a = layers.parts(
+            Some(view.clone()),
+            repos_panel_rect(size),
+            Theme::Dark,
+            1.0,
+            now,
+            &painter,
+        );
         let (frames, rows) = (layers.frames, layers.detail.drawn());
         assert_eq!(frames, 1);
         assert!(rows > 1);
-        let list = repos_layout(&view, size).detail_list;
+        let list = repos_layout(&view, repos_panel_rect(size)).detail_list;
         let in_list = |parts: &[crate::chrome::Part]| -> Vec<f64> {
             let ys = parts.iter().filter(|p| p.clip == Some(list));
             ys.map(|p| p.loc.y).collect()
@@ -6639,8 +6720,15 @@ mod tests {
             moved.detail.over = over;
             moved.detail.pin = pin;
             moved.detail.stuck = stuck;
-            let layout = repos_layout(&moved, size);
-            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            let layout = repos_layout(&moved, repos_panel_rect(size));
+            let b = layers.parts(
+                Some(moved.clone()),
+                repos_panel_rect(size),
+                Theme::Dark,
+                1.0,
+                now,
+                &painter,
+            );
             assert_eq!((layers.frames, layers.detail.drawn()), (frames, rows));
             let ys_b = in_list(&b);
             let shadow = usize::from(stuck);
@@ -6673,11 +6761,27 @@ mod tests {
             menu.deletable.push(false);
         }
         let mut layers = ReposLayers::default();
-        layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, opened, &painter);
-        let a = layers.parts(Some(view.clone()), size, Theme::Dark, 1.0, now, &painter);
+        layers.parts(
+            Some(view.clone()),
+            repos_panel_rect(size),
+            Theme::Dark,
+            1.0,
+            opened,
+            &painter,
+        );
+        let a = layers.parts(
+            Some(view.clone()),
+            repos_panel_rect(size),
+            Theme::Dark,
+            1.0,
+            now,
+            &painter,
+        );
         let drawn = (layers.frames, layers.cards, layers.menu_lines.drawn());
         assert_eq!(drawn, (1, 1, 7));
-        let list = repos_layout(&view, size).branch_list.unwrap();
+        let list = repos_layout(&view, repos_panel_rect(size))
+            .branch_list
+            .unwrap();
         let in_list = |parts: &[crate::chrome::Part]| -> Vec<f64> {
             let ys = parts.iter().filter(|p| p.clip == Some(list));
             ys.map(|p| p.loc.y).collect()
@@ -6695,9 +6799,16 @@ mod tests {
                     menu.deletable.pop();
                 }
             }
-            let layout = repos_layout(&moved, size);
+            let layout = repos_layout(&moved, repos_panel_rect(size));
             assert_eq!(layout.branch_list, Some(list));
-            let b = layers.parts(Some(moved.clone()), size, Theme::Dark, 1.0, now, &painter);
+            let b = layers.parts(
+                Some(moved.clone()),
+                repos_panel_rect(size),
+                Theme::Dark,
+                1.0,
+                now,
+                &painter,
+            );
             let again = (layers.frames, layers.cards, layers.menu_lines.drawn());
             assert_eq!(again, drawn);
             let ys_b = in_list(&b);
@@ -6758,7 +6869,12 @@ mod tests {
         for view in views {
             for (w, h) in SIZES {
                 for (theme, scale) in [(Theme::Dark, 1.0), (Theme::Light, 2.0)] {
-                    let _ = painter.repos(&view, (w, h).into(), scale, theme.palette());
+                    let _ = painter.repos(
+                        &view,
+                        repos_panel_rect((w, h).into()),
+                        scale,
+                        theme.palette(),
+                    );
                 }
             }
         }
@@ -6907,9 +7023,10 @@ mod tests {
                 .map(|c| (c, size))
                 .chain([(&narrow.0, narrow.1)]);
             for ((name, view), size) in cases {
-                let panel = repos_layout(view, size).panel;
+                let panel = repos_layout(view, repos_panel_rect(size)).panel;
                 let w = ((panel.size.w + 2 * SHADOW) as f64 * scale).round() as usize;
-                let mut buffer = painter.repos(view, size, scale, theme.palette());
+                let mut buffer =
+                    painter.repos(view, repos_panel_rect(size), scale, theme.palette());
                 let mut out = Vec::new();
                 let _ = buffer.render().draw(|mem| {
                     let h = mem.len() / 4 / w;

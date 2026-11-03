@@ -5388,6 +5388,7 @@ impl Panel {
             tree_share: ctx.tree_share,
             grouping: self.grouping,
             diff_only: false,
+            flat: false,
         }
     }
 

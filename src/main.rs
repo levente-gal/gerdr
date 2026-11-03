@@ -1735,7 +1735,7 @@ impl Gerdr {
             {
                 return Some(drag);
             }
-            let layout = chrome::repos_layout(&view, self.repos_size());
+            let layout = chrome::repos_layout(&view, self.repos_rect());
             let on = layout.splitter.to_f64().contains(pos)
                 && layout.sheet.is_none()
                 && layout.branch_menu.is_none()
@@ -6444,7 +6444,7 @@ impl Gerdr {
             density: self.density,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
-            repos_size: self.repos_size(),
+            repos_rect: self.repos_rect(),
             scale: self.scale(),
         }
     }

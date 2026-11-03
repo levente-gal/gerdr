@@ -130,10 +130,11 @@ impl Gerdr {
         })
     }
 
-    /// What the repositories panel is centred in: the output, or its left
-    /// part beside a preview.
-    pub fn repos_size(&self) -> Size<i32, Logical> {
-        self.dock().map_or_else(|| self.output_size(), |d| d.panel)
+    /// Where the repositories panel goes: centred in the output, or in
+    /// its left part beside a preview.
+    pub fn repos_rect(&self) -> chrome::Rect {
+        let around = self.dock().map_or_else(|| self.output_size(), |d| d.panel);
+        chrome::repos_panel_rect(around)
     }
 
     /// Lay the windows out again if the review went beside its preview,

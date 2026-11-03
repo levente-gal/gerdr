@@ -194,7 +194,7 @@ pub struct ChromeView {
     pub size: Size<i32, Logical>,
     /// What the repositories panel is centred in: the output, or its left
     /// part beside a preview (see `md_dock`).
-    pub repos_size: Size<i32, Logical>,
+    pub repos_rect: Rect,
     pub scale: f64,
 }
 
@@ -630,7 +630,7 @@ impl Chrome {
                 // The repositories panel, over nearly everything.
                 Kind::Repos => parts.extend(self.repos.parts(
                     view.repos.take(),
-                    view.repos_size,
+                    view.repos_rect,
                     theme,
                     scale,
                     now,
@@ -1153,7 +1153,7 @@ fn hit_rects(
         }
     }
     if let Some(panel) = &view.repos {
-        let layout = repos_layout(panel, output);
+        let layout = repos_layout(panel, view.repos_rect);
         for (line, check, expander) in layout.lines {
             rects.extend(
                 [line, check]

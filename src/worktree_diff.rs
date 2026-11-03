@@ -996,7 +996,7 @@ fn ctx<'a>(
 impl crate::Gerdr {
     /// What the worktree diff's views and keys need of the chrome.
     pub(crate) fn worktree_env(&self) -> Env {
-        let size = self.repos_size();
+        let size = self.repos_rect();
         Env {
             page: crate::chrome::diff_only_page(size, self.density),
             cols: crate::chrome::diff_only_cols(size),
@@ -1269,6 +1269,7 @@ impl crate::Gerdr {
             tree_share: 0.0,
             grouping: Default::default(),
             diff_only: true,
+            flat: false,
         })
     }
 
