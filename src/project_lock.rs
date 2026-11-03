@@ -6,11 +6,23 @@
 //! crash, so no lock outlives its gerdr. A project is open elsewhere when an
 //! exclusive lock can't be had; gerdr's own shared lock counts too, so
 //! callers leave out the project they show themselves.
+//!
+//! That test holds the exclusive lock for a moment, and every gerdr runs it
+//! often (see `discover_services`). So a shared lock is retried while one
+//! is held, and a test that finds the lock held tries again before it says
+//! so: two tests at once mustn't look like a gerdr.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How long a lock is tried for while another gerdr's test holds it.
+const TAKE_FOR: Duration = Duration::from_secs(1);
+
+/// How many times a test tries the lock before it says it is held.
+const TESTS: u32 = 3;
 
 /// The folder of the locks: `$XDG_RUNTIME_DIR/gerdr/projects`; none
 /// without a runtime folder, and then no project counts as open elsewhere.
@@ -30,7 +42,14 @@ impl ProjectLock {
     /// alongside.
     pub fn take(dir: &Path, id: &str) -> io::Result<Self> {
         let file = open(dir, id)?;
-        flock(&file, libc::LOCK_SH | libc::LOCK_NB)?;
+        let until = Instant::now() + TAKE_FOR;
+        // Only a test holds it exclusively, and only for a moment.
+        while let Err(err) = flock(&file, libc::LOCK_SH | libc::LOCK_NB) {
+            if err.kind() != io::ErrorKind::WouldBlock || Instant::now() > until {
+                return Err(err);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         Ok(Self {
             id: id.to_owned(),
             _file: file,
@@ -48,8 +67,17 @@ pub fn is_open_elsewhere(dir: &Path, id: &str) -> bool {
     let Ok(file) = open(dir, id) else {
         return false;
     };
-    // Closing the file lets go of the lock just taken.
-    flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_err()
+    // Closing the file lets go of the lock just taken. Another gerdr's
+    // test holds it a moment only; a gerdr's shared lock stays.
+    for test in 0..TESTS {
+        if flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_ok() {
+            return false;
+        }
+        if test + 1 < TESTS {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    true
 }
 
 fn open(dir: &Path, id: &str) -> io::Result<File> {
@@ -116,6 +144,22 @@ mod tests {
         assert!(is_open_elsewhere(&dir, "aft"));
         drop(second);
         assert!(let_go(&dir, "aft"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lock_is_taken_while_another_gerdr_tests_it() {
+        let dir = temp_dir("tested");
+        let test = open(&dir, "aft").unwrap();
+        flock(&test, libc::LOCK_EX | libc::LOCK_NB).unwrap();
+        let ends = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(test);
+        });
+        let lock = ProjectLock::take(&dir, "aft").unwrap();
+        ends.join().unwrap();
+        assert!(is_open_elsewhere(&dir, "aft"));
+        drop(lock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
