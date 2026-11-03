@@ -348,11 +348,12 @@ fn started(pid: u32) -> Option<SystemTime> {
 }
 
 /// An app closed for an import, to start again as it was: its command
-/// line, environment and folder.
+/// line, environment (`None` when it can't be read, see `close`) and
+/// folder.
 #[derive(Debug)]
 struct Closed {
     argv: Vec<OsString>,
-    env: Vec<(OsString, OsString)>,
+    env: Option<Vec<(OsString, OsString)>>,
     cwd: Option<PathBuf>,
 }
 
@@ -371,13 +372,19 @@ fn close(pid: u32, name: &str) -> Result<Closed, String> {
             .map(|field| OsString::from_vec(field.to_vec()))
             .collect()
     };
-    let argv = fields(read("cmdline"));
+    // A browser or Electron app writes its process title over its
+    // arguments: one string of them all, split again (see `cmdline_args`).
+    let argv: Vec<OsString> = launch::cmdline_args(&read("cmdline"))
+        .into_iter()
+        .filter(|arg| !arg.is_empty())
+        .map(OsString::from)
+        .collect();
     if argv.is_empty() {
         return Err(format!(
             "Couldn't tell how {name} was started: quit it first"
         ));
     }
-    let env = fields(read("environ"))
+    let env: Vec<(OsString, OsString)> = fields(read("environ"))
         .into_iter()
         .filter_map(|pair| {
             let bytes = pair.into_vec();
@@ -388,6 +395,10 @@ fn close(pid: u32, name: &str) -> Result<Closed, String> {
             ))
         })
         .collect();
+    // Writing its title, a browser blanks its environment too. Started
+    // with none, it would find no session bus, so no keyring: its logins
+    // wouldn't open, and it drops them. gerdr's own is the session's.
+    let env = env.iter().any(|(key, _)| key == "HOME").then_some(env);
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
     // SAFETY: `kill` only sends a signal.
     if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
@@ -418,10 +429,11 @@ impl Closed {
     fn reopen(self, key: &str) -> std::io::Result<()> {
         let log = |file: Option<std::fs::File>| file.map_or_else(Stdio::null, Stdio::from);
         let mut command = std::process::Command::new(&self.argv[0]);
+        command.args(&self.argv[1..]);
+        if let Some(env) = self.env {
+            command.env_clear().envs(env);
+        }
         command
-            .args(&self.argv[1..])
-            .env_clear()
-            .envs(self.env)
             .stdin(Stdio::null())
             .stdout(log(launch::log_file(key)))
             .stderr(log(launch::log_file(key)))
