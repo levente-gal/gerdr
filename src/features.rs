@@ -126,6 +126,9 @@ const WATCH_EVERY: Duration = Duration::from_secs(30);
 /// How far a notch of the wheel moves a column of the feature tab, in
 /// logical pixels: as far as the sidebar's.
 const TAB_NOTCH: f64 = 48.0;
+/// How much of the page column PgUp / PgDn keep in view, in logical
+/// pixels: a line or two of what showed.
+const PAGE_KEEP: i32 = 48;
 
 /// A feature's probes (see `ship::probe`).
 #[derive(Debug, Default)]
@@ -2781,6 +2784,16 @@ impl Gerdr {
         mods: &ModifiersState,
         sym: Keysym,
     ) -> Option<PanelOutcome> {
+        let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
+        let page = match sym {
+            Keysym::Page_Up | Keysym::KP_Page_Up if plain => Some(-1.0),
+            Keysym::Page_Down | Keysym::KP_Page_Down if plain => Some(1.0),
+            _ => None,
+        };
+        if let Some(sign) = page {
+            self.page_feature_tab(sign);
+            return None;
+        }
         let panel = self.features.panel.as_ref()?;
         let slugs = self.listed_slugs(&panel.project);
         let feature = self.feature(&panel.project, &panel.slug).cloned()?;
@@ -2794,6 +2807,25 @@ impl Gerdr {
             self.reveal_feature_repo();
         }
         outcome
+    }
+
+    /// Glide the feature tab's page column a page down (`sign` 1) or up
+    /// (-1), keeping a little of what showed in view, as PgUp / PgDn do.
+    fn page_feature_tab(&mut self, sign: f64) {
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let col = TabColumn::Page;
+        let Some(place) = layout.columns[col as usize] else {
+            return;
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let by = (place.size.h - PAGE_KEEP).max(place.size.h / 2) as f64;
+        let scroll = &mut panel.scroll[col as usize];
+        let to = scroll.pos() + sign * by;
+        scroll.glide_to(to, Instant::now(), tab_bounds(&layout, col));
     }
 
     /// Scroll the feature tab's repositories' column to show the one with

@@ -11,7 +11,7 @@ rules, for reviewing a branch before it merges.
 | --- | --- |
 | Esc | Step back one level: clear the query, then leave a sub-mode (search, comment, rename), then close. The footer hint reads "clear" while there is something to clear, "close" otherwise. A comment or commit draft is kept, never thrown away by Esc. |
 | Enter | Do the selected row's main action. |
-| Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. |
+| Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. Where there is no list to page through, PgUp / PgDn scroll a page (the feature tab's stage page). |
 | Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. |
 | Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too). |
 | Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons). |
