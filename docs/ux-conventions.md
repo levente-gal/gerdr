@@ -13,17 +13,19 @@ rules, for reviewing a branch before it merges.
 | Enter | Do the selected row's main action. |
 | Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. |
 | Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. |
+| Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too). |
+| Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons). |
 | Ctrl+N | New / create (project, branch, todo). |
 | Ctrl+O | Open (in a tab, in the browser, the file). |
-| Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature panel: a repository's pull request, or Verify's evidence once a run of its checks wrote it). |
+| Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature tab: a repository's pull request, or Verify's evidence once a run of its checks wrote it). |
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
-| Ctrl+R | Refresh / reload (feature panel: start the stage's agent afresh, Build's too). |
+| Ctrl+R | Refresh / reload (feature tab: start the selected stage's agent afresh, Build's too). |
 | Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet). |
 | Ctrl+Shift+V | Show or hide the file under review rendered, beside the review, following its edits and caret; on an output narrower than 1400 px, in a web tab of its own (a feature's brief, plan or other stage file; Verify's evidence). |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
-| Ctrl+Shift+L | Link another project to a feature, so it spans that project's repositories too: the new feature dialog's project picker (again: back to the repositories; also its "Link project…" button), or the feature panel before Ship. |
+| Ctrl+Shift+L | Link another project to a feature, so it spans that project's repositories too: the new feature dialog's project picker (again: back to the repositories; also its "Link project…" button), or the feature tab before Ship. |
 | Ctrl+Q | Stop a project's session (project menu). |
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
