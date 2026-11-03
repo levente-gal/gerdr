@@ -2644,8 +2644,20 @@ impl Gerdr {
             if now - since >= FORGET_IDLE && !restoring {
                 self.gone_since.remove(&id);
                 if let Some(p) = self.projects.project_mut(&project) {
-                    p.workspaces.retain(|r| r.id != id);
-                    changed = true;
+                    match p.workspaces.iter_mut().find(|r| r.id == id) {
+                        // Its app quit: keep the place, not what to start.
+                        Some(r) if r.keeps_place() => {
+                            if !r.tabs.is_empty() || !r.panes.is_empty() {
+                                r.tabs.clear();
+                                r.panes.clear();
+                                changed = true;
+                            }
+                        }
+                        _ => {
+                            p.workspaces.retain(|r| r.id != id);
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
@@ -3455,7 +3467,7 @@ impl Gerdr {
         let mut zed_expected = false;
         for record in records {
             if !record.tabs.iter().any(|t| t.layout.holds_apps()) {
-                if record.herdr_id.is_none() {
+                if record.herdr_id.is_none() && !record.keeps_place() {
                     self.forget_workspace(&record.id);
                 }
                 continue;
@@ -4324,9 +4336,14 @@ impl Gerdr {
         else {
             return;
         };
-        let bar = chrome::pane_bar_rects(rect).0;
-        // At the bar's left end, clear of its buttons; on its grip too
-        // while the bar is hidden.
+        // As high as the bar's pill reaches, so the menu opens below it.
+        let grip = chrome::pane_bar_rects(rect).0;
+        let bar = Rectangle::new(
+            grip.loc,
+            (grip.size.w, chrome::PANE_BAR_HEIGHT.min(rect.size.h)).into(),
+        );
+        // At the bar's left end, clear of its buttons: on its grip, out
+        // or not.
         let on = Point::from((bar.loc.x as f64 + 4.0, bar.loc.y as f64 + 1.0));
         if let Some(mut spec) = self.pane_bar_menu(on) {
             spec.anchor = Rectangle::new(
@@ -4987,9 +5004,9 @@ impl Gerdr {
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
                 for (id, rect) in tab.shown_rects(area) {
-                    // A terminal's bar takes the top of its place.
+                    // A pane with a bar gives its grip the top of its place.
                     let rect = if tab.has_bar(id) {
-                        chrome::pane_bar_rects_shown(rect, self.pane_bar_shown(tab, id)).1
+                        chrome::pane_bar_rects(rect).1
                     } else {
                         rect
                     };
@@ -6174,7 +6191,7 @@ impl Gerdr {
                 .into_iter()
                 .find(|(id, _)| *id == focused)?;
             Some(if tab.has_bar(id) {
-                chrome::pane_bar_rects_shown(rect, self.pane_bar_shown(tab, id)).1
+                chrome::pane_bar_rects(rect).1
             } else {
                 rect
             })

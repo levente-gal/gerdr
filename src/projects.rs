@@ -936,6 +936,18 @@ impl WorkspaceRecord {
     pub fn mirrors(&self, herdr_id: &str) -> bool {
         self.herdr_id.as_deref() == Some(herdr_id)
     }
+
+    /// Whether it keeps its place once its windows are gone, rather than
+    /// being forgotten: the Cursor workspace, opened again where it was
+    /// when Cursor starts again.
+    pub fn keeps_place(&self) -> bool {
+        self.kind == Kind::Cursor && self.herdr_id.is_none()
+    }
+
+    /// Whether only its place is kept: nothing of it to bring back.
+    pub fn is_place_only(&self) -> bool {
+        self.keeps_place() && self.tabs.is_empty()
+    }
 }
 
 /// What `Store::reread` found.
@@ -1767,6 +1779,19 @@ mod tests {
         // w2, not open, keeps its place between them.
         assert_eq!(ids, ["w3", "w2", "w1"]);
         assert!(!store.order_workspaces("api", &["w3", "w1"]));
+    }
+
+    #[test]
+    fn only_the_cursor_workspace_keeps_its_place() {
+        let mut cursor = record("g1".into(), "Cursor".into(), Kind::Cursor, "/w".into());
+        // In herdr: herdr keeps it.
+        assert!(!cursor.keeps_place());
+        cursor.herdr_id = None;
+        assert!(cursor.keeps_place() && cursor.is_place_only());
+        cursor.tabs = sample().projects[0].workspaces[0].tabs.clone();
+        assert!(cursor.keeps_place() && !cursor.is_place_only());
+        let project = record("g2".into(), "api".into(), Kind::Project, "/w".into());
+        assert!(!project.keeps_place() && !project.is_place_only());
     }
 
     #[test]
