@@ -324,12 +324,13 @@ impl DiffView {
         }
         let page = ctx.page.max(1);
         // Out of view or near an edge (under the pinned header), it goes
-        // a third down the page.
+        // a third down the page; on a line on many rows, the row it is on.
+        let shown = self.part_row(row, hit.chars.start);
         let room = (page / 4).min(3) as f64;
         let near = |at: f64| at < room.max(1.0) || at > page as f64 - 1.0 - room;
-        if self.shown_at(row, page).is_none_or(near) {
+        if self.shown_at(shown, page).is_none_or(near) {
             let last = self.diff_last(page) as f64;
-            let to = (row as f64 - (page / 3) as f64).clamp(0.0, last);
+            let to = (shown as f64 - (page / 3) as f64).clamp(0.0, last);
             move_to(&mut self.scroll, to);
         }
         self.select_diff_row(row, ctx);
@@ -349,6 +350,12 @@ impl DiffView {
         let mut rows: HashMap<(usize, usize, Within), usize> = HashMap::new();
         let mut heads: HashMap<(usize, usize), usize> = HashMap::new();
         for (r, row) in self.rows.iter().enumerate() {
+            // A page has no headers: its file's first row stands for them.
+            if self.plain
+                && let Some(file) = row.file()
+            {
+                heads.entry(file).or_insert(r);
+            }
             match *row {
                 DiffRow::File(k, f) => {
                     heads.insert((k, f), r);
@@ -371,7 +378,10 @@ impl DiffView {
         let mut parent = None;
         for (r, row) in self.rows.iter().enumerate() {
             let DiffRow::Comment { at, c, i } = *row else {
-                if !matches!(row, DiffRow::Editor { .. } | DiffRow::EditorHint { .. }) {
+                if !matches!(
+                    row,
+                    DiffRow::Editor { .. } | DiffRow::EditorHint { .. } | DiffRow::Wrap(..)
+                ) {
                     parent = Some(r);
                 }
                 continue;
@@ -385,6 +395,10 @@ impl DiffView {
             let found = (r, Within::Comment(c, i), text);
             match (at, parent) {
                 (Some(_), Some(p)) => under.entry(p).or_default().push(found),
+                // On the whole of a page's file: over its first line.
+                (Some(file), None) if self.plain => {
+                    under.entry(heads[&file]).or_default().push(found);
+                }
                 _ => gone.push((comment, found)),
             }
         }
@@ -412,9 +426,15 @@ impl DiffView {
                             }),
                     );
                 };
-                add(Within::Path, &path_text(file), None);
-                for &(r, within, text) in under.get(&head).into_iter().flatten() {
-                    add(within, text, Some(r));
+                // A page shows no path; its first line's comments come with
+                // that line.
+                if !self.plain {
+                    add(Within::Path, &path_text(file), None);
+                }
+                if !matches!(self.rows.get(head), Some(DiffRow::Line(..))) {
+                    for &(r, within, text) in under.get(&head).into_iter().flatten() {
+                        add(within, text, Some(r));
+                    }
                 }
                 for (h, hunk) in file.hunks.iter().enumerate() {
                     if !hunk.context.is_empty() {
@@ -486,7 +506,11 @@ impl DiffView {
         let count = chrome::search_count(!query.text.is_empty(), n, search.current);
         Some(SearchBar {
             query,
-            placeholder: "Find in the diff".into(),
+            placeholder: match self.plain {
+                true => "Find in the file",
+                false => "Find in the diff",
+            }
+            .into(),
             count,
             found: n > 0,
             focused: self.search_has_keys(ctx),

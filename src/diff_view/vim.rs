@@ -644,7 +644,7 @@ impl DiffView {
         let Some(head) = self.header_row(&after.root, Some(&after.path)) else {
             return;
         };
-        let DiffRow::File(k, f) = self.rows[head] else {
+        let Some((k, f)) = self.rows[head].file() else {
             return;
         };
         let Some((_, file)) = self.diff_file(k, f) else {

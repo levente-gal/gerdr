@@ -562,6 +562,9 @@ pub struct DetailView {
     /// Where the places found are on the scrollbar: shares of all the
     /// rows from the top, each with whether it is the one gone to.
     pub ticks: Vec<(f64, bool)>,
+    /// It shows a file as a page, not as a change: one column of line
+    /// numbers, no tint.
+    pub plain: bool,
     /// How many digits the line numbers before the diff's lines take: as
     /// many as the widest in view; 0 for no numbers.
     pub gutter: usize,
@@ -757,6 +760,8 @@ pub enum ReposButton {
     /// A comment on the diff lines picked; the comment being written
     /// kept, dropped, or (one written before) deleted.
     Comment,
+    /// Write a comment on the whole of the file under review.
+    CommentFile,
     SaveComment,
     DiscardComment,
     DeleteComment,
@@ -833,6 +838,7 @@ impl ReposButton {
             ReposButton::SendReview => "Send to agent",
             ReposButton::ClearReview => "Clear review",
             ReposButton::Comment => "Comment",
+            ReposButton::CommentFile => "Comment on file",
             ReposButton::SaveComment => "Save",
             ReposButton::DiscardComment => "Discard",
             ReposButton::DeleteComment => "Delete",
@@ -1429,24 +1435,27 @@ pub fn diff_only_cols(panel: Rect) -> usize {
 const GUTTER_GAP: i32 = 6;
 
 /// How wide the line numbers before the diff's lines are, logical pixels,
-/// with `digits` digits each (old, then new): none for none.
-fn gutter_width(digits: usize) -> i32 {
+/// with `digits` digits each (old, then new; on a `plain` page, the one):
+/// none for none.
+fn gutter_width(digits: usize, plain: bool) -> i32 {
     if digits == 0 {
         return 0;
     }
     let advance = measure_mono("0", SMALL_FONT_SIZE)
         .filter(|a| *a > 0.0)
         .unwrap_or(SMALL_FONT_SIZE * 0.6);
-    (2.0 * digits as f32 * advance).ceil() as i32 + 2 * GUTTER_GAP
+    let columns = if plain { 1.0 } else { 2.0 };
+    (columns * digits as f32 * advance).ceil() as i32 + 2 * GUTTER_GAP
 }
 
 /// How many chars of a diff line fit on its row past numbers of `digits`
-/// digits, where a comment's row holds `cols` (`repos_detail_cols`).
-pub fn diff_line_room(cols: usize, digits: usize) -> usize {
+/// digits (`plain`: of the one column), where a comment's row holds `cols`
+/// (`repos_detail_cols`).
+pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
     let advance = measure_mono("0", REPOS_MONO_SIZE)
         .filter(|a| *a > 0.0)
         .unwrap_or(REPOS_MONO_SIZE * 0.6);
-    let px = cols as f32 * advance + COMMENT_INDENT as f32 - gutter_width(digits) as f32;
+    let px = cols as f32 * advance + COMMENT_INDENT as f32 - gutter_width(digits, plain) as f32;
     ((px / advance).floor() as usize).max(8)
 }
 
@@ -1626,6 +1635,8 @@ struct DetailLook {
     word: Option<Range<usize>>,
     /// The digits of the line numbers before a line (`DetailView::gutter`).
     gutter: usize,
+    /// One column of them, no tint (`DetailView::plain`).
+    plain: bool,
     /// Its line is shown from a char on (`DetailView::skipped`).
     skipped: bool,
 }
@@ -1665,6 +1676,7 @@ fn detail_look(view: &ReposView, i: usize) -> DetailLook {
             .filter(|(j, _)| *j == i)
             .map(|(_, word)| word.clone()),
         gutter: view.detail.gutter,
+        plain: view.detail.plain,
         skipped: view.detail.skipped.is_some_and(|(j, _)| j == i),
     }
 }
@@ -2504,7 +2516,8 @@ pub fn repos_diff_char(
     let DetailRow::Line(_) = view.detail.rows.get(i)? else {
         return None;
     };
-    let start = layout.detail_rows.get(i)?.loc.x + DIFF_INSET + gutter_width(view.detail.gutter);
+    let gutter = gutter_width(view.detail.gutter, view.detail.plain);
+    let start = layout.detail_rows.get(i)?.loc.x + DIFF_INSET + gutter;
     let x = pos.x - start as f64;
     let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
     // A row shown from a char on: chars of the line, not of the row.
@@ -3999,12 +4012,13 @@ impl Painter {
             }
             DetailRow::Line(line) => {
                 let tone = match line.kind {
+                    _ if look.plain => None,
                     LineKind::Added => Some(p.success),
                     LineKind::Removed => Some(p.error),
                     LineKind::Context => None,
                 };
                 // After the line numbers (where it was, where it is).
-                let gutter = px(gutter_width(look.gutter)) as f32;
+                let gutter = px(gutter_width(look.gutter, look.plain)) as f32;
                 let tx = bx + inset + gutter;
                 let lighten = |color: Rgb| match lit {
                     Some(amount) => mix(color, p.selected, amount),
@@ -4103,12 +4117,17 @@ impl Painter {
                 // The numbers: where it was (none for an added line), where
                 // it is (none for a removed one), right-aligned in theirs.
                 if look.gutter > 0 {
-                    let col = (gutter - 2.0 * px(GUTTER_GAP) as f32) / 2.0;
+                    let columns = if look.plain { 1.0 } else { 2.0 };
+                    let col = (gutter - 2.0 * px(GUTTER_GAP) as f32) / columns;
                     let x0 = bx + inset;
-                    let numbers = [
-                        (line.kind != LineKind::Added).then_some(line.old),
-                        (line.kind != LineKind::Removed).then_some(line.number),
-                    ];
+                    // A page's lines have the one number.
+                    let numbers = match look.plain {
+                        true => [Some(line.number), None],
+                        false => [
+                            (line.kind != LineKind::Added).then_some(line.old),
+                            (line.kind != LineKind::Removed).then_some(line.number),
+                        ],
+                    };
                     for (k, n) in numbers.into_iter().enumerate() {
                         let Some(n) = n.filter(|&n| n > 0) else {
                             continue;
@@ -6662,7 +6681,7 @@ mod tests {
         let rect = layout.detail_rows[i];
         let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
         // Its text starts after the line numbers.
-        let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter)) as f64;
+        let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter, false)) as f64;
         let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
         let at = |x: f64| repos_diff_char(&view, repos_panel_rect(size), (x, y).into());
         assert_eq!(at(x0 + 0.5 * advance), Some((i, 0)));
