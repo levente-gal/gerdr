@@ -10,9 +10,13 @@
 //!
 //! The CLIs' flags, as checked on 2026-11-02:
 //!
-//! - `claude [--add-dir <dir>]… "<prompt>"`: interactive, prompt first.
-//! - `cursor-agent [--add-dir <dir>]… "<prompt>"`.
-//! - `codex [--add-dir <dir>]… "<prompt>"`.
+//! - `claude [--add-dir <dir>]… -- "<prompt>"`: interactive, prompt first.
+//! - `cursor-agent [--add-dir <dir>]… -- "<prompt>"`.
+//! - `codex [--add-dir <dir>]… -- "<prompt>"`.
+//!
+//! The `--` matters: claude's `--add-dir` takes any number of directories,
+//! so without it the prompt is read as one more, and the agent starts with
+//! no prompt at all and no complaint (checked on 2026-11-03).
 //!
 //! A read-only stage (Plan) is told so in its prompt; its plan mode would
 //! stop it writing `plan.md`. gerdr checks the code didn't change instead
@@ -100,7 +104,9 @@ pub fn needs(stage: Stage) -> Option<Needs> {
 /// The shell command that starts `base` (an `[agents]` command such as
 /// `claude`) on the prompt in `prompt`, allowed into `dirs` too.
 /// The prompt goes in as `"$(cat '<prompt>')"`, so a long one with quotes
-/// and newlines arrives whole.
+/// and newlines arrives whole. A CLI gerdr knows gets `--` before it, so no
+/// flag can take the prompt for its own value, whether gerdr added the flag
+/// or the `[agents]` command ends in one.
 pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
     use crate::desktop::shell_quote;
     let mut line = base.trim().to_owned();
@@ -109,6 +115,7 @@ pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
             line.push_str(" --add-dir ");
             line.push_str(&shell_quote(&dir.to_string_lossy()));
         }
+        line.push_str(" --");
     }
     line.push_str(&format!(
         " \"$(cat {})\"",
@@ -185,7 +192,7 @@ mod tests {
             assert_eq!(
                 command_line(base, prompt, &dirs),
                 format!(
-                    "{base} --add-dir '/d/my feature' \"$(cat '/d/my feature/prompts/plan-1.md')\""
+                    "{base} --add-dir '/d/my feature' -- \"$(cat '/d/my feature/prompts/plan-1.md')\""
                 )
             );
         }
@@ -195,7 +202,7 @@ mod tests {
         );
         assert_eq!(
             command_line("claude", Path::new("/p.md"), &[]),
-            "claude \"$(cat /p.md)\""
+            "claude -- \"$(cat /p.md)\""
         );
     }
 
