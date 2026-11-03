@@ -253,6 +253,74 @@ fn create_in(
     }
 }
 
+/// A linked project to make a feature's folder in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkSpec {
+    /// The project's id.
+    pub project: String,
+    /// Its name, for errors.
+    pub name: String,
+    pub root: Root,
+    /// Its repositories the feature changes.
+    pub touched: Vec<String>,
+}
+
+/// `create` in the home `root`, then `create_links`: on a failure, every
+/// folder made so far is taken down again.
+pub fn create_spanning(
+    root: &Root,
+    slug: &str,
+    touched: &[String],
+    links: &[LinkSpec],
+) -> Result<(Created, Vec<(Link, Created)>), String> {
+    let home = create(root, slug, touched)?;
+    match create_links(slug, links) {
+        Ok(made) => Ok((home, made)),
+        Err(err) => {
+            undo_created(slug, &home);
+            Err(err)
+        }
+    }
+}
+
+/// `create_linked` for each of `links`, the error naming the project: on
+/// a failure, the folders made before it are taken down again.
+pub fn create_links(slug: &str, links: &[LinkSpec]) -> Result<Vec<(Link, Created)>, String> {
+    let mut made: Vec<(Link, Created)> = Vec::new();
+    for spec in links {
+        match create_linked(&spec.root, slug, &spec.touched, &spec.project) {
+            Ok(created) => made.push((link_of(&spec.project, &spec.root, &created), created)),
+            Err(err) => {
+                for (_, created) in &made {
+                    undo_created(slug, created);
+                }
+                return Err(format!("{}: {err}", spec.name));
+            }
+        }
+    }
+    Ok(made)
+}
+
+/// Take down a feature folder `create` made a moment ago.
+fn undo_created(slug: &str, created: &Created) {
+    let repos: Vec<&Repo> = created.repos.iter().collect();
+    let mut failed = Vec::new();
+    take_down(
+        &format!("feature/{slug}"),
+        &repos,
+        &created.dir,
+        true,
+        &mut failed,
+    );
+    if !failed.is_empty() {
+        tracing::warn!(
+            "taking {} down again: {}",
+            shown(&created.dir),
+            failed.join("; ")
+        );
+    }
+}
+
 /// The link of linked project `project` whose feature folder
 /// `create_linked` made under `root` as `created`.
 pub fn link_of(project: &str, root: &Root, created: &Created) -> Link {
@@ -661,7 +729,7 @@ pub fn remove(feature: &Feature, force: bool) -> Result<(), String> {
     let mut failed = Vec::new();
     for (project, dir) in feature.folders() {
         let repos: Vec<&Repo> = feature.repos_of(project).collect();
-        take_down(feature, &repos, dir, force, &mut failed);
+        take_down(&feature.branch(), &repos, dir, force, &mut failed);
     }
     if failed.is_empty() {
         Ok(())
@@ -688,7 +756,7 @@ pub fn unlink(feature: &Feature, project: &str, force: bool) -> Result<(), Strin
     }
     let mut failed = Vec::new();
     let repos: Vec<&Repo> = feature.repos_of(Some(project)).collect();
-    take_down(feature, &repos, &link.dir, force, &mut failed);
+    take_down(&feature.branch(), &repos, &link.dir, force, &mut failed);
     if failed.is_empty() {
         Ok(())
     } else {
@@ -696,17 +764,11 @@ pub fn unlink(feature: &Feature, project: &str, force: bool) -> Result<(), Strin
     }
 }
 
-/// Take down `repos`' worktrees of `feature`, all in feature folder `dir`,
-/// then `dir` once they are gone, noting what failed in `failed`.
-fn take_down(
-    feature: &Feature,
-    repos: &[&Repo],
-    dir: &Path,
-    force: bool,
-    failed: &mut Vec<String>,
-) {
+/// Take down `repos`' worktrees of a feature on `branch`, all in feature
+/// folder `dir`, then `dir` once they are gone, noting what failed in
+/// `failed`.
+fn take_down(branch: &str, repos: &[&Repo], dir: &Path, force: bool, failed: &mut Vec<String>) {
     let mut left = false;
-    let branch = feature.branch();
     for repo in repos {
         let name = repo.key();
         if repo.worktree.symlink_metadata().is_ok() {
@@ -727,10 +789,10 @@ fn take_down(
         if !repo.touched {
             continue;
         }
-        if let Err(err) = hook::unguard(&repo.main, &branch) {
+        if let Err(err) = hook::unguard(&repo.main, branch) {
             tracing::warn!("unguarding {branch} of {name}: {err}");
         }
-        if !branch_exists(&repo.main, &branch) {
+        if !branch_exists(&repo.main, branch) {
             continue;
         }
         if !force {
@@ -746,7 +808,7 @@ fn take_down(
                 continue;
             }
         }
-        if let Err(err) = git(&repo.main, &["branch", "-D", &branch]) {
+        if let Err(err) = git(&repo.main, &["branch", "-D", branch]) {
             failed.push(format!("{name}: {err}"));
         }
     }
@@ -1094,6 +1156,54 @@ mod tests {
         assert!(!home.join(".features").exists());
         assert!(!branch_exists(&lib, "feature/x"));
         assert!(!branch_exists(&home, "feature/x"));
+    }
+
+    #[test]
+    fn a_feature_over_two_roots_is_made_whole_or_not_at_all() {
+        let t = Temp::new();
+        let home = t.repo("app", "main");
+        let mut libs = Vec::new();
+        for name in ["one", "two"] {
+            let lib = t.0.join(name).join("lib");
+            std::fs::create_dir_all(&lib).unwrap();
+            run(&lib, &["init", "-q", "-b", "main"]);
+            commit(&lib, "a", "first");
+            libs.push(lib);
+        }
+        let root = find_root(&home, &[], &[], &[]).unwrap();
+        let spec = |i: usize, touched: &[&str]| LinkSpec {
+            project: format!("p{i}"),
+            name: format!("Project {i}"),
+            root: find_root(&libs[i], &[], &[], &[]).unwrap(),
+            touched: touched.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        // The second link can't be made: neither folder stays.
+        std::fs::create_dir_all(libs[1].join(".features/x")).unwrap();
+        let err = create_spanning(&root, "x", &[], &[spec(0, &["lib"]), spec(1, &[])]).unwrap_err();
+        assert!(err.starts_with("Project 1: "), "{err}");
+        assert!(!home.join(".features/x").exists());
+        assert!(!libs[0].join(".features").exists());
+        assert!(!branch_exists(&libs[0], "feature/x"));
+        assert!(!branch_exists(&home, "feature/x"));
+        std::fs::remove_dir_all(libs[1].join(".features")).unwrap();
+
+        let (made, links) =
+            create_spanning(&root, "x", &[], &[spec(0, &["lib"]), spec(1, &[])]).unwrap();
+        assert_eq!(made.dir, home.join(".features/x"));
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].0.project, "p0");
+        assert_eq!(links[0].0.dir, libs[0].join(".features/x"));
+        assert!(links[0].1.repos[0].touched && !links[1].1.repos[0].touched);
+        assert_eq!(links[1].1.repos[0].key(), "p1:lib");
+        let mut f = feature_of(&root, made, "x");
+        for (link, created) in links {
+            f.links.push(link);
+            f.repos.extend(created.repos);
+        }
+        remove(&f, false).unwrap();
+        for dir in [&home, &libs[0], &libs[1]] {
+            assert!(!dir.join(".features").exists(), "{}", dir.display());
+        }
     }
 
     #[test]

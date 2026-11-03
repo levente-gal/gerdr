@@ -474,6 +474,17 @@ impl<T> PerProject<T> {
     }
 }
 
+impl PerProject<String> {
+    /// What `repo` is called on screen, with these projects' names: its
+    /// name, a linked project's as "<project>: <repo>".
+    pub fn label(&self, repo: &Repo) -> String {
+        match &repo.project {
+            None => repo.name.clone(),
+            Some(id) => format!("{}: {}", self.links.get(id).unwrap_or(id), repo.name),
+        }
+    }
+}
+
 /// Unix seconds now.
 pub fn now() -> u64 {
     crate::review::now()
