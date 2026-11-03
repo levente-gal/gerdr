@@ -8,7 +8,9 @@
 // Beside the file's review (gerdr's `md_dock`), the page marks the block
 // the review's caret is in (`{ type: "caret", line }`) and the blocks
 // with comments (`marks`, `[line, text]`); a click on a block puts the
-// review's caret on its first line.
+// review's caret on its first line. The two scroll together: gerdr sends
+// the line at the review's top (`{ type: "scroll", line }`, to the
+// fraction), and the page tells it the line at its own.
 
 const body = document.getElementById("body");
 const error = document.getElementById("error");
@@ -24,6 +26,11 @@ let caret = null;
 let caretBlock = null;
 // The lines with comments, and what each says.
 let marks = [];
+// The line at the top of the page and its review, once they scroll
+// together; and where the page scrolled itself to for it, whose scroll
+// isn't told back.
+let topLine = null;
+let ownY = null;
 
 // Elements rendered with their lines that aren't blocks.
 const INLINE = new Set(["A", "EM", "STRONG", "CODE", "DEL", "SPAN", "IMG", "SUP", "SUB", "INPUT"]);
@@ -40,8 +47,38 @@ function blocks() {
   return found;
 }
 
+// Each block's lines and place down the page, `[first, last, top, height]`.
+function spans() {
+  return blocks().map(([first, last, element]) => {
+    const rect = element.getBoundingClientRect();
+    return [first, last, rect.top + scrollY, rect.height];
+  });
+}
+
+// Stand with `line` of the file at the top, as the review beside does.
+function standAt(line) {
+  topLine = line;
+  scrollTo(scrollX, lineY(spans(), line));
+  ownY = scrollY;
+}
+
+// The page scrolled, by the user's hand: its review follows, once a frame.
+let told = false;
+addEventListener("scroll", () => {
+  if (topLine === null || told) return;
+  told = true;
+  requestAnimationFrame(() => {
+    told = false;
+    if (ownY !== null && Math.abs(scrollY - ownY) <= 1) return;
+    ownY = null;
+    topLine = yLine(spans(), scrollY);
+    chrome.runtime.sendMessage({ type: "preview-scroll", line: topLine }).catch(() => {});
+  });
+});
+
 // The review's caret on `line`, none for no line; the page scrolls to its
-// block only when the block changes.
+// block only when the block changes, and never while it scrolls with the
+// review, which shows the caret itself.
 function markCaret(line, scroll) {
   caret = Number.isInteger(line) ? line : null;
   const block = caret === null ? null : pickBlock(blocks(), caret);
@@ -51,7 +88,7 @@ function markCaret(line, scroll) {
     return;
   }
   block.classList.add("gerdr-caret");
-  if (scroll && block !== caretBlock) block.scrollIntoView({ block: "nearest" });
+  if (scroll && topLine === null && block !== caretBlock) block.scrollIntoView({ block: "nearest" });
   caretBlock = block;
 }
 
@@ -84,7 +121,7 @@ function show(message) {
     return;
   }
   error.hidden = true;
-  // Where it was, after an edit as before it.
+  // Where it was, after an edit as before it: at its line beside the review.
   const [x, y] = [scrollX, scrollY];
   body.innerHTML = typeof message.html === "string" ? message.html : "";
   marks = Array.isArray(message.marks) ? message.marks : [];
@@ -92,12 +129,14 @@ function show(message) {
   // The new blocks keep the caret, without the page moving for it.
   caretBlock = null;
   markCaret(caret, false);
-  scrollTo(x, y);
+  if (topLine === null) scrollTo(x, y);
+  else standAt(topLine);
 }
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message && message.type === "preview") show(message);
   if (message && message.type === "caret") markCaret(message.line, true);
+  if (message && message.type === "scroll" && Number.isFinite(message.line)) standAt(message.line);
   return false;
 });
 

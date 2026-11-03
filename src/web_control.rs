@@ -131,6 +131,9 @@ enum FromBrowser {
     Ready { pane: String },
     /// A block clicked in the pane's preview, from this line of its file.
     Line { pane: String, line: usize },
+    /// The pane's preview scrolled to this line of its file, to the
+    /// fraction, at its top (see `DiffView::top_line`).
+    Scroll { pane: String, line: f64 },
     /// T3 Code's app in the pane's tab started no new thread (see
     /// `Gerdr::t3_no_thread`): what went wrong, as a short word, and what
     /// the page showed.
@@ -195,6 +198,12 @@ enum ToBrowser<'a> {
     Caret {
         pane: String,
         line: Option<usize>,
+    },
+    /// Scroll the pane's preview to this line of its file, to the
+    /// fraction, at its top: where its review beside it stands.
+    Scroll {
+        pane: String,
+        line: f64,
     },
 }
 
@@ -530,6 +539,11 @@ impl Gerdr {
                     self.preview_line(pane, line);
                 }
             }
+            Event::Message(_, FromBrowser::Scroll { pane, line }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.preview_scrolled(pane, line);
+                }
+            }
             Event::Message(_, FromBrowser::Review { pane }) => {
                 if let Some(pane) = token_pane(&pane) {
                     self.preview_review(pane);
@@ -693,6 +707,16 @@ impl Gerdr {
     /// extension follows its tab; whether it was sent.
     pub(crate) fn caret_to_browser(&mut self, pane: u32, line: Option<usize>) -> bool {
         let message = ToBrowser::Caret {
+            pane: pane_token(pane),
+            line,
+        };
+        self.send_to_browser(pane, &message)
+    }
+
+    /// Scroll `pane`'s preview page to `line` of its file at its top, if
+    /// the extension follows its tab; whether it was sent.
+    pub(crate) fn scroll_to_browser(&mut self, pane: u32, line: f64) -> bool {
+        let message = ToBrowser::Scroll {
             pane: pane_token(pane),
             line,
         };
@@ -951,6 +975,25 @@ mod tests {
         assert_eq!((token_pane(&pane), line), (Some(4), 7));
     }
 
+    #[test]
+    fn a_preview_scrolls_with_its_review() {
+        let to = ToBrowser::Scroll {
+            pane: pane_token(4),
+            line: 12.5,
+        };
+        let to = serde_json::to_value(&to).unwrap();
+        assert_eq!(
+            (to["type"].as_str(), to["line"].as_f64()),
+            (Some("scroll"), Some(12.5))
+        );
+        let token = pane_token(4);
+        let from = format!(r#"{{"type":"scroll","pane":"{token}","line":3.75}}"#);
+        let FromBrowser::Scroll { pane, line } = serde_json::from_str(&from).unwrap() else {
+            panic!("not a scroll");
+        };
+        assert_eq!((token_pane(&pane), line), (Some(4), 3.75));
+    }
+
     /// The page's lookup of the block holding a line, run by node if it
     /// is here.
     #[test]
@@ -960,7 +1003,7 @@ mod tests {
             return;
         };
         let check = r#"
-const { sourceLines, pickBlock } = require(process.argv[1]);
+const { sourceLines, pickBlock, lineY, yLine } = require(process.argv[1]);
 const assert = require("assert");
 assert.deepStrictEqual(sourceLines("3:1-5:20"), [3, 5]);
 assert.strictEqual(sourceLines("x"), null);
@@ -973,6 +1016,24 @@ assert.strictEqual(pickBlock(blocks, 3), "li1");
 assert.strictEqual(pickBlock(blocks, 7), "li2");
 assert.strictEqual(pickBlock(blocks, 2), "h1");
 assert.strictEqual(pickBlock([[2, 2, "p"]], 1), null);
+// A heading (line 1) at 0-40, a list (3-6) at 60-160 with items 3 and
+// 4-6, a paragraph (8-9) at 180-220.
+const spans = [[1, 1, 0, 40], [3, 6, 60, 100], [3, 3, 60, 25], [4, 6, 85, 75], [8, 9, 180, 40]];
+assert.strictEqual(lineY(spans, 1), 0);
+assert.strictEqual(lineY(spans, 1.5), 20);
+assert.strictEqual(lineY(spans, 5), 85 + 25);
+// Between blocks, between the end of one and the start of the next.
+assert.strictEqual(lineY(spans, 2), 40);
+assert.strictEqual(lineY(spans, 2.5), 50);
+assert.strictEqual(lineY(spans, 7.5), 170);
+assert.strictEqual(lineY(spans, 50), 220);
+// Turned round, the place gives its line back.
+for (const line of [1, 1.5, 2.5, 3, 5, 7.5, 8.25]) {
+  assert.ok(Math.abs(yLine(spans, lineY(spans, line)) - line) < 1e-9, String(line));
+}
+assert.strictEqual(yLine(spans, 1000), 10);
+assert.strictEqual(lineY([], 3), 0);
+assert.strictEqual(yLine([], 3), 1);
 "#;
         let blocks = concat!(
             env!("CARGO_MANIFEST_DIR"),
