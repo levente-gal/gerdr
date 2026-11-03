@@ -466,6 +466,10 @@ pub enum FeatureTabHit {
     /// Index as in `FeatureTabView::repos`.
     Repo(usize),
     RepoButton(usize),
+    /// The narrow tab's "+N" / "N+" chip at an end of the repositories'
+    /// strip, standing for the ones that don't fit: the repository a click
+    /// selects (the first hidden one that way), as in `repos`.
+    MoreRepos(usize),
     /// Index as in `StagePage::buttons`.
     PageButton(usize),
     Hint(usize),

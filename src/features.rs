@@ -3598,7 +3598,7 @@ impl Gerdr {
                 }
                 None
             }
-            FeatureTabHit::Repo(i) => {
+            FeatureTabHit::Repo(i) | FeatureTabHit::MoreRepos(i) => {
                 if let Some(panel) = self
                     .features
                     .panel
