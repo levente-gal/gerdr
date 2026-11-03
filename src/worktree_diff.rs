@@ -34,7 +34,7 @@ use crate::{
     chrome::{Density, DetailView, Hint, ReposButton, ReposHit, SheetView},
     diff::FileDiff,
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
-    feature::Stage,
+    doc_review::DocFile,
     feature::review_import::Decision,
     feature_diff::FeatureOf,
     git::Change,
@@ -96,7 +96,8 @@ pub struct WorktreeDiff {
 pub struct DocOf {
     pub project: String,
     pub slug: String,
-    pub stage: Stage,
+    /// Which of the feature's files it is.
+    pub file: DocFile,
     /// The file: `<feature data dir>/brief.md`.
     pub path: PathBuf,
     /// Where its review comments are kept (`doc_review::comments_path`).
@@ -109,15 +110,18 @@ pub struct DocOf {
     pub text: Option<String>,
     /// Opened from the feature panel, which Esc goes back to.
     pub back: bool,
-    /// Verify's `evidence.md`, only read: no comments, no Approve or Send
-    /// back (see `Gerdr::open_evidence`).
-    pub evidence: bool,
     /// Why it can't be edited now (`doc_review::locked`): its agent is
     /// writing it, it's approved. None: the diff's edits change it.
     pub locked: Option<&'static str>,
 }
 
 impl DocOf {
+    /// Verify's `evidence.md`, only read: no comments, no Approve or Send
+    /// back.
+    pub fn evidence(&self) -> bool {
+        self.file == DocFile::Evidence
+    }
+
     /// The file's name: `brief.md`.
     pub fn name(&self) -> String {
         let name = self.path.file_name().unwrap_or(self.path.as_os_str());
@@ -309,7 +313,7 @@ impl WorktreeDiff {
 
     /// Whether it shows Verify's evidence.
     fn evidence(&self) -> bool {
-        self.doc.as_ref().is_some_and(|d| d.evidence)
+        self.doc.as_ref().is_some_and(|d| d.evidence())
     }
 
     /// Whether its lines take no comments: a commit's, the evidence.
@@ -541,10 +545,10 @@ impl WorktreeDiff {
             return format!("Commit · {}", self.label);
         }
         if let Some(doc) = &self.doc {
-            if doc.evidence {
+            if doc.evidence() {
                 return format!("Evidence of \u{201c}{}\u{201d}", doc.title);
             }
-            return format!("{} · {}", doc.stage.label(), doc.name());
+            return format!("{} · {}", doc.file.stage().label(), doc.name());
         }
         let name = self.branch.clone().unwrap_or_else(|| {
             let dir = self.root.file_name().unwrap_or(self.root.as_os_str());
@@ -566,7 +570,7 @@ impl WorktreeDiff {
             return feature.summary(self.diff.review.own());
         }
         if let Some(doc) = &self.doc {
-            if doc.evidence {
+            if doc.evidence() {
                 return doc.state.clone();
             }
             return format!("\u{201c}{}\u{201d} · {}", doc.title, doc.state);
@@ -873,7 +877,7 @@ impl WorktreeDiff {
                     match (&self.commit, &self.doc) {
                         _ if self.feature.is_some() => "Keys in a feature's code review",
                         (Some(_), _) => "Keys in a commit's diff",
-                        (_, Some(doc)) if doc.evidence => "Keys in the evidence",
+                        (_, Some(doc)) if doc.evidence() => "Keys in the evidence",
                         (_, Some(_)) => "Keys in a file under review",
                         (None, None) => "Keys in a worktree's diff",
                     },
@@ -1802,14 +1806,13 @@ mod tests {
         let doc = DocOf {
             project: "p".into(),
             slug: "login".into(),
-            stage: crate::feature::Stage::Discover,
+            file: DocFile::Stage(crate::feature::Stage::Discover),
             path: "/data/features/p/login/brief.md".into(),
             comments: "/data/features/p/login/discover-comments.json".into(),
             title: "Log in".into(),
             state: "ready for review".into(),
             text: None,
             back: false,
-            evidence: false,
             locked: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
@@ -2069,14 +2072,13 @@ mod tests {
         let doc = DocOf {
             project: "p".into(),
             slug: "login".into(),
-            stage: crate::feature::Stage::Verify,
+            file: DocFile::Evidence,
             path: "/data/features/p/login/evidence.md".into(),
             comments: "/data/features/p/login/verify-comments.json".into(),
             title: "Log in".into(),
             state: "run 2 failed".into(),
             text: None,
             back: true,
-            evidence: true,
             locked: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());

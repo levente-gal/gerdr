@@ -239,7 +239,7 @@ impl Gerdr {
         }
         let wd = self.wd()?;
         let doc = wd.doc.as_ref().filter(|doc| doc.path == file)?;
-        let comments = match doc.evidence {
+        let comments = match doc.evidence() {
             true => Vec::new(),
             false => wd.diff.comment_lines(),
         };

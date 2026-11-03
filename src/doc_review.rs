@@ -21,15 +21,75 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     Gerdr,
     diff::{self, FileDiff, Hunk, Line, LineKind},
-    feature::{Feature, Stage, Status, store, verify::EVIDENCE},
+    feature::{Feature, Stage, Status, artifacts, store, verify::EVIDENCE},
     features::Job,
     review::{self, Review},
     toast::Level,
-    worktree_diff::{DocOf, WorktreeDiff},
+    worktree_diff::{DocOf, EVIDENCE_READ_ONLY, WorktreeDiff},
 };
+
+/// Which of a feature's files a review shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DocFile {
+    /// The file a stage's agent writes: `brief.md`, `plan.md`.
+    Stage(Stage),
+    /// Verify's `evidence.md`, only read: no comments, no Approve or Send
+    /// back.
+    Evidence,
+}
+
+impl DocFile {
+    /// The stage it belongs to.
+    pub fn stage(self) -> Stage {
+        match self {
+            DocFile::Stage(stage) => stage,
+            DocFile::Evidence => Stage::Verify,
+        }
+    }
+
+    /// Its name, if it has a file at all.
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            DocFile::Stage(stage) => artifacts::name(stage),
+            DocFile::Evidence => Some(EVIDENCE),
+        }
+    }
+
+    /// Where it stands, as the review's header says it; `running`: its
+    /// checks run again.
+    pub fn state(self, feature: Option<&Feature>, running: bool) -> String {
+        match self {
+            DocFile::Stage(stage) => state(feature, stage),
+            DocFile::Evidence => evidence_state(feature, running),
+        }
+    }
+
+    /// Why it can't be edited now. None: it can.
+    pub fn locked(self, feature: Option<&Feature>) -> Option<&'static str> {
+        match self {
+            DocFile::Stage(stage) => locked(feature, stage),
+            DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
+        }
+    }
+
+    /// Where it is, under feature data dir `dir`.
+    pub fn path(self, dir: &Path) -> Option<PathBuf> {
+        Some(dir.join(self.name()?))
+    }
+}
+
+/// Why a file can't be opened: what is said about it, and how loudly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failed {
+    Warning(String),
+    Error(String),
+}
 
 /// `text`, the file `name`, as a diff adding every line of it: one hunk,
 /// lines numbered from 1, coloured as its language. An empty file has no
@@ -151,84 +211,87 @@ fn read(path: &Path, name: &str) -> Result<String, String> {
 }
 
 impl Gerdr {
-    /// Show feature `slug`'s `evidence.md` (see `feature::verify`) in the
-    /// same view, read-only, without Approve or Send back.
-    pub fn open_evidence(&mut self, project: &str, slug: &str) {
+    /// `file` of feature `slug` read, as a review shows it.
+    pub(crate) fn read_doc(
+        &self,
+        project: &str,
+        slug: &str,
+        file: DocFile,
+    ) -> Result<(DocOf, String), Failed> {
+        let dir = store::dir(None, project, slug);
+        let Some(path) = file.path(&dir) else {
+            let stage = file.stage().label();
+            return Err(Failed::Warning(format!("{stage} has no file to review")));
+        };
         let Some(feature) = self.feature(project, slug) else {
-            return self.show_warning("That feature is gone".into());
+            return Err(Failed::Warning("That feature is gone".into()));
         };
         let title = feature.title.clone();
-        let running = self.busy_with(project, slug, Job::Verify).is_some();
-        let state = evidence_state(Some(feature), running);
-        let dir = store::dir(None, project, slug);
-        let path = dir.join(EVIDENCE);
+        let name = file.name().unwrap_or_default();
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == ErrorKind::NotFound => {
-                return self.show_warning("No evidence yet: Run checks first".into());
+                return Err(match file {
+                    DocFile::Evidence => {
+                        Failed::Warning("No evidence yet: Run checks first".into())
+                    }
+                    DocFile::Stage(_) => {
+                        Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
+                    }
+                });
             }
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
-                return self.show_error(format!("Couldn't read {EVIDENCE}: {err}"));
+                return Err(Failed::Error(format!("Couldn't read {name}: {err}")));
             }
         };
+        let running = self.busy_with(project, slug, Job::Verify).is_some();
         let doc = DocOf {
             project: project.to_owned(),
             slug: slug.to_owned(),
-            stage: Stage::Verify,
+            file,
             path,
-            comments: comments_path(&dir, Stage::Verify),
+            comments: comments_path(&dir, file.stage()),
             title,
-            state,
+            state: file.state(Some(feature), running),
             text: None,
             back: false,
-            evidence: true,
-            locked: None,
+            locked: file.locked(Some(feature)),
         };
-        self.show_doc(doc, text, Review::default());
+        Ok((doc, text))
+    }
+
+    /// Say why a file couldn't be opened.
+    pub(crate) fn show_failed(&mut self, failed: Failed) {
+        match failed {
+            Failed::Warning(text) => self.show_warning(text),
+            Failed::Error(text) => self.show_error(text),
+        }
+    }
+
+    /// Show feature `slug`'s `evidence.md` (see `feature::verify`) in the
+    /// same view, read-only, without Approve or Send back.
+    pub fn open_evidence(&mut self, project: &str, slug: &str) {
+        self.open_doc(project, slug, DocFile::Evidence);
     }
 
     /// Show `stage`'s file of feature `slug` for review.
     pub fn open_doc_review(&mut self, project: &str, slug: &str, stage: Stage) {
-        let Some(name) = crate::feature::artifacts::name(stage) else {
-            let text = format!("{} has no file to review", stage.label());
-            return self.show_warning(text);
-        };
-        let Some(feature) = self.feature(project, slug) else {
-            return self.show_warning("That feature is gone".into());
-        };
-        let title = feature.title.clone();
-        let state = state(Some(feature), stage);
-        let locked = locked(Some(feature), stage);
-        let dir = store::dir(None, project, slug);
-        let path = dir.join(name);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                let text = format!("No {name} yet for \u{201c}{title}\u{201d}");
-                return self.show_error(text);
+        self.open_doc(project, slug, DocFile::Stage(stage));
+    }
+
+    /// Show `file` of feature `slug`.
+    fn open_doc(&mut self, project: &str, slug: &str, file: DocFile) {
+        match self.read_doc(project, slug, file) {
+            Ok((doc, text)) => {
+                let review = match file {
+                    DocFile::Stage(_) => review::load_file(&doc.comments),
+                    DocFile::Evidence => Review::default(),
+                };
+                self.show_doc(doc, text, review);
             }
-            Err(err) => {
-                tracing::warn!("reading {}: {err}", path.display());
-                return self.show_error(format!("Couldn't read {name}: {err}"));
-            }
-        };
-        let comments = comments_path(&dir, stage);
-        let review = review::load_file(&comments);
-        let doc = DocOf {
-            project: project.to_owned(),
-            slug: slug.to_owned(),
-            stage,
-            path,
-            comments,
-            title,
-            state,
-            text: None,
-            back: false,
-            evidence: false,
-            locked,
-        };
-        self.show_doc(doc, text, review);
+            Err(failed) => self.show_failed(failed),
+        }
     }
 
     /// Show `doc`, read as `text`, its review comments `review`: back to
@@ -281,16 +344,9 @@ impl Gerdr {
         };
         let read = read(&doc.path, &doc.name());
         let feature = self.feature(&doc.project, &doc.slug);
-        let locked = locked(feature, doc.stage);
-        let state = match doc.evidence {
-            true => {
-                let running = self
-                    .busy_with(&doc.project, &doc.slug, Job::Verify)
-                    .is_some();
-                evidence_state(feature, running)
-            }
-            false => state(feature, doc.stage),
-        };
+        let locked = doc.file.locked(feature);
+        let running = (self.busy_with(&doc.project, &doc.slug, Job::Verify)).is_some();
+        let state = doc.file.state(feature, running);
         let env = self.worktree_env();
         let Some(wd) = self.wd_mut() else {
             return;
@@ -356,9 +412,10 @@ impl Gerdr {
         let count = wd.diff.review.comments.len();
         if count > 0 {
             let name = doc.name();
-            return self.ask_approve_unsent(doc.project, doc.slug, doc.stage, &name, count);
+            let stage = doc.file.stage();
+            return self.ask_approve_unsent(doc.project, doc.slug, stage, &name, count);
         }
-        self.approve_doc_now(&doc.project, &doc.slug, doc.stage);
+        self.approve_doc_now(&doc.project, &doc.slug, doc.file.stage());
     }
 
     /// Approve `stage` of feature `slug`: the stage marked done, then its
@@ -379,11 +436,11 @@ impl Gerdr {
         // One no longer waiting is refused there: the comments stay.
         let waiting = self
             .feature(&doc.project, &doc.slug)
-            .is_some_and(|f| f.status == Status::Open && f.current() == Some(doc.stage));
+            .is_some_and(|f| f.status == Status::Open && f.current() == Some(doc.file.stage()));
         if waiting {
-            self.doc_done(&doc.project, &doc.slug, doc.stage);
+            self.doc_done(&doc.project, &doc.slug, doc.file.stage());
         }
-        self.send_back_stage(&doc.project, &doc.slug, doc.stage, comments);
+        self.send_back_stage(&doc.project, &doc.slug, doc.file.stage(), comments);
     }
 
     /// `stage` of feature `slug` is approved or sent back: its comments
@@ -394,7 +451,7 @@ impl Gerdr {
         self.doc_write_review(&comments_path(&dir, stage), &Review::default());
         let open = self
             .doc_of()
-            .filter(|d| d.project == project && d.slug == slug && d.stage == stage)
+            .filter(|d| d.project == project && d.slug == slug && d.file == DocFile::Stage(stage))
             .map(|d| d.back);
         if let Some(back) = open {
             if let Some(wd) = self.wd_mut() {
