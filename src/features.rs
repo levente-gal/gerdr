@@ -3273,7 +3273,7 @@ impl Gerdr {
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
             body = format!(
-                "{body}.\n{}",
+                "{body}.\n{}.",
                 crate::feature_workspace::closing_text(&running)
             );
         }
