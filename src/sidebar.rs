@@ -733,7 +733,7 @@ impl Gerdr {
         match hit? {
             SidebarHit::Plus => {
                 let tip = Tooltip::new(
-                    "Add a workspace: a terminal, a folder in Zed or Cursor; or open the inbox",
+                    "Add a workspace (a terminal, or a folder in Zed or Cursor), start a feature, or open the inbox",
                     layout.plus,
                 );
                 let help = self.keymap.help();
@@ -1208,6 +1208,7 @@ impl Gerdr {
                     Action::NewProject,
                 ),
                 MenuItem::new("Cursor workspace", MenuAction::NewCursor),
+                MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
                 hinted(
                     MenuItem::new("Open inbox", MenuAction::Inbox),
                     Action::Inbox,
