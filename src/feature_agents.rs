@@ -1556,7 +1556,7 @@ mod tests {
 
     #[test]
     fn the_reviewer_is_not_the_builder() {
-        const CODEX: (&str, &str) = ("Codex", "codex --add-dir /d \"$(cat /d/p.md)\"");
+        const CODEX: (&str, &str) = ("Codex", "codex --add-dir /d -- \"$(cat /d/p.md)\"");
         let installed = [
             agent("T3 Code", Start::T3),
             agent("Codex", Start::Command("codex".into())),
@@ -1594,7 +1594,7 @@ mod tests {
             Pick::NoCli
         );
         // Built by Claude Code set as a command: the same agent.
-        let by_claude = Some(("claude", "/usr/bin/claude --add-dir /d \"$(cat /d/p.md)\""));
+        let by_claude = Some(("claude", "/usr/bin/claude --add-dir /d -- \"$(cat /d/p.md)\""));
         assert_eq!(pick_reviewer(None, by_claude, &installed, false), codex);
         let Pick::Refused(why) = pick_reviewer(Some("Claude Code"), by_claude, &installed, false)
         else {
