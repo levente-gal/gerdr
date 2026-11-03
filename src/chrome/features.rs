@@ -421,12 +421,10 @@ pub fn feature_repos_shown(view: &FeaturePanelView, output: Size<i32, Logical>) 
     repos.min(fit)
 }
 
-/// Where the feature panel's parts go on an output of `output`: centred,
-/// as wide as a dialog, the repositories past what fits scrolled.
-pub fn feature_panel_layout(
-    view: &FeaturePanelView,
-    output: Size<i32, Logical>,
-) -> FeaturePanelLayout {
+/// Where the feature panel's parts go in `frame` (its tab's area):
+/// centred, as wide as a dialog, the repositories past what fits scrolled.
+pub fn feature_panel_layout(view: &FeaturePanelView, frame: Rect) -> FeaturePanelLayout {
+    let output = frame.size;
     let pitch = PANEL_ROW + PANEL_ROW_GAP;
     let shown = feature_repos_shown(view, output);
     let check_h = check_height(view.check.len());
@@ -449,8 +447,8 @@ pub fn feature_panel_layout(
     let width = DIALOG_WIDTH.min(output.w);
     let panel = Rectangle::new(
         (
-            ((output.w - width) / 2).max(0),
-            ((output.h - height) / 2).max(0),
+            frame.loc.x + ((output.w - width) / 2).max(0),
+            frame.loc.y + ((output.h - height) / 2).max(0),
         )
             .into(),
         (width, height).into(),
@@ -772,7 +770,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = feature_panel_layout(view, output);
+        let layout = feature_panel_layout(view, Rectangle::from_size(output));
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
@@ -1115,7 +1113,7 @@ mod tests {
     fn the_panel_fits_a_small_output_and_clamps_the_repositories() {
         let output: Size<i32, Logical> = (860, 900).into();
         let view = panel_view(30);
-        let l = feature_panel_layout(&view, output);
+        let l = feature_panel_layout(&view, Rectangle::from_size(output));
         assert!(l.panel.size.w <= 860 && l.panel.size.h <= 900);
         assert!(l.repos.len() < 30 && !l.repos.is_empty());
         assert_eq!(l.stages.len(), 8);

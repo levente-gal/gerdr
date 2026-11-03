@@ -3923,6 +3923,7 @@ mod tests {
             github: false,
             agent: None,
             zoomed: false,
+            pinned: false,
         };
         let tabs = [
             tab(

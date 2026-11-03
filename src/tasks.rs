@@ -411,7 +411,6 @@ impl Gerdr {
         self.worktrees.close();
         self.project_menu = None;
         self.scrollback = None;
-        self.features.panel = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }

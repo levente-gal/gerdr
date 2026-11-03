@@ -4,9 +4,10 @@
 //!
 //! From the top: the tooltip, the modal dialogs (quit, restart, checkout,
 //! new feature, the manual test sheet, confirm), the context menu, the toasts, the welcome screen,
-//! the help panel, then the panels (the tasks, the feature panel, the
-//! project menu, the worktrees popup, the repositories and inbox panels,
-//! the scrollback viewer, the switcher).
+//! the help panel, then the panels (the tasks, the project menu, the
+//! worktrees popup, the repositories and inbox panels, the scrollback
+//! viewer, the switcher), and last the feature panel, which is not over
+//! the apps but in its feature's pinned first tab.
 //! The toasts are over every popup but the menu and the dialogs, so what
 //! a panel reports shows while it is open; the help panel is under them,
 //! over the panels it may be pinned over.
@@ -15,7 +16,8 @@
 //! open, every key, press and scroll goes to it, wherever the pointer
 //! is. The context menu takes every key and press too (a press outside
 //! closes it). The toasts and the help panel take only what lands on
-//! them; the tooltip takes nothing.
+//! them; the tooltip takes nothing. The feature panel takes the keys
+//! while its tab shows, and what lands in the tab, like an app would.
 
 use std::time::Instant;
 
@@ -43,7 +45,8 @@ pub enum Overlay {
     Help,
     /// The background tasks, over the footer (see `tasks`).
     Tasks,
-    /// The feature panel: a feature's stages (see `features`).
+    /// The feature panel: a feature's stages, in the pinned first tab of
+    /// its workspace (see `features`, `feature_workspace`).
     Features,
     ProjectMenu,
     Worktrees,
@@ -70,13 +73,14 @@ impl Overlay {
         Self::Welcome,
         Self::Help,
         Self::Tasks,
-        Self::Features,
         Self::ProjectMenu,
         Self::Worktrees,
         Self::Repos,
         Self::Inbox,
         Self::Scrollback,
         Self::Switcher,
+        // In its tab, under every popup.
+        Self::Features,
     ];
 
     /// Whether it is a modal dialog: over all but the tooltip, asking
@@ -104,7 +108,6 @@ impl Overlay {
                 | Self::Scrollback
                 | Self::Switcher
                 | Self::Tasks
-                | Self::Features
         )
     }
 
@@ -117,7 +120,7 @@ impl Overlay {
     /// Whether, while it is open, the keys go to it rather than the apps
     /// (or what is under it).
     pub fn takes_keys(self) -> bool {
-        self.grabs() || self == Self::ContextMenu
+        self.grabs() || matches!(self, Self::ContextMenu | Self::Features)
     }
 
     /// Whether it is over `other`.
@@ -138,7 +141,6 @@ impl Overlay {
             Self::Switcher => Action::Switcher,
             Self::Help => Action::Shortcuts,
             Self::Tasks => Action::Tasks,
-            Self::Features => Action::Features,
             _ => return None,
         })
     }
@@ -217,13 +219,15 @@ impl Gerdr {
 
     /// Whether open `overlay` takes the pointer at `pos`: one that grabs,
     /// and the menu (a press outside it closes it), anywhere; the toasts
-    /// and the help panel where they are; the tooltip nowhere.
+    /// and the help panel where they are; the feature panel in its tab;
+    /// the tooltip nowhere.
     pub fn overlay_covers(&self, overlay: Overlay, pos: Point<f64, Logical>) -> bool {
         match overlay {
             Overlay::Tooltip => false,
             Overlay::Toasts => self.toast_at(pos),
             Overlay::Help => self.help_hit(pos).is_some(),
             Overlay::ContextMenu => true,
+            Overlay::Features => self.content_rect().to_f64().contains(pos),
             _ => overlay.grabs(),
         }
     }

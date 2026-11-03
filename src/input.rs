@@ -228,6 +228,8 @@ pub(crate) fn works_over(over: overlay::Overlay, action: &Action) -> bool {
         overlay::Overlay::Welcome => over_welcome(action),
         // A dialog asks first: nothing else goes on over it.
         o if o.is_dialog() => false,
+        // The feature panel is a tab: every key works there.
+        overlay::Overlay::Features => true,
         _ => over_panel(action),
     }
 }
@@ -257,7 +259,6 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
-        O::Features => Intercepted::Features(crate::features::PanelOutcome::Close),
         O::ManualTest => Intercepted::ManualTest(crate::manual_test::Outcome::Close),
         _ => return None,
     })
@@ -568,6 +569,13 @@ impl Gerdr {
                 if let Some(top) = self.grabbing_overlay() {
                     if let Some(motion) = motion {
                         self.overlay_scroll(top, motion);
+                    }
+                    return;
+                }
+                // Over the feature panel's tab, its repositories move.
+                if at == Some(overlay::Overlay::Features) {
+                    if let Some(motion) = motion {
+                        self.overlay_scroll(overlay::Overlay::Features, motion);
                     }
                     return;
                 }
@@ -937,10 +945,6 @@ impl Gerdr {
         if over == overlay::Overlay::Tasks && opens_panel(&action) {
             self.close_tasks();
         }
-        // So does the feature panel.
-        if over == overlay::Overlay::Features && opens_panel(&action) {
-            self.close_feature_panel();
-        }
         Some(Intercepted::Action(action))
     }
 
@@ -1230,7 +1234,11 @@ impl Gerdr {
     /// one on top that grabs it. The dialogs have none.
     fn text_overlay(&self) -> Option<Overlay> {
         use crate::overlay::Overlay as O;
-        match self.grabbing_overlay()? {
+        // The feature panel's tab, with nothing over it.
+        let Some(top) = self.grabbing_overlay() else {
+            return self.is_open(O::Features).then_some(Overlay::Features);
+        };
+        match top {
             O::Welcome => Some(Overlay::Welcome),
             O::ProjectMenu => Some(Overlay::ProjectMenu),
             O::Worktrees => Some(Overlay::Worktrees),
@@ -1241,7 +1249,6 @@ impl Gerdr {
             O::Tasks => Some(Overlay::Tasks),
             O::NewFeature => Some(Overlay::NewFeature),
             O::ManualTest => Some(Overlay::ManualTest),
-            O::Features => Some(Overlay::Features),
             _ => None,
         }
     }

@@ -120,7 +120,8 @@ impl Gerdr {
         let Some(source) = ws.tabs.get(from).filter(|t| has_leaf(t, id)) else {
             return;
         };
-        if to.is_some_and(|t| t == from || t >= ws.tabs.len()) {
+        // The feature panel's tab takes no panes.
+        if to.is_some_and(|t| t == from || t >= ws.tabs.len() || ws.tabs[t].pinned) {
             return;
         }
         // Alone in its tab, it has a tab of its own already.

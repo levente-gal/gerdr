@@ -382,6 +382,9 @@ pub struct Tab {
     pub label: Option<String>,
     /// The pane filling the whole tab, if any (see `Tab::zoomed`).
     pub zoom: Option<Zoom>,
+    /// The feature panel's tab: first in a feature's workspace, with no
+    /// panes, and never closed or moved (see `feature_workspace`).
+    pub pinned: bool,
 }
 
 impl Default for Tab {
@@ -396,6 +399,7 @@ impl Default for Tab {
             focused: None,
             label: None,
             zoom: None,
+            pinned: false,
         }
     }
 }
@@ -406,6 +410,15 @@ fn tab_place(workspaces: &[Workspace], id: u64) -> Option<(usize, usize)> {
         .iter()
         .enumerate()
         .find_map(|(w, ws)| Some((w, ws.tabs.iter().position(|tab| tab.id == id)?)))
+}
+
+/// Where the tab at `from` among `tabs` goes when moved to `to`: the
+/// feature panel's tab stays first, and the others stay after it. `None`
+/// when it stays where it is.
+fn tab_move_target(tabs: &[Tab], from: usize, to: usize) -> Option<usize> {
+    let pinned = |t: usize| tabs.get(t).is_some_and(|tab| tab.pinned);
+    let to = if pinned(0) { to.max(1) } else { to };
+    (!pinned(from) && to != from && to < tabs.len()).then_some(to)
 }
 
 /// A pane zoomed to fill its tab, with the layout it was zoomed in: any
@@ -1755,7 +1768,9 @@ impl Gerdr {
                 let Some(ws) = self.workspaces.get_mut(self.active_workspace) else {
                     return;
                 };
-                move_item(&mut ws.tabs, &mut ws.active_tab, to);
+                if let Some(to) = tab_move_target(&ws.tabs, ws.active_tab, to) {
+                    move_item(&mut ws.tabs, &mut ws.active_tab, to);
+                }
             }
             // A pane only lands when dropped; meanwhile, where it would.
             Reorderable::Pane(id) => self.pane_drop = self.pane_drop_at(id, pos),
@@ -3436,7 +3451,9 @@ impl Gerdr {
             };
             restored_any = true;
             let ws = &mut self.workspaces[w];
-            let t = i.min(ws.tabs.len());
+            // A feature's panel tab, first, isn't saved: the rest go after it.
+            let pinned = usize::from(ws.tabs.first().is_some_and(|t| t.pinned));
+            let t = (i + pinned).min(ws.tabs.len());
             ws.tabs.insert(
                 t,
                 Tab {
@@ -3472,7 +3489,11 @@ impl Gerdr {
             .collect();
         let mut zed_expected = false;
         for record in records {
-            if !record.tabs.iter().any(|t| t.layout.holds_apps()) {
+            // A feature's workspace comes back with only its panel tab.
+            let feature = (self.project.as_ref())
+                .and_then(|id| self.features.all.get(id))
+                .is_some_and(|all| feature_workspace::feature_on(all, &record.dir).is_some());
+            if !feature && !record.tabs.iter().any(|t| t.layout.holds_apps()) {
                 if record.herdr_id.is_none() && !record.keeps_place() {
                     self.forget_workspace(&record.id);
                 }
@@ -4038,6 +4059,10 @@ impl Gerdr {
         if ws.tabs.is_empty() {
             return;
         }
+        // The feature panel's tab has nothing to split: a tab of its own.
+        if ws.tabs[ws.active_tab].pinned {
+            return self.new_tab();
+        }
         let (w, t) = (self.active_workspace, ws.active_tab);
         let Some((pid, herdr)) = self.start_terminal(w, Some(t), dir) else {
             return;
@@ -4078,6 +4103,9 @@ impl Gerdr {
         let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx)) else {
             return;
         };
+        if tab.pinned {
+            return self.refuse_pinned_close();
+        }
         let running: Vec<String> = tab
             .panes
             .iter()
@@ -4092,7 +4120,9 @@ impl Gerdr {
 
     /// Close tab `idx` of the active workspace without asking.
     pub fn close_tab_now(&mut self, idx: usize) {
-        if let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx)) {
+        if let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx))
+            && !tab.pinned
+        {
             self.close_panes(Self::closing(tab));
             self.drop_unstarted(self.active_workspace, idx);
             self.prune();
@@ -4272,7 +4302,6 @@ impl Gerdr {
             Action::Inbox => self.open_inbox(None),
             Action::Tasks if self.is_open(Overlay::Tasks) => self.close_tasks(),
             Action::Tasks => self.open_tasks(0),
-            Action::Features if self.is_open(Overlay::Features) => self.close_feature_panel(),
             Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
@@ -4331,9 +4360,9 @@ impl Gerdr {
             return;
         };
         let to = ws.active_tab.saturating_add_signed(step);
-        if to == ws.active_tab || to >= ws.tabs.len() {
+        let Some(to) = tab_move_target(&ws.tabs, ws.active_tab, to) else {
             return;
-        }
+        };
         move_item(&mut ws.tabs, &mut ws.active_tab, to);
         self.reorder_herdr(Reorderable::Tab);
     }
@@ -4532,6 +4561,7 @@ impl Gerdr {
                 .or_else(|| tab.panes.first().map(|p| p.window.clone()))
         });
         self.focus(target);
+        self.sync_feature_panel();
         self.refresh_pointer_focus();
         let project = self
             .project
@@ -4552,10 +4582,10 @@ impl Gerdr {
     /// Drop tabs with no windows left and nothing still starting, then
     /// workspaces with no tabs left.
     fn prune(&mut self) {
-        let mut changed = false;
+        let mut changed = self.pin_feature_tabs();
         for ws in &mut self.workspaces {
             changed |= retain_active(&mut ws.tabs, &mut ws.active_tab, |t| {
-                !t.panes.is_empty() || !t.expected.is_empty()
+                t.pinned || !t.panes.is_empty() || !t.expected.is_empty()
             });
         }
         changed |= retain_active(&mut self.workspaces, &mut self.active_workspace, |ws| {
@@ -4937,9 +4967,9 @@ impl Gerdr {
                 }
                 let w = self.active_workspace;
                 let ws = &mut self.workspaces[w];
-                if ws.tabs.is_empty() {
+                if ws.tabs.get(ws.active_tab).is_none_or(|t| t.pinned) {
                     ws.tabs.push(Tab::default());
-                    ws.active_tab = 0;
+                    ws.active_tab = ws.tabs.len() - 1;
                 }
                 (w, ws.active_tab)
             }
@@ -5249,6 +5279,14 @@ impl Gerdr {
         ws.tabs
             .iter()
             .map(|tab| {
+                // The feature panel's tab.
+                if tab.pinned {
+                    return TabView {
+                        title: "Feature".into(),
+                        pinned: true,
+                        ..TabView::default()
+                    };
+                }
                 // A tab is named after its first window's title.
                 let main = tab.shown().first().and_then(|id| tab.window(*id));
                 let title: Option<String> = main.and_then(|window| {

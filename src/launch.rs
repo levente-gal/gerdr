@@ -118,7 +118,9 @@ impl Gerdr {
         let w = self.active_workspace;
         let ws = &mut self.workspaces[w];
         let before = ws.active_tab;
-        if ws.tabs.is_empty() || place == Place::Tab {
+        // The feature panel's tab has no panes to split: a tab of its own.
+        let pinned = ws.tabs.get(ws.active_tab).is_some_and(|t| t.pinned);
+        if ws.tabs.is_empty() || place == Place::Tab || pinned {
             ws.tabs.push(Tab::default());
             ws.active_tab = ws.tabs.len() - 1;
         }
@@ -126,7 +128,7 @@ impl Gerdr {
         match self.launch_into(w, t, None, command) {
             Some(_) => self.show_active(),
             // The new tab is gone again: back to the one shown before.
-            None if place == Place::Tab => self.switch_tab(before),
+            None if place == Place::Tab || pinned => self.switch_tab(before),
             None => {}
         }
     }
