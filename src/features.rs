@@ -210,6 +210,8 @@ pub(crate) struct Busy {
 pub(crate) enum Done {
     Found {
         serial: u64,
+        /// The main worktree of the repository it was opened from, if any.
+        from: Option<PathBuf>,
         result: Result<Root, String>,
     },
     /// The root of `project`, another project the dialog can link.
@@ -457,8 +459,8 @@ impl NewFeatureDialog {
         }
     }
 
-    /// The root was found, or not: over several repositories the one it
-    /// was opened from is ticked.
+    /// The root was found, or not: every repository of the project is
+    /// offered, and of several the one it was opened from is ticked.
     fn found(&mut self, result: Result<Root, String>) {
         match result {
             Ok(root) => {
@@ -1705,7 +1707,11 @@ impl Gerdr {
     /// to is kept and said.
     fn feature_done(&mut self, done: Done) {
         match done {
-            Done::Found { serial, result } => {
+            Done::Found {
+                serial,
+                from,
+                result,
+            } => {
                 if let Err(why) = &result {
                     tracing::warn!("finding where a feature goes: {why}");
                 }
@@ -1714,6 +1720,9 @@ impl Gerdr {
                 if let Some(dialog) = self.features.dialog.as_mut()
                     && dialog.serial == serial
                 {
+                    if let Some(from) = from {
+                        dialog.from = from;
+                    }
                     dialog.found(result);
                 }
             }
@@ -2408,8 +2417,9 @@ impl Gerdr {
 
     // ----------------------------------------------------------- dialog
 
-    /// Open the new feature dialog for the active project, from the
-    /// folder of workspace `at`, else the active one's.
+    /// Open the new feature dialog for the active project, offering all
+    /// its repositories: the one workspace `at` is in, else the active
+    /// one's, starts ticked.
     pub fn open_new_feature(&mut self, at: Option<usize>) {
         let Some(id) = self.project.clone() else {
             return self.show_warning("Open a project to start a feature in".into());
@@ -2441,6 +2451,7 @@ impl Gerdr {
         self.features.dialog = Some(NewFeatureDialog::new(id, serial, from.clone()));
         self.feature_work(None, move |_| Done::Found {
             serial,
+            from: layout::main_top(&from),
             result: layout::find_root(&from, &workspace_dirs, &ignore, &bases),
         });
         // It takes the pointer from the client under it.

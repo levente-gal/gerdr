@@ -38,55 +38,88 @@ pub struct Found {
     pub base: String,
 }
 
-/// The root a feature started from `dir` would use: `dir`'s repository
-/// alone, or, when the project has workspaces in two or more repositories
-/// with the same parent folder (`workspace_dirs`), that parent with every
-/// repository in it. Repositories named in `ignore` are left out; `bases`
-/// overrides the base branch by repository name. An error says why there
-/// is none ("~ is not in a git repository").
+/// The root a feature of this project would use: every repository of the
+/// project, wherever it was started from. `dir` is where it was started,
+/// and `workspace_dirs` the project's workspaces.
+///
+/// One repository alone is a root by itself. Otherwise the root is the
+/// folder holding the most of them, with every repository in that folder
+/// if two workspaces share it or a workspace is that folder; repositories
+/// elsewhere join as they are. With none in any workspace, a workspace's
+/// folder that has repositories right under it is the root. Repositories
+/// named in `ignore` are left out of a root of several; `bases` overrides
+/// the base branch by repository name. An error says why there is none
+/// ("~ is not in a git repository").
 pub fn find_root(
     dir: &Path,
     workspace_dirs: &[PathBuf],
     ignore: &[String],
     bases: &[(String, String)],
 ) -> Result<Root, String> {
-    // From inside a feature's folder (its workspace), the root is the one
-    // that folder sits under: the folder holds worktrees, not repositories.
+    // A feature's folder counts as the folder it sits under: it holds
+    // worktrees, not repositories.
     let dir = above_features(dir);
-    let dir = dir.as_path();
-    if let Some(top) = main_top(dir) {
-        let parent = top.parent().map(Path::to_path_buf);
-        let mut siblings: Vec<PathBuf> = workspace_dirs
-            .iter()
-            .filter_map(|d| main_top(d))
-            .filter(|t| parent.is_some() && t.parent() == parent.as_deref())
-            .collect();
-        siblings.sort();
-        siblings.dedup();
-        if siblings.len() >= 2
-            && let Some(parent) = parent
-        {
-            return multi_root(&parent, ignore, bases);
+    let here = main_top(&dir);
+    let mut tops = Vec::new();
+    let mut folders = Vec::new();
+    for d in std::iter::once(&dir).chain(workspace_dirs) {
+        let d = above_features(d);
+        match main_top(&d) {
+            Some(top) => tops.push(top),
+            None => folders.push(d.canonicalize().unwrap_or(d)),
         }
-        let name = folder_name(&top);
-        let base = base_of(&name, &top, bases)?;
+    }
+    tops.sort();
+    tops.dedup();
+    let count = |p: &Path| tops.iter().filter(|t| t.parent() == Some(p)).count();
+    let shared = |p: &Path| count(p) >= 2 || folders.iter().any(|f| f == p);
+    let here_parent = here.as_deref().and_then(Path::parent);
+    let home = tops
+        .iter()
+        .filter_map(|t| t.parent())
+        .max_by_key(|p| (shared(p), count(p), Some(*p) == here_parent));
+    let Some(home) = home else {
+        return match folders.iter().find(|f| !child_repos(f).is_empty()) {
+            Some(folder) => multi_root(folder, ignore, bases),
+            None => Err(format!(
+                "{} is not in a git repository and has none in it",
+                shown(&dir)
+            )),
+        };
+    };
+    if let ([top], false) = (tops.as_slice(), shared(home)) {
+        let name = folder_name(top);
+        let base = base_of(&name, top, bases)?;
         return Ok(Root {
             path: top.clone(),
             multi: false,
             repos: vec![Found {
                 name,
-                main: top,
+                main: top.clone(),
                 base,
             }],
         });
     }
-    if !child_repos(dir).is_empty() {
-        return multi_root(dir, ignore, bases);
+    let mut repos = if shared(home) {
+        child_repos(home)
+    } else {
+        Vec::new()
+    };
+    for top in &tops {
+        let name = folder_name(top);
+        match repos.iter().find(|(n, _)| *n == name) {
+            None => repos.push((name, top.clone())),
+            // Repositories go by folder name in a feature's folder.
+            Some((_, main)) if main != top => tracing::warn!(
+                "leaving {} out of new features: {} has its name",
+                top.display(),
+                main.display()
+            ),
+            Some(_) => {}
+        }
     }
-    Err(format!(
-        "{} is not in a git repository and has none in it",
-        shown(dir)
-    ))
+    repos.sort();
+    root_of(home, repos, ignore, bases)
 }
 
 /// The folder holding `dir`'s nearest `.features` folder, else `dir`.
@@ -101,8 +134,19 @@ fn above_features(dir: &Path) -> PathBuf {
 /// The root `dir` holding several repositories.
 fn multi_root(dir: &Path, ignore: &[String], bases: &[(String, String)]) -> Result<Root, String> {
     let path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let repos = child_repos(&path);
+    root_of(&path, repos, ignore, bases)
+}
+
+/// The root at `path` of these repositories, less those in `ignore`.
+fn root_of(
+    path: &Path,
+    found: Vec<(String, PathBuf)>,
+    ignore: &[String],
+    bases: &[(String, String)],
+) -> Result<Root, String> {
     let mut repos = Vec::new();
-    for (name, main) in child_repos(&path) {
+    for (name, main) in found {
         if ignore.contains(&name) {
             continue;
         }
@@ -112,11 +156,11 @@ fn multi_root(dir: &Path, ignore: &[String], bases: &[(String, String)]) -> Resu
     if repos.is_empty() {
         return Err(format!(
             "{} has no git repositories left once the ignored ones are out",
-            shown(&path)
+            shown(path)
         ));
     }
     Ok(Root {
-        path,
+        path: path.to_path_buf(),
         multi: true,
         repos,
     })
@@ -141,7 +185,7 @@ fn child_repos(dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// The top folder of the main worktree of the repository `dir` is in.
-fn main_top(dir: &Path) -> Option<PathBuf> {
+pub fn main_top(dir: &Path) -> Option<PathBuf> {
     let common = git(
         dir,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -493,7 +537,10 @@ fn link_root(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
         .map(|e| e.file_name())
         .filter(|name| {
             let path = root.join(name);
-            !UNLINKED.iter().any(|u| name == *u) && path.join(".git").symlink_metadata().is_err()
+            // A repository from elsewhere may have taken the name.
+            !UNLINKED.iter().any(|u| name == *u)
+                && path.join(".git").symlink_metadata().is_err()
+                && dir.join(name).symlink_metadata().is_err()
         })
         .collect();
     names.sort();
@@ -1270,6 +1317,127 @@ mod tests {
         let root = find_root(&repo, &[], &[], &[]).unwrap();
         let created = create(&root, "x", &[]).unwrap();
         assert_eq!(find_root(&created.dir, &[], &[], &[]).unwrap(), root);
+    }
+
+    #[test]
+    fn a_worktree_in_a_feature_folder_names_its_main_worktree() {
+        let t = Temp::new();
+        let api = t.repo("api", "main");
+        t.repo("web", "main");
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        assert_eq!(main_top(&created.dir.join("api")), Some(api));
+        assert_eq!(main_top(&created.dir), None);
+    }
+
+    #[test]
+    fn every_repository_of_the_project_is_offered_from_any_workspace() {
+        let t = Temp::new();
+        let app = t.0.join("app");
+        let elsewhere = t.0.join("elsewhere");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let repo_in = |folder: &Path, name: &str| {
+            let repo = folder.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+            repo
+        };
+        let api = repo_in(&app, "api");
+        let web = repo_in(&app, "web");
+        repo_in(&app, "unopened");
+        let tool = repo_in(&elsewhere, "tool");
+        // A plain folder's repositories aren't the project's when others are.
+        let plain = t.0.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        repo_in(&plain, "stray");
+
+        let dirs = [plain.clone(), api.clone(), web.clone(), tool.clone()];
+        let all = ["api", "tool", "unopened", "web"];
+        for from in [&api, &web, &tool, &plain] {
+            let root = find_root(from, &dirs, &[], &[]).unwrap();
+            assert!(root.multi);
+            assert_eq!(root.path, app, "from {}", from.display());
+            assert_eq!(names(&root), all);
+            assert_eq!(root.repos[1].main, tool);
+        }
+
+        // A feature gets a worktree of the one from elsewhere too.
+        let root = find_root(&api, &dirs, &[], &[]).unwrap();
+        let created = create(&root, "x", &["tool".into()]).unwrap();
+        assert_eq!(created.repos[1].worktree, app.join(".features/x/tool"));
+        assert!(created.repos[1].touched);
+
+        // Ignored ones stay out, wherever they are.
+        let root = find_root(&api, &dirs, &["tool".into()], &[]).unwrap();
+        assert_eq!(names(&root), ["api", "unopened", "web"]);
+    }
+
+    #[test]
+    fn a_workspace_on_the_folder_brings_its_repositories_to_one_in_it() {
+        let t = Temp::new();
+        let api = t.repo("api", "main");
+        t.repo("web", "main");
+        let root = find_root(&api, &[t.0.clone(), api.clone()], &[], &[]).unwrap();
+        assert!(root.multi);
+        assert_eq!(names(&root), ["api", "web"]);
+    }
+
+    #[test]
+    fn repositories_with_no_folder_in_common_are_only_those() {
+        let t = Temp::new();
+        let (a, b) = (t.0.join("a"), t.0.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for (folder, name) in [(&a, "one"), (&a, "not-opened"), (&b, "two")] {
+            let repo = folder.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+        }
+        let (one, two) = (a.join("one"), b.join("two"));
+        let root = find_root(&two, &[one, two.clone()], &[], &[]).unwrap();
+        assert!(root.multi);
+        assert_eq!(root.path, b, "the folder of the one it started from");
+        assert_eq!(names(&root), ["one", "two"]);
+    }
+
+    #[test]
+    fn a_name_taken_in_the_root_keeps_the_roots_repository() {
+        let t = Temp::new();
+        let (a, b) = (t.0.join("a"), t.0.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for (folder, name) in [(&a, "api"), (&a, "web"), (&b, "api")] {
+            let repo = folder.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+        }
+        let dirs = [a.join("api"), a.join("web"), b.join("api")];
+        let root = find_root(&b.join("api"), &dirs, &[], &[]).unwrap();
+        assert_eq!(names(&root), ["api", "web"]);
+        assert_eq!(root.repos[0].main, a.join("api"));
+    }
+
+    #[test]
+    fn a_repository_from_elsewhere_takes_a_name_over_a_root_file() {
+        let t = Temp::new();
+        let (app, b) = (t.0.join("app"), t.0.join("b"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for (folder, name) in [(&app, "api"), (&app, "web"), (&b, "tool")] {
+            let repo = folder.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+        }
+        std::fs::write(app.join("tool"), "x").unwrap();
+        let dirs = [app.join("api"), app.join("web"), b.join("tool")];
+        let root = find_root(&app.join("api"), &dirs, &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        assert!(created.repos[1].worktree.join(".git").is_file());
     }
 
     #[test]
