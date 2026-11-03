@@ -47,10 +47,11 @@ const PILL_PAD: i32 = 4;
 /// How high a terminal's pill is: lower than the others, as it stays out
 /// over a running command's output.
 const PILL_TERMINAL_HEIGHT: i32 = 24;
-/// How opaque a terminal's pill is while the pointer is away from it: it
-/// stays out over a running command's output, which shows through a
-/// little. Under the pointer it fades to whole, for its buttons.
-const PILL_TERMINAL_REST: f32 = 0.85;
+/// How opaque a terminal's or a web page's pill is while the pointer is
+/// away from it: what is under it (a running command's output, the
+/// page's own header) shows through a little. Under the pointer it fades
+/// to whole, for its buttons.
+const PILL_REST: f32 = 0.85;
 /// How far a bar's buttons keep from its top and bottom, at least: they
 /// are smaller than `BAR_BUTTON` in a pill too low for that.
 const BUTTON_INSET_Y: i32 = 2;
@@ -385,7 +386,7 @@ pub struct PaneBarView {
     /// The pointer is over the bar: its buttons show.
     pub lit: bool,
     /// How far it has gone from not lit to lit, 0 to 1, on its way after
-    /// `lit`: a terminal's pill comes whole over it. Applied when the
+    /// `lit`: a terminal's or a web page's pill comes whole over it. Applied when the
     /// pill is composed, not drawn into it.
     pub lit_level: f32,
     /// The button under the pointer.
@@ -403,19 +404,20 @@ pub struct PaneBarView {
 impl PaneBarView {
     /// Where the pill is drawn right now, how big, and how opaque: whole
     /// with its shadow round it, fading in as it drops from a little
-    /// higher; nothing while its fade has it gone. A terminal's lets
-    /// what is under it show through while the pointer is away, less as
-    /// it lights up (`lit_level`).
+    /// higher; nothing while its fade has it gone. A terminal's or a web
+    /// page's lets what is under it show through while the pointer is
+    /// away, less as it lights up (`lit_level`).
     pub fn placement(&self) -> (Point<i32, Logical>, Size<i32, Logical>, f32) {
         if self.alpha <= 0.0 || self.rect.size.h <= 0 {
             return (self.rect.loc, Size::from((0, 0)), 0.0);
         }
         let loc = self.rect.loc - Point::from((SHADOW, SHADOW + self.drop()));
         let size = self.rect.size + Size::from((2 * SHADOW, 2 * SHADOW));
-        let rest = if self.buttons == BarButtons::Terminal {
-            PILL_TERMINAL_REST + (1.0 - PILL_TERMINAL_REST) * self.lit_level.clamp(0.0, 1.0)
-        } else {
-            1.0
+        let rest = match self.buttons {
+            BarButtons::Terminal | BarButtons::Web { .. } => {
+                PILL_REST + (1.0 - PILL_REST) * self.lit_level.clamp(0.0, 1.0)
+            }
+            BarButtons::None => 1.0,
         };
         (loc, size, self.alpha * rest)
     }
@@ -767,8 +769,8 @@ impl Painter {
 mod tests {
     use super::{
         BAR_PILL_HEIGHT, BAR_REVEAL, BAR_SLIDE, BarButton, BarButtons, BarHit, BarStatus,
-        FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_DROP, PILL_MARGIN, PILL_PAD, PILL_TERMINAL_HEIGHT,
-        PILL_TERMINAL_REST, PILL_TOP, PILL_WEB_MAX, PaneBarView, SHADOW, UNZOOM_BUTTON,
+        FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_DROP, PILL_MARGIN, PILL_PAD, PILL_REST,
+        PILL_TERMINAL_HEIGHT, PILL_TOP, PILL_WEB_MAX, PaneBarView, SHADOW, UNZOOM_BUTTON,
         UNZOOM_MARGIN, field_fill, focus_strip, focus_strip_rect, handle_color, pane_bar_buttons,
         pane_bar_field, pane_bar_hit, pane_bar_rect, pane_bar_rects, pane_grip_rect,
         pointer_reveals, split_address, unzoom_button_rect,
@@ -1014,24 +1016,26 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_pill_lets_its_window_show_through_until_the_pointer_comes() {
+    fn a_pill_lets_its_window_show_through_until_the_pointer_comes() {
         let mut v = view(600);
         v.buttons = BarButtons::Terminal;
         v.lit_level = 0.0;
-        assert_eq!(v.placement().2, PILL_TERMINAL_REST);
+        assert_eq!(v.placement().2, PILL_REST);
         v.alpha = 0.5;
-        assert_eq!(v.placement().2, 0.5 * PILL_TERMINAL_REST);
+        assert_eq!(v.placement().2, 0.5 * PILL_REST);
         // On its way to lit, between; lit, whole.
         v.lit_level = 0.5;
         let half = v.placement().2;
-        assert!(half > 0.5 * PILL_TERMINAL_REST && half < 0.5, "{half}");
+        assert!(half > 0.5 * PILL_REST && half < 0.5, "{half}");
         v.lit_level = 1.0;
         assert_eq!(v.placement().2, 0.5);
         // How lit it is doesn't draw the pill again.
         assert_eq!(v.still().lit_level, 0.0);
-        // The others are whole either way.
-        v.buttons = WEB;
+        // A web page's too; an app's is whole either way.
         v.lit_level = 0.0;
+        v.buttons = WEB;
+        assert_eq!(v.placement().2, 0.5 * PILL_REST);
+        v.buttons = BarButtons::None;
         assert_eq!(v.placement().2, 0.5);
     }
 
