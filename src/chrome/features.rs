@@ -9,8 +9,8 @@ use super::{
     Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_side, copy,
-    dialog_buttons, dot_shape, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs,
-    icon_sdf, measure, measured_footer_height, mix, phys, physical, plus, rect_px, tab, trash,
+    dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf,
+    measure, measured_footer_height, mix, phys, physical, plus, rect_px, status_dot, tab, trash,
 };
 use crate::agent_icons::AgentIcon;
 use crate::text_field::Line;
@@ -670,6 +670,9 @@ const NODE: i32 = 24;
 const NODE_GAP: i32 = 6;
 const NODE_LABEL: i32 = 18;
 const NODE_LINE: i32 = 16;
+/// How far a label's second line sits under its first, when it is too
+/// wide for its slot and takes the short line's place.
+const RAIL_LABEL_STEP: i32 = 16;
 /// The room left between a node and the line joining it to the next.
 const CONNECTOR_GAP: i32 = 6;
 /// How wide the repositories' and activity's columns are: the page
@@ -839,6 +842,30 @@ fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// The room left between a repository row's name and its line stat,
+/// between the stat's two counts, and the least of the name the stat
+/// leaves showing.
+const STAT_GAP: i32 = 8;
+const STAT_SPACE: i32 = 5;
+const STAT_NAME_MIN: i32 = 40;
+
+/// An activity row's dot in `spot`, by its `tone`: a tick in the success
+/// colour for what went through, a filled dot in the warning colour for
+/// what was sent back or failed, and a ring in the muted colour for the
+/// rest. Told apart by their shapes too, not by colour alone.
+fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Palette) {
+    let s = scale as f32;
+    let d = spot.size.w as f32 * s;
+    let color = tone.color(p);
+    match tone {
+        CheckTone::Ready => icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 0.95)),
+        CheckTone::Blocker => icon_sdf(c, spot, scale, color, |x, y| x.hypot(y) - d / 2.0),
+        CheckTone::Note => icon_sdf(c, spot, scale, color, |x, y| {
+            stage_dot(StageMark::Later, x, y, d)
+        }),
+    }
 }
 
 /// The most lines an activity row takes; the last ends in "…".
@@ -1279,6 +1306,113 @@ fn more_label(n: usize, after: bool) -> String {
     }
 }
 
+/// A rail node's circle in its `slot`: at the slot's top middle.
+fn node_circle(slot: Rect) -> Rect {
+    Rectangle::new(
+        (slot.loc.x + (slot.size.w - NODE) / 2, slot.loc.y).into(),
+        (NODE, NODE).into(),
+    )
+}
+
+/// Where the status dot of the agent card at `card` goes.
+fn agent_card_dot(card: Rect) -> Rect {
+    Rectangle::new(
+        (
+            card.loc.x + AGENT_PAD + 22,
+            card.loc.y + AGENT_PAD + (AGENT_HEAD - DOT) / 2,
+        )
+            .into(),
+        (DOT, DOT).into(),
+    )
+}
+
+/// How wide a repository's dot is, on its row or chip.
+const REPO_DOT: i32 = 8;
+
+/// Where the dot of a repository's row at `row` goes, left of its name.
+fn repo_row_dot(row: Rect) -> Rect {
+    Rectangle::new(
+        (row.loc.x + 6, row.loc.y + 8).into(),
+        (REPO_DOT, REPO_DOT).into(),
+    )
+}
+
+/// Where the dot of a repository's chip at `chip` goes.
+fn repo_chip_dot(chip: Rect) -> Rect {
+    Rectangle::new(
+        (
+            chip.loc.x + CHIP_PAD,
+            chip.loc.y + (chip.size.h - REPO_DOT) / 2,
+        )
+            .into(),
+        (REPO_DOT, REPO_DOT).into(),
+    )
+}
+
+/// The blinking dot (`DOT` across) over a repository's still dot's
+/// `spot`.
+fn repo_blinker(spot: Rect) -> Rect {
+    Rectangle::new(spot.loc, (DOT, DOT).into())
+}
+
+/// Where the blinking dots of the feature tab showing `view` go, laid
+/// out as `l`: the dot of an agent card whose agent is at work, and of a
+/// repository being touched. Each as laid out, unscrolled, with the
+/// column it is in (and scrolls with); `None` for one in the head (a
+/// narrow tab's strip of chips).
+pub fn feature_tab_blinkers(
+    view: &FeatureTabView,
+    l: &FeatureTabLayout,
+) -> Vec<(Rect, Option<TabColumn>)> {
+    let mut dots = Vec::new();
+    for (rect, piece) in &l.pieces[TabColumn::Page as usize] {
+        if let Piece::Agent(k) = piece
+            && let Some(PageSection::Agent { dot, .. }) = view.page.sections.get(*k)
+            && dot.blinks()
+        {
+            dots.push((agent_card_dot(*rect), Some(TabColumn::Page)));
+        }
+    }
+    if view.repos_error.is_none() {
+        let busy = |i: usize| view.repos.get(i).is_some_and(|r| r.busy);
+        match l.strip {
+            Some(_) => dots.extend(
+                (l.repos.iter().enumerate())
+                    .filter(|(i, (chip, _))| busy(*i) && chip.size.w > 0)
+                    .map(|(_, (chip, _))| (repo_blinker(repo_chip_dot(*chip)), None)),
+            ),
+            None => {
+                dots.extend((l.repos.iter().enumerate()).filter(|(i, _)| busy(*i)).map(
+                    |(_, (row, _))| (repo_blinker(repo_row_dot(*row)), Some(TabColumn::Repos)),
+                ))
+            }
+        }
+    }
+    dots
+}
+
+/// How far the glow round the current stage's node reaches past it.
+const PULSE_HALO: i32 = 7;
+/// How opaque the glow is at the top of its pulse.
+const PULSE_PEAK: f32 = 0.7;
+
+/// Where the glow pulsing round the current stage's node goes on the tab
+/// showing `view`, laid out as `l`, if a stage is current.
+pub fn feature_tab_pulse(view: &FeatureTabView, l: &FeatureTabLayout) -> Option<Rect> {
+    let i = view.rail.iter().position(|n| n.mark == NodeMark::Current)?;
+    let spot = node_circle(*l.nodes.get(i)?);
+    Some(Rectangle::new(
+        (spot.loc.x - PULSE_HALO, spot.loc.y - PULSE_HALO).into(),
+        (NODE + 2 * PULSE_HALO, NODE + 2 * PULSE_HALO).into(),
+    ))
+}
+
+/// How opaque the current node's glow is drawn when the pulse stands at
+/// `pulse` (0 to 1, see `anim::pulse`).
+pub fn rail_pulse_alpha(pulse: f32) -> f32 {
+    PULSE_PEAK * pulse.clamp(0.0, 1.0)
+}
+
 /// A part of the feature tab drawn in a buffer of its own, over the
 /// ground and cards of `Painter::feature_tab_back`, so a change to one
 /// (a hover, a key move, a column scrolled) draws only that one again.
@@ -1430,13 +1564,17 @@ pub(super) struct FeatureTabLayers {
     hints: super::Cached<SliceKey>,
     /// The thumbs, by their size.
     thumbs: [super::Cached<ThumbKey>; 3],
+    /// The glow round the current stage's node, composed over the head
+    /// at the pulse's opacity, so the head isn't drawn again for it.
+    pulse: super::Cached<(super::Theme, f64)>,
     /// How many buffers were drawn, for tests.
     drawn: std::cell::Cell<usize>,
 }
 
 impl FeatureTabLayers {
     /// The parts showing the feature tab in `area` at `now`, front to
-    /// back.
+    /// back: the current stage's node glowing at `pulse` (see
+    /// `anim::pulse`), and `blink`'s dot over what is at work.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn parts(
         &mut self,
@@ -1446,6 +1584,8 @@ impl FeatureTabLayers {
         scale: f64,
         now: std::time::Instant,
         painter: &Painter,
+        pulse: f32,
+        blink: super::layers::Blink,
     ) -> Vec<super::layers::Part> {
         use super::layers::Part;
         let p = theme.palette();
@@ -1457,11 +1597,12 @@ impl FeatureTabLayers {
             .as_ref()
             .map(|l| ((output, l.columns, theme, scale), area.loc, output));
         let drawn = &self.drawn;
-        let (head, columns, hints, thumbs) = (
+        let (head, columns, hints, thumbs, glow) = (
             &mut self.head,
             &mut self.columns,
             &mut self.hints,
             &mut self.thumbs,
+            &mut self.pulse,
         );
         let more = |_: &BackKey| {
             let (Some(view), Some(l)) = (&view, &layout) else {
@@ -1482,7 +1623,35 @@ impl FeatureTabLayers {
                 let part = Part::new(buffer, at(region), region.size, 1.0);
                 Some((part, moves))
             };
+            // Inside a column's card's edge: what of it shows.
+            let inside = |place: Rect| {
+                Rectangle::new(
+                    at(place) + Point::from((1, 1)),
+                    (place.size.w - 2, place.size.h - 2).into(),
+                )
+            };
+            // In front: the dots of what is at work, moving with their
+            // column, and the current node's glow, over the slices so
+            // these aren't drawn again as they blink and pulse.
             let mut parts = Vec::new();
+            if let Some((dot, alpha)) = blink.filter(|(_, a)| *a > 0.0) {
+                for (rect, column) in feature_tab_blinkers(view, l) {
+                    let part = Part::new(dot, at(rect), rect.size, alpha);
+                    let part = match column.and_then(|c| Some((c, l.columns[c as usize]?))) {
+                        Some((c, place)) => {
+                            let loc = (part.loc.x, part.loc.y - view.scroll[c as usize]).into();
+                            part.at(loc).clipped(inside(place))
+                        }
+                        None => part,
+                    };
+                    parts.push(part);
+                }
+            }
+            let alpha = rail_pulse_alpha(pulse);
+            if let Some(halo) = feature_tab_pulse(view, l).filter(|_| alpha > 0.0) {
+                let buffer = glow.get((theme, scale), |_| painter.rail_pulse(scale, p));
+                parts.push(Part::new(buffer, at(halo), halo.size, alpha));
+            }
             for column in TabColumn::ALL {
                 let i = column as usize;
                 let Some(place) = l.columns[i] else {
@@ -1503,11 +1672,7 @@ impl FeatureTabLayers {
                             .into()),
                     );
                 }
-                // Inside the card's edge.
-                let inside = Rectangle::new(
-                    at(place) + Point::from((1, 1)),
-                    (place.size.w - 2, place.size.h - 2).into(),
-                );
+                let inside = inside(place);
                 if let Some((part, moves)) = slice(&mut columns[i], TabSlice::Column(column), down)
                 {
                     let part = match moves {
@@ -1550,9 +1715,23 @@ pub(super) fn feature_tab_composed(
     let mut layers = FeatureTabLayers::default();
     let now = std::time::Instant::now();
     let area = Rectangle::from_size(output);
-    let _ = layers.parts(Some(view.clone()), area, theme, scale, now, painter);
-    let later = now + std::time::Duration::from_secs(2);
-    let parts = layers.parts(Some(view.clone()), area, theme, scale, later, painter);
+    // The glow half-way, the dots bright.
+    let dot = super::blink_dot(Dot::Working, scale, theme.palette());
+    let blink = Some((&dot, 1.0));
+    let part = |layers: &mut FeatureTabLayers, now| {
+        layers.parts(
+            Some(view.clone()),
+            area,
+            theme,
+            scale,
+            now,
+            painter,
+            0.5,
+            blink,
+        )
+    };
+    let _ = part(&mut layers, now);
+    let parts = part(&mut layers, now + std::time::Duration::from_secs(2));
     compose(&parts, output, scale)
 }
 
@@ -1901,12 +2080,7 @@ impl Painter {
 
         // The rail: the lines joining the nodes, then each node with its
         // label and line under it.
-        let circle = |slot: Rect| {
-            Rectangle::new(
-                (slot.loc.x + (slot.size.w - NODE) / 2, slot.loc.y).into(),
-                (NODE, NODE).into(),
-            )
-        };
+        let circle = node_circle;
         // The hovered node's band first: the connectors run over it.
         if let Some(FeatureTabHit::Node(i)) = view.hover
             && let Some(slot) = l.nodes.get(i)
@@ -1957,16 +2131,18 @@ impl Painter {
                 NodeMark::Later if !node.selected => p.muted,
                 _ => p.text,
             };
-            self.centred_cut(
-                c,
-                &node.label,
-                SMALL_FONT_SIZE,
-                label,
-                node.selected,
-                scale,
-                label_color,
-            );
-            if !node.line.is_empty() {
+            // A label too wide for its slot takes the line under it too,
+            // in place of the node's short line.
+            let lines = self.rail_label(&node.label, label.size.w, scale);
+            for (j, text) in lines.iter().enumerate() {
+                let rect = Rectangle::new(
+                    (label.loc.x, label.loc.y + j as i32 * RAIL_LABEL_STEP).into(),
+                    label.size,
+                );
+                let bold = node.selected;
+                self.centred_cut(c, text, SMALL_FONT_SIZE, rect, bold, scale, label_color);
+            }
+            if lines.len() == 1 && !node.line.is_empty() {
                 let line = Rectangle::new(
                     (label.loc.x, label.loc.y + NODE_LABEL).into(),
                     (label.size.w, NODE_LINE).into(),
@@ -2080,6 +2256,49 @@ impl Painter {
         }
     }
 
+    /// A rail node's label as it goes in a slot `w` wide: on one line,
+    /// or on two when it is wider than that in bold (as it is selected,
+    /// so picking it doesn't move it). A word too long for its line is
+    /// cut when it is drawn.
+    pub(super) fn rail_label(&self, text: &str, w: i32, scale: f64) -> Vec<String> {
+        let fits = |t: &str| self.bold_width(t, SMALL_FONT_SIZE, scale) <= w as f32 * scale as f32;
+        if fits(text) {
+            return vec![text.to_owned()];
+        }
+        // Where to break it: the most even split that fits, else after
+        // the first word.
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let split = |k: usize| (words[..k].join(" "), words[k..].join(" "));
+        let best = (1..words.len())
+            .map(split)
+            .filter(|(a, b)| fits(a) && fits(b))
+            .min_by_key(|(a, b)| a.chars().count().abs_diff(b.chars().count()));
+        match best.or_else(|| (words.len() > 1).then(|| split(1))) {
+            Some((a, b)) => vec![a, b],
+            None => vec![text.to_owned()],
+        }
+    }
+
+    /// The glow pulsing round the current stage's node: the accent,
+    /// fading out from the node's edge over `PULSE_HALO`, on a clear
+    /// buffer `NODE + 2 * PULSE_HALO` square. Its opacity is given when
+    /// it is composed (`rail_pulse_alpha`).
+    pub(super) fn rail_pulse(&self, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let size = NODE + 2 * PULSE_HALO;
+        let mut c = Canvas::new(physical(Size::from((size, size)), scale));
+        let s = scale as f32;
+        let (cx, cy) = (c.w as f32 / 2.0, c.h as f32 / 2.0);
+        let (r, reach) = (NODE as f32 / 2.0 * s, PULSE_HALO as f32 * s);
+        let (w, h) = (c.w, c.h);
+        c.paint_in(0, 0, w, h, p.accent, |x, y| {
+            let d = (x - cx).hypot(y - cy) - r;
+            let edge = (d + 0.5).clamp(0.0, 1.0);
+            let fade = (1.0 - d / reach).clamp(0.0, 1.0);
+            edge * fade * fade
+        });
+        c.into_buffer(false)
+    }
+
     /// `text` in bold, small, centred on `rect`.
     fn bold_centred(&self, c: &mut Canvas, text: &str, rect: Rect, scale: f64, color: Rgb) {
         let (x, end) = phys(rect, scale);
@@ -2136,11 +2355,7 @@ impl Painter {
                 let edge = if selected { p.accent } else { p.border_variant };
                 c.rounded(x, y, w, h, h / 2.0, edge);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, h / 2.0 - b, fill);
-                let dot = Rectangle::new(
-                    (chip.loc.x + CHIP_PAD, chip.loc.y + (chip.size.h - 8) / 2).into(),
-                    (8, 8).into(),
-                );
-                self.repo_dot(c, dot, repo, scale, p);
+                self.repo_dot(c, repo_chip_dot(*chip), repo, scale, p);
                 let text = Rectangle::new(
                     (chip.loc.x + CHIP_PAD + DOT_ROOM - 4, chip.loc.y).into(),
                     (chip.size.w - CHIP_PAD - DOT_ROOM + 4, chip.size.h).into(),
@@ -2176,11 +2391,12 @@ impl Painter {
         }
     }
 
-    /// A repository's dot in `spot`: touched in the success colour, being
-    /// touched in the accent, else a quiet one.
+    /// A repository's dot in `spot`: touched in the success colour, else
+    /// a quiet one. One being touched blinks: it is composed over the tab
+    /// (see `feature_tab_blinkers`).
     fn repo_dot(&self, c: &mut Canvas, spot: Rect, repo: &FeatureRepoRow, scale: f64, p: &Palette) {
         let color = if repo.busy {
-            p.accent
+            return;
         } else if repo.touched {
             p.success
         } else {
@@ -2287,14 +2503,8 @@ impl Painter {
                 );
                 let icon_spot = Rectangle::new(head.loc, (16, AGENT_HEAD).into());
                 agent_icon(c, icon_spot, 16, *icon, p.text, scale);
-                let dot_spot = Rectangle::new(
-                    (head.loc.x + 22, head.loc.y + (AGENT_HEAD - DOT) / 2).into(),
-                    (DOT, DOT).into(),
-                );
-                let d = DOT as f32 * s;
-                icon_sdf(c, dot_spot, scale, dot.color(p), |x, y| {
-                    dot_shape(*dot, x, y, d)
-                });
+                // A dot at work blinks: it is composed over the tab.
+                status_dot(c, agent_card_dot(rect), *dot, scale, p);
                 let button_rect = button.and_then(|i| l.page_buttons.get(i).copied().flatten());
                 let end_x =
                     button_rect.map_or(head.loc.x + head.size.w, |r| r.loc.x - QUIT_BUTTON_GAP);
@@ -2350,17 +2560,27 @@ impl Painter {
                 let button = l.repos.get(*i).and_then(|(_, b)| *b).map(at);
                 let end =
                     button.map_or(rect.loc.x + rect.size.w - 4, |b| b.loc.x - QUIT_BUTTON_GAP);
-                let name = Rectangle::new(
-                    (rect.loc.x + DOT_ROOM + 4, rect.loc.y + 2).into(),
-                    ((end - rect.loc.x - DOT_ROOM - 4).max(1), 20).into(),
+                let left = rect.loc.x + DOT_ROOM + 4;
+                // The lines it changes, at the end of its name's line,
+                // when they leave the name room.
+                let stat = Rectangle::new(
+                    (left + STAT_NAME_MIN, rect.loc.y + 2).into(),
+                    ((end - left - STAT_NAME_MIN).max(0), 20).into(),
                 );
-                let dot = Rectangle::new((rect.loc.x + 6, name.loc.y + 6).into(), (8, 8).into());
-                self.repo_dot(c, dot, repo, scale, p);
+                let name_end = match self.repo_stat(c, repo.stat, stat, scale, p) {
+                    Some(from) => from - STAT_GAP,
+                    None => end,
+                };
+                let name = Rectangle::new(
+                    (left, rect.loc.y + 2).into(),
+                    ((name_end - left).max(1), 20).into(),
+                );
+                self.repo_dot(c, repo_row_dot(rect), repo, scale, p);
                 let color = if repo.touched { p.text } else { p.muted };
                 line(c, &repo.name, name, FONT_SIZE, color);
                 let branch = Rectangle::new(
                     (name.loc.x, name.loc.y + 20).into(),
-                    (name.size.w, 18).into(),
+                    ((end - left).max(1), 18).into(),
                 );
                 let detail = if repo.busy {
                     format!("{} \u{b7} touching\u{2026}", repo.line)
@@ -2379,8 +2599,7 @@ impl Painter {
                     return;
                 };
                 let dot = Rectangle::new((rect.loc.x + 1, rect.loc.y + 5).into(), (8, 8).into());
-                let d = 8.0 * s;
-                icon_sdf(c, dot, scale, a.tone.color(p), |x, y| x.hypot(y) - d / 2.0);
+                activity_dot(c, dot, a.tone, scale, p);
                 let ago = Rectangle::new(rect.loc, (rect.size.w, TAIL_LINE).into());
                 let (ax, aend) = phys(ago, scale);
                 let w = self.text_width(&a.ago, DETAIL_FONT_SIZE, scale);
@@ -2404,6 +2623,58 @@ impl Painter {
                 }
             }
         }
+    }
+
+    /// A repository's `stat` as "+A −R" (added in the success
+    /// colour, removed in the error colour, a side that is 0 left out),
+    /// from the right of `rect` if it fits in it: where it starts (in
+    /// logical pixels), or `None` when nothing is drawn.
+    fn repo_stat(
+        &self,
+        c: &mut Canvas,
+        stat: Option<(usize, usize)>,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) -> Option<i32> {
+        let (added, removed) = stat?;
+        let parts: Vec<(String, Rgb)> = [
+            (added, format!("+{added}"), p.success),
+            (removed, format!("\u{2212}{removed}"), p.error),
+        ]
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .map(|(_, text, color)| (text, color))
+        .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let s = scale as f32;
+        let gap = (STAT_SPACE as f32 * s).round();
+        let widths: Vec<f32> = (parts.iter())
+            .map(|(text, _)| self.text_width(text, DETAIL_FONT_SIZE, scale).ceil())
+            .collect();
+        let total = widths.iter().sum::<f32>() + gap * (parts.len() - 1) as f32;
+        let (x, end) = phys(rect, scale);
+        if total > end - x {
+            return None;
+        }
+        let mut from = (end - total).floor();
+        let start = from;
+        for ((text, color), w) in parts.iter().zip(&widths) {
+            self.text(
+                c,
+                text,
+                DETAIL_FONT_SIZE,
+                from,
+                from + w + 1.0,
+                band(rect, scale),
+                scale,
+                *color,
+            );
+            from += w + gap;
+        }
+        Some((start / s).floor() as i32)
     }
 
     /// The page's button `i` in `rect`.
@@ -2797,7 +3068,16 @@ mod tests {
         let parts = |layers: &mut FeatureTabLayers, view: &FeatureTabView| -> Vec<Part> {
             frame.set(frame.get() + 1);
             let now = t0 + Duration::from_secs(frame.get());
-            layers.parts(Some(view.clone()), area, Theme::Dark, 1.0, now, &painter)
+            layers.parts(
+                Some(view.clone()),
+                area,
+                Theme::Dark,
+                1.0,
+                now,
+                &painter,
+                0.5,
+                None,
+            )
         };
         let n = 20;
         let time = |what: &str, f: &mut dyn FnMut(usize)| {
@@ -2849,7 +3129,16 @@ mod tests {
         let step = |layers: &mut FeatureTabLayers, view: &FeatureTabView, k: u64| {
             let now = t0 + Duration::from_secs(k);
             let before = layers.drawn.get();
-            let parts = layers.parts(Some(view.clone()), area, Theme::Dark, 1.0, now, &painter);
+            let parts = layers.parts(
+                Some(view.clone()),
+                area,
+                Theme::Dark,
+                1.0,
+                now,
+                &painter,
+                0.5,
+                None,
+            );
             (layers.drawn.get() - before, parts)
         };
         // The head, the hints and the three columns, then the ground once
@@ -2915,5 +3204,153 @@ mod tests {
             l.hit(&view, centre(*lead)),
             Some(FeatureTabHit::MoreRepos(9))
         );
+    }
+
+    /// A label wider than its slot (in bold, as when selected) goes on
+    /// two lines. "Manual test" and "Code review" fit on one down to
+    /// about 540 px wide (a slot of about 64 px in bold).
+    #[test]
+    fn long_rail_labels_take_two_lines_on_a_narrow_tab() {
+        let painter = crate::chrome::Painter::new();
+        assert!(painter.font.is_some(), "the widths need a font");
+        let view = tab_view();
+        let lines = |w: i32| -> Vec<Vec<String>> {
+            let l = tab_at(&view, w);
+            (l.nodes.iter().zip(&view.rail))
+                .map(|(slot, node)| painter.rail_label(&node.label, slot.size.w - 4, 1.0))
+                .collect()
+        };
+        for w in [870, 1180, 1920] {
+            assert!(
+                lines(w).iter().all(|l| l.len() == 1),
+                "at {w}: {:?}",
+                lines(w)
+            );
+        }
+        let narrow = lines(500);
+        let at = |label: &str| {
+            let i = view.rail.iter().position(|n| n.label == label).unwrap();
+            narrow[i].clone()
+        };
+        assert_eq!(at("Manual test"), ["Manual", "test"]);
+        assert_eq!(at("Code review"), ["Code", "review"]);
+        assert_eq!(at("Ship"), ["Ship"]);
+        // One word stays one line, however narrow: it is cut instead.
+        assert_eq!(painter.rail_label("Discover", 10, 1.0), ["Discover"]);
+    }
+
+    /// The dots blinking over the tab: the agent card's while its agent
+    /// works, a repository's while it is touched, on its row or chip.
+    #[test]
+    fn the_blinking_dots_sit_on_what_is_at_work() {
+        let mut view = tab_view();
+        let l = tab_at(&view, 1920);
+        let dots = feature_tab_blinkers(&view, &l);
+        let card = (l.pieces[TabColumn::Page as usize].iter())
+            .find(|(_, piece)| matches!(piece, Piece::Agent(_)))
+            .map(|(rect, _)| *rect)
+            .unwrap();
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].1, Some(TabColumn::Page));
+        assert!(card.contains_rect(dots[0].0));
+        assert_eq!(dots[0].0.size, Size::from((DOT, DOT)));
+
+        if let Some(PageSection::Agent { dot, .. }) = view.page.sections.first_mut() {
+            *dot = Dot::Idle;
+        }
+        view.repos[1].busy = true;
+        let l = tab_at(&view, 1920);
+        let dots = feature_tab_blinkers(&view, &l);
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].1, Some(TabColumn::Repos));
+        assert!(l.repos[1].0.contains_rect(dots[0].0));
+
+        let l = tab_at(&view, 850);
+        let dots = feature_tab_blinkers(&view, &l);
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].1, None);
+        assert!(l.repos[1].0.contains_rect(dots[0].0));
+        view.repos_error = Some("no".into());
+        assert!(feature_tab_blinkers(&view, &tab_at(&view, 850)).is_empty());
+    }
+
+    /// The current node's glow and the dots at work change only their
+    /// parts' opacity: nothing is drawn again for them. A dot in a
+    /// column moves with its scroll and shows only inside the column.
+    #[test]
+    fn the_pulse_and_the_blink_draw_nothing_again() {
+        use crate::chrome::Theme;
+        use std::time::{Duration, Instant};
+        let painter = crate::chrome::Painter::new();
+        let area = Rectangle::from_size((1920, 900).into());
+        let p = Theme::Dark.palette();
+        let dot = crate::chrome::blink_dot(Dot::Working, 1.0, p);
+        let mut view = tab_view();
+        let row = view.activity[0].clone();
+        view.activity = (0..80).map(|_| row.clone()).collect();
+        let mut layers = FeatureTabLayers::default();
+        let t0 = Instant::now();
+        let mut step = |view: &FeatureTabView, k: u64, pulse: f32, blink: f32| {
+            let now = t0 + Duration::from_secs(k);
+            let before = layers.drawn.get();
+            let parts = layers.parts(
+                Some(view.clone()),
+                area,
+                Theme::Dark,
+                1.0,
+                now,
+                &painter,
+                pulse,
+                Some((&dot, blink)),
+            );
+            (layers.drawn.get() - before, parts)
+        };
+        let _ = step(&view, 0, 0.0, 1.0);
+        let _ = step(&view, 1, 0.0, 1.0);
+        let l = tab_at(&view, 1920);
+        let halo = feature_tab_pulse(&view, &l).unwrap();
+        assert!(halo.contains_rect(node_circle(l.nodes[2])));
+        let (drawn, parts) = step(&view, 2, 0.8, 0.4);
+        assert_eq!(drawn, 0);
+        let glow = (parts.iter())
+            .find(|part| part.loc == halo.loc.to_f64())
+            .unwrap();
+        assert_eq!(glow.alpha, rail_pulse_alpha(0.8));
+        let (spot, _) = feature_tab_blinkers(&view, &l)[0];
+        let blinker = |parts: &[crate::chrome::layers::Part]| {
+            parts
+                .iter()
+                .find(|part| part.alpha == 0.4 && part.size == spot.size)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(blinker(&parts).loc, spot.loc.to_f64());
+        let page = l.columns[TabColumn::Page as usize].unwrap();
+        assert!(page.contains_rect(blinker(&parts).clip.unwrap()));
+        view.scroll[TabColumn::Page as usize] = 12.5;
+        let (_, parts) = step(&view, 3, 0.8, 0.4);
+        assert_eq!(blinker(&parts).loc.y, f64::from(spot.loc.y) - 12.5);
+        // No pulse at all: no glow.
+        let (drawn, parts) = step(&view, 4, 0.0, 0.4);
+        assert_eq!(drawn, 0);
+        assert!(!parts.iter().any(|part| part.loc == halo.loc.to_f64()));
+        for node in &mut view.rail {
+            node.mark = NodeMark::Done;
+        }
+        assert_eq!(feature_tab_pulse(&view, &l), None);
+    }
+
+    /// The line stat's colours read on the repositories' column, on a
+    /// row at rest, hovered and selected.
+    #[test]
+    fn the_line_stat_reads_on_the_rows_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT] {
+            for color in [p.success, p.error] {
+                for ground in [p.panel, p.element, p.selected] {
+                    let ratio = contrast(color, ground);
+                    assert!(ratio >= 3.0, "{color:?} on {ground:?} at {ratio:.2}:1");
+                }
+            }
+        }
     }
 }

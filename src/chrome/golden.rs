@@ -1913,7 +1913,7 @@ fn dump_identity() {
 /// the chips row under 870, no activity column under 1180, and all three
 /// columns.
 const TAB_HEIGHT: i32 = 900;
-const TAB_WIDTHS: [i32; 4] = [850, 860, 1180, 1920];
+const TAB_WIDTHS: [i32; 5] = [500, 850, 860, 1180, 1920];
 
 fn tab_line(text: &str, tone: super::CheckTone) -> super::CheckLine {
     super::CheckLine {
@@ -1923,8 +1923,9 @@ fn tab_line(text: &str, tone: super::CheckTone) -> super::CheckLine {
 }
 
 /// A feature's tab with Build current and running: claude at work with
-/// the tail of its pane, three of five milestones done, three
-/// repositories (shared not touched).
+/// the last three lines of its pane, three of five milestones done by
+/// name, three repositories (shared not touched), the two touched with
+/// the lines they change.
 pub(super) fn feature_tab() -> super::FeatureTabView {
     use super::{
         ActivityRow, ButtonStyle, CheckTone, Dot, FeatureRepoRow, FeatureTabView, NodeMark,
@@ -1950,15 +1951,18 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             selected: i == 2,
         })
         .collect();
-    let repo =
-        |name: &str, line: &str, touched: bool, button: Option<&'static str>| FeatureRepoRow {
-            name: name.into(),
-            line: line.into(),
-            touched,
-            busy: false,
-            button,
-            stat: None,
-        };
+    let repo = |name: &str,
+                line: &str,
+                touched: bool,
+                button: Option<&'static str>,
+                stat: Option<(usize, usize)>| FeatureRepoRow {
+        name: name.into(),
+        line: line.into(),
+        touched,
+        busy: false,
+        button,
+        stat,
+    };
     let activity = [
         ("Build started by you", "14m ago", CheckTone::Note),
         ("plan.md approved", "1h ago", CheckTone::Ready),
@@ -1996,9 +2000,9 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         remove: "Abandon\u{2026}",
         rail,
         repos: vec![
-            repo("api", "feature/bulk-export", true, None),
-            repo("web", "feature/bulk-export", true, None),
-            repo("shared", "context at dev", false, Some("Touch")),
+            repo("api", "feature/bulk-export", true, None, Some((212, 38))),
+            repo("web", "feature/bulk-export", true, None, Some((96, 4))),
+            repo("shared", "context at dev", false, Some("Touch"), None),
         ],
         repos_error: None,
         repo: 0,
@@ -2033,6 +2037,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     tail: vec![
                         "\u{203a} Editing api/src/export/csv.rs".into(),
                         "\u{203a} cargo test export:: (12 passed)".into(),
+                        "\u{203a} Reading web/src/export/Dialog.tsx".into(),
                     ],
                     button: Some(2),
                 },
@@ -2327,8 +2332,18 @@ fn feature_tab_more_repos_mid() -> super::FeatureTabView {
     view
 }
 
+/// So narrow the longer stages' labels take two lines; web being
+/// touched (its chip's dot blinks), shared adding lines only.
+fn feature_tab_rail_wrap() -> super::FeatureTabView {
+    let mut view = feature_tab();
+    view.repos[1].busy = true;
+    view.repos[2].stat = Some((7, 0));
+    at_stage(&mut view, 5, super::NodeMark::Current, "3 of 9 viewed");
+    view
+}
+
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 10] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 11] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2340,11 +2355,12 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 10] {
         ("tab_repos_error", feature_tab_repos_error()),
         ("tab_more_repos", feature_tab_more_repos()),
         ("tab_more_repos_mid", feature_tab_more_repos_mid()),
+        ("tab_rail_wrap", feature_tab_rail_wrap()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 12] = [
+const TAB_SURFACES: [(&str, i32); 14] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2357,9 +2373,11 @@ const TAB_SURFACES: [(&str, i32); 12] = [
     ("tab_repos_error", 860),
     ("tab_more_repos", 850),
     ("tab_more_repos_mid", 850),
+    ("tab_rail_wrap", 500),
+    ("tab_rail_wrap", 1180),
 ];
 
-const FEATURE_TAB: [&str; 12] = [
+const FEATURE_TAB: [&str; 14] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2372,6 +2390,8 @@ const FEATURE_TAB: [&str; 12] = [
     "tab_repos_error_860",
     "tab_more_repos_850",
     "tab_more_repos_mid_850",
+    "tab_rail_wrap_500",
+    "tab_rail_wrap_1180",
 ];
 
 fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -2392,66 +2412,74 @@ fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 12]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
     // Dark at 1
     [
-        0x16cb22fa1c0ed626, // tab_build_860
-        0x9968f3dd4c79dcd3, // tab_build_1180
-        0xdb2a9708af8c2f4a, // tab_build_1920
-        0x4c8f01675a2eb15d, // tab_plan_review_1180
-        0x600485b0f2dc4317, // tab_verify_failed_1920
-        0x842615b7d1a6b796, // tab_ship_blocked_1180
-        0x0208bd837bbe5824, // tab_done_1920
-        0x1057cadcbb4bdb85, // tab_later_860
-        0x7788fd51b7a7ddaf, // tab_repos_1180
-        0xc926b1a1e931934c, // tab_repos_error_860
-        0x7b242a77fe94486b, // tab_more_repos_850
-        0xf14017ef858a78a1, // tab_more_repos_mid_850
+        0xab7c76988146b933, // tab_build_860
+        0xafa33d7bf6b96f95, // tab_build_1180
+        0x2edd90f8815151bc, // tab_build_1920
+        0x8d945aef770a548a, // tab_plan_review_1180
+        0xcd847a6568a005e8, // tab_verify_failed_1920
+        0x98e69e2db7da2b19, // tab_ship_blocked_1180
+        0xdb3b8f1e1f9e17eb, // tab_done_1920
+        0x2bc6d20d28e2d26d, // tab_later_860
+        0xd6280b5a4cf75d65, // tab_repos_1180
+        0x18c2523cc89947b1, // tab_repos_error_860
+        0xb2843590391a6e56, // tab_more_repos_850
+        0xbc318450690884c4, // tab_more_repos_mid_850
+        0xb8b1b2090a39d328, // tab_rail_wrap_500
+        0xac45aa4c271428ee, // tab_rail_wrap_1180
     ],
     // Dark at 2
     [
-        0x9adadb9dcbbbe49c, // tab_build_860
-        0x144864cdf60df980, // tab_build_1180
-        0x9d73755fa1448645, // tab_build_1920
-        0x658e38549f227ab7, // tab_plan_review_1180
-        0xda78a14d08380d46, // tab_verify_failed_1920
-        0x9d29dd5fdc765916, // tab_ship_blocked_1180
-        0x5743ceea5b436063, // tab_done_1920
-        0x435795129e94f325, // tab_later_860
-        0x49e9067a25d750b2, // tab_repos_1180
-        0x4b0f2aaa4df8aadb, // tab_repos_error_860
-        0xfd6f6404aec57d26, // tab_more_repos_850
-        0x934bd494a11136e3, // tab_more_repos_mid_850
+        0x11e5857e9e9a3fbf, // tab_build_860
+        0x97a9accaf3019f10, // tab_build_1180
+        0xff16eab90c483c31, // tab_build_1920
+        0x0f626666efc90f80, // tab_plan_review_1180
+        0x454ba84afa7d9d09, // tab_verify_failed_1920
+        0x37aa3a0a4560a891, // tab_ship_blocked_1180
+        0x97b1fc7842bbbf06, // tab_done_1920
+        0xcd69d2b2e474eab5, // tab_later_860
+        0xbaffaf5e0430b85e, // tab_repos_1180
+        0xc86f375ebc848158, // tab_repos_error_860
+        0xa4bc035dc293e3d5, // tab_more_repos_850
+        0x16000a6216c9d8e0, // tab_more_repos_mid_850
+        0xa101c1c0775bf11e, // tab_rail_wrap_500
+        0x0b835aa2820daa32, // tab_rail_wrap_1180
     ],
     // Light at 1
     [
-        0x75563693f6ac3011, // tab_build_860
-        0x66c858069b3c9c31, // tab_build_1180
-        0x4e2d2656cc9e6aeb, // tab_build_1920
-        0xa13001d440d8ce9a, // tab_plan_review_1180
-        0x278d39c745b4ded3, // tab_verify_failed_1920
-        0xabb2828c42a7592b, // tab_ship_blocked_1180
-        0x6e1ebf22e78bd3a5, // tab_done_1920
-        0x692e326da4f3c9b2, // tab_later_860
-        0x77940ba3f43726a7, // tab_repos_1180
-        0x620582d786527262, // tab_repos_error_860
-        0xc22eec43dae9a562, // tab_more_repos_850
-        0x328cca8d3e20f860, // tab_more_repos_mid_850
+        0x28854bd740fef650, // tab_build_860
+        0x30ff0cca15357e75, // tab_build_1180
+        0x5f34c051cf5a2803, // tab_build_1920
+        0x58345601c873d0c3, // tab_plan_review_1180
+        0xf9491c38484fe292, // tab_verify_failed_1920
+        0xd4382c14f1fdc6da, // tab_ship_blocked_1180
+        0xd651e461bab3c526, // tab_done_1920
+        0x121e49e11876fdfe, // tab_later_860
+        0xb8d2b6dd642ffcf7, // tab_repos_1180
+        0x95a537cbbf1156fb, // tab_repos_error_860
+        0xacc70766a1a69f6b, // tab_more_repos_850
+        0x03738b19c20cd82d, // tab_more_repos_mid_850
+        0x4c1655874ce9d4f8, // tab_rail_wrap_500
+        0xae0e84b880f07569, // tab_rail_wrap_1180
     ],
     // Light at 2
     [
-        0x44ed89a9d9c4752b, // tab_build_860
-        0x4396e5e545392bd8, // tab_build_1180
-        0x4aa83807dc6f85e4, // tab_build_1920
-        0x7ea4c22782184a76, // tab_plan_review_1180
-        0x7147b239f56bde29, // tab_verify_failed_1920
-        0xadedb84045820507, // tab_ship_blocked_1180
-        0x509cfa0c12d79665, // tab_done_1920
-        0x10e6f6becc20558f, // tab_later_860
-        0x9f8183b7d41676fd, // tab_repos_1180
-        0x613ba7fff87eabdd, // tab_repos_error_860
-        0xda58062e634f1138, // tab_more_repos_850
-        0x55076de7ef654ac7, // tab_more_repos_mid_850
+        0x6d78d2aba22ec9b1, // tab_build_860
+        0x6f9ed9768b863931, // tab_build_1180
+        0xa499ed71e1f32c81, // tab_build_1920
+        0x8549b04e5eb91195, // tab_plan_review_1180
+        0xfdf6b29d1c7e227a, // tab_verify_failed_1920
+        0x73b9c08e76158874, // tab_ship_blocked_1180
+        0x56f50cc615e71d21, // tab_done_1920
+        0xbf94e8e71e2e5a0b, // tab_later_860
+        0x17d3554af01f5974, // tab_repos_1180
+        0xd63eca782d6b35b7, // tab_repos_error_860
+        0x6ddbcf4deaa64ac6, // tab_more_repos_850
+        0xb2e4c16e9dab739d, // tab_more_repos_mid_850
+        0xa0618b9585c48346, // tab_rail_wrap_500
+        0x4b7f9187b711ad7b, // tab_rail_wrap_1180
     ],
 ];
 
