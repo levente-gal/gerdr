@@ -1026,6 +1026,17 @@ pub struct FeatureRowView {
     pub marks: Vec<StageMark>,
 }
 
+impl FeatureRowView {
+    /// The mark the row starts with: the current stage's, else done.
+    pub(super) fn mark(&self) -> StageMark {
+        if self.marks.contains(&StageMark::Current) {
+            StageMark::Current
+        } else {
+            StageMark::Done
+        }
+    }
+}
+
 /// How big a stage dot of a sidebar row is, and the gap between two.
 pub(super) const STAGE_DOT: i32 = 8;
 pub(super) const STAGE_DOT_GAP: i32 = 3;

@@ -1691,6 +1691,17 @@ fn features_sidebar() -> SidebarView {
     }
 }
 
+/// The features sidebar with its second workspace the active one: the
+/// first one's blocked agent goes up into the "Needs you" list.
+fn needs_you_sidebar() -> SidebarView {
+    let mut view = SidebarView {
+        active: Some(1),
+        ..features_sidebar()
+    };
+    view.agents[0].iter_mut().for_each(|card| card.inbox = true);
+    view
+}
+
 const FEATURE_OUTPUT: (i32, i32) = (870, 720);
 
 fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -1707,6 +1718,7 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
         hash(painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p)),
+        hash(painter.sidebar_view(&needs_you_sidebar(), (260, 520).into(), scale, p)),
     ]
 }
 
@@ -1781,7 +1793,7 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 10] = [
+const FEATURES: [&str; 11] = [
     "new_feature",
     "feature_panel",
     "feature_panel_multi",
@@ -1792,61 +1804,66 @@ const FEATURES: [&str; 10] = [
     "manual_test",
     "manual_test_note",
     "sidebar_feature_workspace",
+    "sidebar_needs_you",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 10]; 4] = [
+const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0xaf6537e36661773b, // new_feature
         0x869764fa3d9048d7, // feature_panel
         0xde9d2405310235e7, // feature_panel_multi
-        0xa9c315b7044804cf, // sidebar_features
+        0x8a8248195a96fa9b, // sidebar_features
         0xc6d96ee5e01de0da, // feature_ship_blocked
         0xc16daf60f0e04c88, // feature_ship_ready
         0x25725cfbc3b3ba91, // feature_done_prs
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x63cc1266276af2a6, // sidebar_feature_workspace
+        0x1922db4785f72a5b, // sidebar_feature_workspace
+        0x7a4244041d19231d, // sidebar_needs_you
     ],
     // Dark at 2
     [
         0x9a3eb907776fe145, // new_feature
         0x31307a3926bbc629, // feature_panel
         0x5437f7692eaeff36, // feature_panel_multi
-        0x16881e74e80d5fee, // sidebar_features
+        0xbe43afa680de5f7d, // sidebar_features
         0x96b5aee7e55e893b, // feature_ship_blocked
         0x55c082e14c28296d, // feature_ship_ready
         0xc43b3e6d75230966, // feature_done_prs
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0x923af16fcfd248d7, // sidebar_feature_workspace
+        0xbd538e2248f5cc52, // sidebar_feature_workspace
+        0x47103f7749b4e42c, // sidebar_needs_you
     ],
     // Light at 1
     [
         0x0e77512e4815b092, // new_feature
         0x3abb7fb4ebb6164f, // feature_panel
         0x0608e5100d8d1171, // feature_panel_multi
-        0xd73830a02a3b09da, // sidebar_features
+        0xade984faf27796ac, // sidebar_features
         0x566c8cd22fcb3376, // feature_ship_blocked
         0xb2f69eb40cd2a0e6, // feature_ship_ready
         0x05cc7d58ebc3d6c6, // feature_done_prs
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0xdec7ed57e73f3ab4, // sidebar_feature_workspace
+        0x365a2e244822a7ca, // sidebar_feature_workspace
+        0xb86cdade241c2795, // sidebar_needs_you
     ],
     // Light at 2
     [
         0x9e8eaff9dfeac632, // new_feature
         0x0dcda199b0dbc637, // feature_panel
         0x71310a3466763ea3, // feature_panel_multi
-        0x5dde9940ceb74f62, // sidebar_features
+        0x8dbf84513abcd5ad, // sidebar_features
         0x9c492950881672d9, // feature_ship_blocked
         0x336e04083585dc13, // feature_ship_ready
         0x0a045e32666be0f4, // feature_done_prs
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x869e887cba78a19a, // sidebar_feature_workspace
+        0xd430167b8f533e60, // sidebar_feature_workspace
+        0xe874542dd41cc364, // sidebar_needs_you
     ],
 ];
 
@@ -1914,6 +1931,12 @@ fn dump_features() {
             &dir,
             &format!("sidebar_feature_workspace_{tag}"),
             painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p),
+            px(260),
+        );
+        dump(
+            &dir,
+            &format!("sidebar_needs_you_{tag}"),
+            painter.sidebar_view(&needs_you_sidebar(), (260, 520).into(), scale, p),
             px(260),
         );
     }
