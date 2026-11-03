@@ -11,7 +11,7 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 2),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 3),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 2),
         "build" => (include_str!("../../assets/prompts/build.md"), 3),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 2),
@@ -109,6 +109,16 @@ mod tests {
             assert!(!text.contains("{{"), "{name}: {text}");
         }
         assert!(render_builtin("nope", &vars(false, "")).is_err());
+    }
+
+    #[test]
+    fn discover_asks_the_user_before_it_looks() {
+        let first = render_builtin("discover", &vars(false, "")).unwrap();
+        assert!(first.contains("wait for\n   their answer"), "{first}");
+        assert!(!first.contains("Skip step 1"), "{first}");
+        // A brief sent back: the user has said what they want.
+        let back = render_builtin("discover", &vars(false, "Fix the scope.")).unwrap();
+        assert!(back.contains("Skip step 1"), "{back}");
     }
 
     #[test]
