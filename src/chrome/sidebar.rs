@@ -35,7 +35,7 @@ use super::{
     ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE,
     TINY_FONT_SIZE, TabView, agent_icon, app, arrow, band, centred_dot, chevron_down, ci_mark,
     cross, distinct, ellipsis, folder, git_branch, icon_sdf, measure, mix, new_tab, physical,
-    rect_px, restart_arrow, sparkle, status_dot, status_mark, terminal,
+    rect_px, restart_arrow, sparkle, status_dot, status_mark, terminal, tray,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -157,6 +157,11 @@ const EMPTY_HINT_TOP: i32 = 12;
 /// The "Needs you" list: its heading's height, and the room after it.
 const INBOX_TITLE: i32 = 20;
 const INBOX_GAP: i32 = 6;
+/// The features section under the workspaces: the room from the last
+/// block to its heading, with a rule across the sidebar halfway, and its
+/// heading's height (a header's, as it heads a list of its own).
+const SECTION_TOP: i32 = 12;
+const SECTION_TITLE: i32 = 26;
 /// The most of an inbox row its workspace's name takes, as a part of it.
 const INBOX_PLACE: f32 = 0.4;
 /// The gap between an agent row's name and what it is on.
@@ -1547,7 +1552,7 @@ impl SidebarLayout {
     /// This layout with `n` feature rows under the workspaces, a heading
     /// over them, in a sidebar `width` wide.
     pub fn with_features(mut self, n: usize, width: i32, density: Density) -> Self {
-        let (title, rows, _) = inbox_rects(n, self.blocks_end(), width, density);
+        let (title, rows, _) = features_rects(n, self.blocks_end(), width, density);
         self.features_title = title;
         self.features = rows;
         self
@@ -1747,6 +1752,27 @@ fn inbox_rects(n: usize, y: i32, width: i32, density: Density) -> (Option<Rect>,
         })
         .collect();
     (Some(title), rows, y + INBOX_GAP)
+}
+
+/// The features section with `n` rows starting at `y` (where the
+/// workspaces' blocks end) in a sidebar `width` wide: its heading, under
+/// a rule; its rows, lined up with the agent rows; and where it ends.
+fn features_rects(
+    n: usize,
+    y: i32,
+    width: i32,
+    density: Density,
+) -> (Option<Rect>, Vec<Rect>, i32) {
+    if n == 0 {
+        return (None, Vec::new(), y);
+    }
+    let title = Rectangle::new(
+        (0, y + SECTION_TOP).into(),
+        (width - GAP, SECTION_TITLE).into(),
+    );
+    let rows_top = title.loc.y + SECTION_TITLE - INBOX_TITLE;
+    let (_, rows, end) = inbox_rects(n, rows_top, width, density);
+    (Some(title), rows, end)
 }
 
 /// `sidebar_layout` at `density`.
@@ -2065,7 +2091,7 @@ impl Painter {
             let rows: Vec<_> = (view.features.iter().zip(&layout.features).enumerate())
                 .map(|(n, (row, rect))| (row, state.feature(n), *rect))
                 .collect();
-            self.feature_rows(&mut c, title, &rows, scale, p);
+            self.feature_rows(&mut c, title, &rows, density, scale, p);
         }
         for i in 0..layout.rows.len().min(view.workspaces.len()) {
             self.workspace_block(&mut c, view, &layout, i, scale, p);
@@ -2209,17 +2235,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        self.text(
-            c,
-            "Needs you",
-            TINY_FONT_SIZE,
-            px(NAME_X - CHILD_PAD) as f32,
-            px(title.loc.x + title.size.w - ROW_INSET) as f32,
-            band(title, scale),
-            scale,
-            p.muted,
-        );
+        self.section_heading(c, title, tray, "Needs you", None, scale, p);
         for (card, place, hover, rect) in rows {
             let state = CardState {
                 hover: *hover,
@@ -2239,49 +2255,126 @@ impl Painter {
         }
     }
 
-    /// The "Features" heading at `title`, then its `rows`: each a feature,
-    /// its hover alpha and where it goes. A row has the feature's title
-    /// cut to fit, and a dot per stage at its right.
-    fn feature_rows(
+    /// A section's heading in `title`, lined up with the workspace
+    /// headers: its `icon` in their kind icon's column, its `label` where
+    /// their names start, and a `count` at the right when it has one.
+    #[allow(clippy::too_many_arguments)]
+    fn section_heading(
         &self,
         c: &mut Canvas,
         title: Rect,
-        rows: &[(&super::FeatureRowView, u8, Rect)],
+        icon: impl Fn(f32, f32, f32) -> f32,
+        label: &str,
+        count: Option<usize>,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
+        let title_band = band(title, scale);
+        let spot = Rectangle::new(
+            (ICON_X, title.loc.y).into(),
+            (ROW_ICON_WIDTH, title.size.h).into(),
+        );
+        icon_sdf(c, spot, scale, p.placeholder, |x, y| icon(x, y, 0.8 * s));
+        let right = px(title.loc.x + title.size.w - ROW_INSET - CHILD_PAD) as f32;
+        let end = match count {
+            Some(n) => {
+                let n = n.to_string();
+                let w = self.text_width(&n, DETAIL_FONT_SIZE, scale);
+                let x = (right - w).round();
+                self.text(
+                    c,
+                    &n,
+                    DETAIL_FONT_SIZE,
+                    x,
+                    right + 1.0,
+                    title_band,
+                    scale,
+                    p.placeholder,
+                );
+                x - px(TITLE_GAP) as f32
+            }
+            None => right,
+        };
         self.text(
             c,
-            "Features",
-            TINY_FONT_SIZE,
-            px(NAME_X - CHILD_PAD) as f32,
-            px(title.loc.x + title.size.w - ROW_INSET) as f32,
-            band(title, scale),
+            label,
+            SMALL_FONT_SIZE,
+            px(NAME_X) as f32,
+            end,
+            title_band,
             scale,
             p.muted,
         );
+    }
+
+    /// The features section: a rule across the sidebar over its heading
+    /// at `title`, then its `rows`: each a feature, its hover alpha and
+    /// where it goes. A row has the mark of the stage the feature is at
+    /// where an agent row has its icon, the feature's title where an
+    /// agent row's text starts, and the stage's name and number at the
+    /// right.
+    fn feature_rows(
+        &self,
+        c: &mut Canvas,
+        title: Rect,
+        rows: &[(&super::FeatureRowView, u8, Rect)],
+        density: Density,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let rule_y = px(title.loc.y - SECTION_TOP / 2);
+        let rule_h = px(GAP).max(1);
+        let rule_x = px(ROW_INSET);
+        let rule_w = px(title.loc.x + title.size.w - ROW_INSET) - rule_x;
+        c.fill(rule_x, rule_y, rule_w, rule_h, p.border);
+        self.section_heading(c, title, git_branch, "Features", Some(rows.len()), scale, p);
         for (row, hover, rect) in rows {
             let hover = alpha(*hover);
             if hover > 0.0 {
                 let (x, y, w, h) = rect_px(*rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
             }
-            let marks = Rectangle::new(
-                (rect.loc.x, rect.loc.y).into(),
-                (rect.size.w - CHILD_PAD, rect.size.h).into(),
+            let line_band = band(*rect, scale);
+            let icon = agent_icon_rect(*rect, density);
+            let spot = Rectangle::new(
+                (
+                    icon.loc.x + (icon.size.w - super::STAGE_DOT) / 2,
+                    icon.loc.y + (icon.size.h - super::STAGE_DOT) / 2,
+                )
+                    .into(),
+                (super::STAGE_DOT, super::STAGE_DOT).into(),
             );
-            self.stage_marks(c, &row.marks, marks, scale, p);
-            let dots = super::stage_marks_width(row.marks.len());
-            let end = rect.loc.x + rect.size.w - CHILD_PAD - dots - CHILD_PAD;
+            let mark = row.mark();
+            icon_sdf(c, spot, scale, mark.color(p), |x, y| {
+                super::stage_dot(mark, x, y, 7.0 * s)
+            });
+            let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
+            let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
+            let detail = row.detail();
+            let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
+            let w = self.text_width(&detail, DETAIL_FONT_SIZE, scale).min(most);
+            let x = (right - w).round();
+            self.text(
+                c,
+                &detail,
+                DETAIL_FONT_SIZE,
+                x,
+                right + 1.0,
+                line_band,
+                scale,
+                p.placeholder,
+            );
             self.text(
                 c,
                 &row.title,
                 SMALL_FONT_SIZE,
-                px(rect.loc.x + CHILD_PAD) as f32,
-                px(end) as f32,
-                band(*rect, scale),
+                text_x,
+                x - px(TITLE_GAP) as f32,
+                line_band,
                 scale,
                 p.text,
             );
@@ -3474,11 +3567,11 @@ impl Painter {
         c.into_buffer(true)
     }
 
-    /// The feature rows `key` has, from their heading's top, as the
-    /// sidebar draws them.
+    /// The feature rows `key` has, from the rule over their heading, as
+    /// the sidebar draws them.
     fn sidebar_features_part(&self, key: &FeaturesKey) -> MemoryRenderBuffer {
         let (scale, p) = (key.scale, key.theme.palette());
-        let (title, rects, end) = inbox_rects(key.rows.len(), 0, key.width, key.density);
+        let (title, rects, end) = features_rects(key.rows.len(), 0, key.width, key.density);
         let Some(title) = title else {
             return MemoryRenderBuffer::default();
         };
@@ -3488,7 +3581,7 @@ impl Painter {
         let rows: Vec<_> = (key.rows.iter().zip(rects))
             .map(|((row, hover), rect)| (row, *hover, rect))
             .collect();
-        self.feature_rows(&mut c, title, &rows, scale, p);
+        self.feature_rows(&mut c, title, &rows, key.density, scale, p);
         c.into_buffer(true)
     }
 }
@@ -3637,9 +3730,10 @@ impl SidebarLayers {
 
         if let Some(title) = layout.features_title {
             let n = layout.features.len();
-            let (.., end) = inbox_rects(n, title.loc.y, width, density);
-            let h = end - title.loc.y;
-            if shows(title.loc.y, h) {
+            let top = title.loc.y - SECTION_TOP;
+            let (.., end) = features_rects(n, top, width, density);
+            let h = end - top;
+            if shows(top, h) {
                 let rows = (sidebar.features.iter().enumerate())
                     .map(|(n, row)| (row.clone(), state.feature(n)))
                     .collect();
@@ -3653,7 +3747,7 @@ impl SidebarLayers {
                 let buffer = self.features.get(key, (width, h).into(), scale, |key| {
                     painter.sidebar_features_part(key)
                 });
-                parts.push(moved(&buffer, (0, title.loc.y), (width, h).into()));
+                parts.push(moved(&buffer, (0, top), (width, h).into()));
             }
         }
 
