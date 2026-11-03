@@ -121,7 +121,7 @@ impl Gerdr {
             return;
         };
         // The feature panel's tab takes no panes.
-        if to.is_some_and(|t| t == from || t >= ws.tabs.len() || ws.tabs[t].pinned) {
+        if to.is_some_and(|t| t == from || t >= ws.tabs.len() || !ws.tabs[t].takes_panes()) {
             return;
         }
         // Alone in its tab, it has a tab of its own already.

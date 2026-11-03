@@ -699,7 +699,7 @@ impl Gerdr {
                 let mut items = tab_menu_items(w, t, pane, tab.zoomed(), &hints);
                 // A feature's panel tab has no panes, no name of its own,
                 // and doesn't close: only a new tab is left to ask for.
-                if tab.pinned {
+                if tab.is_feature() {
                     items.truncate(1);
                 }
                 Some(MenuSpec {

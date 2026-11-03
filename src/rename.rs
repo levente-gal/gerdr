@@ -38,7 +38,7 @@ impl Gerdr {
                 .get(w)
                 .and_then(|ws| ws.tabs.get(t))
                 // A feature's panel tab keeps its name.
-                .filter(|tab| !tab.pinned)
+                .filter(|tab| !tab.is_feature())
                 .map(|tab| tab.label.clone().unwrap_or_default()),
         };
         let Some(current) = current else {

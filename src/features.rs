@@ -2960,7 +2960,7 @@ impl Gerdr {
     /// tab shows again.
     pub(crate) fn sync_feature_panel(&mut self) {
         let w = self.active_workspace;
-        let on_tab = self.tab().is_some_and(|t| t.pinned);
+        let on_tab = self.tab().is_some_and(crate::Tab::is_feature);
         let shown = (self.project.clone())
             .zip(on_tab.then(|| self.workspace_feature(w)).flatten())
             .map(|(project, f)| (project, f.slug.clone()));

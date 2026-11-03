@@ -17,7 +17,7 @@ use std::{
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
-    Gerdr, Tab, Workspace, WorkspaceKind,
+    Gerdr, Tab, TabKind, Workspace, WorkspaceKind,
     feature::{Feature, Status},
 };
 
@@ -104,13 +104,13 @@ pub(crate) fn closing_text(running: &[String]) -> String {
 /// Give `tabs` a pinned first tab if `want`, else take every pinned one
 /// out, keeping `active` on the tab it was on. Whether they changed.
 pub(crate) fn pin_tab(tabs: &mut Vec<Tab>, active: &mut usize, want: bool) -> bool {
-    let has = tabs.first().is_some_and(|t| t.pinned);
+    let has = tabs.first().is_some_and(Tab::is_feature);
     if want && !has {
         let had = !tabs.is_empty();
         tabs.insert(
             0,
             Tab {
-                pinned: true,
+                kind: TabKind::Feature,
                 ..Tab::default()
             },
         );
@@ -119,11 +119,11 @@ pub(crate) fn pin_tab(tabs: &mut Vec<Tab>, active: &mut usize, want: bool) -> bo
         }
         return true;
     }
-    if !want && tabs.iter().any(|t| t.pinned) {
+    if !want && tabs.iter().any(Tab::is_feature) {
         let before = tabs.len();
         let mut i = 0;
         tabs.retain(|t| {
-            let keep = !t.pinned;
+            let keep = !t.is_feature();
             if !keep && i < *active {
                 *active -= 1;
             }
@@ -217,7 +217,7 @@ impl Gerdr {
         let kept = self
             .workspaces
             .iter()
-            .any(|ws| ws.record == record && ws.tabs.iter().any(|t| !t.pinned));
+            .any(|ws| ws.record == record && ws.tabs.iter().any(|t| !t.is_feature()));
         if new && !kept {
             self.closing_records.insert(record.clone());
             self.prune();
@@ -448,7 +448,7 @@ mod tests {
         let mut t = tabs(2);
         let mut active = 1;
         assert!(pin_tab(&mut t, &mut active, true));
-        assert!(t[0].pinned && !t[1].pinned && !t[2].pinned);
+        assert!(t[0].is_feature() && !t[1].is_feature() && !t[2].is_feature());
         assert_eq!(active, 2);
         // Once is enough.
         assert!(!pin_tab(&mut t, &mut active, true));
@@ -465,7 +465,7 @@ mod tests {
         let mut active = 1;
         pin_tab(&mut t, &mut active, true);
         assert!(pin_tab(&mut t, &mut active, false));
-        assert!(t.iter().all(|t| !t.pinned));
+        assert!(t.iter().all(|t| !t.is_feature()));
         assert_eq!((t.len(), active), (2, 1));
         // Shown, it gives way to the next.
         let mut t = tabs(1);
