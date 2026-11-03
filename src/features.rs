@@ -53,7 +53,8 @@ use crate::{
     Gerdr,
     chrome::{
         self, CheckLine, CheckTone, Dot, FeatureHit, FeaturePanelView, FeatureRepoRow,
-        MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo, NewFeatureView, StageMark, StageRow,
+        FeatureTabHit, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo, NewFeatureView, StageMark,
+        StageRow, TabArea,
     },
     feature::{
         self, Event, Feature, Pr, Stage, Status,
@@ -66,6 +67,7 @@ use crate::{
         store,
     },
     home_dir, paths, projects,
+    scroll::Scroll,
     tasks::Task,
     text_field::{Edit, TextField},
 };
@@ -704,6 +706,19 @@ pub struct FeaturePanel {
     /// The first repository shown, when not all fit.
     pub repo_top: usize,
     pub hover: Option<FeatureHit>,
+    /// The feature tab's area with the keyboard.
+    pub focus: TabArea,
+    /// The stage whose page shows, if the user picked one; none shows
+    /// the current stage.
+    pub stage: Option<Stage>,
+    /// The current stage when `stage` was picked: once the feature moves
+    /// on (a tick, a send-back, code changed), the pick is dropped.
+    pub picked_at: Option<Stage>,
+    /// The repository with the keyboard while `focus` is `Repos`.
+    pub repo: usize,
+    /// Each column's scroll, indexed by `TabColumn` (logical pixels).
+    pub scroll: [Scroll; 3],
+    pub tab_hover: Option<FeatureTabHit>,
 }
 
 /// What the feature panel asks gerdr to do.

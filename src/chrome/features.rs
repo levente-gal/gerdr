@@ -3,12 +3,13 @@
 //! stages, and the stage marks the sidebar's feature rows show.
 
 use super::{
-    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH,
+    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, Dot,
     FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON,
     QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band,
     button_width, check, dialog_buttons, field_text, footer_height, footer_hint_spots, hint_strs,
     icon_sdf, phys,
 };
+use crate::agent_icons::AgentIcon;
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -421,6 +422,223 @@ pub fn feature_repos_shown(view: &FeaturePanelView, output: Size<i32, Logical>) 
     repos.min(fit)
 }
 
+/// How a stage's node on the feature tab's rail reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NodeMark {
+    /// Done: a success ring with a tick.
+    Done,
+    /// The stage the feature is at: filled in the accent, pulsing.
+    Current,
+    /// Still to come: a border ring.
+    Later,
+    /// Done, but the code changed since: a warning ring.
+    Stale,
+    /// The current stage, with a gate waiting for the user (a file to
+    /// review, a stop to go on from): a warning dot.
+    Waiting,
+}
+
+/// A stage's node on the feature tab's rail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RailNode {
+    pub label: String,
+    /// One short line under the label ("2h ago", "running 14m", "ready
+    /// for review", "failed"), or empty.
+    pub line: String,
+    pub mark: NodeMark,
+    /// Its page is the one shown.
+    pub selected: bool,
+}
+
+/// The feature tab's areas the keyboard moves between, with Tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TabArea {
+    /// The rail: the keys pick a stage's page.
+    #[default]
+    Stages,
+    /// The repositories' column: the keys pick a repository.
+    Repos,
+}
+
+/// The feature tab's columns, each scrolled on its own: the index into
+/// `FeatureTabView::scroll`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TabColumn {
+    Repos = 0,
+    Page = 1,
+    Activity = 2,
+}
+
+impl TabColumn {
+    pub const ALL: [Self; 3] = [Self::Repos, Self::Page, Self::Activity];
+}
+
+/// A button on a stage's page. What it does is for `crate::features` to
+/// know, by its index in `StagePage::buttons`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageButton {
+    pub label: String,
+    /// `Primary` for the one to press next, `Destructive` for one that
+    /// throws work away.
+    pub style: ButtonStyle,
+    /// The key that presses it, shown after the label ("⏎"), if any.
+    pub key: Option<&'static str>,
+}
+
+/// A part of a stage's page, under its button row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageSection {
+    /// A stage's agent: its logo and name, its dot, where it runs, and
+    /// the last lines of its pane (empty until Inc 2 reads them).
+    Agent {
+        icon: AgentIcon,
+        name: String,
+        dot: Dot,
+        /// "working · tab 2", or why it isn't running.
+        status: String,
+        tail: Vec<String>,
+        /// The index in `StagePage::buttons` of the card's own button
+        /// (Show agent), if any.
+        button: Option<usize>,
+    },
+    /// A labelled list of lines in their tones: a file's state, the
+    /// checks, findings, criteria, the Ship check, a done stage's note.
+    Lines {
+        label: String,
+        lines: Vec<CheckLine>,
+    },
+    /// The milestones, "done of total", with a bar, and each by name when
+    /// known (`true` = done; empty until Inc 2 reads them).
+    Milestones {
+        done: usize,
+        total: usize,
+        items: Vec<(bool, String)>,
+    },
+}
+
+/// The selected stage's page, in the feature tab's middle column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagePage {
+    pub title: String,
+    /// What the stage is for.
+    pub about: String,
+    /// Where it stands now, as the old panel's row detail said it.
+    pub status: Option<CheckLine>,
+    pub buttons: Vec<PageButton>,
+    pub sections: Vec<PageSection>,
+}
+
+/// A line of the feature tab's activity: one of the feature's history,
+/// newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityRow {
+    pub what: String,
+    /// "14m ago".
+    pub ago: String,
+    /// Its dot's colour: `Ready` for a tick, `Blocker` for a send-back or
+    /// a failure, `Note` else.
+    pub tone: CheckTone,
+}
+
+/// What the feature tab shows: the whole tab area, not a centred card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeatureTabView {
+    pub title: String,
+    /// Its slug, folder and age.
+    pub sub: String,
+    /// Which of how many features it is, when there are several.
+    pub which: Option<(usize, usize)>,
+    /// The label of the header's last button, removing its worktrees
+    /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`.
+    pub remove: &'static str,
+    /// The eight stages, in order.
+    pub rail: Vec<RailNode>,
+    pub repos: Vec<FeatureRepoRow>,
+    /// Why the repositories couldn't be read, shown in their column in
+    /// place of an empty list.
+    pub repos_error: Option<String>,
+    /// The repository with the keyboard while `focus` is `Repos`.
+    pub repo: usize,
+    pub focus: TabArea,
+    pub page: StagePage,
+    pub activity: Vec<ActivityRow>,
+    /// How far each column is scrolled down, in logical pixels, indexed
+    /// by `TabColumn`.
+    pub scroll: [f64; 3],
+    pub hover: Option<FeatureTabHit>,
+    pub hints: Vec<(String, String)>,
+}
+
+/// What the pointer is over on the feature tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeatureTabHit {
+    /// The tab, but nothing on it that acts.
+    Tab,
+    /// Over a column, but nothing in it that acts: where the wheel goes.
+    Column(TabColumn),
+    Prev,
+    Next,
+    /// `FEATURE_BUTTONS`, then the one removing worktrees.
+    Button(usize),
+    /// A stage's node or label on the rail, by index into `rail`.
+    Node(usize),
+    /// Index as in `FeatureTabView::repos`.
+    Repo(usize),
+    RepoButton(usize),
+    /// Index as in `StagePage::buttons`.
+    PageButton(usize),
+    Hint(usize),
+}
+
+/// Where the feature tab's parts go, in output coordinates.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeatureTabLayout {
+    pub frame: Rect,
+    pub title: Rect,
+    pub sub: Rect,
+    /// "2 of 3", and the buttons to the previous and next feature.
+    pub switch: Option<(Rect, Rect, Rect)>,
+    /// `FEATURE_BUTTONS`, then the one removing worktrees.
+    pub buttons: Vec<Rect>,
+    /// Each stage's node, with its label and line under it: what a click
+    /// picks.
+    pub nodes: Vec<Rect>,
+    /// Each column's place, indexed by `TabColumn`: Activity has none
+    /// when the tab is too narrow (it goes at the end of the page), and
+    /// Repos is a row of chips under the rail when narrower still.
+    pub columns: [Option<Rect>; 3],
+    /// How tall each column's contents are, indexed by `TabColumn`: how
+    /// far it may scroll is this less its place's height.
+    pub content: [i32; 3],
+    pub hints: Rect,
+}
+
+impl FeatureTabLayout {
+    /// What is at `pos` on the tab showing `view`, scrolled as it is.
+    pub fn hit(&self, view: &FeatureTabView, pos: Point<i32, Logical>) -> Option<FeatureTabHit> {
+        let _ = (view, pos);
+        None
+    }
+
+    /// How far `column` may scroll down, in logical pixels.
+    pub fn scroll_room(&self, column: TabColumn) -> i32 {
+        let i = column as usize;
+        let shown = self.columns[i].map_or(0, |r| r.size.h);
+        (self.content[i] - shown).max(0)
+    }
+}
+
+/// Where the feature tab's parts go in `frame`, its tab's area: a header,
+/// the stages' rail, then the repositories', page's and activity's
+/// columns, and the hints at the foot.
+pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
+    let _ = view;
+    FeatureTabLayout {
+        frame,
+        ..FeatureTabLayout::default()
+    }
+}
+
 /// Where the feature panel's parts go in `frame` (its tab's area):
 /// centred, as wide as a dialog, the repositories past what fits scrolled.
 pub fn feature_panel_layout(view: &FeaturePanelView, frame: Rect) -> FeaturePanelLayout {
@@ -759,6 +977,18 @@ impl Painter {
             );
         }
         c.into_buffer(false)
+    }
+
+    /// The feature tab filling `output`, its tab's area.
+    pub(super) fn feature_tab(
+        &self,
+        view: &FeatureTabView,
+        output: Size<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let _ = (view, p);
+        Canvas::new(super::physical(output, scale)).into_buffer(false)
     }
 
     /// The feature panel on an output of `output`, inside a margin of
