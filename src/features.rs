@@ -39,7 +39,7 @@
 //! squash merged makes it done.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -98,6 +98,9 @@ pub struct Features {
     busy: Vec<Busy>,
     /// The latest probe of each feature, by project and slug.
     probes: BTreeMap<(String, String), Probed>,
+    /// The feature folders whose docs link was seen to this run:
+    /// `link_feature_docs` goes once for each.
+    pub(crate) docs_linked: BTreeSet<PathBuf>,
     /// What the Ship sheet open or last open asked to do, by project and
     /// slug: what shipping does once confirmed.
     asked: BTreeMap<(String, String), Asked>,
@@ -228,6 +231,12 @@ pub(crate) enum Done {
         slug: String,
         root: Root,
         result: Result<(Created, Vec<(feature::Link, Created)>), String>,
+    },
+    /// A feature's folder linked to its stage files, and the exclude file
+    /// that changed for it, or why not.
+    DocsLinked {
+        title: String,
+        result: Result<Option<PathBuf>, String>,
     },
     /// Projects linked to open feature `slug`, or not.
     Linked {
@@ -1749,6 +1758,20 @@ impl Gerdr {
                     dialog.found_other(&project, result);
                 }
             }
+            Done::DocsLinked { title, result } => match result {
+                Ok(None) => {}
+                Ok(Some(exclude)) => self.show_success(format!(
+                    "Added /{} to {}",
+                    layout::DOCS_LINK,
+                    tilde(&exclude)
+                )),
+                Err(why) => {
+                    tracing::warn!("linking the stage files of {title}: {why}");
+                    self.show_warning(format!(
+                        "Agents in \u{201c}{title}\u{201d} can't name its stage files: {why}"
+                    ));
+                }
+            },
             Done::Linked {
                 project,
                 slug,
@@ -2668,6 +2691,8 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't create \u{201c}{title}\u{201d}: {why}"));
             }
         };
+        // A slug used before: this folder has no link yet.
+        self.features.docs_linked.remove(&created.dir);
         let mut ignores = created.ignores.clone();
         ignores.extend(linked.iter().flat_map(|(_, c)| c.ignores.iter().cloned()));
         let text = created_text(&title, &root.path, &ignores);
