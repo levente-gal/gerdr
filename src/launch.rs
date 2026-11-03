@@ -277,9 +277,9 @@ impl Gerdr {
     }
 
     /// The project's Cursor workspace, made in the project's folder if it
-    /// has none, and whether it was there already. One still kept in the
-    /// records (its windows went a moment ago, or haven't come back since
-    /// a start) comes back in its place in the sidebar.
+    /// has none, and whether it was there already. One kept in the records
+    /// (Cursor quit, or its windows haven't come back since a start) comes
+    /// back in its place in the sidebar.
     fn cursor_workspace(&mut self) -> (usize, bool) {
         if let Some(w) = self
             .workspaces
@@ -292,12 +292,7 @@ impl Gerdr {
             .project
             .as_deref()
             .and_then(|id| self.projects.project(id))
-            .and_then(|p| {
-                p.workspaces.iter().find(|r| {
-                    WorkspaceKind::from_record(r.kind) == WorkspaceKind::Cursor
-                        && r.herdr_id.is_none()
-                })
-            })
+            .and_then(|p| p.workspaces.iter().find(|r| r.keeps_place()))
             .cloned();
         if let Some(record) = kept {
             let mut ws = Workspace::new(record.dir, WorkspaceKind::Cursor);
@@ -307,7 +302,8 @@ impl Gerdr {
                 record.label
             };
             ws.record = record.id;
-            return (self.insert_workspace(ws), false);
+            // Kept already: a launch that fails leaves the record be.
+            return (self.insert_workspace(ws), true);
         }
         let dir = self
             .project

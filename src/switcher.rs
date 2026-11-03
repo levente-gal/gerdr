@@ -797,7 +797,11 @@ fn project_items(projects: &[Project], current: Option<&str>) -> Vec<Item> {
     let mut items: Vec<Item> = others
         .into_iter()
         .map(|project| {
-            let n = project.workspaces.len();
+            let n = project
+                .workspaces
+                .iter()
+                .filter(|r| !r.is_place_only())
+                .count();
             let plural = if n == 1 { "" } else { "s" };
             Item::new(
                 ItemIcon::Workspace(WorkspaceKind::Project),

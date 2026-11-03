@@ -2643,8 +2643,20 @@ impl Gerdr {
             if now - since >= FORGET_IDLE && !restoring {
                 self.gone_since.remove(&id);
                 if let Some(p) = self.projects.project_mut(&project) {
-                    p.workspaces.retain(|r| r.id != id);
-                    changed = true;
+                    match p.workspaces.iter_mut().find(|r| r.id == id) {
+                        // Its app quit: keep the place, not what to start.
+                        Some(r) if r.keeps_place() => {
+                            if !r.tabs.is_empty() || !r.panes.is_empty() {
+                                r.tabs.clear();
+                                r.panes.clear();
+                                changed = true;
+                            }
+                        }
+                        _ => {
+                            p.workspaces.retain(|r| r.id != id);
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
@@ -3454,7 +3466,7 @@ impl Gerdr {
         let mut zed_expected = false;
         for record in records {
             if !record.tabs.iter().any(|t| t.layout.holds_apps()) {
-                if record.herdr_id.is_none() {
+                if record.herdr_id.is_none() && !record.keeps_place() {
                     self.forget_workspace(&record.id);
                 }
                 continue;
