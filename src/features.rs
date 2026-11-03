@@ -1,4 +1,4 @@
-//! Features in gerdr's window: the new feature dialog, the feature panel,
+//! Features in gerdr's window: the new feature dialog, the feature tab,
 //! and the work they start off the UI thread (see `feature` for the record
 //! and where it lives).
 //!
@@ -10,22 +10,24 @@
 //! creates it, Tab and Shift+Tab (Up/Down) move between the title and the
 //! repositories, Space ticks one, Esc clears the title, then closes.
 //!
-//! The feature panel: a feature's repositories and its eight stages. It is
-//! the pinned first tab of the feature's workspace (see `feature_workspace`):
-//! showing that tab shows the panel, and it can't be closed, moved or
-//! renamed; closing the workspace takes it along. Up and
-//! Down (Ctrl+J/K) move, Enter does the row's own thing (start, show or
-//! review the current stage's agent, let Build go on after a milestone,
-//! run Verify's checks, mark a stage without either done, ship it once
-//! Ship is the current one, reopen a done one, touch a repository or open
-//! a tab in it), Left/Right go to the previous or next feature, Ctrl+O
-//! opens a tab in the feature's folder, Ctrl+Shift+O opens the pull
-//! request of the repository under the cursor, or on Verify's row its
-//! evidence, Ctrl+R starts the current stage's agent afresh, Ctrl+C copies
-//! its path, Ctrl+N starts a new one, Del abandons it (or, once done,
-//! removes its worktrees) after asking. Build's row says what
-//! setup does while it runs, and Verify's what its checks do, or what
-//! failed.
+//! The feature tab: the pinned first tab of the feature's workspace (see
+//! `feature_workspace`), full size, painted from `feature_tab_view` (its
+//! state is `FeaturePanel`). It can't be closed, moved or renamed; closing
+//! the workspace takes it along. A header with the feature's buttons, the
+//! eight stages as a rail, and under it the repositories', the picked
+//! stage's page's and the activity's columns, each scrolled on its own
+//! (on a narrow tab the repositories are a row of chips and the activity
+//! goes at the page's end). Tab moves the keyboard between the rail and
+//! the repositories; the arrows (Ctrl+J/K), Home and End pick a stage's
+//! page or a repository, which scrolls into view. Enter does the page's
+//! next thing (start, show or review the stage's agent, let Build go on
+//! after a milestone, run Verify's checks, mark it done, ship) or the
+//! repository's (touch it, open a tab in it); Ctrl+PgUp/PgDn go to the
+//! previous or next feature, Ctrl+O opens a tab in the feature's folder,
+//! Ctrl+Shift+O opens the pull request of the repository picked, or on
+//! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
+//! Ctrl+C copies its path, Ctrl+N starts a new one, Del abandons it (or,
+//! once done, removes its worktrees) after asking.
 //!
 //! The marks from Build on are bound to the code (see `feature::patch`):
 //! marking one reads the feature's patch-id off the thread first, and the
@@ -2783,10 +2785,32 @@ impl Gerdr {
         let slugs = self.listed_slugs(&panel.project);
         let feature = self.feature(&panel.project, &panel.slug).cloned()?;
         let ctx = self.row_ctx(&feature);
-        self.features
-            .panel
-            .as_mut()?
-            .key(mods, sym, &feature, &slugs, ctx)
+        let panel = self.features.panel.as_mut()?;
+        let before = (panel.focus, panel.repo);
+        let outcome = panel.key(mods, sym, &feature, &slugs, ctx);
+        let moved = (self.features.panel.as_ref())
+            .is_some_and(|p| p.focus == TabArea::Repos && (p.focus, p.repo) != before);
+        if moved {
+            self.reveal_feature_repo();
+        }
+        outcome
+    }
+
+    /// Scroll the feature tab's repositories' column to show the one with
+    /// the keyboard, as laid out now.
+    fn reveal_feature_repo(&mut self) {
+        let Some((view, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let scroll = &mut panel.scroll[TabColumn::Repos as usize];
+        if let Some(to) = layout.reveal_repo(view.repo, scroll.pos())
+            && to != scroll.pos()
+        {
+            scroll.jump(to);
+        }
     }
 
     /// Do what the feature panel asked.
@@ -3607,12 +3631,8 @@ impl Gerdr {
     /// it scrolls within.
     fn feature_tab_column(&self, pos: Point<f64, Logical>) -> Option<(TabColumn, Bounds)> {
         let (_, layout) = self.feature_tab_parts()?;
-        TabColumn::ALL.into_iter().find_map(|col| {
-            let rect = layout.columns[col as usize]?;
-            rect.to_f64()
-                .contains(pos)
-                .then(|| (col, tab_bounds(&layout, col)))
-        })
+        let col = layout.column_at(pos.to_i32_round())?;
+        Some((col, tab_bounds(&layout, col)))
     }
 
     /// The wheel or the touchpad over the feature tab: the column under
