@@ -246,6 +246,19 @@ impl WorktreeDiff {
         }
     }
 
+    /// The panel showing this diff alone across it.
+    pub fn repos_view(&self, env: Env) -> crate::chrome::ReposView {
+        crate::chrome::ReposView::diff_only(
+            self.heading(),
+            self.summary(),
+            self.hover,
+            self.hints(),
+            self.view(env),
+            self.sheet(env),
+            env.density,
+        )
+    }
+
     /// The file under review read again (`Err`: why it couldn't be): shown
     /// as all added lines, where it stood; the same text as before left
     /// as it is.
@@ -1256,34 +1269,7 @@ impl crate::Gerdr {
     /// What the worktree's diff shows, while open: the panel with the
     /// diff alone across it.
     pub(crate) fn worktree_diff_view(&self) -> Option<crate::chrome::ReposView> {
-        let wd = self.wd()?;
-        let env = self.worktree_env();
-        Some(crate::chrome::ReposView {
-            title: wd.heading(),
-            summary: wd.summary(),
-            lines: Vec::new(),
-            part: 0.0,
-            over: 0.0,
-            first: 0,
-            total: 0,
-            selected: None,
-            hover: wd.hover,
-            field: Default::default(),
-            field_focused: false,
-            placeholder: String::new(),
-            error: None,
-            result: None,
-            hints: wd.hints(),
-            detail: wd.view(env),
-            sheet: wd.sheet(env),
-            empty: String::new(),
-            branch: Default::default(),
-            density: self.density,
-            tree_share: 0.0,
-            grouping: Default::default(),
-            diff_only: true,
-            flat: false,
-        })
+        Some(self.wd()?.repos_view(self.worktree_env()))
     }
 
     /// What a key or click on the worktree's diff asked for, as the
@@ -1291,9 +1277,7 @@ impl crate::Gerdr {
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
         self.worktree_save_review();
         let (error, decided) = self
-            .repos
-            .worktree
-            .as_mut()
+            .wd_mut()
             .map(WorktreeDiff::take_error)
             .unwrap_or_default();
         if let Some(why) = error {

@@ -240,6 +240,46 @@ pub struct ReposView {
     pub flat: bool,
 }
 
+impl ReposView {
+    /// The panel with a diff alone across it, `title` its heading.
+    pub fn diff_only(
+        title: String,
+        summary: String,
+        hover: Option<ReposHit>,
+        hints: Vec<Hint>,
+        detail: DetailView,
+        sheet: Option<SheetView>,
+        density: Density,
+    ) -> Self {
+        ReposView {
+            title,
+            summary,
+            lines: Vec::new(),
+            part: 0.0,
+            over: 0.0,
+            first: 0,
+            total: 0,
+            selected: None,
+            hover,
+            field: Default::default(),
+            field_focused: false,
+            placeholder: String::new(),
+            error: None,
+            result: None,
+            hints,
+            detail,
+            sheet,
+            empty: String::new(),
+            branch: Default::default(),
+            density,
+            tree_share: 0.0,
+            grouping: Default::default(),
+            diff_only: true,
+            flat: false,
+        }
+    }
+}
+
 /// The header's branch picker: the branch the repositories acted on are
 /// on, and its menu while open.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -5907,19 +5947,35 @@ mod tests {
                 file.check = None;
             }
         }
+        let hints = vec![
+            hint(ReposButton::Comment, "c", None),
+            hint(ReposButton::Help, "F1", None),
+            hint(ReposButton::Close, "Esc", None),
+        ];
+        let title = "Worktree · feat/x".into();
+        let summary = "2 commits on main".into();
         ReposView {
-            title: "Worktree · feat/x".into(),
-            summary: "2 commits on main".into(),
-            lines: Vec::new(),
-            hints: vec![
-                hint(ReposButton::Comment, "c", None),
-                hint(ReposButton::Help, "F1", None),
-                hint(ReposButton::Close, "Esc", None),
-            ],
-            result: None,
-            error: None,
-            diff_only: true,
-            ..view
+            field: view.field,
+            field_focused: view.field_focused,
+            placeholder: view.placeholder,
+            empty: view.empty,
+            branch: view.branch,
+            tree_share: view.tree_share,
+            grouping: view.grouping,
+            part: view.part,
+            over: view.over,
+            first: view.first,
+            total: view.total,
+            selected: view.selected,
+            ..ReposView::diff_only(
+                title,
+                summary,
+                view.hover,
+                hints,
+                view.detail,
+                view.sheet,
+                view.density,
+            )
         }
     }
 
