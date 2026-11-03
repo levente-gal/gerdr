@@ -1893,7 +1893,7 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0x25725cfbc3b3ba91, // feature_done_prs
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x6a43783f5bb5fcd3, // sidebar_feature_workspace
+        0x41c27deb8d74ba1a, // sidebar_feature_workspace
         0x818d05fb2ec3d9a9, // sidebar_needs_you
     ],
     // Dark at 2
@@ -1907,7 +1907,7 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0xc43b3e6d75230966, // feature_done_prs
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0x6d690a720cee56d2, // sidebar_feature_workspace
+        0x343ff92f09e0e5b8, // sidebar_feature_workspace
         0x445f579930bc139c, // sidebar_needs_you
     ],
     // Light at 1
@@ -1921,7 +1921,7 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0x05cc7d58ebc3d6c6, // feature_done_prs
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0xd2bbdc87ca87827a, // sidebar_feature_workspace
+        0x1ac111419d6a09d2, // sidebar_feature_workspace
         0x0884214637ba9738, // sidebar_needs_you
     ],
     // Light at 2
@@ -1935,7 +1935,7 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0x0a045e32666be0f4, // feature_done_prs
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x0998b64583e38b40, // sidebar_feature_workspace
+        0x5763cc404205b495, // sidebar_feature_workspace
         0x94e9eab9390bd4db, // sidebar_needs_you
     ],
 ];

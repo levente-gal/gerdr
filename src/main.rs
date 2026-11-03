@@ -1774,6 +1774,7 @@ impl Gerdr {
             Reorderable::Workspace => {
                 let layout = self.sidebar_layout();
                 let to = chrome::workspace_slot(&layout.blocks, self.active_workspace, pos.y);
+                let to = self.kept_slot(self.active_workspace, to);
                 move_item(&mut self.workspaces, &mut self.active_workspace, to);
             }
             Reorderable::Tab => {
@@ -4596,6 +4597,7 @@ impl Gerdr {
     /// workspaces with no tabs left.
     fn prune(&mut self) {
         let mut changed = self.pin_feature_tabs();
+        changed |= self.features_last();
         for ws in &mut self.workspaces {
             changed |= retain_active(&mut ws.tabs, &mut ws.active_tab, |t| {
                 t.pinned || !t.panes.is_empty() || !t.expected.is_empty()
