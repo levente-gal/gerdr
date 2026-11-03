@@ -1880,3 +1880,101 @@ fn dump_features() {
         );
     }
 }
+
+/// The git identity dialog: filled from the GitHub account, the pointer
+/// on Save and retry; else (`error`) a bad email said, the keyboard on
+/// the scope, kept for the failed repository only.
+fn identity(error: bool) -> super::IdentityView {
+    super::IdentityView {
+        body: "They go on every commit. Once saved, Commit and push runs again.".into(),
+        name: Line::from("Octo Cat"),
+        email: Line::from(if error {
+            "octo cat"
+        } else {
+            "42+octo@users.noreply.github.com"
+        }),
+        focus: if error {
+            super::IdentityFocus::Scope
+        } else {
+            super::IdentityFocus::Email
+        },
+        global: !error,
+        only: "Only assettag-api".into(),
+        error: error.then(|| "That email doesn't look right: it needs an @ and no spaces.".into()),
+        hover: (!error).then_some(super::IdentityHit::Button(1)),
+        keys: if error {
+            vec![("Tab", "next"), ("Space", "switch"), ("Esc", "close")]
+        } else {
+            vec![("Tab", "next"), ("Esc", "close")]
+        },
+    }
+}
+
+const IDENTITY_OUTPUT: (i32, i32) = (870, 720);
+
+fn paint_identity(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = IDENTITY_OUTPUT.into();
+    vec![
+        hash(painter.identity_dialog(&identity(false), size, scale, p)),
+        hash(painter.identity_dialog(&identity(true), size, scale, p)),
+    ]
+}
+
+const IDENTITY: [&str; 2] = ["identity", "identity_error"];
+
+/// The recorded hashes of `IDENTITY`, per case in `CASES`.
+const GOLDEN_IDENTITY: [[u64; 2]; 4] = [
+    // Dark at 1
+    [
+        0xfe9670c1db2227bb, // identity
+        0xef59994443850f38, // identity_error
+    ],
+    // Dark at 2
+    [
+        0x9cace75ad1c239a3, // identity
+        0x8d7402004f72d9cb, // identity_error
+    ],
+    // Light at 1
+    [
+        0x2dcb64793711569e, // identity
+        0xc52c2f5d94c6d25a, // identity_error
+    ],
+    // Light at 2
+    [
+        0xd8b061bf59d82bc3, // identity
+        0x09a2ede92adb49a9, // identity_error
+    ],
+];
+
+#[test]
+fn the_identity_dialog_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_IDENTITY.iter().map(|row| row.as_slice()).collect();
+    check(&IDENTITY, &golden, paint_identity);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the identity dialog there.
+#[test]
+fn dump_identity() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = IDENTITY_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, error) in [("identity", false), ("identity_error", true)] {
+            let panel = super::identity_layout(size, error).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.identity_dialog(&identity(error), size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}

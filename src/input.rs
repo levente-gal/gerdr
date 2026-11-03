@@ -166,6 +166,8 @@ enum Intercepted {
     Tasks(crate::tasks::Outcome),
     /// The new feature dialog asked for this.
     NewFeature(crate::features::DialogOutcome),
+    /// The name and email dialog asked for this.
+    Identity(crate::git_identity::IdentityOutcome),
     /// The manual test sheet asked for this.
     ManualTest(crate::manual_test::Outcome),
     /// The feature panel asked for this.
@@ -189,6 +191,8 @@ pub enum Overlay {
     Tasks,
     /// The new feature dialog, with its title field.
     NewFeature,
+    /// The name and email dialog, with its two fields.
+    Identity,
     /// The manual test sheet, with a failure's note field.
     ManualTest,
     /// The feature panel, which has no field: only its key hints come
@@ -331,6 +335,7 @@ impl Gerdr {
                             // what they take while held.
                             let fielded = match dialog {
                                 overlay::Overlay::NewFeature => Some(Overlay::NewFeature),
+                                overlay::Overlay::GitIdentity => Some(Overlay::Identity),
                                 overlay::Overlay::ManualTest => Some(Overlay::ManualTest),
                                 _ => None,
                             };
@@ -778,6 +783,7 @@ impl Gerdr {
             O::Confirm => _ = self.confirm_click(pos),
             O::Tasks => self.tasks_click(pos),
             O::NewFeature => self.new_feature_click(pos),
+            O::GitIdentity => self.identity_click(pos),
             O::ManualTest => self.manual_test_click(pos),
             O::Features => self.feature_panel_click(pos),
             // A click on a toast dismisses it, on its button does what the
@@ -808,7 +814,8 @@ impl Gerdr {
         }
         // A click on a field focuses it, and puts the caret there.
         if overlay.grabs()
-            && (!overlay.is_dialog() || overlay == O::NewFeature || overlay == O::ManualTest)
+            && (!overlay.is_dialog()
+                || matches!(overlay, O::NewFeature | O::GitIdentity | O::ManualTest))
         {
             self.press_field(pos);
         }
@@ -830,6 +837,7 @@ impl Gerdr {
             O::Confirm => self.confirm_controls().iter().any(on),
             O::Tasks => self.tasks_controls().iter().any(on),
             O::NewFeature => self.new_feature_controls().iter().any(on),
+            O::GitIdentity => self.identity_controls().iter().any(on),
             O::ManualTest => self.manual_test_controls().iter().any(on),
             O::Features => self.feature_panel_controls().iter().any(on),
             O::ContextMenu => self
@@ -1221,6 +1229,7 @@ impl Gerdr {
             }
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
             Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
+            Intercepted::Identity(outcome) => self.apply_identity(outcome),
             Intercepted::ManualTest(outcome) => self.apply_manual_test(outcome),
             Intercepted::Features(outcome) => self.apply_feature_panel(outcome),
         }
@@ -1240,6 +1249,7 @@ impl Gerdr {
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
             O::NewFeature => Some(Overlay::NewFeature),
+            O::GitIdentity => Some(Overlay::Identity),
             O::ManualTest => Some(Overlay::ManualTest),
             O::Features => Some(Overlay::Features),
             _ => None,
@@ -1288,6 +1298,9 @@ impl Gerdr {
             Overlay::NewFeature => self
                 .new_feature_key(mods, sym, typed)
                 .map(Intercepted::NewFeature),
+            Overlay::Identity => self
+                .identity_key(mods, sym, typed)
+                .map(Intercepted::Identity),
             Overlay::Features => self.feature_panel_key(mods, sym).map(Intercepted::Features),
             Overlay::ManualTest => self
                 .manual_test_key(mods, sym, typed)
@@ -1340,6 +1353,7 @@ impl Gerdr {
                 size,
                 scale,
             )),
+            Overlay::Identity => chrome::identity_field(&self.identity_view()?, size, scale),
             Overlay::ManualTest => {
                 chrome::manual_test_field(&self.manual_test_view()?, size, scale)
             }
@@ -1358,6 +1372,7 @@ impl Gerdr {
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
             Overlay::Tasks | Overlay::Features => None,
             Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
+            Overlay::Identity => self.identity_field_mut(),
             Overlay::ManualTest => self
                 .features
                 .manual

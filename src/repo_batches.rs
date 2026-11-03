@@ -1621,35 +1621,11 @@ impl Gerdr {
             Outcome::Batch { kind, jobs } | Outcome::Confirmed { kind, jobs } => {
                 self.start_batch(kind, jobs)
             }
-            Outcome::RetryFailed => {
-                let Some(batch) = &self.repos.batch else {
-                    return;
-                };
-                let jobs = batch
-                    .runs
-                    .iter()
-                    .filter(|r| match &r.state {
-                        RunState::Failed { failure, .. } => {
-                            !matches!(failure, Failure::Conflict(_))
-                        }
-                        _ => false,
-                    })
-                    .map(|r| {
-                        // What committed is only pushed again.
-                        let committed = r
-                            .log
-                            .iter()
-                            .any(|ran| ran.ok && ran.command.contains(" commit "));
-                        let mut job = r.job.clone();
-                        if matches!(batch.kind, BatchKind::Commit { push: true, .. }) && committed {
-                            job.files.clear();
-                        }
-                        job
-                    })
-                    .collect();
-                let kind = batch.kind.clone();
-                self.start_batch(kind, jobs);
-            }
+            Outcome::SetIdentity => self.open_identity(),
+            // git can't commit without a name and email: asked first, the
+            // dialog runs it again once saved.
+            Outcome::RetryFailed if self.identity_failed() => self.open_identity(),
+            Outcome::RetryFailed => self.retry_failed(),
             Outcome::OpenInZed { root, paths, at } => self.repos_open_in_zed(&root, &paths, at),
             Outcome::Copy { text, count } => {
                 self.copy_text(text);
@@ -2189,6 +2165,8 @@ impl Gerdr {
     /// A thread's news.
     fn repos_event(&mut self, event: RepoEvent) {
         match event {
+            RepoEvent::IdentityGuess { serial, guess } => self.identity_guess(serial, guess),
+            RepoEvent::IdentitySaved { serial, result } => self.identity_saved(serial, result),
             RepoEvent::Step { batch, root, what } => {
                 if let Some(run) = self.batch_run_mut(batch, &root) {
                     run.state = RunState::Running(what);
@@ -2351,6 +2329,36 @@ impl Gerdr {
         }
     }
 
+    /// Run the panel's batch again where it failed but in conflict: what
+    /// committed only pushed again.
+    pub(crate) fn retry_failed(&mut self) {
+        let Some(batch) = &self.repos.batch else {
+            return;
+        };
+        let jobs = batch
+            .runs
+            .iter()
+            .filter(|r| match &r.state {
+                RunState::Failed { failure, .. } => !matches!(failure, Failure::Conflict(_)),
+                _ => false,
+            })
+            .map(|r| {
+                // What committed is only pushed again.
+                let committed = r
+                    .log
+                    .iter()
+                    .any(|ran| ran.ok && ran.command.contains(" commit "));
+                let mut job = r.job.clone();
+                if matches!(batch.kind, BatchKind::Commit { push: true, .. }) && committed {
+                    job.files.clear();
+                }
+                job
+            })
+            .collect();
+        let kind = batch.kind.clone();
+        self.start_batch(kind, jobs);
+    }
+
     /// The batch is done in every repository: empty the field it used, ask
     /// which way to pull those
     /// that diverged; told in a toast when the panel is closed.
@@ -2393,7 +2401,18 @@ impl Gerdr {
         let long = SystemTime::now()
             .duration_since(batch_started)
             .is_ok_and(|d| d >= SAY_DONE_AFTER);
-        if self.repos.panel.is_none() || long {
+        let identity = self.identity_failed();
+        if identity && self.repos.panel.is_some() {
+            // git wants a name and email to commit: asked at once, the
+            // batch run again once they are saved.
+            self.open_identity();
+        } else if identity {
+            let set = (
+                "Set name and email\u{2026}".to_owned(),
+                MenuAction::SetGitIdentity,
+            );
+            self.toast_with(summary, level(tone), Some(set));
+        } else if self.repos.panel.is_none() || long {
             self.toast(summary, level(tone));
         }
     }

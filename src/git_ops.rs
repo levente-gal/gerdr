@@ -91,6 +91,9 @@ pub enum Failure {
     CheckedOut(PathBuf),
     /// Another git holds a lock: `index.lock`, a ref's, `packed-refs`'.
     Locked,
+    /// git doesn't know who commits: no `user.name` or `user.email` set,
+    /// and none it could guess.
+    Identity,
     /// It took longer than allowed and was killed.
     Timeout,
     /// It wasn't tried: why (`"detached HEAD"`, `"no remote"`, `"HEAD
@@ -563,6 +566,15 @@ pub fn classify(stderr: &str, stdout: &str) -> Failure {
         || has("could not lock config file");
     if locked {
         return Failure::Locked;
+    }
+    const IDENTITY: [&str; 4] = [
+        "Author identity unknown",
+        "Committer identity unknown",
+        "unable to auto-detect email address",
+        "empty ident name",
+    ];
+    if IDENTITY.iter().any(|s| has(s)) {
+        return Failure::Identity;
     }
     const AUTH: [&str; 6] = [
         "Permission denied (publickey",
@@ -1788,6 +1800,138 @@ pub fn stash_drop(dir: &Path, n: usize) -> OpResult {
     let mut op = Op::new(dir);
     op.run(&["stash", "drop", &format!("stash@{{{n}}}")])?;
     op.done()
+}
+
+/// Who commits, as git's `user.name` and `user.email` have it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub name: String,
+    pub email: String,
+}
+
+impl Identity {
+    /// What is wrong with it for git, as a sentence; `None` when git
+    /// takes it.
+    pub fn problem(&self) -> Option<&'static str> {
+        let (name, email) = (self.name.trim(), self.email.trim());
+        let bad = |s: &str| s.contains(['<', '>', '\n']);
+        if name.is_empty() {
+            Some("Type the name your commits carry.")
+        } else if bad(name) {
+            Some("A name can't have < or > in it.")
+        } else if email.is_empty() {
+            Some("Type the email your commits carry.")
+        } else if bad(email) || email.contains(char::is_whitespace) || !email.contains('@') {
+            Some("That email doesn't look right: it needs an @ and no spaces.")
+        } else {
+            None
+        }
+    }
+}
+
+/// Who commits in `dir` as its config says (its own, the user's, the
+/// system's): empty where none is set.
+pub fn identity(dir: &Path) -> Identity {
+    let get = |key: &str| {
+        query(dir, &["config", "--get", key])
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default()
+    };
+    Identity {
+        name: get("user.name"),
+        email: get("user.email"),
+    }
+}
+
+/// A guess at who commits in `roots`, where git knows nobody: what their
+/// config has (a name with no email), else what one of `others` has,
+/// else the GitHub account gh is signed in to (its noreply address when
+/// the email is private). Empty where nothing tells.
+pub fn guess_identity(roots: &[PathBuf], others: &[PathBuf]) -> Identity {
+    let fill = |guess: &mut Identity, found: Identity| {
+        if guess.name.is_empty() {
+            guess.name = found.name;
+        }
+        if guess.email.is_empty() {
+            guess.email = found.email;
+        }
+    };
+    let mut guess = Identity::default();
+    for dir in roots.iter().chain(others) {
+        fill(&mut guess, identity(dir));
+    }
+    if (guess.name.is_empty() || guess.email.is_empty())
+        && let Some(dir) = roots.first()
+    {
+        // Only a guess: without gh, or signed out, the user types it.
+        match crate::ci::gh_json::<serde_json::Value>(dir, &["api", "user"]) {
+            Ok(user) => fill(&mut guess, github_identity(&user)),
+            Err(why) => tracing::debug!("guessing a git identity from gh: {why}"),
+        }
+    }
+    guess
+}
+
+/// Who the GitHub account `user` (`gh api user`) commits as: its name,
+/// else its login; its public email, else its noreply address.
+fn github_identity(user: &serde_json::Value) -> Identity {
+    let text = |key: &str| {
+        user.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let login = text("login");
+    let email = text("email").map(str::to_owned).or_else(|| {
+        let id = user.get("id")?.as_u64()?;
+        Some(format!("{id}+{}@users.noreply.github.com", login?))
+    });
+    Identity {
+        name: text("name").or(login).unwrap_or_default().to_owned(),
+        email: email.unwrap_or_default(),
+    }
+}
+
+/// Make `who` the one committing: for every repository when `global`
+/// (the user's git config), else in each of `roots`. Why it failed, if
+/// it did.
+pub fn set_identity(roots: &[PathBuf], global: bool, who: &Identity) -> Result<(), String> {
+    let pairs = [
+        ("user.name", who.name.trim()),
+        ("user.email", who.email.trim()),
+    ];
+    let home = crate::home_dir();
+    let dirs: Vec<&Path> = match global {
+        true => home
+            .as_deref()
+            .or(roots.first().map(PathBuf::as_path))
+            .into_iter()
+            .collect(),
+        false => roots.iter().map(PathBuf::as_path).collect(),
+    };
+    if dirs.is_empty() {
+        return Err("no repository to set it in".into());
+    }
+    for dir in dirs {
+        for (key, value) in pairs {
+            let mut args = vec!["config"];
+            if global {
+                args.push("--global");
+            }
+            args.extend([key, value]);
+            let out = exec(dir, &args, Reach::Local);
+            if !out.ran.ok {
+                log_failed(dir, std::slice::from_ref(&out.ran));
+                let why = why(&out.stderr, &out.stdout);
+                return Err(if why.is_empty() {
+                    format!("{} failed", out.ran.command)
+                } else {
+                    why
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3267,5 +3411,76 @@ mod tests {
         let failed = push(dir, Some("far"), false).unwrap_err();
         let said = &failed.log[0].output;
         assert!(said.contains("-o Foo=bar -o BatchMode=yes"), "{said}");
+    }
+
+    /// git's refusal to commit with nobody to commit as.
+    const NO_IDENTITY: &str = "Author identity unknown\n\n*** Please tell me who you are.\n\n\
+        Run\n\n  git config --global user.email \"you@example.com\"\n  \
+        git config --global user.name \"Your Name\"\n\n\
+        to set your account's default identity.\n\
+        Omit --global to set the identity only in this repository.\n\n\
+        fatal: unable to auto-detect email address (got 'me@box.(none)')\n";
+
+    #[test]
+    fn nobody_to_commit_as_is_an_identity_failure() {
+        assert_eq!(classify(NO_IDENTITY, ""), Failure::Identity);
+        let empty = "Committer identity unknown\n\nfatal: empty ident name (for <>) not allowed\n";
+        assert_eq!(classify(empty, ""), Failure::Identity);
+    }
+
+    #[test]
+    fn an_identity_needs_a_name_and_an_email_git_takes() {
+        let who = |name: &str, email: &str| Identity {
+            name: name.into(),
+            email: email.into(),
+        };
+        assert!(who("", "a@b").problem().is_some());
+        assert!(who("A <b>", "a@b").problem().is_some());
+        assert!(who("A", "").problem().is_some());
+        assert!(who("A", "ab").problem().is_some());
+        assert!(who("A", "a b@c").problem().is_some());
+        assert_eq!(who("Octo Cat", "o@c.at").problem(), None);
+    }
+
+    #[test]
+    fn a_github_account_commits_as_its_name_else_login_and_noreply_address() {
+        let user = serde_json::json!({"login": "octo", "id": 42, "name": null, "email": null});
+        assert_eq!(
+            github_identity(&user),
+            Identity {
+                name: "octo".into(),
+                email: "42+octo@users.noreply.github.com".into(),
+            }
+        );
+        let user =
+            serde_json::json!({"login": "octo", "id": 42, "name": "Octo Cat", "email": "o@c.at"});
+        assert_eq!(
+            github_identity(&user),
+            Identity {
+                name: "Octo Cat".into(),
+                email: "o@c.at".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_identity_set_in_the_repositories_only_is_read_back_there() {
+        let (one, two) = (Fx::local(), Fx::local());
+        let who = Identity {
+            name: "Octo Cat".into(),
+            email: "o@c.at".into(),
+        };
+        assert_eq!(identity(&one.repo), Identity::default());
+        let roots = [one.repo.clone(), two.repo.clone()];
+        set_identity(&roots, false, &who).unwrap();
+        assert_eq!(identity(&one.repo), who);
+        assert_eq!(identity(&two.repo), who);
+        // Guessed from the first that knows, for one that doesn't.
+        let three = Fx::local();
+        let guess = guess_identity(
+            std::slice::from_ref(&three.repo),
+            std::slice::from_ref(&one.repo),
+        );
+        assert_eq!(guess, who);
     }
 }

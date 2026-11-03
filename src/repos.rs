@@ -157,6 +157,11 @@ pub struct Repos {
     /// the tooltips on its marks, by root: read when first hovered, read
     /// again once its counts or HEAD moved.
     pub(crate) mark_commits: HashMap<(PathBuf, bool), MarkCommits>,
+    /// The name and email dialog, while open (`crate::git_identity`).
+    pub(crate) identity: Option<crate::git_identity::IdentityDialog>,
+    /// What was typed in it and where to keep it (every repository or
+    /// not) when last closed unsaved, for the next opening.
+    pub(crate) identity_draft: Option<(crate::git_ops::Identity, bool)>,
 }
 
 /// A repository's first commits to push or pull (`Repos::mark_commits`),
@@ -1008,6 +1013,17 @@ pub enum RepoEvent {
     /// A feature's touched repositories read for its code review
     /// (`feature_diff`).
     FeatureDiff(Box<crate::feature_diff::Read>),
+    /// The name and email guessed for opening `serial` of the identity
+    /// dialog.
+    IdentityGuess {
+        serial: u64,
+        guess: crate::git_ops::Identity,
+    },
+    /// The identity dialog's name and email written, or why not.
+    IdentitySaved {
+        serial: u64,
+        result: Result<(), String>,
+    },
 }
 
 /// What the panel asked for.
@@ -1032,6 +1048,9 @@ pub enum Outcome {
     },
     /// Run the last batch again over the repositories it failed in.
     RetryFailed,
+    /// Ask for the name and email git wants for commits, where the last
+    /// batch failed for want of them; then run it again there.
+    SetIdentity,
     /// Put the review, as Markdown, on the clipboard: `count` comments.
     Copy {
         text: String,
@@ -3486,6 +3505,10 @@ impl Panel {
                 }
                 _ => Err(Why::other("Nothing to run in a terminal")),
             },
+            B::SetIdentity => match failure {
+                Some(Failure::Identity) => Ok(Outcome::SetIdentity),
+                _ => Err(Why::other("git knows who commits there")),
+            },
             B::OpenWorkspace => match failure {
                 Some(Failure::CheckedOut(path)) => Ok(Outcome::OpenWorkspace(path)),
                 _ => Err(Why::other("Not checked out elsewhere")),
@@ -4726,6 +4749,11 @@ impl Panel {
                             Tone::Warning,
                             format!("The branch is checked out in {}", path.display()),
                         ),
+                        Failure::Identity => (
+                            "author unknown",
+                            Tone::Error,
+                            "git needs your name and email to commit: set them, then it goes on".into(),
+                        ),
                         Failure::Locked => (
                             "locked",
                             Tone::Warning,
@@ -4905,6 +4933,7 @@ impl Panel {
                     buttons.push(B::RunInTerminal);
                 }
                 Some(Failure::CheckedOut(_)) => buttons.push(B::OpenWorkspace),
+                Some(Failure::Identity) => buttons.push(B::SetIdentity),
                 _ => {}
             }
         }
@@ -7235,6 +7264,34 @@ mod tests {
         assert_eq!(
             panel.click(ReposHit::Button(ReposButton::RunInTerminal), &ctx),
             Some(Outcome::RunInTerminal(root("auth")))
+        );
+    }
+
+    #[test]
+    fn nobody_to_commit_as_offers_the_name_and_email_dialog() {
+        let items = vec![repo("app", "main", vec![change("a.rs", 'M')])];
+        let kind = BatchKind::Commit {
+            msg: "fix".into(),
+            push: true,
+        };
+        let b = batch(kind, vec![run("app", failed(Failure::Identity))]);
+        let ctx = ctx(&items, Some(&b));
+        let mut panel = Panel::new(&items);
+        select(&mut panel, "app");
+        let view = panel.view("p", &ctx);
+        let chip = repo_lines(&view)[0].chip.clone().unwrap();
+        assert_eq!(
+            (chip.text.as_str(), chip.tone),
+            ("author unknown", Tone::Error)
+        );
+        assert!(
+            view.hints
+                .iter()
+                .any(|h| h.button == ReposButton::SetIdentity)
+        );
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::SetIdentity), &ctx),
+            Some(Outcome::SetIdentity)
         );
     }
 

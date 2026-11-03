@@ -26,6 +26,7 @@ mod footer;
 #[cfg(test)]
 mod golden;
 mod help;
+mod identity;
 mod hints;
 mod inbox;
 mod layers;
@@ -74,6 +75,7 @@ pub use drop::*;
 pub use features::*;
 pub use footer::*;
 pub use help::*;
+pub use identity::*;
 pub use hints::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
@@ -160,6 +162,8 @@ pub struct ChromeView {
     pub confirm: Option<ConfirmView>,
     /// Set while the new feature dialog is open.
     pub new_feature: Option<NewFeatureView>,
+    /// Set while the name and email dialog is open.
+    pub identity: Option<IdentityView>,
     /// Set while the manual test sheet is open.
     pub manual_test: Option<ManualTestView>,
     /// Set while the feature panel is open.
@@ -211,6 +215,7 @@ pub struct Chrome {
     checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
+    identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
     manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
     features: Overlay<(FeaturePanelView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
@@ -271,6 +276,7 @@ impl Chrome {
             checkout: Overlay::default(),
             confirm: Overlay::default(),
             new_feature: Overlay::default(),
+            identity: Overlay::default(),
             manual_test: Overlay::default(),
             features: Overlay::default(),
             project_menu: ProjectMenuLayers::default(),
@@ -445,6 +451,17 @@ impl Chrome {
                     });
                     let part = self.new_feature.part(dialog, now, true, |(v, output, ..)| {
                         painter.new_feature_dialog(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
+                Kind::GitIdentity => {
+                    let dialog = view.identity.take().map(|v| {
+                        let (loc, size) =
+                            shadowed(identity_layout(output, v.error.is_some()).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.identity.part(dialog, now, true, |(v, output, ..)| {
+                        painter.identity_dialog(v, *output, scale, theme.palette())
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }

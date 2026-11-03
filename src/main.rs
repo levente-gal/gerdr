@@ -37,6 +37,7 @@ mod frecency;
 mod find;
 mod fuzzy;
 mod git;
+mod git_identity;
 mod git_ops;
 mod handlers;
 mod herdr;
@@ -6269,6 +6270,7 @@ impl Gerdr {
             checkout: self.checkout_view(),
             confirm: self.confirm_view(),
             new_feature: self.new_feature_view(),
+            identity: self.identity_view(),
             manual_test: self.manual_test_view(),
             features: self.feature_panel_view(),
             project_menu: self.project_menu_view(),

@@ -659,6 +659,8 @@ pub enum ReposButton {
     Undo,
     RetryFailed,
     RunInTerminal,
+    /// Ask for the name and email git wants for commits.
+    SetIdentity,
     OpenWorkspace,
     /// The selected repository's stashes.
     Stash,
@@ -748,6 +750,7 @@ impl ReposButton {
             ReposButton::Undo => "Undo",
             ReposButton::RetryFailed => "Retry failed",
             ReposButton::RunInTerminal => "Run in terminal",
+            ReposButton::SetIdentity => "Set name and email\u{2026}",
             ReposButton::OpenWorkspace => "Open workspace",
             ReposButton::Stash => "Stash",
             ReposButton::StashPop => "Pop stash",

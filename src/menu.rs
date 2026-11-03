@@ -27,6 +27,9 @@ pub enum MenuAction {
     NewTerminal,
     /// An action of the repositories panel, as its footer offers it.
     ReposAction(ReposButton),
+    /// The name and email git wants, asked for the panel's batch that
+    /// failed for want of them (see `Gerdr::open_identity`).
+    SetGitIdentity,
     /// The project's Cursor workspace (see `Gerdr::open_cursor`).
     NewCursor,
     /// The agent picker, for an agent CLI in a new tab of workspace `.0`
@@ -431,6 +434,7 @@ impl Gerdr {
             }
             MenuAction::GoToVisited(id, back) => self.go_to_visited(id, back),
             MenuAction::ReposAction(button) => self.repos_press(button),
+            MenuAction::SetGitIdentity => self.open_identity(),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
             MenuAction::UnlockKeyring => crate::keyring::ask(),
