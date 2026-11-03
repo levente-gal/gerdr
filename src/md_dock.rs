@@ -9,6 +9,8 @@
 //! The keys stay with the review. The pointer over the preview is the
 //! browser's: it scrolls the page and follows its links, and a click on
 //! a block of the page puts the review's caret on its first line. The
+//! two scroll together: each tells the other the line of the file at its
+//! top, to the fraction (`DiffView::top_line`). The
 //! page marks the block the caret is in, and the lines with comments.
 //! The gap between the two drags their split, kept in `state.json`.
 //!
