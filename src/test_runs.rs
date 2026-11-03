@@ -74,12 +74,29 @@ fn testy(word: &str) -> bool {
     unversioned(word).to_lowercase().contains("test")
 }
 
+/// Whether `program` runs the script its argument names, so that a path
+/// there says what is running (`python3 /usr/bin/pytest`).
+fn interpreter(program: &str) -> bool {
+    const NAMES: [&str; 13] = [
+        "sh", "bash", "dash", "zsh", "ksh", "fish", "node", "nodejs", "bun", "deno", "ruby",
+        "perl", "php",
+    ];
+    NAMES.contains(&program) || program.starts_with("python") || program.starts_with("pypy")
+}
+
+/// Whether `word` is a path, not a scoped package (`@playwright/test`).
+fn path_like(word: &str) -> bool {
+    word.contains('/') && !word.starts_with('@')
+}
+
 /// The test command `info` has in the foreground, if any: one whose
 /// program has "test" in its name (`pytest`, `vitest`), or whose first or
 /// second argument that isn't an option does (`cargo test`, `npm run
 /// test:e2e`, `python -m pytest`, `uv run pytest`). A file, as in `nvim
 /// test_foo.py`, doesn't count: an argument counts by its base name, which
-/// must have no dot.
+/// must have no dot. Neither does what only sits in an argument: a folder
+/// given to anything but an interpreter (`claude --add-dir /f/test-x`), or
+/// text of several words (an agent's prompt).
 pub fn test_command(info: &ProcessInfo) -> Option<Found> {
     let group = info.foreground_process_group_id?;
     if info.shell_pid == Some(group) {
@@ -123,12 +140,15 @@ pub fn test_command(info: &ProcessInfo) -> Option<Found> {
             .copied()
             .filter(|a| !a.starts_with('-'))
             .collect();
-        let at = named
-            .iter()
-            .take(2)
-            .position(|a| testy(&base(a)) && !unversioned(&base(a)).contains('.'))?;
+        let script_allowed = interpreter(&program);
+        let at = named.iter().take(2).position(|a| {
+            !a.contains(char::is_whitespace)
+                && (script_allowed || !path_like(a))
+                && testy(&base(a))
+                && !unversioned(&base(a)).contains('.')
+        })?;
         // A script run by its path (`python3 /usr/bin/pytest`) is named alone.
-        if named[at].contains('/') {
+        if path_like(named[at]) {
             let script = args.iter().position(|a| *a == named[at]).unwrap_or(0);
             (base(named[at]), command(&args[script..]))
         } else {
@@ -494,6 +514,27 @@ mod tests {
         assert_eq!(short(&["nvim", "test_foo.py"]), None);
         assert_eq!(short(&["nvim", "src/tests/mod.rs"]), None);
         assert_eq!(short(&["cargo", "build"]), None);
+        // Not tests: a folder or a prompt given to an agent.
+        assert_eq!(
+            short(&[
+                "claude",
+                "--add-dir",
+                "/d/features/app/test-feature",
+                "You are the agent for test-feature, see /d/test-feature",
+            ]),
+            None
+        );
+        assert_eq!(short(&["claude", "write a test"]), None);
+        assert_eq!(short(&["nvim", "src/tests"]), None);
+        // A script by a relative path, a scoped package: still tests.
+        assert_eq!(
+            short(&["bash", "scripts/run-tests"]).as_deref(),
+            Some("run-tests")
+        );
+        assert_eq!(
+            short(&["npx", "@playwright/test"]).as_deref(),
+            Some("npx @playwright/test")
+        );
         // A package's version isn't its name: `latest` names no tests.
         assert_eq!(short(&["npm", "exec", "t2@latest"]), None);
         assert_eq!(short(&["npm exec t2@latest"]), None);
