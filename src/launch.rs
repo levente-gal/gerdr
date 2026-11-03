@@ -643,6 +643,9 @@ impl Gerdr {
             ready_vs_code_profile(&home, &key, profile);
         } else if CHROMIUMS.contains(&key.as_str()) || FIREFOXES.contains(&key.as_str()) {
             seed_browser_profile(&home, &key, profile);
+            if CHROMIUMS.contains(&key.as_str()) {
+                leave_out_web_apps(profile);
+            }
         }
     }
 
@@ -1011,6 +1014,10 @@ pub(crate) const BROWSER_UNCOPIED: &[&str] = &[
     "Current Tabs",
     "Last Session",
     "Last Tabs",
+    // The web apps installed in the user's own Chromium: started from the
+    // copy, the browser would point their desktop shortcuts at it, and they
+    // would open in gerdr (see `leave_out_web_apps`).
+    WEB_APPS,
     // Firefox
     "lock",
     ".parentlock",
@@ -1021,6 +1028,48 @@ pub(crate) const BROWSER_UNCOPIED: &[&str] = &[
     "sessionstore-backups",
     "sessionCheckpoints.json",
 ];
+
+/// Where a Chromium profile keeps its installed web apps (PWAs).
+const WEB_APPS: &str = "Web Applications";
+/// Marks a gerdr Chromium profile that has no web apps of the user's own
+/// Chromium any more (see `leave_out_web_apps`).
+const WEB_APPS_LEFT_OUT: &str = ".gerdr-web-apps-left-out";
+
+/// Move aside, once, the web apps a project's Chromium `profile` has from
+/// the user's own Chromium (copied before gerdr left them out, see
+/// `BROWSER_UNCOPIED`), while no Chromium runs on it. Started on them,
+/// the browser points the apps' desktop shortcuts at this profile, and
+/// they open in gerdr. Web apps installed in the profile after that stay.
+fn leave_out_web_apps(profile: &Path) {
+    let marker = profile.join(WEB_APPS_LEFT_OUT);
+    if marker.exists() || !profile.is_dir() || crate::profile_import::running(profile) {
+        return;
+    }
+    // Each of the browser's profiles: `Default`, `Profile 1`…
+    for entry in std::fs::read_dir(profile).into_iter().flatten().flatten() {
+        let apps = entry.path().join(WEB_APPS);
+        if !apps.is_dir() {
+            continue;
+        }
+        let aside = entry.path().join(format!("{WEB_APPS}.left-out"));
+        // One moved aside before, if any: this one is newer.
+        let _ = std::fs::remove_dir_all(&aside);
+        match std::fs::rename(&apps, &aside) {
+            Ok(()) => tracing::info!(
+                "left the user's web apps out of gerdr's {}: in {}",
+                profile.display(),
+                aside.display()
+            ),
+            Err(err) => {
+                // Not marked: tried again at the next start.
+                return tracing::warn!("leaving {} out: {err}", apps.display());
+            }
+        }
+    }
+    if let Err(err) = std::fs::write(&marker, "") {
+        tracing::warn!("marking {}: {err}", marker.display());
+    }
+}
 
 /// Start browser profile `dir` (see `own_instance`), when it is new, as a
 /// copy of gerdr's profile of browser `key`, so the project's browser
@@ -1855,6 +1904,31 @@ mod tests {
         for command in ["zed -n .", "firefox", "ghostty", "htop"] {
             assert!(!super::uses_keyring(command), "{command}");
         }
+    }
+
+    #[test]
+    fn copies_of_a_chromium_profile_leave_its_web_apps_out_once() {
+        let root = std::env::temp_dir().join(format!("gerdr-web-apps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (shared, copy) = (root.join("shared"), root.join("copy"));
+        std::fs::create_dir_all(shared.join("Default/Web Applications/Manifest Resources"))
+            .unwrap();
+        std::fs::write(shared.join("Default/Preferences"), "{}").unwrap();
+        super::copy_browser_profile(&shared, &copy).unwrap();
+        assert!(copy.join("Default/Preferences").is_file());
+        assert!(!copy.join("Default/Web Applications").exists());
+
+        // A profile copied before: its web apps go aside, once.
+        let old = root.join("old");
+        std::fs::create_dir_all(old.join("Default/Web Applications/x")).unwrap();
+        super::leave_out_web_apps(&old);
+        assert!(!old.join("Default/Web Applications").exists());
+        assert!(old.join("Default/Web Applications.left-out/x").is_dir());
+        // One installed in it later stays.
+        std::fs::create_dir_all(old.join("Default/Web Applications/y")).unwrap();
+        super::leave_out_web_apps(&old);
+        assert!(old.join("Default/Web Applications/y").is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

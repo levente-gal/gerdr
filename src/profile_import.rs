@@ -291,7 +291,7 @@ fn lock_pid(lock: &Path) -> Option<u32> {
 
 /// Whether an app runs on profile folder `dir`: a lock in it names a
 /// running process, or a socket in it answers (Zed's).
-fn running(dir: &Path) -> bool {
+pub(crate) fn running(dir: &Path) -> bool {
     let locked = ["SingletonLock", "lock", "code.lock"]
         .iter()
         .filter_map(|name| lock_pid(&dir.join(name)))
