@@ -2111,6 +2111,32 @@ mod tests {
     }
 
     #[test]
+    fn feature_workspaces_sit_under_the_features_heading() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{Density, WorkspaceView, sidebar_layout_at};
+        let ws = |name: &str, feature: bool| {
+            let mut ws = WorkspaceView::new(name.into(), WorkspaceKind::Terminal, &[]);
+            if feature {
+                ws.stages = vec![StageMark::Done, StageMark::Current];
+            }
+            ws
+        };
+        let d = Density::Comfortable;
+        let workspaces = [ws("a", false), ws("b", true), ws("c", true)];
+        let layout = sidebar_layout_at(&workspaces, &[], 260, d).with_features(1, 260, d);
+        let title = layout.features_title.expect("a heading");
+        let blocks = &layout.blocks;
+        assert!(title.loc.y >= blocks[0].loc.y + blocks[0].size.h);
+        assert!(blocks[1].loc.y >= title.loc.y + title.size.h);
+        // The rows of features with no workspace come after theirs.
+        assert!(layout.features[0].loc.y >= blocks[2].loc.y + blocks[2].size.h);
+        // A feature's workspace among others has no heading over it.
+        let mixed = [ws("b", true), ws("a", false)];
+        let layout = sidebar_layout_at(&mixed, &[], 260, d);
+        assert!(layout.features_title.is_none());
+    }
+
+    #[test]
     fn stage_marks_read_on_the_panels_in_both_themes() {
         for p in [&ONE_DARK, &ONE_LIGHT] {
             for mark in [StageMark::Done, StageMark::Current, StageMark::Later] {

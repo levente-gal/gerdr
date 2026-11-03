@@ -252,6 +252,59 @@ impl Gerdr {
         changed
     }
 
+    /// Put the features' workspaces after all the others, each kind in the
+    /// order it had, the active one kept shown: the sidebar's Features
+    /// section holds them, under its heading. herdr is told, so the order
+    /// holds when gerdr starts again. Whether any moved.
+    pub(crate) fn features_last(&mut self) -> bool {
+        let n = self.workspaces.len();
+        let feature: Vec<bool> = (0..n)
+            .map(|w| self.workspace_feature(w).is_some())
+            .collect();
+        if feature.windows(2).all(|pair| !pair[0] || pair[1]) {
+            return false;
+        }
+        let order: Vec<usize> = ((0..n).filter(|&w| !feature[w]))
+            .chain((0..n).filter(|&w| feature[w]))
+            .collect();
+        let mut old: Vec<Option<Workspace>> = std::mem::take(&mut self.workspaces)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.workspaces = order.iter().filter_map(|&w| old[w].take()).collect();
+        if let Some(active) = order.iter().position(|&w| w == self.active_workspace) {
+            self.active_workspace = active;
+        }
+        // Each feature's moved to the end in turn keeps them in order.
+        let first = n - feature.iter().filter(|f| **f).count();
+        if let Some(herdr) = self.herdr.as_mut() {
+            for id in self.workspaces[first..]
+                .iter()
+                .filter_map(Workspace::herdr_id)
+            {
+                if let Err(err) = herdr.workspace_move(id, None) {
+                    tracing::warn!("herdr: {err}");
+                }
+            }
+        }
+        true
+    }
+
+    /// Slot `to` held to the slots of workspace `w`'s kind, for a drag of
+    /// it: a feature's among the features' workspaces, any other before
+    /// them (see `features_last`).
+    pub(crate) fn kept_slot(&self, w: usize, to: usize) -> usize {
+        let n = self.workspaces.len();
+        let first = (0..n)
+            .find(|&w| self.workspace_feature(w).is_some())
+            .unwrap_or(n);
+        if self.workspace_feature(w).is_some() {
+            to.max(first)
+        } else {
+            to.min(first.saturating_sub(1))
+        }
+    }
+
     /// Say why a feature's panel tab doesn't close.
     pub(crate) fn refuse_pinned_close(&mut self) {
         self.show_warning("The feature's tab stays open: close its workspace to close it".into());

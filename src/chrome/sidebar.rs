@@ -1567,11 +1567,15 @@ impl SidebarLayout {
         }
     }
 
-    /// This layout with `n` feature rows under the workspaces, a heading
-    /// over them, in a sidebar `width` wide.
+    /// This layout with `n` feature rows under the workspaces, in a
+    /// sidebar `width` wide: under the feature workspaces' heading when
+    /// there are any (see `sidebar_layout_at`), else under one of their own.
     pub fn with_features(mut self, n: usize, width: i32, density: Density) -> Self {
-        let (title, rows, _) = features_rects(n, self.blocks_end(), width, density);
-        self.features_title = title;
+        let heading = self.features_title.is_none();
+        let (title, rows, _) = features_rects(n, self.blocks_end(), heading, width, density);
+        if heading {
+            self.features_title = title;
+        }
         self.features = rows;
         self
     }
@@ -1775,24 +1779,23 @@ fn inbox_rects(n: usize, y: i32, width: i32, density: Density) -> (Option<Rect>,
 
 /// The features section with `n` rows starting at `y` (where the
 /// workspaces' blocks end) in a sidebar `width` wide: its heading, under
-/// a rule; its rows, lined up with the agent rows; and where it ends.
+/// a rule, when `heading` (else the rows start at `y`); its rows, lined
+/// up with the agent rows; and where it ends.
 fn features_rects(
     n: usize,
     y: i32,
+    heading: bool,
     width: i32,
     density: Density,
 ) -> (Option<Rect>, Vec<Rect>, i32) {
     if n == 0 {
         return (None, Vec::new(), y);
     }
-    let title = Rectangle::new(
-        (0, y + SECTION_TOP).into(),
-        (width - GAP, SECTION_TITLE).into(),
-    );
+    let title = heading.then(|| features_title_rect(y, width));
     // A row per feature, as an agent row with a line under its first
     // for the stage dots.
     let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
-    let mut y = title.loc.y + SECTION_TITLE;
+    let mut y = title.map_or(y, |t| t.loc.y + SECTION_TITLE);
     let rows = (0..n)
         .map(|_| {
             let h = agent_row(density) + STAGE_LINE;
@@ -1801,7 +1804,42 @@ fn features_rects(
             rect
         })
         .collect();
-    (Some(title), rows, y + INBOX_GAP)
+    (title, rows, y + INBOX_GAP)
+}
+
+/// The "Features" heading of a section starting at `y`, under its rule,
+/// in a sidebar `width` wide.
+fn features_title_rect(y: i32, width: i32) -> Rect {
+    Rectangle::new(
+        (0, y + SECTION_TOP).into(),
+        (width - GAP, SECTION_TITLE).into(),
+    )
+}
+
+/// Where a part of the features section with `n` rows, from its top,
+/// puts its heading when it has one (`heading`) and its rows; and where
+/// it ends. A heading alone is that of the feature workspaces under it.
+fn features_part_rects(
+    heading: bool,
+    n: usize,
+    width: i32,
+    density: Density,
+) -> (Option<Rect>, Vec<Rect>, i32) {
+    if heading && n == 0 {
+        let title = features_title_rect(0, width);
+        return (Some(title), Vec::new(), title.loc.y + title.size.h);
+    }
+    features_rects(n, 0, heading, width, density)
+}
+
+/// The first of `workspaces` from which on all are features' (have stage
+/// marks): the Features section starts there, over them. None without any
+/// feature workspace at the end.
+fn features_from(workspaces: &[WorkspaceView]) -> Option<usize> {
+    let n = (workspaces.iter().rev())
+        .take_while(|ws| !ws.stages.is_empty())
+        .count();
+    (n > 0).then(|| workspaces.len() - n)
 }
 
 /// `sidebar_layout` at `density`.
@@ -1829,7 +1867,15 @@ pub fn sidebar_layout_at(
     let (mut rows, mut card_rects, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
     let (mut card_closes, mut more, mut ci) = (Vec::new(), Vec::new(), Vec::new());
     let mut subagents = Vec::new();
+    let first_feature = features_from(workspaces);
+    let mut features_title = None;
     for (i, ws) in workspaces.iter().enumerate() {
+        // The features' workspaces go under the Features heading.
+        if first_feature == Some(i) {
+            let title = features_title_rect(y, width);
+            y = title.loc.y + title.size.h;
+            features_title = Some(title);
+        }
         let cards = agents.get(i).unwrap_or(&none);
         let attention_lines = ws.attention_lines(density) as i32;
         let foldable = !cards.is_empty()
@@ -1995,7 +2041,7 @@ pub fn sidebar_layout_at(
         repos,
         inbox_title,
         inbox,
-        features_title: None,
+        features_title,
         features: Vec::new(),
         rows,
         cards: card_rects,
@@ -2122,10 +2168,13 @@ impl Painter {
             .scrolled_over(state.scroll, state.over, size.h);
         self.sidebar_inbox(&mut c, view, &layout, scale, p);
         if let Some(title) = layout.features_title {
+            let workspaces =
+                features_from(&view.workspaces).map_or(0, |f| view.workspaces.len() - f);
+            self.features_heading(&mut c, title, workspaces + view.features.len(), scale, p);
             let rows: Vec<_> = (view.features.iter().zip(&layout.features).enumerate())
                 .map(|(n, (row, rect))| (row, state.feature(n), *rect))
                 .collect();
-            self.feature_rows(&mut c, title, &rows, density, scale, p);
+            self.feature_rows(&mut c, &rows, density, scale, p);
         }
         for i in 0..layout.rows.len().min(view.workspaces.len()) {
             self.workspace_block(&mut c, view, &layout, i, scale, p);
@@ -2343,15 +2392,26 @@ impl Painter {
         );
     }
 
-    /// The features section: a rule across the sidebar over its heading
-    /// at `title`, then its `rows`: each a feature, its hover alpha and
-    /// where it goes. A row has the mark of the stage the feature is at
-    /// under the heading's icon, the feature's title under its label, and
-    /// a dot per stage on a line under the title.
+    /// The features section's heading at `title`, counting `count`
+    /// features, under a rule across the sidebar.
+    fn features_heading(&self, c: &mut Canvas, title: Rect, count: usize, scale: f64, p: &Palette) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let rule_y = px(title.loc.y - SECTION_TOP / 2);
+        let rule_h = px(GAP).max(1);
+        let rule_x = px(ROW_INSET);
+        let rule_w = px(title.loc.x + title.size.w - ROW_INSET) - rule_x;
+        c.fill(rule_x, rule_y, rule_w, rule_h, p.border);
+        self.section_heading(c, title, git_branch, "Features", Some(count), scale, p);
+    }
+
+    /// The features section's rows of features with no workspace: each a
+    /// feature, its hover alpha and where it goes. A row has the mark of
+    /// the stage the feature is at under the heading's icon, the feature's
+    /// title under its label, and a dot per stage on a line under the
+    /// title.
     fn feature_rows(
         &self,
         c: &mut Canvas,
-        title: Rect,
         rows: &[(&super::FeatureRowView, u8, Rect)],
         density: Density,
         scale: f64,
@@ -2359,12 +2419,6 @@ impl Painter {
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let rule_y = px(title.loc.y - SECTION_TOP / 2);
-        let rule_h = px(GAP).max(1);
-        let rule_x = px(ROW_INSET);
-        let rule_w = px(title.loc.x + title.size.w - ROW_INSET) - rule_x;
-        c.fill(rule_x, rule_y, rule_w, rule_h, p.border);
-        self.section_heading(c, title, git_branch, "Features", Some(rows.len()), scale, p);
         for (row, hover, rect) in rows {
             let hover = alpha(*hover);
             if hover > 0.0 {
@@ -3547,6 +3601,8 @@ struct InboxKey {
 /// then as `BlockKey`.
 #[derive(Clone, Debug, PartialEq)]
 struct FeaturesKey {
+    /// The heading's count, when the part starts with the heading.
+    heading: Option<usize>,
     rows: Vec<(super::FeatureRowView, u8)>,
     density: Density,
     width: i32,
@@ -3612,21 +3668,26 @@ impl Painter {
         c.into_buffer(true)
     }
 
-    /// The feature rows `key` has, from the rule over their heading, as
-    /// the sidebar draws them.
+    /// The heading `key` has, from the rule over it, and its feature
+    /// rows, as the sidebar draws them.
     fn sidebar_features_part(&self, key: &FeaturesKey) -> MemoryRenderBuffer {
         let (scale, p) = (key.scale, key.theme.palette());
-        let (title, rects, end) = features_rects(key.rows.len(), 0, key.width, key.density);
-        let Some(title) = title else {
+        let n = key.rows.len();
+        let (title, rects, end) =
+            features_part_rects(key.heading.is_some(), n, key.width, key.density);
+        if end == 0 {
             return MemoryRenderBuffer::default();
-        };
+        }
         let mut c = Canvas::new(physical((key.width, end).into(), scale));
         c.fill(0, 0, c.w, c.h, p.panel);
         sidebar_edge(&mut c, scale, p);
+        if let (Some(title), Some(count)) = (title, key.heading) {
+            self.features_heading(&mut c, title, count, scale, p);
+        }
         let rows: Vec<_> = (key.rows.iter().zip(rects))
             .map(|((row, hover), rect)| (row, *hover, rect))
             .collect();
-        self.feature_rows(&mut c, title, &rows, key.density, scale, p);
+        self.feature_rows(&mut c, &rows, key.density, scale, p);
         c.into_buffer(true)
     }
 }
@@ -3773,16 +3834,28 @@ impl SidebarLayers {
             }
         }
 
-        if let Some(title) = layout.features_title {
-            let n = layout.features.len();
-            let top = title.loc.y - SECTION_TOP;
-            let (.., end) = features_rects(n, top, width, density);
-            let h = end - top;
-            if shows(top, h) {
-                let rows = (sidebar.features.iter().enumerate())
-                    .map(|(n, row)| (row.clone(), state.feature(n)))
+        // The Features heading with the rows under it; or, over the
+        // features' workspaces, the heading on its own and the rows after.
+        let workspaces =
+            features_from(&sidebar.workspaces).map_or(0, |f| sidebar.workspaces.len() - f);
+        let heading = layout.features_title.map(|title| title.loc.y - SECTION_TOP);
+        let count = workspaces + layout.features.len();
+        let all: Vec<usize> = (0..sidebar.features.len()).collect();
+        let pieces = if workspaces > 0 {
+            let rows = layout.features.first().map(|r| (r.loc.y, None, &all[..]));
+            [heading.map(|top| (top, Some(count), &[][..])), rows]
+        } else {
+            [heading.map(|top| (top, Some(count), &all[..])), None]
+        };
+        for (top, heading, rows) in pieces.into_iter().flatten() {
+            let (.., h) = features_part_rects(heading.is_some(), rows.len(), width, density);
+            if h > 0 && shows(top, h) {
+                let rows = rows
+                    .iter()
+                    .map(|&n| (sidebar.features[n].clone(), state.feature(n)))
                     .collect();
                 let key = FeaturesKey {
+                    heading,
                     rows,
                     density,
                     width,

@@ -194,6 +194,9 @@ struct Preview {
     /// comments (`marks_hash`).
     caret: Option<Option<usize>>,
     marks: Option<u64>,
+    /// The line at the top of its review and its page, as told to the
+    /// page or by it last (see `DiffView::top_line`).
+    top: Option<f64>,
 }
 
 impl Preview {
@@ -203,6 +206,7 @@ impl Preview {
             sent: None,
             caret: None,
             marks: None,
+            top: None,
         }
     }
 }
@@ -228,6 +232,19 @@ impl Previews {
     /// The file `pane`'s preview shows.
     pub fn file(&self, pane: u32) -> Option<PathBuf> {
         self.shown.get(&pane).map(|p| p.file.clone())
+    }
+
+    /// The line at the top of `pane`'s preview and its review, as told
+    /// to its page or by it last.
+    pub fn top(&self, pane: u32) -> Option<f64> {
+        self.shown.get(&pane)?.top
+    }
+
+    /// `pane`'s preview and its review stand with `line` at their top.
+    pub fn set_top(&mut self, pane: u32, line: f64) {
+        if let Some(preview) = self.shown.get_mut(&pane) {
+            preview.top = Some(line);
+        }
     }
 }
 
@@ -287,6 +304,7 @@ impl Gerdr {
         if let Some(preview) = self.previews.shown.get_mut(&pane) {
             preview.sent = None;
             preview.caret = None;
+            preview.top = None;
         }
         self.send_preview(pane);
         self.sync_preview_marks();

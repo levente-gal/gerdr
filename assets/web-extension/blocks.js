@@ -24,4 +24,57 @@ function pickBlock(blocks, line) {
   return holding !== null ? holding : before;
 }
 
-if (typeof module !== "undefined") module.exports = { sourceLines, pickBlock };
+// Where the page and its review stand: the line of the file at the top of
+// each, to the fraction. Of `spans`, `[first, last, top, height]` of each
+// block in document order (in pixels down the page), the place down the
+// page `line` is at: as far into its block as the line is into its lines,
+// or between the blocks around a line between them.
+function lineY(spans, line) {
+  if (spans.length === 0) return 0;
+  let holding = null;
+  let before = null;
+  let after = null;
+  for (const span of spans) {
+    const [first, last] = span;
+    if (first <= line && line < last + 1) holding = span;
+    if (last + 1 <= line && (!before || last >= before[1])) before = span;
+    if (first > line && after === null) after = span;
+  }
+  if (holding) {
+    const [first, last, top, height] = holding;
+    return top + ((line - first) / (last + 1 - first)) * height;
+  }
+  // Ends of blocks and starts of the next, the lines and places between;
+  // the top of the page is the start of the line before the first block.
+  const [from, fromY] = before ? [before[1] + 1, before[2] + before[3]] : [after ? after[0] - 1 : 1, 0];
+  if (!after) return fromY;
+  const [to, toY] = [after[0], after[2]];
+  if (to <= from) return toY;
+  return Math.max(0, fromY + ((line - from) / (to - from)) * (toY - fromY));
+}
+
+// The line at place `y` down the page, to the fraction: `lineY` turned
+// round. In the innermost block there, or between the blocks around it.
+function yLine(spans, y) {
+  if (spans.length === 0) return 1;
+  let holding = null;
+  let before = null;
+  let after = null;
+  for (const span of spans) {
+    const [, , top, height] = span;
+    if (top <= y && y < top + height) holding = span;
+    if (top + height <= y && (!before || top + height >= before[2] + before[3])) before = span;
+    if (top > y && (!after || top < after[2])) after = span;
+  }
+  if (holding) {
+    const [first, last, top, height] = holding;
+    return first + ((y - top) / Math.max(height, 1)) * (last + 1 - first);
+  }
+  const [from, fromY] = before ? [before[1] + 1, before[2] + before[3]] : [after ? after[0] - 1 : 1, 0];
+  if (!after) return from;
+  const [to, toY] = [after[0], after[2]];
+  if (toY <= fromY) return to;
+  return from + ((y - fromY) / (toY - fromY)) * (to - from);
+}
+
+if (typeof module !== "undefined") module.exports = { sourceLines, pickBlock, lineY, yLine };

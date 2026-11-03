@@ -21,7 +21,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
 | Ctrl+R | Refresh / reload (feature tab: start the selected stage's agent afresh, Build's too). |
 | Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet). |
-| Ctrl+Shift+V | Show or hide the file under review rendered, beside the review, following its edits and caret; on an output narrower than 1400 px, in a web tab of its own (a feature's brief, plan or other stage file; Verify's evidence). |
+| Ctrl+Shift+V | Show or hide the file under review rendered, beside the review, following its edits and caret, the two scrolling together; on an output narrower than 1400 px, in a web tab of its own (a feature's brief, plan or other stage file; Verify's evidence). |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
