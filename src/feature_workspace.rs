@@ -18,7 +18,8 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
     Gerdr, Tab, TabKind, Workspace, WorkspaceKind,
-    feature::{Feature, Status},
+    feature::{Feature, Status, layout, store},
+    features::Done,
 };
 
 /// How often a removal waiting for a closed feature workspace's panes to
@@ -260,6 +261,30 @@ impl Gerdr {
         changed
     }
 
+    /// Link each feature workspace's folder to its stage files, once a run
+    /// and off the thread: any agent started there can name them, in a
+    /// feature made before there was a link too (see `layout::link_docs`).
+    pub(crate) fn link_feature_docs(&mut self) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        for w in 0..self.workspaces.len() {
+            let Some(feature) = self.workspace_feature(w) else {
+                continue;
+            };
+            let (slug, title) = (feature.slug.clone(), feature.title.clone());
+            let (dir, multi) = (feature.dir.clone(), feature.multi);
+            if !self.features.docs_linked.insert(dir.clone()) {
+                continue;
+            }
+            let data = store::dir(None, &project, &slug);
+            self.feature_work(None, move |_| Done::DocsLinked {
+                title,
+                result: layout::link_docs(&dir, multi, &data),
+            });
+        }
+    }
+
     /// Put the features' workspaces after all the others, each kind in the
     /// order it had, the active one kept shown: the sidebar's Features
     /// section holds them, under its heading. herdr is told, so the order
@@ -329,6 +354,7 @@ impl Gerdr {
         let record = ws.record.clone();
         self.workspaces.push(ws);
         self.pin_feature_tabs();
+        self.link_feature_docs();
         record
     }
 
