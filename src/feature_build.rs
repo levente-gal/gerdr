@@ -580,11 +580,8 @@ impl Gerdr {
         let mut sent = Err(String::from("its tab is gone"));
         if alive {
             let data = store::dir(None, project, slug);
-            let project_name = self
-                .projects
-                .project(project)
-                .map_or_else(|| project.to_owned(), |p| p.name.clone());
-            let values = feature_agents::vars(&feature, &project_name, &data, stage);
+            let names = self.projects.names(&feature);
+            let values = feature_agents::vars(&feature, &names, &data, stage);
             sent = crate::prompts::render_builtin("continue", &values)
                 .map_err(|e| e.to_string())
                 .and_then(|line| self.tell_build_agent(&feature, line.trim()));
@@ -788,14 +785,11 @@ impl Gerdr {
     ) {
         let title = &feature.title;
         let data = store::dir(None, project, slug);
-        let project_name = self
-            .projects
-            .project(project)
-            .map_or_else(|| project.to_owned(), |p| p.name.clone());
+        let names = self.projects.names(feature);
         let joined = failures.join("\n");
         let mut sent = Err(String::from("its tab is gone"));
         if into_pane {
-            let mut values = feature_agents::vars(feature, &project_name, &data, Stage::Build);
+            let mut values = feature_agents::vars(feature, &names, &data, Stage::Build);
             values.insert("evidence".into(), joined.clone());
             sent = crate::prompts::render_builtin("fix", &values)
                 .map_err(|e| e.to_string())

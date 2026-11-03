@@ -11,17 +11,17 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 1),
-        "plan" => (include_str!("../../assets/prompts/plan.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 2),
-        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 1),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 2),
+        "plan" => (include_str!("../../assets/prompts/plan.md"), 2),
+        "build" => (include_str!("../../assets/prompts/build.md"), 3),
+        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 2),
         "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 1),
         "fix" => (include_str!("../../assets/prompts/fix.md"), 1),
         "continue" => (include_str!("../../assets/prompts/continue.md"), 1),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
-        "repos" => (include_str!("../../assets/prompts/repos.md"), 1),
+        "repos" => (include_str!("../../assets/prompts/repos.md"), 2),
         _ => return None,
     })
 }
@@ -63,6 +63,7 @@ mod tests {
             ("branch", "feature/bulk-edit"),
             ("multi_repo", if multi { "yes" } else { "" }),
             ("repos", "- api\n- web"),
+            ("projects", ""),
             ("comments", comments),
             ("comments.path", "/d/c.md"),
             ("missing", "no Outcome section"),
@@ -102,8 +103,33 @@ mod tests {
                     assert!(!text.contains("{{"), "{name}: {text}");
                 }
             }
+            let mut linked = vars(true, "");
+            linked.insert("projects".into(), "- Shop, home: /w/bulk-edit".into());
+            let text = render_builtin(name, &linked).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!text.contains("{{"), "{name}: {text}");
         }
         assert!(render_builtin("nope", &vars(false, "")).is_err());
+    }
+
+    #[test]
+    fn a_feature_over_several_projects_names_every_folder() {
+        let mut v = vars(true, "");
+        v.insert(
+            "projects".into(),
+            "- Shop, home: /w/bulk-edit\n- Admin: /a/.features/bulk-edit".into(),
+        );
+        v.insert("repos".into(), "- api (project Shop): /w/bulk-edit/api (changed by this feature)\n- admin:ui (project Admin): /a/.features/bulk-edit/ui (context only)".into());
+        for name in ["discover", "plan", "build", "ai-review"] {
+            let text = render_builtin(name, &v).unwrap();
+            assert!(text.contains("several projects"), "{name}: {text}");
+            assert!(
+                text.contains("/a/.features/bulk-edit") && text.contains("admin:ui"),
+                "{name}"
+            );
+            assert!(!text.contains("several repositories, each"), "{name}");
+        }
+        let one = render_builtin("plan", &vars(true, "")).unwrap();
+        assert!(!one.contains("several projects"));
     }
 
     #[test]

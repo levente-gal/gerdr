@@ -27,7 +27,7 @@ use crate::{
     Gerdr, agents,
     cli_agents::CliAgent,
     feature::{
-        self, Feature, Stage, Status,
+        self, Feature, PerProject, Stage, Status,
         agents::{StageRun, Stop, command_line, needs},
         artifacts,
         patch::Reading,
@@ -259,8 +259,11 @@ fn judge(
 /// lacks. A multi-repository plan must name the touched repositories.
 pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<(), Vec<String>> {
     let mut lacks = artifacts::check(stage, text).err().unwrap_or_default();
-    if stage == Stage::Plan && feature.multi {
-        let touched: Vec<&str> = feature.touched().map(|r| r.name.as_str()).collect();
+    if stage == Stage::Plan && feature.many_repos() {
+        // By plain name: a plan's `web:api` names `api` too.
+        let mut touched: Vec<&str> = feature.touched().map(|r| r.name.as_str()).collect();
+        touched.sort_unstable();
+        touched.dedup();
         for repo in artifacts::unnamed_repos(text, &touched) {
             lacks.push(format!("Repositories doesn't name {repo}"));
         }
@@ -477,10 +480,25 @@ fn stage_key(stage: Stage) -> String {
         .unwrap_or_else(|| stage.label().to_lowercase())
 }
 
-/// The values the stage templates are rendered with.
-pub(crate) fn vars(feature: &Feature, project_name: &str, data: &Path, stage: Stage) -> Vars {
+/// The values the stage templates are rendered with. `names` holds the
+/// projects' names (`Store::names`): the home one, and each link's.
+pub(crate) fn vars(
+    feature: &Feature,
+    names: &PerProject<String>,
+    data: &Path,
+    stage: Stage,
+) -> Vars {
     let path = |p: Option<PathBuf>| p.map(|p| p.display().to_string()).unwrap_or_default();
-    let repos = if feature.multi {
+    let name_of = |project: Option<&str>| match project {
+        None => names.home.clone(),
+        Some(id) => names
+            .links
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_owned()),
+    };
+    let linked = !feature.links.is_empty();
+    let repos = if feature.many_repos() {
         feature
             .repos
             .iter()
@@ -490,7 +508,16 @@ pub(crate) fn vars(feature: &Feature, project_name: &str, data: &Path, stage: St
                 } else {
                     "context only"
                 };
-                format!("- {}: {} ({what})", r.name, r.worktree.display())
+                if linked {
+                    format!(
+                        "- {} (project {}): {} ({what})",
+                        r.key(),
+                        name_of(r.project.as_deref()),
+                        r.worktree.display()
+                    )
+                } else {
+                    format!("- {}: {} ({what})", r.name, r.worktree.display())
+                }
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -501,12 +528,25 @@ pub(crate) fn vars(feature: &Feature, project_name: &str, data: &Path, stage: St
             .map(|r| r.name.clone())
             .unwrap_or_default()
     };
+    let projects = if linked {
+        feature
+            .folders()
+            .into_iter()
+            .map(|(project, dir)| {
+                let home = if project.is_none() { ", home" } else { "" };
+                format!("- {}{home}: {}", name_of(project), dir.display())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        String::new()
+    };
     [
         ("feature.title", feature.title.clone()),
         ("feature.slug", feature.slug.clone()),
         ("feature.dir", feature.dir.display().to_string()),
         ("feature.data", data.display().to_string()),
-        ("project.name", project_name.to_owned()),
+        ("project.name", names.home.clone()),
         ("artifact.path", path(artifacts::path(data, stage))),
         ("brief.path", path(artifacts::path(data, Stage::Discover))),
         ("plan.path", path(artifacts::path(data, Stage::Plan))),
@@ -518,9 +558,10 @@ pub(crate) fn vars(feature: &Feature, project_name: &str, data: &Path, stage: St
         ("branch", feature.branch()),
         (
             "multi_repo",
-            if feature.multi { "yes" } else { "" }.to_owned(),
+            if feature.many_repos() { "yes" } else { "" }.to_owned(),
         ),
         ("repos", repos),
+        ("projects", projects),
         ("comments", String::new()),
         ("comments.path", String::new()),
         ("missing", String::new()),
@@ -689,10 +730,7 @@ impl Gerdr {
         let Some(need) = needs(stage) else {
             return false;
         };
-        let project_name = self
-            .projects
-            .project(project)
-            .map_or_else(|| project.to_owned(), |p| p.name.clone());
+        let names = self.projects.names(&feature);
         let workflow = self.projects.project(project).map(|p| &p.workflow);
         let configured = workflow.and_then(|w| w.agents.get(&stage).cloned());
         let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
@@ -723,7 +761,7 @@ impl Gerdr {
         let prompt = data
             .join("prompts")
             .join(format!("{}-{n}.md", stage_key(stage)));
-        let mut values = vars(&feature, &project_name, &data, stage);
+        let mut values = vars(&feature, &names, &data, stage);
         if stage == Stage::AiReview {
             values.extend(crate::feature_review::review_vars(&feature));
         }
@@ -985,12 +1023,9 @@ impl Gerdr {
         };
         let project = feature.project.clone();
         let slug = feature.slug.clone();
-        let project_name = self
-            .projects
-            .project(&project)
-            .map_or_else(|| project.clone(), |p| p.name.clone());
+        let names = self.projects.names(feature);
         let data = store::dir(None, &project, &slug);
-        let mut values = vars(feature, &project_name, &data, stage);
+        let mut values = vars(feature, &names, &data, stage);
         values.insert(
             "absent".into(),
             if absent { "yes".into() } else { String::new() },
@@ -1257,11 +1292,8 @@ impl Gerdr {
                 .and_then(|()| std::fs::write(&file, &comments))
                 .map_err(|e| format!("writing {}: {e}", file.display()))
                 .and_then(|()| {
-                    let project_name = self
-                        .projects
-                        .project(project)
-                        .map_or_else(|| project.to_owned(), |p| p.name.clone());
-                    let mut values = vars(&feature, &project_name, &data, stage);
+                    let names = self.projects.names(&feature);
+                    let mut values = vars(&feature, &names, &data, stage);
                     values.insert("comments".into(), comments.clone());
                     values.insert("comments.path".into(), file.display().to_string());
                     prompts::render_builtin("send-back", &values).map_err(|e| e.to_string())
@@ -1614,7 +1646,12 @@ mod tests {
     #[test]
     fn the_review_prompt_gets_its_file_and_the_diffs() {
         let f = feature("a", vec![repo("api", true)], 4);
-        let mut v = vars(&f, "Acme", Path::new("/data/a"), Stage::AiReview);
+        let mut v = vars(
+            &f,
+            &PerProject::all("Acme".to_owned()),
+            Path::new("/data/a"),
+            Stage::AiReview,
+        );
         assert_eq!(v["artifact.path"], "/data/a/review.json");
         v.extend(crate::feature_review::review_vars(&f));
         let text = prompts::render_builtin("ai-review", &v).unwrap();
@@ -1791,7 +1828,12 @@ mod tests {
     #[test]
     fn prompts_render_for_the_feature() {
         let f = feature("a", vec![repo("api", true), repo("web", false)], 0);
-        let v = vars(&f, "Acme", Path::new("/data/a"), Stage::Plan);
+        let v = vars(
+            &f,
+            &PerProject::all("Acme".to_owned()),
+            Path::new("/data/a"),
+            Stage::Plan,
+        );
         assert_eq!(v["artifact.path"], "/data/a/plan.md");
         assert_eq!(v["brief.path"], "/data/a/brief.md");
         assert_eq!(v["multi_repo"], "yes");
@@ -1799,6 +1841,42 @@ mod tests {
         let text = prompts::render_builtin("plan", &v).unwrap();
         assert!(text.contains("Feature a") && text.contains("Acme"));
         assert_eq!(stage_key(Stage::AiReview), "ai-review");
+    }
+
+    #[test]
+    fn prompts_name_every_projects_folder_and_repositories() {
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        f.multi = false;
+        let mut ui = repo("ui", false);
+        ui.project = Some("admin".into());
+        ui.worktree = "/admin/.features/a/ui".into();
+        f.repos.push(ui);
+        f.links.push(feature::Link {
+            project: "admin".into(),
+            root: "/admin".into(),
+            dir: "/admin/.features/a".into(),
+            multi: false,
+        });
+        let mut names = PerProject::all("Acme".to_owned());
+        names.links.insert("admin".into(), "Admin".into());
+        let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        assert_eq!(v["multi_repo"], "yes");
+        assert_eq!(
+            v["projects"],
+            "- Acme, home: /work/.features/a\n- Admin: /admin/.features/a"
+        );
+        assert_eq!(
+            v["repos"],
+            "- api (project Acme): /work/.features/bulk/api (changed by this feature)\n\
+             - admin:ui (project Admin): /admin/.features/a/ui (context only)"
+        );
+        let text = prompts::render_builtin("plan", &v).unwrap();
+        assert!(text.contains("/admin/.features/a") && text.contains("admin:ui"));
+        // One project, one repository: as before.
+        let one = feature("b", vec![repo("api", true)], 0);
+        let v = vars(&one, &names, Path::new("/data/b"), Stage::Plan);
+        assert_eq!((v["repos"].as_str(), v["projects"].as_str()), ("api", ""));
+        assert_eq!(v["multi_repo"], "");
     }
 
     #[test]
@@ -1993,7 +2071,12 @@ mod tests {
     #[test]
     fn the_build_prompt_gets_the_plan_evidence_and_branch() {
         let f = feature("a", vec![repo("api", true)], 2);
-        let v = vars(&f, "Acme", Path::new("/data/a"), Stage::Build);
+        let v = vars(
+            &f,
+            &PerProject::all("Acme".to_owned()),
+            Path::new("/data/a"),
+            Stage::Build,
+        );
         assert_eq!(v["artifact.path"], "/data/a/build.md");
         assert_eq!(v["plan.path"], "/data/a/plan.md");
         assert_eq!(v["evidence.path"], "/data/a/evidence.md");

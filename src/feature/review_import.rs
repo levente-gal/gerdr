@@ -366,6 +366,17 @@ fn place(repo: Option<String>, file: &str, repos: &[(String, PathBuf)]) -> (Stri
     }
     let file = file.trim_start_matches("./").to_owned();
     match repo {
+        // A linked project's repository by its plain name, when only one
+        // has it.
+        Some(repo) if !repos.iter().any(|(key, _)| *key == repo) => {
+            let mut by_name = repos
+                .iter()
+                .filter(|(key, _)| key.rsplit(':').next() == Some(repo.as_str()));
+            match (by_name.next(), by_name.next()) {
+                (Some((key, _)), None) => (key.clone(), file),
+                _ => (repo, file),
+            }
+        }
         Some(repo) => (repo, file),
         None if repos.len() == 1 => (repos[0].0.clone(), file),
         None => (String::new(), file),
@@ -907,5 +918,33 @@ mod tests {
         assert_eq!(read.diff["api"]["login"], [(1, 1)]);
         assert_eq!(read.heads["api"].len(), 40);
         assert!(!read.diff.contains_key("web"));
+    }
+
+    #[test]
+    fn a_linked_projects_repository_is_placed_by_its_key() {
+        let repos = vec![
+            ("api".to_owned(), PathBuf::from("/w/f/api")),
+            ("admin:ui".to_owned(), PathBuf::from("/a/.features/f/ui")),
+            ("admin:api".to_owned(), PathBuf::from("/a/.features/f/api")),
+        ];
+        let at = |repo: Option<&str>, file: &str| place(repo.map(str::to_owned), file, &repos);
+        assert_eq!(
+            at(None, "/a/.features/f/ui/src/b.rs"),
+            ("admin:ui".into(), "src/b.rs".into())
+        );
+        assert_eq!(
+            at(Some("admin:ui"), "src/b.rs"),
+            ("admin:ui".into(), "src/b.rs".into())
+        );
+        // A plain name only one repository has.
+        assert_eq!(
+            at(Some("ui"), "src/b.rs"),
+            ("admin:ui".into(), "src/b.rs".into())
+        );
+        // `api` is the home one's key: it stays.
+        assert_eq!(
+            at(Some("api"), "src/b.rs"),
+            ("api".into(), "src/b.rs".into())
+        );
     }
 }

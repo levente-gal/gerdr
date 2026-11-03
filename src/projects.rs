@@ -865,6 +865,23 @@ impl Store {
         }
     }
 
+    /// The names of `feature`'s projects: its home's and each link's, an
+    /// id standing in for a project gone from the store.
+    pub fn names(&self, feature: &crate::feature::Feature) -> crate::feature::PerProject<String> {
+        let name = |id: &str| {
+            self.project(id)
+                .map_or_else(|| id.to_owned(), |p| p.name.clone())
+        };
+        crate::feature::PerProject {
+            home: name(&feature.project),
+            links: feature
+                .links
+                .iter()
+                .map(|l| (l.project.clone(), name(&l.project)))
+                .collect(),
+        }
+    }
+
     pub fn project_mut(&mut self, id: &str) -> Option<&mut Project> {
         self.projects.iter_mut().find(|p| p.id == id)
     }
