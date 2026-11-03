@@ -60,7 +60,7 @@ use smithay::{
 };
 
 use crate::{
-    anim::{FAST, Fade, SLOW, phase},
+    anim::{FAST, Fade, Hover, SLOW, phase},
     overlay::Overlay as Kind,
 };
 
@@ -239,6 +239,9 @@ pub struct Chrome {
     pane_grips: Vec<Cached<GripKey>>,
     /// The button over a zoomed pane: lit or not, theme, scale.
     unzoom: Cached<(bool, Theme, f64)>,
+    /// How lit the unzoom button is: see-through at rest, as a pill is,
+    /// and whole under the pointer, over a fade.
+    unzoom_lit: Hover<()>,
     /// The strip along the focused pane's top edge.
     focus_strip: Cached<(Size<i32, Logical>, Theme, f64)>,
     /// The highlight where a held pane would land: its size, theme, scale.
@@ -294,6 +297,7 @@ impl Chrome {
             pane_bars: Vec::new(),
             pane_grips: Vec::new(),
             unzoom: Cached::default(),
+            unzoom_lit: Hover::default(),
             focus_strip: Cached::default(),
             pane_drop: Cached::default(),
             hits: Cached::default(),
@@ -660,14 +664,17 @@ impl Chrome {
         }
 
         // The button unzooming the zoomed pane, over it and under the
-        // toasts.
+        // toasts: see-through like a pill until the pointer comes.
+        let hovered = view.unzoom.is_some_and(|b| b.to_f64().contains(pointer));
+        self.unzoom_lit.track(hovered.then_some(()), now);
         if let Some(button) = view.unzoom {
-            let hovered = button.to_f64().contains(pointer);
             let buffer = self.unzoom.get((hovered, theme, scale), |(hovered, ..)| {
                 painter.unzoom_button(*hovered, scale, theme.palette())
             });
             let (loc, size) = shadowed(button);
-            parts.push(Part::new(buffer, loc, size, 1.0));
+            let lit = self.unzoom_lit.alpha((), now);
+            let rest = pane_bar::PILL_REST;
+            parts.push(Part::new(buffer, loc, size, rest + (1.0 - rest) * lit));
         }
 
         // The placeholders over the panes still waiting for their window,
