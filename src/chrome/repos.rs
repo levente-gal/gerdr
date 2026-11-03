@@ -726,6 +726,9 @@ pub enum ReposButton {
     MarkViewed,
     /// A feature's code review: go to the next file not viewed.
     NextUnviewed,
+    /// A file under review shown rendered, in a web tab (see
+    /// `md_preview`).
+    Preview,
 }
 
 impl ReposButton {
@@ -788,6 +791,7 @@ impl ReposButton {
             ReposButton::ReopenFinding => "Reopen",
             ReposButton::MarkViewed => "Viewed",
             ReposButton::NextUnviewed => "Next unviewed",
+            ReposButton::Preview => "Preview",
         }
     }
 }
@@ -5896,6 +5900,29 @@ mod tests {
         }
     }
 
+    /// A feature's brief under review: Preview, Send back and Approve on
+    /// the diff's title row.
+    fn doc_review() -> ReposView {
+        let mut view = diff_only();
+        view.title = "Brief \u{b7} Log in with a password".into();
+        view.summary = "ready for review".into();
+        view.detail.title = "brief.md \u{b7} 12 lines".into();
+        view.detail.title_buttons = [
+            (ReposButton::Preview, "Ctrl+Shift+V"),
+            (ReposButton::SendBack, "Ctrl+Shift+Enter"),
+            (ReposButton::Approve, "Ctrl+Enter"),
+        ]
+        .into_iter()
+        .map(|(button, key)| Hint {
+            button,
+            label: button.label().into(),
+            key: key.into(),
+            disabled: None,
+        })
+        .collect();
+        view
+    }
+
     /// The Log tab: the commits to pull and to push, one picked.
     fn with_log() -> ReposView {
         let view = full();
@@ -6775,6 +6802,7 @@ mod tests {
             ("menu_bad_name", with_bad_name_menu()),
             ("search", with_search()),
             ("diff_only", diff_only()),
+            ("doc_review", doc_review()),
             ("log", with_log()),
             ("commit", commit_only()),
             (

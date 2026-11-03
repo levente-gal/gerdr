@@ -853,6 +853,7 @@ impl Gerdr {
     /// A Git status read came in.
     pub fn repos_read(&mut self) {
         self.worktree_diff_read();
+        self.refresh_previews();
         if self.repos.panel.is_none() && self.repos.batch.is_none() {
             return;
         }

@@ -8,10 +8,12 @@
 // a pane's tab to another page (in a single-page app by the app's own
 // router, see `goInApp`), back, forward, or load it again, keep T3
 // Code's app in it to the projects under some folders, and start a thread
-// there in one of them (see `inT3`).
+// there in one of them (see `inT3`). A pane's tab can be the extension's
+// preview page too, which shows a markdown file gerdr sends it.
 
 const HOST = "dev.gerdr.web";
 const BOOT = chrome.runtime.getURL("open.html");
+const PREVIEW = chrome.runtime.getURL("preview.html");
 
 // The pane of each tab gerdr opened, by the tab's id. Kept in the
 // session's storage too: the worker comes and goes.
@@ -104,9 +106,30 @@ async function retry(tab, looks = 5) {
   await chrome.tabs.reload(tab.id);
 }
 
-// open.html asks to be taken before it goes on to its page.
+// What a preview page asks of gerdr, as told to it: that it loaded,
+// to open a link, to review its file.
+const FROM_PREVIEW = { "preview-ready": "ready", "preview-open": "open", "preview-review": "review" };
+
+// open.html asks to be taken before it goes on to its page. A pane's
+// preview page (see preview.js) tells gerdr what it asks; only its own
+// tab's.
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
-  if (message.type !== "boot" || !sender.tab) return false;
+  if (!sender.tab || !message) return false;
+  const asked = FROM_PREVIEW[message.type];
+  if (asked) {
+    if (!sender.url || !sender.url.startsWith(PREVIEW)) return false;
+    loaded.then(() => {
+      const pane = panes[sender.tab.id];
+      if (pane === undefined) return;
+      if (asked === "open") {
+        if (typeof message.url === "string") send({ type: "open", pane, url: message.url });
+      } else {
+        send({ type: asked, pane });
+      }
+    });
+    return false;
+  }
+  if (message.type !== "boot") return false;
   loaded.then(() => boot(sender.tab, sender.url)).then(reply, () => reply(false));
   return true;
 });
@@ -555,6 +578,10 @@ async function command(message) {
         await save();
         await scope(tab);
         await startThread(tab);
+        break;
+      // To the pane's preview page, which shows it (see preview.js).
+      case "preview":
+        await chrome.tabs.sendMessage(tab, message);
         break;
       case "newthread":
         threads[tab] = { origin: message.origin, dirs: message.dirs, at: Date.now() };

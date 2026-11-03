@@ -562,6 +562,12 @@ impl Gerdr {
                     app_id = format!("-{}_", web_control::EXTENSION_ID);
                     steered
                 }
+                // The extension's own pages show nothing without it: no
+                // command, which doesn't start (see `steers`).
+                None if site == format!("-{}_", web_control::EXTENSION_ID) => {
+                    app_id = site;
+                    String::new()
+                }
                 None => {
                     app_id = site;
                     web
@@ -630,6 +636,13 @@ impl Gerdr {
         web.contains(&app).then(|| web.replacen(&app, &boot, 1))
     }
 
+    /// Whether `command`, run in folder `dir`, opens through gerdr's
+    /// extension (see `steered`): one of its own pages needs it.
+    pub(crate) fn steers(&self, command: &str, dir: &Path) -> bool {
+        let app_id = self.prepare(command, dir, Some(0)).app_id;
+        app_id == format!("-{}_", web_control::EXTENSION_ID)
+    }
+
     /// Make `profile`, the one `command` runs with (see `own_instance`),
     /// ready when it is the project's: not a Flatpak app's, which sees
     /// only its own folder (see `ready_vs_code_profile` and
@@ -669,6 +682,10 @@ impl Gerdr {
         ws.tabs.get(t)?;
         let dir = ws.dir.clone();
         let prepared = self.prepare(command, &dir, pane);
+        if prepared.command.is_empty() {
+            tracing::warn!("{command}: nothing to run it with");
+            return None;
+        }
         if let Some(profile) = &prepared.profile
             && let Err(err) = std::fs::create_dir_all(profile)
         {
@@ -790,7 +807,10 @@ const CHROMIUMS: &[&str] = &[
 fn web_app(url: &str, opener: &str) -> Option<(String, String)> {
     let url = url.trim();
     let (scheme, rest) = url.split_once("://")?;
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+    // A page of gerdr's extension too, as the preview (see `md_preview`).
+    let own = scheme == "chrome-extension"
+        && rest.starts_with(&format!("{}/", web_control::EXTENSION_ID));
+    if !own && !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return None;
     }
     let quoted = desktop::shell_quote(url);

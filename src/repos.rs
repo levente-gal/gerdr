@@ -3561,7 +3561,8 @@ impl Panel {
             | B::DismissFinding
             | B::ReopenFinding
             | B::MarkViewed
-            | B::NextUnviewed => Err(Why::other("Nothing to review here")),
+            | B::NextUnviewed
+            | B::Preview => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly
             | B::Cancel

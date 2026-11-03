@@ -300,6 +300,8 @@ impl Gerdr {
             doc.locked = locked;
         }
         wd.set_doc(read, env);
+        // Its preview shows an edit at once.
+        self.refresh_previews();
     }
 
     /// Save the review comments on the file under review, if they

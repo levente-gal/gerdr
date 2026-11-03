@@ -39,6 +39,7 @@ use crate::{
     feature_diff::FeatureOf,
     git::Change,
     git_ops::Since,
+    md_preview::PREVIEW_KEY,
     repos::{diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
     review::Review,
     scroll::Motion,
@@ -185,6 +186,8 @@ pub enum Done {
     /// Send it back to its agent with these comments, as Markdown
     /// (`review::doc_markdown`).
     SendBack(String),
+    /// Show the file under review rendered (see `md_preview`).
+    Preview,
 }
 
 impl WorktreeDiff {
@@ -396,10 +399,15 @@ impl WorktreeDiff {
         }
         let own: &[(&str, &str)] = match (evidence, &self.feature) {
             (_, Some(_)) => &crate::feature_diff::KEYS,
-            (true, _) => &[("Esc", "close the evidence"), ("F1", "list the keys")],
+            (true, _) => &[
+                ("Esc", "close the evidence"),
+                ("F1", "list the keys"),
+                (PREVIEW_KEY, "show it rendered, in a web tab"),
+            ],
             (false, _) => &[
                 ("Esc", "close the review"),
                 ("F1", "list the keys"),
+                (PREVIEW_KEY, "show it rendered, in a web tab"),
                 (APPROVE_KEY, "approve the file as it is"),
                 (SEND_BACK_KEY, "send it back to its agent with the comments"),
             ],
@@ -583,16 +591,19 @@ impl WorktreeDiff {
             };
         }
         (view.row_buttons).retain(|(_, hint)| hint.button != ReposButton::Restore);
-        if self.evidence() {
-            return;
-        }
         let hint = |button: ReposButton, key: &str| Hint {
             button,
             label: button.label().into(),
             key: key.into(),
             disabled: None,
         };
+        if self.evidence() {
+            view.title_buttons
+                .push(hint(ReposButton::Preview, PREVIEW_KEY));
+            return;
+        }
         view.title_buttons.extend([
+            hint(ReposButton::Preview, PREVIEW_KEY),
             hint(ReposButton::SendBack, SEND_BACK_KEY),
             hint(ReposButton::Approve, APPROVE_KEY),
         ]);
@@ -659,6 +670,11 @@ impl WorktreeDiff {
                 true => self.send_back(env),
             };
         }
+        let v = matches!(sym, Keysym::v | Keysym::V);
+        if self.doc.is_some() && v && mods.ctrl && mods.shift && !mods.alt && !mods.logo && !typing
+        {
+            return Some(Done::Preview);
+        }
         // Alt+Shift+Down and Up: the next file not viewed, and the one
         // before.
         let up_down = match sym {
@@ -713,6 +729,9 @@ impl WorktreeDiff {
         if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
+        if self.doc.is_some() {
+            buttons.push(B::Preview);
+        }
         if self.diff.review.own() > 0 {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
@@ -731,6 +750,7 @@ impl WorktreeDiff {
                 key: match button {
                     B::Approve => APPROVE_KEY,
                     B::SendBack => SEND_BACK_KEY,
+                    B::Preview => PREVIEW_KEY,
                     B::MarkViewed => "Space",
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
                     button => key_name(button),
@@ -776,6 +796,7 @@ impl WorktreeDiff {
         }
         if self.doc.is_some() {
             match hit {
+                ReposHit::Button(ReposButton::Preview) => return Some(Done::Preview),
                 ReposHit::Button(ReposButton::Approve) => return self.approve(),
                 ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
                 ReposHit::DiffRestore(_) if self.evidence() => {
@@ -1304,6 +1325,10 @@ impl crate::Gerdr {
                 self.doc_send_back(comments);
                 None
             }
+            Done::Preview => {
+                self.open_doc_preview();
+                None
+            }
         }
     }
 
@@ -1794,7 +1819,7 @@ mod tests {
 
     #[test]
     fn a_stage_file_shows_as_added_lines_to_review() {
-        let wd = doc();
+        let mut wd = doc();
         assert_eq!(wd.heading(), "Discover · brief.md");
         assert_eq!(wd.summary(), "\u{201c}Log in\u{201d} · ready for review");
         assert_eq!(wd.root, PathBuf::from("/data/features/p/login"));
@@ -1811,21 +1836,42 @@ mod tests {
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(buttons, [ReposButton::SendBack, ReposButton::Approve]);
+        assert_eq!(
+            buttons,
+            [
+                ReposButton::Preview,
+                ReposButton::SendBack,
+                ReposButton::Approve
+            ]
+        );
         assert!(wd.view(ENV).row_buttons.is_empty());
         let hints: Vec<(ReposButton, String)> =
             wd.hints().into_iter().map(|h| (h.button, h.key)).collect();
         assert_eq!(
-            hints[..3],
+            hints[..4],
             [
                 (ReposButton::Comment, "c".into()),
                 (ReposButton::Approve, APPROVE_KEY.into()),
                 (ReposButton::SendBack, SEND_BACK_KEY.into()),
+                (ReposButton::Preview, PREVIEW_KEY.into()),
             ]
         );
         let help = wd.help_lines();
-        assert_eq!(help[2].0, APPROVE_KEY);
-        assert_eq!(help[3].0, SEND_BACK_KEY);
+        assert_eq!(help[2].0, PREVIEW_KEY);
+        assert_eq!(help[3].0, APPROVE_KEY);
+        assert_eq!(help[4].0, SEND_BACK_KEY);
+        // Ctrl+Shift+V and the button show it rendered; not while a
+        // comment is written.
+        let ctrl_shift = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let v = Keysym::V;
+        assert_eq!(wd.key(&ctrl_shift, v, v, ENV), Some(Done::Preview));
+        let preview = ReposHit::Button(ReposButton::Preview);
+        assert_eq!(wd.click(preview, ENV), Some(Done::Preview));
+        assert_eq!(wd.press(ReposButton::Preview, ENV), Some(Done::Preview));
         // Its edits are listed; the restore it refuses isn't.
         let keys: Vec<&str> = help.iter().map(|(key, ..)| key.as_str()).collect();
         assert!(keys.contains(&"c / Del Del"), "{keys:?}");
@@ -2013,11 +2059,16 @@ mod tests {
         let approve = ReposHit::Button(ReposButton::Approve);
         assert_eq!(wd.click(approve, ENV), refused);
         // Nor buttons, hints or keys sheet lines for them.
+        // It shows rendered as any file under review does.
         let view = wd.view(ENV);
-        assert!(view.title_buttons.is_empty());
+        let buttons: Vec<_> = view.title_buttons.iter().map(|h| h.button).collect();
+        assert_eq!(buttons, [ReposButton::Preview]);
         assert!(view.row_buttons.is_empty());
         let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
-        assert_eq!(hints, [ReposButton::Help, ReposButton::Close]);
+        assert_eq!(
+            hints,
+            [ReposButton::Preview, ReposButton::Help, ReposButton::Close]
+        );
         let lines = wd.help_lines();
         assert_eq!(lines[0].1, "close the evidence");
         assert!(

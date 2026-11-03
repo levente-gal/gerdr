@@ -55,6 +55,7 @@ mod keys;
 mod launch;
 mod layout;
 mod manual_test;
+mod md_preview;
 mod menu;
 mod nav;
 mod nav_history;
@@ -1360,6 +1361,8 @@ pub struct Gerdr {
     /// The browsers following and steering the web pages (see
     /// `web_control`).
     pub web_control: web_control::WebControl,
+    /// The web tabs showing a markdown file's preview (see `md_preview`).
+    pub previews: md_preview::Previews,
     /// The CI of the shown project's repositories, by root (see
     /// `ci_watch`).
     pub ci: HashMap<PathBuf, ci::RepoCi>,
@@ -6708,6 +6711,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         web_pending: false,
         web_control: web_control::WebControl::default(),
+        previews: md_preview::Previews::default(),
         notifier: None,
         activation: None,
         blocked_since: HashMap::new(),

@@ -16,6 +16,11 @@
 //! same; and with the version changed, while the worker's file's name
 //! does. Both follow the worker's content (see `install`).
 //!
+//! The extension also has a page of its own, `preview.html`, that shows a
+//! markdown file rendered (see `md_preview`): gerdr sends it the file's
+//! HTML on load and after each change, and it sends back the links and the
+//! Review button clicked in it.
+//!
 //! A pane without a tab of the extension's (its browser was running
 //! before, or can't run the host, as from a Flatpak) is followed by
 //! `web_pages` still.
@@ -34,7 +39,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use smithay::reexports::calloop::channel;
 
-use crate::{Gerdr, desktop};
+use crate::{Gerdr, desktop, md_preview};
 
 /// The extension's id, which the key in its manifest fixes.
 pub const EXTENSION_ID: &str = "elaigohdbahomgbfbgmgbofdmgoejbed";
@@ -53,8 +58,35 @@ const WORKER: &str = include_str!("../assets/web-extension/worker.js");
 const OPEN_HTML: &str = include_str!("../assets/web-extension/open.html");
 const OPEN_JS: &str = include_str!("../assets/web-extension/open.js");
 
+/// The extension's other files, by name: the preview page (see
+/// `md_preview`) and its styles.
+const FILES: [(&str, &str); 7] = [
+    ("open.html", OPEN_HTML),
+    ("open.js", OPEN_JS),
+    (
+        "preview.html",
+        include_str!("../assets/web-extension/preview.html"),
+    ),
+    (
+        "preview.js",
+        include_str!("../assets/web-extension/preview.js"),
+    ),
+    (
+        "preview.css",
+        include_str!("../assets/web-extension/preview.css"),
+    ),
+    (
+        "markdown-light.css",
+        include_str!("../assets/web-extension/markdown-light.css"),
+    ),
+    (
+        "markdown-dark.css",
+        include_str!("../assets/web-extension/markdown-dark.css"),
+    ),
+];
+
 /// A message bigger than this ends the connection.
-const MESSAGE_MAX: usize = 1 << 20;
+pub(crate) const MESSAGE_MAX: usize = 1 << 20;
 
 /// How often the host tries gerdr's socket again while it isn't there.
 const HOST_RETRY: Duration = Duration::from_secs(1);
@@ -86,6 +118,12 @@ enum FromBrowser {
     },
     /// T3 Code's app in the pane's tab took its project filter.
     Scoped { pane: String },
+    /// A link clicked in the pane's preview (see `md_preview`).
+    Open { pane: String, url: String },
+    /// The pane's preview asked to review its file.
+    Review { pane: String },
+    /// The pane's preview page loaded, and shows nothing yet.
+    Ready { pane: String },
     /// T3 Code's app in the pane's tab started no new thread (see
     /// `Gerdr::t3_no_thread`): what went wrong, as a short word, and what
     /// the page showed.
@@ -130,6 +168,18 @@ enum ToBrowser<'a> {
         pane: String,
         origin: &'a str,
         dirs: Vec<String>,
+    },
+    /// Show a markdown file in the pane's preview page (see
+    /// `md_preview`): rendered as `html`, or `error` saying why it isn't.
+    Preview {
+        pane: String,
+        title: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        html: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+        dark: bool,
+        review: bool,
     },
 }
 
@@ -210,7 +260,7 @@ pub fn boot_url(pane: u32, url: &str) -> String {
 }
 
 /// `text` with every byte but the unreserved ones percent-encoded.
-fn percent_encoded(text: &str) -> String {
+pub(crate) fn percent_encoded(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
@@ -227,6 +277,15 @@ fn content_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+/// What the extension's version follows: its worker and every other file,
+/// so a changed page loads too.
+fn extension_hash() -> u64 {
+    let all: Vec<&str> = std::iter::once(WORKER)
+        .chain(FILES.iter().map(|(_, contents)| *contents))
+        .collect();
+    content_hash(all.join("\0").as_bytes())
 }
 
 /// The extension's version for its worker's `hash`: four numbers of up to
@@ -251,6 +310,7 @@ pub fn install(profile: &Path, socket: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let hash = content_hash(WORKER.as_bytes());
     let worker = format!("worker-{hash:016x}.js");
+    let version_hash = extension_hash();
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("worker-") && name != worker {
@@ -261,12 +321,13 @@ pub fn install(profile: &Path, socket: &Path) -> std::io::Result<PathBuf> {
         .replace("\"worker.js\"", &format!("\"{worker}\""))
         .replace(
             "\"version\": \"1\"",
-            &format!("\"version\": \"{}\"", version(hash)),
+            &format!("\"version\": \"{}\"", version(version_hash)),
         );
     write_if_changed(&dir.join("manifest.json"), manifest.as_bytes())?;
     write_if_changed(&dir.join(&worker), WORKER.as_bytes())?;
-    write_if_changed(&dir.join("open.html"), OPEN_HTML.as_bytes())?;
-    write_if_changed(&dir.join("open.js"), OPEN_JS.as_bytes())?;
+    for (name, contents) in FILES {
+        write_if_changed(&dir.join(name), contents.as_bytes())?;
+    }
 
     // A binary replaced while it runs reads as deleted.
     let exe = std::env::current_exe()?;
@@ -436,6 +497,22 @@ impl Gerdr {
                 if let Some(pane) = token_pane(&pane) {
                     control.panes.remove(&pane);
                     control.history.remove(&pane);
+                    self.preview_closed(pane);
+                }
+            }
+            Event::Message(_, FromBrowser::Open { pane, url }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.preview_link(pane, &url);
+                }
+            }
+            Event::Message(_, FromBrowser::Ready { pane }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.preview_ready(pane);
+                }
+            }
+            Event::Message(_, FromBrowser::Review { pane }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.preview_review(pane);
                 }
             }
             Event::Message(
@@ -481,6 +558,7 @@ impl Gerdr {
                 };
                 control.panes.insert(pane, id);
                 control.history.insert(pane, WebHistory { back, forward });
+                self.preview_page(pane, &url);
                 if crate::is_web_link(&url) {
                     self.t3_page(pane, &url);
                     self.set_web_page(pane, url);
@@ -578,20 +656,62 @@ impl Gerdr {
         self.send_to_browser(pane, &message)
     }
 
+    /// Show `shown` in `pane`'s preview page, if the extension follows
+    /// its tab; whether it was sent. One too big for a message says so
+    /// instead.
+    pub(crate) fn preview_to_browser(&mut self, pane: u32, shown: &md_preview::Shown) -> bool {
+        let body = shown.body.as_deref().map_err(String::as_str);
+        let message =
+            preview_message(pane, &shown.title, body, shown.dark, shown.review).or_else(|| {
+                let name = shown.title.rsplit(" \u{b7} ").next().unwrap_or("The file");
+                let why = format!("{name} is too big to preview");
+                preview_message(pane, &shown.title, Err(&why), shown.dark, shown.review)
+            });
+        message.is_some_and(|message| self.send_bytes(pane, &message))
+    }
+
     /// Send `message` to the browser holding `pane`'s tab; whether it went.
     fn send_to_browser(&mut self, pane: u32, message: &ToBrowser) -> bool {
-        let control = &mut self.web_control;
-        let Some(id) = control.panes.get(&pane).copied() else {
+        let Ok(message) = serde_json::to_vec(message) else {
             return false;
         };
-        let Ok(message) = serde_json::to_vec(message) else {
+        self.send_bytes(pane, &message)
+    }
+
+    /// Send `message`, JSON, to the browser holding `pane`'s tab; whether
+    /// it went.
+    fn send_bytes(&mut self, pane: u32, message: &[u8]) -> bool {
+        let control = &mut self.web_control;
+        let Some(id) = control.panes.get(&pane).copied() else {
             return false;
         };
         control
             .connections
             .get_mut(&id)
-            .is_some_and(|stream| stream.write_all(&framed(&message)).is_ok())
+            .is_some_and(|stream| stream.write_all(&framed(message)).is_ok())
     }
+}
+
+/// The message showing `body` (the rendered file, or why it isn't) in
+/// `pane`'s preview page, titled `title`; `None` when it is bigger than a
+/// message may be.
+pub(crate) fn preview_message(
+    pane: u32,
+    title: &str,
+    body: Result<&str, &str>,
+    dark: bool,
+    review: bool,
+) -> Option<Vec<u8>> {
+    let message = ToBrowser::Preview {
+        pane: pane_token(pane),
+        title,
+        html: body.ok(),
+        error: body.err(),
+        dark,
+        review,
+    };
+    let message = serde_json::to_vec(&message).ok()?;
+    (message.len() <= MESSAGE_MAX).then_some(message)
 }
 
 /// `dirs` as the extension takes them.
@@ -765,9 +885,11 @@ mod tests {
         let worker = format!("worker-{:016x}.js", content_hash(WORKER.as_bytes()));
         let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
         assert!(manifest.contains(&format!("\"service_worker\": \"{worker}\"")));
-        let hash = content_hash(WORKER.as_bytes());
+        let hash = extension_hash();
         assert!(manifest.contains(&format!("\"version\": \"{}\"", version(hash))));
         assert!(dir.join(&worker).exists());
+        assert!(dir.join("preview.html").exists());
+        assert!(dir.join("markdown-dark.css").exists());
         assert!(!dir.join("worker-old.js").exists());
         let host = std::fs::read_to_string(dir.join("host")).unwrap();
         assert!(host.ends_with(" --web-host /run/gerdr.sock\n"));
