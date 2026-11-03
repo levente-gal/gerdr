@@ -48,18 +48,21 @@ html.dark #review:hover {
 html.dark #error {
   color: #f85149;
 }
-/* The block the review's caret is in, beside the review. */
-.markdown-body .gerdr-caret {
+/* The block the review's caret is in, beside the review: a bar on its
+   left. */
+.markdown-body .gerdr-caret:not(tr) {
   box-shadow: -12px 0 0 -8px #0969da;
 }
-html.dark .markdown-body .gerdr-caret {
+html.dark .markdown-body .gerdr-caret:not(tr) {
   box-shadow: -12px 0 0 -8px #4493f8;
 }
 /* A block with review comments: a dot in the left margin. */
-.markdown-body .gerdr-said {
+.markdown-body .gerdr-said:not(tr),
+.markdown-body tr.gerdr-said > :first-child {
   position: relative;
 }
-.markdown-body .gerdr-said::before {
+.markdown-body .gerdr-said:not(tr)::before,
+.markdown-body tr.gerdr-said > :first-child::before {
   content: "";
   position: absolute;
   left: -22px;
@@ -69,6 +72,21 @@ html.dark .markdown-body .gerdr-caret {
   border-radius: 50%;
   background: #bf8700;
 }
-html.dark .markdown-body .gerdr-said::before {
+html.dark .markdown-body .gerdr-said:not(tr)::before,
+html.dark .markdown-body tr.gerdr-said > :first-child::before {
   background: #d29922;
+}
+/* A table row's marks are inside its first cell: marks on the row itself
+   would add a cell, and the table clips what is outside it. */
+.markdown-body tr.gerdr-caret > :first-child {
+  box-shadow: inset 4px 0 0 #0969da;
+}
+html.dark .markdown-body tr.gerdr-caret > :first-child {
+  box-shadow: inset 4px 0 0 #4493f8;
+}
+.markdown-body tr.gerdr-said > :first-child::before {
+  left: 5px;
+  top: calc(50% - 3px);
+  width: 6px;
+  height: 6px;
 }
