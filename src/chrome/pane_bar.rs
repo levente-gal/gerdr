@@ -51,7 +51,7 @@ const PILL_TERMINAL_HEIGHT: i32 = 24;
 /// it (a running command's output, a page's or an app's own header)
 /// shows through a little. Under the pointer it fades to whole, for its
 /// buttons.
-const PILL_REST: f32 = 0.85;
+const PILL_REST: f32 = 0.7;
 /// How far a bar's buttons keep from its top and bottom, at least: they
 /// are smaller than `BAR_BUTTON` in a pill too low for that.
 const BUTTON_INSET_Y: i32 = 2;
