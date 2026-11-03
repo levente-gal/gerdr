@@ -162,6 +162,8 @@ const INBOX_GAP: i32 = 6;
 /// heading's height (a header's, as it heads a list of its own).
 const SECTION_TOP: i32 = 12;
 const SECTION_TITLE: i32 = 26;
+/// The line under a feature row's title holding its stage dots.
+const STAGE_LINE: i32 = 12;
 /// The most of an inbox row its workspace's name takes, as a part of it.
 const INBOX_PLACE: f32 = 0.4;
 /// The gap between an agent row's name and what it is on.
@@ -1770,9 +1772,19 @@ fn features_rects(
         (0, y + SECTION_TOP).into(),
         (width - GAP, SECTION_TITLE).into(),
     );
-    let rows_top = title.loc.y + SECTION_TITLE - INBOX_TITLE;
-    let (_, rows, end) = inbox_rects(n, rows_top, width, density);
-    (Some(title), rows, end)
+    // A row per feature, as an agent row with a line under its first
+    // for the stage dots.
+    let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
+    let mut y = title.loc.y + SECTION_TITLE;
+    let rows = (0..n)
+        .map(|_| {
+            let h = agent_row(density) + STAGE_LINE;
+            let rect = Rectangle::new((CHILD_X, y).into(), (child_w, h).into());
+            y += h + CHILD_GAP;
+            rect
+        })
+        .collect();
+    (Some(title), rows, y + INBOX_GAP)
 }
 
 /// `sidebar_layout` at `density`.
@@ -2313,7 +2325,7 @@ impl Painter {
     /// at `title`, then its `rows`: each a feature, its hover alpha and
     /// where it goes. A row has the mark of the stage the feature is at
     /// under the heading's icon, the feature's title under its label, and
-    /// a dot per stage at the right.
+    /// a dot per stage on a line under the title.
     fn feature_rows(
         &self,
         c: &mut Canvas,
@@ -2337,7 +2349,6 @@ impl Painter {
                 let (x, y, w, h) = rect_px(*rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
             }
-            let line_band = band(*rect, scale);
             // The dot in the column of the heading's icon and of the
             // agent rows' status dots.
             let first = blocked_band(*rect, density);
@@ -2353,23 +2364,22 @@ impl Painter {
             icon_sdf(c, spot, scale, mark.color(p), |x, y| {
                 super::stage_dot(mark, x, y, 7.0 * s)
             });
-            // The title where the heading's label starts, up to the
-            // stages' dots at the right.
-            let text_x = px(rect.loc.x - CHILD_X + NAME_X) as f32;
+            // The title where the heading's label starts, across the
+            // row; the stages' dots on the line under it.
+            let text_x = px(rect.loc.x - CHILD_X + NAME_X);
+            let dots = super::stage_marks_width(row.marks.len());
             let marks = Rectangle::new(
-                (rect.loc.x, rect.loc.y).into(),
-                (rect.size.w - CHILD_PAD, rect.size.h).into(),
+                (rect.loc.x - CHILD_X + NAME_X, first.loc.y + first.size.h).into(),
+                (dots, STAGE_LINE - CHILD_PAD / 2).into(),
             );
             self.stage_marks(c, &row.marks, marks, scale, p);
-            let dots = super::stage_marks_width(row.marks.len());
-            let end = rect.loc.x + rect.size.w - CHILD_PAD - dots - TITLE_GAP;
             self.text(
                 c,
                 &row.title,
                 SMALL_FONT_SIZE,
-                text_x,
-                px(end) as f32,
-                line_band,
+                text_x as f32,
+                px(rect.loc.x + rect.size.w - CHILD_PAD) as f32,
+                band(first, scale),
                 scale,
                 p.text,
             );
