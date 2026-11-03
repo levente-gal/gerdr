@@ -4336,12 +4336,12 @@ impl Gerdr {
         else {
             return;
         };
-        // As high as the bar's pill reaches, so the menu opens below it.
+        // Down to the bottom of the bar's pill, so the menu opens right
+        // under it.
         let grip = chrome::pane_bar_rects(rect).0;
-        let bar = Rectangle::new(
-            grip.loc,
-            (grip.size.w, chrome::PANE_BAR_HEIGHT.min(rect.size.h)).into(),
-        );
+        let pill = self.pane_pill_rect(tab, id, rect);
+        let bottom = (pill.loc.y + pill.size.h).max(grip.loc.y + grip.size.h);
+        let bar = Rectangle::new(grip.loc, (grip.size.w, bottom - grip.loc.y).into());
         // At the bar's left end, clear of its buttons: on its grip, out
         // or not.
         let on = Point::from((bar.loc.x as f64 + 4.0, bar.loc.y as f64 + 1.0));

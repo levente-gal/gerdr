@@ -865,6 +865,17 @@ impl Gerdr {
         &self.bar_states
     }
 
+    /// Where the pill of pane `id` of `tab`, placed at `rect`, is when
+    /// out (see `chrome::pane_bar_rect`).
+    pub(crate) fn pane_pill_rect(&self, tab: &Tab, id: u32, rect: Rect) -> Rect {
+        let kind = tab
+            .panes
+            .iter()
+            .find(|p| p.id == id)
+            .map_or(BarButtons::None, |pane| self.pane_bar_of(pane).buttons);
+        chrome::pane_bar_rect(rect, kind)
+    }
+
     /// Whether the bar of pane `id` of `tab` is out over its window:
     /// there to see and to click.
     fn pane_bar_drawn(&self, tab: &Tab, id: u32) -> bool {
