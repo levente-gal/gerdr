@@ -4934,6 +4934,7 @@ fn tab_view(
                 Some(PanelOutcome::OpenPr(_)) => Some("Open PR"),
                 _ => None,
             },
+            stat: None,
         })
         .collect();
     let stage = panel.page_stage(feature);

@@ -273,6 +273,9 @@ pub struct FeatureRepoRow {
     /// The label of its button: Touch for one the feature doesn't change,
     /// Open PR for one with a pull request; none else.
     pub button: Option<&'static str>,
+    /// Lines added and removed since its base, uncommitted changes
+    /// included, once read (`git diff --numstat`).
+    pub stat: Option<(usize, usize)>,
 }
 
 /// How a line of the Ship check reads.

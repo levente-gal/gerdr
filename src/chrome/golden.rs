@@ -1957,6 +1957,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             touched,
             busy: false,
             button,
+            stat: None,
         };
     let activity = [
         ("Build started by you", "14m ago", CheckTone::Note),
