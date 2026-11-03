@@ -838,14 +838,80 @@ impl DiffView {
     /// The diff row of line `number` (`diff::Line::number`) that isn't
     /// removed: the first, of the first file that has one.
     pub(crate) fn row_of_line(&self, number: usize) -> Option<usize> {
-        self.rows.iter().position(|&row| {
-            let DiffRow::Line(k, f, h, l) = row else {
-                return false;
+        (self.rows.iter()).position(|&row| self.kept_line(row) == Some(number))
+    }
+
+    /// The diff row of the first line from `number` on that isn't
+    /// removed, and that line's number.
+    fn row_from_line(&self, number: usize) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        for (r, &row) in self.rows.iter().enumerate() {
+            let Some(n) = self.kept_line(row) else {
+                continue;
             };
-            self.diff_file(k, f)
-                .and_then(|(_, file)| file.hunks.get(h)?.lines.get(l))
-                .is_some_and(|line| line.kind != LineKind::Removed && line.number == number)
-        })
+            if n == number {
+                return Some((r, n));
+            }
+            if n > number && best.is_none_or(|(_, b)| n < b) {
+                best = Some((r, n));
+            }
+        }
+        best
+    }
+
+    /// The number of the line at `row` if it is one that isn't removed.
+    fn kept_line(&self, row: DiffRow) -> Option<usize> {
+        let DiffRow::Line(k, f, h, l) = row else {
+            return None;
+        };
+        let (_, file) = self.diff_file(k, f)?;
+        let line = file.hunks.get(h)?.lines.get(l)?;
+        (line.kind != LineKind::Removed).then_some(line.number)
+    }
+
+    /// The first row that is a line that isn't removed, and its number.
+    fn first_kept(&self) -> Option<(usize, usize)> {
+        (self.rows.iter().enumerate()).find_map(|(r, &row)| Some((r, self.kept_line(row)?)))
+    }
+
+    /// The line of the file at the top of the diff as it stands, to the
+    /// fraction: the number of the first line shown that isn't removed,
+    /// less the rows above it, plus the part of the first row scrolled
+    /// past. The rows above the first line stand for the line before it,
+    /// from its start (`n - 1` with the diff at its top) to its end. None
+    /// without such lines.
+    pub(crate) fn top_line(&self) -> Option<f64> {
+        let pos = self.scroll.pos().max(0.0);
+        let (r1, n1) = self.first_kept()?;
+        if pos < r1 as f64 {
+            return Some(n1 as f64 - 1.0 + pos / r1 as f64);
+        }
+        let first = self.scroll.first();
+        let (r, n) = (self.rows.iter().enumerate().skip(first))
+            .find_map(|(r, &row)| Some((r, self.kept_line(row)?)))?;
+        Some(n as f64 - (r - first) as f64 + self.scroll.part())
+    }
+
+    /// Stand with line `line` of the file at the top, to the fraction (see
+    /// `top_line`).
+    pub(crate) fn stand_at_line(&mut self, line: f64, ctx: &Ctx) {
+        let Some((r1, n1)) = self.first_kept() else {
+            return;
+        };
+        if line < n1 as f64 {
+            let into = (line - (n1 as f64 - 1.0)).max(0.0);
+            return self.stand_at(into * r1 as f64, ctx);
+        }
+        let whole = line.floor() as usize;
+        let Some((row, number)) = self.row_from_line(whole) else {
+            return;
+        };
+        let past = if number == whole {
+            line - whole as f64
+        } else {
+            0.0
+        };
+        self.stand_at(row as f64 + past, ctx);
     }
 
     /// Each comment's text by the number of its last line (none for one

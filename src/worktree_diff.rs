@@ -1914,6 +1914,32 @@ mod tests {
     }
 
     #[test]
+    fn it_stands_at_a_line_of_its_file() {
+        let mut wd = doc();
+        let text: String = (1..=80).map(|n| format!("Line {n}.\n")).collect();
+        wd.set_doc(Ok(text), ENV);
+        let top = |wd: &WorktreeDiff| wd.diff.top_line().unwrap();
+        // At the start, the rows above the first line stand for the
+        // line before it.
+        assert_eq!(top(&wd), 0.0);
+        let first = wd.diff.row_of_line(1).unwrap();
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(0.5, ctx));
+        assert_eq!(wd.diff.scroll.pos(), first as f64 / 2.0);
+        assert!((top(&wd) - 0.5).abs() < 1e-9, "{}", top(&wd));
+        // A preview's top line, to the fraction, is the review's too.
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(30.25, ctx));
+        assert!((top(&wd) - 30.25).abs() < 1e-9, "{}", top(&wd));
+        let row = wd.diff.row_of_line(30).unwrap();
+        assert_eq!(wd.diff.scroll.first(), row);
+        // Before the first line, the review stands at its start.
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(-4.0, ctx));
+        assert_eq!(wd.diff.scroll.pos(), 0.0);
+        // Past the end, as far as it scrolls.
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(500.0, ctx));
+        assert!(top(&wd) < 80.0, "{}", top(&wd));
+    }
+
+    #[test]
     fn its_keys_approve_or_send_back() {
         let mut wd = doc();
         let ctrl = ModifiersState {

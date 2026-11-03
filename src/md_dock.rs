@@ -9,6 +9,8 @@
 //! The keys stay with the review. The pointer over the preview is the
 //! browser's: it scrolls the page and follows its links, and a click on
 //! a block of the page puts the review's caret on its first line. The
+//! two scroll together: each tells the other the line of the file at its
+//! top, to the fraction (`DiffView::top_line`). The
 //! page marks the block the caret is in, and the lines with comments.
 //! The gap between the two drags their split, kept in `state.json`.
 //!
@@ -28,6 +30,9 @@ use crate::{
     chrome::{self, DOCK_GAP, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, Rect},
     md_preview::{self, NO_EXTENSION},
 };
+
+/// How far, in lines, the review may move before its preview follows.
+const SCROLL_STILL: f64 = 0.01;
 
 /// The line of a file under review its caret is on, and its comments by
 /// the line they end on.
@@ -143,6 +148,9 @@ impl Gerdr {
             self.refresh_pointer_focus();
         }
         self.sync_preview_marks();
+        if let Some(dock) = &dock {
+            self.sync_dock_scroll(dock.pane);
+        }
         dock.is_some()
     }
 
@@ -235,6 +243,38 @@ impl Gerdr {
             false => wd.diff.comment_lines(),
         };
         Some((wd.diff.cursor_line(), comments))
+    }
+
+    /// Scroll the preview `pane` beside the review to where the review
+    /// stands, if it moved since they last stood together.
+    fn sync_dock_scroll(&mut self, pane: u32) {
+        let Some(top) = (self.repos.worktree.as_ref()).and_then(|wd| wd.diff.top_line()) else {
+            return;
+        };
+        if (self.previews.top(pane)).is_some_and(|was| (was - top).abs() < SCROLL_STILL) {
+            return;
+        }
+        if self.scroll_to_browser(pane, top) {
+            self.previews.set_top(pane, top);
+        }
+    }
+
+    /// The preview `pane` beside the review scrolled to `line` of its
+    /// file at its top: the review stands there too.
+    pub(crate) fn preview_scrolled(&mut self, pane: u32, line: f64) {
+        if !line.is_finite() || self.dock().is_none_or(|d| d.pane != pane) {
+            return;
+        }
+        let env = self.worktree_env();
+        let Some(wd) = self.repos.worktree.as_mut() else {
+            return;
+        };
+        let top = wd.with_diff(env, |diff, ctx| {
+            diff.stand_at_line(line, ctx);
+            diff.top_line()
+        });
+        // What the review stands at is what the page shows: not sent back.
+        self.previews.set_top(pane, top.unwrap_or(line));
     }
 
     /// A block clicked in `pane`'s preview, from `line` of its file: the
