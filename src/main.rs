@@ -55,6 +55,7 @@ mod keys;
 mod launch;
 mod layout;
 mod manual_test;
+mod md_dock;
 mod md_preview;
 mod menu;
 mod nav;
@@ -1212,6 +1213,8 @@ pub enum Drag {
     Sidebar,
     /// The line between the repositories panel's tree and its detail.
     ReposSplit,
+    /// The gap between a file's review and its preview (see `md_dock`).
+    DockSplit,
     /// The gap between two panes of the shown tab: the split at `path`.
     Split { path: Vec<bool>, dir: Dir },
 }
@@ -1689,9 +1692,14 @@ impl Gerdr {
     /// The divider within grabbing distance of `pos`, if any.
     pub fn divider_at(&self, pos: Point<f64, Logical>) -> Option<Drag> {
         // Over the repositories panel only its own line between the tree
-        // and the detail.
+        // and the detail, and the gap beside its preview.
         if let Some(view) = self.repos_view() {
-            let layout = chrome::repos_layout(&view, self.output_size());
+            if self.context_menu.is_none()
+                && let Some(drag) = self.dock_divider_at(pos)
+            {
+                return Some(drag);
+            }
+            let layout = chrome::repos_layout(&view, self.repos_size());
             let on = layout.splitter.to_f64().contains(pos)
                 && layout.sheet.is_none()
                 && layout.branch_menu.is_none()
@@ -1727,6 +1735,7 @@ impl Gerdr {
                 self.sidebar_width = (pos.x.round() as i32).min(max).max(SIDEBAR_MIN_WIDTH);
             }
             Drag::ReposSplit => self.repos_drag_to(pos),
+            Drag::DockSplit => self.dock_drag_to(pos),
             Drag::Split { path, dir } => {
                 let area = self.content_rect();
                 let ws = &mut self.workspaces[self.active_workspace];
@@ -5061,13 +5070,22 @@ impl Gerdr {
         // While a divider moves, clients may skip sizes between frames (Zed
         // otherwise rebuilds its swapchain for every one and falls far behind).
         let resizing = self.drag.is_some();
+        // A file's preview beside its review shows there, whichever tab
+        // is shown (see `md_dock`).
+        let dock = self.dock();
+        let docked = |window: &Window| dock.as_ref().is_some_and(|d| &d.window == window);
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
                 for (id, rect) in tab.shown_rects(area) {
                     // The window takes its whole place; its bar floats
                     // over its top.
-                    panes.push((w, t, tab.window(id).unwrap().clone(), rect));
+                    let window = tab.window(id).unwrap().clone();
+                    let rect = match &dock {
+                        Some(d) if d.window == window => d.preview,
+                        _ => rect,
+                    };
+                    panes.push((w, t, window, rect));
                 }
             }
         }
@@ -5094,7 +5112,7 @@ impl Gerdr {
             toplevel.send_pending_configure();
             set_preferred_scale(toplevel.wl_surface(), scale);
             let id = toplevel.wl_surface().id();
-            if !self.is_visible(w, t) {
+            if !self.is_visible(w, t) && !docked(&window) {
                 self.pending_place.remove(&id);
                 self.space.unmap_elem(&window);
                 continue;
@@ -5124,7 +5142,7 @@ impl Gerdr {
                 hidden.extend(
                     tab.panes
                         .iter()
-                        .filter(|p| p.id != zoomed)
+                        .filter(|p| p.id != zoomed && !docked(&p.window))
                         .map(|p| p.window.clone()),
                 );
             }
@@ -5134,6 +5152,11 @@ impl Gerdr {
                 .remove(&window.toplevel().unwrap().wl_surface().id());
             self.space.unmap_elem(&window);
         }
+        // Over the tab's own windows.
+        if let Some(d) = &dock {
+            self.space.raise_element(&d.window, false);
+        }
+        self.previews.docked = dock.map(|d| (d.pane, d.preview));
     }
 
     /// Give `window` the keyboard. Focusing a pane under a zoomed one ends
@@ -5248,9 +5271,17 @@ impl Gerdr {
             .as_ref()
             .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
         let reordering = self.reorder.is_some_and(|r| r.moving);
-        // These take every click.
-        if self.grabbing_overlay().is_some() {
-            return None;
+        // These take every click, but a file's review leaves its preview
+        // beside it the browser's (see `md_dock`).
+        if let Some(overlay) = self.grabbing_overlay() {
+            let to_dock = overlay == Overlay::Repos
+                && self.context_menu.is_none()
+                && self.drag.is_none()
+                && self.on_dock(pos);
+            return match to_dock {
+                true => self.surface_under(pos),
+                false => None,
+            };
         }
         if self.on_footer(pos) {
             return None;
@@ -6058,6 +6089,7 @@ impl Gerdr {
         let size = self.output_size();
         self.projects.window_size = Some((size.w, size.h));
         self.projects.sidebar_width = Some(self.sidebar_width);
+        self.projects.dock_share = Some(self.previews.share);
         self.keep_nav(true);
         self.projects.save();
         self.close_cursor_socket();
@@ -6245,6 +6277,7 @@ impl Gerdr {
         self.tooltip.tick(now);
         self.expire_toasts(now);
         self.t3_seen();
+        let docked = self.sync_dock();
         let tab_strip = self.tab_hover_tick(now);
         let workspaces: Vec<_> = self
             .workspace_views()
@@ -6258,7 +6291,7 @@ impl Gerdr {
         let active = ws.map(|_| self.active_workspace);
         let area = self.content_rect();
         let tab = self.tab();
-        let focused_pane = tab.and_then(|tab| {
+        let focused_pane = tab.filter(|_| !docked).and_then(|tab| {
             let focused = tab.focused_id()?;
             let (id, rect) = tab
                 .shown_rects(area)
@@ -6270,7 +6303,7 @@ impl Gerdr {
                 rect
             })
         });
-        let placeholders = tab.map_or(Vec::new(), |tab| {
+        let placeholders = tab.filter(|_| !docked).map_or(Vec::new(), |tab| {
             tab.expected_rects(area)
                 .into_iter()
                 .map(|(expected, rect)| PlaceholderView {
@@ -6329,14 +6362,23 @@ impl Gerdr {
             inbox,
             scrollback: self.scrollback_view(),
             toasts: self.toast_views(),
-            pane_bars: self.pane_bar_views(),
+            // A preview beside the review covers the tab's panes, bars
+            // and all (see `md_dock`).
+            pane_bars: match docked {
+                true => Vec::new(),
+                false => self.pane_bar_views(),
+            },
             footer: self.footer_view(&tasks),
             tasks: self.tasks_view(&tasks),
-            unzoom: self.unzoom_button().map(|(_, rect)| rect),
+            unzoom: self
+                .unzoom_button()
+                .filter(|_| !docked)
+                .map(|(_, rect)| rect),
             theme: self.theme(),
             density: self.density,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
+            repos_size: self.repos_size(),
             scale: self.scale(),
         }
     }
@@ -6927,6 +6969,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     // The first run turns the session gerdr used before projects into one.
+    if let Some(share) = store.dock_share {
+        state.previews.share = share.clamp(chrome::DOCK_SHARE_MIN, chrome::DOCK_SHARE_MAX);
+    }
     state.projects = store;
     state.restore_nav();
     state.load_features();

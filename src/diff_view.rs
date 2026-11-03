@@ -824,6 +824,44 @@ impl DiffView {
         Some((cursor.row, cursor.col.min(len.saturating_sub(1))))
     }
 
+    /// The number of the line the cursor is on (`diff::Line::number`),
+    /// while it is on a line that isn't removed.
+    pub(crate) fn cursor_line(&self) -> Option<usize> {
+        let DiffRow::Line(k, f, h, l) = *self.rows.get(self.cursor.as_ref()?.row)? else {
+            return None;
+        };
+        let (_, file) = self.diff_file(k, f)?;
+        let line = file.hunks.get(h)?.lines.get(l)?;
+        (line.kind != LineKind::Removed).then_some(line.number)
+    }
+
+    /// The diff row of line `number` (`diff::Line::number`) that isn't
+    /// removed: the first, of the first file that has one.
+    pub(crate) fn row_of_line(&self, number: usize) -> Option<usize> {
+        self.rows.iter().position(|&row| {
+            let DiffRow::Line(k, f, h, l) = row else {
+                return false;
+            };
+            self.diff_file(k, f)
+                .and_then(|(_, file)| file.hunks.get(h)?.lines.get(l))
+                .is_some_and(|line| line.kind != LineKind::Removed && line.number == number)
+        })
+    }
+
+    /// Each comment's text by the number of its last line (none for one
+    /// on the whole file), the user's only.
+    pub(crate) fn comment_lines(&self) -> Vec<(usize, String)> {
+        let mut lines: Vec<(usize, String)> = self
+            .review
+            .comments
+            .iter()
+            .filter(|c| c.flag.is_none())
+            .filter_map(|c| Some((c.lines.last()?.number, c.text.clone())))
+            .collect();
+        lines.sort();
+        lines
+    }
+
     /// Put the caret on char `col` of diff row `row`, the diff scrolled
     /// to show it and its file selected in the tree.
     pub(crate) fn caret_to(&mut self, row: usize, col: usize, ctx: &Ctx) {

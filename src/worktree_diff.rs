@@ -402,12 +402,12 @@ impl WorktreeDiff {
             (true, _) => &[
                 ("Esc", "close the evidence"),
                 ("F1", "list the keys"),
-                (PREVIEW_KEY, "show it rendered, in a web tab"),
+                (PREVIEW_KEY, "show or hide it rendered, beside the review"),
             ],
             (false, _) => &[
                 ("Esc", "close the review"),
                 ("F1", "list the keys"),
-                (PREVIEW_KEY, "show it rendered, in a web tab"),
+                (PREVIEW_KEY, "show or hide it rendered, beside the review"),
                 (APPROVE_KEY, "approve the file as it is"),
                 (SEND_BACK_KEY, "send it back to its agent with the comments"),
             ],
@@ -996,7 +996,7 @@ fn ctx<'a>(
 impl crate::Gerdr {
     /// What the worktree diff's views and keys need of the chrome.
     pub(crate) fn worktree_env(&self) -> Env {
-        let size = self.output_size();
+        let size = self.repos_size();
         Env {
             page: crate::chrome::diff_only_page(size, self.density),
             cols: crate::chrome::diff_only_cols(size),
@@ -1126,6 +1126,8 @@ impl crate::Gerdr {
     /// commit's, back to the repositories panel.
     pub(crate) fn close_worktree_diff(&mut self) {
         self.worktree_save_review();
+        // The next review shows its preview beside it again.
+        self.previews.undocked = false;
         // A commit's diff, a file under review and a feature's code review
         // weren't opened from the worktrees popup.
         let other = (self.repos.worktree.as_ref())
@@ -1326,7 +1328,7 @@ impl crate::Gerdr {
                 None
             }
             Done::Preview => {
-                self.open_doc_preview();
+                self.toggle_doc_preview();
                 None
             }
         }
@@ -1879,6 +1881,36 @@ mod tests {
             assert!(keys.contains(&edit), "{edit} not in {keys:?}");
         }
         assert!(!keys.contains(&"Shift+R"), "Shift+R in {keys:?}");
+    }
+
+    #[test]
+    fn its_caret_and_comments_are_found_by_line() {
+        let mut wd = doc();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let enter = Keysym::Return;
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        // Line 2 of the file is the row "Users log in.".
+        let row = texts(&wd)
+            .iter()
+            .position(|t| t == "Users log in.")
+            .unwrap();
+        assert_eq!(wd.diff.row_of_line(2), Some(row));
+        assert_eq!(wd.diff.row_of_line(9), None);
+        assert_eq!(wd.diff.cursor_line(), None);
+        wd.click(ReposHit::DiffRow(row), ENV);
+        assert_eq!(wd.diff.cursor_line(), Some(2));
+        // A comment there is told by its line.
+        key(&mut wd, Keysym::c);
+        key(&mut wd, Keysym::o);
+        wd.key(&ctrl, enter, enter, ENV);
+        assert_eq!(wd.diff.comment_lines(), [(2, "o".to_owned())]);
+        // The caret goes where a preview's block starts.
+        let third = wd.diff.row_of_line(3).unwrap();
+        wd.with_diff(ENV, |diff, ctx| diff.caret_to(third, 0, ctx));
+        assert_eq!(wd.diff.cursor_line(), Some(3));
     }
 
     #[test]

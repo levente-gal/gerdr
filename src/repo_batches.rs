@@ -599,7 +599,7 @@ impl Gerdr {
     }
 
     fn repos_page(&self) -> (usize, usize) {
-        chrome::repos_page(self.output_size(), self.density)
+        chrome::repos_page(self.repos_size(), self.density)
     }
 
     /// What the panel's views and keys need of the chrome: the density,
@@ -607,8 +607,8 @@ impl Gerdr {
     /// comment's row of the diff holds, and how many lines a sheet shows.
     fn repos_env(&self) -> (Density, f64, usize, usize) {
         let share = self.repos.tree_share.unwrap_or(chrome::REPOS_TREE_SHARE);
-        let cols = chrome::repos_detail_cols(self.output_size(), share);
-        let sheet = chrome::repos_sheet_rows(self.output_size(), false);
+        let cols = chrome::repos_detail_cols(self.repos_size(), share);
+        let sheet = chrome::repos_sheet_rows(self.repos_size(), false);
         (self.density, share, cols, sheet)
     }
 
@@ -977,7 +977,12 @@ impl Gerdr {
         let Some(view) = self.repos_view() else {
             return;
         };
-        let layout = chrome::repos_layout(&view, self.output_size());
+        // The gap beside the file's preview drags their split.
+        if let Some(drag) = self.dock_divider_at(pos) {
+            self.drag = Some(drag);
+            return;
+        }
+        let layout = chrome::repos_layout(&view, self.repos_size());
         let Some(hit) = chrome::repos_hit(&layout, pos) else {
             return self.close_repos();
         };
@@ -999,7 +1004,7 @@ impl Gerdr {
             _ => {}
         }
         // A press on a line puts the caret on the char there.
-        let at = chrome::repos_diff_char(&view, self.output_size(), pos);
+        let at = chrome::repos_diff_char(&view, self.repos_size(), pos);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.diff.pointer_char = at;
         }
@@ -1083,7 +1088,7 @@ impl Gerdr {
         let Some(view) = self.repos_view() else {
             return;
         };
-        let output = self.output_size();
+        let output = self.repos_size();
         let layout = chrome::repos_layout(&view, output);
         let Some(hit) = chrome::repos_hit(&layout, pos) else {
             return;
@@ -1179,7 +1184,7 @@ impl Gerdr {
 
     /// The line between the tree and the detail dragged to `pos`.
     pub fn repos_drag_to(&mut self, pos: Point<f64, Logical>) {
-        let share = chrome::repos_share_at(pos.x, self.output_size());
+        let share = chrome::repos_share_at(pos.x, self.repos_size());
         self.repos.tree_share = Some(share);
     }
 
@@ -1191,7 +1196,7 @@ impl Gerdr {
             self.repos_rows_drag = false;
             return;
         };
-        let layout = chrome::repos_layout(&view, self.output_size());
+        let layout = chrome::repos_layout(&view, self.repos_size());
         let list = layout.detail_list;
         let by = if pos.y < list.loc.y as f64 {
             -1
@@ -1294,7 +1299,7 @@ impl Gerdr {
     /// The pointer moved while the panel is open.
     pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.repos_view()?;
-        let size = self.output_size();
+        let size = self.repos_size();
         if let Some(wd) = self.repos.worktree.as_mut() {
             if wd.scrolling(std::time::Instant::now()) {
                 wd.hover = None;
@@ -1315,7 +1320,7 @@ impl Gerdr {
             panel.hover = None;
             return None;
         }
-        let layout = chrome::repos_layout(&view, self.output_size());
+        let layout = chrome::repos_layout(&view, self.repos_size());
         let hit = chrome::repos_hit(&layout, pos);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.hover = hit;
@@ -1431,7 +1436,7 @@ impl Gerdr {
         let Some(view) = self.repos_view() else {
             return;
         };
-        let layout = chrome::repos_layout(&view, self.output_size());
+        let layout = chrome::repos_layout(&view, self.repos_size());
         let pos = self.seat.get_pointer().unwrap().current_location();
         let over_detail = layout.detail.to_f64().contains(pos);
         let over_menu = layout

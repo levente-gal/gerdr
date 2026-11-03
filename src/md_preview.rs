@@ -38,7 +38,7 @@ const FILE_MAX: u64 = 512 * 1024;
 
 /// Where a preview that can't open tells the user to look (see
 /// `problems`).
-const PROBLEM: &str = "preview";
+pub(crate) const PROBLEM: &str = "preview";
 
 /// Why a preview can't open.
 pub const NO_EXTENSION: &str =
@@ -111,6 +111,9 @@ pub struct Shown {
     pub dark: bool,
     /// The file is a feature stage's: the page offers to review it.
     pub review: bool,
+    /// Its review's comments, by the line they are on: the page marks
+    /// their blocks.
+    pub marks: Vec<(usize, String)>,
 }
 
 impl Shown {
@@ -121,6 +124,7 @@ impl Shown {
             body: read(file, name).map(|text| render(&text)),
             dark,
             review,
+            marks: Vec::new(),
         }
     }
 
@@ -157,22 +161,73 @@ fn read(file: &Path, name: &str) -> Result<String, String> {
     }
 }
 
-/// The web tabs showing a preview, by pane.
-#[derive(Default)]
+/// The web tabs showing a preview, by pane; and how one shows beside its
+/// file's review (see `md_dock`).
 pub struct Previews {
     shown: HashMap<u32, Preview>,
+    /// Ctrl+Shift+V took the preview away from beside the review, until
+    /// the review closes.
+    pub undocked: bool,
+    /// The review's share of the output's width beside its preview.
+    pub share: f64,
+    /// The preview's pane and place beside the review, as the windows
+    /// were laid out last.
+    pub docked: Option<(u32, crate::chrome::Rect)>,
+}
+
+impl Default for Previews {
+    fn default() -> Self {
+        Previews {
+            shown: HashMap::new(),
+            undocked: false,
+            share: crate::chrome::DOCK_SHARE,
+            docked: None,
+        }
+    }
 }
 
 struct Preview {
     file: PathBuf,
     /// What was sent to its page last (`Shown::hash`).
     sent: Option<u64>,
+    /// The line of its review's caret sent to its page last, as its
+    /// comments (`marks_hash`).
+    caret: Option<Option<usize>>,
+    marks: Option<u64>,
+}
+
+impl Preview {
+    fn new(file: PathBuf) -> Self {
+        Preview {
+            file,
+            sent: None,
+            caret: None,
+            marks: None,
+        }
+    }
+}
+
+/// Something that changes with `marks`.
+fn marks_hash(marks: &[(usize, String)]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    Hash::hash(marks, &mut hasher);
+    hasher.finish()
 }
 
 impl Previews {
     /// Whether `pane` shows a preview.
     pub fn has(&self, pane: u32) -> bool {
         self.shown.contains_key(&pane)
+    }
+
+    /// Whether `pane` shows `file`'s preview.
+    pub fn shows(&self, pane: u32, file: &Path) -> bool {
+        self.shown.get(&pane).is_some_and(|p| p.file == file)
+    }
+
+    /// The file `pane`'s preview shows.
+    pub fn file(&self, pane: u32) -> Option<PathBuf> {
+        self.shown.get(&pane).map(|p| p.file.clone())
     }
 }
 
@@ -222,9 +277,7 @@ impl Gerdr {
             .get(&pane)
             .is_some_and(|p| p.file == file);
         if !same {
-            self.previews
-                .shown
-                .insert(pane, Preview { file, sent: None });
+            self.previews.shown.insert(pane, Preview::new(file));
         }
         self.send_preview(pane);
     }
@@ -233,8 +286,10 @@ impl Gerdr {
     pub(crate) fn preview_ready(&mut self, pane: u32) {
         if let Some(preview) = self.previews.shown.get_mut(&pane) {
             preview.sent = None;
+            preview.caret = None;
         }
         self.send_preview(pane);
+        self.sync_preview_marks();
     }
 
     /// `pane`'s tab closed.
@@ -265,7 +320,9 @@ impl Gerdr {
         let name = name.to_string_lossy().into_owned();
         let dark = self.theme() == Theme::Dark;
         let review = self.doc_at(&file).is_some();
-        let shown = Shown::of(&file, &name, dark, review);
+        let mut shown = Shown::of(&file, &name, dark, review);
+        shown.marks = self.review_marks(&file).map(|(_, m)| m).unwrap_or_default();
+        let marks = marks_hash(&shown.marks);
         let hash = shown.hash();
         if preview.sent == Some(hash) {
             return;
@@ -274,6 +331,38 @@ impl Gerdr {
         if let Some(preview) = self.previews.shown.get_mut(&pane) {
             // Not sent: tried again with the next read.
             preview.sent = sent.then_some(hash);
+            // Not sent, it is all sent with the next read: not every frame.
+            preview.marks = Some(marks);
+        }
+    }
+
+    /// Tell every preview where its file's review has its caret, and send
+    /// it again if the review's comments changed; one whose file isn't
+    /// under review marks nothing.
+    pub(crate) fn sync_preview_marks(&mut self) {
+        let wanted: Vec<(u32, Option<usize>, u64, bool, bool)> = (self.previews.shown.iter())
+            .map(|(&pane, p)| {
+                let (caret, marks) = self.review_marks(&p.file).unwrap_or_default();
+                let hash = marks_hash(&marks);
+                (
+                    pane,
+                    caret,
+                    hash,
+                    p.caret != Some(caret),
+                    p.marks != Some(hash),
+                )
+            })
+            .collect();
+        for (pane, caret, _, caret_moved, marks_changed) in wanted {
+            if marks_changed {
+                self.send_preview(pane);
+            }
+            if caret_moved
+                && self.caret_to_browser(pane, caret)
+                && let Some(preview) = self.previews.shown.get_mut(&pane)
+            {
+                preview.caret = Some(caret);
+            }
         }
     }
 
@@ -393,17 +482,24 @@ mod tests {
         // Every byte an escape in JSON, as `<` is in HTML: the worst case.
         let text = "<".repeat(FILE_MAX as usize);
         let html = render(&text);
-        assert_eq!(
-            web_control::preview_message(1, "P", Ok(&html), true, false),
-            None
-        );
-        let why = web_control::preview_message(1, "P", Err("big.md is too big"), true, false);
+        let shown = |dark, review, marks| Shown {
+            title: "P".into(),
+            body: Ok(String::new()),
+            dark,
+            review,
+            marks,
+        };
+        let dark = shown(true, false, Vec::new());
+        assert_eq!(web_control::preview_message(1, &dark, Ok(&html)), None);
+        let why = web_control::preview_message(1, &dark, Err("big.md is too big"));
         assert!(why.is_some_and(|m| m.len() <= web_control::MESSAGE_MAX));
-        let fits = web_control::preview_message(1, "P", Ok("<p>hi</p>"), false, true).unwrap();
+        let marked = shown(false, true, vec![(3, "Say why".into())]);
+        let fits = web_control::preview_message(1, &marked, Ok("<p>hi</p>")).unwrap();
         let fits: serde_json::Value = serde_json::from_slice(&fits).unwrap();
         assert_eq!(fits["type"], "preview");
         assert_eq!(fits["html"], "<p>hi</p>");
         assert_eq!(fits["review"], true);
+        assert_eq!(fits["marks"], serde_json::json!([[3, "Say why"]]));
         assert!(fits.get("error").is_none());
     }
 }

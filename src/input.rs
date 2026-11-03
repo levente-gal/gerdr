@@ -278,6 +278,7 @@ fn drag_cursor(drag: &Drag) -> CursorIcon {
     match drag {
         Drag::Sidebar
         | Drag::ReposSplit
+        | Drag::DockSplit
         | Drag::Split {
             dir: Dir::Right, ..
         } => CursorIcon::ColResize,
@@ -571,7 +572,9 @@ impl Gerdr {
                 // Nothing scrolls behind an overlay; what the one on top
                 // lists moves instead (see `overlay_scroll`), if it lists
                 // anything.
-                if let Some(top) = self.grabbing_overlay() {
+                // A file's preview beside its review scrolls itself.
+                let on_dock = self.on_dock(self.pointer);
+                if let Some(top) = self.grabbing_overlay().filter(|_| !on_dock) {
                     if let Some(motion) = motion {
                         self.overlay_scroll(top, motion);
                     }
@@ -586,7 +589,7 @@ impl Gerdr {
                 }
                 // Over a toast, the help panel or the footer, nothing
                 // moves.
-                if at.is_some() || self.on_footer(self.pointer) {
+                if (at.is_some() || self.on_footer(self.pointer)) && !on_dock {
                     return;
                 }
                 // Over the sidebar, its rows scroll.
@@ -650,6 +653,11 @@ impl Gerdr {
         if let Some(hit) = hit {
             self.overlay_press(hit, location, button);
             return true;
+        }
+        // A file's preview beside its review takes its own presses, and
+        // the keys stay with the review (see `md_dock`).
+        if self.on_dock(location) {
+            return false;
         }
         // The mouse's back and forward buttons over gerdr's own parts go
         // back and forward through the tabs shown; a window under the
@@ -854,7 +862,7 @@ impl Gerdr {
                 .is_some_and(|menu| menu.item_at(pos).is_some()),
             O::Toasts => true,
             O::Repos => self.repos_view().is_some_and(|view| {
-                let layout = chrome::repos_layout(&view, output);
+                let layout = chrome::repos_layout(&view, self.repos_size());
                 let mut controls = layout
                     .lines
                     .iter()
@@ -1346,7 +1354,11 @@ impl Gerdr {
                 size,
                 scale,
             )),
-            Overlay::Repos => Some(chrome::repos_field(&self.repos_view()?, size, scale)),
+            Overlay::Repos => Some(chrome::repos_field(
+                &self.repos_view()?,
+                self.repos_size(),
+                scale,
+            )),
             Overlay::Inbox => Some(chrome::inbox_field(&self.inbox_view()?, size, scale)),
             Overlay::Scrollback => chrome::scrollback_field(&self.scrollback_view()?, scale),
             Overlay::Switcher(_) => Some(chrome::switcher_field(

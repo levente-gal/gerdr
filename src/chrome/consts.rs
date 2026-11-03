@@ -243,3 +243,14 @@ pub(super) const BAR_BUTTON: i32 = 24;
 pub(super) const BAR_BUTTON_GAP: i32 = 2;
 pub(super) const BAR_INSET: i32 = 4;
 pub(super) const BAR_NOTE_GAP: i32 = 8;
+
+/// How wide the output must be for a file under review to show its
+/// preview beside it (see `md_dock`), in logical pixels.
+pub const DOCK_MIN_WIDTH: i32 = 1400;
+/// The review's share of the output's width beside its preview, as it
+/// starts and as far as its split is dragged.
+pub const DOCK_SHARE: f64 = 0.5;
+pub const DOCK_SHARE_MIN: f64 = 0.3;
+pub const DOCK_SHARE_MAX: f64 = 0.7;
+/// The room between the review and its preview, and around the preview.
+pub const DOCK_GAP: i32 = 16;

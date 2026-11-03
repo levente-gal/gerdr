@@ -19,7 +19,9 @@
 //! The extension also has a page of its own, `preview.html`, that shows a
 //! markdown file rendered (see `md_preview`): gerdr sends it the file's
 //! HTML on load and after each change, and it sends back the links and the
-//! Review button clicked in it.
+//! Review button clicked in it. Beside the file's review (see `md_dock`),
+//! gerdr tells it the line of the review's caret and the comments' lines
+//! to mark, and it sends back the line of a block clicked in it.
 //!
 //! A pane without a tab of the extension's (its browser was running
 //! before, or can't run the host, as from a Flatpak) is followed by
@@ -57,12 +59,15 @@ const MANIFEST: &str = include_str!("../assets/web-extension/manifest.json");
 const WORKER: &str = include_str!("../assets/web-extension/worker.js");
 const OPEN_HTML: &str = include_str!("../assets/web-extension/open.html");
 const OPEN_JS: &str = include_str!("../assets/web-extension/open.js");
+/// Which block of a preview holds a line of its file.
+const BLOCKS_JS: &str = include_str!("../assets/web-extension/blocks.js");
 
 /// The extension's other files, by name: the preview page (see
 /// `md_preview`) and its styles.
-const FILES: [(&str, &str); 7] = [
+const FILES: [(&str, &str); 8] = [
     ("open.html", OPEN_HTML),
     ("open.js", OPEN_JS),
+    ("blocks.js", BLOCKS_JS),
     (
         "preview.html",
         include_str!("../assets/web-extension/preview.html"),
@@ -124,6 +129,8 @@ enum FromBrowser {
     Review { pane: String },
     /// The pane's preview page loaded, and shows nothing yet.
     Ready { pane: String },
+    /// A block clicked in the pane's preview, from this line of its file.
+    Line { pane: String, line: usize },
     /// T3 Code's app in the pane's tab started no new thread (see
     /// `Gerdr::t3_no_thread`): what went wrong, as a short word, and what
     /// the page showed.
@@ -180,6 +187,14 @@ enum ToBrowser<'a> {
         error: Option<&'a str>,
         dark: bool,
         review: bool,
+        /// The lines with review comments, and what each says.
+        marks: &'a [(usize, String)],
+    },
+    /// Mark the block of the pane's preview holding this line of its
+    /// file, where its review's caret is; none, no block.
+    Caret {
+        pane: String,
+        line: Option<usize>,
     },
 }
 
@@ -510,6 +525,11 @@ impl Gerdr {
                     self.preview_ready(pane);
                 }
             }
+            Event::Message(_, FromBrowser::Line { pane, line }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.preview_line(pane, line);
+                }
+            }
             Event::Message(_, FromBrowser::Review { pane }) => {
                 if let Some(pane) = token_pane(&pane) {
                     self.preview_review(pane);
@@ -661,13 +681,22 @@ impl Gerdr {
     /// instead.
     pub(crate) fn preview_to_browser(&mut self, pane: u32, shown: &md_preview::Shown) -> bool {
         let body = shown.body.as_deref().map_err(String::as_str);
-        let message =
-            preview_message(pane, &shown.title, body, shown.dark, shown.review).or_else(|| {
-                let name = shown.title.rsplit(" \u{b7} ").next().unwrap_or("The file");
-                let why = format!("{name} is too big to preview");
-                preview_message(pane, &shown.title, Err(&why), shown.dark, shown.review)
-            });
+        let message = preview_message(pane, shown, body).or_else(|| {
+            let name = shown.title.rsplit(" \u{b7} ").next().unwrap_or("The file");
+            let why = format!("{name} is too big to preview");
+            preview_message(pane, shown, Err(&why))
+        });
         message.is_some_and(|message| self.send_bytes(pane, &message))
+    }
+
+    /// Mark the block holding `line` in `pane`'s preview page, if the
+    /// extension follows its tab; whether it was sent.
+    pub(crate) fn caret_to_browser(&mut self, pane: u32, line: Option<usize>) -> bool {
+        let message = ToBrowser::Caret {
+            pane: pane_token(pane),
+            line,
+        };
+        self.send_to_browser(pane, &message)
     }
 
     /// Send `message` to the browser holding `pane`'s tab; whether it went.
@@ -692,23 +721,22 @@ impl Gerdr {
     }
 }
 
-/// The message showing `body` (the rendered file, or why it isn't) in
-/// `pane`'s preview page, titled `title`; `None` when it is bigger than a
+/// The message showing `shown` in `pane`'s preview page, its body `body`
+/// (the rendered file, or why it isn't); `None` when it is bigger than a
 /// message may be.
 pub(crate) fn preview_message(
     pane: u32,
-    title: &str,
+    shown: &md_preview::Shown,
     body: Result<&str, &str>,
-    dark: bool,
-    review: bool,
 ) -> Option<Vec<u8>> {
     let message = ToBrowser::Preview {
         pane: pane_token(pane),
-        title,
+        title: &shown.title,
         html: body.ok(),
         error: body.err(),
-        dark,
-        review,
+        dark: shown.dark,
+        review: shown.review,
+        marks: &shown.marks,
     };
     let message = serde_json::to_vec(&message).ok()?;
     (message.len() <= MESSAGE_MAX).then_some(message)
@@ -898,5 +926,78 @@ mod tests {
             serde_json::from_slice(&std::fs::read(hosts).unwrap()).unwrap();
         assert_eq!(hosts["path"], dir.join("host").to_string_lossy().as_ref());
         std::fs::remove_dir_all(&profile).unwrap();
+    }
+
+    #[test]
+    fn a_preview_marks_the_block_of_its_reviews_caret() {
+        let caret = ToBrowser::Caret {
+            pane: pane_token(4),
+            line: Some(12),
+        };
+        let caret = serde_json::to_value(&caret).unwrap();
+        assert_eq!(caret["type"], "caret");
+        assert_eq!(caret["line"], 12);
+        let none = ToBrowser::Caret {
+            pane: pane_token(4),
+            line: None,
+        };
+        assert!(serde_json::to_value(&none).unwrap()["line"].is_null());
+        // A click on a block puts the caret on its first line.
+        let token = pane_token(4);
+        let clicked = format!(r#"{{"type":"line","pane":"{token}","line":7}}"#);
+        let FromBrowser::Line { pane, line } = serde_json::from_str(&clicked).unwrap() else {
+            panic!("not a line");
+        };
+        assert_eq!((token_pane(&pane), line), (Some(4), 7));
+    }
+
+    /// The page's lookup of the block holding a line, run by node if it
+    /// is here.
+    #[test]
+    fn a_line_is_in_its_innermost_block() {
+        let Ok(node) = which_node() else {
+            eprintln!("no node: skipped");
+            return;
+        };
+        let check = r#"
+const { sourceLines, pickBlock } = require(process.argv[1]);
+const assert = require("assert");
+assert.deepStrictEqual(sourceLines("3:1-5:20"), [3, 5]);
+assert.strictEqual(sourceLines("x"), null);
+// A list (lines 3-6) with items 3 and 4-6, a paragraph at 8.
+const blocks = [[1, 1, "h1"], [3, 6, "ul"], [3, 3, "li1"], [4, 6, "li2"], [8, 9, "p"]];
+assert.strictEqual(pickBlock(blocks, 1), "h1");
+assert.strictEqual(pickBlock(blocks, 5), "li2");
+assert.strictEqual(pickBlock(blocks, 3), "li1");
+// A blank line between blocks: the one before it.
+assert.strictEqual(pickBlock(blocks, 7), "li2");
+assert.strictEqual(pickBlock(blocks, 2), "h1");
+assert.strictEqual(pickBlock([[2, 2, "p"]], 1), null);
+"#;
+        let blocks = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/web-extension/blocks.js"
+        );
+        let out = std::process::Command::new(node)
+            .args(["-e", check, blocks])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn which_node() -> Result<std::path::PathBuf, ()> {
+        let home = std::env::var_os("HOME").ok_or(())?;
+        let mise =
+            std::path::Path::new(&home).join(".local/share/mise/installs/node/latest/bin/node");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("node"))
+            .chain([mise])
+            .find(|node| node.is_file())
+            .ok_or(())
     }
 }

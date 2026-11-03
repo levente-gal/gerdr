@@ -226,7 +226,8 @@ impl Gerdr {
     /// Whether open `overlay` takes the pointer at `pos`: one that grabs,
     /// and the menu (a press outside it closes it), anywhere; the toasts
     /// and the help panel where they are; the feature panel in its tab;
-    /// the tooltip nowhere.
+    /// the repositories panel but over a file's preview beside it; the
+    /// tooltip nowhere.
     pub fn overlay_covers(&self, overlay: Overlay, pos: Point<f64, Logical>) -> bool {
         match overlay {
             Overlay::Tooltip => false,
@@ -234,6 +235,8 @@ impl Gerdr {
             Overlay::Help => self.help_hit(pos).is_some(),
             Overlay::ContextMenu => true,
             Overlay::Features => self.content_rect().to_f64().contains(pos),
+            // A file's preview beside its review is the browser's.
+            Overlay::Repos => !self.on_dock(pos),
             _ => overlay.grabs(),
         }
     }

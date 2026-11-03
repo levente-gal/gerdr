@@ -48,3 +48,27 @@ html.dark #review:hover {
 html.dark #error {
   color: #f85149;
 }
+/* The block the review's caret is in, beside the review. */
+.markdown-body .gerdr-caret {
+  box-shadow: -12px 0 0 -8px #0969da;
+}
+html.dark .markdown-body .gerdr-caret {
+  box-shadow: -12px 0 0 -8px #4493f8;
+}
+/* A block with review comments: a dot in the left margin. */
+.markdown-body .gerdr-said {
+  position: relative;
+}
+.markdown-body .gerdr-said::before {
+  content: "";
+  position: absolute;
+  left: -22px;
+  top: 0.5em;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #bf8700;
+}
+html.dark .markdown-body .gerdr-said::before {
+  background: #d29922;
+}

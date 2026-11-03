@@ -192,6 +192,9 @@ pub struct ChromeView {
     pub density: Density,
     pub sidebar_width: i32,
     pub size: Size<i32, Logical>,
+    /// What the repositories panel is centred in: the output, or its left
+    /// part beside a preview (see `md_dock`).
+    pub repos_size: Size<i32, Logical>,
     pub scale: f64,
 }
 
@@ -619,7 +622,7 @@ impl Chrome {
                 // The repositories panel, over nearly everything.
                 Kind::Repos => parts.extend(self.repos.parts(
                     view.repos.take(),
-                    output,
+                    view.repos_size,
                     theme,
                     scale,
                     now,

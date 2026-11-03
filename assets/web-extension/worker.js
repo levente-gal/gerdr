@@ -107,8 +107,13 @@ async function retry(tab, looks = 5) {
 }
 
 // What a preview page asks of gerdr, as told to it: that it loaded,
-// to open a link, to review its file.
-const FROM_PREVIEW = { "preview-ready": "ready", "preview-open": "open", "preview-review": "review" };
+// to open a link, to review its file, to put its review's caret on a line.
+const FROM_PREVIEW = {
+  "preview-ready": "ready",
+  "preview-open": "open",
+  "preview-review": "review",
+  "preview-line": "line",
+};
 
 // open.html asks to be taken before it goes on to its page. A pane's
 // preview page (see preview.js) tells gerdr what it asks; only its own
@@ -123,6 +128,8 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (pane === undefined) return;
       if (asked === "open") {
         if (typeof message.url === "string") send({ type: "open", pane, url: message.url });
+      } else if (asked === "line") {
+        if (Number.isInteger(message.line) && message.line > 0) send({ type: "line", pane, line: message.line });
       } else {
         send({ type: asked, pane });
       }
@@ -581,6 +588,7 @@ async function command(message) {
         break;
       // To the pane's preview page, which shows it (see preview.js).
       case "preview":
+      case "caret":
         await chrome.tabs.sendMessage(tab, message);
         break;
       case "newthread":

@@ -77,6 +77,10 @@ pub struct Store {
     /// How wide the sidebar was left, in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<i32>,
+    /// The review's share of the output's width beside its file's
+    /// preview, as last dragged (see `md_dock`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dock_share: Option<f64>,
     /// How big gerdr's window was left, in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<(i32, i32)>,
@@ -125,6 +129,8 @@ struct State {
     repo_grouping: Grouping,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sidebar_width: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dock_share: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_size: Option<(i32, i32)>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -532,6 +538,7 @@ impl Store {
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
         self.sidebar_width = state.sidebar_width;
+        self.dock_share = state.dock_share;
         self.window_size = state.window_size;
         self.service_anchors = state.service_anchors;
         self.service_errors = state.service_errors;
@@ -551,6 +558,7 @@ impl Store {
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
             sidebar_width: self.sidebar_width,
+            dock_share: self.dock_share,
             window_size: self.window_size,
             service_anchors: self.service_anchors.clone(),
             service_errors: self.service_errors.clone(),
@@ -1743,6 +1751,7 @@ mod tests {
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
             sidebar_width: Some(280),
+            dock_share: Some(0.6),
             window_size: Some((1600, 1000)),
             service_anchors: BTreeMap::new(),
             service_errors: Vec::new(),

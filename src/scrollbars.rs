@@ -93,7 +93,7 @@ impl Gerdr {
             }
             Bar::ReposTree | Bar::ReposDetail => {
                 let view = self.repos_view()?;
-                let layout = chrome::repos_layout(&view, size);
+                let layout = chrome::repos_layout(&view, self.repos_size());
                 // The sheet and the branch menu are over them.
                 if layout.sheet.is_some() || layout.branch_menu.is_some() {
                     return None;

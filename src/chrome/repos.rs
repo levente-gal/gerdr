@@ -1124,6 +1124,11 @@ struct Parts {
     sheet_buttons: Vec<(usize, Rect)>,
 }
 
+/// Where the panel is on an output of `size` (see `panel_rect`).
+pub fn repos_panel_rect(size: Size<i32, Logical>) -> Rect {
+    panel_rect(size)
+}
+
 /// The panel on an output of `size`: centred, a margin in from its edges,
 /// at most `REPOS_MAX_WIDTH` by `REPOS_MAX_HEIGHT`.
 fn panel_rect(size: Size<i32, Logical>) -> Rect {
