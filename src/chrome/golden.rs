@@ -2114,3 +2114,517 @@ fn dump_identity() {
         }
     }
 }
+
+// ------------------------------------------------------------ feature tab
+
+/// How high the feature tab is painted, and the widths it is painted at:
+/// the chips row under 870, no activity column under 1180, and all three
+/// columns.
+const TAB_HEIGHT: i32 = 900;
+const TAB_WIDTHS: [i32; 3] = [860, 1180, 1920];
+
+fn tab_line(text: &str, tone: super::CheckTone) -> super::CheckLine {
+    super::CheckLine {
+        text: text.into(),
+        tone,
+    }
+}
+
+/// A feature's tab with Build current and running: claude at work with
+/// the tail of its pane, three of five milestones done, three
+/// repositories (shared not touched).
+pub(super) fn feature_tab() -> super::FeatureTabView {
+    use super::{
+        ActivityRow, ButtonStyle, CheckTone, Dot, FeatureRepoRow, FeatureTabView, NodeMark,
+        PageButton, PageSection, RailNode, StagePage, TabArea,
+    };
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let rail = Stage::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, stage)| RailNode {
+            label: stage.label().into(),
+            line: match i {
+                0 => "2h ago".into(),
+                1 => "1h ago".into(),
+                2 => "running 14m".into(),
+                _ => String::new(),
+            },
+            mark: match i {
+                0 | 1 => NodeMark::Done,
+                2 => NodeMark::Current,
+                _ => NodeMark::Later,
+            },
+            selected: i == 2,
+        })
+        .collect();
+    let repo =
+        |name: &str, line: &str, touched: bool, button: Option<&'static str>| FeatureRepoRow {
+            name: name.into(),
+            line: line.into(),
+            touched,
+            busy: false,
+            button,
+        };
+    let activity = [
+        ("Build started by you", "14m ago", CheckTone::Note),
+        ("plan.md approved", "1h ago", CheckTone::Ready),
+        (
+            "brief.md reviewed, with two comments sent to the agent",
+            "2h ago",
+            CheckTone::Ready,
+        ),
+        ("web joined the feature", "3h ago", CheckTone::Note),
+        ("Feature created", "3h ago", CheckTone::Note),
+    ]
+    .map(|(what, ago, tone)| ActivityRow {
+        what: what.into(),
+        ago: ago.into(),
+        tone,
+    });
+    let hints = [
+        ("Left / Right", "stage"),
+        ("Tab", "repositories"),
+        ("Enter", "mark done"),
+        ("Ctrl+O", "open tab"),
+        ("Ctrl+C", "copy path"),
+        ("Ctrl+N", "new"),
+        ("Del", "abandon"),
+        ("F1", "all keys"),
+    ];
+    FeatureTabView {
+        title: "Bulk export of invoices".into(),
+        sub: "bulk-export \u{b7} ~/Work/aft/.features/bulk-export \u{b7} started 3h ago".into(),
+        which: Some((0, 2)),
+        remove: "Abandon\u{2026}",
+        rail,
+        repos: vec![
+            repo("api", "feature/bulk-export", true, None),
+            repo("web", "feature/bulk-export", true, None),
+            repo("shared", "context at dev", false, Some("Touch")),
+        ],
+        repos_error: None,
+        repo: 0,
+        focus: TabArea::Stages,
+        page: StagePage {
+            title: "Build".into(),
+            about: Stage::Build.about().into(),
+            status: Some(tab_line("claude is working in tab 2", CheckTone::Note)),
+            buttons: vec![
+                PageButton {
+                    label: "Mark done".into(),
+                    style: ButtonStyle::Primary,
+                    key: Some("\u{23ce}"),
+                },
+                PageButton {
+                    label: "Restart agent".into(),
+                    style: ButtonStyle::Plain,
+                    key: None,
+                },
+                PageButton {
+                    label: "Show agent".into(),
+                    style: ButtonStyle::Plain,
+                    key: None,
+                },
+            ],
+            sections: vec![
+                PageSection::Agent {
+                    icon: AgentIcon::Claude,
+                    name: "claude".into(),
+                    dot: Dot::Working,
+                    status: "working \u{b7} tab 2".into(),
+                    tail: vec![
+                        "\u{203a} Editing api/src/export/csv.rs".into(),
+                        "\u{203a} cargo test export:: (12 passed)".into(),
+                    ],
+                    button: Some(2),
+                },
+                PageSection::Milestones {
+                    done: 3,
+                    total: 5,
+                    items: [
+                        (true, "Export query + streaming CSV"),
+                        (true, "Background job + progress"),
+                        (true, "Download endpoint"),
+                        (false, "Web: export dialog"),
+                        (false, "Email when ready"),
+                    ]
+                    .map(|(d, t)| (d, t.to_owned()))
+                    .into(),
+                },
+            ],
+        },
+        activity: activity.into(),
+        scroll: [0.0; 3],
+        hover: None,
+        hints: hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into(),
+    }
+}
+
+/// `view` with stage `i` the selected one.
+fn select_node(view: &mut super::FeatureTabView, i: usize) {
+    for (j, node) in view.rail.iter_mut().enumerate() {
+        node.selected = i == j;
+    }
+}
+
+/// `view` at stage `current`: the ones before it done, it marked `mark`.
+fn at_stage(view: &mut super::FeatureTabView, current: usize, mark: super::NodeMark, line: &str) {
+    use super::NodeMark;
+    for (j, node) in view.rail.iter_mut().enumerate() {
+        node.mark = match j {
+            j if j < current => NodeMark::Done,
+            j if j == current => mark,
+            _ => NodeMark::Later,
+        };
+        node.line = match j {
+            j if j < current => "1h ago".into(),
+            j if j == current => line.into(),
+            _ => String::new(),
+        };
+    }
+    select_node(view, current);
+}
+
+/// Plan written and waiting for review: the planner idle.
+fn feature_tab_plan_review() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
+    let button = |label: &str, style, key| PageButton {
+        label: label.into(),
+        style,
+        key,
+    };
+    view.page = StagePage {
+        title: "Plan".into(),
+        about: Stage::Plan.about().into(),
+        status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
+        buttons: vec![
+            button("Review", ButtonStyle::Primary, Some("\u{23ce}")),
+            button("Preview", ButtonStyle::Plain, None),
+            button("Show agent", ButtonStyle::Plain, None),
+        ],
+        sections: vec![
+            PageSection::Agent {
+                icon: AgentIcon::Codex,
+                name: "codex".into(),
+                dot: Dot::Idle,
+                status: "waiting for you \u{b7} tab 2".into(),
+                tail: Vec::new(),
+                button: Some(2),
+            },
+            PageSection::Lines {
+                label: "plan.md".into(),
+                lines: vec![
+                    tab_line("Ready for review, sent back once", CheckTone::Blocker),
+                    tab_line("5 milestones", CheckTone::Note),
+                ],
+            },
+        ],
+    };
+    view
+}
+
+/// Verify failed: two checks fail, a fix sent.
+fn feature_tab_verify_failed() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 3, NodeMark::Current, "failed");
+    view.page = StagePage {
+        title: "Verify".into(),
+        about: Stage::Verify.about().into(),
+        status: Some(tab_line(
+            "2 of 5 checks failed \u{b7} fixes sent 1 of 3",
+            CheckTone::Blocker,
+        )),
+        buttons: vec![
+            PageButton {
+                label: "Run again".into(),
+                style: ButtonStyle::Primary,
+                key: Some("\u{23ce}"),
+            },
+            PageButton {
+                label: "Evidence".into(),
+                style: ButtonStyle::Plain,
+                key: None,
+            },
+        ],
+        sections: vec![PageSection::Lines {
+            label: "Checks".into(),
+            lines: vec![
+                tab_line("cargo build passed", CheckTone::Ready),
+                tab_line("cargo clippy passed", CheckTone::Ready),
+                tab_line(
+                    "cargo test failed: export::csv::streams_large_files panicked at \
+                     'assertion failed: rows == 10000', api/src/export/csv.rs:212",
+                    CheckTone::Blocker,
+                ),
+                tab_line(
+                    "pnpm test failed: Dialog.test.tsx (1 of 14)",
+                    CheckTone::Blocker,
+                ),
+                tab_line("pnpm lint passed", CheckTone::Ready),
+            ],
+        }],
+    };
+    view
+}
+
+/// Ship current, blocked by what isn't committed and a branch behind.
+fn feature_tab_ship_blocked() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 7, NodeMark::Current, "blocked");
+    view.repos[1].line = "feature/bulk-export \u{b7} push not guarded: hooks path is set".into();
+    view.page = StagePage {
+        title: "Ship".into(),
+        about: Stage::Ship.about().into(),
+        status: Some(tab_line("2 things stop shipping", CheckTone::Blocker)),
+        buttons: vec![PageButton {
+            label: "Ship\u{2026}".into(),
+            style: ButtonStyle::Off,
+            key: Some("\u{23ce}"),
+        }],
+        sections: vec![
+            PageSection::Lines {
+                label: "Ship check".into(),
+                lines: vec![
+                    tab_line("api has changes not committed", CheckTone::Blocker),
+                    tab_line("web is 3 commits behind dev", CheckTone::Blocker),
+                ],
+            },
+            PageSection::Lines {
+                label: "How it ships".into(),
+                lines: vec![
+                    tab_line("api: squash into main", CheckTone::Note),
+                    tab_line("web: pull request into dev", CheckTone::Note),
+                ],
+            },
+        ],
+    };
+    view
+}
+
+/// A done feature, Ship's page shown read-only, with its pull requests.
+fn feature_tab_done() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    for node in &mut view.rail {
+        node.mark = NodeMark::Done;
+        node.line = "2h ago".into();
+    }
+    view.rail[3].mark = NodeMark::Stale;
+    view.rail[3].line = "code changed".into();
+    select_node(&mut view, 7);
+    for (i, repo) in ["api", "web"].into_iter().enumerate() {
+        let row = &mut view.repos[i];
+        row.line = format!("PR {repo}/pull/1{i}");
+        row.button = Some("Open PR");
+    }
+    view.sub = format!("done \u{b7} {}", view.sub);
+    view.remove = "Remove worktrees";
+    view.page = StagePage {
+        title: "Ship".into(),
+        about: Stage::Ship.about().into(),
+        status: Some(tab_line("Done 2h ago by you", CheckTone::Ready)),
+        buttons: vec![PageButton {
+            label: "Reopen".into(),
+            style: ButtonStyle::Plain,
+            key: None,
+        }],
+        sections: vec![PageSection::Lines {
+            label: "Pull requests".into(),
+            lines: vec![
+                tab_line("api/pull/10 open, 2 checks passed", CheckTone::Ready),
+                tab_line("web/pull/11 open, review requested", CheckTone::Note),
+            ],
+        }],
+    };
+    view
+}
+
+/// Build current, a later stage's page picked: no buttons.
+fn feature_tab_later() -> super::FeatureTabView {
+    use super::{CheckTone, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    select_node(&mut view, 5);
+    view.hover = Some(super::FeatureTabHit::Node(6));
+    view.page = StagePage {
+        title: "Code review".into(),
+        about: Stage::CodeReview.about().into(),
+        status: None,
+        buttons: Vec::new(),
+        sections: vec![PageSection::Lines {
+            label: String::new(),
+            lines: vec![tab_line("Comes after AI review", CheckTone::Note)],
+        }],
+    };
+    view
+}
+
+/// The keyboard on the repositories, on shared, the pointer on its Touch.
+fn feature_tab_repos() -> super::FeatureTabView {
+    let mut view = feature_tab();
+    view.focus = super::TabArea::Repos;
+    view.repo = 2;
+    view.hover = Some(super::FeatureTabHit::RepoButton(2));
+    view.hints[1] = ("Tab".into(), "stages".into());
+    view.hints[2] = ("Enter".into(), "touch".into());
+    view
+}
+
+/// The repositories couldn't be read.
+fn feature_tab_repos_error() -> super::FeatureTabView {
+    let mut view = feature_tab();
+    view.repos_error = Some("git status in api: fatal: not a git repository".into());
+    view
+}
+
+/// The feature tab's fixtures, by name.
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 8] {
+    [
+        ("tab_build", feature_tab()),
+        ("tab_plan_review", feature_tab_plan_review()),
+        ("tab_verify_failed", feature_tab_verify_failed()),
+        ("tab_ship_blocked", feature_tab_ship_blocked()),
+        ("tab_done", feature_tab_done()),
+        ("tab_later", feature_tab_later()),
+        ("tab_repos", feature_tab_repos()),
+        ("tab_repos_error", feature_tab_repos_error()),
+    ]
+}
+
+/// Each fixture at the width it shows best at, and Build at all three.
+const TAB_SURFACES: [(&str, i32); 10] = [
+    ("tab_build", 860),
+    ("tab_build", 1180),
+    ("tab_build", 1920),
+    ("tab_plan_review", 1180),
+    ("tab_verify_failed", 1920),
+    ("tab_ship_blocked", 1180),
+    ("tab_done", 1920),
+    ("tab_later", 860),
+    ("tab_repos", 1180),
+    ("tab_repos_error", 860),
+];
+
+const FEATURE_TAB: [&str; 10] = [
+    "tab_build_860",
+    "tab_build_1180",
+    "tab_build_1920",
+    "tab_plan_review_1180",
+    "tab_verify_failed_1920",
+    "tab_ship_blocked_1180",
+    "tab_done_1920",
+    "tab_later_860",
+    "tab_repos_1180",
+    "tab_repos_error_860",
+];
+
+fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let views = feature_tabs();
+    TAB_SURFACES
+        .iter()
+        .map(|(name, w)| {
+            let view = &views.iter().find(|(n, _)| n == name).expect("a fixture").1;
+            hash(painter.feature_tab(view, (*w, TAB_HEIGHT).into(), scale, p))
+        })
+        .collect()
+}
+
+/// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
+const GOLDEN_FEATURE_TAB: [[u64; 10]; 4] = [
+    // Dark at 1
+    [
+        0x348b84218afa171a, // tab_build_860
+        0x55d13eec94bf4555, // tab_build_1180
+        0xf9baba634a0dfde4, // tab_build_1920
+        0x08efb8696a3d1fc7, // tab_plan_review_1180
+        0x5b0bbb8b952a14a2, // tab_verify_failed_1920
+        0x61f0b5b524725188, // tab_ship_blocked_1180
+        0x1031f8708f1219e4, // tab_done_1920
+        0x55e1e5240591705d, // tab_later_860
+        0xedb630fd10dffba9, // tab_repos_1180
+        0xededcb57e73a5710, // tab_repos_error_860
+    ],
+    // Dark at 2
+    [
+        0xaef0211514424fd5, // tab_build_860
+        0x3405e14d5eae123d, // tab_build_1180
+        0x1943f9d2e6fab4e8, // tab_build_1920
+        0x63f25849ffdb0937, // tab_plan_review_1180
+        0x8eea453de3cc7eaf, // tab_verify_failed_1920
+        0xd8f1da5a92186ecb, // tab_ship_blocked_1180
+        0x9f9afb52c5c6dcb8, // tab_done_1920
+        0x5274ce4207fdc076, // tab_later_860
+        0x341b9b5c4113dc4c, // tab_repos_1180
+        0x443de08e3b631cd2, // tab_repos_error_860
+    ],
+    // Light at 1
+    [
+        0x22acff39d98c9080, // tab_build_860
+        0x3c6d9f56837b4328, // tab_build_1180
+        0xf939cbc6c0f95e86, // tab_build_1920
+        0xb345f8e69fcc9334, // tab_plan_review_1180
+        0xa785259417eab6b3, // tab_verify_failed_1920
+        0xd2c2237e24eb3d1c, // tab_ship_blocked_1180
+        0x7eefc7689a2a0df5, // tab_done_1920
+        0x662bf20365391924, // tab_later_860
+        0xb4d2d72147495c26, // tab_repos_1180
+        0x7600bc6b202928a3, // tab_repos_error_860
+    ],
+    // Light at 2
+    [
+        0x7c02447b36b5f121, // tab_build_860
+        0x35b122e118bc0cdf, // tab_build_1180
+        0x4ce4f47fd2f9f33d, // tab_build_1920
+        0x2090a6260fdd0304, // tab_plan_review_1180
+        0xed7db5c147b43789, // tab_verify_failed_1920
+        0x4b1992f273815083, // tab_ship_blocked_1180
+        0x88a2ab2968583255, // tab_done_1920
+        0x01a28f82a1d783bf, // tab_later_860
+        0xc3e73655b1793684, // tab_repos_1180
+        0x673c1e75b50d422b, // tab_repos_error_860
+    ],
+];
+
+#[test]
+fn the_feature_tab_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_FEATURE_TAB
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    check(&FEATURE_TAB, &golden, paint_feature_tab);
+}
+
+/// With `GERDR_DUMP_DIR` set, write every feature tab fixture there at
+/// each of `TAB_WIDTHS`.
+#[test]
+fn dump_feature_tab() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        for (name, view) in feature_tabs() {
+            for w in TAB_WIDTHS {
+                dump(
+                    &dir,
+                    &format!("{name}_{w}_{}_{}", theme.name(), scale),
+                    painter.feature_tab(&view, (w, TAB_HEIGHT).into(), scale, p),
+                    (w as f64 * scale).round() as usize,
+                );
+            }
+        }
+    }
+}
