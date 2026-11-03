@@ -179,6 +179,8 @@ mod tests {
         let line = render_builtin("send-fixes", &v).unwrap();
         assert!(!line.trim_end().contains('\n'), "{line}");
         assert!(line.contains("2 findings") && line.contains("build-1-findings-1.md"));
+        // Typed into a pane: a shell there must not take it for a command.
+        assert!(line.starts_with("Please "), "{line}");
     }
 
     #[test]

@@ -506,10 +506,20 @@ impl Gerdr {
             .and_then(|r| r.pane.clone())
             .filter(|p| self.herdr_pane_place(p).is_some())
             .ok_or_else(|| String::from("its tab is gone"))?;
-        match self.herdr.as_mut() {
-            Some(herdr) => herdr.send_line(&pane, line),
-            None => Err("herdr isn't connected".into()),
+        self.tell_agent_pane(&pane, line)
+    }
+
+    /// Type `line` into `pane`, where a stage's agent ran, if something
+    /// still runs there: a pane back at its shell's prompt would run the
+    /// line as a command.
+    pub(crate) fn tell_agent_pane(&mut self, pane: &str, line: &str) -> Result<(), String> {
+        let Some(herdr) = self.herdr.as_mut() else {
+            return Err("herdr isn't connected".into());
+        };
+        if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
+            return Err("its agent has quit".into());
         }
+        herdr.send_line(pane, line)
     }
 
     /// The Build of feature `slug` holds on the code `patch`: marked done

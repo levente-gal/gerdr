@@ -1243,10 +1243,7 @@ impl Gerdr {
                     values.insert("comments.path".into(), file.display().to_string());
                     prompts::render_builtin("send-back", &values).map_err(|e| e.to_string())
                 })
-                .and_then(|line| match self.herdr.as_mut() {
-                    Some(herdr) => herdr.send_line(&pane, line.trim()),
-                    None => Err("herdr isn't connected".into()),
-                });
+                .and_then(|line| self.tell_agent_pane(&pane, line.trim()));
         }
         let now = feature::now();
         let Some(f) = self.feature_mut(project, slug) else {
