@@ -595,9 +595,10 @@ impl Chrome {
                         },
                     ));
                 }
-                // The feature tab, filling its tab's area.
-                // The feature tab, a part per slice so a hover or a scroll
-                // draws only its own again.
+                // The feature tab, filling its tab's area: a part per
+                // slice so a hover or a scroll draws only its own again,
+                // and the current stage's glow and the dots at work over
+                // them, so their motion draws none.
                 Kind::Features => parts.extend(self.features.parts(
                     view.features.take(),
                     area,
@@ -605,6 +606,8 @@ impl Chrome {
                     scale,
                     now,
                     painter,
+                    view.pulse,
+                    Some((dot, blink)),
                 )),
                 // The project menu reaches over the sidebar and the apps.
                 Kind::ProjectMenu => parts.extend(self.project_menu.parts(
