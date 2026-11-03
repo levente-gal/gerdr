@@ -44,9 +44,10 @@ const HANDLE_FADE: f32 = 0.3;
 const PILL_TOP: i32 = 3;
 const BAR_PILL_HEIGHT: i32 = PANE_BAR_HEIGHT - 2 * PILL_TOP;
 const PILL_PAD: i32 = 4;
-/// How wide a web page's or a terminal's pill is: this share of its pane,
-/// no less than `PILL_WEB_MIN` nor more than `PILL_WEB_MAX`; an app's is
-/// `PILL_APP`.
+/// How wide a web page's pill is: this share of its pane, no less than
+/// `PILL_WEB_MIN` nor more than `PILL_WEB_MAX`, room for its address; an
+/// app's or a terminal's is `PILL_APP`, so it covers little of the window
+/// under it.
 const PILL_WEB_SHARE: f64 = 0.6;
 const PILL_WEB_MIN: i32 = 420;
 const PILL_WEB_MAX: i32 = 760;
@@ -75,10 +76,10 @@ pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
 pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
     let room = (pane.size.w - 2 * PILL_MARGIN).max(0);
     let want = match kind {
-        BarButtons::Web { .. } | BarButtons::Terminal => {
+        BarButtons::Web { .. } => {
             ((pane.size.w as f64 * PILL_WEB_SHARE).round() as i32).clamp(PILL_WEB_MIN, PILL_WEB_MAX)
         }
-        BarButtons::None => PILL_APP,
+        BarButtons::None | BarButtons::Terminal => PILL_APP,
     };
     let w = want.min(room);
     let h = BAR_PILL_HEIGHT.min(pane.size.h - PILL_TOP - 1).max(0);
@@ -937,14 +938,11 @@ mod tests {
                 assert!(r.loc.x > pill.loc.x && r.loc.x + r.size.w < pill.loc.x + pill.size.w);
             }
         }
-        // A web page's and a terminal's grow with their pane, within
-        // bounds; an app's doesn't.
+        // A web page's grows with its pane, within bounds; an app's and a
+        // terminal's don't.
         let wide = Rect::new((0, 0).into(), (3000, 400).into());
         assert_eq!(pane_bar_rect(wide, WEB).size.w, PILL_WEB_MAX);
-        assert_eq!(
-            pane_bar_rect(wide, BarButtons::Terminal).size.w,
-            PILL_WEB_MAX
-        );
+        assert_eq!(pane_bar_rect(wide, BarButtons::Terminal).size.w, PILL_APP);
         assert_eq!(pane_bar_rect(wide, BarButtons::None).size.w, PILL_APP);
         let narrow = Rect::new((0, 0).into(), (300, 400).into());
         assert_eq!(pane_bar_rect(narrow, WEB).size.w, 300 - 2 * PILL_MARGIN);
