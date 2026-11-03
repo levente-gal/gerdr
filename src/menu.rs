@@ -104,6 +104,8 @@ pub enum MenuAction {
     /// Start again what pane `id` of the active tab waits for, after it
     /// failed to show a window (or its window went away).
     RetryExpected(u32),
+    /// Ask again to unlock the keyring, which apps wait for (see `keyring`).
+    UnlockKeyring,
     /// Give up on what pane `id` of the active tab waits for, and close
     /// the pane.
     CloseExpected(u32),
@@ -431,6 +433,7 @@ impl Gerdr {
             MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
+            MenuAction::UnlockKeyring => crate::keyring::ask(),
             MenuAction::CloseExpected(pane) => self.close_expected(pane),
             MenuAction::RunApp(place) => self.open_run_prompt(place),
             MenuAction::Worktrees(dir) => self.open_worktrees(Some(dir)),

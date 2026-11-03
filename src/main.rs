@@ -48,6 +48,7 @@ mod inbox_store;
 mod input;
 mod issues;
 mod keep;
+mod keyring;
 mod keys;
 mod launch;
 mod layout;
@@ -296,6 +297,9 @@ pub struct Expected {
     /// For another window of a kept app (see `Pane::window_of`): the
     /// command that started the app, and the window's title as saved.
     pub window_of: Option<(String, String)>,
+    /// Not started yet, as it keeps its logins in the keyring, which is
+    /// locked (see `keyring`): started once it is open.
+    pub held: bool,
 }
 
 impl Expected {
@@ -313,6 +317,7 @@ impl Expected {
             closed: false,
             kept: false,
             window_of: None,
+            held: false,
         }
     }
 
@@ -3668,11 +3673,28 @@ impl Gerdr {
             let Some((w, t, i)) = queued else {
                 return dropped;
             };
+            // One keeping its logins in the keyring waits for it, and
+            // the ones after it (see `keyring`).
+            let e = &mut self.workspaces[w].tabs[t].expected[i];
+            if e
+                .app_command
+                .as_deref()
+                .is_some_and(launch::uses_keyring)
+                && !keyring::state().ready()
+            {
+                e.held = true;
+                self.wait_for_keyring();
+                return dropped;
+            }
             let pid = start(self, w, t, i);
             let tab = &mut self.workspaces[w].tabs[t];
             match pid {
                 Some(pid) => {
-                    tab.expected[i].pid = Some(pid);
+                    let e = &mut tab.expected[i];
+                    e.pid = Some(pid);
+                    e.held = false;
+                    // Its wait for a window starts now, not when queued.
+                    e.started = Instant::now();
                     return dropped;
                 }
                 // A Zed keeps its leaf, for the layout, with a Retry.
@@ -4685,6 +4707,11 @@ impl Gerdr {
             // Queued by app_id: started in its turn.
             (app_id, Some(_), _) if !app_id.is_empty() => {
                 dropped = self.launch_next_apps();
+                true
+            }
+            (_, Some(command), _) if launch::uses_keyring(&command) && !keyring::state().ready() => {
+                self.workspaces[w].tabs[t].expected[i].held = true;
+                self.wait_for_keyring();
                 true
             }
             (_, Some(command), _) => match self.start_app(w, t, &command, None) {
@@ -6205,6 +6232,7 @@ impl Gerdr {
                     since: expected.started,
                     timed_out: expected.timed_out,
                     closed: expected.closed,
+                    held: expected.held && !expected.timed_out,
                 })
                 .collect()
         });
@@ -6887,6 +6915,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
     state.watch_profile_imports();
+    state.watch_keyring();
     state.watch_installed_apps();
     state.start_project(args.project.as_deref(), args.folders);
 

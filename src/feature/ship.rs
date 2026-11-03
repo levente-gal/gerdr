@@ -479,7 +479,12 @@ const GH_TIMEOUT: Duration = Duration::from_secs(120);
 /// What `gh args`, run in `dir`, prints, or one line on why it failed.
 fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
     let what = args.get(..2).unwrap_or(args).join(" ");
-    let mut child = Command::new(gh)
+    let mut command = Command::new(gh);
+    // The real gh, not a test's.
+    if gh == "gh" {
+        crate::ci::signed_in(&mut command)?;
+    }
+    let mut child = command
         .args(args)
         .current_dir(dir)
         .env("GH_PROMPT_DISABLED", "1")

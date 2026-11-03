@@ -25,6 +25,8 @@ use std::{
 
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 
+use crate::keyring;
+
 /// How often the CI is read while some of it runs, and while all of it is
 /// settled.
 pub const BUSY_INTERVAL: Duration = Duration::from_secs(20);
@@ -687,7 +689,9 @@ fn gh_api<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> 
 /// went wrong.
 pub(crate) fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result<T, String> {
     let what = args.get(..2).unwrap_or(args).join(" ");
-    let out = Command::new("gh")
+    let mut command = Command::new("gh");
+    signed_in(&mut command)?;
+    let out = command
         .args(args)
         .current_dir(root)
         .env("GH_PROMPT_DISABLED", "1")
@@ -700,10 +704,94 @@ pub(crate) fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result
         })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("Bad credentials") || err.contains("HTTP 401") {
+            forget_gh_token();
+        }
         let why = err.lines().map(str::trim).find(|l| !l.is_empty());
         return Err(why.map_or_else(|| format!("gh {what} failed"), str::to_owned));
     }
     serde_json::from_slice(&out.stdout).map_err(|err| format!("gh {what}: {err}"))
+}
+
+/// gh's token for github.com, once read (see `signed_in`).
+static GH_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// How long a `gh` waits for the keyring to open before it gives up.
+const KEYRING_WAIT: Duration = Duration::from_secs(10);
+
+/// `command`, a `gh`, given gh's token for github.com in `GH_TOKEN`, read
+/// once with `gh auth token`. Each `gh` would read it from the keyring
+/// otherwise, many at once, which can crash gnome-keyring (see `keyring`).
+/// While the keyring is locked, it waits for it a little, asking for it,
+/// then says so. Nothing to do when the token is in gh's file or the
+/// environment, or can't be read: `gh` then tells what is wrong.
+pub(crate) fn signed_in(command: &mut Command) -> Result<(), String> {
+    if ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some())
+    {
+        return Ok(());
+    }
+    // Held while it is read: the `gh`s started meanwhile wait for it.
+    let mut token = GH_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+    if token.is_none() {
+        if gh_token_in_file() {
+            return Ok(());
+        }
+        wait_for_keyring()?;
+        *token = read_gh_token();
+    }
+    if let Some(token) = token.as_deref() {
+        command.env("GH_TOKEN", token);
+    }
+    Ok(())
+}
+
+/// Wait for the keyring to open, asking for it, up to `KEYRING_WAIT`.
+fn wait_for_keyring() -> Result<(), String> {
+    let deadline = std::time::Instant::now() + KEYRING_WAIT;
+    loop {
+        let state = keyring::state();
+        if state.ready() {
+            return Ok(());
+        }
+        if state == keyring::State::Locked {
+            keyring::ask();
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("gh's token is in the keyring, which is locked".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// gh's token for github.com, by `gh auth token`, if it has one.
+fn read_gh_token() -> Option<String> {
+    let out = Command::new("gh")
+        .args(["auth", "token", "--hostname", "github.com"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(Stdio::null())
+        .output()
+        .inspect_err(|err| tracing::debug!("gh auth token: {err}"))
+        .ok()?;
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (out.status.success() && !token.is_empty()).then_some(token)
+}
+
+/// Whether gh keeps a token in its own file, not in the keyring.
+fn gh_token_in_file() -> bool {
+    let dir = std::env::var_os("GH_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("gh")))
+        .or_else(|| crate::home_dir().map(|h| h.join(".config/gh")));
+    dir.and_then(|dir| std::fs::read_to_string(dir.join("hosts.yml")).ok())
+        .is_some_and(|hosts| hosts.contains("oauth_token:"))
+}
+
+/// Read gh's token again next time: it was turned down (the user signed
+/// in again, or out).
+fn forget_gh_token() {
+    *GH_TOKEN.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// The CI of the repository `slug` on `host` out of what `gh` gave: its
