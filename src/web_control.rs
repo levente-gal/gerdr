@@ -1032,6 +1032,13 @@ for (const line of [1, 1.5, 2.5, 3, 5, 7.5, 8.25]) {
   assert.ok(Math.abs(yLine(spans, lineY(spans, line)) - line) < 1e-9, String(line));
 }
 assert.strictEqual(yLine(spans, 1000), 10);
+// Above the first block, the line before it, from the page's top.
+const low = [[1, 1, 32, 40], [3, 3, 100, 20]];
+assert.strictEqual(lineY(low, 0), 0);
+assert.strictEqual(lineY(low, 0.5), 16);
+assert.strictEqual(lineY(low, -2), 0);
+assert.strictEqual(yLine(low, 0), 0);
+assert.strictEqual(yLine(low, 16), 0.5);
 assert.strictEqual(lineY([], 3), 0);
 assert.strictEqual(yLine([], 3), 1);
 "#;

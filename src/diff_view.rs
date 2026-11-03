@@ -869,11 +869,23 @@ impl DiffView {
         (line.kind != LineKind::Removed).then_some(line.number)
     }
 
+    /// The first row that is a line that isn't removed, and its number.
+    fn first_kept(&self) -> Option<(usize, usize)> {
+        (self.rows.iter().enumerate()).find_map(|(r, &row)| Some((r, self.kept_line(row)?)))
+    }
+
     /// The line of the file at the top of the diff as it stands, to the
     /// fraction: the number of the first line shown that isn't removed,
     /// less the rows above it, plus the part of the first row scrolled
-    /// past. None without such lines.
+    /// past. The rows above the first line stand for the line before it,
+    /// from its start (`n - 1` with the diff at its top) to its end. None
+    /// without such lines.
     pub(crate) fn top_line(&self) -> Option<f64> {
+        let pos = self.scroll.pos().max(0.0);
+        let (r1, n1) = self.first_kept()?;
+        if pos < r1 as f64 {
+            return Some(n1 as f64 - 1.0 + pos / r1 as f64);
+        }
         let first = self.scroll.first();
         let (r, n) = (self.rows.iter().enumerate().skip(first))
             .find_map(|(r, &row)| Some((r, self.kept_line(row)?)))?;
@@ -881,9 +893,16 @@ impl DiffView {
     }
 
     /// Stand with line `line` of the file at the top, to the fraction (see
-    /// `top_line`); a line before the first stands above it.
+    /// `top_line`).
     pub(crate) fn stand_at_line(&mut self, line: f64, ctx: &Ctx) {
-        let whole = line.floor().max(1.0) as usize;
+        let Some((r1, n1)) = self.first_kept() else {
+            return;
+        };
+        if line < n1 as f64 {
+            let into = (line - (n1 as f64 - 1.0)).max(0.0);
+            return self.stand_at(into * r1 as f64, ctx);
+        }
+        let whole = line.floor() as usize;
         let Some((row, number)) = self.row_from_line(whole) else {
             return;
         };
@@ -892,7 +911,7 @@ impl DiffView {
         } else {
             0.0
         };
-        self.stand_at((row as f64 + past).max(0.0), ctx);
+        self.stand_at(row as f64 + past, ctx);
     }
 
     /// Each comment's text by the number of its last line (none for one
