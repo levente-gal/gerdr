@@ -3268,10 +3268,12 @@ impl Gerdr {
             )
         };
         let mut body = removal_body(&losses);
+        // On a line of its own: the dialog cuts a line to its width, and
+        // both together don't fit.
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
             body = format!(
-                "{body}. {}",
+                "{body}.\n{}",
                 crate::feature_workspace::closing_text(&running)
             );
         }
