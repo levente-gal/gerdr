@@ -309,7 +309,7 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
 /// for review.
 /// Manual test, while its brief has criteria (`manual` says how many
 /// passed of how many), from Code review's mark.
-fn gate_of(
+pub(crate) fn gate_of(
     f: &Feature,
     manual: impl Fn(&Feature) -> Option<(u32, u32)>,
 ) -> Option<(Stage, u64, GateKind)> {
