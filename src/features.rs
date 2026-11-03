@@ -3239,10 +3239,20 @@ impl Gerdr {
         self.sidebar_listed()
             .into_iter()
             .map(|f| chrome::FeatureRowView {
-                title: f.title.clone(),
+                title: self.row_title(f),
                 marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
             })
             .collect()
+    }
+
+    /// A sidebar row's title for `f`: another project's feature (one
+    /// spanning the shown project) says whose it is.
+    fn row_title(&self, f: &Feature) -> String {
+        if self.project.as_deref() == Some(f.project.as_str()) {
+            return f.title.clone();
+        }
+        let home = (self.projects.project(&f.project)).map_or(f.project.as_str(), |p| &p.name);
+        format!("{} \u{b7} in {home}", f.title)
     }
 
     /// How many feature rows the sidebar shows.
@@ -3256,14 +3266,27 @@ impl Gerdr {
     }
 
     /// The features the sidebar's Features section lists, in order: the
-    /// shown project's open ones with no workspace open, whose own
-    /// workspace's header shows them instead.
+    /// shown project's open ones with no workspace open (their own
+    /// workspace's header shows them instead), then other projects' open
+    /// features that span the shown project too.
     fn sidebar_listed(&self) -> Vec<&Feature> {
-        let Some(all) = self.project.as_ref().and_then(|p| self.features.all.get(p)) else {
+        let Some(project) = self.project.as_deref() else {
             return Vec::new();
         };
         let dirs: Vec<&Path> = self.workspaces.iter().map(|ws| ws.dir.as_path()).collect();
-        crate::feature_workspace::without_workspace(sidebar_features(all), &dirs)
+        let own = self
+            .features
+            .all
+            .get(project)
+            .map(|all| sidebar_features(all));
+        let mut listed =
+            crate::feature_workspace::without_workspace(own.unwrap_or_default(), &dirs);
+        listed.extend(
+            linked_in(&self.features.all, project)
+                .into_iter()
+                .map(|(_, f)| f),
+        );
+        listed
     }
 }
 

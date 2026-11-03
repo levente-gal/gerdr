@@ -627,7 +627,7 @@ impl Gerdr {
             (SidebarHit::Feature(n), BTN_LEFT) => {
                 if let Some(f) = self.sidebar_feature(n) {
                     let (project, slug) = (f.project.clone(), f.slug.clone());
-                    self.open_feature(&project, &slug);
+                    self.open_linked_feature(&project, &slug);
                 }
             }
             (SidebarHit::Card(i, k) | SidebarHit::Inbox(i, k), BTN_LEFT) => {

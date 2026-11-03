@@ -540,6 +540,8 @@ impl Gerdr {
             focus: finding.map(str::to_owned),
         };
         let root = feature.root.clone();
+        // A Zed opened from it goes to the feature's own workspace.
+        let w = (self.feature_workspace(project, slug)).unwrap_or(self.active_workspace);
         let review = review::load_file(&comments).without_findings();
         // It covers the other panels: they close, the repositories panel
         // kept as it was.
@@ -563,7 +565,7 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
-        let wd = WorktreeDiff::of_feature(fe, root, self.active_workspace, review);
+        let wd = WorktreeDiff::of_feature(fe, root, w, review);
         self.repos.worktree = Some(wd);
         self.worktree_diff_read();
         // It takes the pointer from the client under it.
