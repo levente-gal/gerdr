@@ -2,23 +2,22 @@
 //! shows, and how it is drawn; and the strip marking the focused pane,
 //! whatever it shows.
 //!
-//! A hidden bar leaves its grip behind: a thin band along the pane's top
-//! edge with room of its own, a dot for what runs, the title small and a
-//! faint close button, so every pane can be found, closed and held. The
-//! pointer on the grip brings the whole bar out, grown from it. A bar out
-//! has all its buttons, whatever the pane shows, faint until the pointer
-//! is over it.
+//! Every bar is a pill. Hidden, it leaves its grip behind: a bare band
+//! along the pane's top edge with room of its own and a handle in its
+//! middle, so every pane can be found and held. The pointer on the grip
+//! drops the pill from the handle over the top of the window, as wide as
+//! it needs, so the window's own header still shows either side of it.
+//! A bar out has all its buttons, faint until the pointer is over it.
 //!
-//! A web page's or an app's bar floats instead (see `BarButtons::floats`):
-//! hidden, its grip is a bare band with a handle in its middle; out, it is
-//! a pill dropped from the handle over the top of the window, as wide as
-//! it needs, so the page's own header still shows either side of it.
+//! A terminal running a command keeps its pill out, in a band with room
+//! of its own (`PANE_BAR_HEIGHT`) over the window, so what runs, and its
+//! stop and restart, are always in sight.
 
 use super::{
-    BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PADDING,
-    PANE_BAR_HEIGHT, Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band,
-    centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow,
-    status_mark, stop, text_lines, zoom_corners,
+    BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PANE_BAR_HEIGHT,
+    Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band, centred_dot, chevron_side,
+    copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop, text_lines,
+    zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -27,29 +26,27 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 /// How far from a pane's top edge, above or below it, the pointer brings
 /// its hidden bar out.
 pub const BAR_REVEAL: i32 = 8;
-/// How far a bar slides from under the top edge of its pane as it shows,
-/// and back as it hides: all but its grip (see `PANE_GRIP`).
+/// How far along its way out a bar is, from 0 (hidden) to this (out): its
+/// pill drops `PILL_DROP` over it.
 pub const BAR_SLIDE: i32 = PANE_BAR_HEIGHT - PANE_GRIP;
 /// The strip along the top edge of the focused pane: this high.
 pub const FOCUS_STRIP: i32 = 2;
 /// How high a hidden bar's grip is (see the module doc).
 pub const PANE_GRIP: i32 = 8;
-/// The size of a grip's title.
-const GRIP_FONT_SIZE: f32 = 7.5;
-/// How big a grip's dot is.
-const GRIP_DOT: i32 = 4;
-/// The handle in the middle of a floating bar's grip: this wide and high.
+/// The handle in the middle of a grip: this wide and high.
 const HANDLE_W: i32 = 32;
 const HANDLE_H: i32 = 3;
 /// How far an unfocused pane's handle fades toward its grip, 0 to 1.
 const HANDLE_FADE: f32 = 0.3;
-/// How high a floating bar's pill is, how far below its pane's top edge
-/// it hangs, and how far in from the pill's ends its buttons sit.
-const BAR_PILL_HEIGHT: i32 = 30;
+/// How far below its pane's top edge a pill hangs, how high it is (the
+/// room a bar kept out takes, less this either side), and how far in from
+/// the pill's ends its buttons sit.
 const PILL_TOP: i32 = 3;
+const BAR_PILL_HEIGHT: i32 = PANE_BAR_HEIGHT - 2 * PILL_TOP;
 const PILL_PAD: i32 = 4;
-/// How wide a web page's pill is: this share of its pane, no less than
-/// `PILL_WEB_MIN` nor more than `PILL_WEB_MAX`; an app's is `PILL_APP`.
+/// How wide a web page's or a terminal's pill is: this share of its pane,
+/// no less than `PILL_WEB_MIN` nor more than `PILL_WEB_MAX`; an app's is
+/// `PILL_APP`.
 const PILL_WEB_SHARE: f64 = 0.6;
 const PILL_WEB_MIN: i32 = 420;
 const PILL_WEB_MAX: i32 = 760;
@@ -59,16 +56,18 @@ const PILL_APP: i32 = 340;
 const PILL_MARGIN: i32 = 8;
 const PILL_DROP: i32 = 6;
 
-/// A pane's place split in two: its bar on top, and the rest for its
-/// window, which keeps at least a pixel. The bar as it is when shown; see
-/// `pane_bar_rects_shown` for one that may be hidden.
+/// A pane's place split in two: the band its bar keeps out on top, and
+/// the rest for its window, which keeps at least a pixel. The band as it
+/// is when the bar stays out; see `pane_bar_rects_shown` for one that may
+/// be hidden.
 pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
     pane_bar_rects_shown(pane, true)
 }
 
-/// A pane's place split in two: its bar on top, and the rest for its
-/// window, which keeps at least a pixel. A hidden bar (`shown` false)
-/// keeps only its grip, `PANE_GRIP` high, and the window takes the rest.
+/// A pane's place split in two: the band its bar has on top, and the rest
+/// for its window, which keeps at least a pixel. A bar that stays out
+/// (`shown`) has `PANE_BAR_HEIGHT` with its pill in it; any other keeps
+/// only its grip, `PANE_GRIP` high, and the window takes the rest.
 pub fn pane_bar_rects_shown(pane: Rect, shown: bool) -> (Rect, Rect) {
     let h = if shown { PANE_BAR_HEIGHT } else { PANE_GRIP };
     let h = h.min(pane.size.h - 1).max(0);
@@ -81,18 +80,15 @@ pub fn pane_bar_rects_shown(pane: Rect, shown: bool) -> (Rect, Rect) {
 }
 
 /// Where the bar of the pane at `pane` with `kind`'s buttons is when out:
-/// along its top for a terminal (see `pane_bar_rects`); a pill hanging in
-/// the middle of its top edge for a bar that floats.
+/// a pill hanging in the middle of its top edge, inside the band of a bar
+/// kept out (see `pane_bar_rects`).
 pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
-    if !kind.floats() {
-        return pane_bar_rects(pane).0;
-    }
     let room = (pane.size.w - 2 * PILL_MARGIN).max(0);
     let want = match kind {
-        BarButtons::Web { .. } => {
+        BarButtons::Web { .. } | BarButtons::Terminal => {
             ((pane.size.w as f64 * PILL_WEB_SHARE).round() as i32).clamp(PILL_WEB_MIN, PILL_WEB_MAX)
         }
-        _ => PILL_APP,
+        BarButtons::None => PILL_APP,
     };
     let w = want.min(room);
     let h = BAR_PILL_HEIGHT.min(pane.size.h - PILL_TOP - 1).max(0);
@@ -104,14 +100,14 @@ pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
 
 /// The grip of the pane at `pane`: the band along its top edge a hidden
 /// bar leaves (see `pane_bar_rects_shown`).
+#[cfg(test)]
 pub fn pane_grip_rect(pane: Rect) -> Rect {
     pane_bar_rects_shown(pane, false).0
 }
 
 /// Whether the pointer at `pos` asks for the bar of the pane at `pane`
 /// with `kind`'s buttons: within `BAR_REVEAL` of the pane's top edge, or,
-/// while the bar is `shown`, anywhere over it; for a floating bar, over
-/// its pill and the shadow round it.
+/// while the bar is `shown`, over its pill and the shadow round it.
 pub fn pointer_reveals(
     pane: Rect,
     kind: BarButtons,
@@ -124,25 +120,25 @@ pub fn pointer_reveals(
         return false;
     }
     let top = pane.loc.y as f64;
-    if shown && kind.floats() {
-        let pill = pane_bar_rect(pane, kind);
-        let around = Rectangle::new(
-            (pill.loc.x - PILL_MARGIN, pane.loc.y).into(),
-            (
-                pill.size.w + 2 * PILL_MARGIN,
-                pill.loc.y - pane.loc.y + pill.size.h + PILL_MARGIN,
-            )
-                .into(),
-        );
-        let reach = PANE_GRIP.max(BAR_REVEAL) as f64;
-        return around.to_f64().contains(pos) || y >= top - BAR_REVEAL as f64 && y < top + reach;
-    }
     let reach = if shown {
-        pane_bar_rects(pane).0.size.h.max(BAR_REVEAL)
+        PANE_GRIP.max(BAR_REVEAL)
     } else {
         BAR_REVEAL
     };
-    y >= top - BAR_REVEAL as f64 && y < top + reach as f64
+    let near = y >= top - BAR_REVEAL as f64 && y < top + reach as f64;
+    if !shown {
+        return near;
+    }
+    let pill = pane_bar_rect(pane, kind);
+    let around = Rectangle::new(
+        (pill.loc.x - PILL_MARGIN, pane.loc.y).into(),
+        (
+            pill.size.w + 2 * PILL_MARGIN,
+            pill.loc.y - pane.loc.y + pill.size.h + PILL_MARGIN,
+        )
+            .into(),
+    );
+    near || around.to_f64().contains(pos)
 }
 
 /// Where the strip marking the focused pane goes: along the top edge of
@@ -188,23 +184,13 @@ pub fn unzoom_button_rect(pane: Rect) -> Option<Rect> {
 /// right end; then the zoom button, if `zoom` (see `zoom_button`); last
 /// the close button, on every bar.
 ///
-/// A floating bar's sit inside its pill, square, clear of its round ends.
+/// They sit inside the pill `bar`, square, clear of its round ends.
 pub fn pane_bar_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<(BarButton, Rect)> {
-    let bar = if kind.floats() {
-        let inset_y = ((bar.size.h - BAR_BUTTON) / 2).max(0);
-        Rectangle::new(
-            (bar.loc.x + PILL_PAD, bar.loc.y + inset_y).into(),
-            ((bar.size.w - 2 * PILL_PAD).max(0), bar.size.h - 2 * inset_y).into(),
-        )
-    } else {
-        bar
-    };
-    lay_out_buttons(bar, kind, zoom)
-}
-
-/// The buttons of a bar with `kind`'s, laid out edge to edge over `bar`
-/// (see `pane_bar_buttons`).
-fn lay_out_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<(BarButton, Rect)> {
+    let inset_y = ((bar.size.h - BAR_BUTTON) / 2).max(0);
+    let bar: Rect = Rectangle::new(
+        (bar.loc.x + PILL_PAD, bar.loc.y + inset_y).into(),
+        ((bar.size.w - 2 * PILL_PAD).max(0), bar.size.h - 2 * inset_y).into(),
+    );
     let (leading, trailing) = kind.buttons().split_at(kind.leading());
     let trailing: Vec<_> = trailing
         .iter()
@@ -287,28 +273,6 @@ pub fn pane_bar_hit(
     Some(button.map_or(BarHit::Label, |(button, _)| BarHit::Button(button)))
 }
 
-/// Where a hidden terminal bar's grip has its close button: at its end,
-/// where the bar's is.
-fn grip_close(grip: Rect) -> Rect {
-    lay_out_buttons(grip, BarButtons::None, None)
-        .into_iter()
-        .find(|(b, _)| *b == BarButton::Close)
-        .map_or(grip, |(_, r)| r)
-}
-
-/// What of a hidden terminal bar's `grip` is at `pos`, if the grip is: its
-/// close button, or else its label.
-pub fn pane_grip_hit(grip: Rect, pos: Point<f64, Logical>) -> Option<BarHit> {
-    if !grip.to_f64().contains(pos) {
-        return None;
-    }
-    Some(if grip_close(grip).to_f64().contains(pos) {
-        BarHit::Button(BarButton::Close)
-    } else {
-        BarHit::Label
-    })
-}
-
 /// A button in a pane's bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarButton {
@@ -357,12 +321,6 @@ impl BarButtons {
         }
     }
 
-    /// Whether the bar floats over its window as a pill, leaving only a
-    /// handle while hidden: any but a terminal's.
-    pub fn floats(self) -> bool {
-        self != Self::Terminal
-    }
-
     /// How many of the buttons lead the bar, at its start; the rest are
     /// at its end.
     pub fn leading(self) -> usize {
@@ -397,11 +355,10 @@ pub enum BarStatus {
 /// where it stands between hidden and shown.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneBarView {
-    /// Where the bar goes on the output when shown in full; no height while
-    /// it is hidden and still. A floating bar's pill (see `pane_bar_rect`).
+    /// Where its pill goes on the output when out (see `pane_bar_rect`).
     pub rect: Rect,
-    /// Where a floating bar's grip goes, drawn on its own under the pill
-    /// (see `grip`).
+    /// Where its band goes: the grip, or the room a bar kept out takes,
+    /// drawn on its own under the pill (see `grip`).
     pub grip: Rect,
     /// What runs, or a web page's address.
     pub label: String,
@@ -429,79 +386,69 @@ pub struct PaneBarView {
     pub visible: bool,
     /// Its opacity, 0 to 1, from the fade showing or hiding it; 1 at rest.
     pub alpha: f32,
-    /// How far it is still under its pane's top edge, in logical pixels,
-    /// while it slides in or out; 0 at rest.
+    /// How far it still has to go out, 0 (out) to `BAR_SLIDE` (hidden),
+    /// while it shows or hides: its pill drops as it goes; 0 at rest.
     pub slide: i32,
 }
 
 impl PaneBarView {
-    /// Where the bar is drawn right now, how big, and how opaque: slid
-    /// under the top edge by `slide`, so only the rest shows.
-    ///
-    /// A floating bar's pill is drawn whole with its shadow round it,
-    /// fading in as it drops from a little higher; nothing while its fade
-    /// has it gone.
+    /// Where the pill is drawn right now, how big, and how opaque: whole
+    /// with its shadow round it, fading in as it drops from a little
+    /// higher; nothing while its fade has it gone.
     pub fn placement(&self) -> (Point<i32, Logical>, Size<i32, Logical>, f32) {
-        if self.buttons.floats() {
-            if self.alpha <= 0.0 || self.rect.size.h <= 0 {
-                return (self.rect.loc, Size::from((0, 0)), 0.0);
-            }
-            let drop = (PILL_DROP * self.slide).checked_div(BAR_SLIDE).unwrap_or(0);
-            let loc = self.rect.loc - Point::from((SHADOW, SHADOW + drop));
-            let size = self.rect.size + Size::from((2 * SHADOW, 2 * SHADOW));
-            return (loc, size, self.alpha);
+        if self.alpha <= 0.0 || self.rect.size.h <= 0 {
+            return (self.rect.loc, Size::from((0, 0)), 0.0);
         }
-        let h = (self.rect.size.h - self.slide).max(0);
-        (self.rect.loc, (self.rect.size.w, h).into(), self.alpha)
+        let loc = self.rect.loc - Point::from((SHADOW, SHADOW + self.drop()));
+        let size = self.rect.size + Size::from((2 * SHADOW, 2 * SHADOW));
+        (loc, size, self.alpha)
     }
 
-    /// Where a floating bar's grip is drawn, under its pill; none for a
-    /// terminal's, whose grip is the bar itself slid away.
+    /// How far above its place the pill still is, on its way.
+    fn drop(&self) -> i32 {
+        (PILL_DROP * self.slide).checked_div(BAR_SLIDE).unwrap_or(0)
+    }
+
+    /// Where its band is drawn, under its pill.
     pub fn grip(&self) -> Option<Rect> {
-        (self.buttons.floats() && self.grip.size.w > 0 && self.grip.size.h > 0).then_some(self.grip)
+        (self.grip.size.w > 0 && self.grip.size.h > 0).then_some(self.grip)
     }
 
-    /// Whether no more than its grip shows: it is drawn as the grip.
-    pub fn is_grip(&self) -> bool {
-        if self.buttons.floats() {
-            return false;
-        }
-        let h = self.placement().1.h;
-        h > 0 && h <= PANE_GRIP && self.rect.size.h > PANE_GRIP
+    /// Whether its pill starts with a mark saying how its command is: a
+    /// terminal's, once something has run in it.
+    fn has_mark(&self) -> bool {
+        self.buttons == BarButtons::Terminal && self.status != BarStatus::Idle
     }
 
-    /// Where its mark goes on the output: at its start, `slide` up with
-    /// the rest of it.
-    fn mark(&self) -> Rect {
+    /// Where its mark goes, in the pill at `pill`.
+    fn mark_in(pill: Rect) -> Rect {
         Rectangle::new(
-            (
-                self.rect.loc.x + PADDING as i32,
-                self.rect.loc.y - self.slide,
-            )
-                .into(),
-            (STATUS_WIDTH, self.rect.size.h).into(),
+            (pill.loc.x + PILL_PAD + BAR_INSET, pill.loc.y).into(),
+            (STATUS_WIDTH, pill.size.h).into(),
         )
     }
 
     /// Where its blinking dot goes on the output, while its command runs
-    /// and the dot is not slid under its pane's top edge.
+    /// and its pill is drawn: on its mark, dropping with the pill.
     pub fn blinker(&self) -> Option<Rect> {
-        let dot = centred_dot(self.mark());
+        let pill = Rectangle::new(
+            self.rect.loc - Point::from((0, self.drop())),
+            self.rect.size,
+        );
         (self.status == BarStatus::Running
-            && self.rect.size.h > 0
-            && !self.is_grip()
-            && dot.loc.y >= self.rect.loc.y)
-            .then_some(dot)
+            && self.has_mark()
+            && self.alpha > 0.0
+            && self.rect.size.h > 0)
+            .then(|| centred_dot(Self::mark_in(pill)))
     }
 
-    /// The same bar at full opacity: what its buffer looks like, for a
-    /// cache key (the alpha is applied when it is composed).
-    /// A pill looks the same wherever it is on its way, so its slide is
-    /// left out too.
+    /// The same bar at full opacity and at rest: what its buffer looks
+    /// like, for a cache key (the alpha and the drop are applied when it
+    /// is composed).
     pub fn still(&self) -> Self {
         Self {
             alpha: 1.0,
-            slide: if self.buttons.floats() { 0 } else { self.slide },
+            slide: 0,
             ..self.clone()
         }
     }
@@ -566,117 +513,19 @@ impl Painter {
         c.into_buffer(false)
     }
 
-    /// A pane's bar: a mark saying how its command is, the command (or the
-    /// app's title, cut in the middle so it keeps its end) and a note
-    /// after it, then its buttons, faint unless the pointer is over the
-    /// bar. A web page's has its address in a field between its buttons.
-    /// Drawn `view.slide` pixels up, cut off at the top; no more than its
-    /// grip showing, drawn as the grip (see `pane_grip`). A focused pane's
-    /// ends in a line in the accent.
+    /// A pane's bar, its pill: a round panel with its shadow; a web page's
+    /// with its back, forward and reload, its address in a soft field, the
+    /// host plain and the path muted and cut in the middle, then copy, zoom
+    /// and close; a terminal's with a mark saying how its command is (a
+    /// running one's is a blinking dot, composed over it: see `blinker`),
+    /// the command cut in the middle and a note after it, then its
+    /// buttons; an app's with its title, then zoom and close.
     pub(super) fn pane_bar(
         &self,
         view: &PaneBarView,
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        if view.buttons.floats() {
-            return self.pane_pill(view, scale, p);
-        }
-        let (_, size, _) = view.placement();
-        let full = view.rect.size;
-        let mut c = Canvas::new(physical(size, scale));
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
-        let line = px(1).max(1);
-        if view.is_grip() {
-            self.pane_grip(&mut c, view, scale, p);
-            return c.into_buffer(true);
-        }
-        let background = if view.focused {
-            p.tab_active
-        } else {
-            p.tab_bar
-        };
-        c.fill(0, 0, c.w, c.h, background);
-        if view.focused {
-            let accent = px(FOCUS_STRIP).max(1);
-            c.fill(0, c.h - accent, c.w, accent, p.accent);
-        } else {
-            c.fill(0, c.h - line, c.w, line, p.border_variant);
-        }
-
-        // Everything is laid out in the full bar, then moved up by the slide.
-        let up = -view.slide;
-        let bar = Rectangle::new((0, up).into(), full);
-        let buttons = pane_bar_buttons(bar, view.buttons, view.zoom);
-        let mark = Rectangle::new((PADDING as i32, up).into(), (STATUS_WIDTH, full.h).into());
-        // The marks the sidebar's agent chips use: a ring for waiting, an
-        // open ring for busy. A running command's is a blinking dot,
-        // composed over the bar (see `blinker`).
-        match view.status {
-            BarStatus::Idle | BarStatus::Running => {}
-            BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
-                status_mark(AgentStatus::Idle, x, y, s)
-            }),
-            // Busy, as an agent busy is everywhere else: in the accent.
-            BarStatus::Working => icon_sdf(&mut c, mark, scale, p.accent, |x, y| {
-                status_mark(AgentStatus::Working, x, y, s)
-            }),
-        }
-
-        // The note keeps its room; the label is cut short before it.
-        let band = band(bar, scale);
-        let x = px(mark.loc.x + STATUS_WIDTH + STATUS_GAP) as f32;
-        let end_x = buttons
-            .first()
-            .map_or(full.w - BAR_INSET, |(_, first)| first.loc.x);
-        let right = px(end_x - BAR_NOTE_GAP) as f32;
-        let note_w = view.note.map_or(0.0, |note| {
-            self.text_width(note, DETAIL_FONT_SIZE, scale) + px(BAR_NOTE_GAP) as f32
-        });
-        // An unfocused bar is all muted; a focused one says more.
-        let (label_color, note_color) = match view.status {
-            _ if !view.focused => (p.muted, p.placeholder),
-            BarStatus::Running => (p.text, p.muted),
-            BarStatus::Working => (p.text, p.accent),
-            // Focused, it says what it is plainly enough to read.
-            BarStatus::Idle | BarStatus::Exited => (p.text, p.muted),
-        };
-        let label_right = (right - note_w).max(x);
-        let label = self.cut_middle(&view.label, DETAIL_FONT_SIZE, label_right - x, scale);
-        let end = self.text(
-            &mut c,
-            &label,
-            DETAIL_FONT_SIZE,
-            x,
-            label_right,
-            band,
-            scale,
-            label_color,
-        );
-        if let Some(note) = view.note {
-            self.text(
-                &mut c,
-                note,
-                DETAIL_FONT_SIZE,
-                end + px(BAR_NOTE_GAP) as f32,
-                right,
-                band,
-                scale,
-                note_color,
-            );
-        }
-
-        self.bar_buttons(&mut c, view, buttons, background, scale, p);
-        c.into_buffer(true)
-    }
-
-    /// A floating bar's pill (see `BarButtons::floats`): a round panel with
-    /// its shadow; a web page's with its back, forward and reload, its
-    /// address in a soft field, the host plain and the path muted and cut
-    /// in the middle, then copy, zoom and close; an app's with its title,
-    /// then zoom and close.
-    fn pane_pill(&self, view: &PaneBarView, scale: f64, p: &Palette) -> MemoryRenderBuffer {
         let size = view.rect.size;
         let mut c = self.popup(size, size.h as f32 / 2.0, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -715,31 +564,72 @@ impl Painter {
                 );
             }
         } else if !matches!(view.buttons, BarButtons::Web { .. }) {
-            let left = px(bar.loc.x + PILL_PAD + BAR_NOTE_GAP) as f32;
+            let mark = PaneBarView::mark_in(bar);
+            // The marks the sidebar's agent chips use: a ring for done, an
+            // open ring in the accent for busy.
+            let s = scale as f32;
+            match view.status {
+                _ if !view.has_mark() => {}
+                BarStatus::Idle | BarStatus::Running => {}
+                BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
+                    status_mark(AgentStatus::Idle, x, y, s)
+                }),
+                BarStatus::Working => icon_sdf(&mut c, mark, scale, p.accent, |x, y| {
+                    status_mark(AgentStatus::Working, x, y, s)
+                }),
+            }
+            let left = if view.has_mark() {
+                px(mark.loc.x + STATUS_WIDTH + STATUS_GAP)
+            } else {
+                px(bar.loc.x + PILL_PAD + BAR_NOTE_GAP)
+            } as f32;
             let end_x = buttons
                 .first()
                 .map_or(bar.loc.x + bar.size.w - PILL_PAD, |(_, first)| first.loc.x);
             let right = px(end_x - BAR_NOTE_GAP / 2) as f32;
-            let label = self.cut_middle(&view.label, DETAIL_FONT_SIZE, right - left, scale);
+            // The note keeps its room; the label is cut short before it.
+            let note_w = view.note.map_or(0.0, |note| {
+                self.text_width(note, DETAIL_FONT_SIZE, scale) + px(BAR_NOTE_GAP) as f32
+            });
+            let label_right = (right - note_w).max(left);
+            let label = self.cut_middle(&view.label, DETAIL_FONT_SIZE, label_right - left, scale);
             let band = band(bar, scale);
-            self.text(
+            let end = self.text(
                 &mut c,
                 &label,
                 DETAIL_FONT_SIZE,
                 left,
-                right,
+                label_right,
                 band,
                 scale,
                 p.text,
             );
+            if let Some(note) = view.note {
+                let color = if view.status == BarStatus::Working {
+                    p.accent
+                } else {
+                    p.muted
+                };
+                self.text(
+                    &mut c,
+                    note,
+                    DETAIL_FONT_SIZE,
+                    end + px(BAR_NOTE_GAP) as f32,
+                    right,
+                    band,
+                    scale,
+                    color,
+                );
+            }
         }
         self.bar_buttons(&mut c, view, buttons, p.elevated, scale, p);
         c.into_buffer(false)
     }
 
-    /// A floating bar's grip, `size` big: a bare band with a short handle
+    /// A bar's band, `size` big: its grip, a bare band with a short handle
     /// in its middle, in the accent while its pane is `focused` (the line
-    /// along the window's top says so too), else faint over a hairline.
+    /// along the window's top says so too), else faint over a hairline. The
+    /// taller band of a bar kept out has no handle: its pill hides it.
     pub(super) fn pane_handle(
         &self,
         size: Size<i32, Logical>,
@@ -754,62 +644,15 @@ impl Painter {
             let line = px(1).max(1);
             c.fill(0, c.h - line, c.w, line, p.border_variant);
         }
+        if size.h > PANE_GRIP {
+            return c.into_buffer(false);
+        }
         let w = HANDLE_W.min(size.w);
         let h = HANDLE_H.min(size.h);
         let at = Rectangle::new(((size.w - w) / 2, (size.h - h) / 2).into(), (w, h).into());
         let (x, y, w, h) = rect_px(at, scale);
         c.rounded(x, y, w, h, h / 2.0, handle_color(focused, p));
         c.into_buffer(false)
-    }
-
-    /// A hidden pane's grip over the whole of `c`: a dot while something
-    /// runs or has run, the title small and cut in the middle, and the
-    /// close button faint at its end. A focused pane's is tinted with the
-    /// accent and ends in an accent line, so the focus shows from afar.
-    fn pane_grip(&self, c: &mut Canvas, view: &PaneBarView, scale: f64, p: &Palette) {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
-        let (_, size, _) = view.placement();
-        let background = if view.focused {
-            mix(p.tab_bar, p.accent, 0.22)
-        } else {
-            p.tab_bar
-        };
-        c.fill(0, 0, c.w, c.h, background);
-        let line = px(1).max(1);
-        let edge = if view.focused {
-            p.accent
-        } else {
-            p.border_variant
-        };
-        c.fill(0, c.h - line, c.w, line, edge);
-        let grip = Rectangle::new((0, 0).into(), size);
-        let dot = match view.status {
-            BarStatus::Running | BarStatus::Working => Some(p.accent),
-            BarStatus::Exited => Some(p.placeholder),
-            BarStatus::Idle => None,
-        };
-        if let Some(color) = dot {
-            let at = Rectangle::new(
-                (
-                    PADDING as i32 + (STATUS_WIDTH - GRIP_DOT) / 2,
-                    (size.h - GRIP_DOT) / 2,
-                )
-                    .into(),
-                (GRIP_DOT, GRIP_DOT).into(),
-            );
-            let (x, y, w, h) = rect_px(at, scale);
-            c.rounded(x, y, w, h, w / 2.0, color);
-        }
-        let close = grip_close(grip);
-        let x = px(PADDING as i32 + STATUS_WIDTH + STATUS_GAP) as f32;
-        let right = px(close.loc.x - BAR_NOTE_GAP) as f32;
-        let label = self.cut_middle(&view.label, GRIP_FONT_SIZE, right - x, scale);
-        let color = if view.focused { p.text } else { p.muted };
-        let band = band(grip, scale);
-        self.text(c, &label, GRIP_FONT_SIZE, x, right, band, scale, color);
-        let faint = mix(p.muted, background, 0.4);
-        icon_sdf(c, close, scale, faint, |x, y| cross(x, y, 0.55 * s));
     }
 
     /// `text` cut to fit `width` (physical pixels) at `size`: whole if it
@@ -875,12 +718,7 @@ impl Painter {
                 );
                 let (x, y, w, h) = rect_px(inset, scale);
                 // Round in a pill, like the pill.
-                let r = if view.buttons.floats() {
-                    w.min(h) / 2.0
-                } else {
-                    4.0 * s
-                };
-                c.rounded(x, y, w, h, r, p.selected);
+                c.rounded(x, y, w, h, w.min(h) / 2.0, p.selected);
             }
             let color = if !enabled {
                 mix(p.placeholder, background, 0.5)
@@ -916,18 +754,18 @@ impl Painter {
 mod tests {
     use super::{
         BAR_PILL_HEIGHT, BAR_REVEAL, BAR_SLIDE, BarButton, BarButtons, BarHit, BarStatus,
-        FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_MARGIN, PILL_PAD, PILL_TOP, PILL_WEB_MAX,
+        FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_DROP, PILL_MARGIN, PILL_PAD, PILL_TOP, PILL_WEB_MAX,
         PaneBarView, SHADOW, UNZOOM_BUTTON, UNZOOM_MARGIN, field_fill, focus_strip,
         focus_strip_rect, handle_color, pane_bar_buttons, pane_bar_field, pane_bar_hit,
-        pane_bar_rect, pane_bar_rects, pane_bar_rects_shown, pane_grip_hit, pane_grip_rect,
-        pointer_reveals, split_address, unzoom_button_rect,
+        pane_bar_rect, pane_bar_rects, pane_bar_rects_shown, pane_grip_rect, pointer_reveals,
+        split_address, unzoom_button_rect,
     };
-    use crate::chrome::{BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
+    use crate::chrome::{BAR_BUTTON, BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
     use smithay::utils::{Point, Size};
 
     fn view(w: i32) -> PaneBarView {
         PaneBarView {
-            rect: Rect::new((0, 0).into(), (w, PANE_BAR_HEIGHT).into()),
+            rect: Rect::new((0, 0).into(), (w, BAR_PILL_HEIGHT).into()),
             grip: Rect::default(),
             label: "npm run dev -- --port 3000 --host 0.0.0.0".into(),
             note: None,
@@ -995,30 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_at_rest_hidden_shows_as_its_grip() {
-        let mut v = view(600);
-        v.slide = BAR_SLIDE;
-        assert_eq!(v.placement().1.h, PANE_GRIP);
-        assert!(v.is_grip());
-        assert_eq!(v.blinker(), None);
-        v.slide = 0;
-        assert!(!v.is_grip());
-        // A grip's close button is where the bar's is.
-        let pane = Rect::new((200, 50).into(), (600, 400).into());
-        let grip = pane_bar_rects_shown(pane, false).0;
-        let end = (200.0 + 600.0 - BAR_INSET as f64 - 4.0, 52.0).into();
-        assert_eq!(
-            pane_grip_hit(grip, end),
-            Some(BarHit::Button(BarButton::Close))
-        );
-        assert_eq!(
-            pane_grip_hit(grip, (300.0, 52.0).into()),
-            Some(BarHit::Label)
-        );
-        assert_eq!(pane_grip_hit(grip, (300.0, 60.0).into()), None);
-    }
-
-    #[test]
     fn a_cut_label_keeps_its_end() {
         let painter = Painter::new();
         let text = "npm run dev -- --port 3000 --host 0.0.0.0";
@@ -1060,14 +874,14 @@ mod tests {
         assert!(!pointer_reveals(pane, T, false, at(300.0, 41.0)));
         assert!(!pointer_reveals(pane, T, false, at(199.0, 50.0)));
         assert!(!pointer_reveals(pane, T, false, at(800.0, 50.0)));
-        // Shown: the whole bar keeps it, and the band above still counts.
-        assert!(pointer_reveals(pane, T, true, at(300.0, 73.0)));
-        assert!(pointer_reveals(pane, T, true, at(300.0, 45.0)));
-        assert!(!pointer_reveals(pane, T, true, at(300.0, 74.0)));
-        // A pane too short for a bar still has its band.
-        let short = Rect::new((0, 100).into(), (300, 4).into());
-        assert!(pointer_reveals(short, T, true, at(10.0, 105.0)));
-        assert!(!pointer_reveals(short, T, true, at(10.0, 108.0)));
+        // Shown: the pill and the shadow round it keep it, and the band
+        // above still counts; beside the pill, the window is the window's.
+        let pill = pane_bar_rect(pane, T);
+        let below = (pill.loc.y + pill.size.h + PILL_MARGIN) as f64;
+        assert!(pointer_reveals(pane, T, true, at(500.0, below - 1.0)));
+        assert!(!pointer_reveals(pane, T, true, at(500.0, below)));
+        assert!(pointer_reveals(pane, T, true, at(210.0, 45.0)));
+        assert!(!pointer_reveals(pane, T, true, at(210.0, 73.0)));
     }
 
     #[test]
@@ -1136,17 +950,18 @@ mod tests {
     }
 
     #[test]
-    fn a_floating_bar_hangs_as_a_pill_in_the_middle_of_its_top_edge() {
+    fn every_bar_hangs_as_a_pill_in_the_middle_of_its_top_edge() {
         let pane = Rect::new((200, 50).into(), (1000, 400).into());
-        assert_eq!(
-            pane_bar_rect(pane, BarButtons::Terminal),
-            pane_bar_rects(pane).0
-        );
-        for kind in [WEB, BarButtons::None] {
-            assert!(kind.floats());
+        let band = pane_bar_rects(pane).0;
+        for kind in [WEB, BarButtons::None, BarButtons::Terminal] {
             let pill = pane_bar_rect(pane, kind);
             assert_eq!(pill.loc.y, 50 + PILL_TOP);
             assert_eq!(pill.size.h, BAR_PILL_HEIGHT);
+            // Kept out, it sits in the middle of its band.
+            assert_eq!(
+                pill.loc.y + pill.size.h + PILL_TOP,
+                band.loc.y + band.size.h
+            );
             // Centred, inside the pane.
             let (left, right) = (pill.loc.x - 200, 1200 - pill.loc.x - pill.size.w);
             assert!((left - right).abs() <= 1, "{left} {right}");
@@ -1158,9 +973,14 @@ mod tests {
                 assert!(r.loc.x > pill.loc.x && r.loc.x + r.size.w < pill.loc.x + pill.size.w);
             }
         }
-        // A web page's grows with its pane, within bounds; an app's doesn't.
+        // A web page's and a terminal's grow with their pane, within
+        // bounds; an app's doesn't.
         let wide = Rect::new((0, 0).into(), (3000, 400).into());
         assert_eq!(pane_bar_rect(wide, WEB).size.w, PILL_WEB_MAX);
+        assert_eq!(
+            pane_bar_rect(wide, BarButtons::Terminal).size.w,
+            PILL_WEB_MAX
+        );
         assert_eq!(pane_bar_rect(wide, BarButtons::None).size.w, PILL_APP);
         let narrow = Rect::new((0, 0).into(), (300, 400).into());
         assert_eq!(pane_bar_rect(narrow, WEB).size.w, 300 - 2 * PILL_MARGIN);
@@ -1205,7 +1025,6 @@ mod tests {
         v.rect = pane_bar_rect(pane, WEB);
         v.grip = pane_grip_rect(pane);
         v.status = BarStatus::Idle;
-        assert!(!v.is_grip());
         assert_eq!(v.grip(), Some(v.grip));
         assert_eq!(v.blinker(), None);
         // Out: drawn whole with its shadow round it.
@@ -1220,12 +1039,15 @@ mod tests {
         assert!(half.y < loc.y && alpha == 0.5);
         v.alpha = 0.0;
         assert_eq!(v.placement().1.h, 0);
-        // A terminal's has no grip of its own: it slides into it.
+        // No band, none drawn.
         assert_eq!(view(600).grip(), None);
         let painter = Painter::new();
         for theme in [Theme::Dark, Theme::Light] {
             for focused in [true, false] {
                 painter.pane_handle(v.grip.size, focused, 2.0, theme.palette());
+                // The band of a bar kept out.
+                let band = pane_bar_rects(pane).0.size;
+                painter.pane_handle(band, focused, 2.0, theme.palette());
             }
             for kind in [WEB, BarButtons::Web { history: false }, BarButtons::None] {
                 let mut v = v.clone();
@@ -1245,6 +1067,16 @@ mod tests {
             let field = field_fill(p);
             for (what, colour, floor) in [("host", p.text, 4.5), ("path", p.muted, 4.5)] {
                 let ratio = contrast(colour, field);
+                assert!(ratio >= floor, "{theme:?}: {what} {ratio:.2}:1");
+            }
+            // A terminal's pill: its command, its note and its marks.
+            for (what, colour, floor) in [
+                ("label", p.text, 4.5),
+                ("note", p.muted, 4.5),
+                ("working note", p.accent, 4.5),
+                ("exited mark", p.placeholder, 3.0),
+            ] {
+                let ratio = contrast(colour, p.elevated);
                 assert!(ratio >= floor, "{theme:?}: {what} {ratio:.2}:1");
             }
             for focused in [true, false] {
@@ -1287,15 +1119,15 @@ mod tests {
             );
             assert!(kind.leading() < order.len());
             let (_, last) = buttons.last().unwrap();
-            let pad = if kind.floats() { PILL_PAD } else { 0 };
-            assert_eq!(last.loc.x + last.size.w, 200 + 600 - pad - BAR_INSET);
+            assert_eq!(last.loc.x + last.size.w, 200 + 600 - PILL_PAD - BAR_INSET);
             for pair in buttons.windows(2) {
                 assert!(pair[0].1.loc.x + pair[0].1.size.w <= pair[1].1.loc.x);
             }
+            let top = 50 + (PANE_BAR_HEIGHT - BAR_BUTTON) / 2;
             assert!(
                 buttons
                     .iter()
-                    .all(|(_, r)| r.loc.y == 50 && r.size.h == PANE_BAR_HEIGHT)
+                    .all(|(_, r)| r.loc.y == top && r.size.h == BAR_BUTTON)
             );
         }
         // A pane alone in its tab has no zoom button; every pane can close.
@@ -1337,7 +1169,7 @@ mod tests {
             pane_bar_hit(bar, kind, None, (210.0, 60.0).into()),
             Some(BarHit::Label)
         );
-        assert_eq!(pane_bar_hit(bar, kind, None, (210.0, 80.0).into()), None);
+        assert_eq!(pane_bar_hit(bar, kind, None, (210.0, 90.0).into()), None);
         assert_eq!(pane_bar_hit(bar, kind, None, (100.0, 60.0).into()), None);
         // A hidden bar has nothing to hit.
         let hidden = Rect::new((200, 50).into(), (600, 0).into());
@@ -1345,19 +1177,12 @@ mod tests {
     }
 
     #[test]
-    fn a_sliding_bar_shows_only_what_is_past_the_edge() {
+    fn a_pill_on_its_way_is_cached_as_at_rest() {
         let mut v = view(600);
         v.alpha = 0.5;
-        v.slide = 10;
-        let (loc, size, alpha) = v.placement();
-        assert_eq!(loc, (0, 0).into());
-        assert_eq!(size, (600, PANE_BAR_HEIGHT - 10).into());
-        assert_eq!(alpha, 0.5);
-        v.slide = PANE_BAR_HEIGHT + 5;
-        assert_eq!(v.placement().1.h, 0);
-        // The cache key forgets the alpha, not the slide.
+        v.slide = BAR_SLIDE / 2;
         let still = v.still();
-        assert_eq!((still.alpha, still.slide), (1.0, PANE_BAR_HEIGHT + 5));
+        assert_eq!((still.alpha, still.slide), (1.0, 0));
     }
 
     #[test]
@@ -1367,16 +1192,22 @@ mod tests {
         v.status = BarStatus::Running;
         let dot = v.blinker().expect("a running bar blinks");
         assert_eq!(dot.size, (crate::chrome::DOT, crate::chrome::DOT).into());
-        assert!(dot.loc.x > 200 && dot.loc.x < 200 + super::PADDING as i32 + super::STATUS_WIDTH);
+        let mark_end = 200 + PILL_PAD + BAR_INSET + super::STATUS_WIDTH;
+        assert!(dot.loc.x > 200 + PILL_PAD && dot.loc.x + dot.size.w <= mark_end);
         let mid = dot.loc.y + dot.size.h / 2;
-        assert!((mid - (50 + PANE_BAR_HEIGHT / 2)).abs() <= 1);
-        // Slid up with the bar, while it stays past the edge.
-        v.slide = 2;
-        assert_eq!(v.blinker().map(|d| d.loc.y), Some(dot.loc.y - 2));
-        v.slide = PANE_BAR_HEIGHT / 2;
+        assert!((mid - (50 + BAR_PILL_HEIGHT / 2)).abs() <= 1);
+        // It drops with the pill, and goes with it.
+        v.slide = BAR_SLIDE;
+        assert_eq!(v.blinker().map(|d| d.loc.y), Some(dot.loc.y - PILL_DROP));
+        v.alpha = 0.0;
         assert_eq!(v.blinker(), None);
+        v.alpha = 1.0;
         v.slide = 0;
         v.status = BarStatus::Exited;
+        assert_eq!(v.blinker(), None);
+        // Only a terminal's runs a command.
+        v.status = BarStatus::Running;
+        v.buttons = BarButtons::None;
         assert_eq!(v.blinker(), None);
     }
 
