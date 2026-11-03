@@ -38,7 +38,7 @@ use smithay::reexports::calloop::channel;
 
 use crate::{
     Expected, Gerdr, Tab, Workspace, WorkspaceKind, app_icons::AppIcon, cli_agents, desktop,
-    home_dir, hooks, layout, state_dir, web_control,
+    home_dir, hooks, keyring, layout, state_dir, web_control,
 };
 
 /// The start of the class of the Ghostty gerdr keeps (see `Gerdr::shared_name`),
@@ -178,7 +178,10 @@ impl Gerdr {
         let kept = leaf
             .filter(|_| !queued && self.keeps(original))
             .and_then(|_| self.take_kept(original));
-        let pid = if queued {
+        // An app keeping its logins in the keyring waits for it to be
+        // open (see `keyring`).
+        let held = !queued && kept.is_none() && uses_keyring(original) && !keyring::state().ready();
+        let pid = if queued || held {
             None
         } else if kept.is_some() {
             kept
@@ -200,7 +203,12 @@ impl Gerdr {
         let mut expected = Expected::new(pid, &app_id, id, leaf.is_none());
         expected.app_command = Some(original.to_owned());
         expected.kept = self.is_kept(pid);
+        expected.held = held;
         self.workspaces[w].tabs[t].expected.push(expected);
+        if held {
+            self.wait_for_keyring();
+            return Some(id);
+        }
         if !queued {
             return Some(id);
         }
@@ -1219,6 +1227,21 @@ fn alacritty_command(command: &str, socket: &Path, dir: &Path, extra: &[String])
     ))
 }
 
+/// Whether `command` starts an app that keeps its logins in the keyring
+/// (see `keyring`): a Chromium, which a web page opens in too (see
+/// `web_app`), or a VS Code.
+pub(crate) fn uses_keyring(command: &str) -> bool {
+    let opener = desktop::url_command(command);
+    if opener
+        .as_deref()
+        .is_some_and(|opener| web_app(command, opener).is_some())
+    {
+        return true;
+    }
+    program_name(opener.as_deref().unwrap_or(command))
+        .is_some_and(|key| CHROMIUMS.contains(&key.as_str()) || VS_CODES.contains(&key.as_str()))
+}
+
 /// The program `command` starts (see `program`), to match commands to the
 /// installed apps by.
 pub fn program_name(command: &str) -> Option<String> {
@@ -1817,6 +1840,21 @@ mod tests {
             paths.push(name);
         }
         paths
+    }
+
+    #[test]
+    fn chromiums_and_vs_codes_wait_for_the_keyring() {
+        for command in [
+            "chromium-browser --app=https://x.dev",
+            "/usr/bin/brave-browser-stable",
+            "cursor .",
+            "code --new-window",
+        ] {
+            assert!(super::uses_keyring(command), "{command}");
+        }
+        for command in ["zed -n .", "firefox", "ghostty", "htop"] {
+            assert!(!super::uses_keyring(command), "{command}");
+        }
     }
 
     #[test]

@@ -34,12 +34,16 @@ pub struct PlaceholderView {
     pub since: Instant,
     pub timed_out: bool,
     pub closed: bool,
+    /// It waits for the keyring to unlock (see `keyring`).
+    pub held: bool,
 }
 
 impl PlaceholderView {
     /// What the placeholder says.
     pub fn text(&self) -> String {
-        if self.closed {
+        if self.held {
+            format!("{} waits for the keyring to unlock", self.label)
+        } else if self.closed {
             format!("{} closed", self.label)
         } else if self.timed_out {
             format!("{} didn't start", self.label)
@@ -195,8 +199,18 @@ mod tests {
             since: Instant::now(),
             timed_out: false,
             closed: false,
+            held: false,
         };
         assert_eq!(waiting.text(), "Starting Zed…");
+        let held = PlaceholderView {
+            label: "chromium-browser".into(),
+            held: true,
+            ..waiting.clone()
+        };
+        assert_eq!(
+            held.text(),
+            "chromium-browser waits for the keyring to unlock"
+        );
         let layout = placeholder_layout(rect, false);
         let spinner = layout.spinner.expect("a spinner while waiting");
         assert_eq!(spinner.size, (SPINNER_SIZE, SPINNER_SIZE).into());

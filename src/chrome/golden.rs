@@ -265,6 +265,7 @@ fn placeholder(timed_out: bool) -> PlaceholderView {
         since: Instant::now(),
         timed_out,
         closed: false,
+        held: false,
     }
 }
 
