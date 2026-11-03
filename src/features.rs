@@ -22,12 +22,14 @@
 //! page or a repository, which scrolls into view. Enter does the page's
 //! next thing (start, show or review the stage's agent, let Build go on
 //! after a milestone, run Verify's checks, mark it done, ship) or the
-//! repository's (touch it, open a tab in it); Ctrl+PgUp/PgDn go to the
+//! repository's (touch it, open a tab in it); Ctrl+PgUp/Ctrl+PgDn go to the
 //! previous or next feature, Ctrl+O opens a tab in the feature's folder,
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Del abandons it (or,
-//! once done, removes its worktrees) after asking.
+//! once done, removes its worktrees) after asking, and F1 lists every
+//! key in place of the page. A done stage's Enter does nothing: Reopen is
+//! only clicked. Each feature's panel is kept as it was left.
 //!
 //! The marks from Build on are bound to the code (see `feature::patch`):
 //! marking one reads the feature's patch-id off the thread first, and the
@@ -724,6 +726,11 @@ pub struct FeaturePanel {
     pub repo: usize,
     /// Each column's scroll, indexed by `TabColumn` (logical pixels).
     pub scroll: [Scroll; 3],
+    /// The page the Page column's scroll is for: the stage, and whether
+    /// the keys list showed. Another page starts at its top.
+    pub page_of: Option<(Stage, bool)>,
+    /// Every key of the tab is listed in place of the page (F1).
+    pub keys: bool,
     pub tab_hover: Option<FeatureTabHit>,
 }
 
@@ -1231,6 +1238,28 @@ impl FeaturePanel {
         self.picked_at = None;
     }
 
+    /// The page the Page column shows on `feature`: its stage, and
+    /// whether the keys list shows in its place.
+    fn page_key(&self, feature: &Feature) -> (Stage, bool) {
+        (self.page_stage(feature), self.keys)
+    }
+
+    /// The Page column's scroll as it shows on `feature`: none while it
+    /// was scrolled for another page.
+    fn page_scroll(&self, feature: &Feature) -> Option<&Scroll> {
+        let col = TabColumn::Page as usize;
+        (self.page_of == Some(self.page_key(feature))).then(|| &self.scroll[col])
+    }
+
+    /// Hold the Page column's scroll for page `key`, from its top if it
+    /// was for another.
+    fn hold_page(&mut self, key: (Stage, bool)) {
+        if self.page_of != Some(key) {
+            self.scroll[TabColumn::Page as usize] = Scroll::default();
+            self.page_of = Some(key);
+        }
+    }
+
     /// Handle a key over `feature`, one of `slugs` listed.
     fn key(
         &mut self,
@@ -1252,6 +1281,17 @@ impl FeaturePanel {
         let stage = self.page_stage(feature);
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
+        let bare = plain && !mods.shift;
+        // The keys list: F1 or Esc puts it away, as does any other key
+        // (it does nothing else then).
+        if self.keys {
+            self.keys = false;
+            return None;
+        }
+        if sym == Keysym::F1 && bare {
+            self.keys = true;
+            return None;
+        }
         let step = match sym {
             Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left if plain => {
                 Some(Step::Back)
@@ -1344,18 +1384,24 @@ fn stage_index(stage: Stage) -> usize {
     Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0)
 }
 
-/// What Enter does on `stage`'s page of `feature`: its first button,
-/// else, on a later stage, says which comes first.
+/// What Enter does on `stage`'s page of `feature`: its button marked
+/// with Enter, else, on a later stage, says which comes first. A done
+/// stage's has none: Reopen is only clicked.
 fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
     page_actions(feature, stage, ctx)
         .into_iter()
-        .next()
+        .find(|(b, _)| b.key == Some(ENTER_MARK))
         .map(|(_, outcome)| outcome)
         .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
+        .filter(|outcome| !matches!(outcome, PanelOutcome::Untick(_)))
 }
 
+/// The key mark of the page button Enter presses.
+const ENTER_MARK: &str = "\u{23ce}";
+
 /// The buttons on `stage`'s page of `feature`, each with what it does:
-/// what Enter does first (the primary, unless it reopens a done stage),
+/// what Enter does first (the primary, or Reopen on a done stage, which
+/// Enter doesn't press),
 /// then its agent's tab, a fresh agent, Verify's evidence, AI review's
 /// fixes to send, and Ship's pull requests. A later stage has none.
 /// The page's clicks and Enter both go by this list.
@@ -1379,11 +1425,12 @@ pub fn page_actions(
         stage_button(feature, stage, ctx),
         row_action(feature, row, ctx),
     ) {
-        let style = match main {
-            PanelOutcome::Untick(_) => ButtonStyle::Plain,
-            _ => ButtonStyle::Primary,
+        // Reopen is no default: Enter leaves a done stage be.
+        let (style, key) = match main {
+            PanelOutcome::Untick(_) => (ButtonStyle::Plain, None),
+            _ => (ButtonStyle::Primary, Some(ENTER_MARK)),
         };
-        out.push((button(label, style, Some("\u{23ce}")), main));
+        out.push((button(label, style, key), main));
     }
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
@@ -1425,6 +1472,21 @@ pub fn page_actions(
         }
     }
     out
+}
+
+/// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
+/// then `remove`.
+fn header_label(remove: &'static str, i: usize) -> Option<&'static str> {
+    chrome::FEATURE_BUTTONS
+        .get(i)
+        .copied()
+        .or((i == chrome::FEATURE_BUTTONS.len()).then_some(remove))
+}
+
+/// The repository `rows` on from `at`, of `len`: it stops at the ends.
+fn strip_step(at: usize, rows: isize, len: usize) -> usize {
+    let last = len.saturating_sub(1);
+    at.min(last).saturating_add_signed(rows).min(last)
 }
 
 /// The slug before (`back`) or after `slug` in `slugs`, round the ends;
@@ -2681,17 +2743,19 @@ impl Gerdr {
         self.close_menu();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
-        // It starts afresh, not as it was left.
-        let key = (project.to_owned(), slug.to_owned());
-        self.features.parked.remove(&key);
+        // It shows as it was left (its parked panel), on the picked
+        // stage while the feature didn't move on.
         let same = |p: &FeaturePanel| p.project == project && p.slug == slug;
         let shown = self.features.panel.as_ref().is_some_and(same);
         if !self.show_feature_tab(project, slug) {
             return;
         }
-        if let Some(panel) = self.features.panel.as_mut().filter(|p| same(p)) {
+        // Showing it again where it shows goes back to its current stage.
+        if shown && let Some(panel) = self.features.panel.as_mut().filter(|p| same(p)) {
             panel.unpick();
+            panel.keys = false;
         }
+        self.sync_feature_page();
         // Showing its tab read the feature again, unless it showed already.
         if shown {
             self.probe_feature(project, slug);
@@ -2725,6 +2789,7 @@ impl Gerdr {
             });
             self.features.panel = Some(panel);
             self.features.shown.insert(project.clone(), slug.clone());
+            self.sync_feature_page();
             self.probe_feature(&project, &slug);
         }
         self.refresh_pointer_focus();
@@ -2768,7 +2833,24 @@ impl Gerdr {
         let on_it = |p: &&mut FeaturePanel| p.project == project && p.slug == slug;
         if let Some(panel) = self.features.panel.as_mut().filter(on_it) {
             panel.focus = TabArea::Stages;
+            panel.keys = false;
             panel.pick(&feature, stage);
+        }
+        self.sync_feature_page();
+    }
+
+    /// Hold the feature tab's Page scroll for the page it shows now (see
+    /// `FeaturePanel::sync_page`).
+    fn sync_feature_page(&mut self) {
+        let Some(panel) = self.features.panel.as_ref() else {
+            return;
+        };
+        let Some(key) = (self.feature(&panel.project, &panel.slug)).map(|f| panel.page_key(f))
+        else {
+            return;
+        };
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.hold_page(key);
         }
     }
 
@@ -2794,6 +2876,17 @@ impl Gerdr {
             self.page_feature_tab(sign);
             return None;
         }
+        // Up and Down scroll the keys list a notch.
+        let keys = (self.features.panel.as_ref()).is_some_and(|p| p.keys);
+        let notch = match sym {
+            Keysym::Up | Keysym::KP_Up if plain => Some(-1.0),
+            Keysym::Down | Keysym::KP_Down if plain => Some(1.0),
+            _ => None,
+        };
+        if let Some(sign) = notch.filter(|_| keys) {
+            self.feature_panel_scroll_page(Motion::Notches(sign));
+            return None;
+        }
         let panel = self.features.panel.as_ref()?;
         let slugs = self.listed_slugs(&panel.project);
         let feature = self.feature(&panel.project, &panel.slug).cloned()?;
@@ -2806,12 +2899,27 @@ impl Gerdr {
         if moved {
             self.reveal_feature_repo();
         }
+        self.sync_feature_page();
         outcome
+    }
+
+    /// Move the feature tab's Page column by `motion`, wherever the
+    /// pointer is.
+    fn feature_panel_scroll_page(&mut self, motion: Motion) {
+        self.sync_feature_page();
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let col = TabColumn::Page;
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.scroll[col as usize].apply(motion, Instant::now(), tab_bounds(&layout, col));
+        }
     }
 
     /// Glide the feature tab's page column a page down (`sign` 1) or up
     /// (-1), keeping a little of what showed in view, as PgUp / PgDn do.
     fn page_feature_tab(&mut self, sign: f64) {
+        self.sync_feature_page();
         let Some((_, layout)) = self.feature_tab_parts() else {
             return;
         };
@@ -3594,6 +3702,7 @@ impl Gerdr {
                     (self.features.panel.as_mut(), Stage::ALL.get(i))
                 {
                     panel.focus = TabArea::Stages;
+                    panel.keys = false;
                     panel.pick(&feature, *stage);
                 }
                 None
@@ -3610,9 +3719,20 @@ impl Gerdr {
                 }
                 None
             }
-            FeatureTabHit::RepoButton(i) => repo_button(&feature, i),
+            FeatureTabHit::RepoButton(i) => {
+                // Its row takes the keyboard too.
+                if let Some(panel) =
+                    (self.features.panel.as_mut()).filter(|_| i < feature.repos.len())
+                {
+                    panel.focus = TabArea::Repos;
+                    panel.repo = i;
+                }
+                repo_button(&feature, i)
+            }
             FeatureTabHit::PageButton(i) => {
-                let stage = self.features.panel.as_ref().map(|p| p.page_stage(&feature));
+                let stage = (self.features.panel.as_ref())
+                    .filter(|p| !p.keys)
+                    .map(|p| p.page_stage(&feature));
                 stage.and_then(|stage| {
                     let mut actions = page_actions(&feature, stage, ctx);
                     (i < actions.len()).then(|| actions.swap_remove(i).1)
@@ -3623,6 +3743,7 @@ impl Gerdr {
             FeatureTabHit::Button(2) => Some(PanelOutcome::New),
             FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
         };
+        self.sync_feature_page();
         if let Some(outcome) = outcome {
             self.apply_feature_panel(outcome);
         }
@@ -3645,6 +3766,18 @@ impl Gerdr {
                     None => stage.about().to_owned(),
                 };
                 Some(Tooltip::new(&text, *layout.nodes.get(i)?))
+            }
+            // Icons alone on a narrow tab: their names.
+            FeatureTabHit::Button(i) if layout.compact => {
+                let label = header_label(view.remove, i)?;
+                Some(Tooltip::new(label, *layout.buttons.get(i)?))
+            }
+            FeatureTabHit::Prev | FeatureTabHit::Next => {
+                let (_, prev, next) = layout.switch?;
+                Some(match hit? {
+                    FeatureTabHit::Prev => Tooltip::new("Previous feature", prev),
+                    _ => Tooltip::new("Next feature", next),
+                })
             }
             _ => None,
         }
@@ -3669,18 +3802,55 @@ impl Gerdr {
 
     /// The wheel or the touchpad over the feature tab: the column under
     /// the pointer moves.
+    /// Over the narrow tab's row of repository chips, the wheel steps
+    /// through the repositories instead. What is under the pointer is
+    /// found again once the column stops (see `tick_scrolls`).
     pub fn feature_panel_scroll(&mut self, motion: Motion) {
-        let Some((col, bounds)) = self.feature_tab_column(self.pointer) else {
-            return;
-        };
-        if let Some(panel) = self.features.panel.as_mut() {
+        self.sync_feature_page();
+        let pos = self.pointer.to_i32_round();
+        let on_strip = (self.feature_tab_parts()).is_some_and(|(_, l)| {
+            l.columns[TabColumn::Repos as usize].is_none()
+                && l.strip.is_some_and(|r| r.contains(pos))
+        });
+        if on_strip {
+            return self.feature_strip_scroll(motion);
+        }
+        if let Some((col, bounds)) = self.feature_tab_column(self.pointer)
+            && let Some(panel) = self.features.panel.as_mut()
+        {
             panel.scroll[col as usize].apply(motion, Instant::now(), bounds);
         }
+        // What is under the pointer is found again now, and once the
+        // column stops (see `tick_scrolls`): a tooltip left goes.
+        self.scrolling = true;
+        let time = self.start_time.elapsed().as_millis() as u32;
+        self.pointer_moved(self.pointer, time);
+    }
+
+    /// The wheel over the narrow tab's repository chips: the next one down
+    /// (or up) takes the keyboard.
+    fn feature_strip_scroll(&mut self, motion: Motion) {
+        let Some(repos) = self.panel_feature().map(|f| f.repos.len()) else {
+            return;
+        };
+        let rows = self.motion_rows(motion, TAB_NOTCH);
+        if rows == 0 || repos == 0 {
+            return;
+        }
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.focus = TabArea::Repos;
+            panel.repo = strip_step(panel.repo, rows, repos);
+        }
+        let time = self.start_time.elapsed().as_millis() as u32;
+        self.pointer_moved(self.pointer, time);
     }
 
     /// Move the feature tab's columns on to `now` if they move on their
     /// own; whether one still does.
     pub fn feature_tab_scroll_tick(&mut self, now: Instant) -> bool {
+        // Every frame: a page shown afresh (picked, or the feature moved
+        // on) starts at its top.
+        self.sync_feature_page();
         let moving = (self.features.panel.as_ref()).is_some_and(|p| {
             p.scroll
                 .iter()
@@ -4557,6 +4727,12 @@ fn stage_page(
             Stage::CodeReview | Stage::ManualTest => {}
         }
     }
+    // The agent's card says what it does: the status line needn't again.
+    let carded = |l: &CheckLine| {
+        (sections.iter())
+            .any(|s| matches!(s, PageSection::Agent { status, .. } if *status == l.text))
+    };
+    let status = status.filter(|l| !carded(l));
     StagePage {
         title: stage.label().to_owned(),
         about: stage.about().to_owned(),
@@ -4608,6 +4784,68 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
         .collect()
 }
 
+/// Every key the feature tab takes, by where it works, as F1 lists them:
+/// (heading, [(keys, what they do)]).
+const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
+    (
+        "Stages",
+        &[
+            ("Left / Right", "previous or next stage"),
+            ("Up / Down", "previous or next stage"),
+            ("Ctrl+K / Ctrl+J", "previous or next stage"),
+            ("Home / End", "first or last stage"),
+            ("Enter", "the page's main button (not Reopen)"),
+            ("Ctrl+Shift+O", "Verify's evidence"),
+            ("Ctrl+R", "start the stage's agent afresh"),
+        ],
+    ),
+    (
+        "Repositories",
+        &[
+            ("Up / Down", "previous or next repository"),
+            ("Left / Right", "previous or next repository"),
+            ("Ctrl+K / Ctrl+J", "previous or next repository"),
+            ("Home / End", "first or last repository"),
+            ("Enter", "open a tab in it, or touch it"),
+            ("Ctrl+Shift+O", "open its pull request"),
+        ],
+    ),
+    (
+        "Anywhere on the tab",
+        &[
+            ("Tab / Shift+Tab", "stages or repositories"),
+            ("PgUp / PgDn", "scroll the page"),
+            ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
+            ("Ctrl+O", "open a tab in the feature's folder"),
+            ("Ctrl+C", "copy the feature's path"),
+            ("Ctrl+N", "new feature"),
+            ("Ctrl+Shift+L", "link another project, before Ship"),
+            ("Del", "abandon it, or remove its worktrees once done"),
+            ("F1", "list these keys; any key puts them away"),
+        ],
+    ),
+];
+
+/// The page listing every key of the tab (F1), in place of a stage's.
+fn keys_page() -> StagePage {
+    let sections = TAB_KEYS
+        .iter()
+        .map(|(label, keys)| {
+            let rows = (keys.iter())
+                .map(|(k, what)| line(format!("{k}: {what}"), CheckTone::Note))
+                .collect();
+            lines(label, rows)
+        })
+        .collect();
+    StagePage {
+        title: "Keys".to_owned(),
+        about: "Every key of the feature tab. Press any key to go back.".to_owned(),
+        status: None,
+        buttons: Vec::new(),
+        sections,
+    }
+}
+
 /// The feature tab's key hints over `feature`, one of `slugs`, as `panel`
 /// has the keyboard on `stage`'s page.
 fn tab_hints(
@@ -4618,6 +4856,9 @@ fn tab_hints(
     ctx: RowCtx,
 ) -> Vec<(String, String)> {
     let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
+    if panel.keys {
+        return vec![hint("Esc", "back to the page"), hint("F1", "hide the keys")];
+    }
     let mut hints = Vec::new();
     let repos = !feature.repos.is_empty();
     match panel.focus {
@@ -4655,7 +4896,7 @@ fn tab_hints(
         }
     }
     if slugs.len() > 1 {
-        hints.push(hint("Ctrl+PgUp / PgDn", "other feature"));
+        hints.push(hint("Ctrl+PgUp / Ctrl+PgDn", "other feature"));
     }
     hints.extend([
         hint("Ctrl+O", "open tab"),
@@ -4666,6 +4907,7 @@ fn tab_hints(
         hints.push(hint("Ctrl+Shift+L", "link project"));
     }
     hints.push(hint("Del", &remove_label(feature).to_lowercase()));
+    hints.push(hint("F1", "all keys"));
     hints
 }
 
@@ -4702,8 +4944,16 @@ fn tab_view(
             ..rail_node(feature, *s, state, now)
         })
         .collect();
-    let actions = page_actions(feature, stage, state.ctx);
-    let page = stage_page(feature, stage, state, &actions, now);
+    let page = match panel.keys {
+        true => keys_page(),
+        false => stage_page(
+            feature,
+            stage,
+            state,
+            &page_actions(feature, stage, state.ctx),
+            now,
+        ),
+    };
     let repos_error = match state.probe.map(|p| &p.reading) {
         Some(Err(why)) => Some(format!("Couldn't read the code: {why}")),
         _ => None,
@@ -4736,7 +4986,13 @@ fn tab_view(
         focus,
         page,
         activity: activity(feature, now),
-        scroll: panel.scroll.each_ref().map(|s| s.pos() - s.overscroll()),
+        scroll: std::array::from_fn(|col| {
+            let s = match col == TabColumn::Page as usize {
+                true => panel.page_scroll(feature),
+                false => Some(&panel.scroll[col]),
+            };
+            s.map_or(0.0, |s| s.pos() - s.overscroll())
+        }),
         hover: panel.tab_hover,
         hints: tab_hints(panel, feature, stage, slugs, state.ctx),
     }
@@ -5195,9 +5451,13 @@ pub(crate) mod tests {
         // Left and Right (Up, Down, Ctrl+J/K) pick another stage's page.
         assert_eq!(press(&mut panel, &f, key(Keysym::Left)), None);
         assert_eq!(panel.page_stage(&f), Stage::Plan);
+        // A done stage's Enter does nothing: Reopen is only clicked.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Return)), None);
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert_eq!(actions[0].1, PanelOutcome::Untick(Stage::Plan));
         assert_eq!(
-            press(&mut panel, &f, key(Keysym::Return)),
-            Some(PanelOutcome::Untick(Stage::Plan))
+            (actions[0].0.style, actions[0].0.key),
+            (ButtonStyle::Plain, None)
         );
         press(&mut panel, &f, ctrl(Keysym::j));
         press(&mut panel, &f, key(Keysym::Right));
@@ -5299,6 +5559,126 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn another_page_starts_at_its_top() {
+        let f = feature("b", vec![repo("api", true)], 2);
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "b".into(),
+            ..FeaturePanel::default()
+        };
+        let page = TabColumn::Page as usize;
+        let slugs = vec!["b".to_owned()];
+        let state = PanelState::default();
+        // Build's page, scrolled down (PgDn to its end).
+        panel.hold_page(panel.page_key(&f));
+        panel.scroll[page].jump(300.0);
+        assert_eq!(
+            tab_view(&panel, &f, &slugs, &state, 2_060).scroll[page],
+            300.0
+        );
+        // Right: Verify's page shows from its top, at once and held.
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(
+            tab_view(&panel, &f, &slugs, &state, 2_060).scroll[page],
+            0.0
+        );
+        panel.hold_page(panel.page_key(&f));
+        assert_eq!(panel.scroll[page].pos(), 0.0);
+        // Back on Build, scrolled again: the feature moving on (the reset
+        // rule) shows the current stage's page from its top too.
+        press(&mut panel, &f, key(Keysym::Left));
+        panel.hold_page(panel.page_key(&f));
+        panel.scroll[page].jump(200.0);
+        press(&mut panel, &f, key(Keysym::Home));
+        panel.hold_page(panel.page_key(&f));
+        assert_eq!(panel.page_stage(&f), Stage::Discover);
+        panel.scroll[page].jump(120.0);
+        let moved_on = feature("b", vec![repo("api", true)], 3);
+        assert_eq!(panel.page_stage(&moved_on), Stage::Verify);
+        assert_eq!(
+            tab_view(&panel, &moved_on, &slugs, &state, 2_060).scroll[page],
+            0.0
+        );
+        // The other columns keep theirs.
+        panel.scroll[TabColumn::Repos as usize].jump(40.0);
+        panel.hold_page(panel.page_key(&moved_on));
+        assert_eq!(panel.scroll[TabColumn::Repos as usize].pos(), 40.0);
+        assert_eq!(panel.scroll[page].pos(), 0.0);
+    }
+
+    #[test]
+    fn f1_lists_every_key_in_place_of_the_page() {
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 2);
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "b".into(),
+            ..FeaturePanel::default()
+        };
+        let three = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let state = PanelState::default();
+        // Every hint the footer offers, either focus, is in the list (K3).
+        let mut offered: Vec<String> = Vec::new();
+        for focus in [TabArea::Stages, TabArea::Repos] {
+            panel.focus = focus;
+            for stage in Stage::ALL {
+                panel.pick(&f, stage);
+                let view = tab_view(&panel, &f, &three, &state, 2_060);
+                offered.extend(view.hints.into_iter().map(|(k, _)| k));
+            }
+        }
+        panel.focus = TabArea::Stages;
+        panel.unpick();
+        assert_eq!(press(&mut panel, &f, key(Keysym::F1)), None);
+        assert!(panel.keys);
+        let view = tab_view(&panel, &f, &three, &state, 2_060);
+        assert_eq!(view.page.title, "Keys");
+        assert!(view.page.buttons.is_empty());
+        let listed: Vec<String> = (view.page.sections.iter())
+            .flat_map(|s| match s {
+                PageSection::Lines { lines, .. } => lines.iter().map(|l| l.text.clone()).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        // Each key offered, alone or among others ("Tab" in "Tab /
+        // Shift+Tab").
+        let listed_keys: Vec<&str> = (listed.iter())
+            .filter_map(|l| l.split_once(": ").map(|(k, _)| k))
+            .flat_map(|k| k.split(" / "))
+            .collect();
+        for keys in &offered {
+            for k in keys.split(" / ") {
+                assert!(listed_keys.contains(&k), "{k} listed");
+            }
+        }
+        let hints: Vec<&str> = view.hints.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(hints, ["Esc", "F1"]);
+        // Any key puts the list away and does nothing else.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Return)), None);
+        assert!(!panel.keys);
+        assert_eq!(panel.page_stage(&f), Stage::Build);
+        press(&mut panel, &f, key(Keysym::F1));
+        press(&mut panel, &f, key(Keysym::F1));
+        assert!(!panel.keys);
+        press(&mut panel, &f, key(Keysym::F1));
+        press(&mut panel, &f, key(Keysym::Escape));
+        assert!(!panel.keys);
+    }
+
+    #[test]
+    fn header_buttons_and_the_strip_wheel() {
+        assert_eq!(header_label("Abandon", 0), Some("Open tab"));
+        assert_eq!(header_label("Abandon", 2), Some("New feature\u{2026}"));
+        assert_eq!(header_label("Abandon", 3), Some("Abandon"));
+        assert_eq!(header_label("Abandon", 4), None);
+        // The wheel over the chips steps the repositories, stopping at
+        // the ends.
+        assert_eq!(strip_step(0, 1, 3), 1);
+        assert_eq!(strip_step(2, 1, 3), 2);
+        assert_eq!(strip_step(1, -3, 3), 0);
+        assert_eq!(strip_step(5, 0, 3), 2);
+    }
+
+    #[test]
     fn a_picked_page_holds_until_the_feature_moves_on() {
         let mut f = feature("b", vec![repo("api", true)], 2);
         let mut panel = FeaturePanel::default();
@@ -5392,6 +5772,7 @@ pub(crate) mod tests {
                 "Ctrl+N",
                 "Ctrl+Shift+L",
                 "Del",
+                "F1",
             ]
         );
         assert_eq!(view.hints[1].1, "mark done");
@@ -5416,7 +5797,7 @@ pub(crate) mod tests {
                 ("Up / Down", "repository"),
                 ("Enter", "touch"),
                 ("Tab", "stages"),
-                ("Ctrl+PgUp / PgDn", "other feature"),
+                ("Ctrl+PgUp / Ctrl+PgDn", "other feature"),
             ]
         );
         // A probe that couldn't read the code says so.
@@ -6394,13 +6775,8 @@ pub(crate) mod tests {
         assert_eq!(actions[1].0.key, Some("Ctrl+R"));
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(page.title, "Build");
-        assert_eq!(
-            page.status,
-            Some(line(
-                "Claude Code working \u{b7} started 16m ago",
-                CheckTone::Note
-            ))
-        );
+        // The agent's card below says what it does.
+        assert_eq!(page.status, None);
         assert_eq!(
             page.sections,
             [PageSection::Agent {
@@ -6493,7 +6869,12 @@ pub(crate) mod tests {
             ]
         );
         let page = stage_page(&f, Stage::Plan, &state, &actions, 2_000);
-        assert_eq!(page.status.as_ref().map(|s| s.tone), Some(CheckTone::Ready));
+        // The agent's card says it: no status line says it again.
+        assert_eq!(page.status, None);
+        assert!(matches!(
+            &page.sections[0],
+            PageSection::Agent { status, .. } if status == "Claude Code done \u{b7} plan.md ready"
+        ));
         assert!(matches!(
             page.sections[0],
             PageSection::Agent {
