@@ -1514,7 +1514,11 @@ fn ship_panel(check: Vec<super::CheckLine>) -> super::FeaturePanelView {
                 } else {
                     "done 2h ago by you".to_owned()
                 },
-                mark: if ship { StageMark::Current } else { StageMark::Done },
+                mark: if ship {
+                    StageMark::Current
+                } else {
+                    StageMark::Done
+                },
                 button: Some(if ship { "Ship\u{2026}" } else { "Reopen" }),
             }
         })
@@ -1639,10 +1643,82 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.feature_panel(&feature_ship_blocked(), size, scale, p)),
         hash(painter.feature_panel(&feature_ship_ready(), size, scale, p)),
         hash(painter.feature_panel(&feature_done_prs(), size, scale, p)),
+        hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
+        hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
     ]
 }
 
-const FEATURES: [&str; 7] = [
+/// The manual test sheet: a criterion of each kind, one cut short, the
+/// last refusal said; `note`: a failure's note being written.
+fn manual_test(note: bool) -> super::ManualTestView {
+    use super::{ManualMark, ManualRow};
+    let row = |id: &str, text: &str, mark, note: &str, sent| ManualRow {
+        id: id.into(),
+        text: text.into(),
+        mark,
+        note: note.into(),
+        sent,
+    };
+    let hints: &[(&str, &str)] = if note {
+        &[("Enter", "save"), ("Esc", "save")]
+    } else {
+        &[
+            ("Space", "pass"),
+            ("f", "fail\u{2026}"),
+            ("Del", "clear"),
+            ("Ctrl+Enter", "mark passed"),
+            ("Ctrl+Shift+Enter", "send failures"),
+            ("F1", "keys"),
+            ("Esc", "close"),
+        ]
+    };
+    super::ManualTestView {
+        title: "Manual test of \u{201c}Bulk export of invoices\u{201d}".into(),
+        sub: "1 of 4 criteria passed \u{b7} 2 failed".into(),
+        rows: vec![
+            row(
+                "AC-1",
+                "Given two invoices, when I export both, then one CSV holds both",
+                ManualMark::Passed,
+                "",
+                false,
+            ),
+            row(
+                "AC-2",
+                "Given no invoices, when I export, then the button is off",
+                ManualMark::Failed,
+                "The button stays on and exports an empty file",
+                true,
+            ),
+            row(
+                "AC-3",
+                "Given a cancelled invoice, when I export, then it is left out of the file and the total",
+                ManualMark::Failed,
+                "It shows with a total of 0",
+                false,
+            ),
+            row(
+                "AC-4",
+                "Given 500 invoices, when I export, then it is done in a second",
+                ManualMark::Untested,
+                "",
+                false,
+            ),
+        ],
+        cursor: if note { 3 } else { 2 },
+        top: 0,
+        editing: note.then(|| (3, Line::from("Takes 4 seconds"))),
+        notice: (!note).then(|| "Not passed yet: AC-2 failed, AC-3 failed, AC-4 not tried".into()),
+        hover: (!note).then_some(super::ManualHit::Fail(3)),
+        keys: None,
+        hints: hints
+            .iter()
+            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+            .collect(),
+    }
+}
+
+const FEATURES: [&str; 9] = [
     "new_feature",
     "feature_panel",
     "feature_panel_multi",
@@ -1650,10 +1726,12 @@ const FEATURES: [&str; 7] = [
     "feature_ship_blocked",
     "feature_ship_ready",
     "feature_done_prs",
+    "manual_test",
+    "manual_test_note",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 7]; 4] = [
+const GOLDEN_FEATURES: [[u64; 9]; 4] = [
     // Dark at 1
     [
         0xe5e4e33f1868788d, // new_feature
@@ -1663,6 +1741,8 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
         0xc6d96ee5e01de0da, // feature_ship_blocked
         0xc16daf60f0e04c88, // feature_ship_ready
         0x25725cfbc3b3ba91, // feature_done_prs
+        0xd6e30203a62942e4, // manual_test
+        0x62d360577ccf88ce, // manual_test_note
     ],
     // Dark at 2
     [
@@ -1673,6 +1753,8 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
         0x96b5aee7e55e893b, // feature_ship_blocked
         0x55c082e14c28296d, // feature_ship_ready
         0xc43b3e6d75230966, // feature_done_prs
+        0x6c1754681a158e4e, // manual_test
+        0xd1c154091904ae50, // manual_test_note
     ],
     // Light at 1
     [
@@ -1683,6 +1765,8 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
         0x566c8cd22fcb3376, // feature_ship_blocked
         0xb2f69eb40cd2a0e6, // feature_ship_ready
         0x05cc7d58ebc3d6c6, // feature_done_prs
+        0x500d39d85dd6c891, // manual_test
+        0x3ba8483f8f88082d, // manual_test_note
     ],
     // Light at 2
     [
@@ -1693,6 +1777,8 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
         0x9c492950881672d9, // feature_ship_blocked
         0x336e04083585dc13, // feature_ship_ready
         0x0a045e32666be0f4, // feature_done_prs
+        0x7e66cc94db49267b, // manual_test
+        0xb06471a7dc5d5204, // manual_test_note
     ],
 ];
 
@@ -1737,6 +1823,16 @@ fn dump_features() {
                 &dir,
                 &format!("{name}_{tag}"),
                 painter.feature_panel(&view, size, scale, p),
+                px(panel.size.w + shadow),
+            );
+        }
+        for (name, note) in [("manual_test", false), ("manual_test_note", true)] {
+            let view = manual_test(note);
+            let panel = super::manual_test_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.manual_test_sheet(&view, size, scale, p),
                 px(panel.size.w + shadow),
             );
         }

@@ -51,6 +51,7 @@ mod keep;
 mod keys;
 mod launch;
 mod layout;
+mod manual_test;
 mod menu;
 mod nav;
 mod nav_history;
@@ -6227,6 +6228,7 @@ impl Gerdr {
             checkout: self.checkout_view(),
             confirm: self.confirm_view(),
             new_feature: self.new_feature_view(),
+            manual_test: self.manual_test_view(),
             features: self.feature_panel_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),

@@ -18,17 +18,17 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature panel: a repository's pull request, or Verify's evidence once a run of its checks wrote it). |
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
 | Ctrl+R | Refresh / reload (feature panel: start the stage's agent afresh, Build's too). |
-| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing). |
+| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet). |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
 | Ctrl+Q | Stop a project's session (project menu). |
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
-| Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. |
+| Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. In a feature's manual test sheet, Del clears a criterion's result at once (no arming: Space or `f` gives it again). |
 | Ctrl+Del | Dismiss every listed row of the selected row's group (inbox Services; also its label's "Dismiss all" button). One Undo toast brings them all back. |
 | Ctrl+I | Ignore the selected service error, or stop ignoring it (inbox). An ignored error goes under "Ignored errors", folded to its count; Alt+I (or the label's Show button, or a click on the label) lists them, dim. It sends no notifications or counts. Del there forgets it (armed first). Undo toast. |
-| Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel); go to the next file not viewed (Alt+Shift+Up: the one before). |
+| Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel); go to the next file not viewed (Alt+Shift+Up: the one before). A feature's manual test sheet: mark the criterion passed, or not; `f` marks it failed, with a note saying what went wrong. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
 | Ctrl+C | Copy. Never closes anything. |
 

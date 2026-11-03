@@ -166,6 +166,8 @@ enum Intercepted {
     Tasks(crate::tasks::Outcome),
     /// The new feature dialog asked for this.
     NewFeature(crate::features::DialogOutcome),
+    /// The manual test sheet asked for this.
+    ManualTest(crate::manual_test::Outcome),
     /// The feature panel asked for this.
     Features(crate::features::PanelOutcome),
 }
@@ -187,6 +189,8 @@ pub enum Overlay {
     Tasks,
     /// The new feature dialog, with its title field.
     NewFeature,
+    /// The manual test sheet, with a failure's note field.
+    ManualTest,
     /// The feature panel, which has no field: only its key hints come
     /// this way.
     Features,
@@ -254,6 +258,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
         O::Features => Intercepted::Features(crate::features::PanelOutcome::Close),
+        O::ManualTest => Intercepted::ManualTest(crate::manual_test::Outcome::Close),
         _ => return None,
     })
 }
@@ -321,17 +326,23 @@ impl Gerdr {
                         // A dialog takes every key.
                         if let Some(dialog) = top.filter(|o| o.is_dialog()) {
                             state.suppressed_keys.push(code);
-                            // The new feature dialog's title takes pastes,
-                            // and repeats what it takes while held.
-                            if dialog == overlay::Overlay::NewFeature {
+                            // The new feature dialog's title and the manual
+                            // test sheet's note take pastes, and repeat
+                            // what they take while held.
+                            let fielded = match dialog {
+                                overlay::Overlay::NewFeature => Some(Overlay::NewFeature),
+                                overlay::Overlay::ManualTest => Some(Overlay::ManualTest),
+                                _ => None,
+                            };
+                            if let Some(into) = fielded {
                                 state.prefix_armed = false;
                                 if text_field::is_paste(mods, sym) {
-                                    state.paste_clipboard(Overlay::NewFeature);
+                                    state.paste_clipboard(into);
                                     return FilterResult::Intercept(None);
                                 }
                                 let typed = handle.modified_sym();
                                 text_field::took_key();
-                                let out = state.overlay_key(Overlay::NewFeature, mods, sym, typed);
+                                let out = state.overlay_key(into, mods, sym, typed);
                                 let took = text_field::took_key();
                                 state.repeat_key(code, *mods, sym, typed, took);
                                 return FilterResult::Intercept(out);
@@ -767,6 +778,7 @@ impl Gerdr {
             O::Confirm => _ = self.confirm_click(pos),
             O::Tasks => self.tasks_click(pos),
             O::NewFeature => self.new_feature_click(pos),
+            O::ManualTest => self.manual_test_click(pos),
             O::Features => self.feature_panel_click(pos),
             // A click on a toast dismisses it, on its button does what the
             // button says.
@@ -795,7 +807,9 @@ impl Gerdr {
             O::Tooltip | O::ContextMenu => {}
         }
         // A click on a field focuses it, and puts the caret there.
-        if overlay.grabs() && (!overlay.is_dialog() || overlay == O::NewFeature) {
+        if overlay.grabs()
+            && (!overlay.is_dialog() || overlay == O::NewFeature || overlay == O::ManualTest)
+        {
             self.press_field(pos);
         }
     }
@@ -816,6 +830,7 @@ impl Gerdr {
             O::Confirm => self.confirm_controls().iter().any(on),
             O::Tasks => self.tasks_controls().iter().any(on),
             O::NewFeature => self.new_feature_controls().iter().any(on),
+            O::ManualTest => self.manual_test_controls().iter().any(on),
             O::Features => self.feature_panel_controls().iter().any(on),
             O::ContextMenu => self
                 .context_menu
@@ -1206,6 +1221,7 @@ impl Gerdr {
             }
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
             Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
+            Intercepted::ManualTest(outcome) => self.apply_manual_test(outcome),
             Intercepted::Features(outcome) => self.apply_feature_panel(outcome),
         }
     }
@@ -1224,6 +1240,7 @@ impl Gerdr {
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
             O::NewFeature => Some(Overlay::NewFeature),
+            O::ManualTest => Some(Overlay::ManualTest),
             O::Features => Some(Overlay::Features),
             _ => None,
         }
@@ -1272,6 +1289,9 @@ impl Gerdr {
                 .new_feature_key(mods, sym, typed)
                 .map(Intercepted::NewFeature),
             Overlay::Features => self.feature_panel_key(mods, sym).map(Intercepted::Features),
+            Overlay::ManualTest => self
+                .manual_test_key(mods, sym, typed)
+                .map(Intercepted::ManualTest),
         }
     }
 
@@ -1320,6 +1340,9 @@ impl Gerdr {
                 size,
                 scale,
             )),
+            Overlay::ManualTest => {
+                chrome::manual_test_field(&self.manual_test_view()?, size, scale)
+            }
         }
     }
 
@@ -1335,6 +1358,13 @@ impl Gerdr {
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
             Overlay::Tasks | Overlay::Features => None,
             Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
+            Overlay::ManualTest => self
+                .features
+                .manual
+                .as_mut()?
+                .editing
+                .as_mut()
+                .map(|(_, field)| field),
         }
     }
 

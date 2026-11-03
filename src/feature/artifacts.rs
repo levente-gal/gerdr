@@ -178,7 +178,7 @@ fn heading(line: &str) -> Option<String> {
 }
 
 /// Whether `line` reads Given …, when …, then …, in that order.
-fn given_when_then(line: &str) -> bool {
+pub(crate) fn given_when_then(line: &str) -> bool {
     let words: Vec<String> = line
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -196,9 +196,9 @@ fn given_when_then(line: &str) -> bool {
         .is_some()
 }
 
-/// The box of checkbox list item `line` (trimmed): `[ ]`, `[x]` or
-/// `[X]`. A numbered item (`1. [ ] …`, `1) [ ] …`) counts too.
-fn checkbox(line: &str) -> Option<&'static str> {
+/// What list item `line` (trimmed) says after its marker: `- `, `* `,
+/// `+ `, or a number (`1. `, `1) `). `None` when it isn't one.
+pub(crate) fn list_item(line: &str) -> Option<&str> {
     let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let rest = if digits > 0 {
         line[digits..]
@@ -209,10 +209,22 @@ fn checkbox(line: &str) -> Option<&'static str> {
             .or_else(|| line.strip_prefix("* "))
             .or_else(|| line.strip_prefix("+ "))
     };
-    let rest = rest?.trim_start();
+    Some(rest?.trim_start())
+}
+
+/// The box of checkbox list item `line` (trimmed): `[ ]`, `[x]` or
+/// `[X]`. A numbered item (`1. [ ] …`, `1) [ ] …`) counts too.
+pub(crate) fn checkbox(line: &str) -> Option<&'static str> {
+    let rest = list_item(line)?;
     ["[ ]", "[x]", "[X]"]
         .into_iter()
         .find(|b| rest.starts_with(b))
+}
+
+/// The lines of the first section of `text` headed `heading` (any level,
+/// case-insensitive), trimmed, blank ones and fenced code left out.
+pub(crate) fn section<'a>(text: &'a str, heading: &str) -> Option<Vec<&'a str>> {
+    Sections::of(text).get(heading)
 }
 
 /// Whether `line` is the `Migrations:` line: as a list item or in bold

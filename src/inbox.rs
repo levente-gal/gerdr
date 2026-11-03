@@ -858,6 +858,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 }
                 K::Findings { .. } => ("Read", "Enter shows the diff at the first finding"),
                 K::CodeReview => ("Waiting", "Enter shows the diff to review"),
+                K::ManualTest { .. } => ("Waiting", "Enter opens the manual test sheet"),
             };
             field(when, crate::projects::ago(now, *since));
             field("Next", next.to_owned());
@@ -2145,6 +2146,13 @@ mod tests {
         );
         assert!(
             next(GateKind::CodeReview).contains(&field("Next", "Enter shows the diff to review"))
+        );
+        assert!(
+            next(GateKind::ManualTest {
+                passed: 1,
+                total: 2
+            })
+            .contains(&field("Next", "Enter opens the manual test sheet"))
         );
     }
 

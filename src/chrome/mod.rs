@@ -29,6 +29,7 @@ mod help;
 mod hints;
 mod inbox;
 mod layers;
+mod manual_test;
 mod menu;
 mod painter;
 mod pane_bar;
@@ -77,6 +78,7 @@ pub use hints::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
 use layers::*;
+pub use manual_test::*;
 pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
@@ -158,6 +160,8 @@ pub struct ChromeView {
     pub confirm: Option<ConfirmView>,
     /// Set while the new feature dialog is open.
     pub new_feature: Option<NewFeatureView>,
+    /// Set while the manual test sheet is open.
+    pub manual_test: Option<ManualTestView>,
     /// Set while the feature panel is open.
     pub features: Option<FeaturePanelView>,
     /// Set while the project menu is open.
@@ -207,6 +211,7 @@ pub struct Chrome {
     checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
+    manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
     features: Overlay<(FeaturePanelView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
@@ -266,6 +271,7 @@ impl Chrome {
             checkout: Overlay::default(),
             confirm: Overlay::default(),
             new_feature: Overlay::default(),
+            manual_test: Overlay::default(),
             features: Overlay::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
@@ -442,11 +448,20 @@ impl Chrome {
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
+                Kind::ManualTest => {
+                    let sheet = view.manual_test.take().map(|v| {
+                        let (loc, size) = shadowed(manual_test_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.manual_test.part(sheet, now, true, |(v, output, ..)| {
+                        painter.manual_test_sheet(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
                 Kind::Confirm => {
                     let confirm = view.confirm.take().map(|confirm| {
                         let lines = confirm_body_lines(&confirm.body);
-                        let (loc, size) =
-                            shadowed(confirm_lines_layout(output, "", lines).panel);
+                        let (loc, size) = shadowed(confirm_lines_layout(output, "", lines).panel);
                         ((confirm, output, theme, scale), loc, size)
                     });
                     let part = self

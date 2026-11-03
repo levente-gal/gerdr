@@ -816,6 +816,14 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             "review the diff".to_owned(),
             None,
         ),
+        GateKind::ManualTest { passed, total } => {
+            let what = if total == 1 { "criterion" } else { "criteria" };
+            (
+                format!("Manual test of “{title}”: {passed} of {total} {what} passed"),
+                "try the criteria".to_owned(),
+                None,
+            )
+        }
     }
 }
 
@@ -833,10 +841,17 @@ pub fn gate_items(gates: &[GateItem], now_secs: u64) -> Vec<InboxItem> {
                 id: gate_item_id(&gate.project, &gate.slug),
                 section: Section::Gates,
                 // Back from a dismissal when the next stage waits, or
-                // this one again after it was sent back.
+                // this one again after it was sent back; not when the
+                // user's own manual test results change.
                 fingerprint: format!(
-                    "{}|{:?}|{:?}|{}",
-                    gate.slug, gate.stage, gate.kind, gate.since
+                    "{}|{:?}|{}|{}",
+                    gate.slug,
+                    gate.stage,
+                    match gate.kind {
+                        GateKind::ManualTest { .. } => "ManualTest".to_owned(),
+                        kind => format!("{kind:?}"),
+                    },
+                    gate.since
                 ),
                 workspace: None,
                 title,
@@ -1439,6 +1454,31 @@ mod tests {
                 "Code review of “log-in title”: review the diff",
                 "p1 name · review the diff"
             )
+        );
+        assert_eq!(
+            gate(GateKind::ManualTest {
+                passed: 2,
+                total: 3
+            }),
+            line(
+                "Manual test of “log-in title”: 2 of 3 criteria passed",
+                "p1 name · try the criteria"
+            )
+        );
+        // Results given don't bring a dismissed gate back.
+        let mut a = gate_of("p1", "log-in", Stage::ManualTest, 990_000);
+        a.gate.kind = GateKind::ManualTest {
+            passed: 0,
+            total: 3,
+        };
+        let mut b = a.clone();
+        b.gate.kind = GateKind::ManualTest {
+            passed: 1,
+            total: 3,
+        };
+        assert_eq!(
+            gate_items(&[a], 1_000_000)[0].fingerprint,
+            gate_items(&[b], 1_000_000)[0].fingerprint
         );
     }
 

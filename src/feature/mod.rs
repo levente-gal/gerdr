@@ -31,6 +31,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod hook;
 pub mod layout;
+pub mod manual;
 pub mod patch;
 pub mod review_import;
 pub mod setup;
@@ -251,6 +252,9 @@ pub struct Feature {
     /// Code review's viewed ticks (see `viewed`).
     #[serde(default, skip_serializing_if = "viewed::Viewed::is_empty")]
     pub viewed: viewed::Viewed,
+    /// Manual test's results (see `manual`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<manual::ManualTest>,
 }
 
 impl Feature {
@@ -455,6 +459,7 @@ pub(crate) mod tests {
             verify: None,
             review: None,
             viewed: Default::default(),
+            manual: None,
         }
     }
 
@@ -478,6 +483,7 @@ pub(crate) mod tests {
             verify: None,
             review: None,
             viewed: Default::default(),
+            manual: None,
         }
     }
 

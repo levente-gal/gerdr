@@ -861,6 +861,7 @@ mod tests {
             verify: None,
             review: None,
             viewed: Default::default(),
+            manual: None,
             history: Vec::new(),
         }
     }

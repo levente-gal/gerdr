@@ -95,6 +95,11 @@ pub struct Features {
     /// What Build and Verify keep while gerdr runs (see `feature_build`).
     #[allow(dead_code)] // read by `feature_build` (inc 4 contract)
     pub(crate) build: crate::feature_build::BuildState,
+    /// The manual test sheet, while it is open (see `manual_test`).
+    pub(crate) manual: Option<crate::manual_test::ManualSheet>,
+    /// The acceptance criteria of each open feature's brief, by project
+    /// and slug, as last read: none kept for a brief without.
+    pub(crate) criteria: BTreeMap<(String, String), Vec<feature::manual::Criterion>>,
 }
 
 /// How often the patch watch looks: the feature shown, and one whose
@@ -494,6 +499,8 @@ pub enum PanelOutcome {
     SendFixes,
     /// Review the feature's diff (Code review).
     CodeReview,
+    /// Open the manual test sheet (Manual test, with criteria).
+    ManualTest,
     /// Show Verify's `evidence.md`.
     Evidence,
     /// Open this pull request's page.
@@ -549,6 +556,9 @@ pub struct RowCtx {
     /// Verify has checks to run (see `feature::verify::checks`); without,
     /// Verify stays a mark set by hand.
     pub checks: bool,
+    /// How many acceptance criteria the brief has: with some, Manual test
+    /// is marked from its sheet.
+    pub criteria: usize,
 }
 
 /// What Enter (or the row's button) does on `row` of `feature`.
@@ -568,6 +578,9 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
             StageMark::Current if stage == Stage::AiReview => review_action(feature),
             StageMark::Current if stage == Stage::CodeReview => PanelOutcome::CodeReview,
+            StageMark::Current if stage == Stage::ManualTest && ctx.criteria > 0 => {
+                PanelOutcome::ManualTest
+            }
             StageMark::Current if needs(stage).is_some() => agent_action(feature, stage),
             StageMark::Current => PanelOutcome::Tick,
             StageMark::Later => PanelOutcome::NotYet(feature.current()?),
@@ -691,6 +704,7 @@ fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
         Some(PanelOutcome::Findings) => "review findings",
         Some(PanelOutcome::SendFixes) => "send fixes",
         Some(PanelOutcome::CodeReview) => "review code",
+        Some(PanelOutcome::ManualTest) => "test",
         Some(PanelOutcome::Tick) => "mark done",
         Some(PanelOutcome::Ship) => "ship\u{2026}",
         Some(PanelOutcome::Untick(_)) => "reopen",
@@ -715,6 +729,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Findings => Some("Review findings"),
         PanelOutcome::SendFixes => Some("Send fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
+        PanelOutcome::ManualTest => Some("Test\u{2026}"),
         _ => None,
     }
 }
@@ -1321,13 +1336,22 @@ impl Gerdr {
             .find(|b| b.project == project && b.slug == slug && b.job == job)
     }
 
+    /// What the latest probe of feature `slug` of `project` read of its
+    /// code, if it could.
+    pub(crate) fn feature_reading(&self, project: &str, slug: &str) -> Option<&Reading> {
+        let key = (project.to_owned(), slug.to_owned());
+        let probe = self.features.probes.get(&key)?.last.as_ref()?;
+        probe.reading.as_ref().ok()
+    }
+
     /// What the panel's rows need of `feature` besides it.
     fn row_ctx(&self, feature: &Feature) -> RowCtx {
         let checks = self
             .projects
             .project(&feature.project)
             .is_some_and(|p| !feature::verify::checks(feature, &p.workflow.verify).is_empty());
-        RowCtx { checks }
+        let criteria = self.criteria(&feature.project, &feature.slug).len();
+        RowCtx { checks, criteria }
     }
 
     // ------------------------------------------------------ patch watch
@@ -1356,6 +1380,10 @@ impl Gerdr {
         if let Some(panel) = &self.features.panel {
             due.push((panel.project.clone(), panel.slug.clone(), PANEL_EVERY));
         }
+        // The sheet's results count on the code as it is now.
+        if let Some(sheet) = &self.features.manual {
+            due.push((sheet.project.clone(), sheet.slug.clone(), PANEL_EVERY));
+        }
         for (project, all) in &self.features.all {
             for feature in all.iter().filter(|f| watched(f)) {
                 due.push((project.clone(), feature.slug.clone(), watch_every(feature)));
@@ -1381,7 +1409,12 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
-        if feature.status != Status::Open || self.feature_sender().is_none() {
+        if feature.status != Status::Open {
+            return;
+        }
+        // The brief may have changed: its criteria are read again.
+        self.load_criteria(project, slug);
+        if self.feature_sender().is_none() {
             return;
         }
         let mode = self.projects.project(project).and_then(|p| p.workflow.ship);
@@ -1561,6 +1594,30 @@ impl Gerdr {
                 self.show_warning(text);
             }
             Stage::AiReview => self.tick_feature(project, slug, Some(&reading.patch), "gerdr"),
+            Stage::ManualTest if !self.criteria(project, slug).is_empty() => {
+                let criteria = self.criteria(project, slug).to_vec();
+                let passed = self.feature(project, slug).is_some_and(|f| {
+                    feature::manual::all_passed(f.manual.as_ref(), &criteria, Some(&reading.patch))
+                });
+                if !passed {
+                    self.show_warning(
+                        "The code changed since the manual test; try the criteria again".into(),
+                    );
+                } else {
+                    self.tick_feature(project, slug, Some(&reading.patch), "you");
+                    let n = criteria.len();
+                    if let Some(f) = self.feature_mut(project, slug) {
+                        let all = if n == 1 {
+                            "its 1 criterion".to_owned()
+                        } else {
+                            format!("all {n} criteria")
+                        };
+                        f.log(feature::now(), format!("Manual test passed: {all}"));
+                    }
+                    self.save_feature(project, slug);
+                    tracing::info!("manual test of {project}/{slug} passed: {n} criteria");
+                }
+            }
             Stage::Verify => {
                 // Marked by hand, as when no checks are set: AI review
                 // starts as on a pass, its last run's findings checked again.
@@ -1759,6 +1816,7 @@ impl Gerdr {
             verify: None,
             review: None,
             viewed: Default::default(),
+            manual: None,
         };
         self.features
             .all
@@ -1908,7 +1966,7 @@ impl Gerdr {
     /// Open the feature panel on feature `slug` of `project` with the
     /// cursor on `stage`'s row. AI review with findings to decide shows
     /// the diff at the first instead, and Code review the diff, as their
-    /// rows' Enter does.
+    /// rows' Enter does; Manual test with criteria opens its sheet over it.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
         let current = self
             .feature(project, slug)
@@ -1928,6 +1986,15 @@ impl Gerdr {
             }
         }
         self.open_feature(project, slug);
+        // Manual test with criteria opens its sheet over the panel.
+        let testing = stage == Stage::ManualTest
+            && self
+                .feature(project, slug)
+                .is_some_and(|f| f.status == Status::Open && f.current() == Some(stage))
+            && !self.criteria(project, slug).is_empty();
+        if testing {
+            self.open_manual_test(project, slug);
+        }
         let row = Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
         let at = self.panel_feature().map(|f| f.repos.len() + row);
         if let Some((panel, at)) = self.features.panel.as_mut().zip(at) {
@@ -2028,6 +2095,7 @@ impl Gerdr {
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
+            PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
             PanelOutcome::OpenPr(url) => {
                 self.close_feature_panel();
                 let w = self.active_workspace;
@@ -2627,6 +2695,9 @@ impl Gerdr {
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
             code_review: self.code_review_line(&panel.project, &panel.slug),
+            manual: self
+                .manual_counts(feature)
+                .map(crate::manual_test::counts_text),
         };
         Some(panel_view(panel, feature, &slugs, &state, feature::now()))
     }
@@ -2807,6 +2878,9 @@ struct PanelState<'a> {
     /// What Code review's row says once the diff was read (see
     /// `code_review_line`).
     code_review: Option<String>,
+    /// How far Manual test's criteria went, in words, when the brief has
+    /// some (see `manual_test::counts_text`).
+    manual: Option<String>,
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads
@@ -2938,6 +3012,7 @@ fn panel_view(
                         .clone()
                         .unwrap_or_else(|| "review every changed file".into()),
                 ),
+                Stage::ManualTest if mark == StageMark::Current => state.manual.clone(),
                 _ => agent.map(str::to_owned),
             };
             StageRow {
@@ -3052,6 +3127,7 @@ pub(crate) mod tests {
             verify: None,
             review: None,
             viewed: Default::default(),
+            manual: None,
         }
     }
 
@@ -3469,7 +3545,10 @@ pub(crate) mod tests {
     fn verify_runs_its_checks_when_it_has_some_else_is_marked() {
         let f = feature("v", vec![repo("api", true)], 3);
         let verify = PanelRow::Stage(Stage::Verify);
-        let checks = RowCtx { checks: true };
+        let checks = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
         assert_eq!(
             row_action(&f, verify, checks),
             Some(PanelOutcome::RunChecks)
@@ -3595,7 +3674,10 @@ pub(crate) mod tests {
     #[test]
     fn verifys_row_says_what_runs_failed_or_that_it_has_no_checks() {
         let mut f = feature("v", vec![repo("api", true)], 3);
-        let checks = RowCtx { checks: true };
+        let checks = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
         let none = RowCtx::default();
         assert_eq!(
             verify_line(&f, none, None).as_deref(),
@@ -3860,6 +3942,43 @@ pub(crate) mod tests {
 
     fn texts(lines: &[CheckLine]) -> Vec<(&str, CheckTone)> {
         lines.iter().map(|l| (l.text.as_str(), l.tone)).collect()
+    }
+
+    #[test]
+    fn manual_test_opens_its_sheet_when_the_brief_has_criteria() {
+        let f = feature("m", vec![repo("api", true)], 6);
+        assert_eq!(f.current(), Some(Stage::ManualTest));
+        let row = PanelRow::Stage(Stage::ManualTest);
+        // Without criteria it is marked done by hand, as before.
+        let none = RowCtx::default();
+        assert_eq!(row_action(&f, row, none), Some(PanelOutcome::Tick));
+        assert_eq!(stage_button(&f, Stage::ManualTest, none), Some("Mark done"));
+        let some = RowCtx {
+            criteria: 3,
+            ..RowCtx::default()
+        };
+        assert_eq!(row_action(&f, row, some), Some(PanelOutcome::ManualTest));
+        assert_eq!(row_hint(&f, row, some), "test");
+        assert_eq!(
+            stage_button(&f, Stage::ManualTest, some),
+            Some("Test\u{2026}")
+        );
+        let panel = FeaturePanel {
+            cursor: start_cursor(&f),
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["m".to_owned()];
+        let state = PanelState {
+            ctx: some,
+            manual: Some("2 of 3 criteria passed \u{b7} 1 failed".into()),
+            ..PanelState::default()
+        };
+        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
+        assert_eq!(
+            view.stages[6].detail,
+            "2 of 3 criteria passed \u{b7} 1 failed"
+        );
+        assert_eq!(view.stages[6].button, Some("Test\u{2026}"));
     }
 
     #[test]

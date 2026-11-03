@@ -3,7 +3,7 @@
 //! paints in the same order, so what takes a click is always what shows.
 //!
 //! From the top: the tooltip, the modal dialogs (quit, restart, checkout,
-//! new feature, confirm), the context menu, the toasts, the welcome screen,
+//! new feature, the manual test sheet, confirm), the context menu, the toasts, the welcome screen,
 //! the help panel, then the panels (the tasks, the feature panel, the
 //! project menu, the worktrees popup, the repositories and inbox panels,
 //! the scrollback viewer, the switcher).
@@ -32,6 +32,9 @@ pub enum Overlay {
     Checkout,
     /// The new feature dialog (see `features`).
     NewFeature,
+    /// The manual test sheet: a feature's acceptance criteria to try
+    /// (see `manual_test`).
+    ManualTest,
     Confirm,
     ContextMenu,
     Toasts,
@@ -52,12 +55,13 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 18] = [
+    pub const ORDER: [Self; 19] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
         Self::Checkout,
         Self::NewFeature,
+        Self::ManualTest,
         Self::Confirm,
         Self::ContextMenu,
         Self::Toasts,
@@ -78,7 +82,12 @@ impl Overlay {
     pub fn is_dialog(self) -> bool {
         matches!(
             self,
-            Self::Quit | Self::Restart | Self::Checkout | Self::NewFeature | Self::Confirm
+            Self::Quit
+                | Self::Restart
+                | Self::Checkout
+                | Self::NewFeature
+                | Self::ManualTest
+                | Self::Confirm
         )
     }
 
@@ -140,6 +149,7 @@ impl Overlay {
             Self::Restart => "the restart dialog",
             Self::Checkout => "the checkout dialog",
             Self::NewFeature => "the new feature dialog",
+            Self::ManualTest => "the manual test sheet",
             Self::Confirm => "the dialog",
             Self::ContextMenu => "the menu",
             Self::Toasts => "the notices",
@@ -167,6 +177,7 @@ impl Gerdr {
             Overlay::Restart => self.restart.is_some(),
             Overlay::Checkout => self.checkout.is_some(),
             Overlay::NewFeature => self.features.dialog.is_some(),
+            Overlay::ManualTest => self.features.manual.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
             Overlay::ContextMenu => self.context_menu.is_some(),
             Overlay::Toasts => {
@@ -242,6 +253,7 @@ impl Gerdr {
             Overlay::Confirm => self.confirm_hover(pos),
             Overlay::Tasks => self.tasks_hover(pos),
             Overlay::NewFeature => self.new_feature_hover(pos),
+            Overlay::ManualTest => return self.manual_test_hover(pos),
             Overlay::Features => self.feature_panel_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
             Overlay::Welcome => return self.welcome_hover(pos),
@@ -286,6 +298,12 @@ impl Gerdr {
                 let rows = self.motion_rows(motion, row_pitch(&self.new_feature_rows()));
                 if rows != 0 {
                     self.new_feature_scroll(rows);
+                }
+            }
+            Overlay::ManualTest => {
+                let rows = self.motion_rows(motion, row_pitch(&self.manual_test_rows()));
+                if rows != 0 {
+                    self.manual_test_scroll(rows);
                 }
             }
             Overlay::Features => {

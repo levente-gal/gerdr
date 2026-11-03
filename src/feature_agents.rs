@@ -73,6 +73,9 @@ pub enum GateKind {
     Findings { open: u32, fix: u32 },
     /// Code review waits for the user to review the diff.
     CodeReview,
+    /// Manual test waits for the user to try the brief's criteria:
+    /// `passed` of `total` passed on the code as it is.
+    ManualTest { passed: u32, total: u32 },
 }
 
 /// How long a file must stay good and unchanged to count as done when
@@ -283,6 +286,7 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
     match stage {
         Stage::AiReview => return Err("AI review is done once its findings are decided".into()),
         Stage::CodeReview => return Err("Approve Code review from the feature's diff".into()),
+        Stage::ManualTest => return Err("Mark Manual test passed from its sheet".into()),
         _ => {}
     }
     let name = artifacts::name(stage).unwrap_or("its file");
@@ -300,7 +304,12 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
 /// to be decided or sent to Build; Code review, from AI review's mark. A
 /// Build run's `ready` says Build was marked done, not that anything waits
 /// for review.
-fn gate_of(f: &Feature) -> Option<(Stage, u64, GateKind)> {
+/// Manual test, while its brief has criteria (`manual` says how many
+/// passed of how many), from Code review's mark.
+fn gate_of(
+    f: &Feature,
+    manual: impl Fn(&Feature) -> Option<(u32, u32)>,
+) -> Option<(Stage, u64, GateKind)> {
     if f.status != Status::Open {
         return None;
     }
@@ -336,17 +345,26 @@ fn gate_of(f: &Feature) -> Option<(Stage, u64, GateKind)> {
             let since = f.marks.get(&Stage::AiReview).map_or(f.created, |m| m.at);
             Some((stage, since, GateKind::CodeReview))
         }
+        Stage::ManualTest => {
+            let (passed, total) = manual(f).filter(|(_, total)| *total > 0)?;
+            let since = f.marks.get(&Stage::CodeReview).map_or(f.created, |m| m.at);
+            Some((stage, since, GateKind::ManualTest { passed, total }))
+        }
         _ => None,
     }
 }
 
-/// The gates waiting in `all` (features by project), oldest first.
-fn gates(all: &BTreeMap<String, Vec<Feature>>) -> Vec<Gate> {
+/// The gates waiting in `all` (features by project), oldest first;
+/// `manual` says how far a feature's manual test went (see `gate_of`).
+fn gates(
+    all: &BTreeMap<String, Vec<Feature>>,
+    manual: impl Fn(&Feature) -> Option<(u32, u32)> + Copy,
+) -> Vec<Gate> {
     let mut gates: Vec<Gate> = all
         .iter()
         .flat_map(|(project, features)| {
             features.iter().filter_map(move |f| {
-                let (stage, since, kind) = gate_of(f)?;
+                let (stage, since, kind) = gate_of(f, manual)?;
                 Some(Gate {
                     project: project.clone(),
                     slug: f.slug.clone(),
@@ -1142,7 +1160,12 @@ impl Gerdr {
 
     /// The gates waiting for the user, oldest first, over every project.
     pub fn waiting_gates(&self) -> Vec<Gate> {
-        gates(&self.features.all)
+        let manual = |f: &Feature| {
+            let n = self.manual_counts(f)?;
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            Some((count(n.passed), count(n.total())))
+        };
+        gates(&self.features.all, manual)
     }
 
     /// Approve `stage` of feature `slug`: its file as it is now. Marks
@@ -1346,7 +1369,7 @@ mod tests {
             ("one".to_owned(), vec![a, c, d]),
             ("two".to_owned(), vec![b, e]),
         ]);
-        let gates = gates(&all);
+        let gates = gates(&all, |_| None);
         let got: Vec<(&str, &str, Stage, u64)> = gates
             .iter()
             .map(|g| (g.project.as_str(), g.slug.as_str(), g.stage, g.since))
@@ -1521,28 +1544,47 @@ mod tests {
             ..AiReview::default()
         });
         // Read in only once the run is ready.
-        assert_eq!(gate_of(&f), None);
+        assert_eq!(gate_of(&f, |_| None), None);
         f.runs.insert(Stage::AiReview, run(Some(500)));
         assert_eq!(
-            gate_of(&f),
+            gate_of(&f, |_| None),
             Some((Stage::AiReview, 500, GateKind::Findings { open: 2, fix: 1 }))
         );
         let review = f.review.as_mut().unwrap();
         review.findings[0].state = FindingState::Dismissed;
         review.findings[1].state = FindingState::Sent;
         assert_eq!(
-            gate_of(&f),
+            gate_of(&f, |_| None),
             Some((Stage::AiReview, 500, GateKind::Findings { open: 0, fix: 1 }))
         );
         f.review.as_mut().unwrap().findings[2].state = FindingState::Sent;
-        assert_eq!(gate_of(&f), None);
+        assert_eq!(gate_of(&f, |_| None), None);
         let mut code = feature("b", vec![repo("api", true)], 5);
         assert_eq!(
-            gate_of(&code),
+            gate_of(&code, |_| None),
             Some((Stage::CodeReview, 2_000, GateKind::CodeReview))
         );
         code.marks.get_mut(&Stage::AiReview).unwrap().at = 3_000;
-        assert_eq!(gate_of(&code).map(|g| g.1), Some(3_000));
+        assert_eq!(gate_of(&code, |_| None).map(|g| g.1), Some(3_000));
+        // Manual test waits only while the brief has criteria.
+        let testing = feature("c", vec![repo("api", true)], 6);
+        assert_eq!(gate_of(&testing, |_| None), None);
+        assert_eq!(gate_of(&testing, |_| Some((0, 0))), None);
+        assert_eq!(
+            gate_of(&testing, |_| Some((1, 2))),
+            Some((
+                Stage::ManualTest,
+                2_000,
+                GateKind::ManualTest {
+                    passed: 1,
+                    total: 2
+                }
+            ))
+        );
+        assert_eq!(
+            approval(&testing, Stage::ManualTest, None),
+            Err("Mark Manual test passed from its sheet".into())
+        );
     }
 
     #[test]
@@ -1891,7 +1933,7 @@ mod tests {
             "one".to_owned(),
             vec![review, built, stopped, failed("d", 3), failed("e", 2)],
         )]);
-        let gates = gates(&all);
+        let gates = gates(&all, |_| None);
         let got: Vec<(&str, Stage, u64, GateKind)> = gates
             .iter()
             .map(|g| (g.slug.as_str(), g.stage, g.since, g.kind))
