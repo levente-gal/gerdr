@@ -5,7 +5,8 @@
 // place of itself: going back never lands on it. gerdr is told where
 // each pane's tab is whenever it changes, whether it can go back or
 // forward, and when it closes, over the native messaging host; it can send
-// a pane's tab to another page, back, forward, or load it again, keep T3
+// a pane's tab to another page (in a single-page app by the app's own
+// router, see `goInApp`), back, forward, or load it again, keep T3
 // Code's app in it to the projects under some folders, and start a thread
 // there in one of them (see `inT3`).
 
@@ -114,6 +115,65 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
 function tabOf(pane) {
   const tab = Object.keys(panes).find((id) => panes[id] === pane);
   return tab === undefined ? undefined : Number(tab);
+}
+
+// In a single-page app's page, go to `href` (a path of the page's own
+// origin) by the app's router, found in React's tree as the `router` of
+// its provider (TanStack Router's `navigate`): the page isn't loaded again.
+// Whether it went: not at a sign-in page, which a load gets past, nor
+// where no router shows within a few seconds. Runs in the page, in its
+// own world.
+function routeTo(href) {
+  const EVERY = 250;
+  const LOOKS = 20;
+  function router() {
+    const root = document.getElementById("root");
+    const key = root && Object.keys(root).find((k) => k.startsWith("__reactContainer$"));
+    const stack = key && root[key] ? [root[key]] : [];
+    let seen = 0;
+    while (stack.length && seen++ < 50000) {
+      const fiber = stack.pop();
+      const found = fiber.memoizedProps?.router;
+      if (found && typeof found.navigate === "function" && found.history) return found;
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }
+    return null;
+  }
+  return new Promise((done) => {
+    let looks = 0;
+    function look() {
+      if (location.pathname.startsWith("/pair")) return done(false);
+      let found = null;
+      try {
+        found = router();
+      } catch {}
+      if (!found) return ++looks < LOOKS ? void setTimeout(look, EVERY) : done(false);
+      try {
+        found.navigate({ href });
+        done(true);
+      } catch {
+        done(false);
+      }
+    }
+    look();
+  });
+}
+
+// Send `tab` to `url` by its app's router when it shows that site already;
+// whether it went.
+async function goInApp(tab, url) {
+  try {
+    const target = new URL(url);
+    const now = (await chrome.tabs.get(tab)).url;
+    if (!now || new URL(now).origin !== target.origin) return false;
+    const href = target.pathname + target.search + target.hash;
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: routeTo, args: [href] });
+    return frame?.result === true;
+  } catch {
+    // Not a page the extension reaches, or one that loaded meanwhile.
+    return false;
+  }
 }
 
 // In T3 Code's app, for the folders `dirs`: `job` "scope" shows their
@@ -424,7 +484,9 @@ async function command(message) {
   try {
     switch (message.type) {
       case "navigate":
-        await chrome.tabs.update(tab, { url: message.url });
+        if (!(message.soft && (await goInApp(tab, message.url)))) {
+          await chrome.tabs.update(tab, { url: message.url });
+        }
         break;
       // From the page, as its own links would: the browser's goBack skips
       // the entries a page made without a click.

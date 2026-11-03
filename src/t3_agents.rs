@@ -941,6 +941,28 @@ fn asks_to_pair(path: &str) -> bool {
     page.trim_end_matches('/') == "/pair" && !path.contains("token=")
 }
 
+/// Pairing link `link` with its token in the query, not the fragment: a
+/// pane at the sign-in page already would only change its fragment, and
+/// the page reads the token as it loads only. T3 Code's page takes either.
+fn token_in_query(link: &str) -> String {
+    let Some((page, fragment)) = link.split_once('#') else {
+        return link.to_owned();
+    };
+    let (token, rest): (Vec<&str>, Vec<&str>) = fragment
+        .split('&')
+        .partition(|part| part.starts_with("token="));
+    let Some(token) = token.first() else {
+        return link.to_owned();
+    };
+    let joint = if page.contains('?') { '&' } else { '?' };
+    let mut out = format!("{page}{joint}{token}");
+    if !rest.is_empty() {
+        out.push('#');
+        out.push_str(&rest.join("&"));
+    }
+    out
+}
+
 /// A one-time link that signs a browser in to `server` (by `t3 pair`).
 fn pairing_link(home: &Path, server: &Server) -> Result<String, String> {
     let binary = t3_binary(home, server).ok_or_else(|| "no t3 command found".to_owned())?;
@@ -1100,8 +1122,9 @@ pub struct T3 {
     /// The folder of the workspace a new thread was asked of, and when,
     /// started once a pane of it shows the app (see `new_t3_thread`).
     new_thread: Option<(PathBuf, Instant)>,
-    /// Whether a pairing link is being asked for.
-    pairing: bool,
+    /// The web panes a pairing link is being asked for, by pane (`None`
+    /// for a new tab).
+    pairing: HashSet<Option<u32>>,
     /// The web panes the extension was told the folders of, for T3 Code's
     /// project filter (see `Gerdr::scope_t3`): the app's origin and the
     /// folders each was told, told again once they change.
@@ -1883,7 +1906,7 @@ impl crate::Gerdr {
                 return;
             }
             let target = link(&own);
-            if page != Page::App && url != target && !self.navigate_web_pane(pane, &target) {
+            if page != Page::App && url != target && !self.go_in_web_app(pane, &target) {
                 // Without gerdr's extension in its browser it can't be
                 // told where to go: a tab of its own then.
                 self.launch(&target, crate::launch::Place::Tab);
@@ -1934,7 +1957,7 @@ impl crate::Gerdr {
         let Some(home) = self.t3.home.clone() else {
             return;
         };
-        if self.t3.pairing {
+        if self.t3.pairing.contains(&pane) {
             return;
         }
         let (tx, rx) = channel::channel::<Result<String, String>>();
@@ -1942,11 +1965,11 @@ impl crate::Gerdr {
             let channel::Event::Msg(result) = event else {
                 return;
             };
-            state.t3.pairing = false;
+            state.t3.pairing.remove(&pane);
             match result {
                 Ok(pairing) => {
                     // At the app's host: `t3 pair` names its own.
-                    let pairing = at_origin(&pairing, &origin);
+                    let pairing = token_in_query(&at_origin(&pairing, &origin));
                     if let Some(marker) = &marker
                         && let Err(err) = std::fs::write(marker, &origin)
                     {
@@ -1979,7 +2002,7 @@ impl crate::Gerdr {
         if let Err(err) = inserted {
             return tracing::warn!("t3 code: {err}");
         }
-        self.t3.pairing = true;
+        self.t3.pairing.insert(pane);
         std::thread::spawn(move || {
             let _ = tx.send(pairing_link(&home, &server));
         });
@@ -2003,7 +2026,7 @@ impl crate::Gerdr {
             let now = Instant::now();
             let sent = self.t3.paired_panes.get(&pane).copied();
             let recent = sent.is_some_and(|(at, _)| now.duration_since(at) < PAIR_AGAIN);
-            if recent || self.t3.pairing {
+            if recent || self.t3.pairing.contains(&Some(pane)) {
                 return;
             }
             let tries = sent.map_or(0, |(_, tries)| tries);
@@ -2041,7 +2064,7 @@ impl crate::Gerdr {
             let then_origin = origin_of(&then).unwrap_or_default().to_owned();
             let target = format!("{origin}{}", &then[then_origin.len()..]);
             if target != url {
-                self.navigate_web_pane(pane, &target);
+                self.go_in_web_app(pane, &target);
             }
         }
     }
@@ -2103,6 +2126,24 @@ impl Start<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_tokens_move_to_the_query() {
+        let link = "http://app.localhost:3773/pair#token=AB12";
+        assert_eq!(
+            token_in_query(link),
+            "http://app.localhost:3773/pair?token=AB12"
+        );
+        let link = "http://a.localhost:1/pair?x=1#token=AB&y=2";
+        assert_eq!(
+            token_in_query(link),
+            "http://a.localhost:1/pair?x=1&token=AB#y=2"
+        );
+        let plain = "http://a.localhost:1/pair#y=2";
+        assert_eq!(token_in_query(plain), plain);
+        // Still a pairing link to `t3_page`, which leaves it be.
+        assert!(!asks_to_pair("/pair?token=AB12"));
+    }
 
     #[test]
     fn reading_in_part_is_a_problem_until_the_database_reads() {

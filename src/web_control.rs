@@ -103,6 +103,10 @@ enum ToBrowser<'a> {
     Navigate {
         pane: String,
         url: &'a str,
+        /// By the page's own router when the tab shows that app already,
+        /// without loading it again (see `goInApp` in worker.js).
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        soft: bool,
     },
     Back {
         pane: String,
@@ -515,9 +519,22 @@ impl Gerdr {
     /// Send `pane`'s tab to `url`, if the extension follows it; whether it
     /// was asked to.
     pub fn navigate_web_pane(&mut self, pane: u32, url: &str) -> bool {
+        self.navigate(pane, url, false)
+    }
+
+    /// Send `pane`'s tab to `url` of the single-page app it shows, by the
+    /// app's own router, without loading the page again: a load where the
+    /// tab is at another site, the app can't be steered, or the extension
+    /// is older. Whether the extension follows the tab.
+    pub fn go_in_web_app(&mut self, pane: u32, url: &str) -> bool {
+        self.navigate(pane, url, true)
+    }
+
+    fn navigate(&mut self, pane: u32, url: &str, soft: bool) -> bool {
         let message = ToBrowser::Navigate {
             pane: pane_token(pane),
             url,
+            soft,
         };
         let sent = self.send_to_browser(pane, &message);
         if sent {
@@ -705,11 +722,22 @@ mod tests {
         let message = serde_json::to_string(&ToBrowser::Navigate {
             pane: "1.2".into(),
             url: "https://c.d",
+            soft: false,
         })
         .unwrap();
         assert_eq!(
             message,
             r#"{"type":"navigate","pane":"1.2","url":"https://c.d"}"#
+        );
+        let soft = serde_json::to_string(&ToBrowser::Navigate {
+            pane: "1.2".into(),
+            url: "https://c.d/x",
+            soft: true,
+        })
+        .unwrap();
+        assert_eq!(
+            soft,
+            r#"{"type":"navigate","pane":"1.2","url":"https://c.d/x","soft":true}"#
         );
         let steps = [
             ToBrowser::Back { pane: "1.2".into() },
