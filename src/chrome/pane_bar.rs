@@ -9,9 +9,9 @@
 //! it needs, so the window's own header still shows either side of it.
 //! A bar out has all its buttons, faint until the pointer is over it.
 //!
-//! A terminal running a command keeps its pill out, in a band with room
-//! of its own (`PANE_BAR_HEIGHT`) over the window, so what runs, and its
-//! stop and restart, are always in sight.
+//! A terminal running a command keeps its pill out, floating over the
+//! top of the window like any other, so what runs, and its stop and
+//! restart, are always in sight without the window giving up any room.
 
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PANE_BAR_HEIGHT,
@@ -38,9 +38,9 @@ const HANDLE_W: i32 = 32;
 const HANDLE_H: i32 = 3;
 /// How far an unfocused pane's handle fades toward its grip, 0 to 1.
 const HANDLE_FADE: f32 = 0.3;
-/// How far below its pane's top edge a pill hangs, how high it is (the
-/// room a bar kept out takes, less this either side), and how far in from
-/// the pill's ends its buttons sit.
+/// How far below its pane's top edge a pill hangs, how high it is
+/// (`PANE_BAR_HEIGHT` less this either side), and how far in from the
+/// pill's ends its buttons sit.
 const PILL_TOP: i32 = 3;
 const BAR_PILL_HEIGHT: i32 = PANE_BAR_HEIGHT - 2 * PILL_TOP;
 const PILL_PAD: i32 = 4;
@@ -56,21 +56,11 @@ const PILL_APP: i32 = 340;
 const PILL_MARGIN: i32 = 8;
 const PILL_DROP: i32 = 6;
 
-/// A pane's place split in two: the band its bar keeps out on top, and
-/// the rest for its window, which keeps at least a pixel. The band as it
-/// is when the bar stays out; see `pane_bar_rects_shown` for one that may
-/// be hidden.
+/// A pane's place split in two: its grip on top, `PANE_GRIP` high, and
+/// the rest for its window, which keeps at least a pixel. A bar out
+/// floats its pill over the window and takes no more room than this.
 pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
-    pane_bar_rects_shown(pane, true)
-}
-
-/// A pane's place split in two: the band its bar has on top, and the rest
-/// for its window, which keeps at least a pixel. A bar that stays out
-/// (`shown`) has `PANE_BAR_HEIGHT` with its pill in it; any other keeps
-/// only its grip, `PANE_GRIP` high, and the window takes the rest.
-pub fn pane_bar_rects_shown(pane: Rect, shown: bool) -> (Rect, Rect) {
-    let h = if shown { PANE_BAR_HEIGHT } else { PANE_GRIP };
-    let h = h.min(pane.size.h - 1).max(0);
+    let h = PANE_GRIP.min(pane.size.h - 1).max(0);
     let bar = Rectangle::new(pane.loc, (pane.size.w, h).into());
     let client = Rectangle::new(
         (pane.loc.x, pane.loc.y + h).into(),
@@ -80,8 +70,8 @@ pub fn pane_bar_rects_shown(pane: Rect, shown: bool) -> (Rect, Rect) {
 }
 
 /// Where the bar of the pane at `pane` with `kind`'s buttons is when out:
-/// a pill hanging in the middle of its top edge, inside the band of a bar
-/// kept out (see `pane_bar_rects`).
+/// a pill hanging in the middle of its top edge, from its grip over the
+/// top of its window (see `pane_bar_rects`).
 pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
     let room = (pane.size.w - 2 * PILL_MARGIN).max(0);
     let want = match kind {
@@ -98,11 +88,11 @@ pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
     )
 }
 
-/// The grip of the pane at `pane`: the band along its top edge a hidden
-/// bar leaves (see `pane_bar_rects_shown`).
+/// The grip of the pane at `pane`: the band along its top edge every
+/// bar has (see `pane_bar_rects`).
 #[cfg(test)]
 pub fn pane_grip_rect(pane: Rect) -> Rect {
-    pane_bar_rects_shown(pane, false).0
+    pane_bar_rects(pane).0
 }
 
 /// Whether the pointer at `pos` asks for the bar of the pane at `pane`
@@ -357,8 +347,8 @@ pub enum BarStatus {
 pub struct PaneBarView {
     /// Where its pill goes on the output when out (see `pane_bar_rect`).
     pub rect: Rect,
-    /// Where its band goes: the grip, or the room a bar kept out takes,
-    /// drawn on its own under the pill (see `grip`).
+    /// Where its grip goes, drawn on its own under the pill (see
+    /// `grip`).
     pub grip: Rect,
     /// What runs, or a web page's address.
     pub label: String,
@@ -380,9 +370,8 @@ pub struct PaneBarView {
     pub lit: bool,
     /// The button under the pointer.
     pub hover: Option<BarButton>,
-    /// The bar is out: with room of its own over its window (see
-    /// `pane_bar_rects_shown`) or drawn over the window's top. While
-    /// false with a height, it is still fading out.
+    /// The bar is out, its pill drawn over the window's top. While false
+    /// with a height, it is still fading out.
     pub visible: bool,
     /// Its opacity, 0 to 1, from the fade showing or hiding it; 1 at rest.
     pub alpha: f32,
@@ -628,8 +617,7 @@ impl Painter {
 
     /// A bar's band, `size` big: its grip, a bare band with a short handle
     /// in its middle, in the accent while its pane is `focused` (the line
-    /// along the window's top says so too), else faint over a hairline. The
-    /// taller band of a bar kept out has no handle: its pill hides it.
+    /// along the window's top says so too), else faint over a hairline.
     pub(super) fn pane_handle(
         &self,
         size: Size<i32, Logical>,
@@ -643,9 +631,6 @@ impl Painter {
         if !focused {
             let line = px(1).max(1);
             c.fill(0, c.h - line, c.w, line, p.border_variant);
-        }
-        if size.h > PANE_GRIP {
-            return c.into_buffer(false);
         }
         let w = HANDLE_W.min(size.w);
         let h = HANDLE_H.min(size.h);
@@ -757,8 +742,8 @@ mod tests {
         FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_DROP, PILL_MARGIN, PILL_PAD, PILL_TOP, PILL_WEB_MAX,
         PaneBarView, SHADOW, UNZOOM_BUTTON, UNZOOM_MARGIN, field_fill, focus_strip,
         focus_strip_rect, handle_color, pane_bar_buttons, pane_bar_field, pane_bar_hit,
-        pane_bar_rect, pane_bar_rects, pane_bar_rects_shown, pane_grip_rect, pointer_reveals,
-        split_address, unzoom_button_rect,
+        pane_bar_rect, pane_bar_rects, pane_grip_rect, pointer_reveals, split_address,
+        unzoom_button_rect,
     };
     use crate::chrome::{BAR_BUTTON, BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
     use smithay::utils::{Point, Size};
@@ -786,24 +771,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_bar_takes_the_top_and_leaves_the_rest_to_the_window() {
-        let pane = Rect::new((200, 50).into(), (600, 400).into());
-        let (bar, client) = pane_bar_rects(pane);
-        assert_eq!(
-            bar,
-            Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into())
-        );
-        assert_eq!(
-            client,
-            Rect::new(
-                (200, 50 + PANE_BAR_HEIGHT).into(),
-                (600, 400 - PANE_BAR_HEIGHT).into()
-            )
-        );
-        assert_eq!(pane_bar_rects_shown(pane, true), (bar, client));
-    }
-
-    #[test]
     fn the_unzoom_button_floats_in_the_bottom_right_corner() {
         let pane = Rect::new((200, 50).into(), (600, 400).into());
         let button = unzoom_button_rect(pane).unwrap();
@@ -819,9 +786,9 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_bar_keeps_its_grip_and_the_window_takes_the_rest() {
+    fn a_bar_keeps_its_grip_and_the_window_takes_the_rest() {
         let pane = Rect::new((200, 50).into(), (600, 400).into());
-        let (bar, client) = pane_bar_rects_shown(pane, false);
+        let (bar, client) = pane_bar_rects(pane);
         assert_eq!(bar, Rect::new((200, 50).into(), (600, PANE_GRIP).into()));
         assert_eq!(
             client,
@@ -829,7 +796,7 @@ mod tests {
         );
         // A pane too small for a grip keeps its window.
         let tiny = Rect::new((0, 0).into(), (300, 1).into());
-        assert_eq!(pane_bar_rects_shown(tiny, false).1, tiny);
+        assert_eq!(pane_bar_rects(tiny).1, tiny);
     }
 
     #[test]
@@ -957,11 +924,8 @@ mod tests {
             let pill = pane_bar_rect(pane, kind);
             assert_eq!(pill.loc.y, 50 + PILL_TOP);
             assert_eq!(pill.size.h, BAR_PILL_HEIGHT);
-            // Kept out, it sits in the middle of its band.
-            assert_eq!(
-                pill.loc.y + pill.size.h + PILL_TOP,
-                band.loc.y + band.size.h
-            );
+            // It hangs from its grip over the window.
+            assert!(pill.loc.y + pill.size.h > band.loc.y + band.size.h);
             // Centred, inside the pane.
             let (left, right) = (pill.loc.x - 200, 1200 - pill.loc.x - pill.size.w);
             assert!((left - right).abs() <= 1, "{left} {right}");
@@ -984,8 +948,8 @@ mod tests {
         assert_eq!(pane_bar_rect(wide, BarButtons::None).size.w, PILL_APP);
         let narrow = Rect::new((0, 0).into(), (300, 400).into());
         assert_eq!(pane_bar_rect(narrow, WEB).size.w, 300 - 2 * PILL_MARGIN);
-        // The grip is the band a hidden bar leaves.
-        assert_eq!(pane_grip_rect(pane), pane_bar_rects_shown(pane, false).0);
+        // The grip is the band every bar has.
+        assert_eq!(pane_grip_rect(pane), band);
     }
 
     #[test]
@@ -1045,9 +1009,6 @@ mod tests {
         for theme in [Theme::Dark, Theme::Light] {
             for focused in [true, false] {
                 painter.pane_handle(v.grip.size, focused, 2.0, theme.palette());
-                // The band of a bar kept out.
-                let band = pane_bar_rects(pane).0.size;
-                painter.pane_handle(band, focused, 2.0, theme.palette());
             }
             for kind in [WEB, BarButtons::Web { history: false }, BarButtons::None] {
                 let mut v = v.clone();
