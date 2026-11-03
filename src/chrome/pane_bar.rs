@@ -44,9 +44,16 @@ const HANDLE_FADE: f32 = 0.3;
 const PILL_TOP: i32 = 3;
 const BAR_PILL_HEIGHT: i32 = PANE_BAR_HEIGHT - 2 * PILL_TOP;
 const PILL_PAD: i32 = 4;
-/// How wide a web page's or a terminal's pill is: this share of its pane,
-/// no less than `PILL_WEB_MIN` nor more than `PILL_WEB_MAX`; an app's is
-/// `PILL_APP`.
+/// How high a terminal's pill is: lower than the others, as it stays out
+/// over a running command's output.
+const PILL_TERMINAL_HEIGHT: i32 = 24;
+/// How far a bar's buttons keep from its top and bottom, at least: they
+/// are smaller than `BAR_BUTTON` in a pill too low for that.
+const BUTTON_INSET_Y: i32 = 2;
+/// How wide a web page's pill is: this share of its pane, no less than
+/// `PILL_WEB_MIN` nor more than `PILL_WEB_MAX`, room for its address; an
+/// app's or a terminal's is `PILL_APP`, so it covers little of the window
+/// under it.
 const PILL_WEB_SHARE: f64 = 0.6;
 const PILL_WEB_MIN: i32 = 420;
 const PILL_WEB_MAX: i32 = 760;
@@ -75,13 +82,17 @@ pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
 pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
     let room = (pane.size.w - 2 * PILL_MARGIN).max(0);
     let want = match kind {
-        BarButtons::Web { .. } | BarButtons::Terminal => {
+        BarButtons::Web { .. } => {
             ((pane.size.w as f64 * PILL_WEB_SHARE).round() as i32).clamp(PILL_WEB_MIN, PILL_WEB_MAX)
         }
-        BarButtons::None => PILL_APP,
+        BarButtons::None | BarButtons::Terminal => PILL_APP,
     };
     let w = want.min(room);
-    let h = BAR_PILL_HEIGHT.min(pane.size.h - PILL_TOP - 1).max(0);
+    let h = match kind {
+        BarButtons::Terminal => PILL_TERMINAL_HEIGHT,
+        BarButtons::Web { .. } | BarButtons::None => BAR_PILL_HEIGHT,
+    };
+    let h = h.min(pane.size.h - PILL_TOP - 1).max(0);
     Rectangle::new(
         (pane.loc.x + (pane.size.w - w) / 2, pane.loc.y + PILL_TOP).into(),
         (w, h).into(),
@@ -176,7 +187,8 @@ pub fn unzoom_button_rect(pane: Rect) -> Option<Rect> {
 ///
 /// They sit inside the pill `bar`, square, clear of its round ends.
 pub fn pane_bar_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<(BarButton, Rect)> {
-    let inset_y = ((bar.size.h - BAR_BUTTON) / 2).max(0);
+    let size = BAR_BUTTON.min(bar.size.h - 2 * BUTTON_INSET_Y).max(0);
+    let inset_y = ((bar.size.h - size) / 2).max(0);
     let bar: Rect = Rectangle::new(
         (bar.loc.x + PILL_PAD, bar.loc.y + inset_y).into(),
         ((bar.size.w - 2 * PILL_PAD).max(0), bar.size.h - 2 * inset_y).into(),
@@ -188,8 +200,8 @@ pub fn pane_bar_buttons(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Vec<
         .chain(zoom_button(zoom))
         .chain([BarButton::Close])
         .collect();
-    let step = BAR_BUTTON + BAR_BUTTON_GAP;
-    let at = |x: i32| Rectangle::new((x, bar.loc.y).into(), (BAR_BUTTON, bar.size.h).into());
+    let step = size + BAR_BUTTON_GAP;
+    let at = |x: i32| Rectangle::new((x, bar.loc.y).into(), (size, bar.size.h).into());
     let left = bar.loc.x + BAR_INSET;
     let n = trailing.len() as i32;
     let right = bar.loc.x + bar.size.w - BAR_INSET - n * step + BAR_BUTTON_GAP;
@@ -739,11 +751,11 @@ impl Painter {
 mod tests {
     use super::{
         BAR_PILL_HEIGHT, BAR_REVEAL, BAR_SLIDE, BarButton, BarButtons, BarHit, BarStatus,
-        FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_DROP, PILL_MARGIN, PILL_PAD, PILL_TOP, PILL_WEB_MAX,
-        PaneBarView, SHADOW, UNZOOM_BUTTON, UNZOOM_MARGIN, field_fill, focus_strip,
-        focus_strip_rect, handle_color, pane_bar_buttons, pane_bar_field, pane_bar_hit,
-        pane_bar_rect, pane_bar_rects, pane_grip_rect, pointer_reveals, split_address,
-        unzoom_button_rect,
+        FOCUS_STRIP, PANE_GRIP, PILL_APP, PILL_DROP, PILL_MARGIN, PILL_PAD, PILL_TERMINAL_HEIGHT,
+        PILL_TOP, PILL_WEB_MAX, PaneBarView, SHADOW, UNZOOM_BUTTON, UNZOOM_MARGIN, field_fill,
+        focus_strip, focus_strip_rect, handle_color, pane_bar_buttons, pane_bar_field,
+        pane_bar_hit, pane_bar_rect, pane_bar_rects, pane_grip_rect, pointer_reveals,
+        split_address, unzoom_button_rect,
     };
     use crate::chrome::{BAR_BUTTON, BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
     use smithay::utils::{Point, Size};
@@ -923,7 +935,13 @@ mod tests {
         for kind in [WEB, BarButtons::None, BarButtons::Terminal] {
             let pill = pane_bar_rect(pane, kind);
             assert_eq!(pill.loc.y, 50 + PILL_TOP);
-            assert_eq!(pill.size.h, BAR_PILL_HEIGHT);
+            // A terminal's is lower, its buttons smaller to fit.
+            let h = if kind == BarButtons::Terminal {
+                PILL_TERMINAL_HEIGHT
+            } else {
+                BAR_PILL_HEIGHT
+            };
+            assert_eq!(pill.size.h, h);
             // It hangs from its grip over the window.
             assert!(pill.loc.y + pill.size.h > band.loc.y + band.size.h);
             // Centred, inside the pane.
@@ -937,14 +955,11 @@ mod tests {
                 assert!(r.loc.x > pill.loc.x && r.loc.x + r.size.w < pill.loc.x + pill.size.w);
             }
         }
-        // A web page's and a terminal's grow with their pane, within
-        // bounds; an app's doesn't.
+        // A web page's grows with its pane, within bounds; an app's and a
+        // terminal's don't.
         let wide = Rect::new((0, 0).into(), (3000, 400).into());
         assert_eq!(pane_bar_rect(wide, WEB).size.w, PILL_WEB_MAX);
-        assert_eq!(
-            pane_bar_rect(wide, BarButtons::Terminal).size.w,
-            PILL_WEB_MAX
-        );
+        assert_eq!(pane_bar_rect(wide, BarButtons::Terminal).size.w, PILL_APP);
         assert_eq!(pane_bar_rect(wide, BarButtons::None).size.w, PILL_APP);
         let narrow = Rect::new((0, 0).into(), (300, 400).into());
         assert_eq!(pane_bar_rect(narrow, WEB).size.w, 300 - 2 * PILL_MARGIN);

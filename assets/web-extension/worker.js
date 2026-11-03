@@ -5,7 +5,8 @@
 // place of itself: going back never lands on it. gerdr is told where
 // each pane's tab is whenever it changes, whether it can go back or
 // forward, and when it closes, over the native messaging host; it can send
-// a pane's tab to another page, back, forward, or load it again, keep T3
+// a pane's tab to another page (in a single-page app by the app's own
+// router, see `goInApp`), back, forward, or load it again, keep T3
 // Code's app in it to the projects under some folders, and start a thread
 // there in one of them (see `inT3`).
 
@@ -116,6 +117,65 @@ function tabOf(pane) {
   return tab === undefined ? undefined : Number(tab);
 }
 
+// In a single-page app's page, go to `href` (a path of the page's own
+// origin) by the app's router, found in React's tree as the `router` of
+// its provider (TanStack Router's `navigate`): the page isn't loaded again.
+// Whether it went: not at a sign-in page, which a load gets past, nor
+// where no router shows within a few seconds. Runs in the page, in its
+// own world.
+function routeTo(href) {
+  const EVERY = 250;
+  const LOOKS = 20;
+  function router() {
+    const root = document.getElementById("root");
+    const key = root && Object.keys(root).find((k) => k.startsWith("__reactContainer$"));
+    const stack = key && root[key] ? [root[key]] : [];
+    let seen = 0;
+    while (stack.length && seen++ < 50000) {
+      const fiber = stack.pop();
+      const found = fiber.memoizedProps?.router;
+      if (found && typeof found.navigate === "function" && found.history) return found;
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }
+    return null;
+  }
+  return new Promise((done) => {
+    let looks = 0;
+    function look() {
+      if (location.pathname.startsWith("/pair")) return done(false);
+      let found = null;
+      try {
+        found = router();
+      } catch {}
+      if (!found) return ++looks < LOOKS ? void setTimeout(look, EVERY) : done(false);
+      try {
+        found.navigate({ href });
+        done(true);
+      } catch {
+        done(false);
+      }
+    }
+    look();
+  });
+}
+
+// Send `tab` to `url` by its app's router when it shows that site already;
+// whether it went.
+async function goInApp(tab, url) {
+  try {
+    const target = new URL(url);
+    const now = (await chrome.tabs.get(tab)).url;
+    if (!now || new URL(now).origin !== target.origin) return false;
+    const href = target.pathname + target.search + target.hash;
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: routeTo, args: [href] });
+    return frame?.result === true;
+  } catch {
+    // Not a page the extension reaches, or one that loaded meanwhile.
+    return false;
+  }
+}
+
 // In T3 Code's app, for the folders `dirs`: `job` "scope" shows their
 // projects only, "thread" starts a new thread in one of them. Runs in the
 // page, in its own world.
@@ -123,9 +183,12 @@ function tabOf(pane) {
 // Scope: by the app's sidebar's own project filter. That filter is kept
 // in the page's localStorage by project key, which the app works out from
 // each repository's remote: the keys are read from the app's own project
-// groups, found in React's tree by their fields. The app reads the filter
-// as it starts, so the page loads again once it changed, once per page
-// session.
+// groups, found in React's tree by their fields. The filter is set in the
+// app's own ui-state store (a zustand store in its `uiStateStore` chunk,
+// imported again from the page's module preloads: the same module), which
+// shows it at once and keeps it. Where that store isn't found, it is set
+// in localStorage, which the app reads as it starts: the page loads again
+// once then, once per page session.
 //
 // Thread: by the app's own `handleNewThread`, which its new-thread
 // buttons call, found in React's tree next to the fields it comes with,
@@ -287,12 +350,32 @@ function inT3(job, dirs) {
     }
   };
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const isStore = (v) =>
+    v && typeof v.getState === "function" && typeof v.getState()?.setSidebarProjectScopeKeys === "function";
+  // The app's ui-state store, from the modules the page loaded already:
+  // importing one again gives the same module, not a new one.
+  async function uiStore() {
+    const tags = document.querySelectorAll('script[type="module"][src], link[rel="modulepreload"][href]');
+    const loaded = performance.getEntriesByType("resource").map((e) => e.name);
+    const urls = new Set([...[...tags].map((t) => t.src || t.href), ...loaded]);
+    for (const url of urls) {
+      if (!/\/uiStateStore-[^/]*\.js$/.test(url.split(/[?#]/)[0]) || new URL(url).origin !== location.origin) continue;
+      try {
+        const found = Object.values(await import(url)).find(isStore);
+        if (found) return found;
+      } catch {}
+    }
+    return null;
+  }
   const mark = "gerdr-t3-scope";
   // How long ago a filter set and loaded again counts as just set.
   const FRESH = 15000;
   return new Promise((done) => {
     let looks = 0;
-    const fail = (reason, detail) => failing(done)(reason, `${detail}, storage ${name}`);
+    // The app's store, once looked for; whether the filter was set in it.
+    let store = null, setLive = false;
+    const fail = (reason, detail) =>
+      failing(done)(reason, `${detail}, storage ${store ? "ui-state store" : name}`);
     // A change that breaks the reading itself is told too.
     function look() {
       try {
@@ -321,7 +404,8 @@ function inT3(job, dirs) {
         return fail("no-match", `no project at or around the folders; roots: ${all.flatMap(roots).join(", ") || "none"}`);
       }
       const state = read();
-      const now = [...(state.sidebarProjectScopeKeys || [])].sort();
+      const held = store ? store.getState().sidebarProjectScopeKeys : state.sidebarProjectScopeKeys;
+      const now = [...(held || [])].sort();
       if (same(now, wanted)) {
         // Set: the app shows those projects only, unless it no longer
         // reads the filter from there.
@@ -329,6 +413,15 @@ function inT3(job, dirs) {
         if (seen.lists.some((l) => same(l, wanted))) return done({ ok: true });
         if (++looks < LOOKS) return void setTimeout(look, EVERY);
         return fail("ignored", `filter ${JSON.stringify(wanted)} stored, but no project list shows only those; lists: ${JSON.stringify(seen.lists).slice(0, 400)}`);
+      }
+      if (store) {
+        // Set once: the next look sees whether the app shows it.
+        if (setLive) {
+          return fail("overwritten", `filter ${JSON.stringify(wanted)} set in the app's store, but it reads ${JSON.stringify(now)}`);
+        }
+        setLive = true;
+        store.getState().setSidebarProjectScopeKeys(wanted);
+        return void setTimeout(look, EVERY);
       }
       let set = {};
       try {
@@ -347,7 +440,21 @@ function inT3(job, dirs) {
       localStorage.setItem(name, JSON.stringify(state));
       location.reload();
     }
-    look();
+    // The app's modules are there once it started: looked for then.
+    function start() {
+      // Signing in first, however long it takes.
+      if (location.pathname.startsWith("/pair")) return void setTimeout(start, EVERY);
+      if (!groups()) {
+        if (++looks < LOOKS) return void setTimeout(start, EVERY);
+        return look();
+      }
+      looks = 0;
+      uiStore().then(
+        (found) => ((store = found), look()),
+        () => look(),
+      );
+    }
+    start();
   });
 }
 
@@ -424,7 +531,9 @@ async function command(message) {
   try {
     switch (message.type) {
       case "navigate":
-        await chrome.tabs.update(tab, { url: message.url });
+        if (!(message.soft && (await goInApp(tab, message.url)))) {
+          await chrome.tabs.update(tab, { url: message.url });
+        }
         break;
       // From the page, as its own links would: the browser's goBack skips
       // the entries a page made without a click.
