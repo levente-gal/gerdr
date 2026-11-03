@@ -110,7 +110,7 @@ impl Gerdr {
         if self.previews.undocked || !self.repos.is_open() {
             return None;
         }
-        let wd = self.repos.worktree.as_ref()?;
+        let wd = self.wd()?;
         let doc = wd.doc.as_ref()?;
         let size = self.output_size();
         if wd.workspace != self.active_workspace || size.w < DOCK_MIN_WIDTH {
@@ -167,7 +167,7 @@ impl Gerdr {
             self.previews.undocked = true;
             return;
         }
-        let Some(wd) = self.repos.worktree.as_ref() else {
+        let Some(wd) = self.wd() else {
             return;
         };
         let Some(doc) = wd.doc.as_ref() else {
@@ -237,7 +237,7 @@ impl Gerdr {
         if !self.repos.is_open() {
             return None;
         }
-        let wd = self.repos.worktree.as_ref()?;
+        let wd = self.wd()?;
         let doc = wd.doc.as_ref().filter(|doc| doc.path == file)?;
         let comments = match doc.evidence {
             true => Vec::new(),
@@ -249,7 +249,7 @@ impl Gerdr {
     /// Scroll the preview `pane` beside the review to where the review
     /// stands, if it moved since they last stood together.
     fn sync_dock_scroll(&mut self, pane: u32) {
-        let Some(top) = (self.repos.worktree.as_ref()).and_then(|wd| wd.diff.top_line()) else {
+        let Some(top) = self.wd().and_then(|wd| wd.diff.top_line()) else {
             return;
         };
         if (self.previews.top(pane)).is_some_and(|was| (was - top).abs() < SCROLL_STILL) {
@@ -267,7 +267,7 @@ impl Gerdr {
             return;
         }
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         let top = wd.with_diff(env, |diff, ctx| {
@@ -288,7 +288,7 @@ impl Gerdr {
             return;
         }
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         wd.with_diff(env, |diff, ctx| {

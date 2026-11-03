@@ -994,6 +994,17 @@ fn ctx<'a>(
 }
 
 impl crate::Gerdr {
+    /// The diff on show: the keys, clicks and views of the panel act on
+    /// it.
+    pub(crate) fn wd(&self) -> Option<&WorktreeDiff> {
+        self.repos.worktree.as_ref()
+    }
+
+    /// `wd`, to change.
+    pub(crate) fn wd_mut(&mut self) -> Option<&mut WorktreeDiff> {
+        self.repos.worktree.as_mut()
+    }
+
     /// What the worktree diff's views and keys need of the chrome.
     pub(crate) fn worktree_env(&self) -> Env {
         let size = self.repos_rect();
@@ -1084,10 +1095,10 @@ impl crate::Gerdr {
     /// Save the worktree diff's review, if it changed: with the others,
     /// pruned; a file under review's in its own file.
     pub(crate) fn worktree_save_review(&mut self) {
-        if (self.repos.worktree.as_ref()).is_some_and(|wd| wd.doc.is_some()) {
+        if self.wd().is_some_and(|wd| wd.doc.is_some()) {
             return self.doc_save_review();
         }
-        if (self.repos.worktree.as_ref()).is_some_and(|wd| wd.feature.is_some()) {
+        if self.wd().is_some_and(|wd| wd.feature.is_some()) {
             return self.feature_save_review();
         }
         // A commit's diff has no review.
@@ -1130,11 +1141,13 @@ impl crate::Gerdr {
         self.previews.undocked = false;
         // A commit's diff, a file under review and a feature's code review
         // weren't opened from the worktrees popup.
-        let other = (self.repos.worktree.as_ref())
+        let other = self
+            .wd()
             .is_some_and(|wd| wd.commit.is_some() || wd.doc.is_some() || wd.feature.is_some());
         // Edits to a file under review can't be undone once it closes:
         // its agent may write it again meanwhile.
-        let doc = (self.repos.worktree.as_ref())
+        let doc = self
+            .wd()
             .filter(|wd| wd.doc.is_some())
             .map(|wd| wd.root.clone());
         if let Some(root) = doc {
@@ -1151,7 +1164,7 @@ impl crate::Gerdr {
     /// Read the worktree's changes and their diff again, off the event
     /// loop, unless a read is under way.
     pub(crate) fn worktree_diff_read(&mut self) {
-        let Some(wd) = self.repos.worktree.as_ref().filter(|wd| !wd.reading) else {
+        let Some(wd) = self.wd().filter(|wd| !wd.reading) else {
             return;
         };
         if wd.doc.is_some() {
@@ -1171,7 +1184,7 @@ impl crate::Gerdr {
         let Some(tx) = self.repos_sender() else {
             return;
         };
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.reading = true;
         }
         std::thread::spawn(move || {
@@ -1190,7 +1203,7 @@ impl crate::Gerdr {
         let Some(tx) = self.repos_sender() else {
             return;
         };
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.reading = true;
         }
         std::thread::spawn(move || {
@@ -1217,7 +1230,7 @@ impl crate::Gerdr {
         read: Result<(Since, Vec<FileDiff>), String>,
     ) {
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut().filter(|wd| wd.is(&root)) else {
+        let Some(wd) = self.wd_mut().filter(|wd| wd.is(&root)) else {
             return;
         };
         // Another commit's, opened before this one: not what is shown.
@@ -1243,7 +1256,7 @@ impl crate::Gerdr {
     /// What the worktree's diff shows, while open: the panel with the
     /// diff alone across it.
     pub(crate) fn worktree_diff_view(&self) -> Option<crate::chrome::ReposView> {
-        let wd = self.repos.worktree.as_ref()?;
+        let wd = self.wd()?;
         let env = self.worktree_env();
         Some(crate::chrome::ReposView {
             title: wd.heading(),
@@ -1289,9 +1302,9 @@ impl crate::Gerdr {
         if let Some((id, decision)) = decided {
             self.feature_decide(id, decision);
         }
-        let commit = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.commit.is_some());
-        let doc = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.doc.is_some());
-        let feature = (self.repos.worktree.as_ref()).is_some_and(|wd| wd.feature.is_some());
+        let commit = self.wd().is_some_and(|wd| wd.commit.is_some());
+        let doc = self.wd().is_some_and(|wd| wd.doc.is_some());
+        let feature = self.wd().is_some_and(|wd| wd.feature.is_some());
         match done? {
             Done::Close if feature => {
                 self.close_feature_review();
@@ -1338,7 +1351,7 @@ impl crate::Gerdr {
     /// Do `button` in the worktree's diff, as its footer or a menu asks.
     pub(crate) fn worktree_diff_press(&mut self, button: ReposButton) {
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         let done = wd.press(button, env);
@@ -1355,7 +1368,7 @@ impl crate::Gerdr {
         typed: Keysym,
     ) -> Option<crate::repos::Outcome> {
         let env = self.worktree_env();
-        let done = self.repos.worktree.as_mut()?.key(mods, sym, typed, env);
+        let done = self.wd_mut()?.key(mods, sym, typed, env);
         self.worktree_done(done)
     }
 
@@ -1371,7 +1384,7 @@ impl crate::Gerdr {
         ctrl: bool,
     ) {
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         let mut drags = false;
@@ -1403,7 +1416,7 @@ impl crate::Gerdr {
     /// `row` (by index into those shown), or `by` rows past them.
     pub(crate) fn worktree_diff_drag(&mut self, by: i64, row: Option<usize>) {
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         match (by, row) {
@@ -1417,7 +1430,7 @@ impl crate::Gerdr {
     pub(crate) fn worktree_diff_scroll(&mut self, motion: Motion) {
         let now = Instant::now();
         let env = self.worktree_env();
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.scroll(motion, now, env);
             if wd.scrolling(now) {
                 wd.hover = None;
@@ -1429,7 +1442,7 @@ impl crate::Gerdr {
     /// held there puts it.
     pub(crate) fn worktree_diff_scroll_to(&mut self, pos: f64) {
         let env = self.worktree_env();
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.stand_at(pos, env);
         }
     }
@@ -1438,7 +1451,7 @@ impl crate::Gerdr {
     /// whether it still does.
     pub(crate) fn worktree_diff_tick(&mut self, now: Instant) -> bool {
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut().filter(|wd| wd.scrolling(now)) else {
+        let Some(wd) = self.wd_mut().filter(|wd| wd.scrolling(now)) else {
             return false;
         };
         let moving = wd.scroll_tick(now, env);

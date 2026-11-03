@@ -557,7 +557,7 @@ impl Gerdr {
         self.close_menu();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
-        if self.repos.worktree.is_some() {
+        if self.wd().is_some() {
             self.worktree_save_review();
             self.repos.close_worktree();
         }
@@ -574,7 +574,7 @@ impl Gerdr {
     /// The record of `project`'s `slug` changed: its code review, if
     /// open, reads where its stage stands again.
     pub(crate) fn feature_diff_changed(&mut self, project: &str, slug: &str) {
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         if !(wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug) {
@@ -586,7 +586,7 @@ impl Gerdr {
 
     /// The feature code review open, if one is.
     fn feature_of(&self) -> Option<&FeatureOf> {
-        self.repos.worktree.as_ref()?.feature.as_ref()
+        self.wd()?.feature.as_ref()
     }
 
     /// Read the feature's touched repositories again, off the event
@@ -609,7 +609,7 @@ impl Gerdr {
             return;
         };
         let env = self.worktree_env();
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.reading = true;
             if let Some(fe) = wd.feature.as_mut() {
                 let changed = fe.findings != findings;
@@ -637,7 +637,7 @@ impl Gerdr {
     /// review is still the one open.
     pub(crate) fn feature_diff_event(&mut self, read: Read) {
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         let open =
@@ -651,7 +651,7 @@ impl Gerdr {
         }
         wd.set_feature(read.repos, env);
         self.code_review_counted();
-        let held = (self.repos.worktree.as_mut()).map(|wd| wd.diff.take_held());
+        let held = self.wd_mut().map(|wd| wd.diff.take_held());
         for (mods, sym, typed) in held.unwrap_or_default() {
             if let Some(outcome) = self.repos_key(&mods, sym, typed) {
                 self.apply_repos(outcome);
@@ -661,7 +661,7 @@ impl Gerdr {
 
     /// Keep the open code review's counts for the feature panel.
     fn code_review_counted(&mut self) {
-        let Some(wd) = self.repos.worktree.as_ref().filter(|wd| wd.read) else {
+        let Some(wd) = self.wd().filter(|wd| wd.read) else {
             return;
         };
         let Some(fe) = &wd.feature else {
@@ -693,7 +693,7 @@ impl Gerdr {
         }
         let viewed = feature.viewed.clone();
         self.save_feature(&project, &slug);
-        if let Some(fe) = (self.repos.worktree.as_mut()).and_then(|wd| wd.feature.as_mut()) {
+        if let Some(fe) = self.wd_mut().and_then(|wd| wd.feature.as_mut()) {
             fe.viewed = viewed;
         }
         self.code_review_counted();
@@ -712,7 +712,7 @@ impl Gerdr {
             .map(|r| r.findings.clone())
             .unwrap_or_default();
         let env = self.worktree_env();
-        if let Some(wd) = self.repos.worktree.as_mut()
+        if let Some(wd) = self.wd_mut()
             && let Some(fe) = wd.feature.as_mut()
         {
             fe.findings = findings;
@@ -722,7 +722,7 @@ impl Gerdr {
 
     /// Approve Code review, unless something holds it up (said why).
     pub(crate) fn feature_approve(&mut self) {
-        let Some(wd) = self.repos.worktree.as_ref() else {
+        let Some(wd) = self.wd() else {
             return;
         };
         let Some(fe) = wd.feature.as_ref() else {
@@ -775,7 +775,7 @@ impl Gerdr {
             tracing::warn!("deleting {}: {err}", path.display());
             self.toast(format!("Couldn't delete the review: {err}"), Level::Error);
         }
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.diff.review.comments.retain(|c| c.flag.is_some());
             wd.diff.review_dirty = false;
         }

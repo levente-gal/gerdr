@@ -250,7 +250,7 @@ impl Gerdr {
         self.close_menu();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
-        if self.repos.worktree.is_some() {
+        if self.wd().is_some() {
             self.worktree_save_review();
             self.repos.close_worktree();
         }
@@ -261,7 +261,7 @@ impl Gerdr {
         let wd = WorktreeDiff::of_doc(doc, w, review);
         self.repos.worktree = Some(wd);
         let env = self.worktree_env();
-        if let Some(wd) = self.repos.worktree.as_mut() {
+        if let Some(wd) = self.wd_mut() {
             wd.set_doc(Ok(text), env);
         }
         // It takes the pointer from the client under it.
@@ -270,7 +270,7 @@ impl Gerdr {
 
     /// The file under review, if one is open.
     fn doc_of(&self) -> Option<&DocOf> {
-        self.repos.worktree.as_ref()?.doc.as_ref()
+        self.wd()?.doc.as_ref()
     }
 
     /// Read the file under review again, and where its stage stands: a
@@ -292,7 +292,7 @@ impl Gerdr {
             false => state(feature, doc.stage),
         };
         let env = self.worktree_env();
-        let Some(wd) = self.repos.worktree.as_mut() else {
+        let Some(wd) = self.wd_mut() else {
             return;
         };
         if let Some(doc) = wd.doc.as_mut() {
@@ -307,8 +307,9 @@ impl Gerdr {
     /// Save the review comments on the file under review, if they
     /// changed; a failure says so.
     pub(crate) fn doc_save_review(&mut self) {
-        let Some(wd) =
-            (self.repos.worktree.as_mut()).filter(|wd| wd.diff.review_dirty && wd.doc.is_some())
+        let Some(wd) = self
+            .wd_mut()
+            .filter(|wd| wd.diff.review_dirty && wd.doc.is_some())
         else {
             return;
         };
@@ -346,7 +347,7 @@ impl Gerdr {
     /// Approve the file under review: asked first when comments on it
     /// would go unsent.
     pub(crate) fn doc_approve(&mut self) {
-        let Some(wd) = self.repos.worktree.as_ref() else {
+        let Some(wd) = self.wd() else {
             return;
         };
         let Some(doc) = wd.doc.clone() else {
@@ -396,7 +397,7 @@ impl Gerdr {
             .filter(|d| d.project == project && d.slug == slug && d.stage == stage)
             .map(|d| d.back);
         if let Some(back) = open {
-            if let Some(wd) = self.repos.worktree.as_mut() {
+            if let Some(wd) = self.wd_mut() {
                 wd.diff.review_dirty = false;
             }
             self.close_worktree_diff();

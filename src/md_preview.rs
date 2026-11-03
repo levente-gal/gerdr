@@ -269,7 +269,7 @@ impl Gerdr {
     /// Show the file under review's preview, in the review's workspace:
     /// the review closes for it, its comments kept.
     pub fn open_doc_preview(&mut self) {
-        let Some(wd) = self.repos.worktree.as_ref() else {
+        let Some(wd) = self.wd() else {
             return;
         };
         let Some(doc) = wd.doc.as_ref() else {
