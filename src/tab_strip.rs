@@ -695,10 +695,16 @@ impl Gerdr {
                 let pane = (t == view.active)
                     .then(|| self.tab()?.focused_id())
                     .flatten();
-                let zoomed = self.workspace()?.tabs.get(t).and_then(Tab::zoomed);
+                let tab = self.workspace()?.tabs.get(t)?;
+                let mut items = tab_menu_items(w, t, pane, tab.zoomed(), &hints);
+                // A feature's panel tab has no panes, no name of its own,
+                // and doesn't close: only a new tab is left to ask for.
+                if tab.pinned {
+                    items.truncate(1);
+                }
                 Some(MenuSpec {
                     anchor: anchor(layout.tabs[t]),
-                    items: tab_menu_items(w, t, pane, zoomed, &hints),
+                    items,
                 })
             }
             TabHit::Plus => Some(MenuSpec {

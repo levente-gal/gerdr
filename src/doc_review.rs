@@ -240,7 +240,6 @@ impl Gerdr {
         // kept as it was.
         self.switcher = None;
         self.project_menu = None;
-        self.features.panel = None;
         self.tasks_panel = None;
         if self.inbox.is_open() {
             self.close_inbox();

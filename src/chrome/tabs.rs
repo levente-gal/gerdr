@@ -45,6 +45,8 @@ pub struct TabView {
     /// One of its panes is zoomed to fill it: it carries a mark that
     /// unzooms it.
     pub zoomed: bool,
+    /// It is a feature's panel tab: it has no "×" (see `Tab::pinned`).
+    pub pinned: bool,
 }
 
 impl TabView {
@@ -147,6 +149,7 @@ impl TabView {
             github: false,
             agent,
             zoomed: false,
+            pinned: false,
         }
     }
 
@@ -401,7 +404,7 @@ impl TabStripView {
     /// Where everything in it sits on a strip `size` big: the tabs that
     /// fit taking in the active one (see `tab_layout_at`).
     pub fn layout(&self, size: Size<i32, Logical>) -> TabLayout {
-        tab_layout_at(
+        let mut layout = tab_layout_at(
             self.tabs.len(),
             self.active,
             self.plus,
@@ -411,7 +414,14 @@ impl TabStripView {
             self.watch.is_some(),
             self.inbox.is_some(),
             self.problems.is_some(),
-        )
+        );
+        // A pinned tab can't close: no "×" to show or press.
+        for (close, tab) in layout.closes.iter_mut().zip(&self.tabs) {
+            if tab.pinned {
+                close.size.w = 0;
+            }
+        }
+        layout
     }
 
     /// Whether the overflow chip shows: some workspace not shown is blocked.

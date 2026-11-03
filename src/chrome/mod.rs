@@ -588,11 +588,11 @@ impl Chrome {
                         },
                     ));
                 }
-                // The feature panel, centred over the apps.
+                // The feature panel, centred in its tab.
                 Kind::Features => {
                     let panel = view.features.take().map(|v| {
-                        let (loc, size) = shadowed(feature_panel_layout(&v, output).panel);
-                        ((v, output, theme, scale), loc, size)
+                        let (loc, size) = shadowed(feature_panel_layout(&v, area).panel);
+                        ((v, area.size, theme, scale), loc, size)
                     });
                     parts.extend(self.features.part(panel, now, true, |(v, output, ..)| {
                         painter.feature_panel(v, *output, scale, theme.palette())

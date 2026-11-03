@@ -170,6 +170,7 @@ fn tabs() -> Vec<TabView> {
             github: false,
             agent: Some(crate::agent_icons::AgentIcon::Claude),
             zoomed: false,
+            pinned: false,
         },
         TabView {
             title: "zsh".into(),
@@ -1345,6 +1346,79 @@ fn status_panel() -> super::TasksView {
     }
 }
 
+/// A feature workspace's tab strip: its panel tab first and shown, with
+/// no "×", then the usual tabs.
+fn pinned_strip_view() -> TabStripView {
+    let mut tabs = tabs();
+    tabs.insert(
+        0,
+        TabView {
+            title: "Feature".into(),
+            pinned: true,
+            ..Default::default()
+        },
+    );
+    TabStripView::plain(tabs, 0, false, ThemeMode::System)
+}
+
+fn paint_pinned(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let strip = (900, super::tab_strip_height(super::Density::Comfortable)).into();
+    vec![hash(painter.tab_strip_view(
+        &pinned_strip_view(),
+        theme,
+        strip,
+        scale,
+    ))]
+}
+
+const PINNED: [&str; 1] = ["pinned_tab_strip"];
+
+/// The recorded hashes of `PINNED`, per case in `CASES`.
+const GOLDEN_PINNED: [[u64; 1]; 4] = [
+    // Dark at 1
+    [
+        0xf152f0daf2737043, // pinned_tab_strip
+    ],
+    // Dark at 2
+    [
+        0x58fb2e701d2fe9fd, // pinned_tab_strip
+    ],
+    // Light at 1
+    [
+        0xf2f7f19a81351ca3, // pinned_tab_strip
+    ],
+    // Light at 2
+    [
+        0xf7f40168b0293f90, // pinned_tab_strip
+    ],
+];
+
+#[test]
+fn a_pinned_tab_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_PINNED.iter().map(|row| row.as_slice()).collect();
+    check(&PINNED, &golden, paint_pinned);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the tab strip with a pinned tab there.
+#[test]
+fn dump_pinned() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let strip = (900, super::tab_strip_height(super::Density::Comfortable)).into();
+        dump(
+            &dir,
+            &format!("pinned_tab_strip_{}_{}", theme.name(), scale),
+            painter.tab_strip_view(&pinned_strip_view(), theme, strip, scale),
+            (900.0 * scale).round() as usize,
+        );
+    }
+}
+
 const STATUS_OUTPUT: (i32, i32) = (1200, 700);
 
 fn paint_status(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -1503,7 +1577,6 @@ fn feature_panel(repos: usize) -> super::FeaturePanelView {
         ("Ctrl+C", "copy path"),
         ("Ctrl+N", "new"),
         ("Del", "abandon"),
-        ("Esc", "close"),
     ];
     super::FeaturePanelView {
         title: "Bulk export of invoices".into(),
@@ -1812,11 +1885,11 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0xaf6537e36661773b, // new_feature
-        0x869764fa3d9048d7, // feature_panel
-        0xde9d2405310235e7, // feature_panel_multi
+        0x2035a515e642ccfc, // feature_panel
+        0x5b44ce1855fbeb6c, // feature_panel_multi
         0x5e017fbffabde99b, // sidebar_features
-        0xc6d96ee5e01de0da, // feature_ship_blocked
-        0xc16daf60f0e04c88, // feature_ship_ready
+        0x8131a71ac2be99e8, // feature_ship_blocked
+        0x6bc31ef9b6d52606, // feature_ship_ready
         0x25725cfbc3b3ba91, // feature_done_prs
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
@@ -1826,11 +1899,11 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 2
     [
         0x9a3eb907776fe145, // new_feature
-        0x31307a3926bbc629, // feature_panel
-        0x5437f7692eaeff36, // feature_panel_multi
+        0x78044619f7e91bd3, // feature_panel
+        0x4d406c7a7a0d55f0, // feature_panel_multi
         0x095e2dfbb584cb35, // sidebar_features
-        0x96b5aee7e55e893b, // feature_ship_blocked
-        0x55c082e14c28296d, // feature_ship_ready
+        0xdfb59c820d65ece1, // feature_ship_blocked
+        0x74a7d1af895962db, // feature_ship_ready
         0xc43b3e6d75230966, // feature_done_prs
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
@@ -1840,11 +1913,11 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Light at 1
     [
         0x0e77512e4815b092, // new_feature
-        0x3abb7fb4ebb6164f, // feature_panel
-        0x0608e5100d8d1171, // feature_panel_multi
+        0x0e728426227e94e8, // feature_panel
+        0x0c3681e01ce58bb2, // feature_panel_multi
         0xd22590056de00ae5, // sidebar_features
-        0x566c8cd22fcb3376, // feature_ship_blocked
-        0xb2f69eb40cd2a0e6, // feature_ship_ready
+        0x5631c29edb78f675, // feature_ship_blocked
+        0xd424f6513eea33c5, // feature_ship_ready
         0x05cc7d58ebc3d6c6, // feature_done_prs
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
@@ -1854,11 +1927,11 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Light at 2
     [
         0x9e8eaff9dfeac632, // new_feature
-        0x0dcda199b0dbc637, // feature_panel
-        0x71310a3466763ea3, // feature_panel_multi
+        0x1bfbbfcdf4c610ce, // feature_panel
+        0xbe2d06e390e5c642, // feature_panel_multi
         0x5e1381a968fcc82e, // sidebar_features
-        0x9c492950881672d9, // feature_ship_blocked
-        0x336e04083585dc13, // feature_ship_ready
+        0x22b990f6fe45e2d3, // feature_ship_blocked
+        0x0db169edcb2bf4ad, // feature_ship_ready
         0x0a045e32666be0f4, // feature_done_prs
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
@@ -1903,7 +1976,9 @@ fn dump_features() {
             ("feature_done_prs", feature_done_prs()),
         ];
         for (name, view) in views {
-            let panel = super::feature_panel_layout(&view, size).panel;
+            let panel =
+                super::feature_panel_layout(&view, smithay::utils::Rectangle::from_size(size))
+                    .panel;
             dump(
                 &dir,
                 &format!("{name}_{tag}"),

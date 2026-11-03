@@ -10,7 +10,10 @@
 //! creates it, Tab and Shift+Tab (Up/Down) move between the title and the
 //! repositories, Space ticks one, Esc clears the title, then closes.
 //!
-//! The feature panel: a feature's repositories and its eight stages. Up and
+//! The feature panel: a feature's repositories and its eight stages. It is
+//! the pinned first tab of the feature's workspace (see `feature_workspace`):
+//! showing that tab shows the panel, and it can't be closed, moved or
+//! renamed; closing the workspace takes it along. Up and
 //! Down (Ctrl+J/K) move, Enter does the row's own thing (start, show or
 //! review the current stage's agent, let Build go on after a milestone,
 //! run Verify's checks, mark a stage without either done, ship it once
@@ -20,7 +23,7 @@
 //! request of the repository under the cursor, or on Verify's row its
 //! evidence, Ctrl+R starts the current stage's agent afresh, Ctrl+C copies
 //! its path, Ctrl+N starts a new one, Del abandons it (or, once done,
-//! removes its worktrees) after asking, Esc closes. Build's row says what
+//! removes its worktrees) after asking. Build's row says what
 //! setup does while it runs, and Verify's what its checks do, or what
 //! failed.
 //!
@@ -77,6 +80,9 @@ pub struct Features {
     /// The feature last shown in the panel, by project: the features key
     /// opens it again.
     shown: BTreeMap<String, String>,
+    /// The panels of the feature tabs not shown, by project and slug: a
+    /// feature's tab shows again as it was left.
+    parked: BTreeMap<(String, String), FeaturePanel>,
     /// What runs off the thread now, for the tasks panel.
     busy: Vec<Busy>,
     /// The latest probe of each feature, by project and slug.
@@ -703,7 +709,6 @@ pub struct FeaturePanel {
 /// What the feature panel asks gerdr to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PanelOutcome {
-    Close,
     /// Mark the current stage done.
     Tick,
     /// Ship it, after the Ship sheet: the current stage is Ship.
@@ -1207,7 +1212,6 @@ impl FeaturePanel {
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         match sym {
-            Keysym::Escape => return Some(PanelOutcome::Close),
             Keysym::Up | Keysym::KP_Up => self.cursor = self.cursor.saturating_sub(1),
             Keysym::Down | Keysym::KP_Down => self.cursor = (self.cursor + 1).min(last),
             Keysym::k | Keysym::K if ctrl => self.cursor = self.cursor.saturating_sub(1),
@@ -1338,13 +1342,10 @@ impl Gerdr {
         self.features.probes.retain(|key, _| kept(key));
         self.features.asked.retain(|key, _| kept(key));
         self.watch_features();
-        // A panel on a feature gone closes.
-        if let Some(panel) = &self.features.panel
-            && self.feature(&panel.project, &panel.slug).is_none()
-        {
-            self.features.panel = None;
-            self.refresh_pointer_focus();
-        }
+        // The workspaces on features get their tab, those on features gone
+        // lose it, and the panel follows.
+        self.prune();
+        self.sync_feature_panel();
     }
 
     /// Feature `slug` of project `project`.
@@ -2064,7 +2065,6 @@ impl Gerdr {
             NewFeatureDialog::new(project.to_owned(), self.features.serial, PathBuf::new());
         dialog.existing = Some(slug.to_owned());
         dialog.title.set(&title);
-        self.features.panel = None;
         self.context_menu = None;
         self.stop_key_repeat();
         self.features.dialog = Some(dialog);
@@ -2460,8 +2460,6 @@ impl Gerdr {
         }
     }
 
-    /// Open the feature panel on feature `slug` of `project`. The other
-    /// panels close: it would cover them.
     /// The open features of other projects that span project `project`
     /// too: what its sidebar lists as "in <home name>" (see
     /// `open_linked_feature`).
@@ -2502,6 +2500,10 @@ impl Gerdr {
         }
     }
 
+    /// Show the feature panel on feature `slug` of `project`: the first
+    /// tab of the feature's workspace, which opens if none is, the cursor
+    /// on the feature's current stage. The other panels close: they would
+    /// cover it.
     pub fn open_feature(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug) else {
             return self.show_warning("That feature is gone".into());
@@ -2520,19 +2522,56 @@ impl Gerdr {
         self.close_menu();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.features
-            .shown
-            .insert(project.to_owned(), slug.to_owned());
-        self.features.panel = Some(FeaturePanel {
-            project: project.to_owned(),
-            slug: slug.to_owned(),
-            cursor,
-            ..FeaturePanel::default()
-        });
+        // It starts afresh, not as it was left.
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.parked.remove(&key);
+        let same = |p: &FeaturePanel| p.project == project && p.slug == slug;
+        let shown = self.features.panel.as_ref().is_some_and(same);
+        if !self.show_feature_tab(project, slug) {
+            return;
+        }
+        if let Some(panel) = self.features.panel.as_mut().filter(|p| same(p)) {
+            panel.cursor = cursor;
+        }
         self.reveal_feature_row();
-        // It takes the pointer from the client under it.
+        // Showing its tab read the feature again, unless it showed already.
+        if shown {
+            self.probe_feature(project, slug);
+        }
+    }
+
+    /// Make the feature panel what the shown tab is: the panel of the
+    /// feature whose workspace it is when it is that workspace's pinned
+    /// tab, else none. A panel left is kept to show as it was when its
+    /// tab shows again.
+    pub(crate) fn sync_feature_panel(&mut self) {
+        let w = self.active_workspace;
+        let on_tab = self.tab().is_some_and(|t| t.pinned);
+        let shown = (self.project.clone())
+            .zip(on_tab.then(|| self.workspace_feature(w)).flatten())
+            .map(|(project, f)| (project, f.slug.clone(), start_cursor(f)));
+        let open = (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
+        if open == shown.as_ref().map(|(p, s, _)| (p.clone(), s.clone())) {
+            return;
+        }
+        if let Some(panel) = self.features.panel.take() {
+            let key = (panel.project.clone(), panel.slug.clone());
+            self.features.parked.insert(key, panel);
+        }
+        if let Some((project, slug, cursor)) = shown {
+            let key = (project.clone(), slug.clone());
+            let panel = self.features.parked.remove(&key).unwrap_or(FeaturePanel {
+                project: project.clone(),
+                slug: slug.clone(),
+                cursor,
+                ..FeaturePanel::default()
+            });
+            self.features.panel = Some(panel);
+            self.features.shown.insert(project.clone(), slug.clone());
+            self.reveal_feature_row();
+            self.probe_feature(&project, &slug);
+        }
         self.refresh_pointer_focus();
-        self.probe_feature(project, slug);
     }
 
     /// Open the feature panel on feature `slug` of `project` with the
@@ -2575,12 +2614,6 @@ impl Gerdr {
         }
     }
 
-    /// Close the feature panel.
-    pub fn close_feature_panel(&mut self) {
-        self.features.panel = None;
-        self.refresh_pointer_focus();
-    }
-
     /// The feature the panel is on.
     fn panel_feature(&self) -> Option<&Feature> {
         let panel = self.features.panel.as_ref()?;
@@ -2592,7 +2625,7 @@ impl Gerdr {
         let Some(view) = self.feature_panel_view() else {
             return;
         };
-        let fit = chrome::feature_repos_shown(&view, self.output_size());
+        let fit = chrome::feature_repos_shown(&view, self.content_rect().size);
         if let Some(panel) = self.features.panel.as_mut() {
             panel.reveal(view.repos.len(), fit);
         }
@@ -2606,9 +2639,7 @@ impl Gerdr {
     ) -> Option<PanelOutcome> {
         let panel = self.features.panel.as_ref()?;
         let slugs = self.listed_slugs(&panel.project);
-        let Some(feature) = self.feature(&panel.project, &panel.slug).cloned() else {
-            return Some(PanelOutcome::Close);
-        };
+        let feature = self.feature(&panel.project, &panel.slug).cloned()?;
         let ctx = self.row_ctx(&feature);
         let out = self
             .features
@@ -2631,7 +2662,6 @@ impl Gerdr {
         };
         let now = feature::now();
         match outcome {
-            PanelOutcome::Close => self.close_feature_panel(),
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
                 Some(stage) if needs(stage).is_some() => {
                     self.approve_stage(&project, &slug, stage);
@@ -2668,10 +2698,7 @@ impl Gerdr {
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
-            PanelOutcome::OpenPr(url) => {
-                self.close_feature_panel();
-                self.open_feature_page(&project, &slug, url);
-            }
+            PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::Untick(stage) => {
                 let Some(feature) = self.feature_mut(&project, &slug) else {
                     return;
@@ -2692,7 +2719,6 @@ impl Gerdr {
                 if !dir.exists() {
                     return self.show_error(format!("{} is gone", tilde(&dir)));
                 }
-                self.close_feature_panel();
                 self.open_feature_project_tab(&project, &slug, &dir);
             }
             PanelOutcome::CopyPath => {
@@ -2704,19 +2730,8 @@ impl Gerdr {
             PanelOutcome::Remove => self.check_remove_feature(&project, &slug),
             PanelOutcome::New => self.open_new_feature(None),
             PanelOutcome::LinkProject => self.open_link_projects(&project, &slug),
-            PanelOutcome::Show(to) => {
-                if let Some(feature) = self.feature(&project, &to) {
-                    let cursor = start_cursor(feature);
-                    self.features.shown.insert(project.clone(), to.clone());
-                    if let Some(panel) = self.features.panel.as_mut() {
-                        panel.slug = to.clone();
-                        panel.cursor = cursor;
-                        panel.repo_top = 0;
-                    }
-                    self.reveal_feature_row();
-                    self.probe_feature(&project, &to);
-                }
-            }
+            // In its own tab, its workspace opened if need be.
+            PanelOutcome::Show(to) => self.open_feature(&project, &to),
         }
     }
 
@@ -2727,7 +2742,6 @@ impl Gerdr {
             .feature(project, slug)
             .and_then(|f| f.runs.get(&stage)?.pane.clone());
         if let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
-            self.close_feature_panel();
             return self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
         }
         if let Some(run) = self
@@ -3136,7 +3150,6 @@ impl Gerdr {
                 tilde(&dir)
             ));
         }
-        self.close_feature_panel();
         // In its own workspace; another project's feature can't open one.
         if (self.in_feature_workspace(project, slug, |gerdr, w| {
             gerdr.new_tab_in(w, &dir, Some(command))
@@ -3342,18 +3355,6 @@ impl Gerdr {
             feature.log(now, "worktrees removed");
         }
         self.save_feature(project, slug);
-        // The panel moves on to another feature, or closes.
-        let on_it = self
-            .features
-            .panel
-            .as_ref()
-            .is_some_and(|p| p.project == project && p.slug == slug);
-        if on_it {
-            match self.listed_slugs(project).into_iter().find(|s| s != slug) {
-                Some(next) => self.apply_feature_panel(PanelOutcome::Show(next)),
-                None => self.close_feature_panel(),
-            }
-        }
         self.show_success(if abandon {
             format!("Abandoned \u{201c}{title}\u{201d}")
         } else {
@@ -3361,7 +3362,8 @@ impl Gerdr {
         });
     }
 
-    /// A left click while the feature panel is open: off it closes it.
+    /// A left click in the feature panel's tab: off the panel it does
+    /// nothing.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.feature_panel_view() else {
             return;
@@ -3369,13 +3371,12 @@ impl Gerdr {
         let Some(feature) = self.panel_feature().cloned() else {
             return;
         };
-        let layout = chrome::feature_panel_layout(&view, self.output_size());
+        let layout = chrome::feature_panel_layout(&view, self.content_rect());
         let rows = panel_rows(&feature);
         let repos = feature.repos.len();
         let stage = |i: usize| PanelRow::Stage(Stage::ALL[i.min(Stage::ALL.len() - 1)]);
         let outcome = match layout.hit(view.repo_top, pos) {
-            None => Some(PanelOutcome::Close),
-            Some(FeatureHit::Panel) => None,
+            None | Some(FeatureHit::Panel) => None,
             Some(FeatureHit::Hint(i)) => {
                 if let Some((keys, _)) = view.hints.get(i).cloned() {
                     self.press_hint(crate::input::Overlay::Features, &keys, pos);
@@ -3414,7 +3415,7 @@ impl Gerdr {
     /// The pointer moved while the feature panel is open.
     pub fn feature_panel_hover(&mut self, pos: Point<f64, Logical>) {
         let hit = self.feature_panel_view().and_then(|view| {
-            chrome::feature_panel_layout(&view, self.output_size()).hit(view.repo_top, pos)
+            chrome::feature_panel_layout(&view, self.content_rect()).hit(view.repo_top, pos)
         });
         if let Some(panel) = self.features.panel.as_mut() {
             panel.hover = hit;
@@ -3426,7 +3427,7 @@ impl Gerdr {
         let Some(view) = self.feature_panel_view() else {
             return;
         };
-        let fit = chrome::feature_repos_shown(&view, self.output_size());
+        let fit = chrome::feature_repos_shown(&view, self.content_rect().size);
         if let Some(panel) = self.features.panel.as_mut() {
             let most = view.repos.len().saturating_sub(fit);
             panel.repo_top = panel.repo_top.saturating_add_signed(by).min(most);
@@ -3436,7 +3437,7 @@ impl Gerdr {
     /// The panel's repository rows shown, for the wheel's pitch.
     pub fn feature_repo_rows(&self) -> Vec<chrome::Rect> {
         self.feature_panel_view().map_or_else(Vec::new, |view| {
-            chrome::feature_panel_layout(&view, self.output_size())
+            chrome::feature_panel_layout(&view, self.content_rect())
                 .repos
                 .into_iter()
                 .map(|(row, _)| row)
@@ -3447,7 +3448,7 @@ impl Gerdr {
     /// What the pointer can press in the feature panel.
     pub fn feature_panel_controls(&self) -> Vec<chrome::Rect> {
         self.feature_panel_view().map_or_else(Vec::new, |view| {
-            chrome::feature_panel_layout(&view, self.output_size()).controls()
+            chrome::feature_panel_layout(&view, self.content_rect()).controls()
         })
     }
 
@@ -4009,10 +4010,7 @@ fn panel_view(
     if linkable(feature) {
         hints.push(hint("Ctrl+Shift+L", "link project"));
     }
-    hints.extend([
-        hint("Del", &remove_label(feature).to_lowercase()),
-        hint("Esc", "close"),
-    ]);
+    hints.push(hint("Del", &remove_label(feature).to_lowercase()));
     let which = slugs
         .iter()
         .position(|s| *s == feature.slug)
@@ -4530,10 +4528,8 @@ pub(crate) mod tests {
             press(&mut panel, &f, key(Keysym::Right)),
             Some(PanelOutcome::Show("c".into()))
         );
-        assert_eq!(
-            press(&mut panel, &f, key(Keysym::Escape)),
-            Some(PanelOutcome::Close)
-        );
+        // Esc leaves it be: it is a tab.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Escape)), None);
         // Ctrl+N and Ctrl+P never move.
         let at = panel.cursor;
         press(&mut panel, &f, ctrl(Keysym::p));
@@ -4582,7 +4578,6 @@ pub(crate) mod tests {
                 "Ctrl+N",
                 "Ctrl+Shift+L",
                 "Del",
-                "Esc"
             ]
         );
         assert_eq!(view.hints[1].1, "mark done");

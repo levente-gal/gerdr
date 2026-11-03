@@ -704,7 +704,6 @@ impl Gerdr {
         // The first agent gets a failed setup run again, like a fresh one.
         let first = !feature.runs.contains_key(&stage);
         if !fresh && let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
-            self.close_feature_panel();
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         if stage == Stage::Build && self.setup_before_build(project, slug, fresh || first) {
@@ -788,7 +787,6 @@ impl Gerdr {
             return false;
         }
         let command = command_line(&base, &prompt, &feature.agent_dirs(&data));
-        self.close_feature_panel();
         // The agent runs in a tab of the feature's own workspace.
         let pane = self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()));
         let now = feature::now();

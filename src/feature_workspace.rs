@@ -3,6 +3,11 @@
 //! there, not in whichever workspace is active. It is a normal Terminal
 //! workspace in every other way (close, rename, restart, agent cards,
 //! inbox), found again by its folder: no record says it is a feature's.
+//!
+//! Its first tab is pinned: it holds the feature panel, takes no panes,
+//! and can't be closed or moved, nor another tab put before it. The
+//! workspace stays open with only that tab; closing the workspace, Ship
+//! and Abandon close it.
 
 use std::{
     path::{Path, PathBuf},
@@ -12,7 +17,7 @@ use std::{
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
-    Gerdr, Workspace, WorkspaceKind,
+    Gerdr, Tab, Workspace, WorkspaceKind,
     feature::{Feature, Status},
 };
 
@@ -96,6 +101,41 @@ pub(crate) fn closing_text(running: &[String]) -> String {
     }
 }
 
+/// Give `tabs` a pinned first tab if `want`, else take every pinned one
+/// out, keeping `active` on the tab it was on. Whether they changed.
+pub(crate) fn pin_tab(tabs: &mut Vec<Tab>, active: &mut usize, want: bool) -> bool {
+    let has = tabs.first().is_some_and(|t| t.pinned);
+    if want && !has {
+        let had = !tabs.is_empty();
+        tabs.insert(
+            0,
+            Tab {
+                pinned: true,
+                ..Tab::default()
+            },
+        );
+        if had {
+            *active += 1;
+        }
+        return true;
+    }
+    if !want && tabs.iter().any(|t| t.pinned) {
+        let before = tabs.len();
+        let mut i = 0;
+        tabs.retain(|t| {
+            let keep = !t.pinned;
+            if !keep && i < *active {
+                *active -= 1;
+            }
+            i += 1;
+            keep
+        });
+        *active = (*active).min(tabs.len().saturating_sub(1));
+        return tabs.len() != before;
+    }
+    false
+}
+
 impl Gerdr {
     /// The index of feature `slug` of `project`'s workspace, if one is open:
     /// a workspace of the shown project on the feature's folder.
@@ -123,18 +163,12 @@ impl Gerdr {
         panes.filter_map(|p| self.running_in(p)).collect()
     }
 
-    /// Run `open` on feature `slug` of `project`'s workspace, which adds a
-    /// tab to it and shows it. With none open, a Terminal workspace on the
-    /// feature's folder, called after the feature, opens first, empty, so
-    /// that `open`'s tab is its first; it goes again if `open` added none.
-    /// Only the shown project's features have workspaces: another's says
-    /// which project to switch to. `None` (with a toast) when it couldn't.
-    pub(crate) fn in_feature_workspace<R>(
-        &mut self,
-        project: &str,
-        slug: &str,
-        open: impl FnOnce(&mut Self, usize) -> R,
-    ) -> Option<R> {
+    /// Feature `slug` of `project`'s workspace, opened on the feature's
+    /// folder and called after the feature when none is open, with
+    /// whether it was just opened. Only the shown project's features have
+    /// workspaces: another's says which project to switch to. `None` (with
+    /// a toast) when it couldn't.
+    fn ensure_feature_workspace(&mut self, project: &str, slug: &str) -> Option<(usize, bool)> {
         let Some(feature) = self.feature(project, slug) else {
             self.show_warning("That feature is gone".into());
             return None;
@@ -151,7 +185,7 @@ impl Gerdr {
             return None;
         }
         if let Some(w) = self.feature_workspace(project, slug) {
-            return Some(open(self, w));
+            return Some((w, false));
         }
         if !dir.is_dir() {
             self.show_error(format!(
@@ -160,17 +194,32 @@ impl Gerdr {
             ));
             return None;
         }
+        self.open_feature_workspace(dir, &title);
+        Some((self.workspaces.len() - 1, true))
+    }
+
+    /// Run `open` on feature `slug` of `project`'s workspace, which adds a
+    /// tab to it and shows it. With none open, one opens first with only
+    /// its panel tab (see `ensure_feature_workspace`); it goes again if
+    /// `open` added none. `None` (with a toast) when it couldn't.
+    pub(crate) fn in_feature_workspace<R>(
+        &mut self,
+        project: &str,
+        slug: &str,
+        open: impl FnOnce(&mut Self, usize) -> R,
+    ) -> Option<R> {
         let before = self.active_workspace;
-        let record = self.open_feature_workspace(dir, &title);
-        let w = self.workspaces.len() - 1;
+        let (w, new) = self.ensure_feature_workspace(project, slug)?;
+        let record = self.workspaces[w].record.clone();
         let out = open(self, w);
         // Nothing opened in it: it goes, its record too, and what was
         // shown shows again.
         let kept = self
             .workspaces
             .iter()
-            .any(|ws| ws.record == record && !ws.tabs.is_empty());
-        if !kept {
+            .any(|ws| ws.record == record && ws.tabs.iter().any(|t| !t.pinned));
+        if new && !kept {
+            self.closing_records.insert(record.clone());
             self.prune();
             self.forget_workspace(&record);
             self.switch_workspace(before);
@@ -178,8 +227,38 @@ impl Gerdr {
         Some(out)
     }
 
-    /// Add an empty Terminal workspace on feature folder `dir` called
-    /// `title`, last, with a record of it: the record's id.
+    /// Show feature `slug` of `project`'s panel tab, opening its workspace
+    /// if none is. Whether it shows.
+    pub(crate) fn show_feature_tab(&mut self, project: &str, slug: &str) -> bool {
+        let Some((w, _)) = self.ensure_feature_workspace(project, slug) else {
+            return false;
+        };
+        self.switch_workspace(w);
+        self.switch_tab(0);
+        true
+    }
+
+    /// Give every feature workspace its panel tab, first, and take it from
+    /// every other workspace and from one closing. Whether a tab came or
+    /// went.
+    pub(crate) fn pin_feature_tabs(&mut self) -> bool {
+        let mut changed = false;
+        for w in 0..self.workspaces.len() {
+            let closing = self.closing_records.contains(&self.workspaces[w].record);
+            let want = !closing && self.workspace_feature(w).is_some();
+            let ws = &mut self.workspaces[w];
+            changed |= pin_tab(&mut ws.tabs, &mut ws.active_tab, want);
+        }
+        changed
+    }
+
+    /// Say why a feature's panel tab doesn't close.
+    pub(crate) fn refuse_pinned_close(&mut self) {
+        self.show_warning("The feature's tab stays open: close its workspace to close it".into());
+    }
+
+    /// Add a Terminal workspace on feature folder `dir` called `title`,
+    /// last, with only its panel tab and a record of it: the record's id.
     fn open_feature_workspace(&mut self, dir: PathBuf, title: &str) -> String {
         let dir = dir.canonicalize().unwrap_or(dir);
         let kind = WorkspaceKind::Terminal;
@@ -188,6 +267,7 @@ impl Gerdr {
         ws.record = self.remember_workspace(&ws.name, kind, &ws.dir, None);
         let record = ws.record.clone();
         self.workspaces.push(ws);
+        self.pin_feature_tabs();
         record
     }
 
@@ -305,6 +385,61 @@ impl Gerdr {
 mod tests {
     use super::*;
     use crate::features::tests::{feature, repo};
+
+    fn tabs(n: usize) -> Vec<Tab> {
+        (0..n).map(|_| Tab::default()).collect()
+    }
+
+    #[test]
+    fn a_feature_workspace_gets_its_panel_tab_first_and_keeps_the_shown_tab() {
+        let mut t = tabs(2);
+        let mut active = 1;
+        assert!(pin_tab(&mut t, &mut active, true));
+        assert!(t[0].pinned && !t[1].pinned && !t[2].pinned);
+        assert_eq!(active, 2);
+        // Once is enough.
+        assert!(!pin_tab(&mut t, &mut active, true));
+        assert_eq!(t.len(), 3);
+        // An empty workspace gets it shown.
+        let (mut empty, mut active) = (Vec::new(), 0);
+        assert!(pin_tab(&mut empty, &mut active, true));
+        assert_eq!((empty.len(), active), (1, 0));
+    }
+
+    #[test]
+    fn a_workspace_no_more_a_features_loses_its_panel_tab() {
+        let mut t = tabs(2);
+        let mut active = 1;
+        pin_tab(&mut t, &mut active, true);
+        assert!(pin_tab(&mut t, &mut active, false));
+        assert!(t.iter().all(|t| !t.pinned));
+        assert_eq!((t.len(), active), (2, 1));
+        // Shown, it gives way to the next.
+        let mut t = tabs(1);
+        let mut active = 0;
+        pin_tab(&mut t, &mut active, true);
+        active = 0;
+        pin_tab(&mut t, &mut active, false);
+        assert_eq!((t.len(), active), (1, 0));
+        assert!(!pin_tab(&mut t, &mut active, false));
+    }
+
+    #[test]
+    fn the_panel_tab_neither_moves_nor_has_tabs_put_before_it() {
+        let mut t = tabs(3);
+        let mut active = 0;
+        pin_tab(&mut t, &mut active, true);
+        // The panel tab stays.
+        assert_eq!(crate::tab_move_target(&t, 0, 2), None);
+        // Another goes no further left than second.
+        assert_eq!(crate::tab_move_target(&t, 2, 0), Some(1));
+        assert_eq!(crate::tab_move_target(&t, 1, 0), None);
+        assert_eq!(crate::tab_move_target(&t, 1, 3), Some(3));
+        assert_eq!(crate::tab_move_target(&t, 1, 4), None);
+        // Without one, any tab goes anywhere.
+        let t = tabs(3);
+        assert_eq!(crate::tab_move_target(&t, 2, 0), Some(0));
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gerdr-fws-{name}-{}", std::process::id()));

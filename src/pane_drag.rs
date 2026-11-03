@@ -107,7 +107,8 @@ impl Gerdr {
             let view = self.tab_strip_view();
             return match self.tab_strip_hit_at(&view, pos)? {
                 TabHit::Tab(t) | TabHit::Close(t) | TabHit::Unzoom(t) => {
-                    (t != view.active).then_some(PaneDrop::Tab(t))
+                    // The feature panel's tab takes no panes.
+                    (t != view.active && !view.tabs[t].pinned).then_some(PaneDrop::Tab(t))
                 }
                 TabHit::Plus => Some(PaneDrop::NewTab),
                 _ => None,
