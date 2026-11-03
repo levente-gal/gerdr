@@ -1347,10 +1347,8 @@ impl Gerdr {
 
     /// What the panel's rows need of `feature` besides it.
     fn row_ctx(&self, feature: &Feature) -> RowCtx {
-        let checks = self
-            .projects
-            .project(&feature.project)
-            .is_some_and(|p| !feature::verify::checks(feature, &p.workflow.verify).is_empty());
+        let config = self.projects.workflows(feature, |w| w.verify.clone());
+        let checks = !feature::verify::checks(feature, &config).is_empty();
         let criteria = self.criteria(&feature.project, &feature.slug).len();
         RowCtx { checks, criteria }
     }
@@ -1419,7 +1417,7 @@ impl Gerdr {
         if self.feature_sender().is_none() {
             return;
         }
-        let mode = self.projects.project(project).and_then(|p| p.workflow.ship);
+        let modes = self.projects.workflows(&feature, |w| w.ship);
         let probed = self
             .features
             .probes
@@ -1433,7 +1431,7 @@ impl Gerdr {
         probed.at = Some(Instant::now());
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
-            probe: ship::probe(&feature, mode),
+            probe: ship::probe(&feature, &modes),
             project,
             slug,
         });

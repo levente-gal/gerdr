@@ -843,6 +843,28 @@ impl Store {
         self.projects.iter().find(|p| p.id == id)
     }
 
+    /// `of` each project's workflow that feature `feature` spans: its home
+    /// project's, and each linked one's by id (a project gone from the
+    /// store is left out, so its repositories get none). Workflow lookups
+    /// for a repository then go to its own project's, by its plain name.
+    pub fn workflows<T: Default>(
+        &self,
+        feature: &crate::feature::Feature,
+        of: impl Fn(&Workflow) -> T,
+    ) -> crate::feature::PerProject<T> {
+        crate::feature::PerProject {
+            home: self
+                .project(&feature.project)
+                .map(|p| of(&p.workflow))
+                .unwrap_or_default(),
+            links: feature
+                .links
+                .iter()
+                .filter_map(|l| Some((l.project.clone(), of(&self.project(&l.project)?.workflow))))
+                .collect(),
+        }
+    }
+
     pub fn project_mut(&mut self, id: &str) -> Option<&mut Project> {
         self.projects.iter_mut().find(|p| p.id == id)
     }

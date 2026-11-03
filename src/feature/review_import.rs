@@ -10,8 +10,9 @@
 //! ```
 //!
 //! - `severity`: `high`, `medium` or `low`.
-//! - `repo`: the repository's folder name; may be left out for a feature
-//!   over one repository.
+//! - `repo`: the repository's key (`Repo::key`: its folder name, or
+//!   `<project>:<name>` in a linked project); may be left out for a
+//!   feature over one repository.
 //! - `file`: from the repository's top folder. `line`: on the new side of
 //!   the diff, 1-based; may be left out for the whole file.
 //! - `id`: only to raise a finding of an earlier run again (the prompt
@@ -103,7 +104,7 @@ pub struct Finding {
     /// `r<run>-<k>`: unique within the feature.
     pub id: String,
     pub severity: Severity,
-    /// The repository's folder name (`Repo::name`).
+    /// The repository's `Repo::key`.
     pub repo: String,
     /// From the repository's top folder.
     pub file: String,
@@ -562,7 +563,7 @@ pub fn read_code(feature: &Feature, path: &Path) -> Result<CodeRead, String> {
         heads: BTreeMap::new(),
     };
     for repo in feature.touched() {
-        let name = &repo.name;
+        let name = &repo.key();
         let range = format!("{}...HEAD", base_ref(repo));
         let diff = git(
             &repo.worktree,

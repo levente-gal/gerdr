@@ -267,10 +267,8 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return false;
         };
-        let has = self
-            .projects
-            .project(project)
-            .is_some_and(|p| setup::has_commands(feature, &p.workflow.setup));
+        let commands = self.projects.workflows(feature, |w| w.setup.clone());
+        let has = setup::has_commands(feature, &commands);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.setting_up.contains(&key);
         let first = setup_first(has, feature.setup.as_ref(), running, fresh);
@@ -302,16 +300,13 @@ impl Gerdr {
     /// Set up feature `slug`'s worktrees off the thread, if its project
     /// gives setup commands and it isn't set up or being set up.
     pub fn start_setup(&mut self, project: &str, slug: &str) {
-        let Some(commands) = self
-            .projects
-            .project(project)
-            .map(|p| p.workflow.setup.clone())
-        else {
+        if self.projects.project(project).is_none() {
             return;
-        };
+        }
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
+        let commands = self.projects.workflows(&feature, |w| w.setup.clone());
         if !setup::has_commands(&feature, &commands) {
             return;
         }
@@ -526,11 +521,10 @@ impl Gerdr {
     /// by gerdr, and Verify runs.
     fn build_done(&mut self, project: &str, slug: &str, patch: &str) {
         let now = feature::now();
-        let config = self
-            .projects
-            .project(project)
-            .map(|p| p.workflow.verify.clone())
-            .unwrap_or_default();
+        let config = match self.feature(project, slug) {
+            Some(feature) => self.projects.workflows(feature, |w| w.verify.clone()),
+            None => return,
+        };
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
@@ -643,11 +637,12 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
-        let (config, timeout) = self
+        let config = self.projects.workflows(&feature, |w| w.verify.clone());
+        // One timeout for the run: the home project's.
+        let timeout = self
             .projects
             .project(project)
-            .map(|p| (p.workflow.verify.clone(), p.workflow.verify_timeout))
-            .unwrap_or_default();
+            .and_then(|p| p.workflow.verify_timeout);
         let checks = verify::checks(&feature, &config);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.verifying.contains(&key);
