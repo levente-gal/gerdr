@@ -50,6 +50,10 @@ pub fn find_root(
     ignore: &[String],
     bases: &[(String, String)],
 ) -> Result<Root, String> {
+    // From inside a feature's folder (its workspace), the root is the one
+    // that folder sits under: the folder holds worktrees, not repositories.
+    let dir = above_features(dir);
+    let dir = dir.as_path();
     if let Some(top) = main_top(dir) {
         let parent = top.parent().map(Path::to_path_buf);
         let mut siblings: Vec<PathBuf> = workspace_dirs
@@ -83,6 +87,15 @@ pub fn find_root(
         "{} is not in a git repository and has none in it",
         shown(dir)
     ))
+}
+
+/// The folder holding `dir`'s nearest `.features` folder, else `dir`.
+fn above_features(dir: &Path) -> PathBuf {
+    dir.ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == FEATURES_DIR))
+        .and_then(Path::parent)
+        .unwrap_or(dir)
+        .to_path_buf()
 }
 
 /// The root `dir` holding several repositories.
@@ -1236,6 +1249,27 @@ mod tests {
         let t = Temp::new();
         let err = find_root(&t.0, &[], &[], &[]).unwrap_err();
         assert!(err.contains("is not in a git repository"), "{err}");
+    }
+
+    #[test]
+    fn a_feature_folder_finds_the_root_it_sits_under() {
+        // Multi: the feature folder holds only linked worktrees.
+        let t = Temp::new();
+        t.repo("api", "main");
+        t.repo("web", "main");
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        let again = find_root(&created.dir, std::slice::from_ref(&created.dir), &[], &[]).unwrap();
+        assert_eq!(again, root);
+        let again = find_root(&created.dir.join("api"), &[], &[], &[]).unwrap();
+        assert_eq!(again, root);
+
+        // Single: the folder sits inside the repository.
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        assert_eq!(find_root(&created.dir, &[], &[], &[]).unwrap(), root);
     }
 
     #[test]
