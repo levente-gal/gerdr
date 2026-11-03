@@ -1525,7 +1525,11 @@ impl Gerdr {
         let title = feature.title.clone();
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
-        self.show_success(format!("\u{201c}{title}\u{201d} is merged: done"));
+        let mut text = format!("\u{201c}{title}\u{201d} is merged: done");
+        if let Some(kept) = self.close_shipped_workspace(project, slug) {
+            text = format!("{text}; {kept}");
+        }
+        self.show_success(text);
     }
 
     /// Read the code of feature `slug` off the thread for run `n` of its
@@ -2128,8 +2132,7 @@ impl Gerdr {
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
             PanelOutcome::OpenPr(url) => {
                 self.close_feature_panel();
-                let w = self.active_workspace;
-                self.open_page(w, url);
+                self.open_feature_page(&project, &slug, url);
             }
             PanelOutcome::Untick(stage) => {
                 let Some(feature) = self.feature_mut(&project, &slug) else {
@@ -2152,8 +2155,7 @@ impl Gerdr {
                     return self.show_error(format!("{} is gone", tilde(&dir)));
                 }
                 self.close_feature_panel();
-                let w = self.active_workspace;
-                self.new_project_tab(w, &dir);
+                self.open_feature_project_tab(&project, &slug, &dir);
             }
             PanelOutcome::CopyPath => {
                 if let Some(dir) = self.feature(&project, &slug).map(|f| f.dir.clone()) {
@@ -2290,7 +2292,8 @@ impl Gerdr {
                 feature.title
             ));
         }
-        if let Some(user) = self.folder_in_use(&feature.dir) {
+        // Its own workspace closes with it; anything else in it refuses.
+        if let Some(user) = self.feature_folder_in_use(project, slug) {
             return self.show_warning(format!(
                 "\u{201c}{}\u{201d} has {user} in it; close it first",
                 feature.title
@@ -2392,8 +2395,14 @@ impl Gerdr {
             ));
         }
         self.close_feature_panel();
-        let w = self.active_workspace;
-        self.new_tab_running(w, &dir, command);
+        // In its own workspace; another project's feature can't open one.
+        if (self.in_feature_workspace(project, slug, |gerdr, w| {
+            gerdr.new_tab_in(w, &dir, Some(command))
+        }))
+        .is_none()
+        {
+            return;
+        }
         if let Some(feature) = self.feature_mut(project, slug) {
             let now = feature::now();
             feature.shipping.squash_at = Some(now);
@@ -2482,16 +2491,20 @@ impl Gerdr {
         if n == 0 {
             return self.probe_feature(project, slug);
         }
-        let text = opened_text(&title, n - updated, updated);
+        let mut text = opened_text(&title, n - updated, updated);
         feature.log(now, text.clone());
-        if squash.is_empty()
+        let done = squash.is_empty()
             && feature.status == Status::Open
-            && feature.current() == Some(Stage::Ship)
-        {
+            && feature.current() == Some(Stage::Ship);
+        if done {
             feature.tick(now, "gerdr", patch);
         }
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
+        // Shipped: its workspace closes, unless something runs in it.
+        if done && let Some(kept) = self.close_shipped_workspace(project, slug) {
+            text = format!("{text}; {kept}");
+        }
         self.show_success(text);
         self.probe_feature(project, slug);
     }
@@ -2512,7 +2525,14 @@ impl Gerdr {
                 "Remove worktrees",
             )
         };
-        let body = removal_body(&losses);
+        let mut body = removal_body(&losses);
+        if let Some(w) = self.feature_workspace(&project, &slug) {
+            let running = self.workspace_running(w);
+            body = format!(
+                "{body}. {}",
+                crate::feature_workspace::closing_text(&running)
+            );
+        }
         let force = !losses.is_empty();
         let then = crate::confirm::Then::RemoveFeature {
             project,
@@ -2540,11 +2560,16 @@ impl Gerdr {
             ),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move |_| Done::Removed {
-            result: layout::remove(&feature, force),
-            project,
-            slug,
-            abandon,
+        // Its workspace closes first, its terminals gone before its
+        // worktrees go.
+        let (p, s) = (project.clone(), slug.clone());
+        self.close_feature_workspace_then(&p, &s, move |gerdr| {
+            gerdr.feature_work(Some(busy), move |_| Done::Removed {
+                result: layout::remove(&feature, force),
+                project,
+                slug,
+                abandon,
+            });
         });
     }
 
@@ -2734,13 +2759,7 @@ impl Gerdr {
 
     /// The sidebar's rows for the shown project's open features.
     pub fn feature_rows(&self) -> Vec<chrome::FeatureRowView> {
-        let Some(project) = &self.project else {
-            return Vec::new();
-        };
-        let Some(all) = self.features.all.get(project) else {
-            return Vec::new();
-        };
-        sidebar_features(all)
+        self.sidebar_listed()
             .into_iter()
             .map(|f| chrome::FeatureRowView {
                 title: f.title.clone(),
@@ -2751,14 +2770,23 @@ impl Gerdr {
 
     /// How many feature rows the sidebar shows.
     pub fn sidebar_feature_count(&self) -> usize {
-        let all = self.project.as_ref().and_then(|p| self.features.all.get(p));
-        all.map_or(0, |all| sidebar_features(all).len())
+        self.sidebar_listed().len()
     }
 
     /// Feature `i` of the sidebar's rows.
     pub fn sidebar_feature(&self, i: usize) -> Option<&Feature> {
-        let all = self.features.all.get(self.project.as_ref()?)?;
-        sidebar_features(all).get(i).copied()
+        self.sidebar_listed().get(i).copied()
+    }
+
+    /// The features the sidebar's Features section lists, in order: the
+    /// shown project's open ones with no workspace open, whose own
+    /// workspace's header shows them instead.
+    fn sidebar_listed(&self) -> Vec<&Feature> {
+        let Some(all) = self.project.as_ref().and_then(|p| self.features.all.get(p)) else {
+            return Vec::new();
+        };
+        let dirs: Vec<&Path> = self.workspaces.iter().map(|ws| ws.dir.as_path()).collect();
+        crate::feature_workspace::without_workspace(sidebar_features(all), &dirs)
     }
 }
 

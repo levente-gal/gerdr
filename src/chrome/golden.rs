@@ -57,6 +57,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             restart: false,
             picks: Vec::new(),
             errors: 0,
+            stages: Vec::new(),
         },
         WorkspaceView {
             name: "~".into(),
@@ -73,6 +74,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             restart: false,
             picks: Vec::new(),
             errors: 0,
+            stages: Vec::new(),
         },
     ]
 }
@@ -1604,19 +1606,56 @@ fn feature_done_prs() -> super::FeaturePanelView {
     view
 }
 
+/// Eight stage marks, the first `done` of them done.
+fn stage_marks(done: usize) -> Vec<super::StageMark> {
+    use super::StageMark;
+    (0..8)
+        .map(|i| match i {
+            i if i < done => StageMark::Done,
+            i if i == done => StageMark::Current,
+            _ => StageMark::Later,
+        })
+        .collect()
+}
+
+/// The sidebar with a feature's own workspace, its header showing the
+/// feature's title and stage marks (the pointer on them), and another
+/// feature with none open under the workspaces.
+fn feature_workspace_sidebar() -> SidebarView {
+    use super::FeatureRowView;
+    let mut workspaces = workspaces();
+    let feature = &mut workspaces[1];
+    feature.name = "Bulk export of invoices".into();
+    feature.stages = stage_marks(3);
+    SidebarView {
+        workspaces,
+        agents: agents(),
+        active: Some(1),
+        project: Some("aft".into()),
+        header_lit: false,
+        features: vec![FeatureRowView {
+            title: "Faster search".into(),
+            marks: stage_marks(1),
+        }],
+        state: SidebarState {
+            rows: vec![
+                RowState::default(),
+                RowState {
+                    hover: 16,
+                    stages: true,
+                    ..RowState::default()
+                },
+            ],
+            ..SidebarState::default()
+        },
+    }
+}
+
 /// The sidebar with two open features under its workspaces, the second
 /// under the pointer.
 fn features_sidebar() -> SidebarView {
-    use super::{FeatureRowView, StageMark};
-    let marks = |done: usize| {
-        (0..8)
-            .map(|i| match i {
-                i if i < done => StageMark::Done,
-                i if i == done => StageMark::Current,
-                _ => StageMark::Later,
-            })
-            .collect()
-    };
+    use super::FeatureRowView;
+    let marks = stage_marks;
     SidebarView {
         workspaces: workspaces(),
         agents: agents(),
@@ -1655,6 +1694,7 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.feature_panel(&feature_done_prs(), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
+        hash(painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p)),
     ]
 }
 
@@ -1729,7 +1769,7 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 9] = [
+const FEATURES: [&str; 10] = [
     "new_feature",
     "feature_panel",
     "feature_panel_multi",
@@ -1739,10 +1779,11 @@ const FEATURES: [&str; 9] = [
     "feature_done_prs",
     "manual_test",
     "manual_test_note",
+    "sidebar_feature_workspace",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 9]; 4] = [
+const GOLDEN_FEATURES: [[u64; 10]; 4] = [
     // Dark at 1
     [
         0xe5e4e33f1868788d, // new_feature
@@ -1754,6 +1795,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0x25725cfbc3b3ba91, // feature_done_prs
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
+        0x63cc1266276af2a6, // sidebar_feature_workspace
     ],
     // Dark at 2
     [
@@ -1766,6 +1808,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0xc43b3e6d75230966, // feature_done_prs
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
+        0x923af16fcfd248d7, // sidebar_feature_workspace
     ],
     // Light at 1
     [
@@ -1778,6 +1821,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0x05cc7d58ebc3d6c6, // feature_done_prs
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
+        0xdec7ed57e73f3ab4, // sidebar_feature_workspace
     ],
     // Light at 2
     [
@@ -1790,6 +1834,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0x0a045e32666be0f4, // feature_done_prs
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
+        0x869e887cba78a19a, // sidebar_feature_workspace
     ],
 ];
 
@@ -1851,6 +1896,12 @@ fn dump_features() {
             &dir,
             &format!("sidebar_features_{tag}"),
             painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p),
+            px(260),
+        );
+        dump(
+            &dir,
+            &format!("sidebar_feature_workspace_{tag}"),
+            painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p),
             px(260),
         );
     }

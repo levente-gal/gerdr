@@ -3839,12 +3839,11 @@ impl Gerdr {
         let Some(ws) = self.workspaces.get(idx) else {
             return;
         };
-        let panes = ws.tabs.iter().flat_map(|tab| &tab.panes);
-        let running: Vec<String> = panes.clone().filter_map(|p| self.running_in(p)).collect();
+        let running = self.workspace_running(idx);
         if running.is_empty() {
             return self.close_workspace_now(idx);
         }
-        let ids = panes.map(|p| p.id).collect();
+        let ids = ws.tabs.iter().flat_map(|tab| &tab.panes).map(|p| p.id).collect();
         self.ask_close_workspace(idx, ids, &running);
     }
 
@@ -5328,6 +5327,14 @@ impl Gerdr {
                         Some(git.branch.clone().unwrap_or_else(|| "detached HEAD".into()))
                     });
                     view.git = Some(git.clone());
+                }
+                // A feature's own workspace: called after it, its stage
+                // marks on its header.
+                if let Some(feature) = self.workspace_feature(w) {
+                    view.name = feature_workspace::feature_label(&ws.name, &ws.dir, &feature.title);
+                    view.stages = (feature::Stage::ALL.iter())
+                        .map(|s| features::stage_mark(feature, *s))
+                        .collect();
                 }
                 // Folded by hand, else while quiet and not the active one.
                 view.folded = self

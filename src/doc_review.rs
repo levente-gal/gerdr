@@ -233,7 +233,8 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
-        let wd = WorktreeDiff::of_doc(doc, self.active_workspace, review);
+        let w = (self.feature_workspace(&doc.project, &doc.slug)).unwrap_or(self.active_workspace);
+        let wd = WorktreeDiff::of_doc(doc, w, review);
         self.repos.worktree = Some(wd);
         let env = self.worktree_env();
         if let Some(wd) = self.repos.worktree.as_mut() {
