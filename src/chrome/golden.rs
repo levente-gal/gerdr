@@ -197,6 +197,7 @@ fn pane_bar() -> PaneBarView {
         zoom: None,
         focused: true,
         lit: true,
+        lit_level: 1.0,
         hover: Some(BarButton::Restart),
         visible: true,
         alpha: 1.0,

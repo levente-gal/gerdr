@@ -446,16 +446,39 @@ struct BarState {
     visible: bool,
     /// The fade it is in, while it still moves.
     fade: Option<Fade>,
+    /// The pointer is over its pill.
+    lit: bool,
+    /// The fade between not lit and lit it is in, while that moves.
+    lit_fade: Option<Fade>,
+}
+
+/// Where `fade` stands at `now`, or, done or none, where it ends: 1 when
+/// `on`, else 0.
+fn fade_at(fade: Option<Fade>, on: bool, now: Instant) -> f32 {
+    match fade {
+        Some(fade) if !fade.done(now) => fade.value(now),
+        _ if on => 1.0,
+        _ => 0.0,
+    }
 }
 
 impl BarState {
     /// Its opacity at `now`.
     fn alpha(&self, now: Instant) -> f32 {
-        match self.fade {
-            Some(fade) if !fade.done(now) => fade.value(now),
-            _ if self.visible => 1.0,
-            _ => 0.0,
-        }
+        fade_at(self.fade, self.visible, now)
+    }
+
+    /// How lit it is at `now`, 0 to 1.
+    fn lit_level(&self, now: Instant) -> f32 {
+        fade_at(self.lit_fade, self.lit, now)
+    }
+
+    /// Start lighting up or going back at `now`, from wherever a fade
+    /// under way had got to.
+    fn light(&mut self, lit: bool, now: Instant) {
+        let from = self.lit_level(now);
+        self.lit = lit;
+        self.lit_fade = Some(Fade::from_value(now, anim::FAST, lit, from));
     }
 
     /// Start showing or hiding at `now`, going on from wherever a fade
@@ -477,6 +500,11 @@ impl BarState {
 pub struct BarLook {
     /// The bar is out, or still fading out.
     pub visible: bool,
+    /// The bar is out and the pointer is over its pill.
+    pub lit: bool,
+    /// How lit it is, 0 to 1, in `anim::quantize` steps: it follows `lit`
+    /// over `anim::FAST`.
+    pub lit_level: f32,
     /// How far out it is, 0 (its grip) to 1, in `anim::quantize` steps.
     pub alpha: f32,
     /// How far it is still under its pane's top edge: 0 out,
@@ -491,13 +519,27 @@ pub struct BarStates(Mutex<HashMap<String, BarState>>);
 
 impl BarStates {
     /// Pane `key`'s bar at `now`: whether it is wanted given whether it is
-    /// out already (`want`).
-    pub fn update(&self, key: &str, now: Instant, want: impl FnOnce(bool) -> bool) -> BarLook {
+    /// out already (`want`), and whether the pointer is over its pill
+    /// (`over`).
+    pub fn update(
+        &self,
+        key: &str,
+        now: Instant,
+        over: bool,
+        want: impl FnOnce(bool) -> bool,
+    ) -> BarLook {
         let mut states = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let state = states.entry(key.to_owned()).or_default();
         let visible = want(state.visible);
         if visible != state.visible {
             state.flip(visible, now);
+        }
+        let lit = visible && over;
+        if lit != state.lit {
+            state.light(lit, now);
+        }
+        if state.lit_fade.is_some_and(|fade| fade.done(now)) {
+            state.lit_fade = None;
         }
         if state.fade.is_some_and(|fade| fade.done(now)) {
             state.fade = None;
@@ -505,6 +547,8 @@ impl BarStates {
         let alpha = anim::quantize(state.alpha(now)) as f32 / 16.0;
         BarLook {
             visible: state.visible,
+            lit: state.lit,
+            lit_level: anim::quantize(state.lit_level(now)) as f32 / 16.0,
             alpha,
             slide: ((1.0 - alpha) * chrome::BAR_SLIDE as f32).round() as i32,
         }
@@ -916,12 +960,13 @@ impl Gerdr {
                 let content = self.pane_bar_of(pane);
                 let is_focused = focused == Some(id);
                 let kind = content.buttons;
-                let look = states.update(&key, now, |out| {
+                // Its grip is drawn always, its pill over it.
+                let full = chrome::pane_bar_rect(rect, kind);
+                let over = full.to_f64().contains(pointer);
+                let look = states.update(&key, now, over, |out| {
                     let near = chrome::pointer_reveals(rect, kind, out, pointer);
                     bar_wanted(content.status, near)
                 });
-                // Its grip is drawn always, its pill over it.
-                let full = chrome::pane_bar_rect(rect, kind);
                 Some(PaneBarView {
                     rect: full,
                     grip: chrome::pane_bar_rects(rect).0,
@@ -935,7 +980,8 @@ impl Gerdr {
                     buttons: content.buttons,
                     zoom: tab.bar_zoom(id),
                     focused: is_focused,
-                    lit: look.visible && full.to_f64().contains(pointer),
+                    lit: look.lit,
+                    lit_level: look.lit_level,
                     hover: self
                         .pane_bar_hover
                         .filter(|(hovered, _)| *hovered == id)
@@ -1770,7 +1816,7 @@ mod tests {
         let t0 = Instant::now();
         let out = |out: bool| out;
         // Not wanted: hidden from the start, nothing to see.
-        let look = states.update("p1", t0, |shown| {
+        let look = states.update("p1", t0, false, |shown| {
             assert!(!shown);
             false
         });
@@ -1778,31 +1824,59 @@ mod tests {
         assert_eq!(look.slide, chrome::BAR_SLIDE);
         assert!(!states.drawn("p1"));
         // Wanted: it starts showing.
-        let look = states.update("p1", t0, |_| true);
+        let look = states.update("p1", t0, false, |_| true);
         assert!(look.visible && look.alpha == 0.0);
         assert!(states.drawn("p1"));
-        let look = states.update("p1", t0 + anim::SLOW / 2, out);
+        let look = states.update("p1", t0 + anim::SLOW / 2, false, out);
         assert!(look.alpha > 0.3 && look.alpha < 0.7, "{}", look.alpha);
         assert!(look.slide > 0 && look.slide < chrome::BAR_SLIDE);
-        let look = states.update("p1", t0 + anim::SLOW, |_| true);
+        let look = states.update("p1", t0 + anim::SLOW, false, |_| true);
         assert_eq!((look.alpha, look.slide), (1.0, 0));
         // Not wanted any more: it fades out.
         let t1 = t0 + Duration::from_secs(2);
-        let look = states.update("p1", t1, |_| false);
+        let look = states.update("p1", t1, false, |_| false);
         assert!(!look.visible && look.alpha == 1.0);
         // On its way out it is not there to click.
         assert!(!states.drawn("p1"));
-        let look = states.update("p1", t1 + 2 * anim::SLOW, |_| false);
+        let look = states.update("p1", t1 + 2 * anim::SLOW, false, |_| false);
         assert_eq!((look.alpha, look.slide), (0.0, chrome::BAR_SLIDE));
+    }
+
+    #[test]
+    fn a_bar_lights_up_under_the_pointer_over_a_fade() {
+        let states = BarStates::default();
+        let t0 = Instant::now();
+        let look = states.update("p1", t0, false, |_| true);
+        assert_eq!((look.lit, look.lit_level), (false, 0.0));
+        // The pointer comes over its pill: lit at once, its level after.
+        let look = states.update("p1", t0, true, |_| true);
+        assert!(look.lit && look.lit_level == 0.0);
+        let look = states.update("p1", t0 + anim::FAST / 2, true, |_| true);
+        assert!(
+            look.lit_level > 0.2 && look.lit_level < 0.8,
+            "{}",
+            look.lit_level
+        );
+        let look = states.update("p1", t0 + anim::FAST, true, |_| true);
+        assert_eq!(look.lit_level, 1.0);
+        // It leaves: back down over the same while.
+        let t1 = t0 + Duration::from_secs(1);
+        let look = states.update("p1", t1, false, |_| true);
+        assert!(!look.lit && look.lit_level == 1.0);
+        let look = states.update("p1", t1 + anim::FAST, false, |_| true);
+        assert_eq!(look.lit_level, 0.0);
+        // A bar not out isn't lit, the pointer over it or not.
+        let look = states.update("p1", t1 + anim::FAST, true, |_| false);
+        assert!(!look.lit);
     }
 
     #[test]
     fn a_fade_turned_around_goes_on_from_where_it_was() {
         let states = BarStates::default();
         let t0 = Instant::now();
-        states.update("p1", t0, |_| true);
-        let half = states.update("p1", t0 + anim::SLOW / 2, |_| true);
-        let back = states.update("p1", t0 + anim::SLOW / 2, |_| false);
+        states.update("p1", t0, false, |_| true);
+        let half = states.update("p1", t0 + anim::SLOW / 2, false, |_| true);
+        let back = states.update("p1", t0 + anim::SLOW / 2, false, |_| false);
         assert!(!back.visible);
         assert!(
             (back.alpha - half.alpha).abs() < 0.1,
@@ -1810,7 +1884,7 @@ mod tests {
             back.alpha,
             half.alpha
         );
-        let gone = states.update("p1", t0 + anim::SLOW, |_| false);
+        let gone = states.update("p1", t0 + anim::SLOW, false, |_| false);
         assert_eq!(gone.alpha, 0.0);
     }
 
@@ -1818,7 +1892,7 @@ mod tests {
     fn forgotten_bars_start_hidden() {
         let states = BarStates::default();
         let t0 = Instant::now();
-        states.update("p1", t0, |_| true);
+        states.update("p1", t0, false, |_| true);
         states.retain(&["p1".into()]);
         assert!(states.drawn("p1"));
         states.retain(&[]);

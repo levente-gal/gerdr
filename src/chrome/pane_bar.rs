@@ -49,7 +49,7 @@ const PILL_PAD: i32 = 4;
 const PILL_TERMINAL_HEIGHT: i32 = 24;
 /// How opaque a terminal's pill is while the pointer is away from it: it
 /// stays out over a running command's output, which shows through a
-/// little. Under the pointer it is whole, for its buttons.
+/// little. Under the pointer it fades to whole, for its buttons.
 const PILL_TERMINAL_REST: f32 = 0.85;
 /// How far a bar's buttons keep from its top and bottom, at least: they
 /// are smaller than `BAR_BUTTON` in a pill too low for that.
@@ -384,6 +384,10 @@ pub struct PaneBarView {
     pub focused: bool,
     /// The pointer is over the bar: its buttons show.
     pub lit: bool,
+    /// How far it has gone from not lit to lit, 0 to 1, on its way after
+    /// `lit`: a terminal's pill comes whole over it. Applied when the
+    /// pill is composed, not drawn into it.
+    pub lit_level: f32,
     /// The button under the pointer.
     pub hover: Option<BarButton>,
     /// The bar is out, its pill drawn over the window's top. While false
@@ -400,15 +404,16 @@ impl PaneBarView {
     /// Where the pill is drawn right now, how big, and how opaque: whole
     /// with its shadow round it, fading in as it drops from a little
     /// higher; nothing while its fade has it gone. A terminal's lets
-    /// what is under it show through while the pointer is away.
+    /// what is under it show through while the pointer is away, less as
+    /// it lights up (`lit_level`).
     pub fn placement(&self) -> (Point<i32, Logical>, Size<i32, Logical>, f32) {
         if self.alpha <= 0.0 || self.rect.size.h <= 0 {
             return (self.rect.loc, Size::from((0, 0)), 0.0);
         }
         let loc = self.rect.loc - Point::from((SHADOW, SHADOW + self.drop()));
         let size = self.rect.size + Size::from((2 * SHADOW, 2 * SHADOW));
-        let rest = if self.buttons == BarButtons::Terminal && !self.lit {
-            PILL_TERMINAL_REST
+        let rest = if self.buttons == BarButtons::Terminal {
+            PILL_TERMINAL_REST + (1.0 - PILL_TERMINAL_REST) * self.lit_level.clamp(0.0, 1.0)
         } else {
             1.0
         };
@@ -454,12 +459,13 @@ impl PaneBarView {
     }
 
     /// The same bar at full opacity and at rest: what its buffer looks
-    /// like, for a cache key (the alpha and the drop are applied when it
-    /// is composed).
+    /// like, for a cache key (the alpha, the drop and how lit it is are
+    /// applied when it is composed).
     pub fn still(&self) -> Self {
         Self {
             alpha: 1.0,
             slide: 0,
+            lit_level: 0.0,
             ..self.clone()
         }
     }
@@ -785,6 +791,7 @@ mod tests {
             zoom: None,
             focused: true,
             lit: true,
+            lit_level: 1.0,
             hover: None,
             visible: true,
             alpha: 1.0,
@@ -1010,15 +1017,21 @@ mod tests {
     fn a_terminal_pill_lets_its_window_show_through_until_the_pointer_comes() {
         let mut v = view(600);
         v.buttons = BarButtons::Terminal;
-        v.lit = false;
+        v.lit_level = 0.0;
         assert_eq!(v.placement().2, PILL_TERMINAL_REST);
         v.alpha = 0.5;
         assert_eq!(v.placement().2, 0.5 * PILL_TERMINAL_REST);
-        v.lit = true;
+        // On its way to lit, between; lit, whole.
+        v.lit_level = 0.5;
+        let half = v.placement().2;
+        assert!(half > 0.5 * PILL_TERMINAL_REST && half < 0.5, "{half}");
+        v.lit_level = 1.0;
         assert_eq!(v.placement().2, 0.5);
+        // How lit it is doesn't draw the pill again.
+        assert_eq!(v.still().lit_level, 0.0);
         // The others are whole either way.
         v.buttons = WEB;
-        v.lit = false;
+        v.lit_level = 0.0;
         assert_eq!(v.placement().2, 0.5);
     }
 
