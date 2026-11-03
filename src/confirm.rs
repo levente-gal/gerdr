@@ -71,6 +71,15 @@ pub enum Then {
         abandon: bool,
         force: bool,
     },
+    /// Unlink these linked projects (ids) from this project's feature,
+    /// `force`: with the work their worktrees hold (see
+    /// `Gerdr::unlink_projects`).
+    UnlinkProjects {
+        project: String,
+        slug: String,
+        projects: Vec<String>,
+        force: bool,
+    },
     /// Ship this project's feature as its Ship check said (see
     /// `Gerdr::ship_feature`).
     ShipFeature { project: String, slug: String },
@@ -576,6 +585,12 @@ impl Gerdr {
                 abandon,
                 force,
             } => self.remove_feature(&project, &slug, abandon, force),
+            Then::UnlinkProjects {
+                project,
+                slug,
+                projects,
+                force,
+            } => self.unlink_projects(&project, &slug, &projects, force),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::ApproveStage {
                 project,

@@ -40,7 +40,10 @@ pub mod store;
 pub mod verify;
 pub mod viewed;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -152,7 +155,7 @@ pub struct Mark {
 /// A pull request a feature opened.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pr {
-    /// The repository's name, as in `Repo::name`.
+    /// The repository's `Repo::key`.
     pub repo: String,
     pub url: String,
 }
@@ -195,6 +198,36 @@ pub struct Repo {
     /// `feature/<slug>` once touched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The id of the project it belongs to when that is a linked one (see
+    /// `Link`); `None` for the feature's home project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+impl Repo {
+    /// What names it among all the feature's repositories: its `name` for a
+    /// home repository, `<project>:<name>` for a linked project's. Maps and
+    /// lists keyed by repository use it.
+    pub fn key(&self) -> String {
+        match &self.project {
+            Some(project) => format!("{project}:{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// Another project a feature spans: its own feature folder, made like the
+/// home one, under its own root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    /// The project's id.
+    pub project: String,
+    /// Like `Feature::root`, for this project.
+    pub root: PathBuf,
+    /// `<root>/.features/<slug>`.
+    pub dir: PathBuf,
+    /// Whether `root` holds several repositories.
+    pub multi: bool,
 }
 
 /// Something that happened to a feature, kept in its history.
@@ -225,8 +258,12 @@ pub struct Feature {
     pub dir: PathBuf,
     /// Whether `root` holds several repositories.
     pub multi: bool,
-    /// Every repository, touched or not, in name order.
+    /// Every repository, touched or not: the home project's in name
+    /// order, then each link's in link order, by name within it.
     pub repos: Vec<Repo>,
+    /// The other projects it spans, in the order they were linked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
     #[serde(default)]
     pub status: Status,
     /// The stages marked done.
@@ -348,6 +385,104 @@ impl Feature {
     pub fn branch(&self) -> String {
         format!("feature/{}", self.slug)
     }
+
+    /// The folders its agents are let into besides their working folder
+    /// (`dir`): the feature data dir `data`, then each linked project's
+    /// feature folder.
+    pub fn agent_dirs(&self, data: &Path) -> Vec<PathBuf> {
+        std::iter::once(data.to_path_buf())
+            .chain(self.links.iter().map(|l| l.dir.clone()))
+            .collect()
+    }
+
+    /// Whether it has more than one repository, over all its projects.
+    pub fn many_repos(&self) -> bool {
+        self.multi || !self.links.is_empty()
+    }
+
+    /// The repository whose `Repo::key` is `key`.
+    pub fn repo(&self, key: &str) -> Option<&Repo> {
+        self.repos.iter().find(|r| r.key() == key)
+    }
+
+    /// Its link to project `project`, if it spans it.
+    pub fn link(&self, project: &str) -> Option<&Link> {
+        self.links.iter().find(|l| l.project == project)
+    }
+
+    /// The feature folder `repo` is in: the home `dir`, or its link's.
+    pub fn dir_of(&self, repo: &Repo) -> &Path {
+        repo.project
+            .as_deref()
+            .and_then(|p| self.link(p))
+            .map_or(self.dir.as_path(), |l| l.dir.as_path())
+    }
+
+    /// Every project it spans with its feature folder: the home one
+    /// (`None`) first, then each link in link order.
+    pub fn folders(&self) -> Vec<(Option<&str>, &Path)> {
+        std::iter::once((None, self.dir.as_path()))
+            .chain(
+                self.links
+                    .iter()
+                    .map(|l| (Some(l.project.as_str()), l.dir.as_path())),
+            )
+            .collect()
+    }
+
+    /// Its repositories of project `project` (`None`: the home one).
+    pub fn repos_of<'a>(&'a self, project: Option<&'a str>) -> impl Iterator<Item = &'a Repo> {
+        self.repos
+            .iter()
+            .filter(move |r| r.project.as_deref() == project)
+    }
+
+    /// Its repositories in key order: the order patch-ids, setup and
+    /// checks go in.
+    pub fn repos_by_key(&self) -> Vec<&Repo> {
+        let mut repos: Vec<&Repo> = self.repos.iter().collect();
+        repos.sort_by_key(|r| r.key());
+        repos
+    }
+}
+
+/// A setting of a feature's projects' workflows, per project: the home
+/// one's and each linked one's by id. `of` gives the one a repository's
+/// own project sets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PerProject<T> {
+    pub home: T,
+    pub links: BTreeMap<String, T>,
+}
+
+impl<T> PerProject<T> {
+    /// The same `home` for every project, as for a feature of one.
+    pub fn all(home: T) -> Self {
+        Self {
+            home,
+            links: BTreeMap::new(),
+        }
+    }
+
+    /// `repo`'s own project's setting; a project without one (gone from
+    /// the store) gives nothing.
+    pub fn of(&self, repo: &Repo) -> Option<&T> {
+        match &repo.project {
+            None => Some(&self.home),
+            Some(p) => self.links.get(p),
+        }
+    }
+}
+
+impl PerProject<String> {
+    /// What `repo` is called on screen, with these projects' names: its
+    /// name, a linked project's as "<project>: <repo>".
+    pub fn label(&self, repo: &Repo) -> String {
+        match &repo.project {
+            None => repo.name.clone(),
+            Some(id) => format!("{}: {}", self.links.get(id).unwrap_or(id), repo.name),
+        }
+    }
 }
 
 /// Unix seconds now.
@@ -437,6 +572,7 @@ pub(crate) mod tests {
                     worktree,
                     touched,
                     branch: touched.then(|| "feature/f".into()),
+                    project: None,
                 }
             })
             .collect();
@@ -450,6 +586,7 @@ pub(crate) mod tests {
             dir,
             multi: true,
             repos,
+            links: Vec::new(),
             status: Status::Open,
             marks: Default::default(),
             history: Vec::new(),
@@ -463,6 +600,51 @@ pub(crate) mod tests {
         }
     }
 
+    /// Link project `project` to `f`: repositories `names` in folder
+    /// `<t>/<project>` (its root), touched but those in `untouched`, each
+    /// worktree in `<root>/.features/f`, as `feature_over` makes them.
+    pub(crate) fn link_over(
+        t: &Temp,
+        f: &mut Feature,
+        project: &str,
+        names: &[&str],
+        untouched: &[&str],
+    ) {
+        let root = t.0.join(project);
+        let dir = root.join(".features/f");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in names {
+            let main = root.join(name);
+            std::fs::create_dir_all(&main).unwrap();
+            run(&main, &["init", "-q", "-b", "main"]);
+            commit(&main, "a", "first");
+            let worktree = dir.join(name);
+            let touched = !untouched.contains(name);
+            let w = worktree.to_str().unwrap();
+            if touched {
+                run(&main, &["worktree", "add", "-q", "-b", "feature/f", w]);
+            } else {
+                run(&main, &["worktree", "add", "-q", "--detach", w]);
+            }
+            f.repos.push(Repo {
+                name: (*name).into(),
+                base_commit: run(&main, &["rev-parse", "main"]).trim().into(),
+                main,
+                base: "main".into(),
+                worktree,
+                touched,
+                branch: touched.then(|| "feature/f".into()),
+                project: Some(project.into()),
+            });
+        }
+        f.links.push(Link {
+            project: project.into(),
+            root,
+            dir,
+            multi: true,
+        });
+    }
+
     pub(crate) fn feature(slug: &str, created: u64) -> Feature {
         Feature {
             version: VERSION,
@@ -474,6 +656,7 @@ pub(crate) mod tests {
             dir: PathBuf::from("/r/.features").join(slug),
             multi: false,
             repos: Vec::new(),
+            links: Vec::new(),
             status: Status::Open,
             marks: BTreeMap::new(),
             history: Vec::new(),
@@ -562,6 +745,43 @@ pub(crate) mod tests {
         assert_eq!(f.current(), None);
         f.status = Status::Abandoned;
         assert_eq!(f.invalidate("p2", 2), None);
+    }
+
+    #[test]
+    fn linked_repos_have_their_own_keys_and_folders() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        link_over(&t, &mut f, "other", &["api", "web"], &["web"]);
+        let keys: Vec<String> = f.repos.iter().map(Repo::key).collect();
+        assert_eq!(keys, ["api", "other:api", "other:web"]);
+        assert!(f.many_repos());
+        assert_eq!(f.repo("other:web").unwrap().name, "web");
+        assert!(f.repo("web").is_none());
+        let linked = f.repo("other:api").unwrap();
+        assert_eq!(f.dir_of(linked), t.0.join("other/.features/f"));
+        assert_eq!(f.dir_of(&f.repos[0]), f.dir);
+        let folders: Vec<_> = f.folders().into_iter().map(|(p, _)| p).collect();
+        assert_eq!(folders, [None, Some("other")]);
+        assert_eq!(f.repos_of(Some("other")).count(), 2);
+        assert_eq!(
+            f.agent_dirs(Path::new("/data")),
+            [PathBuf::from("/data"), t.0.join("other/.features/f")]
+        );
+        let modes = PerProject {
+            home: 1,
+            links: [("other".to_owned(), 2)].into(),
+        };
+        assert_eq!(modes.of(&f.repos[0]), Some(&1));
+        assert_eq!(modes.of(linked), Some(&2));
+        // An old record, without links or projects, loads as it was.
+        let old = r#"{"slug":"a","title":"A","project":"p","created":1,"root":"/r",
+            "dir":"/r/.features/a","multi":false,"repos":[{"name":"r","main":"/r",
+            "base":"main","base_commit":"c","worktree":"/r/.features/a","touched":true}]}"#;
+        let old: Feature = serde_json::from_str(old).unwrap();
+        assert!(old.links.is_empty() && old.repos[0].project.is_none());
+        assert_eq!(old.repos[0].key(), "r");
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
     }
 
     #[test]

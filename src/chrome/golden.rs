@@ -57,6 +57,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             restart: false,
             picks: Vec::new(),
             errors: 0,
+            stages: Vec::new(),
         },
         WorkspaceView {
             name: "~".into(),
@@ -73,6 +74,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             restart: false,
             picks: Vec::new(),
             errors: 0,
+            stages: Vec::new(),
         },
     ]
 }
@@ -1417,29 +1419,41 @@ fn dump_status() {
 }
 
 /// The new feature dialog over three repositories, the second unticked,
-/// the keyboard on the title.
+/// and a linked project's one, the keyboard on the title.
 fn new_feature() -> super::NewFeatureView {
     let repo = |name: &str, base: &str, touched| super::NewFeatureRepo {
         name: name.into(),
-        base: base.into(),
+        place: format!(
+            "from {base} \u{b7} {}",
+            if touched { "changed" } else { "context" }
+        ),
         touched,
         fixed: false,
     };
     super::NewFeatureView {
-        project: "aft".into(),
+        heading: "New feature in \u{201c}aft\u{201d}".into(),
         title: Line::from("Bulk export of invoices"),
         focus: None,
         root: "~/Work/aft".into(),
         root_failed: false,
+        projects: "Projects: aft (home) \u{b7} billing".into(),
+        link: Some(super::LINK_BUTTON[0]),
         repos: vec![
             repo("api", "dev", true),
             repo("shared", "main", false),
             repo("web", "dev", true),
+            repo("billing: ledger", "main", false),
         ],
+        go: "Create",
         top: 0,
         error: None,
         hover: Some(super::NewFeatureHit::Button(1)),
-        keys: vec![("Tab", "next"), ("Space", "tick"), ("Esc", "clear")],
+        keys: vec![
+            ("Tab", "next"),
+            ("Space", "tick"),
+            ("Ctrl+Shift+L", "link project"),
+            ("Esc", "clear"),
+        ],
     }
 }
 
@@ -1604,19 +1618,56 @@ fn feature_done_prs() -> super::FeaturePanelView {
     view
 }
 
+/// Eight stage marks, the first `done` of them done.
+fn stage_marks(done: usize) -> Vec<super::StageMark> {
+    use super::StageMark;
+    (0..8)
+        .map(|i| match i {
+            i if i < done => StageMark::Done,
+            i if i == done => StageMark::Current,
+            _ => StageMark::Later,
+        })
+        .collect()
+}
+
+/// The sidebar with a feature's own workspace, its header showing the
+/// feature's title and stage marks (the pointer on them), and another
+/// feature with none open under the workspaces.
+fn feature_workspace_sidebar() -> SidebarView {
+    use super::FeatureRowView;
+    let mut workspaces = workspaces();
+    let feature = &mut workspaces[1];
+    feature.name = "Bulk export of invoices".into();
+    feature.stages = stage_marks(3);
+    SidebarView {
+        workspaces,
+        agents: agents(),
+        active: Some(1),
+        project: Some("aft".into()),
+        header_lit: false,
+        features: vec![FeatureRowView {
+            title: "Faster search".into(),
+            marks: stage_marks(1),
+        }],
+        state: SidebarState {
+            rows: vec![
+                RowState::default(),
+                RowState {
+                    hover: 16,
+                    stages: true,
+                    ..RowState::default()
+                },
+            ],
+            ..SidebarState::default()
+        },
+    }
+}
+
 /// The sidebar with two open features under its workspaces, the second
 /// under the pointer.
 fn features_sidebar() -> SidebarView {
-    use super::{FeatureRowView, StageMark};
-    let marks = |done: usize| {
-        (0..8)
-            .map(|i| match i {
-                i if i < done => StageMark::Done,
-                i if i == done => StageMark::Current,
-                _ => StageMark::Later,
-            })
-            .collect()
-    };
+    use super::FeatureRowView;
+    let marks = stage_marks;
     SidebarView {
         workspaces: workspaces(),
         agents: agents(),
@@ -1627,12 +1678,10 @@ fn features_sidebar() -> SidebarView {
             FeatureRowView {
                 title: "Bulk export of invoices".into(),
                 marks: marks(2),
-                stage: Some("Build".into()),
             },
             FeatureRowView {
                 title: "A feature with a title far too long to fit".into(),
                 marks: marks(6),
-                stage: Some("Manual test".into()),
             },
         ],
         state: SidebarState {
@@ -1668,6 +1717,7 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.feature_panel(&feature_done_prs(), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
+        hash(painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p)),
         hash(painter.sidebar_view(&needs_you_sidebar(), (260, 520).into(), scale, p)),
     ]
 }
@@ -1743,7 +1793,7 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 10] = [
+const FEATURES: [&str; 11] = [
     "new_feature",
     "feature_panel",
     "feature_panel_multi",
@@ -1753,62 +1803,67 @@ const FEATURES: [&str; 10] = [
     "feature_done_prs",
     "manual_test",
     "manual_test_note",
+    "sidebar_feature_workspace",
     "sidebar_needs_you",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 10]; 4] = [
+const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 1
     [
-        0xe5e4e33f1868788d, // new_feature
+        0xaf6537e36661773b, // new_feature
         0x869764fa3d9048d7, // feature_panel
         0xde9d2405310235e7, // feature_panel_multi
-        0x9a42cd55ebee6d1b, // sidebar_features
+        0x5e017fbffabde99b, // sidebar_features
         0xc6d96ee5e01de0da, // feature_ship_blocked
         0xc16daf60f0e04c88, // feature_ship_ready
         0x25725cfbc3b3ba91, // feature_done_prs
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x91d42b38d3b2a5d1, // sidebar_needs_you
+        0x6a43783f5bb5fcd3, // sidebar_feature_workspace
+        0x818d05fb2ec3d9a9, // sidebar_needs_you
     ],
     // Dark at 2
     [
-        0x2f8fa96d6cb9236d, // new_feature
+        0x9a3eb907776fe145, // new_feature
         0x31307a3926bbc629, // feature_panel
         0x5437f7692eaeff36, // feature_panel_multi
-        0x3029b726c417cdcc, // sidebar_features
+        0x095e2dfbb584cb35, // sidebar_features
         0x96b5aee7e55e893b, // feature_ship_blocked
         0x55c082e14c28296d, // feature_ship_ready
         0xc43b3e6d75230966, // feature_done_prs
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0x1b14526ed52bb265, // sidebar_needs_you
+        0x6d690a720cee56d2, // sidebar_feature_workspace
+        0x445f579930bc139c, // sidebar_needs_you
     ],
     // Light at 1
     [
-        0xebea9664a0f6707e, // new_feature
+        0x0e77512e4815b092, // new_feature
         0x3abb7fb4ebb6164f, // feature_panel
         0x0608e5100d8d1171, // feature_panel_multi
-        0x18af4122b0156ae0, // sidebar_features
+        0xd22590056de00ae5, // sidebar_features
         0x566c8cd22fcb3376, // feature_ship_blocked
         0xb2f69eb40cd2a0e6, // feature_ship_ready
         0x05cc7d58ebc3d6c6, // feature_done_prs
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0x081b70d6ed1ca405, // sidebar_needs_you
+        0xd2bbdc87ca87827a, // sidebar_feature_workspace
+        0x0884214637ba9738, // sidebar_needs_you
     ],
     // Light at 2
     [
-        0x1fbf661fb84507e5, // new_feature
+        0x9e8eaff9dfeac632, // new_feature
         0x0dcda199b0dbc637, // feature_panel
         0x71310a3466763ea3, // feature_panel_multi
-        0x1b6f0c852b68e576, // sidebar_features
+        0x5e1381a968fcc82e, // sidebar_features
         0x9c492950881672d9, // feature_ship_blocked
         0x336e04083585dc13, // feature_ship_ready
         0x0a045e32666be0f4, // feature_done_prs
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x6592cb8a03fcb147, // sidebar_needs_you
+        0x0998b64583e38b40, // sidebar_feature_workspace
+        0x94e9eab9390bd4db, // sidebar_needs_you
     ],
 ];
 
@@ -1870,6 +1925,12 @@ fn dump_features() {
             &dir,
             &format!("sidebar_features_{tag}"),
             painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p),
+            px(260),
+        );
+        dump(
+            &dir,
+            &format!("sidebar_feature_workspace_{tag}"),
+            painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p),
             px(260),
         );
         dump(

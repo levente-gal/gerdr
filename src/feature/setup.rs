@@ -28,7 +28,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{Feature, layout::shown, now};
+use super::{Feature, PerProject, Repo, layout::shown, now};
 
 /// The folders copied from a repository's main worktree before its setup.
 pub const REFLINK: &[&str] = &["node_modules"];
@@ -53,19 +53,25 @@ pub struct SetupRun {
     pub failed: Option<String>,
 }
 
-/// Whether `commands` (the store file's setup, by repository name) give
-/// `feature` anything to run, `REFLINK` copies aside.
-pub fn has_commands(feature: &Feature, commands: &BTreeMap<String, Vec<String>>) -> bool {
+/// Each project's setup commands, by repository name: the store file's
+/// `"workflow": {"setup": ...}` of the project a repository is in.
+pub type Commands = PerProject<BTreeMap<String, Vec<String>>>;
+
+/// Whether `commands` give `feature` anything to run, `REFLINK` copies
+/// aside.
+pub fn has_commands(feature: &Feature, commands: &Commands) -> bool {
     feature
         .repos
         .iter()
-        .any(|repo| repo.worktree.is_dir() && !commands_of(commands, &repo.name).is_empty())
+        .any(|repo| repo.worktree.is_dir() && !commands_of(commands, repo).is_empty())
 }
 
-/// The commands `commands` give repository `name`, blank ones left out.
-fn commands_of<'a>(commands: &'a BTreeMap<String, Vec<String>>, name: &str) -> Vec<&'a str> {
+/// The commands `commands` give `repo` (its own project's, by its name),
+/// blank ones left out.
+fn commands_of<'a>(commands: &'a Commands, repo: &Repo) -> Vec<&'a str> {
     commands
-        .get(name)
+        .of(repo)
+        .and_then(|c| c.get(&repo.name))
         .into_iter()
         .flatten()
         .map(|c| c.trim())
@@ -78,7 +84,7 @@ fn commands_of<'a>(commands: &'a BTreeMap<String, Vec<String>>, name: &str) -> V
 /// what runs, in words: "services-api: npm ci (2 of 3)".
 pub fn run(
     feature: &Feature,
-    commands: &BTreeMap<String, Vec<String>>,
+    commands: &Commands,
     log: &Path,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
@@ -96,14 +102,11 @@ pub fn run(
         .iter()
         .filter(|r| r.worktree.is_dir())
         .collect();
-    repos.sort_by(|a, b| a.name.cmp(&b.name));
-    let total: usize = repos
-        .iter()
-        .map(|r| commands_of(commands, &r.name).len())
-        .sum();
+    repos.sort_by_key(|r| r.key());
+    let total: usize = repos.iter().map(|r| commands_of(commands, r).len()).sum();
     let mut i = 0;
     for repo in repos {
-        let name = &repo.name;
+        let name = &repo.key();
         for folder in REFLINK {
             let from = repo.main.join(folder);
             let to = repo.worktree.join(folder);
@@ -141,7 +144,7 @@ pub fn run(
             // be written doesn't stop the setup (its error is the result).
             let _ = writeln!(file, "== {} {name}: {note}", super::verify::utc(now()));
         }
-        for command in commands_of(commands, name) {
+        for command in commands_of(commands, repo) {
             i += 1;
             progress(format!("{name}: {command} ({i} of {total})"));
             // As above: a log line lost doesn't stop the setup.
@@ -293,13 +296,50 @@ pub fn log_path(data: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::tests::{Temp, feature_over};
+    use crate::feature::tests::{Temp, feature_over, link_over};
 
-    fn map(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    fn by_name(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
         pairs
             .iter()
             .map(|(k, v)| ((*k).into(), v.iter().map(|c| (*c).into()).collect()))
             .collect()
+    }
+
+    fn map(pairs: &[(&str, &[&str])]) -> Commands {
+        PerProject::all(by_name(pairs))
+    }
+
+    #[test]
+    fn a_linked_projects_repos_take_its_own_commands() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        link_over(&t, &mut f, "other", &["api"], &["api"]);
+        let commands = Commands {
+            home: by_name(&[("api", &["echo home > who"])]),
+            links: [(
+                "other".to_owned(),
+                by_name(&[("api", &["echo other > who"])]),
+            )]
+            .into(),
+        };
+        let mut said = Vec::new();
+        run(&f, &commands, &t.0.join("setup.log"), &mut |s| said.push(s)).unwrap();
+        assert_eq!(
+            said,
+            [
+                "api: echo home > who (1 of 2)",
+                "other:api: echo other > who (2 of 2)"
+            ]
+        );
+        let who = |r: usize| std::fs::read_to_string(f.repos[r].worktree.join("who")).unwrap();
+        assert_eq!((who(0), who(1)), ("home\n".into(), "other\n".into()));
+        // A project gone from the store gives its repositories nothing.
+        assert!(!has_commands(&f, &PerProject::all(BTreeMap::new())));
+        let only_gone = Commands {
+            home: BTreeMap::new(),
+            links: BTreeMap::new(),
+        };
+        assert!(!has_commands(&f, &only_gone));
     }
 
     #[test]
@@ -365,7 +405,7 @@ mod tests {
         std::fs::write(web.worktree.join("node_modules/own"), "").unwrap();
         let log = t.0.join("setup.log");
         let mut said = Vec::new();
-        run(&f, &BTreeMap::new(), &log, &mut |s| said.push(s)).unwrap();
+        run(&f, &Commands::default(), &log, &mut |s| said.push(s)).unwrap();
         assert_eq!(said, ["api: copying node_modules"]);
         let text = std::fs::read_to_string(&log).unwrap();
         let copied = api.worktree.join("node_modules/x/i.js");

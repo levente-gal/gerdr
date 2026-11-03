@@ -51,7 +51,7 @@ const PILL_TERMINAL_HEIGHT: i32 = 24;
 /// How opaque a pill is while the pointer is away from it: what is under
 /// it (a running command's output, a page's or an app's own header)
 /// shows through a little. Under the pointer it fades to whole, for its
-/// buttons. A grip is as see-through, always.
+/// buttons. A grip and the focus strip are as see-through, always.
 pub(super) const PILL_REST: f32 = 0.7;
 /// How far a bar's buttons keep from its top and bottom, at least: they
 /// are smaller than `BAR_BUTTON` in a pill too low for that.

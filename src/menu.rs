@@ -446,7 +446,7 @@ impl Gerdr {
             MenuAction::Inbox => self.open_inbox(None),
             MenuAction::Features => self.open_features(),
             MenuAction::NewFeature(at) => self.open_new_feature(at),
-            MenuAction::OpenFeature(project, slug) => self.open_feature(&project, &slug),
+            MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),
             MenuAction::InboxRestore {
                 project,
                 ids,

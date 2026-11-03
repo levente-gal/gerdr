@@ -6,12 +6,13 @@
 //! (`ShipMode`):
 //!
 //! - pull requests (`open_prs`): for each touched repository with commits,
-//!   in name order, allow the push (`hook::allow`), push `feature/<slug>`
+//!   in the feature's order (home project first, then each link), allow the push (`hook::allow`), push `feature/<slug>`
 //!   with its upstream, guard it again, and open a pull request into its
 //!   base with `gh pr create`, or keep the one open for the branch already.
 //!   With more than one, every body links the others (`gh pr edit`).
-//! - squash (`squash_command`): a command for a tab in the main worktree
-//!   that squashes the branch into the base and commits, the message
+//! - squash (`squash_command`): a command for a tab that goes to each
+//!   repository's own main worktree in turn (a linked project's too) and
+//!   squashes the branch into the base and commits, the message
 //!   prefilled with the title, for the user to edit. The feature is done
 //!   once every branch reads as merged (`Probe::merged`).
 //!
@@ -26,7 +27,7 @@ use std::{
 };
 
 use super::{
-    Feature, Pr, Repo, ShipMode, Stage, Status,
+    Feature, PerProject, Pr, Repo, ShipMode, Stage, Status,
     hook::{self, Guard},
     layout::{git, shown},
     patch::{self, Reading},
@@ -86,8 +87,8 @@ pub struct ShipCheck {
 pub struct Probe {
     /// Its patch-id and uncommitted changes, or why they couldn't be read.
     pub reading: Result<Reading, String>,
-    /// Per touched repository, by name: whether pushes from its worktree
-    /// are guarded (after making sure of the hook there).
+    /// Per touched repository, by `Repo::key`: whether pushes from its
+    /// worktree are guarded (after making sure of the hook there).
     pub guards: BTreeMap<String, Guard>,
     /// When Ship is its current stage: whether it can ship.
     pub ship: Option<ShipCheck>,
@@ -96,16 +97,18 @@ pub struct Probe {
     pub merged: bool,
 }
 
-/// How `repo` of `feature` ships: `mode` when the project sets one, else
-/// a pull request when its `origin` is on GitHub, else a squash.
-pub fn mode_of(feature: &Feature, repo: &str, mode: Option<ShipMode>) -> ShipMode {
-    if let Some(mode) = mode {
+/// Each project's ship mode setting, if it has one (`Workflow::ship`).
+pub type Modes = PerProject<Option<ShipMode>>;
+
+/// How `feature`'s repository `repo` (its `Repo::key`) ships: the mode its
+/// own project sets in `modes`, if any, else a pull request when its
+/// `origin` is on GitHub, else a squash.
+pub fn mode_of(feature: &Feature, repo: &str, modes: &Modes) -> ShipMode {
+    let found = feature.repo(repo);
+    if let Some(mode) = found.and_then(|r| modes.of(r)).copied().flatten() {
         return mode;
     }
-    let on_github = feature
-        .repos
-        .iter()
-        .find(|r| r.name == repo)
+    let on_github = found
         .and_then(|r| gitinfo::web_url(&r.main))
         .is_some_and(|url| url.starts_with("https://github.com/"));
     if on_github {
@@ -115,18 +118,18 @@ pub fn mode_of(feature: &Feature, repo: &str, mode: Option<ShipMode>) -> ShipMod
     }
 }
 
-/// Read `feature` for the panel (see `Probe`); `mode` is the project's
-/// setting, if any. Makes sure of every touched repository's hook and
+/// Read `feature` for the panel (see `Probe`); `modes` are its projects'
+/// settings. Makes sure of every touched repository's hook and
 /// guard file on the way (`hook::ensure`, `hook::guard_if_missing`).
-pub fn probe(feature: &Feature, mode: Option<ShipMode>) -> Probe {
+pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     let reading = patch::read(feature);
     let branch = feature.branch();
     let guards = feature
         .touched()
-        .map(|repo| (repo.name.clone(), guard_of(repo, &branch)))
+        .map(|repo| (repo.key(), guard_of(repo, &branch)))
         .collect();
     let ship = (feature.status == Status::Open && feature.current() == Some(Stage::Ship))
-        .then(|| check(feature, &reading, mode));
+        .then(|| check(feature, &reading, modes));
     let merged =
         feature.shipping.squash_at.is_some() && reading.as_ref().is_ok_and(|r| merged(feature, r));
     Probe {
@@ -158,7 +161,7 @@ fn merged(feature: &Feature, reading: &Reading) -> bool {
     let branch = feature.branch();
     let mut shipped = feature
         .touched()
-        .filter(|r| reading.commits.get(&r.name).is_some_and(|n| *n > 0))
+        .filter(|r| reading.commits.get(&r.key()).is_some_and(|n| *n > 0))
         .peekable();
     if shipped.peek().is_none() {
         return false;
@@ -174,11 +177,7 @@ fn merged(feature: &Feature, reading: &Reading) -> bool {
 }
 
 /// Whether `feature`, at Ship, can ship as `reading` found it.
-fn check(
-    feature: &Feature,
-    reading: &Result<Reading, String>,
-    mode: Option<ShipMode>,
-) -> ShipCheck {
+fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) -> ShipCheck {
     let mut out = ShipCheck::default();
     for stage in Stage::ALL.into_iter().filter(|s| *s < Stage::Ship) {
         if !feature.is_done(stage) {
@@ -211,7 +210,7 @@ fn check(
         ));
     }
     let branch = feature.branch();
-    let commits = |r: &Repo| reading.commits.get(&r.name).copied().unwrap_or(0);
+    let commits = |r: &Repo| reading.commits.get(&r.key()).copied().unwrap_or(0);
     let shipped: Vec<&Repo> = feature.touched().filter(|r| commits(r) > 0).collect();
     if shipped.is_empty() {
         out.blockers
@@ -220,17 +219,17 @@ fn check(
     }
     for repo in feature.touched().filter(|r| commits(r) == 0) {
         out.notes
-            .push(format!("{} has no commits: left out", repo.name));
+            .push(format!("{} has no commits: left out", repo.key()));
     }
     let mut prs = Vec::new();
     let mut squashes = Vec::new();
     for repo in shipped {
-        match mode_of(feature, &repo.name, mode) {
+        match mode_of(feature, &repo.key(), modes) {
             ShipMode::Pr => {
                 if git(&repo.main, &["remote", "get-url", "origin"]).is_err() {
                     out.blockers.push(format!(
                         "{} has no origin remote to open a pull request on",
-                        repo.name
+                        repo.key()
                     ));
                 }
                 prs.push(repo);
@@ -245,17 +244,15 @@ fn check(
         return out;
     }
     for repo in &prs {
-        out.actions.push(Action::Push {
-            repo: repo.name.clone(),
-        });
-        let kept = feature.shipping.prs.iter().find(|p| p.repo == repo.name);
+        out.actions.push(Action::Push { repo: repo.key() });
+        let kept = feature.shipping.prs.iter().find(|p| p.repo == repo.key());
         out.actions.push(match kept {
             Some(pr) => Action::KeepPr {
-                repo: repo.name.clone(),
+                repo: repo.key(),
                 url: pr.url.clone(),
             },
             None => Action::OpenPr {
-                repo: repo.name.clone(),
+                repo: repo.key(),
                 base: repo.base.clone(),
             },
         });
@@ -265,7 +262,7 @@ fn check(
     }
     for repo in squashes {
         out.actions.push(Action::Squash {
-            repo: repo.name.clone(),
+            repo: repo.key(),
             base: repo.base.clone(),
         });
     }
@@ -274,7 +271,7 @@ fn check(
 
 /// What stops squashing `branch` into `repo`'s base in its main worktree.
 fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
-    let (name, base) = (&repo.name, &repo.base);
+    let (name, base) = (&repo.key(), &repo.base);
     let on = git(&repo.main, &["symbolic-ref", "-q", "--short", "HEAD"])
         .map(|b| b.trim().to_owned())
         .unwrap_or_default();
@@ -330,7 +327,7 @@ pub fn open_prs(
 ) -> Result<Vec<Pr>, (String, Vec<Pr>)> {
     let branch = feature.branch();
     let mut prs: Vec<Pr> = Vec::new();
-    let repo_of = |name: &str| feature.repos.iter().find(|r| r.name == name);
+    let repo_of = |key: &str| feature.repo(key);
     for action in actions {
         let fail = |why: String, prs: &Vec<Pr>| Err((why, prs.clone()));
         match action {
@@ -401,7 +398,7 @@ fn push(repo: &Repo, branch: &str) -> Result<(), String> {
     let pushed = git_ops::push(&repo.worktree, Some("origin"), false);
     let guarded = hook::guard(&repo.main, branch);
     if let Err(err) = &guarded {
-        tracing::warn!("guarding {branch} of {} again: {err}", repo.name);
+        tracing::warn!("guarding {branch} of {} again: {err}", repo.key());
     }
     pushed.map(|_| ()).map_err(|failed| push_why(&failed))
 }
@@ -547,7 +544,7 @@ pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String
     let mains: Vec<&Path> = actions
         .iter()
         .filter_map(|a| match a {
-            Action::Squash { repo, .. } => feature.repos.iter().find(|r| &r.name == repo),
+            Action::Squash { repo, .. } => feature.repo(repo),
             _ => None,
         })
         .map(|r| r.main.as_path())
@@ -580,12 +577,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::feature::tests::{Temp, commit, feature_over, run, try_run};
+    use crate::feature::tests::{Temp, commit, feature_over, link_over, run, try_run};
 
     /// Give each of `f`'s repositories a bare origin with main on it.
     fn origins(t: &Temp, f: &Feature) {
         for repo in &f.repos {
-            let origin = t.0.join(format!("{}.git", repo.name));
+            let origin = t.0.join(format!("{}.git", repo.key().replace(':', "-")));
             std::fs::create_dir_all(&origin).unwrap();
             run(&origin, &["init", "-q", "--bare", "-b", "main"]);
             run(
@@ -658,7 +655,7 @@ esac
         mark_all(&mut f);
         let gh = fake_gh(&t);
 
-        let p = probe(&f, Some(ShipMode::Pr));
+        let p = probe(&f, &Modes::all(Some(ShipMode::Pr)));
         assert_eq!(p.guards["api"], Guard::On);
         assert!(hook::guarded(&f.repos[0].main, "feature/f"));
         let check = p.ship.unwrap();
@@ -714,7 +711,7 @@ esac
 
         // Shipped again: the pull request is kept, the push updates it.
         f.shipping.prs = prs.clone();
-        let check = probe(&f, Some(ShipMode::Pr)).ship.unwrap();
+        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
         assert_eq!(
             check.actions[1],
             Action::KeepPr {
@@ -736,7 +733,7 @@ esac
         commit(&wt(&f, "web"), "w1", "web change");
         mark_all(&mut f);
         let gh = fake_gh(&t);
-        let check = probe(&f, Some(ShipMode::Pr)).ship.unwrap();
+        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
         assert_eq!(check.notes, ["docs has no commits: left out"]);
         assert_eq!(check.actions.len(), 5);
         assert_eq!(check.actions[4], Action::LinkPrs);
@@ -753,7 +750,7 @@ esac
         std::fs::remove_file(t.0.join("refuse")).unwrap();
 
         f.shipping.prs = so_far;
-        let check = probe(&f, Some(ShipMode::Pr)).ship.unwrap();
+        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
         assert!(matches!(check.actions[1], Action::KeepPr { .. }));
         let prs = open_prs(&f, &check.actions, &gh).unwrap();
         let urls: Vec<&str> = prs.iter().map(|p| p.url.as_str()).collect();
@@ -779,7 +776,7 @@ esac
 
         // One open for the branch already is used, not made again.
         std::fs::write(t.0.join("open"), "").unwrap();
-        let fresh = probe(&feature_over_again(&f), Some(ShipMode::Pr))
+        let fresh = probe(&feature_over_again(&f), &Modes::all(Some(ShipMode::Pr)))
             .ship
             .unwrap();
         let prs = open_prs(&f, &fresh.actions, &gh).unwrap();
@@ -799,14 +796,19 @@ esac
         let mut f = feature_over(&t, &["api", "docs"], &["docs"]);
         origins(&t, &f);
         mark_all(&mut f);
-        let blockers = |f: &Feature| probe(f, Some(ShipMode::Pr)).ship.unwrap().blockers;
+        let blockers = |f: &Feature| {
+            probe(f, &Modes::all(Some(ShipMode::Pr)))
+                .ship
+                .unwrap()
+                .blockers
+        };
         assert_eq!(blockers(&f), ["Nothing to ship: no commits on feature/f"]);
 
         // The marks were given on code without commits.
         commit(&wt(&f, "api"), "a1", "change");
         std::fs::write(wt(&f, "api").join("a1"), "more").unwrap();
         std::fs::write(wt(&f, "docs").join("a"), "x").unwrap();
-        let check = probe(&f, Some(ShipMode::Pr)).ship.unwrap();
+        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
         assert_eq!(
             check.blockers,
             [
@@ -819,7 +821,7 @@ esac
 
         // Not at Ship: no check.
         f.untick(Stage::Verify, 2);
-        assert!(probe(&f, None).ship.is_none());
+        assert!(probe(&f, &Modes::default()).ship.is_none());
     }
 
     #[test]
@@ -839,19 +841,19 @@ esac
             ..AiReview::default()
         });
         let err = Err("gone".to_owned());
-        let blockers = check(&f, &err, None).blockers;
+        let blockers = check(&f, &err, &Modes::default()).blockers;
         assert!(
             blockers.contains(&"2 AI review findings open".to_owned()),
             "{blockers:?}"
         );
         f.review.as_mut().unwrap().findings.truncate(1);
-        let blockers = check(&f, &err, None).blockers;
+        let blockers = check(&f, &err, &Modes::default()).blockers;
         assert!(
             blockers.contains(&"1 AI review finding open".to_owned()),
             "{blockers:?}"
         );
         f.review = None;
-        let blockers = check(&f, &err, None).blockers;
+        let blockers = check(&f, &err, &Modes::default()).blockers;
         assert!(
             !blockers.iter().any(|b| b.contains("AI review")),
             "{blockers:?}"
@@ -866,8 +868,8 @@ esac
         commit(&wt(&f, "api"), "a", "feature side");
         mark_all(&mut f);
         // No origin on GitHub: a squash.
-        assert_eq!(mode_of(&f, "api", None), ShipMode::Squash);
-        let check = |f: &Feature| probe(f, None).ship.unwrap();
+        assert_eq!(mode_of(&f, "api", &Modes::default()), ShipMode::Squash);
+        let check = |f: &Feature| probe(f, &Modes::default()).ship.unwrap();
         assert_eq!(
             check(&f).actions,
             [Action::Squash {
@@ -907,7 +909,7 @@ esac
         f.title = "Don't break".into();
         commit(&wt(&f, "api"), "x", "feature");
         mark_all(&mut f);
-        let check = probe(&f, None).ship.unwrap();
+        let check = probe(&f, &Modes::default()).ship.unwrap();
         let (dir, command) = squash_command(&f, &check.actions);
         let main = f.repos[0].main.clone();
         assert_eq!(dir, main);
@@ -921,13 +923,57 @@ esac
         assert_eq!(squash_command(&f, &[]), (f.root.clone(), String::new()));
 
         f.shipping.squash_at = Some(5);
-        assert!(!probe(&f, None).merged);
+        assert!(!probe(&f, &Modes::default()).merged);
         run(&main, &["merge", "-q", "--squash", "feature/f"]);
         run(&main, &["commit", "-q", "-m", "Don't break"]);
-        let p = probe(&f, None);
+        let p = probe(&f, &Modes::default());
         assert!(p.merged);
         f.shipping.squash_at = None;
-        assert!(!probe(&f, None).merged);
+        assert!(!probe(&f, &Modes::default()).merged);
+    }
+
+    #[test]
+    fn each_project_ships_its_own_way_and_squashes_in_its_own_main() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        link_over(&t, &mut f, "other", &["api", "docs"], &["docs"]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "x", "home change");
+        commit(&f.repos[1].worktree.clone(), "y", "linked change");
+        mark_all(&mut f);
+        let modes = Modes {
+            home: Some(ShipMode::Pr),
+            links: [("other".to_owned(), Some(ShipMode::Squash))].into(),
+        };
+        assert_eq!(mode_of(&f, "other:api", &modes), ShipMode::Squash);
+        assert_eq!(mode_of(&f, "api", &modes), ShipMode::Pr);
+        let p = probe(&f, &modes);
+        assert_eq!(p.guards.keys().collect::<Vec<_>>(), ["api", "other:api"]);
+        let check = p.ship.unwrap();
+        assert!(check.blockers.is_empty(), "{:?}", check.blockers);
+        assert_eq!(
+            check.actions,
+            [
+                Action::Push { repo: "api".into() },
+                Action::OpenPr {
+                    repo: "api".into(),
+                    base: "main".into()
+                },
+                Action::Squash {
+                    repo: "other:api".into(),
+                    base: "main".into()
+                },
+            ]
+        );
+        let (dir, command) = squash_command(&f, &check.actions);
+        let linked = f.repos[1].main.clone();
+        assert_eq!(dir, linked);
+        assert!(command.starts_with(&format!("cd '{}' &&", linked.display())));
+
+        let gh = fake_gh(&t);
+        let prs = open_prs(&f, &check.actions, &gh).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].repo, "api");
     }
 
     #[test]

@@ -5,7 +5,8 @@
 //! Per touched repository, `git diff <merge-base> HEAD | git patch-id
 //! --stable` gives the id of its committed change against its base; the
 //! feature's patch-id is `git hash-object` of the lines `<repo> <id>`, in
-//! repository name order. Only commits count: uncommitted changes are
+//! `Repo::key` order (a home repository's key is its name; a linked
+//! project's are `<project>:<name>`, so they span every project). Only commits count: uncommitted changes are
 //! reported apart (`Reading::dirty`), and a bound stage can't be marked
 //! while there are any.
 //!
@@ -25,12 +26,12 @@ pub struct Reading {
     /// without commits as for any other one without.
     pub patch: String,
     /// Touched repositories with uncommitted changes (untracked files
-    /// count, ignored ones don't), by name.
+    /// count, ignored ones don't), by `Repo::key`.
     pub dirty: Vec<String>,
     /// Repositories the feature doesn't touch whose worktree has changes,
-    /// by name: those wouldn't ship.
+    /// by `Repo::key`: those wouldn't ship.
     pub stray: Vec<String>,
-    /// Per touched repository, its commits not in its base.
+    /// Per touched repository by `Repo::key`, its commits not in its base.
     pub commits: BTreeMap<String, usize>,
 }
 
@@ -42,11 +43,9 @@ pub struct Reading {
 /// same.
 pub fn read(feature: &Feature) -> Result<Reading, String> {
     let mut reading = Reading::default();
-    let mut repos: Vec<&Repo> = feature.repos.iter().collect();
-    repos.sort_by(|a, b| a.name.cmp(&b.name));
     let mut lines = String::new();
-    for repo in repos {
-        let name = &repo.name;
+    for repo in feature.repos_by_key() {
+        let name = &repo.key();
         if !repo.touched {
             if repo.worktree.is_dir() && changed(repo)? {
                 reading.stray.push(name.clone());
@@ -78,7 +77,7 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
 /// The patch-id of `repo`'s committed change against its base (empty when
 /// it changes nothing), and its commits not in the base.
 fn committed(repo: &Repo) -> Result<(String, usize), String> {
-    let name = &repo.name;
+    let name = &repo.key();
     let dir = &repo.worktree;
     let base = base_ref(repo);
     let mb = git(dir, &["merge-base", &base, "HEAD"])
@@ -123,7 +122,7 @@ fn committed(repo: &Repo) -> Result<(String, usize), String> {
 fn changed(repo: &Repo) -> Result<bool, String> {
     git(&repo.worktree, &["status", "--porcelain"])
         .map(|out| !out.trim().is_empty())
-        .map_err(|err| format!("{}: couldn't tell what it has: {err}", repo.name))
+        .map_err(|err| format!("{}: couldn't tell what it has: {err}", repo.key()))
 }
 
 #[cfg(test)]
@@ -131,7 +130,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::feature::tests::{Temp, commit, feature_over, run};
+    use crate::feature::tests::{Temp, commit, feature_over, link_over, run};
 
     fn wt(f: &Feature, name: &str) -> PathBuf {
         f.repos
@@ -175,6 +174,36 @@ mod tests {
         assert_ne!(two.patch, one.patch);
         assert_eq!(two.commits["api"], 2);
         assert_eq!(two.dirty, ["web"]);
+    }
+
+    #[test]
+    fn a_linked_projects_repos_count_by_their_keys() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        let alone = read(&f).unwrap();
+        link_over(&t, &mut f, "other", &["api", "docs"], &["docs"]);
+        let linked = read(&f).unwrap();
+        // Linked repositories without commits change nothing.
+        assert_eq!(linked.patch, alone.patch);
+        assert_eq!(
+            linked.commits.keys().collect::<Vec<_>>(),
+            ["api", "other:api"]
+        );
+        commit(&f.repos[1].worktree.clone(), "x", "linked change");
+        let one = read(&f).unwrap();
+        assert_ne!(one.patch, alone.patch);
+        assert_eq!(one.commits["other:api"], 1);
+        assert_eq!(one.commits["api"], 0);
+        // The same change in the home repository is another patch.
+        let u = Temp::new();
+        let g = feature_over(&u, &["api"], &[]);
+        commit(&g.repos[0].worktree.clone(), "x", "linked change");
+        assert_ne!(read(&g).unwrap().patch, one.patch);
+        std::fs::write(f.repos[2].worktree.join("a"), "changed").unwrap();
+        std::fs::write(f.repos[1].worktree.join("b"), "new").unwrap();
+        let r = read(&f).unwrap();
+        assert_eq!(r.stray, ["other:docs"]);
+        assert_eq!(r.dirty, ["other:api"]);
     }
 
     #[test]

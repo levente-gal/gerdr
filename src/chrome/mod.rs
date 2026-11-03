@@ -722,7 +722,8 @@ impl Chrome {
             }
         }
         // The strip marking the focused pane, on the apps and under the
-        // pane bars, whose pills hang over it.
+        // pane bars, whose pills hang over it. The app shows through it,
+        // as through a grip.
         if let Some(pane) = view.focused_pane {
             let strip = focus_strip_rect(pane);
             if strip.size.w > 0 && strip.size.h > 0 {
@@ -731,7 +732,7 @@ impl Chrome {
                     .get((strip.size, theme, scale), |(size, ..)| {
                         focus_strip(*size, scale, theme.palette())
                     });
-                parts.push(Part::new(buffer, strip.loc, strip.size, 1.0));
+                parts.push(Part::new(buffer, strip.loc, strip.size, pane_bar::PILL_REST));
             }
         }
         // Where a pane held by its bar would land: over the apps and the

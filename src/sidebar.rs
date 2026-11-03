@@ -101,6 +101,23 @@ fn worktrees_tooltip(worktrees: &[Worktree], root: Option<&Path>, anchor: Rect) 
     Tooltip::new(&text, anchor).rows(rows)
 }
 
+/// What a feature's tooltip says of it: the stage it is at, and how many
+/// are done.
+fn feature_fields(f: &crate::feature::Feature) -> Vec<(String, String)> {
+    let stage = match f.current() {
+        Some(stage) => format!("{} \u{b7} {}", stage.label(), stage.about()),
+        None => "Every stage done".to_owned(),
+    };
+    let done = f.marks.len();
+    vec![
+        ("Stage".to_owned(), stage),
+        (
+            "Done".to_owned(),
+            format!("{done} of {}", crate::feature::Stage::ALL.len()),
+        ),
+    ]
+}
+
 /// What a workspace's tooltip says of the venv its new shells activate.
 fn venv_word(venv: &VenvSetting) -> String {
     match venv {
@@ -353,6 +370,7 @@ impl Gerdr {
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
+                stages: hit == Some(SidebarHit::Stages(i)),
                 by_hand: self.workspace_folded(i).is_some(),
             })
             .collect();
@@ -609,7 +627,7 @@ impl Gerdr {
             (SidebarHit::Feature(n), BTN_LEFT) => {
                 if let Some(f) = self.sidebar_feature(n) {
                     let (project, slug) = (f.project.clone(), f.slug.clone());
-                    self.open_feature(&project, &slug);
+                    self.open_linked_feature(&project, &slug);
                 }
             }
             (SidebarHit::Card(i, k) | SidebarHit::Inbox(i, k), BTN_LEFT) => {
@@ -638,6 +656,12 @@ impl Gerdr {
                 }
             }
             (SidebarHit::Ci(i) | SidebarHit::CiMark(i), BTN_LEFT) => self.focus_repo_tab(i),
+            (SidebarHit::Stages(i), BTN_LEFT) => {
+                if let Some(f) = self.workspace_feature(i) {
+                    let (project, slug) = (f.project.clone(), f.slug.clone());
+                    self.open_feature(&project, &slug);
+                }
+            }
             (SidebarHit::Fold(i), BTN_LEFT) => self.toggle_fold(i),
             (SidebarHit::CiChip(i, k), BTN_LEFT) => {
                 if let Some((_, row)) = self.ci_row(i, k) {
@@ -930,20 +954,21 @@ impl Gerdr {
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let rect = *layout.features.get(n)?;
-                let stage = match f.current() {
-                    Some(stage) => format!("{} \u{b7} {}", stage.label(), stage.about()),
-                    None => "Every stage done".to_owned(),
-                };
-                let done = f.marks.len();
-                let fields = vec![
-                    ("Stage".to_owned(), stage),
-                    (
-                        "Done".to_owned(),
-                        format!("{done} of {}", crate::feature::Stage::ALL.len()),
-                    ),
-                ];
-                let tip = Tooltip::new(&f.title, rect).fields(fields);
-                Some(tip.key("click to open its panel"))
+                // The row cuts its title to fit, "in <home>" first.
+                let tip = Tooltip::new(&self.row_title(f), rect).fields(feature_fields(f));
+                if self.project.as_deref() == Some(f.project.as_str()) {
+                    return Some(tip.key("click to open its panel"));
+                }
+                let home = self.home_name(f);
+                Some(tip.key(&format!("click to switch to {home} and open its panel")))
+            }
+            // A feature's own workspace: its feature's stage marks.
+            SidebarHit::Stages(i) => {
+                let f = self.workspace_feature(i)?;
+                let rect = layout.rows.get(i)?.stages?;
+                let text = format!("Feature \u{201c}{}\u{201d}", f.title);
+                let tip = Tooltip::new(&text, rect).fields(feature_fields(f));
+                Some(tip.key("click to open its panel, or Open feature in its menu"))
             }
             SidebarHit::Inbox(i, k) => {
                 let card = agents.get(i)?.get(k)?;
@@ -1133,9 +1158,13 @@ impl Gerdr {
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
+                // Another project's feature: its folder in the shown one.
+                let shown = self.project.as_deref();
+                let link = f.links.iter().find(|l| Some(l.project.as_str()) == shown);
+                let dir = link.map_or(&f.dir, |l| &l.dir).clone();
                 let items = vec![
                     MenuItem::new("Open", open),
-                    MenuItem::new("Copy path", MenuAction::CopyPath(f.dir.clone())),
+                    MenuItem::new("Copy path", MenuAction::CopyPath(dir)),
                     MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
                 ];
                 Some(MenuSpec { anchor: at, items })
@@ -1161,6 +1190,11 @@ impl Gerdr {
                     MenuItem::new("Copy path", MenuAction::CopyPath(dir.clone())),
                     MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(Some(i))),
                 ];
+                // A feature's own workspace opens its feature's panel.
+                if let Some(f) = self.workspace_feature(i) {
+                    let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
+                    items.insert(4, MenuItem::new("Open feature", open));
+                }
                 let git = self.git.get(&dir);
                 if git.is_some_and(|g| g.root.is_some()) {
                     let item = MenuItem::new("Repositories", MenuAction::Repos);

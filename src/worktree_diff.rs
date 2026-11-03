@@ -82,7 +82,7 @@ pub struct WorktreeDiff {
     /// once, not edited, no review.
     pub commit: Option<CommitOf>,
     /// A feature stage's file under review instead: read again with
-    /// every Git status read, not edited.
+    /// every Git status read, edited while its agent isn't writing it.
     pub doc: Option<DocOf>,
     /// A feature's code review instead: its changes over every repository
     /// it touched, read again with every Git status read, not edited.
@@ -111,6 +111,9 @@ pub struct DocOf {
     /// Verify's `evidence.md`, only read: no comments, no Approve or Send
     /// back (see `Gerdr::open_evidence`).
     pub evidence: bool,
+    /// Why it can't be edited now (`doc_review::locked`): its agent is
+    /// writing it, it's approved. None: the diff's edits change it.
+    pub locked: Option<&'static str>,
 }
 
 impl DocOf {
@@ -121,8 +124,9 @@ impl DocOf {
     }
 }
 
-/// Why an edit or a restore does nothing on a file under review.
-pub const DOC_READ_ONLY: &str = "A file under review can't be edited here";
+/// Why a restore does nothing on a file under review: it shows as all
+/// added, with nothing before it to restore.
+pub const DOC_NO_RESTORE: &str = "There's nothing to restore in a file under review";
 /// Why a comment, an edit, Approve or Send back do nothing on Verify's
 /// evidence.
 pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
@@ -336,8 +340,9 @@ impl WorktreeDiff {
         (self.doc.is_some() && !self.evidence()) || self.feature.is_some()
     }
 
-    /// What the diff asked for, on a file under review: no edits, and
-    /// the review copied as the agent is sent it.
+    /// What the diff asked for, on a file under review: edits only while
+    /// it isn't locked, no restore, and the review copied as the agent is
+    /// sent it.
     fn doc_outcome(&self, outcome: Option<Outcome>) -> Option<Outcome> {
         if self.feature.is_some() {
             return match outcome {
@@ -349,9 +354,14 @@ impl WorktreeDiff {
             return outcome;
         }
         let refused = |o: &Outcome| o.edits() || *o == Outcome::Notice(diff_view::READ_ONLY);
+        let restores = |o: &Outcome| matches!(o, Outcome::Cut(e) if e.cut.restored().is_some());
+        // A yank takes nothing from the file: it works however it stands.
+        let changes = |o: &Outcome| o.edits() && !matches!(o, Outcome::Yank(_));
+        let locked = self.doc.as_ref().and_then(|d| d.locked);
         match outcome {
             Some(o) if self.evidence() && refused(&o) => Some(Outcome::Notice(EVIDENCE_READ_ONLY)),
-            Some(o) if o.edits() => Some(Outcome::Notice(DOC_READ_ONLY)),
+            Some(o) if restores(&o) => Some(Outcome::Notice(DOC_NO_RESTORE)),
+            Some(o) if changes(&o) && locked.is_some() => locked.map(Outcome::Notice),
             Some(Outcome::Copy { count, .. }) => Some(Outcome::Copy {
                 text: self.doc_markdown(),
                 count,
@@ -370,11 +380,17 @@ impl WorktreeDiff {
         };
         // Evidence takes no comments either.
         let comments = |what: &str| what.contains("comment");
-        let read_only = self.doc.is_some() || self.commit.is_some() || self.feature.is_some();
+        // A file under review is edited while unlocked, never restored.
+        let restore = |what: &str| what.contains("restore the change");
+        let locked = self.doc.as_ref().is_some_and(|d| d.locked.is_some());
+        let read_only =
+            self.commit.is_some() || self.feature.is_some() || self.evidence() || locked;
         let evidence = self.evidence();
-        let diff = diff_help_lines()
-            .into_iter()
-            .filter(|(_, what, _)| !(read_only && edits(what)) && !(evidence && comments(what)));
+        let diff = diff_help_lines().into_iter().filter(|(_, what, _)| {
+            !(read_only && edits(what))
+                && !(self.doc.is_some() && restore(what))
+                && !(evidence && comments(what))
+        });
         if self.doc.is_none() && self.feature.is_none() {
             return diff.collect();
         }
@@ -766,7 +782,7 @@ impl WorktreeDiff {
                     return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
                 }
                 ReposHit::DiffRestore(_) => {
-                    return Some(Done::Diff(Outcome::Notice(DOC_READ_ONLY)));
+                    return Some(Done::Diff(Outcome::Notice(DOC_NO_RESTORE)));
                 }
                 _ => {}
             }
@@ -1093,6 +1109,15 @@ impl crate::Gerdr {
         // weren't opened from the worktrees popup.
         let other = (self.repos.worktree.as_ref())
             .is_some_and(|wd| wd.commit.is_some() || wd.doc.is_some() || wd.feature.is_some());
+        // Edits to a file under review can't be undone once it closes:
+        // its agent may write it again meanwhile.
+        let doc = (self.repos.worktree.as_ref())
+            .filter(|wd| wd.doc.is_some())
+            .map(|wd| wd.root.clone());
+        if let Some(root) = doc {
+            self.repos.cuts.retain(|d| d.root != root);
+            self.repos.undone.retain(|d| d.root != root);
+        }
         self.repos.close_worktree();
         if !other {
             self.worktrees.unpark();
@@ -1760,6 +1785,7 @@ mod tests {
             text: None,
             back: false,
             evidence: false,
+            locked: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
@@ -1800,12 +1826,13 @@ mod tests {
         let help = wd.help_lines();
         assert_eq!(help[2].0, APPROVE_KEY);
         assert_eq!(help[3].0, SEND_BACK_KEY);
-        // The keys it refuses aren't listed.
+        // Its edits are listed; the restore it refuses isn't.
         let keys: Vec<&str> = help.iter().map(|(key, ..)| key.as_str()).collect();
         assert!(keys.contains(&"c / Del Del"), "{keys:?}");
-        for refused in ["x X D dd dw de d$ 3dd", "yy yw y$ Y, p / P", "Shift+R"] {
-            assert!(!keys.contains(&refused), "{refused} in {keys:?}");
+        for edit in ["x X D dd dw de d$ 3dd", "yy yw y$ Y, p / P"] {
+            assert!(keys.contains(&edit), "{edit} not in {keys:?}");
         }
+        assert!(!keys.contains(&"Shift+R"), "Shift+R in {keys:?}");
     }
 
     #[test]
@@ -1861,22 +1888,79 @@ mod tests {
     }
 
     #[test]
-    fn a_file_under_review_is_read_only_but_takes_comments() {
+    fn a_file_under_review_is_edited_but_not_restored() {
         let mut wd = doc();
         let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
-        let refused = Some(Done::Diff(Outcome::Notice(DOC_READ_ONLY)));
+        let no_restore = Some(Done::Diff(Outcome::Notice(DOC_NO_RESTORE)));
         let row = texts(&wd).iter().position(|t| t == "# Brief").unwrap();
         wd.click(ReposHit::DiffRow(row), ENV);
         key(&mut wd, Keysym::d);
-        assert_eq!(key(&mut wd, Keysym::d), refused);
-        assert_eq!(key(&mut wd, Keysym::x), refused);
-        assert_eq!(key(&mut wd, Keysym::R), refused);
-        assert_eq!(wd.click(ReposHit::DiffRestore(row), ENV), refused);
+        let Some(Done::Diff(Outcome::Cut(edit))) = key(&mut wd, Keysym::d) else {
+            panic!("dd didn't cut");
+        };
+        assert_eq!(edit.root, Path::new("/data/features/p/login"));
+        assert_eq!(edit.path, "brief.md");
+        assert!(matches!(
+            key(&mut wd, Keysym::x),
+            Some(Done::Diff(Outcome::Cut(_)))
+        ));
+        key(&mut wd, Keysym::y);
+        assert!(matches!(
+            key(&mut wd, Keysym::y),
+            Some(Done::Diff(Outcome::Yank(_)))
+        ));
+        assert!(matches!(
+            key(&mut wd, Keysym::u),
+            Some(Done::Diff(Outcome::UndoCut(_)))
+        ));
+        assert_eq!(key(&mut wd, Keysym::R), no_restore);
+        assert_eq!(wd.click(ReposHit::DiffRestore(row), ENV), no_restore);
         assert_eq!(texts(&wd)[row], "# Brief");
         key(&mut wd, Keysym::c);
         assert!(wd.diff.editing.is_some());
         assert_eq!(key(&mut wd, Keysym::Escape), None);
         assert_eq!(key(&mut wd, Keysym::Escape), Some(Done::Close));
+        // The keys sheet lists the edits, not the restore.
+        let lines = wd.help_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|(_, what, _)| what.contains("delete from the file"))
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|(_, what, _)| !what.contains("restore the change"))
+        );
+    }
+
+    #[test]
+    fn a_locked_file_under_review_says_why_it_isnt_edited() {
+        let mut wd = doc();
+        let why = "The agent is still writing the file";
+        if let Some(doc) = wd.doc.as_mut() {
+            doc.locked = Some(why);
+        }
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let refused = Some(Done::Diff(Outcome::Notice(why)));
+        let row = texts(&wd).iter().position(|t| t == "# Brief").unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        key(&mut wd, Keysym::d);
+        assert_eq!(key(&mut wd, Keysym::d), refused);
+        assert_eq!(key(&mut wd, Keysym::x), refused);
+        assert_eq!(key(&mut wd, Keysym::u), refused);
+        // A yank takes nothing from it.
+        key(&mut wd, Keysym::y);
+        assert!(matches!(
+            key(&mut wd, Keysym::y),
+            Some(Done::Diff(Outcome::Yank(_)))
+        ));
+        let lines = wd.help_lines();
+        assert!(
+            lines
+                .iter()
+                .all(|(_, what, _)| !what.contains("delete from the file"))
+        );
     }
 
     fn evidence() -> WorktreeDiff {
@@ -1891,6 +1975,7 @@ mod tests {
             text: None,
             back: true,
             evidence: true,
+            locked: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Evidence\napi: npm test failed\n".into()), ENV);

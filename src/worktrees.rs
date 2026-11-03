@@ -1290,10 +1290,25 @@ impl Gerdr {
     /// What is in folder `path`, if anything: a workspace (by name) or a
     /// terminal. A folder in use isn't deleted under it.
     pub fn folder_in_use(&self, path: &Path) -> Option<String> {
-        if let Some(ws) = self.workspaces.iter().find(|ws| ws.dir.starts_with(path)) {
+        self.folder_in_use_except(path, None)
+    }
+
+    /// What is in folder `path`, as `folder_in_use` says, other than
+    /// workspace `own` and its terminals.
+    pub fn folder_in_use_except(&self, path: &Path, own: Option<usize>) -> Option<String> {
+        let mut others = (self.workspaces.iter().enumerate()).filter(|(w, _)| Some(*w) != own);
+        if let Some((_, ws)) = others.find(|(_, ws)| ws.dir.starts_with(path)) {
             return Some(format!("workspace {}", ws.name));
         }
-        let mut panes = self.herdr_tabs.values().flat_map(|t| &t.panes);
+        let own_tabs: Vec<&str> = own
+            .and_then(|w| self.workspaces.get(w))
+            .map(|ws| ws.tabs.iter().filter_map(|t| t.herdr_tab_id()).collect())
+            .unwrap_or_default();
+        let tabs = self
+            .herdr_tabs
+            .iter()
+            .filter(|(id, _)| !own_tabs.contains(&id.as_str()));
+        let mut panes = tabs.flat_map(|(_, t)| &t.panes);
         panes
             .find(|pane| {
                 let dir = pane.foreground_cwd.as_ref().or(pane.cwd.as_ref());

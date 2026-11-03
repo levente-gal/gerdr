@@ -26,6 +26,9 @@ const MARGIN: i32 = 40;
 pub const NEW_FEATURE_BUTTONS: [&str; 2] = ["Cancel", "Create"];
 /// The Create button, after Cancel: the dialog's default.
 pub const CREATE: usize = 1;
+/// The new feature dialog's Projects row button: the project picker,
+/// and back from it.
+pub const LINK_BUTTON: [&str; 2] = ["Link project\u{2026}", "Done"];
 /// How high a row of the feature panel is, and the gap between rows.
 const PANEL_ROW: i32 = 30;
 const PANEL_ROW_GAP: i32 = 2;
@@ -94,23 +97,26 @@ fn paint_mark(c: &mut Canvas, rect: Rect, mark: StageMark, scale: f64, p: &Palet
 
 // ---------------------------------------------------------------- dialog
 
-/// A repository the new feature dialog offers.
+/// A row the new feature dialog offers: a repository, or a project in
+/// its project picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewFeatureRepo {
     pub name: String,
-    /// The branch the feature starts from.
-    pub base: String,
-    /// Whether the feature changes it.
+    /// What follows the name: the branch it starts from and what the
+    /// feature does with it, or why a project can't be linked.
+    pub place: String,
+    /// Whether the feature changes it (a project: links it).
     pub touched: bool,
-    /// The only repository: touched, and can't be left out.
+    /// It can't be ticked or left out: the only repository, a project
+    /// linked already or not found.
     pub fixed: bool,
 }
 
 /// What the new feature dialog shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewFeatureView {
-    /// The project's name.
-    pub project: String,
+    /// Its heading: "New feature in “Shop”".
+    pub heading: String,
     pub title: Line,
     /// The repository row with the keyboard; `None`: the title field.
     pub focus: Option<usize>,
@@ -118,7 +124,15 @@ pub struct NewFeatureView {
     /// being found, or why there is none.
     pub root: String,
     pub root_failed: bool,
+    /// The Projects row: the home project and those linked.
+    pub projects: String,
+    /// The label of the Projects row's button (`LINK_BUTTON`); none
+    /// when linking to an open feature, where the rows are the picker.
+    pub link: Option<&'static str>,
+    /// The rows: the repositories, or the projects to link.
     pub repos: Vec<NewFeatureRepo>,
+    /// The label of the button doing it: Create, or Link.
+    pub go: &'static str,
     /// The first repository shown, when not all fit.
     pub top: usize,
     /// What is wrong with the form, as a sentence.
@@ -134,6 +148,8 @@ pub enum NewFeatureHit {
     Field,
     /// Index as in `NewFeatureView::repos`.
     Repo(usize),
+    /// The Projects row's button.
+    Link,
     /// 0 Cancel, 1 Create.
     Button(usize),
 }
@@ -146,6 +162,9 @@ pub struct NewFeatureLayout {
     pub field: Rect,
     pub error: Option<Rect>,
     pub root: Rect,
+    /// The Projects row, and its button at its end.
+    pub projects: Rect,
+    pub link: Rect,
     /// One per repository that fits: the slots the ones from
     /// `NewFeatureView::top` are shown in.
     pub rows: Vec<Rect>,
@@ -165,6 +184,8 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         + QUIT_LINE_GAP
         + error_h
         + QUIT_BODY
+        + QUIT_LINE_GAP
+        + QUIT_BUTTON
         + QUIT_LINE_GAP
         + ROWS_END
         - ROW_GAP
@@ -192,6 +213,12 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
     let field = next(QUIT_BUTTON);
     let error = error.then(|| next(QUIT_BODY));
     let root = next(QUIT_BODY);
+    let projects = next(QUIT_BUTTON);
+    let link_w = button_width(LINK_BUTTON[0]).max(button_width(LINK_BUTTON[1]));
+    let link = Rectangle::new(
+        (projects.loc.x + projects.size.w - link_w, projects.loc.y).into(),
+        (link_w, QUIT_BUTTON).into(),
+    );
     let rows = (0..shown as i32)
         .map(|i| {
             let y = y + i * (CHECKBOX_ROW + ROW_GAP);
@@ -205,6 +232,8 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         field,
         error,
         root,
+        projects,
+        link,
         rows,
         buttons: [buttons[0], buttons[1]],
     }
@@ -220,6 +249,9 @@ impl NewFeatureLayout {
         if on(&self.field) {
             return Some(NewFeatureHit::Field);
         }
+        if on(&self.link) {
+            return Some(NewFeatureHit::Link);
+        }
         self.rows
             .iter()
             .position(on)
@@ -228,7 +260,10 @@ impl NewFeatureLayout {
 
     /// What the pointer can press.
     pub fn controls(&self) -> Vec<Rect> {
-        self.rows.iter().chain(&self.buttons).copied().collect()
+        (self.rows.iter().chain(&self.buttons))
+            .chain(std::iter::once(&self.link))
+            .copied()
+            .collect()
     }
 }
 
@@ -607,13 +642,7 @@ impl Painter {
             let (x, end) = phys(rect, scale);
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
-        line(
-            &mut c,
-            &format!("New feature in \u{201c}{}\u{201d}", view.project),
-            layout.title,
-            LABEL_FONT_SIZE,
-            p.text,
-        );
+        line(&mut c, &view.heading, layout.title, LABEL_FONT_SIZE, p.text);
         self.field(
             &mut c,
             &view.title,
@@ -628,6 +657,21 @@ impl Painter {
         }
         let root_color = if view.root_failed { p.error } else { p.muted };
         line(&mut c, &view.root, layout.root, FONT_SIZE, root_color);
+        let mut projects = layout.projects;
+        if let Some(label) = view.link {
+            projects.size.w = layout.link.loc.x - projects.loc.x - QUIT_BUTTON_GAP;
+            let hovered = view.hover == Some(NewFeatureHit::Link);
+            self.button(
+                &mut c,
+                label,
+                shift(layout.link),
+                (hovered, false),
+                ButtonStyle::Plain,
+                scale,
+                p,
+            );
+        }
+        line(&mut c, &view.projects, projects, FONT_SIZE, p.muted);
 
         let shown = view.repos.iter().enumerate().skip(view.top);
         for (rect, (i, repo)) in layout.rows.iter().zip(shown) {
@@ -658,16 +702,9 @@ impl Painter {
                 scale,
                 if repo.touched { p.text } else { p.muted },
             );
-            let place = if repo.fixed {
-                format!("from {} \u{b7} the only repository", repo.base)
-            } else if repo.touched {
-                format!("from {} \u{b7} changed", repo.base)
-            } else {
-                format!("from {} \u{b7} context", repo.base)
-            };
             self.text(
                 &mut c,
-                &place,
+                &repo.place,
                 FONT_SIZE,
                 after + (PLACE_GAP as f32 * s).round(),
                 end,
@@ -705,7 +742,8 @@ impl Painter {
                 self.dialog_keys(&mut c, &view.keys, row, end, scale, p);
             }
         }
-        for (i, (rect, label)) in layout.buttons.iter().zip(NEW_FEATURE_BUTTONS).enumerate() {
+        let labels = [NEW_FEATURE_BUTTONS[0], view.go];
+        for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
             let style = if i == CREATE {
                 ButtonStyle::Primary
             } else {
@@ -953,15 +991,39 @@ impl Painter {
         self.hints(&mut c, &hint_strs(&view.hints), &hints, hover, scale, p);
         c.into_buffer(false)
     }
+
+    /// A feature's stages as a row of `marks` in `rect`, from the right:
+    /// what the sidebar's feature rows end with.
+    pub(super) fn stage_marks(
+        &self,
+        c: &mut Canvas,
+        marks: &[StageMark],
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let n = marks.len() as i32;
+        let pitch = STAGE_DOT + STAGE_DOT_GAP;
+        let x0 = rect.loc.x + rect.size.w - n * pitch + STAGE_DOT_GAP;
+        let y = rect.loc.y + (rect.size.h - STAGE_DOT) / 2;
+        for (i, mark) in marks.iter().enumerate() {
+            let spot = Rectangle::new(
+                (x0 + i as i32 * pitch, y).into(),
+                (STAGE_DOT, STAGE_DOT).into(),
+            );
+            icon_sdf(c, spot, scale, mark.color(p), |x, y| {
+                stage_dot(*mark, x, y, 7.0 * s)
+            });
+        }
+    }
 }
 
-/// A sidebar row for an open feature: its title, its stages' marks and
-/// the name of the stage it is at (none once every stage is done).
+/// A sidebar row for an open feature: its title and its stages' marks.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FeatureRowView {
     pub title: String,
     pub marks: Vec<StageMark>,
-    pub stage: Option<String>,
 }
 
 impl FeatureRowView {
@@ -973,21 +1035,16 @@ impl FeatureRowView {
             StageMark::Done
         }
     }
-
-    /// What the row ends with: the stage it is at and its number among
-    /// the stages ("Plan · 2/8"), or "done".
-    pub(super) fn detail(&self) -> String {
-        let at = self.marks.iter().position(|m| *m == StageMark::Current);
-        match (&self.stage, at) {
-            (Some(stage), Some(i)) => format!("{stage} \u{b7} {}/{}", i + 1, self.marks.len()),
-            (Some(stage), None) => stage.clone(),
-            (None, _) => "done".to_owned(),
-        }
-    }
 }
 
-/// How big a feature row's stage dot is.
+/// How big a stage dot of a sidebar row is, and the gap between two.
 pub(super) const STAGE_DOT: i32 = 8;
+pub(super) const STAGE_DOT_GAP: i32 = 3;
+
+/// How wide `marks` stage dots are in a sidebar row.
+pub(super) fn stage_marks_width(marks: usize) -> i32 {
+    marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP
+}
 
 #[cfg(test)]
 mod tests {

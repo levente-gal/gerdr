@@ -3,7 +3,10 @@
 //! Approve and Send back on its header (see `feature_agents`).
 //!
 //! It shows across the repositories panel, as a worktree's diff does (see
-//! `worktree_diff::DocOf`), read-only. The file is read again with every
+//! `worktree_diff::DocOf`). The diff's vim edits change the file while its
+//! agent isn't writing it (`locked`); a restore has nothing to put back.
+//! Sending it back tells the agent when the user edited it since it was
+//! written (`artifacts::edited_since_written`). The file is read again with every
 //! Git status read, so an agent writing it again shows; the comments find
 //! their lines again, or say they are outdated. They are kept in the
 //! feature's data dir (`<stage>-comments.json`), so closing and opening
@@ -97,6 +100,25 @@ pub fn state(feature: Option<&Feature>, stage: Stage) -> String {
     }
 }
 
+/// Why `stage`'s file of `feature` can't be edited in its review now:
+/// its agent is writing it, it's approved, the feature is closed. None:
+/// it can.
+pub fn locked(feature: Option<&Feature>, stage: Stage) -> Option<&'static str> {
+    let Some(feature) = feature else {
+        return Some("That feature is gone");
+    };
+    if feature.marks.contains_key(&stage) {
+        return Some("An approved file can't be edited");
+    }
+    if feature.status != Status::Open {
+        return Some("The feature is closed");
+    }
+    match feature.runs.get(&stage) {
+        Some(run) if run.ready.is_none() => Some("The agent is still writing the file"),
+        _ => None,
+    }
+}
+
 /// Where Verify of `feature` stands, as its evidence's header says it;
 /// `running` while its checks run again.
 pub fn evidence_state(feature: Option<&Feature>, running: bool) -> String {
@@ -161,6 +183,7 @@ impl Gerdr {
             text: None,
             back: false,
             evidence: true,
+            locked: None,
         };
         self.show_doc(doc, text, Review::default());
     }
@@ -176,6 +199,7 @@ impl Gerdr {
         };
         let title = feature.title.clone();
         let state = state(Some(feature), stage);
+        let locked = locked(Some(feature), stage);
         let dir = store::dir(None, project, slug);
         let path = dir.join(name);
         let text = match std::fs::read_to_string(&path) {
@@ -202,6 +226,7 @@ impl Gerdr {
             text: None,
             back: false,
             evidence: false,
+            locked,
         };
         self.show_doc(doc, text, review);
     }
@@ -233,7 +258,8 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
-        let wd = WorktreeDiff::of_doc(doc, self.active_workspace, review);
+        let w = (self.feature_workspace(&doc.project, &doc.slug)).unwrap_or(self.active_workspace);
+        let wd = WorktreeDiff::of_doc(doc, w, review);
         self.repos.worktree = Some(wd);
         let env = self.worktree_env();
         if let Some(wd) = self.repos.worktree.as_mut() {
@@ -256,6 +282,7 @@ impl Gerdr {
         };
         let read = read(&doc.path, &doc.name());
         let feature = self.feature(&doc.project, &doc.slug);
+        let locked = locked(feature, doc.stage);
         let state = match doc.evidence {
             true => {
                 let running = self
@@ -271,6 +298,7 @@ impl Gerdr {
         };
         if let Some(doc) = wd.doc.as_mut() {
             doc.state = state;
+            doc.locked = locked;
         }
         wd.set_doc(read, env);
     }
@@ -440,6 +468,30 @@ mod tests {
         );
         let f = crate::features::tests::feature("login", Vec::new(), 1);
         assert_eq!(state(Some(&f), Stage::Discover), "approved");
+    }
+
+    #[test]
+    fn the_file_is_edited_only_while_its_agent_isnt_writing_it() {
+        let mut f = crate::features::tests::feature("login", Vec::new(), 0);
+        assert_eq!(locked(None, Stage::Discover), Some("That feature is gone"));
+        assert_eq!(locked(Some(&f), Stage::Discover), None);
+        let run = StageRun {
+            n: 1,
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Discover, run);
+        let writing = Some("The agent is still writing the file");
+        assert_eq!(locked(Some(&f), Stage::Discover), writing);
+        f.runs.get_mut(&Stage::Discover).unwrap().ready = Some(5);
+        assert_eq!(locked(Some(&f), Stage::Discover), None);
+        f.status = Status::Abandoned;
+        assert_eq!(
+            locked(Some(&f), Stage::Discover),
+            Some("The feature is closed")
+        );
+        let f = crate::features::tests::feature("login", Vec::new(), 1);
+        let approved = Some("An approved file can't be edited");
+        assert_eq!(locked(Some(&f), Stage::Discover), approved);
     }
 
     #[test]

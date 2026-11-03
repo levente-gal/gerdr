@@ -843,6 +843,45 @@ impl Store {
         self.projects.iter().find(|p| p.id == id)
     }
 
+    /// `of` each project's workflow that feature `feature` spans: its home
+    /// project's, and each linked one's by id (a project gone from the
+    /// store is left out, so its repositories get none). Workflow lookups
+    /// for a repository then go to its own project's, by its plain name.
+    pub fn workflows<T: Default>(
+        &self,
+        feature: &crate::feature::Feature,
+        of: impl Fn(&Workflow) -> T,
+    ) -> crate::feature::PerProject<T> {
+        crate::feature::PerProject {
+            home: self
+                .project(&feature.project)
+                .map(|p| of(&p.workflow))
+                .unwrap_or_default(),
+            links: feature
+                .links
+                .iter()
+                .filter_map(|l| Some((l.project.clone(), of(&self.project(&l.project)?.workflow))))
+                .collect(),
+        }
+    }
+
+    /// The names of `feature`'s projects: its home's and each link's, an
+    /// id standing in for a project gone from the store.
+    pub fn names(&self, feature: &crate::feature::Feature) -> crate::feature::PerProject<String> {
+        let name = |id: &str| {
+            self.project(id)
+                .map_or_else(|| id.to_owned(), |p| p.name.clone())
+        };
+        crate::feature::PerProject {
+            home: name(&feature.project),
+            links: feature
+                .links
+                .iter()
+                .map(|l| (l.project.clone(), name(&l.project)))
+                .collect(),
+        }
+    }
+
     pub fn project_mut(&mut self, id: &str) -> Option<&mut Project> {
         self.projects.iter_mut().find(|p| p.id == id)
     }

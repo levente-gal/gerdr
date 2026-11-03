@@ -31,6 +31,7 @@ mod features;
 mod feature_agents;
 mod feature_build;
 mod feature_diff;
+mod feature_workspace;
 mod feature_review;
 mod doc_review;
 mod frecency;
@@ -3839,12 +3840,11 @@ impl Gerdr {
         let Some(ws) = self.workspaces.get(idx) else {
             return;
         };
-        let panes = ws.tabs.iter().flat_map(|tab| &tab.panes);
-        let running: Vec<String> = panes.clone().filter_map(|p| self.running_in(p)).collect();
+        let running = self.workspace_running(idx);
         if running.is_empty() {
             return self.close_workspace_now(idx);
         }
-        let ids = panes.map(|p| p.id).collect();
+        let ids = ws.tabs.iter().flat_map(|tab| &tab.panes).map(|p| p.id).collect();
         self.ask_close_workspace(idx, ids, &running);
     }
 
@@ -5329,6 +5329,14 @@ impl Gerdr {
                     });
                     view.git = Some(git.clone());
                 }
+                // A feature's own workspace: called after it, its stage
+                // marks on its header.
+                if let Some(feature) = self.workspace_feature(w) {
+                    view.name = feature_workspace::feature_label(&ws.name, &ws.dir, &feature.title);
+                    view.stages = (feature::Stage::ALL.iter())
+                        .map(|s| features::stage_mark(feature, *s))
+                        .collect();
+                }
                 // Folded by hand, else while quiet and not the active one.
                 view.folded = self
                     .workspace_folded(w)
@@ -5485,6 +5493,7 @@ impl Gerdr {
         self.place_held(id);
         self.show_active();
         self.show_last_tab();
+        self.open_pending_feature(id);
         if let Some(left) = left {
             // Asked for when switching (see `ask_switch`).
             let stops = self

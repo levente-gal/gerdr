@@ -29,6 +29,36 @@ pub fn path(dir: &Path, stage: Stage) -> Option<PathBuf> {
     Some(dir.join(name(stage)?))
 }
 
+/// Where `stage`'s file is kept as its agent last wrote it, under
+/// feature data dir `dir`: `brief-written.md`. Compared with the file at
+/// send back, it tells whether the user edited it in the review.
+pub fn written_path(dir: &Path, stage: Stage) -> Option<PathBuf> {
+    let name = name(stage)?;
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    Some(dir.join(format!("{stem}-written.md")))
+}
+
+/// Keep `stage`'s file as its agent wrote it (`written_path`); why it
+/// couldn't be.
+pub fn keep_written(dir: &Path, stage: Stage) -> Result<(), String> {
+    let (Some(from), Some(to)) = (path(dir, stage), written_path(dir, stage)) else {
+        return Ok(());
+    };
+    std::fs::copy(&from, &to)
+        .map(drop)
+        .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))
+}
+
+/// Whether `stage`'s file changed since its agent wrote it: false when
+/// either can't be read.
+pub fn edited_since_written(dir: &Path, stage: Stage) -> bool {
+    let read = |p: Option<PathBuf>| p.and_then(|p| std::fs::read(p).ok());
+    match (read(path(dir, stage)), read(written_path(dir, stage))) {
+        (Some(now), Some(written)) => now != written,
+        _ => false,
+    }
+}
+
 /// Whether `text` is a good `stage` file; else what it lacks, one line
 /// each ("no Outcome section").
 pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
@@ -242,6 +272,40 @@ fn migrations_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_edited_since_its_agent_wrote_it_is_told() {
+        let dir = std::env::temp_dir().join(format!("gerdr-written-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = Dir(dir);
+        let brief = dir.path().join("brief.md");
+        assert_eq!(
+            written_path(dir.path(), Stage::Discover),
+            Some(dir.path().join("brief-written.md"))
+        );
+        // Nothing kept yet: not edited.
+        std::fs::write(&brief, "# Brief\n").unwrap();
+        assert!(!edited_since_written(dir.path(), Stage::Discover));
+        keep_written(dir.path(), Stage::Discover).unwrap();
+        assert!(!edited_since_written(dir.path(), Stage::Discover));
+        std::fs::write(&brief, "# Brief, edited\n").unwrap();
+        assert!(edited_since_written(dir.path(), Stage::Discover));
+    }
+
+    /// A scratch dir, deleted when dropped.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     const BRIEF: &str = "# Bulk edit\n\n## Outcome\nEdit many rows at once.\n\n## In scope\n- price\n\n## Out of Scope:\n- stock\n\n## Acceptance criteria\n- Given two rows, when I edit both, then both change.\n";
 
