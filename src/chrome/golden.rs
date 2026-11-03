@@ -1417,29 +1417,41 @@ fn dump_status() {
 }
 
 /// The new feature dialog over three repositories, the second unticked,
-/// the keyboard on the title.
+/// and a linked project's one, the keyboard on the title.
 fn new_feature() -> super::NewFeatureView {
     let repo = |name: &str, base: &str, touched| super::NewFeatureRepo {
         name: name.into(),
-        base: base.into(),
+        place: format!(
+            "from {base} \u{b7} {}",
+            if touched { "changed" } else { "context" }
+        ),
         touched,
         fixed: false,
     };
     super::NewFeatureView {
-        project: "aft".into(),
+        heading: "New feature in \u{201c}aft\u{201d}".into(),
         title: Line::from("Bulk export of invoices"),
         focus: None,
         root: "~/Work/aft".into(),
         root_failed: false,
+        projects: "Projects: aft (home) \u{b7} billing".into(),
+        link: Some(super::LINK_BUTTON[0]),
         repos: vec![
             repo("api", "dev", true),
             repo("shared", "main", false),
             repo("web", "dev", true),
+            repo("billing: ledger", "main", false),
         ],
+        go: "Create",
         top: 0,
         error: None,
         hover: Some(super::NewFeatureHit::Button(1)),
-        keys: vec![("Tab", "next"), ("Space", "tick"), ("Esc", "clear")],
+        keys: vec![
+            ("Tab", "next"),
+            ("Space", "tick"),
+            ("Ctrl+Shift+L", "link project"),
+            ("Esc", "clear"),
+        ],
     }
 }
 
@@ -1745,7 +1757,7 @@ const FEATURES: [&str; 9] = [
 const GOLDEN_FEATURES: [[u64; 9]; 4] = [
     // Dark at 1
     [
-        0xe5e4e33f1868788d, // new_feature
+        0xaf6537e36661773b, // new_feature
         0x869764fa3d9048d7, // feature_panel
         0xde9d2405310235e7, // feature_panel_multi
         0xa9c315b7044804cf, // sidebar_features
@@ -1757,7 +1769,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
     ],
     // Dark at 2
     [
-        0x2f8fa96d6cb9236d, // new_feature
+        0x9a3eb907776fe145, // new_feature
         0x31307a3926bbc629, // feature_panel
         0x5437f7692eaeff36, // feature_panel_multi
         0x16881e74e80d5fee, // sidebar_features
@@ -1769,7 +1781,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
     ],
     // Light at 1
     [
-        0xebea9664a0f6707e, // new_feature
+        0x0e77512e4815b092, // new_feature
         0x3abb7fb4ebb6164f, // feature_panel
         0x0608e5100d8d1171, // feature_panel_multi
         0xd73830a02a3b09da, // sidebar_features
@@ -1781,7 +1793,7 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
     ],
     // Light at 2
     [
-        0x1fbf661fb84507e5, // new_feature
+        0x9e8eaff9dfeac632, // new_feature
         0x0dcda199b0dbc637, // feature_panel
         0x71310a3466763ea3, // feature_panel_multi
         0x5dde9940ceb74f62, // sidebar_features
