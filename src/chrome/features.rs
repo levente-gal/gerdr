@@ -506,6 +506,10 @@ pub struct FeatureTabLayout {
     /// Each repository's row (or chip, in `strip`, not scrolled) and its
     /// button, indexed as `FeatureTabView::repos`.
     pub repos: Vec<(Rect, Option<Rect>)>,
+    /// On the strip, the chips standing for the repositories that don't
+    /// fit, before the shown ones and after them: each chip, the
+    /// repository a click selects (the nearest hidden one), and its label.
+    pub more_repos: Vec<(Rect, usize, String)>,
     /// Each page button's place, indexed as `StagePage::buttons`.
     pub page_buttons: Vec<Option<Rect>>,
     /// The footer, and where each hint goes in it.
@@ -540,6 +544,9 @@ impl FeatureTabLayout {
             return Some(FeatureTabHit::Node(n));
         }
         if self.strip.is_some_and(|s| s.contains(pos)) {
+            if let Some((_, i, _)) = self.more_repos.iter().find(|(r, ..)| on(r)) {
+                return Some(FeatureTabHit::MoreRepos(*i));
+            }
             return self.repo_at(pos).or(Some(FeatureTabHit::Tab));
         }
         for column in TabColumn::ALL {
@@ -786,19 +793,43 @@ fn width_of(text: &str, size: f32) -> f32 {
 /// `text` broken into lines no wider than `width` at `size`: at most
 /// `MAX_WRAP`, the last taking the rest (cut short when painted).
 fn wrap(text: &str, size: f32, width: i32) -> Vec<String> {
+    wrap_to(text, size, width, MAX_WRAP)
+}
+
+/// `text`'s words, a group in brackets ("(run / 21)") kept as one, so a
+/// line doesn't break inside it.
+fn words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    for word in text.split_whitespace() {
+        match words.last_mut() {
+            Some(last) if depth > 0 => {
+                last.push(' ');
+                last.push_str(word);
+            }
+            _ => words.push(word.to_owned()),
+        }
+        depth += word.matches(['(', '[']).count() as i32;
+        depth -= word.matches([')', ']']).count() as i32;
+        depth = depth.max(0);
+    }
+    words
+}
+
+/// `wrap` to at most `max` lines.
+fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
-    for word in text.split_whitespace() {
+    for word in words(text) {
         let longer = if line.is_empty() {
-            word.to_owned()
+            word.clone()
         } else {
             format!("{line} {word}")
         };
-        if line.is_empty() || lines.len() + 1 == MAX_WRAP || width_of(&longer, size) <= width as f32
-        {
+        if line.is_empty() || lines.len() + 1 >= max || width_of(&longer, size) <= width as f32 {
             line = longer;
         } else {
-            lines.push(std::mem::replace(&mut line, word.to_owned()));
+            lines.push(std::mem::replace(&mut line, word));
         }
     }
     if !line.is_empty() || lines.is_empty() {
@@ -806,6 +837,9 @@ fn wrap(text: &str, size: f32, width: i32) -> Vec<String> {
     }
     lines
 }
+
+/// The most lines an activity row takes; the last ends in "…".
+const ACTIVITY_LINES: usize = 2;
 
 /// What a page button says: its label, then its key.
 /// The UI font has neither "⏎" nor "↵": a button's key shows it as
@@ -856,7 +890,12 @@ impl Stack {
     fn activity(&mut self, rows: &[ActivityRow]) {
         for (row, a) in rows.iter().enumerate() {
             let ago = width_of(&a.ago, Font::Detail.size()).ceil() as i32 + 8;
-            let lines = wrap(&a.what, Font::Small.size(), self.w - DOT_ROOM - ago);
+            let lines = wrap_to(
+                &a.what,
+                Font::Small.size(),
+                self.w - DOT_ROOM - ago,
+                ACTIVITY_LINES,
+            );
             let h = lines.len() as i32 * TAIL_LINE + 6;
             self.put(h, Piece::Activity { row, lines });
         }
@@ -1075,6 +1114,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let hint_spots = footer_hint_spots(&hint_strs(&view.hints), hints);
 
     let mut repos = Vec::new();
+    let mut more_repos = Vec::new();
     let strip = (width < REPOS_BELOW).then(|| {
         let strip = Rectangle::new((x, body_top).into(), (inner, CHIP_ROW).into());
         body_top += CHIP_ROW + COLUMN_GAP;
@@ -1100,35 +1140,59 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         let chip_w = |r: &FeatureRepoRow| {
             width_of(&r.name, SMALL_FONT_SIZE).ceil() as i32 + DOT_ROOM + 2 * CHIP_PAD
         };
-        let fits = |from: usize| {
-            let mut cx = x;
-            view.repos[from..]
-                .iter()
-                .take_while(|r| {
-                    cx += chip_w(r) + CHIP_GAP;
-                    cx - CHIP_GAP <= end
-                })
-                .count()
+        let n = view.repos.len();
+        let more_w = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
+        // How many chips fit from `from` after a chip `lead` wide, with
+        // room kept for the "+N" chip when some are left over.
+        let fits = |from: usize, lead: i32| {
+            let mut cx = x + lead;
+            let mut k = 0;
+            for (j, r) in view.repos[from..].iter().enumerate() {
+                let left = n - from - j - 1;
+                let tail = match left {
+                    0 => 0,
+                    left => CHIP_GAP + more_w(&more_label(left, true)),
+                };
+                if cx + chip_w(r) + tail > end {
+                    break;
+                }
+                cx += chip_w(r) + CHIP_GAP;
+                k += 1;
+            }
+            k
         };
-        let first = if view.repo < view.repos.len() && view.repo >= fits(0) {
+        let first = if view.repo < n && view.repo >= fits(0, 0) {
             view.repo
         } else {
             0
         };
-        let shown = first..first + fits(first);
-        let mut cx = x;
+        let lead = match first {
+            0 => 0,
+            first => more_w(&more_label(first, false)) + CHIP_GAP,
+        };
+        let shown = first..first + fits(first, lead);
+        let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
+        if first > 0 {
+            let w = more_w(&more_label(first, false));
+            let chip = Rectangle::new((x, chip_y).into(), (w, ROW_BUTTON).into());
+            more_repos.push((chip, first - 1, more_label(first, false)));
+        }
+        let mut cx = x + lead;
         for (i, repo) in view.repos.iter().enumerate() {
             if !shown.contains(&i) {
                 repos.push((Rect::default(), None));
                 continue;
             }
             let w = chip_w(repo);
-            let chip = Rectangle::new(
-                (cx, strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2).into(),
-                (w, ROW_BUTTON).into(),
-            );
+            let chip = Rectangle::new((cx, chip_y).into(), (w, ROW_BUTTON).into());
             cx += w + CHIP_GAP;
             repos.push((chip, None));
+        }
+        if shown.end < n {
+            let label = more_label(n - shown.end, true);
+            let w = more_w(&label);
+            let chip = Rectangle::new((cx, chip_y).into(), (w, ROW_BUTTON).into());
+            more_repos.push((chip, shown.end, label));
         }
         // The selected one's button even when its chip doesn't show.
         if let Some(slot) = repos.get_mut(view.repo) {
@@ -1195,11 +1259,347 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         content,
         strip,
         repos,
+        more_repos,
         page_buttons,
         hints,
         hint_spots,
         pieces,
     }
+}
+
+/// What the strip's chip standing for `n` hidden repositories says: "+N"
+/// for those after the chips, "N+" for those before.
+fn more_label(n: usize, after: bool) -> String {
+    match after {
+        true => format!("+{n}"),
+        false => format!("{n}+"),
+    }
+}
+
+/// A part of the feature tab drawn in a buffer of its own, over the
+/// ground and cards of `Painter::feature_tab_back`, so a change to one
+/// (a hover, a key move, a column scrolled) draws only that one again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TabSlice {
+    /// The header, the rail and its rule, and a narrow tab's strip of
+    /// repository chips: from the tab's top to the columns.
+    Head,
+    /// A column's contents, unscrolled: scrolling it moves its buffer.
+    Column(TabColumn),
+    Hints,
+}
+
+/// Physical pixels a column's buffer may be high: one taller holds only
+/// what shows of it, and is drawn again as it scrolls.
+const TALL_COLUMN: f64 = 8192.0;
+
+impl FeatureTabLayout {
+    /// Where `slice` goes on the tab, scrolled `down` (its column's
+    /// scroll), and whether it moves with it: a column's contents in
+    /// full when they're not too tall at `scale`, from the column's top
+    /// (so it shows `down` higher), else only what shows. `None` for a
+    /// column the tab hasn't, or one with nothing in it.
+    pub(super) fn slice_rect(
+        &self,
+        slice: TabSlice,
+        down: f64,
+        scale: f64,
+    ) -> Option<(Rect, bool)> {
+        match slice {
+            TabSlice::Head => {
+                let bottom = self.columns[TabColumn::Page as usize]?.loc.y;
+                Some((
+                    Rectangle::new(
+                        self.frame.loc,
+                        (self.frame.size.w, bottom - self.frame.loc.y).into(),
+                    ),
+                    false,
+                ))
+            }
+            TabSlice::Hints => Some((self.hints, false)),
+            TabSlice::Column(column) => {
+                let place = self.columns[column as usize]?;
+                let x = place.loc.x + CARD_PAD;
+                let w = (place.size.w - 2 * CARD_PAD).max(1);
+                let h = self.content[column as usize];
+                if h <= 0 || place.size.h <= 0 {
+                    return None;
+                }
+                if f64::from(h) * scale <= TALL_COLUMN {
+                    return Some((Rectangle::new((x, place.loc.y).into(), (w, h).into()), true));
+                }
+                let dy = down.round() as i32;
+                Some((
+                    Rectangle::new((x, place.loc.y + dy).into(), (w, place.size.h).into()),
+                    false,
+                ))
+            }
+        }
+    }
+}
+
+/// `view` with only what `slice` draws from it kept (and the rest
+/// emptied): what its buffer is cached by, with where it goes. `strip`:
+/// the tab has a strip of repository chips in its head.
+fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTabView {
+    let mut v = FeatureTabView {
+        title: String::new(),
+        sub: String::new(),
+        which: None,
+        remove: "",
+        rail: Vec::new(),
+        repos: Vec::new(),
+        repos_error: None,
+        repo: 0,
+        focus: TabArea::Stages,
+        page: StagePage {
+            title: String::new(),
+            about: String::new(),
+            status: None,
+            buttons: Vec::new(),
+            sections: Vec::new(),
+        },
+        activity: Vec::new(),
+        scroll: [0.0; 3],
+        hover: None,
+        hints: Vec::new(),
+    };
+    use FeatureTabHit as H;
+    let repos = |v: &mut FeatureTabView| {
+        v.repos = view.repos.clone();
+        v.repos_error = view.repos_error.clone();
+        v.repo = view.repo;
+        v.focus = view.focus;
+    };
+    v.hover = view.hover.filter(|hit| match slice {
+        TabSlice::Head => {
+            matches!(hit, H::Prev | H::Next | H::Button(_) | H::Node(_))
+                || strip && matches!(hit, H::Repo(_) | H::RepoButton(_) | H::MoreRepos(_))
+        }
+        TabSlice::Column(TabColumn::Repos) => matches!(hit, H::Repo(_) | H::RepoButton(_)),
+        TabSlice::Column(TabColumn::Page) => matches!(hit, H::PageButton(_)),
+        TabSlice::Column(TabColumn::Activity) => false,
+        TabSlice::Hints => matches!(hit, H::Hint(_)),
+    });
+    match slice {
+        TabSlice::Head => {
+            v.title = view.title.clone();
+            v.sub = view.sub.clone();
+            v.which = view.which;
+            v.remove = view.remove;
+            v.rail = view.rail.clone();
+            v.focus = view.focus;
+            if strip {
+                repos(&mut v);
+            }
+        }
+        TabSlice::Column(TabColumn::Repos) => repos(&mut v),
+        TabSlice::Column(TabColumn::Page) => {
+            v.page = view.page.clone();
+            v.activity = view.activity.clone();
+        }
+        TabSlice::Column(TabColumn::Activity) => v.activity = view.activity.clone(),
+        TabSlice::Hints => v.hints = view.hints.clone(),
+    }
+    v
+}
+
+/// What a feature tab's ground is drawn from: the tab's size, its
+/// columns' places, the theme and the scale.
+type BackKey = (Size<i32, Logical>, [Option<Rect>; 3], super::Theme, f64);
+/// What a slice is drawn from: what it shows of the view, where it goes
+/// (in the tab), the tab's size, the theme and the scale.
+type SliceKey = (FeatureTabView, Rect, Size<i32, Logical>, super::Theme, f64);
+
+/// What a column's thumb is drawn from: its size, the theme and the
+/// scale.
+type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
+
+/// The feature tab as the chrome shows it, fading in and out (see
+/// `Overlay`): its ground and cards, then a buffer per slice (see
+/// `TabSlice`) and a thumb per column that scrolls, each drawn again
+/// only when what it shows changes.
+#[derive(Default)]
+pub(super) struct FeatureTabLayers {
+    overlay: super::Overlay<BackKey>,
+    head: super::Cached<SliceKey>,
+    columns: [super::Cached<SliceKey>; 3],
+    hints: super::Cached<SliceKey>,
+    /// The thumbs, by their size.
+    thumbs: [super::Cached<ThumbKey>; 3],
+    /// How many buffers were drawn, for tests.
+    drawn: std::cell::Cell<usize>,
+}
+
+impl FeatureTabLayers {
+    /// The parts showing the feature tab in `area` at `now`, front to
+    /// back.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parts(
+        &mut self,
+        view: Option<FeatureTabView>,
+        area: Rect,
+        theme: super::Theme,
+        scale: f64,
+        now: std::time::Instant,
+        painter: &Painter,
+    ) -> Vec<super::layers::Part> {
+        use super::layers::Part;
+        let p = theme.palette();
+        let output = area.size;
+        let layout = view
+            .as_ref()
+            .map(|v| feature_tab_layout(v, Rectangle::from_size(output)));
+        let placed = layout
+            .as_ref()
+            .map(|l| ((output, l.columns, theme, scale), area.loc, output));
+        let drawn = &self.drawn;
+        let (head, columns, hints, thumbs) = (
+            &mut self.head,
+            &mut self.columns,
+            &mut self.hints,
+            &mut self.thumbs,
+        );
+        let more = |_: &BackKey| {
+            let (Some(view), Some(l)) = (&view, &layout) else {
+                return Vec::new();
+            };
+            let strip = l.strip.is_some();
+            let at = |r: Rect| Point::from((area.loc.x + r.loc.x, area.loc.y + r.loc.y));
+            let slice = |cache: &mut super::Cached<SliceKey>, slice: TabSlice, down: f64| {
+                let (region, moves) = l.slice_rect(slice, down, scale)?;
+                let mut key = slice_view(view, slice, strip);
+                if let (TabSlice::Column(c), false) = (slice, moves) {
+                    key.scroll[c as usize] = down;
+                }
+                let buffer = cache.get((key, region, output, theme, scale), |_| {
+                    drawn.set(drawn.get() + 1);
+                    painter.feature_tab_slice(view, output, slice, region, scale, p)
+                });
+                let part = Part::new(buffer, at(region), region.size, 1.0);
+                Some((part, moves))
+            };
+            let mut parts = Vec::new();
+            for column in TabColumn::ALL {
+                let i = column as usize;
+                let Some(place) = l.columns[i] else {
+                    continue;
+                };
+                let down = view.scroll[i];
+                if let Some(thumb) = l.thumb(column, down) {
+                    let size = Size::from((thumb.track.size.w, thumb.h.round() as i32));
+                    let buffer = thumbs[i].get((size, theme, scale), |(size, ..)| {
+                        painter.bar_thumb(*size, scale, p)
+                    });
+                    let loc = at(thumb.track).to_f64();
+                    parts.push(
+                        Part::new(buffer, at(thumb.track), size, 1.0).at((
+                            loc.x,
+                            f64::from(area.loc.y) + thumb.top,
+                        )
+                            .into()),
+                    );
+                }
+                // Inside the card's edge.
+                let inside = Rectangle::new(
+                    at(place) + Point::from((1, 1)),
+                    (place.size.w - 2, place.size.h - 2).into(),
+                );
+                if let Some((part, moves)) = slice(&mut columns[i], TabSlice::Column(column), down)
+                {
+                    let part = match moves {
+                        true => {
+                            let loc = (part.loc.x, part.loc.y - down).into();
+                            part.at(loc)
+                        }
+                        false => part,
+                    };
+                    parts.push(part.clipped(inside));
+                }
+            }
+            parts.extend(slice(hints, TabSlice::Hints, 0.0).map(|(part, _)| part));
+            parts.extend(slice(head, TabSlice::Head, 0.0).map(|(part, _)| part));
+            parts
+        };
+        self.overlay.parts(
+            placed,
+            now,
+            true,
+            |(output, columns, ..)| {
+                drawn.set(drawn.get() + 1);
+                painter.feature_tab_back(*output, columns, scale, p)
+            },
+            more,
+        )
+    }
+}
+
+/// The feature tab filling `output` as its parts lay it out, settled
+/// (faded in), in one buffer: for the goldens and the dumps.
+#[cfg(test)]
+pub(super) fn feature_tab_composed(
+    painter: &Painter,
+    view: &FeatureTabView,
+    output: Size<i32, Logical>,
+    theme: super::Theme,
+    scale: f64,
+) -> MemoryRenderBuffer {
+    let mut layers = FeatureTabLayers::default();
+    let now = std::time::Instant::now();
+    let area = Rectangle::from_size(output);
+    let _ = layers.parts(Some(view.clone()), area, theme, scale, now, painter);
+    let later = now + std::time::Duration::from_secs(2);
+    let parts = layers.parts(Some(view.clone()), area, theme, scale, later, painter);
+    compose(&parts, output, scale)
+}
+
+/// `parts` (front to back) laid one over another on a clear buffer the
+/// size of `output`, as the renderer would.
+#[cfg(test)]
+pub(super) fn compose(
+    parts: &[super::layers::Part],
+    output: Size<i32, Logical>,
+    scale: f64,
+) -> MemoryRenderBuffer {
+    let mut c = Canvas::new(physical(output, scale));
+    let (cw, ch) = (c.w, c.h);
+    for part in parts.iter().rev() {
+        let loc = part.loc.to_physical(scale).to_i32_round::<i32>();
+        let size = physical(part.size, scale);
+        let [x0, y0, x1, y1] = match part.clip {
+            Some(clip) => {
+                let r = clip.to_physical_precise_round::<f64, i32>(scale);
+                [r.loc.x, r.loc.y, r.loc.x + r.size.w, r.loc.y + r.size.h]
+            }
+            None => [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
+        };
+        let mut buffer = part.buffer.clone();
+        let _ = buffer.render().draw(|mem| {
+            for y in 0..size.h {
+                let oy = loc.y + y;
+                if oy < 0 || oy >= ch || oy < y0 || oy >= y1 {
+                    continue;
+                }
+                for x in 0..size.w {
+                    let ox = loc.x + x;
+                    if ox < 0 || ox >= cw || ox < x0 || ox >= x1 {
+                        continue;
+                    }
+                    let src = ((y * size.w + x) * 4) as usize;
+                    let dst = ((oy * cw + ox) * 4) as usize;
+                    let Some(px) = mem.get(src..src + 4) else {
+                        continue;
+                    };
+                    let a = u32::from(px[3]);
+                    for (d, s) in c.px[dst..dst + 4].iter_mut().zip(px) {
+                        *d = (u32::from(*s) + u32::from(*d) * (255 - a) / 255) as u8;
+                    }
+                }
+            }
+            Ok::<_, ()>(Vec::new())
+        });
+    }
+    c.into_buffer(false)
 }
 
 impl Painter {
@@ -1349,26 +1749,92 @@ impl Painter {
         c.into_buffer(false)
     }
 
-    /// The feature tab filling `output`, its tab's area: the header, the
-    /// stages' rail, the columns each clipped and scrolled on its own,
-    /// and the hints.
-    pub(super) fn feature_tab(
+    /// The feature tab's `slice` (see `TabSlice`), at `region` of a tab
+    /// filling `output`: its own buffer, `region` big. A column's slice is
+    /// its contents, unscrolled, from `region`'s top; the rest are what is
+    /// in their place.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn feature_tab_slice(
         &self,
         view: &FeatureTabView,
         output: Size<i32, Logical>,
+        slice: TabSlice,
+        region: Rect,
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let l = feature_tab_layout(view, Rectangle::from_size(output));
+        // Laid out with the region's top left at the origin: the canvas's.
+        let frame = Rectangle::new((-region.loc.x, -region.loc.y).into(), output);
+        let l = feature_tab_layout(view, frame);
+        let mut c = Canvas::new(physical(region.size, scale));
+        match slice {
+            TabSlice::Head => {
+                c.fill(0, 0, c.w, c.h, p.background);
+                self.tab_head(&mut c, view, &l, scale, p);
+            }
+            TabSlice::Column(column) => {
+                c.fill(0, 0, c.w, c.h, p.panel);
+                let tall = Rectangle::from_size(region.size);
+                for (rect, piece) in &l.pieces[column as usize] {
+                    if rect.loc.y > tall.size.h || rect.loc.y + rect.size.h < 0 {
+                        continue;
+                    }
+                    self.tab_piece(&mut c, view, &l, *rect, piece, 0, scale, p);
+                }
+            }
+            TabSlice::Hints => {
+                c.fill(0, 0, c.w, c.h, p.background);
+                self.tab_hints(&mut c, view, &l, scale, p);
+            }
+        }
+        c.into_buffer(true)
+    }
+
+    /// What is behind the feature tab's slices filling `output`: its
+    /// ground, and each column's card in `columns` (see
+    /// `FeatureTabLayout::columns`).
+    pub(super) fn feature_tab_back(
+        &self,
+        output: Size<i32, Logical>,
+        columns: &[Option<Rect>; 3],
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
         let mut c = Canvas::new(physical(output, scale));
         let s = scale as f32;
-        let px = |v: i32| (v as f64 * scale).round() as i32;
         c.fill(0, 0, c.w, c.h, p.background);
+        for place in columns.iter().flatten() {
+            let (x, y, w, h) = rect_px(*place, scale);
+            let b = s.round().max(1.0);
+            c.rounded(x, y, w, h, CARD_RADIUS * s, p.border_variant);
+            c.rounded(
+                x + b,
+                y + b,
+                w - 2.0 * b,
+                h - 2.0 * b,
+                CARD_RADIUS * s - b,
+                p.panel,
+            );
+        }
+        c.into_buffer(true)
+    }
 
+    /// The tab's header, rail, the rule under it and, on a narrow tab, the
+    /// strip of repository chips, on `c`.
+    fn tab_head(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let px = |v: i32| (v as f64 * scale).round() as i32;
         // The header: the title and sub line, the switch, the buttons.
         let (tx, tend) = phys(l.title, scale);
         self.bold_text(
-            &mut c,
+            c,
             &view.title,
             TAB_TITLE_FONT,
             tx,
@@ -1379,7 +1845,7 @@ impl Painter {
         );
         let (sx, send) = phys(l.sub, scale);
         self.text(
-            &mut c,
+            c,
             &view.sub,
             DETAIL_FONT_SIZE,
             sx,
@@ -1390,7 +1856,7 @@ impl Painter {
         );
         if let (Some((count, prev, next)), Some((i, n))) = (l.switch, view.which) {
             self.centered(
-                &mut c,
+                c,
                 &format!("{} of {n}", i + 1),
                 FONT_SIZE,
                 count,
@@ -1402,19 +1868,9 @@ impl Painter {
                 (next, false, FeatureTabHit::Next),
             ] {
                 let hovered = view.hover == Some(hit);
-                self.button(
-                    &mut c,
-                    "",
-                    rect,
-                    (hovered, false),
-                    ButtonStyle::Plain,
-                    scale,
-                    p,
-                );
+                self.button(c, "", rect, (hovered, false), ButtonStyle::Plain, scale, p);
                 let color = if hovered { p.text } else { p.muted };
-                icon_sdf(&mut c, rect, scale, color, |x, y| {
-                    chevron_side(left, x, y, s)
-                });
+                icon_sdf(c, rect, scale, color, |x, y| chevron_side(left, x, y, s));
             }
         }
         let labels = FEATURE_BUTTONS.iter().copied().chain([view.remove]);
@@ -1427,12 +1883,12 @@ impl Painter {
             };
             let hovered = view.hover == Some(FeatureTabHit::Button(i));
             if !l.compact {
-                self.button(&mut c, label, *rect, (hovered, false), style, scale, p);
+                self.button(c, label, *rect, (hovered, false), style, scale, p);
                 continue;
             }
-            self.button(&mut c, "", *rect, (hovered, false), style, scale, p);
+            self.button(c, "", *rect, (hovered, false), style, scale, p);
             let color = if destructive { p.on_accent } else { p.text };
-            icon_sdf(&mut c, *rect, scale, color, |x, y| match i {
+            icon_sdf(c, *rect, scale, color, |x, y| match i {
                 0 => tab(x, y, s * 0.8),
                 1 => copy(x, y, s * 1.2),
                 2 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
@@ -1452,7 +1908,7 @@ impl Painter {
         if let Some(FeatureTabHit::Node(i)) = view.hover
             && let Some(slot) = l.nodes.get(i)
         {
-            self.row_highlight(&mut c, *slot, (false, 1.0), scale, p);
+            self.row_highlight(c, *slot, (false, 1.0), scale, p);
         }
         for (i, pair) in l.nodes.windows(2).enumerate() {
             let (a, b) = (circle(pair[0]), circle(pair[1]));
@@ -1487,9 +1943,9 @@ impl Painter {
                 } else {
                     p.background
                 };
-                focus_ring(&mut c, spot, NODE as f32 / 2.0, behind, scale, ring);
+                focus_ring(c, spot, NODE as f32 / 2.0, behind, scale, ring);
             }
-            self.rail_node(&mut c, spot, i + 1, node.mark, scale, p);
+            self.rail_node(c, spot, i + 1, node.mark, scale, p);
             let label = Rectangle::new(
                 (slot.loc.x + 2, spot.loc.y + NODE + NODE_GAP).into(),
                 (slot.size.w - 4, NODE_LABEL).into(),
@@ -1499,7 +1955,7 @@ impl Painter {
                 _ => p.text,
             };
             self.centred_cut(
-                &mut c,
+                c,
                 &node.label,
                 SMALL_FONT_SIZE,
                 label,
@@ -1517,15 +1973,7 @@ impl Painter {
                     NodeMark::Waiting | NodeMark::Stale => p.warning,
                     _ => p.muted,
                 };
-                self.centred_cut(
-                    &mut c,
-                    &node.line,
-                    DETAIL_FONT_SIZE,
-                    line,
-                    false,
-                    scale,
-                    color,
-                );
+                self.centred_cut(c, &node.line, DETAIL_FONT_SIZE, line, false, scale, color);
             }
         }
         // The rule under the rail.
@@ -1536,62 +1984,24 @@ impl Painter {
 
         // On a narrow tab, the repositories as chips.
         if let Some(strip) = l.strip {
-            self.repo_strip(&mut c, view, &l, strip, scale, p);
+            self.repo_strip(c, view, l, strip, scale, p);
         }
+    }
 
-        // The columns, each a card scrolled on its own.
-        for column in TabColumn::ALL {
-            let Some(place) = l.columns[column as usize] else {
-                continue;
-            };
-            let (x, y, w, h) = rect_px(place, scale);
-            let b = s.round().max(1.0);
-            c.rounded(x, y, w, h, CARD_RADIUS * s, p.border_variant);
-            c.rounded(
-                x + b,
-                y + b,
-                w - 2.0 * b,
-                h - 2.0 * b,
-                CARD_RADIUS * s - b,
-                p.panel,
-            );
-            let down = view.scroll[column as usize];
-            let dy = down.round() as i32;
-            let (cx, cy, cw, ch) = (
-                x as i32,
-                y as i32 + b as i32,
-                w as i32,
-                h as i32 - 2 * b as i32,
-            );
-            c.clipped(cx, cy, cw, ch, |c| {
-                for (rect, piece) in &l.pieces[column as usize] {
-                    let rect = Rectangle::new((rect.loc.x, rect.loc.y - dy).into(), rect.size);
-                    if rect.loc.y > place.loc.y + place.size.h
-                        || rect.loc.y + rect.size.h < place.loc.y
-                    {
-                        continue;
-                    }
-                    self.tab_piece(c, view, &l, rect, piece, dy, scale, p);
-                }
-            });
-            if let Some(thumb) = l.thumb(column, down) {
-                self.thumb_in(&mut c, &thumb, scale, p);
-            }
-        }
-
+    /// The tab's hints, on `c`.
+    fn tab_hints(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
         let hover = match view.hover {
             Some(FeatureTabHit::Hint(i)) => Some(i),
             _ => None,
         };
-        self.hints(
-            &mut c,
-            &hint_strs(&view.hints),
-            &l.hint_spots,
-            hover,
-            scale,
-            p,
-        );
-        c.into_buffer(true)
+        self.hints(c, &hint_strs(&view.hints), &l.hint_spots, hover, scale, p);
     }
 
     /// `text` centred in `rect`, or from its left and cut short with "…"
@@ -1749,6 +2159,17 @@ impl Painter {
                 let hovered = view.hover == Some(FeatureTabHit::RepoButton(i));
                 self.button(c, label, *b, (hovered, false), ButtonStyle::Plain, scale, p);
             }
+        }
+        // The chips standing for those that don't fit.
+        for (chip, i, label) in &l.more_repos {
+            let lit = view.hover == Some(FeatureTabHit::MoreRepos(*i));
+            let (x, y, w, h) = rect_px(*chip, scale);
+            let fill = super::row_fill(p, false, if lit { 1.0 } else { 0.0 }).unwrap_or(p.panel);
+            let b = s.round().max(1.0);
+            c.rounded(x, y, w, h, h / 2.0, p.border_variant);
+            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, h / 2.0 - b, fill);
+            let color = if lit { p.text } else { p.muted };
+            self.centered(c, label, SMALL_FONT_SIZE, *chip, scale, color);
         }
     }
 
@@ -2352,5 +2773,144 @@ mod tests {
         let narrow = tab_at(&view, 1000);
         assert_eq!(narrow.scroll_room(TabColumn::Activity), 0);
         assert!(narrow.scroll_room(TabColumn::Page) > room);
+    }
+
+    /// How long drawing the tab's parts takes at 2810x1856, scale 1:
+    /// all of them, then after a page button's hover changes, a column
+    /// scrolls a step and a rail node's hover changes. Run with `cargo
+    /// test --release --bin gerdr paint_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn the_tab_paint_cost() {
+        use crate::chrome::{Theme, layers::Part};
+        use std::time::{Duration, Instant};
+        let painter = crate::chrome::Painter::new();
+        let area = Rectangle::from_size((2810, 1856).into());
+        let mut view = tab_view();
+        let row = view.activity[0].clone();
+        view.activity = (0..120).map(|_| row.clone()).collect();
+        let t0 = Instant::now();
+        let frame = std::cell::Cell::new(0);
+        let parts = |layers: &mut FeatureTabLayers, view: &FeatureTabView| -> Vec<Part> {
+            frame.set(frame.get() + 1);
+            let now = t0 + Duration::from_secs(frame.get());
+            layers.parts(Some(view.clone()), area, Theme::Dark, 1.0, now, &painter)
+        };
+        let n = 20;
+        let time = |what: &str, f: &mut dyn FnMut(usize)| {
+            let start = Instant::now();
+            for i in 0..n {
+                f(i);
+            }
+            let ms = start.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            eprintln!("{what}: {ms:.2} ms");
+        };
+        time("full", &mut |_| {
+            let _ = parts(&mut FeatureTabLayers::default(), &view);
+        });
+        let mut layers = FeatureTabLayers::default();
+        let _ = parts(&mut layers, &view);
+        let mut run = |what: &str, change: &dyn Fn(&mut FeatureTabView, usize)| {
+            let before = layers.drawn.get();
+            time(what, &mut |i| {
+                change(&mut view, i);
+                let _ = parts(&mut layers, &view);
+            });
+            eprintln!("  buffers drawn: {}", layers.drawn.get() - before);
+        };
+        run("hover page button", &|v, i| {
+            v.hover = Some(FeatureTabHit::PageButton(i % 2));
+        });
+        run("scroll activity", &|v, i| {
+            v.hover = None;
+            v.scroll[TabColumn::Activity as usize] = (i + 1) as f64 * 20.0;
+        });
+        run("hover rail node", &|v, i| {
+            v.hover = Some(FeatureTabHit::Node(i % 2));
+        });
+    }
+
+    /// A change to one slice of the view draws only that slice again,
+    /// and a scroll only moves its column's buffer.
+    #[test]
+    fn a_hover_or_a_scroll_draws_only_its_slice() {
+        use crate::chrome::Theme;
+        use std::time::{Duration, Instant};
+        let painter = crate::chrome::Painter::new();
+        let area = Rectangle::from_size((1920, 900).into());
+        let mut view = tab_view();
+        let row = view.activity[0].clone();
+        view.activity = (0..80).map(|_| row.clone()).collect();
+        let mut layers = FeatureTabLayers::default();
+        let t0 = Instant::now();
+        let step = |layers: &mut FeatureTabLayers, view: &FeatureTabView, k: u64| {
+            let now = t0 + Duration::from_secs(k);
+            let before = layers.drawn.get();
+            let parts = layers.parts(Some(view.clone()), area, Theme::Dark, 1.0, now, &painter);
+            (layers.drawn.get() - before, parts)
+        };
+        // The head, the hints and the three columns, then the ground once
+        // it starts to show.
+        assert_eq!(step(&mut layers, &view, 0).0, 5);
+        assert_eq!(step(&mut layers, &view, 1).0, 1);
+        assert_eq!(step(&mut layers, &view, 2).0, 0);
+        view.hover = Some(FeatureTabHit::PageButton(0));
+        assert_eq!(step(&mut layers, &view, 2).0, 1);
+        view.hover = Some(FeatureTabHit::Node(3));
+        assert_eq!(step(&mut layers, &view, 3).0, 2);
+        view.hover = Some(FeatureTabHit::Column(TabColumn::Page));
+        assert_eq!(step(&mut layers, &view, 4).0, 1);
+        let (_, at_top) = step(&mut layers, &view, 5);
+        view.scroll[TabColumn::Activity as usize] = 40.0;
+        let (drawn, scrolled) = step(&mut layers, &view, 6);
+        assert_eq!(drawn, 0);
+        let moved: Vec<f64> = (at_top.iter().zip(&scrolled))
+            .map(|(a, b)| a.loc.y - b.loc.y)
+            .filter(|dy| *dy != 0.0)
+            .collect();
+        assert_eq!(moved.len(), 2, "the column's contents and its thumb");
+        assert_eq!(moved[1], 40.0);
+    }
+
+    /// A narrow tab's strip ends in "+N" for the repositories past it,
+    /// and starts with "N+" when it starts past the first; a click on
+    /// either selects the nearest hidden one.
+    #[test]
+    fn the_strip_marks_the_repositories_it_hides() {
+        let mut view = tab_view();
+        let row = view.repos[0].clone();
+        view.repos = (0..12)
+            .map(|i| FeatureRepoRow {
+                name: format!("repository-{i}"),
+                ..row.clone()
+            })
+            .collect();
+        let l = tab_at(&view, 850);
+        let shown = l.repos.iter().filter(|(r, _)| r.size.w > 0).count();
+        assert!(shown > 0 && shown < 12);
+        let [(chip, i, label)] = l.more_repos.as_slice() else {
+            panic!("one mark: {:?}", l.more_repos);
+        };
+        assert_eq!(
+            (*i, label.as_str()),
+            (shown, format!("+{}", 12 - shown).as_str())
+        );
+        let strip = l.strip.unwrap();
+        assert!(chip.loc.x + chip.size.w <= strip.loc.x + strip.size.w);
+        assert_eq!(
+            l.hit(&view, centre(*chip)),
+            Some(FeatureTabHit::MoreRepos(shown))
+        );
+        // From the 10th: the strip starts there, after "9+".
+        view.repo = 10;
+        let l = tab_at(&view, 850);
+        let (lead, i, label) = &l.more_repos[0];
+        assert_eq!((*i, label.as_str()), (9, "10+"));
+        assert!(l.repos[10].0.size.w > 0);
+        assert!(lead.loc.x + lead.size.w <= l.repos[10].0.loc.x);
+        assert_eq!(
+            l.hit(&view, centre(*lead)),
+            Some(FeatureTabHit::MoreRepos(9))
+        );
     }
 }
