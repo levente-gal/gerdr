@@ -1089,6 +1089,11 @@ impl Gerdr {
         run.ready = Some(now);
         let pane = run.pane.clone();
         feature.log(now, format!("{} ready for review", doc_word(stage)));
+        // As written, to tell the agent at send back whether the user
+        // edited it in the review.
+        if let Err(err) = artifacts::keep_written(&store::dir(None, project, slug), stage) {
+            tracing::warn!("keeping {project}/{slug}'s file as written: {err}");
+        }
         let title = feature.title.clone();
         self.save_feature(project, slug);
         let summary = format!(
@@ -1278,6 +1283,7 @@ impl Gerdr {
             return;
         };
         let data = store::dir(None, project, slug);
+        let comments = with_edits_told(comments, &data, stage);
         let back = run.sent_back + 1;
         let file =
             data.join("prompts")
@@ -1336,6 +1342,21 @@ impl Gerdr {
     }
 }
 
+/// `comments` sending `stage`'s file back, told too when the user edited
+/// the file in the review since its agent wrote it, so it keeps those
+/// edits.
+fn with_edits_told(comments: String, data: &Path, stage: Stage) -> String {
+    if !artifacts::edited_since_written(data, stage) {
+        return comments;
+    }
+    let name = artifacts::name(stage).unwrap_or("the file");
+    format!(
+        "{}\n\nThe user also edited {name} by hand in the review since you wrote it. \
+         Read it as it is now and keep those edits.\n",
+        comments.trim_end()
+    )
+}
+
 /// Whether a Build agent's stop after milestone `done` of `total` is new:
 /// none yet, or another one.
 fn stop_is_new(stop: Option<Stop>, done: u32, total: u32) -> bool {
@@ -1360,6 +1381,24 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_sent_back_after_the_user_edited_it_says_so() {
+        let dir = std::env::temp_dir().join(format!("gerdr-edits-told-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let brief = dir.join("brief.md");
+        std::fs::write(&brief, "# Brief\n").unwrap();
+        artifacts::keep_written(&dir, Stage::Discover).unwrap();
+        let told = |dir: &Path| with_edits_told("Comments.\n".into(), dir, Stage::Discover);
+        assert_eq!(told(&dir), "Comments.\n");
+        std::fs::write(&brief, "# Brief, edited\n").unwrap();
+        let text = told(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            text.starts_with("Comments.\n\nThe user also edited brief.md"),
+            "{text}"
+        );
+    }
     use crate::{
         agent_icons::AgentIcon,
         cli_agents::Start,
