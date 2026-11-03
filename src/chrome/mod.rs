@@ -26,8 +26,8 @@ mod footer;
 #[cfg(test)]
 mod golden;
 mod help;
-mod identity;
 mod hints;
+mod identity;
 mod inbox;
 mod layers;
 mod manual_test;
@@ -75,8 +75,8 @@ pub use drop::*;
 pub use features::*;
 pub use footer::*;
 pub use help::*;
-pub use identity::*;
 pub use hints::*;
+pub use identity::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
 use layers::*;
@@ -167,7 +167,7 @@ pub struct ChromeView {
     /// Set while the manual test sheet is open.
     pub manual_test: Option<ManualTestView>,
     /// Set while the feature panel is open.
-    pub features: Option<FeaturePanelView>,
+    pub features: Option<FeatureTabView>,
     /// Set while the project menu is open.
     pub project_menu: Option<ProjectMenuView>,
     /// Set while the worktrees popup is open.
@@ -220,7 +220,7 @@ pub struct Chrome {
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
     manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
-    features: Overlay<(FeaturePanelView, Size<i32, Logical>, Theme, f64)>,
+    features: Overlay<(FeatureTabView, Size<i32, Logical>, Theme, f64)>,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
     repos: ReposLayers,
@@ -595,14 +595,14 @@ impl Chrome {
                         },
                     ));
                 }
-                // The feature panel, centred in its tab.
+                // The feature tab, filling its tab's area.
                 Kind::Features => {
-                    let panel = view.features.take().map(|v| {
-                        let (loc, size) = shadowed(feature_panel_layout(&v, area).panel);
-                        ((v, area.size, theme, scale), loc, size)
-                    });
+                    let panel = view
+                        .features
+                        .take()
+                        .map(|v| ((v, area.size, theme, scale), area.loc, area.size));
                     parts.extend(self.features.part(panel, now, true, |(v, output, ..)| {
-                        painter.feature_panel(v, *output, scale, theme.palette())
+                        painter.feature_tab(v, *output, scale, theme.palette())
                     }));
                 }
                 // The project menu reaches over the sidebar and the apps.
@@ -742,7 +742,12 @@ impl Chrome {
                     .get((strip.size, theme, scale), |(size, ..)| {
                         focus_strip(*size, scale, theme.palette())
                     });
-                parts.push(Part::new(buffer, strip.loc, strip.size, pane_bar::PILL_REST));
+                parts.push(Part::new(
+                    buffer,
+                    strip.loc,
+                    strip.size,
+                    pane_bar::PILL_REST,
+                ));
             }
         }
         // Where a pane held by its bar would land: over the apps and the

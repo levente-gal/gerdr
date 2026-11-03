@@ -3467,6 +3467,11 @@ impl Gerdr {
         })
     }
 
+    /// The feature tab's view, while a feature's tab shows.
+    pub fn feature_tab_view(&self) -> Option<chrome::FeatureTabView> {
+        None
+    }
+
     pub fn feature_panel_view(&self) -> Option<FeaturePanelView> {
         let panel = self.features.panel.as_ref()?;
         let feature = self.feature(&panel.project, &panel.slug)?;

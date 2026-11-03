@@ -6355,7 +6355,7 @@ impl Gerdr {
             new_feature: self.new_feature_view(),
             identity: self.identity_view(),
             manual_test: self.manual_test_view(),
-            features: self.feature_panel_view(),
+            features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
             repos: self.repos_view(),
