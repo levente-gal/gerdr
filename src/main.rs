@@ -5521,11 +5521,19 @@ impl Gerdr {
             && project_lock::dir().is_some_and(|dir| project_lock::is_open_elsewhere(&dir, id));
         // Taken before the lock held is let go of, so no other gerdr comes
         // in between when it is this project's (see `reload_projects`).
-        let lock = project_lock::dir().and_then(|dir| {
-            project_lock::ProjectLock::take(&dir, id)
-                .inspect_err(|err| tracing::warn!("locking project {id} open: {err}"))
-                .ok()
-        });
+        // Without one, another gerdr would take this project too; without a
+        // runtime folder no gerdr can tell, so it is shown regardless.
+        let lock = match project_lock::dir() {
+            Some(dir) => match project_lock::ProjectLock::take(&dir, id) {
+                Ok(lock) => Some(lock),
+                Err(err) => {
+                    tracing::warn!("locking project {id} open: {err}");
+                    self.refuse_unlocked(id);
+                    return false;
+                }
+            },
+            None => None,
+        };
         let left = self.project.clone();
         self.detach_project();
         self.project_lock = lock;
@@ -5631,6 +5639,26 @@ impl Gerdr {
         }
         if let Some(welcome) = self.welcome.as_mut() {
             welcome.refused = Some(why);
+        }
+    }
+
+    /// Say that project `id` isn't shown because its lock couldn't be
+    /// taken, so other gerdrs couldn't tell it is open here: on the welcome
+    /// screen when nothing is shown, else in an error toast.
+    fn refuse_unlocked(&mut self, id: &str) {
+        let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
+        let text = format!("Couldn't open {name}: gerdr couldn't mark it as open here");
+        if self.project.is_some() {
+            let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
+            return self.toast_with(text, Level::Error, Some(open_log));
+        }
+        // Nothing shown keeps no lock, as one kept over a reload would.
+        self.project_lock = None;
+        if self.welcome.is_none() {
+            self.open_welcome(false);
+        }
+        if let Some(welcome) = self.welcome.as_mut() {
+            welcome.refused = Some(text);
         }
     }
 
