@@ -2073,6 +2073,7 @@ impl Gerdr {
             return;
         };
         if feature.status != Status::Open {
+            self.probe_finished(project, slug, &feature);
             return;
         }
         // The brief may have changed: its criteria are read again.
@@ -2104,12 +2105,48 @@ impl Gerdr {
         });
     }
 
+    /// Read finished `feature` (`slug` of `project`) for its tab: its
+    /// stage files and line counts only (`ship::probe_finished`). Its code
+    /// isn't watched any more, nor its hooks made sure of.
+    fn probe_finished(&mut self, project: &str, slug: &str, feature: &Feature) {
+        if self.feature_sender().is_none() {
+            return;
+        }
+        let probed = self
+            .features
+            .probes
+            .entry((project.to_owned(), slug.to_owned()))
+            .or_default();
+        if probed.running {
+            return;
+        }
+        probed.running = true;
+        probed.at = Some(Instant::now());
+        let data = store::dir(None, project, slug);
+        let (project, slug, feature) = (project.to_owned(), slug.to_owned(), feature.clone());
+        self.feature_work(None, move |_| Done::Probed {
+            probe: Probe {
+                docs: feature::page::read_docs(&data),
+                ..ship::probe_finished(&feature)
+            },
+            project,
+            slug,
+        });
+    }
+
     /// A probe of feature `slug` of `project` is back: its code changed
     /// sends it back, its squash merged makes it done.
     fn feature_probed(&mut self, project: &str, slug: &str, probe: Probe) {
         let key = (project.to_owned(), slug.to_owned());
+        let open = (self.feature(project, slug)).is_some_and(|f| f.status == Status::Open);
         let probed = self.features.probes.entry(key).or_default();
         probed.running = false;
+        // A finished feature's read is for its tab only.
+        if !open {
+            probed.again = false;
+            probed.last = Some(probe);
+            return;
+        }
         let again = std::mem::take(&mut probed.again);
         match &probe.reading {
             Err(why) if probed.logged.as_ref() != Some(why) => {
@@ -4562,6 +4599,9 @@ fn stage_detail(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
 /// The first stage of `feature` whose mark the code changed since, as the
 /// latest probe read it.
 fn stale_from(feature: &Feature, probe: Option<&Probe>) -> Option<Stage> {
+    if feature.status != Status::Open {
+        return None;
+    }
     match probe.map(|p| &p.reading) {
         Some(Ok(reading)) => feature.stale(&reading.patch),
         _ => None,
@@ -4734,6 +4774,27 @@ fn agent_card(
     })
 }
 
+/// The card of Discover's or Plan's file in `feature`: how it stands,
+/// with the page's plain Review and Preview of it in `actions` (a primary
+/// Review stays in the page's row, as the button to press next).
+fn file_card(
+    feature: &Feature,
+    stage: Stage,
+    actions: &[(PageButton, PanelOutcome)],
+) -> PageSection {
+    let own = [PanelOutcome::ReviewDoc(stage), PanelOutcome::Preview(stage)];
+    PageSection::File {
+        name: crate::feature::artifacts::name(stage)
+            .unwrap_or("file")
+            .to_owned(),
+        state: file_line(feature, stage),
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (b, o))| b.style == ButtonStyle::Plain && own.contains(o))
+            .map(|(i, _)| i)
+            .collect(),
+    }
+}
+
 /// How Discover's or Plan's file stands in `feature`.
 fn file_line(feature: &Feature, stage: Stage) -> CheckLine {
     if feature.is_done(stage) {
@@ -4865,8 +4926,7 @@ fn stage_page(
         match stage {
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
-                let file = crate::feature::artifacts::name(stage).unwrap_or("file");
-                sections.push(lines(file, vec![file_line(feature, stage)]));
+                sections.push(file_card(feature, stage, actions));
                 sections.extend(milestones_of(state.probe, stage));
             }
             Stage::Build => {
@@ -5151,7 +5211,9 @@ fn tab_view(
             now,
         ),
     };
-    let repos_error = match state.probe.map(|p| &p.reading) {
+    // A finished feature's code isn't read (`ship::probe_finished`).
+    let read = state.probe.filter(|_| feature.status == Status::Open);
+    let repos_error = match read.map(|p| &p.reading) {
         Some(Err(why)) => Some(format!("Couldn't read the code: {why}")),
         _ => None,
     };
@@ -7047,9 +7109,10 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &[], 2_000);
         assert_eq!(
             page.sections,
-            [lines(
+            [file(
                 "plan.md",
-                vec![line("not written yet", CheckTone::Note)]
+                line("not written yet", CheckTone::Note),
+                &[]
             )]
         );
         f.runs
@@ -7084,7 +7147,7 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             page.sections[1],
-            lines("plan.md", vec![line("ready for review", CheckTone::Ready)])
+            file("plan.md", line("ready for review", CheckTone::Ready), &[])
         );
         let node = rail_node(&f, Stage::Plan, &state, 2_000);
         assert_eq!(
@@ -7337,6 +7400,35 @@ pub(crate) mod tests {
         }
     }
 
+    /// A file card as `stage_page` makes it.
+    fn file(name: &str, state: CheckLine, buttons: &[usize]) -> PageSection {
+        PageSection::File {
+            name: name.to_owned(),
+            state,
+            buttons: buttons.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_finished_features_tab_shows_no_code_error_nor_stale_marks() {
+        let mut f = feature("d", vec![repo("api", true)], 8);
+        f.status = Status::Done;
+        let p = Probe {
+            stats: BTreeMap::from([("api".to_owned(), (4, 1))]),
+            ..ship::probe_finished(&f)
+        };
+        assert!(p.reading.is_err());
+        assert_eq!(stale_from(&f, Some(&p)), None);
+        let mut q = probe(None);
+        q.reading = Ok(feature::patch::Reading {
+            patch: "changed".into(),
+            ..Default::default()
+        });
+        assert_eq!(stale_from(&f, Some(&q)), None, "its marks stay as shipped");
+        f.status = Status::Open;
+        assert!(stale_from(&f, Some(&q)).is_some(), "an open one's go stale");
+    }
+
     #[test]
     fn a_written_plan_offers_review_and_preview_and_lists_its_milestones() {
         let mut f = feature("b", vec![repo("api", true)], 1);
@@ -7363,6 +7455,24 @@ pub(crate) mod tests {
             .filter(|(_, o)| *o == PanelOutcome::ReviewDoc(Stage::Plan))
             .count();
         assert_eq!(reviews, 1);
+        // The file's card holds Preview; the primary Review stays in the
+        // page's row.
+        let preview = (actions.iter())
+            .position(|(_, o)| *o == PanelOutcome::Preview(Stage::Plan))
+            .unwrap();
+        let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
+        let card = page
+            .sections
+            .iter()
+            .find(|s| matches!(s, PageSection::File { .. }));
+        assert_eq!(
+            card,
+            Some(&file(
+                "plan.md",
+                line("ready for review", CheckTone::Ready),
+                &[preview]
+            ))
+        );
         // Its milestones by name, as the probe read them.
         let mut p = probe(None);
         let items = vec![(true, "API".to_owned()), (false, "UI".to_owned())];

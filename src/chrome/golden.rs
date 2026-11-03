@@ -2117,12 +2117,10 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
                 tail: Vec::new(),
                 button: Some(2),
             },
-            PageSection::Lines {
-                label: "plan.md".into(),
-                lines: vec![
-                    tab_line("Ready for review, sent back once", CheckTone::Blocker),
-                    tab_line("5 milestones", CheckTone::Note),
-                ],
+            PageSection::File {
+                name: "plan.md".into(),
+                state: tab_line("ready for review", CheckTone::Ready),
+                buttons: vec![1],
             },
         ],
     };
@@ -2418,7 +2416,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0xab7c76988146b933, // tab_build_860
         0xafa33d7bf6b96f95, // tab_build_1180
         0x2edd90f8815151bc, // tab_build_1920
-        0x8d945aef770a548a, // tab_plan_review_1180
+        0x2feb811507ad9ad5, // tab_plan_review_1180
         0xcd847a6568a005e8, // tab_verify_failed_1920
         0x98e69e2db7da2b19, // tab_ship_blocked_1180
         0xdb3b8f1e1f9e17eb, // tab_done_1920
@@ -2427,7 +2425,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x18c2523cc89947b1, // tab_repos_error_860
         0xb2843590391a6e56, // tab_more_repos_850
         0xbc318450690884c4, // tab_more_repos_mid_850
-        0xb8b1b2090a39d328, // tab_rail_wrap_500
+        0x5e323e7803fe1623, // tab_rail_wrap_500
         0xac45aa4c271428ee, // tab_rail_wrap_1180
     ],
     // Dark at 2
@@ -2435,7 +2433,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x11e5857e9e9a3fbf, // tab_build_860
         0x97a9accaf3019f10, // tab_build_1180
         0xff16eab90c483c31, // tab_build_1920
-        0x0f626666efc90f80, // tab_plan_review_1180
+        0xdd8e3e36d41d428b, // tab_plan_review_1180
         0x454ba84afa7d9d09, // tab_verify_failed_1920
         0x37aa3a0a4560a891, // tab_ship_blocked_1180
         0x97b1fc7842bbbf06, // tab_done_1920
@@ -2444,7 +2442,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0xc86f375ebc848158, // tab_repos_error_860
         0xa4bc035dc293e3d5, // tab_more_repos_850
         0x16000a6216c9d8e0, // tab_more_repos_mid_850
-        0xa101c1c0775bf11e, // tab_rail_wrap_500
+        0x67776fb07872293c, // tab_rail_wrap_500
         0x0b835aa2820daa32, // tab_rail_wrap_1180
     ],
     // Light at 1
@@ -2452,7 +2450,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x28854bd740fef650, // tab_build_860
         0x30ff0cca15357e75, // tab_build_1180
         0x5f34c051cf5a2803, // tab_build_1920
-        0x58345601c873d0c3, // tab_plan_review_1180
+        0x9e6ced722a470604, // tab_plan_review_1180
         0xf9491c38484fe292, // tab_verify_failed_1920
         0xd4382c14f1fdc6da, // tab_ship_blocked_1180
         0xd651e461bab3c526, // tab_done_1920
@@ -2461,7 +2459,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x95a537cbbf1156fb, // tab_repos_error_860
         0xacc70766a1a69f6b, // tab_more_repos_850
         0x03738b19c20cd82d, // tab_more_repos_mid_850
-        0x4c1655874ce9d4f8, // tab_rail_wrap_500
+        0xe7e99fdaf13c744a, // tab_rail_wrap_500
         0xae0e84b880f07569, // tab_rail_wrap_1180
     ],
     // Light at 2
@@ -2469,7 +2467,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x6d78d2aba22ec9b1, // tab_build_860
         0x6f9ed9768b863931, // tab_build_1180
         0xa499ed71e1f32c81, // tab_build_1920
-        0x8549b04e5eb91195, // tab_plan_review_1180
+        0xd55a9bfe3930be62, // tab_plan_review_1180
         0xfdf6b29d1c7e227a, // tab_verify_failed_1920
         0x73b9c08e76158874, // tab_ship_blocked_1180
         0x56f50cc615e71d21, // tab_done_1920
@@ -2478,7 +2476,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0xd63eca782d6b35b7, // tab_repos_error_860
         0x6ddbcf4deaa64ac6, // tab_more_repos_850
         0xb2e4c16e9dab739d, // tab_more_repos_mid_850
-        0xa0618b9585c48346, // tab_rail_wrap_500
+        0xa53326434579f1eb, // tab_rail_wrap_500
         0x4b7f9187b711ad7b, // tab_rail_wrap_1180
     ],
 ];

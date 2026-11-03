@@ -150,6 +150,32 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     }
 }
 
+/// Read finished `feature` for its tab: the line counts of its touched
+/// repositories whose worktree is still there, and nothing of its code
+/// (`reading` says so; a finished feature's tab doesn't show it).
+pub fn probe_finished(feature: &Feature) -> Probe {
+    Probe {
+        reading: Err(format!(
+            "feature is {}: its code isn't read",
+            status_word(feature.status)
+        )),
+        guards: BTreeMap::new(),
+        ship: None,
+        merged: false,
+        stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
+        docs: page::Docs::default(),
+    }
+}
+
+/// How a feature's `status` reads in a sentence.
+fn status_word(status: Status) -> &'static str {
+    match status {
+        Status::Open => "open",
+        Status::Done => "done",
+        Status::Abandoned => "abandoned",
+    }
+}
+
 /// Whether pushes of `branch` from `repo`'s worktree are guarded, making
 /// sure of its hook and guard file.
 fn guard_of(repo: &Repo, branch: &str) -> Guard {

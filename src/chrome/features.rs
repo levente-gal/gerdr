@@ -10,7 +10,8 @@ use super::{
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_side, copy,
     dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf,
-    measure, measured_footer_height, mix, phys, physical, plus, rect_px, status_dot, tab, trash,
+    measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px, status_dot,
+    tab, trash,
 };
 use crate::agent_icons::AgentIcon;
 use crate::text_field::Line;
@@ -385,8 +386,16 @@ pub enum PageSection {
         /// (Show agent), if any.
         button: Option<usize>,
     },
-    /// A labelled list of lines in their tones: a file's state, the
-    /// checks, findings, criteria, the Ship check, a done stage's note.
+    /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
+    /// and the indices in `StagePage::buttons` of the buttons it holds
+    /// (Review, Preview), drawn at the card's right.
+    File {
+        name: String,
+        state: CheckLine,
+        buttons: Vec<usize>,
+    },
+    /// A labelled list of lines in their tones: the checks, findings,
+    /// criteria, the Ship check, a done stage's note.
     Lines {
         label: String,
         lines: Vec<CheckLine>,
@@ -782,9 +791,11 @@ pub(super) enum Piece {
     },
     /// The agent card of `StagePage::sections[i]`.
     Agent(usize),
+    /// The file card of `StagePage::sections[i]`.
+    File(usize),
     /// `FeatureTabView::repos[i]`.
     Repo(usize),
-    /// `StagePage::buttons[i]`, not on an agent card.
+    /// `StagePage::buttons[i]`, not on an agent or file card.
     Button(usize),
     /// `FeatureTabView::activity[row]`, its `what` wrapped in `lines`.
     Activity { row: usize, lines: Vec<String> },
@@ -980,13 +991,14 @@ fn page_stack(view: &FeatureTabView, s: &mut Stack, buttons: &mut [Option<Rect>]
         s.y += 4;
         s.text(&status.text, Font::Body, Ink::Tone(status.tone), BODY_LINE);
     }
-    // The buttons an agent card doesn't hold, wrapped in rows.
+    // The buttons no card holds, wrapped in rows.
     let held: Vec<usize> = page
         .sections
         .iter()
-        .filter_map(|sec| match sec {
-            PageSection::Agent { button, .. } => *button,
-            _ => None,
+        .flat_map(|sec| match sec {
+            PageSection::Agent { button, .. } => button.iter().copied().collect(),
+            PageSection::File { buttons, .. } => buttons.clone(),
+            _ => Vec::new(),
         })
         .collect();
     let free: Vec<usize> = (0..page.buttons.len())
@@ -1027,6 +1039,18 @@ fn page_stack(view: &FeatureTabView, s: &mut Stack, buttons: &mut [Option<Rect>]
                             .into(),
                         (w, ROW_BUTTON).into(),
                     ));
+                }
+            }
+            PageSection::File { buttons: held, .. } => {
+                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::File(k));
+                // Its buttons from the card's right, in their order.
+                let mut bx = card.loc.x + card.size.w - AGENT_PAD;
+                let by = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
+                    let w = button_width(&page_label(&page.buttons[b]));
+                    bx -= w;
+                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                    bx -= QUIT_BUTTON_GAP;
                 }
             }
             PageSection::Lines { label, lines } => {
@@ -1125,11 +1149,19 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     // The rail: a slot per stage, its node at the slot's top middle.
     let rail_top = top + header_h + RAIL_GAP;
     let n = view.rail.len().max(1) as i32;
-    let rail_h = NODE + NODE_GAP + NODE_LABEL + NODE_LINE;
+    let slot = |i: i32| (x + inner * i / n, x + inner * (i + 1) / n);
+    // A label on two lines puts its node's short line under them: the
+    // rail is a line taller for it.
+    let wraps = (0..view.rail.len() as i32)
+        .zip(&view.rail)
+        .any(|(i, node)| {
+            let (left, next) = slot(i);
+            rail_label(&node.label, next - left - 4).len() > 1
+        });
+    let rail_h = NODE + NODE_GAP + NODE_LABEL + NODE_LINE + if wraps { RAIL_LABEL_STEP } else { 0 };
     let nodes = (0..view.rail.len() as i32)
         .map(|i| {
-            let left = x + inner * i / n;
-            let next = x + inner * (i + 1) / n;
+            let (left, next) = slot(i);
             Rectangle::new((left, rail_top).into(), (next - left, rail_h).into())
         })
         .collect();
@@ -1306,11 +1338,60 @@ fn more_label(n: usize, after: bool) -> String {
     }
 }
 
+/// A rail node's label as it goes in a slot `w` wide: on one line, or on
+/// two when it is wider than that in bold (as it is selected, so picking
+/// it doesn't move it). A word too long for its line is cut when it is
+/// drawn. The layout and the painter both go by it.
+pub(super) fn rail_label(text: &str, w: i32) -> Vec<String> {
+    let fits = |t: &str| {
+        let width =
+            measure_bold(t, SMALL_FONT_SIZE).unwrap_or_else(|| width_of(t, SMALL_FONT_SIZE));
+        width <= w as f32
+    };
+    if fits(text) {
+        return vec![text.to_owned()];
+    }
+    // Where to break it: the most even split that fits, else after the
+    // first word.
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let split = |k: usize| (words[..k].join(" "), words[k..].join(" "));
+    let best = (1..words.len())
+        .map(split)
+        .filter(|(a, b)| fits(a) && fits(b))
+        .min_by_key(|(a, b)| a.chars().count().abs_diff(b.chars().count()));
+    match best.or_else(|| (words.len() > 1).then(|| split(1))) {
+        Some((a, b)) => vec![a, b],
+        None => vec![text.to_owned()],
+    }
+}
+
 /// A rail node's circle in its `slot`: at the slot's top middle.
 fn node_circle(slot: Rect) -> Rect {
     Rectangle::new(
         (slot.loc.x + (slot.size.w - NODE) / 2, slot.loc.y).into(),
         (NODE, NODE).into(),
+    )
+}
+
+/// A card's frame on `c` at `rect`: a hairline border round the ground,
+/// as the agent and file cards have it. Gives the card's head row, inside
+/// its padding.
+fn card_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
+    let s = scale as f32;
+    let (x, y, w, h) = rect_px(rect, scale);
+    let b = s.round().max(1.0);
+    c.rounded(x, y, w, h, AGENT_RADIUS * s, p.border_variant);
+    c.rounded(
+        x + b,
+        y + b,
+        w - 2.0 * b,
+        h - 2.0 * b,
+        AGENT_RADIUS * s - b,
+        p.background,
+    );
+    Rectangle::new(
+        (rect.loc.x + AGENT_PAD, rect.loc.y + AGENT_PAD).into(),
+        (rect.size.w - 2 * AGENT_PAD, AGENT_HEAD).into(),
     )
 }
 
@@ -2131,9 +2212,9 @@ impl Painter {
                 NodeMark::Later if !node.selected => p.muted,
                 _ => p.text,
             };
-            // A label too wide for its slot takes the line under it too,
-            // in place of the node's short line.
-            let lines = self.rail_label(&node.label, label.size.w, scale);
+            // A label too wide for its slot takes two lines, its node's
+            // short line under both.
+            let lines = rail_label(&node.label, label.size.w);
             for (j, text) in lines.iter().enumerate() {
                 let rect = Rectangle::new(
                     (label.loc.x, label.loc.y + j as i32 * RAIL_LABEL_STEP).into(),
@@ -2142,9 +2223,10 @@ impl Painter {
                 let bold = node.selected;
                 self.centred_cut(c, text, SMALL_FONT_SIZE, rect, bold, scale, label_color);
             }
-            if lines.len() == 1 && !node.line.is_empty() {
+            if !node.line.is_empty() {
+                let below = (lines.len() as i32 - 1) * RAIL_LABEL_STEP;
                 let line = Rectangle::new(
-                    (label.loc.x, label.loc.y + NODE_LABEL).into(),
+                    (label.loc.x, label.loc.y + NODE_LABEL + below).into(),
                     (label.size.w, NODE_LINE).into(),
                 );
                 let color = match node.mark {
@@ -2253,29 +2335,6 @@ impl Painter {
                 disc(c, ring, p.background);
                 self.bold_centred(c, &number, spot, scale, p.muted);
             }
-        }
-    }
-
-    /// A rail node's label as it goes in a slot `w` wide: on one line,
-    /// or on two when it is wider than that in bold (as it is selected,
-    /// so picking it doesn't move it). A word too long for its line is
-    /// cut when it is drawn.
-    pub(super) fn rail_label(&self, text: &str, w: i32, scale: f64) -> Vec<String> {
-        let fits = |t: &str| self.bold_width(t, SMALL_FONT_SIZE, scale) <= w as f32 * scale as f32;
-        if fits(text) {
-            return vec![text.to_owned()];
-        }
-        // Where to break it: the most even split that fits, else after
-        // the first word.
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let split = |k: usize| (words[..k].join(" "), words[k..].join(" "));
-        let best = (1..words.len())
-            .map(split)
-            .filter(|(a, b)| fits(a) && fits(b))
-            .min_by_key(|(a, b)| a.chars().count().abs_diff(b.chars().count()));
-        match best.or_else(|| (words.len() > 1).then(|| split(1))) {
-            Some((a, b)) => vec![a, b],
-            None => vec![text.to_owned()],
         }
     }
 
@@ -2486,21 +2545,7 @@ impl Painter {
                 else {
                     return;
                 };
-                let (x, y, w, h) = rect_px(rect, scale);
-                let b = s.round().max(1.0);
-                c.rounded(x, y, w, h, AGENT_RADIUS * s, p.border_variant);
-                c.rounded(
-                    x + b,
-                    y + b,
-                    w - 2.0 * b,
-                    h - 2.0 * b,
-                    AGENT_RADIUS * s - b,
-                    p.background,
-                );
-                let head = Rectangle::new(
-                    (rect.loc.x + AGENT_PAD, rect.loc.y + AGENT_PAD).into(),
-                    (rect.size.w - 2 * AGENT_PAD, AGENT_HEAD).into(),
-                );
+                let head = card_frame(c, rect, scale, p);
                 let icon_spot = Rectangle::new(head.loc, (16, AGENT_HEAD).into());
                 agent_icon(c, icon_spot, 16, *icon, p.text, scale);
                 // A dot at work blinks: it is composed over the tab.
@@ -2591,6 +2636,34 @@ impl Painter {
                 if let (Some(b), Some(label)) = (button, repo.button) {
                     let hovered = view.hover == Some(FeatureTabHit::RepoButton(*i));
                     self.button(c, label, b, (hovered, false), ButtonStyle::Plain, scale, p);
+                }
+            }
+            Piece::File(k) => {
+                let Some(PageSection::File {
+                    name,
+                    state,
+                    buttons,
+                }) = view.page.sections.get(*k)
+                else {
+                    return;
+                };
+                let head = card_frame(c, rect, scale, p);
+                let first = buttons
+                    .iter()
+                    .find_map(|i| l.page_buttons.get(*i).copied().flatten());
+                let end_x = first.map_or(head.loc.x + head.size.w, |r| r.loc.x - QUIT_BUTTON_GAP);
+                let text =
+                    Rectangle::new(head.loc, ((end_x - head.loc.x).max(1), AGENT_HEAD).into());
+                let (tx, tend) = phys(text, scale);
+                let hb = band(text, scale);
+                let after = self.bold_text(c, name, FONT_SIZE, tx, tend, hb, scale, p.text);
+                let ink = Ink::Tone(state.tone).color(p);
+                let from = after + (8.0 * s).round();
+                self.text(c, &state.text, SMALL_FONT_SIZE, from, tend, hb, scale, ink);
+                for &i in buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
                 }
             }
             Piece::Button(i) => self.page_button(c, view, *i, rect, scale, p),
@@ -3217,7 +3290,7 @@ mod tests {
         let lines = |w: i32| -> Vec<Vec<String>> {
             let l = tab_at(&view, w);
             (l.nodes.iter().zip(&view.rail))
-                .map(|(slot, node)| painter.rail_label(&node.label, slot.size.w - 4, 1.0))
+                .map(|(slot, node)| rail_label(&node.label, slot.size.w - 4))
                 .collect()
         };
         for w in [870, 1180, 1920] {
@@ -3236,7 +3309,7 @@ mod tests {
         assert_eq!(at("Code review"), ["Code", "review"]);
         assert_eq!(at("Ship"), ["Ship"]);
         // One word stays one line, however narrow: it is cut instead.
-        assert_eq!(painter.rail_label("Discover", 10, 1.0), ["Discover"]);
+        assert_eq!(rail_label("Discover", 10), ["Discover"]);
     }
 
     /// The dots blinking over the tab: the agent card's while its agent
