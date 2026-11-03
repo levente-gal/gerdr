@@ -261,6 +261,18 @@ fn left_text(rows: &[ManualRow]) -> String {
         .join(", ")
 }
 
+/// The sheet's button to press next, of `rows`: Mark passed once every
+/// criterion passed, Send failures while a failure waits to be sent.
+fn primary_button(rows: &[ManualRow]) -> Option<usize> {
+    if !rows.is_empty() && rows.iter().all(|r| r.mark == ManualMark::Passed) {
+        Some(MANUAL_PASS)
+    } else if rows.iter().any(|r| r.mark == ManualMark::Failed && !r.sent) {
+        Some(MANUAL_SEND)
+    } else {
+        None
+    }
+}
+
 /// The acceptance criteria in the brief of feature `slug` of `project`,
 /// read from disk: none when it has no brief, or none in it.
 pub(crate) fn read_criteria(project: &str, slug: &str) -> Vec<Criterion> {
@@ -363,6 +375,30 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Close the manual test sheet once its feature is gone or no longer
+    /// at Manual test (marked done, sent back by a change), where Mark
+    /// passed would only be refused. A note being written keeps it open
+    /// till the note is done.
+    pub(crate) fn manual_sheet_follows(&mut self) {
+        let Some(sheet) = &self.features.manual else {
+            return;
+        };
+        if sheet.editing.is_some() {
+            return;
+        }
+        let testing = self
+            .feature(&sheet.project, &sheet.slug)
+            .is_some_and(|f| f.status == Status::Open && f.current() == Some(Stage::ManualTest));
+        if !testing {
+            tracing::info!(
+                "closing the manual test sheet of {}/{}: no longer at Manual test",
+                sheet.project,
+                sheet.slug
+            );
+            self.close_manual_test();
+        }
+    }
+
     /// The rows of the sheet open.
     fn manual_rows(&self) -> Vec<ManualRow> {
         let Some(sheet) = &self.features.manual else {
@@ -400,6 +436,10 @@ impl Gerdr {
         let rows = self.manual_rows();
         let out = self.features.manual.as_mut()?.key(mods, sym, typed, &rows);
         self.reveal_manual_row();
+        // A note done may be what kept it open (see `manual_sheet_follows`).
+        if out.is_none() {
+            self.manual_sheet_follows();
+        }
         out
     }
 
@@ -705,6 +745,7 @@ impl Gerdr {
             editing: sheet.editing.as_ref().map(|(i, f)| (*i, f.line())),
             notice: sheet.notice.clone(),
             hover: sheet.hover,
+            primary: primary_button(&rows),
             keys: sheet.keys.then(keys_list),
             hints: sheet.hints(),
             rows,
@@ -746,6 +787,25 @@ mod tests {
         k: (ModifiersState, Keysym),
     ) -> Option<Outcome> {
         sheet.key(&k.0, k.1, k.1, rows)
+    }
+
+    #[test]
+    fn the_button_to_press_next_is_drawn_primary() {
+        let passed = row("AC-1", ManualMark::Passed, "");
+        let mut failed = row("AC-2", ManualMark::Failed, "it broke");
+        assert_eq!(primary_button(&[]), None);
+        assert_eq!(
+            primary_button(std::slice::from_ref(&passed)),
+            Some(MANUAL_PASS)
+        );
+        assert_eq!(
+            primary_button(&[passed.clone(), failed.clone()]),
+            Some(MANUAL_SEND)
+        );
+        failed.sent = true;
+        assert_eq!(primary_button(&[passed.clone(), failed]), None);
+        let untried = row("AC-3", ManualMark::Untested, "");
+        assert_eq!(primary_button(&[passed, untried]), None);
     }
 
     #[test]

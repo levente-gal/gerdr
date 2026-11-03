@@ -319,6 +319,16 @@ impl ItemAction {
             key: self.key().to_owned(),
         }
     }
+
+    /// Its button on `item`: a gate's Enter opens what it waits on (a
+    /// document, the diff, the manual test sheet), so it says Open.
+    pub fn button_on(self, item: &InboxItem) -> chrome::InboxButton {
+        let mut button = self.button();
+        if self == ItemAction::GoTo && matches!(item.detail, Detail::Gate { .. }) {
+            button.label = "Open".to_owned();
+        }
+        button
+    }
 }
 
 /// What a section label's button does.
@@ -873,7 +883,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         block_title,
         block,
         block_tail,
-        buttons: actions.iter().map(|a| a.button()).collect(),
+        buttons: actions.iter().map(|a| a.button_on(item)).collect(),
     }
 }
 
@@ -1939,7 +1949,7 @@ impl Panel {
                     let buttons = if selected == Some(k) || hovered == Some(first + n) {
                         self.row_buttons(item, self.armed.as_ref())
                             .into_iter()
-                            .map(ItemAction::button)
+                            .map(|a| a.button_on(item))
                             .collect()
                     } else {
                         Vec::new()
@@ -2107,6 +2117,16 @@ mod tests {
             since: 0,
         };
         item
+    }
+
+    #[test]
+    fn a_gates_enter_button_says_open() {
+        let mut it = gate("gate:p|log-in");
+        it.actions = vec![ItemAction::GoTo];
+        let detail = detail_view(&it, &it.actions, 0);
+        assert_eq!(detail.buttons[0].label, "Open");
+        let other = item("x", Section::Gates, None);
+        assert_eq!(ItemAction::GoTo.button_on(&other).label, "Go to");
     }
 
     #[test]

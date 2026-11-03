@@ -1127,6 +1127,7 @@ impl Gerdr {
             let title = feature.title.clone();
             self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
         }
+        self.manual_sheet_follows();
     }
 
     /// The slugs of the features the panel lists for `project`.
@@ -1376,6 +1377,7 @@ impl Gerdr {
 
     /// Probe what is due.
     fn feature_watch_tick(&mut self) {
+        self.manual_sheet_follows();
         let mut due = Vec::new();
         if let Some(panel) = &self.features.panel {
             due.push((panel.project.clone(), panel.slug.clone(), PANEL_EVERY));
@@ -1457,6 +1459,7 @@ impl Gerdr {
         probed.last = Some(probe);
         if let Some(patch) = &patch {
             self.feature_code_is(project, slug, patch);
+            self.feature_criteria_are(project, slug, patch);
         }
         if merged {
             self.feature_merged(project, slug, patch.as_deref());
@@ -1464,6 +1467,32 @@ impl Gerdr {
         if again {
             self.probe_feature(project, slug);
         }
+    }
+
+    /// The criteria of feature `slug` are as last read from its brief, on
+    /// its code (`patch`'s): Manual test, passed on its sheet, is to do
+    /// again when one of them was added or reworded since, and the toast
+    /// says so. A Manual test ticked plainly (no results kept) stays.
+    fn feature_criteria_are(&mut self, project: &str, slug: &str, patch: &str) {
+        let criteria = self.criteria(project, slug).to_vec();
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let reopen = feature.status == Status::Open
+            && feature.marks.contains_key(&Stage::ManualTest)
+            && feature.manual.is_some()
+            && !criteria.is_empty()
+            && !feature::manual::all_passed(feature.manual.as_ref(), &criteria, Some(patch));
+        if !reopen || !feature.untick(Stage::ManualTest, feature::now()) {
+            return;
+        }
+        let title = feature.title.clone();
+        tracing::info!("criteria of {project}/{slug} changed: Manual test to do again");
+        self.save_feature(project, slug);
+        self.feature_cursor_to_current_of(project, slug);
+        self.show_warning(format!(
+            "The acceptance criteria of \u{201c}{title}\u{201d} changed: back to Manual test"
+        ));
     }
 
     /// The code of feature `slug` is `patch`'s now: the marks that no

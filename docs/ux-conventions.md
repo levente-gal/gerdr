@@ -51,7 +51,8 @@ the label ("Merge main into branch", "Squash into main").
 - Toast levels: Success / Info for what happened, Warning for what needs a
   look, Error for what failed. Never report a failure with Info.
 - Errors and warnings stay longer than info and pause while hovered; every
-  toast can be dismissed. Toasts are painted above every non-modal popup.
+  toast can be dismissed. Toasts are painted above every non-modal popup,
+  and above the manual test sheet, which is worked in for a while.
 - What the user must fix (config, missing tool, unreachable source) goes to
   `problems::report` as well, so it can be seen after the toast is gone. It
   also lands in the log file.

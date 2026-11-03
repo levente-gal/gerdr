@@ -485,7 +485,7 @@ impl Chrome {
                 }
                 // The toasts, stacked at the bottom right of the app area,
                 // each fading on its own, over every popup but the menu and
-                // the dialogs. One leaving fades where the stack has it,
+                // the dialogs (the manual test sheet is under them). One leaving fades where the stack has it,
                 // which holds its place until it is gone.
                 Kind::Toasts => {
                     let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));

@@ -61,10 +61,12 @@ impl Overlay {
         Self::Restart,
         Self::Checkout,
         Self::NewFeature,
-        Self::ManualTest,
         Self::Confirm,
         Self::ContextMenu,
         Self::Toasts,
+        // A sheet worked in for a while: the toasts of what it does (and
+        // of all else going on) show over it.
+        Self::ManualTest,
         Self::Welcome,
         Self::Help,
         Self::Tasks,
@@ -358,6 +360,8 @@ mod tests {
         assert!(Overlay::Confirm.is_above(Overlay::ContextMenu));
         assert!(Overlay::ContextMenu.is_above(Overlay::Toasts));
         assert!(Overlay::Toasts.is_above(Overlay::Help));
+        assert!(Overlay::Toasts.is_above(Overlay::ManualTest));
+        assert!(Overlay::ManualTest.is_above(Overlay::Welcome));
         for panel in Overlay::ORDER.into_iter().filter(|o| o.is_panel()) {
             assert!(Overlay::Toasts.is_above(panel));
             assert!(Overlay::Help.is_above(panel));

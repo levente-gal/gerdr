@@ -81,6 +81,10 @@ pub struct ManualTestView {
     /// Why the last thing asked was refused.
     pub notice: Option<String>,
     pub hover: Option<ManualHit>,
+    /// The button drawn as the one to press next (`MANUAL_PASS` once
+    /// every criterion passed, `MANUAL_SEND` while failures wait to be
+    /// sent), if one is.
+    pub primary: Option<usize>,
     /// The keys and what they do, shown instead of the rows (F1).
     pub keys: Option<Vec<(String, String)>>,
     pub hints: Vec<(String, String)>,
@@ -604,7 +608,7 @@ impl Painter {
             line(&mut c, notice, rect, FONT_SIZE, p.error);
         }
         for (i, (rect, label)) in layout.buttons.iter().zip(MANUAL_BUTTONS).enumerate() {
-            let style = if i == MANUAL_PASS {
+            let style = if view.primary == Some(i) {
                 ButtonStyle::Primary
             } else {
                 ButtonStyle::Plain
@@ -656,6 +660,7 @@ mod tests {
             editing: None,
             notice: None,
             hover: None,
+            primary: None,
             keys: None,
             hints: vec![("Esc".into(), "close".into())],
         }

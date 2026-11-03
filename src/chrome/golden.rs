@@ -1712,6 +1712,7 @@ fn manual_test(note: bool) -> super::ManualTestView {
         editing: note.then(|| (3, Line::from("Takes 4 seconds"))),
         notice: (!note).then(|| "Not passed yet: AC-2 failed, AC-3 failed, AC-4 not tried".into()),
         hover: (!note).then_some(super::ManualHit::Fail(3)),
+        primary: Some(super::MANUAL_SEND),
         keys: None,
         hints: hints
             .iter()
@@ -1743,8 +1744,8 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0xc6d96ee5e01de0da, // feature_ship_blocked
         0xc16daf60f0e04c88, // feature_ship_ready
         0x25725cfbc3b3ba91, // feature_done_prs
-        0xd6e30203a62942e4, // manual_test
-        0x62d360577ccf88ce, // manual_test_note
+        0xab580425d0a50879, // manual_test
+        0x8e4d20f7c6316567, // manual_test_note
     ],
     // Dark at 2
     [
@@ -1755,8 +1756,8 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0x96b5aee7e55e893b, // feature_ship_blocked
         0x55c082e14c28296d, // feature_ship_ready
         0xc43b3e6d75230966, // feature_done_prs
-        0x6c1754681a158e4e, // manual_test
-        0xd1c154091904ae50, // manual_test_note
+        0xc14927ebcde55bf1, // manual_test
+        0xb520dd662440b737, // manual_test_note
     ],
     // Light at 1
     [
@@ -1767,8 +1768,8 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0x566c8cd22fcb3376, // feature_ship_blocked
         0xb2f69eb40cd2a0e6, // feature_ship_ready
         0x05cc7d58ebc3d6c6, // feature_done_prs
-        0x500d39d85dd6c891, // manual_test
-        0x3ba8483f8f88082d, // manual_test_note
+        0x093b890ce5537eef, // manual_test
+        0xa74e12b563efbdaf, // manual_test_note
     ],
     // Light at 2
     [
@@ -1779,8 +1780,8 @@ const GOLDEN_FEATURES: [[u64; 9]; 4] = [
         0x9c492950881672d9, // feature_ship_blocked
         0x336e04083585dc13, // feature_ship_ready
         0x0a045e32666be0f4, // feature_done_prs
-        0x7e66cc94db49267b, // manual_test
-        0xb06471a7dc5d5204, // manual_test_note
+        0xed40d3ad66f63314, // manual_test
+        0x1239c6f64e145f2f, // manual_test_note
     ],
 ];
 
