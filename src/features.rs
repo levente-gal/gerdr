@@ -1833,6 +1833,7 @@ impl Gerdr {
             dir: created.dir,
             multi: root.multi,
             repos: created.repos,
+            links: Vec::new(),
             status: Status::Open,
             marks: BTreeMap::new(),
             history: vec![Event {
@@ -3120,6 +3121,7 @@ pub(crate) mod tests {
             worktree: PathBuf::from(format!("/work/.features/bulk/{name}")),
             touched,
             branch: touched.then(|| "feature/bulk".into()),
+            project: None,
         }
     }
 
@@ -3135,6 +3137,7 @@ pub(crate) mod tests {
             dir: format!("/work/.features/{slug}").into(),
             multi: repos.len() > 1,
             repos,
+            links: Vec::new(),
             status: Status::Open,
             marks: Stage::ALL
                 .iter()

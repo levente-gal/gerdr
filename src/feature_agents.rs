@@ -717,15 +717,6 @@ impl Gerdr {
                 return false;
             }
         };
-        // The agent runs in a tab of the workspace open: with none, it
-        // would start nowhere.
-        if self.active_workspace >= self.workspaces.len() {
-            self.show_error(format!(
-                "No workspace to start the {} agent in: open one first",
-                stage.label()
-            ));
-            return false;
-        }
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
         let n = last.map_or(1, |r| r.n + 1);
@@ -758,10 +749,10 @@ impl Gerdr {
             self.show_error(format!("Couldn't write {}: {err}", prompt.display()));
             return false;
         }
-        let command = command_line(&base, &prompt, std::slice::from_ref(&data));
+        let command = command_line(&base, &prompt, &feature.agent_dirs(&data));
         self.close_feature_panel();
-        let w = self.active_workspace;
-        let pane = self.new_tab_pane(w, &feature.dir, Some(command.clone()));
+        // The agent runs in a tab of the feature's own workspace.
+        let pane = self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()));
         let now = feature::now();
         let run = StageRun {
             n,

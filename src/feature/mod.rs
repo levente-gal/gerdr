@@ -40,7 +40,10 @@ pub mod store;
 pub mod verify;
 pub mod viewed;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -195,6 +198,36 @@ pub struct Repo {
     /// `feature/<slug>` once touched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The id of the project it belongs to when that is a linked one (see
+    /// `Link`); `None` for the feature's home project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+impl Repo {
+    /// What names it among all the feature's repositories: its `name` for a
+    /// home repository, `<project>:<name>` for a linked project's. Maps and
+    /// lists keyed by repository use it.
+    pub fn key(&self) -> String {
+        match &self.project {
+            Some(project) => format!("{project}:{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// Another project a feature spans: its own feature folder, made like the
+/// home one, under its own root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    /// The project's id.
+    pub project: String,
+    /// Like `Feature::root`, for this project.
+    pub root: PathBuf,
+    /// `<root>/.features/<slug>`.
+    pub dir: PathBuf,
+    /// Whether `root` holds several repositories.
+    pub multi: bool,
 }
 
 /// Something that happened to a feature, kept in its history.
@@ -225,8 +258,12 @@ pub struct Feature {
     pub dir: PathBuf,
     /// Whether `root` holds several repositories.
     pub multi: bool,
-    /// Every repository, touched or not, in name order.
+    /// Every repository, touched or not: the home project's in name
+    /// order, then each link's in link order, by name within it.
     pub repos: Vec<Repo>,
+    /// The other projects it spans, in the order they were linked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
     #[serde(default)]
     pub status: Status,
     /// The stages marked done.
@@ -348,6 +385,20 @@ impl Feature {
     pub fn branch(&self) -> String {
         format!("feature/{}", self.slug)
     }
+
+    /// The folders its agents are let into besides their working folder
+    /// (`dir`): the feature data dir `data`, then each linked project's
+    /// feature folder.
+    pub fn agent_dirs(&self, data: &Path) -> Vec<PathBuf> {
+        std::iter::once(data.to_path_buf())
+            .chain(self.links.iter().map(|l| l.dir.clone()))
+            .collect()
+    }
+
+    /// Whether it has more than one repository, over all its projects.
+    pub fn many_repos(&self) -> bool {
+        self.multi || !self.links.is_empty()
+    }
 }
 
 /// Unix seconds now.
@@ -437,6 +488,7 @@ pub(crate) mod tests {
                     worktree,
                     touched,
                     branch: touched.then(|| "feature/f".into()),
+                    project: None,
                 }
             })
             .collect();
@@ -450,6 +502,7 @@ pub(crate) mod tests {
             dir,
             multi: true,
             repos,
+            links: Vec::new(),
             status: Status::Open,
             marks: Default::default(),
             history: Vec::new(),
@@ -474,6 +527,7 @@ pub(crate) mod tests {
             dir: PathBuf::from("/r/.features").join(slug),
             multi: false,
             repos: Vec::new(),
+            links: Vec::new(),
             status: Status::Open,
             marks: BTreeMap::new(),
             history: Vec::new(),

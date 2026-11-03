@@ -315,6 +315,7 @@ fn build(
             worktree: path,
             touched: is_touched,
             branch: is_touched.then(|| branch.to_owned()),
+            project: None,
         });
     }
     let links = if root.multi {
@@ -853,6 +854,7 @@ mod tests {
             dir: created.dir,
             multi: root.multi,
             repos: created.repos,
+            links: Vec::new(),
             status: Status::Open,
             marks: Default::default(),
             shipping: Default::default(),
