@@ -1913,7 +1913,7 @@ fn dump_identity() {
 /// the chips row under 870, no activity column under 1180, and all three
 /// columns.
 const TAB_HEIGHT: i32 = 900;
-const TAB_WIDTHS: [i32; 3] = [860, 1180, 1920];
+const TAB_WIDTHS: [i32; 4] = [850, 860, 1180, 1920];
 
 fn tab_line(text: &str, tone: super::CheckTone) -> super::CheckLine {
     super::CheckLine {
@@ -1966,7 +1966,11 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             "2h ago",
             CheckTone::Ready,
         ),
-        ("web joined the feature", "3h ago", CheckTone::Note),
+        (
+            "Verify failed and sent it back to Build (run / 21)",
+            "3h ago",
+            CheckTone::Blocker,
+        ),
         ("Feature created", "3h ago", CheckTone::Note),
     ]
     .map(|(what, ago, tone)| ActivityRow {
@@ -2278,8 +2282,52 @@ fn feature_tab_repos_error() -> super::FeatureTabView {
     view
 }
 
+/// Eleven repositories, more than a narrow tab's strip holds: from the
+/// first, the pointer on the "+N" chip standing for those after.
+fn feature_tab_more_repos() -> super::FeatureTabView {
+    let mut view = feature_tab();
+    let row = view.repos[0].clone();
+    view.repos = [
+        "api",
+        "web-frontend",
+        "shared",
+        "billing-service",
+        "search-index",
+        "mobile-app",
+        "infra",
+        "docs-site",
+        "auth",
+        "analytics-pipeline",
+        "payments-gateway",
+    ]
+    .map(|name| super::FeatureRepoRow {
+        name: name.into(),
+        ..row.clone()
+    })
+    .to_vec();
+    let l = super::feature_tab_layout(
+        &view,
+        smithay::utils::Rectangle::from_size((850, TAB_HEIGHT).into()),
+    );
+    view.hover = l
+        .more_repos
+        .last()
+        .map(|(_, i, _)| super::FeatureTabHit::MoreRepos(*i));
+    view
+}
+
+/// The keyboard on a repository past the strip's first chips: it starts
+/// at that one, after "N+" for those before.
+fn feature_tab_more_repos_mid() -> super::FeatureTabView {
+    let mut view = feature_tab_more_repos();
+    view.hover = None;
+    view.focus = super::TabArea::Repos;
+    view.repo = 9;
+    view
+}
+
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 8] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 10] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2289,11 +2337,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 8] {
         ("tab_later", feature_tab_later()),
         ("tab_repos", feature_tab_repos()),
         ("tab_repos_error", feature_tab_repos_error()),
+        ("tab_more_repos", feature_tab_more_repos()),
+        ("tab_more_repos_mid", feature_tab_more_repos_mid()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 10] = [
+const TAB_SURFACES: [(&str, i32); 12] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2304,9 +2354,11 @@ const TAB_SURFACES: [(&str, i32); 10] = [
     ("tab_later", 860),
     ("tab_repos", 1180),
     ("tab_repos_error", 860),
+    ("tab_more_repos", 850),
+    ("tab_more_repos_mid", 850),
 ];
 
-const FEATURE_TAB: [&str; 10] = [
+const FEATURE_TAB: [&str; 12] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2317,73 +2369,88 @@ const FEATURE_TAB: [&str; 10] = [
     "tab_later_860",
     "tab_repos_1180",
     "tab_repos_error_860",
+    "tab_more_repos_850",
+    "tab_more_repos_mid_850",
 ];
 
 fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
-    let p = theme.palette();
     let views = feature_tabs();
     TAB_SURFACES
         .iter()
         .map(|(name, w)| {
             let view = &views.iter().find(|(n, _)| n == name).expect("a fixture").1;
-            hash(painter.feature_tab(view, (*w, TAB_HEIGHT).into(), scale, p))
+            hash(super::feature_tab_composed(
+                painter,
+                view,
+                (*w, TAB_HEIGHT).into(),
+                theme,
+                scale,
+            ))
         })
         .collect()
 }
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 10]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 12]; 4] = [
     // Dark at 1
     [
-        0x348b84218afa171a, // tab_build_860
-        0x55d13eec94bf4555, // tab_build_1180
-        0xf9baba634a0dfde4, // tab_build_1920
-        0x08efb8696a3d1fc7, // tab_plan_review_1180
-        0x5b0bbb8b952a14a2, // tab_verify_failed_1920
-        0x61f0b5b524725188, // tab_ship_blocked_1180
-        0x1031f8708f1219e4, // tab_done_1920
-        0x55e1e5240591705d, // tab_later_860
-        0xedb630fd10dffba9, // tab_repos_1180
-        0xededcb57e73a5710, // tab_repos_error_860
+        0x16cb22fa1c0ed626, // tab_build_860
+        0x9968f3dd4c79dcd3, // tab_build_1180
+        0xdb2a9708af8c2f4a, // tab_build_1920
+        0x4c8f01675a2eb15d, // tab_plan_review_1180
+        0x600485b0f2dc4317, // tab_verify_failed_1920
+        0x842615b7d1a6b796, // tab_ship_blocked_1180
+        0x0208bd837bbe5824, // tab_done_1920
+        0x1057cadcbb4bdb85, // tab_later_860
+        0x7788fd51b7a7ddaf, // tab_repos_1180
+        0xc926b1a1e931934c, // tab_repos_error_860
+        0x7b242a77fe94486b, // tab_more_repos_850
+        0xf14017ef858a78a1, // tab_more_repos_mid_850
     ],
     // Dark at 2
     [
-        0xaef0211514424fd5, // tab_build_860
-        0x3405e14d5eae123d, // tab_build_1180
-        0x1943f9d2e6fab4e8, // tab_build_1920
-        0x63f25849ffdb0937, // tab_plan_review_1180
-        0x8eea453de3cc7eaf, // tab_verify_failed_1920
-        0xd8f1da5a92186ecb, // tab_ship_blocked_1180
-        0x9f9afb52c5c6dcb8, // tab_done_1920
-        0x5274ce4207fdc076, // tab_later_860
-        0x341b9b5c4113dc4c, // tab_repos_1180
-        0x443de08e3b631cd2, // tab_repos_error_860
+        0x9adadb9dcbbbe49c, // tab_build_860
+        0x144864cdf60df980, // tab_build_1180
+        0x9d73755fa1448645, // tab_build_1920
+        0x658e38549f227ab7, // tab_plan_review_1180
+        0xda78a14d08380d46, // tab_verify_failed_1920
+        0x9d29dd5fdc765916, // tab_ship_blocked_1180
+        0x5743ceea5b436063, // tab_done_1920
+        0x435795129e94f325, // tab_later_860
+        0x49e9067a25d750b2, // tab_repos_1180
+        0x4b0f2aaa4df8aadb, // tab_repos_error_860
+        0xfd6f6404aec57d26, // tab_more_repos_850
+        0x934bd494a11136e3, // tab_more_repos_mid_850
     ],
     // Light at 1
     [
-        0x22acff39d98c9080, // tab_build_860
-        0x3c6d9f56837b4328, // tab_build_1180
-        0xf939cbc6c0f95e86, // tab_build_1920
-        0xb345f8e69fcc9334, // tab_plan_review_1180
-        0xa785259417eab6b3, // tab_verify_failed_1920
-        0xd2c2237e24eb3d1c, // tab_ship_blocked_1180
-        0x7eefc7689a2a0df5, // tab_done_1920
-        0x662bf20365391924, // tab_later_860
-        0xb4d2d72147495c26, // tab_repos_1180
-        0x7600bc6b202928a3, // tab_repos_error_860
+        0x75563693f6ac3011, // tab_build_860
+        0x66c858069b3c9c31, // tab_build_1180
+        0x4e2d2656cc9e6aeb, // tab_build_1920
+        0xa13001d440d8ce9a, // tab_plan_review_1180
+        0x278d39c745b4ded3, // tab_verify_failed_1920
+        0xabb2828c42a7592b, // tab_ship_blocked_1180
+        0x6e1ebf22e78bd3a5, // tab_done_1920
+        0x692e326da4f3c9b2, // tab_later_860
+        0x77940ba3f43726a7, // tab_repos_1180
+        0x620582d786527262, // tab_repos_error_860
+        0xc22eec43dae9a562, // tab_more_repos_850
+        0x328cca8d3e20f860, // tab_more_repos_mid_850
     ],
     // Light at 2
     [
-        0x7c02447b36b5f121, // tab_build_860
-        0x35b122e118bc0cdf, // tab_build_1180
-        0x4ce4f47fd2f9f33d, // tab_build_1920
-        0x2090a6260fdd0304, // tab_plan_review_1180
-        0xed7db5c147b43789, // tab_verify_failed_1920
-        0x4b1992f273815083, // tab_ship_blocked_1180
-        0x88a2ab2968583255, // tab_done_1920
-        0x01a28f82a1d783bf, // tab_later_860
-        0xc3e73655b1793684, // tab_repos_1180
-        0x673c1e75b50d422b, // tab_repos_error_860
+        0x44ed89a9d9c4752b, // tab_build_860
+        0x4396e5e545392bd8, // tab_build_1180
+        0x4aa83807dc6f85e4, // tab_build_1920
+        0x7ea4c22782184a76, // tab_plan_review_1180
+        0x7147b239f56bde29, // tab_verify_failed_1920
+        0xadedb84045820507, // tab_ship_blocked_1180
+        0x509cfa0c12d79665, // tab_done_1920
+        0x10e6f6becc20558f, // tab_later_860
+        0x9f8183b7d41676fd, // tab_repos_1180
+        0x613ba7fff87eabdd, // tab_repos_error_860
+        0xda58062e634f1138, // tab_more_repos_850
+        0x55076de7ef654ac7, // tab_more_repos_mid_850
     ],
 ];
 
@@ -2407,13 +2474,18 @@ fn dump_feature_tab() {
     let _ = std::fs::create_dir_all(&dir);
     let painter = Painter::new();
     for (theme, scale) in CASES {
-        let p = theme.palette();
         for (name, view) in feature_tabs() {
             for w in TAB_WIDTHS {
                 dump(
                     &dir,
                     &format!("{name}_{w}_{}_{}", theme.name(), scale),
-                    painter.feature_tab(&view, (w, TAB_HEIGHT).into(), scale, p),
+                    super::feature_tab_composed(
+                        &painter,
+                        &view,
+                        (w, TAB_HEIGHT).into(),
+                        theme,
+                        scale,
+                    ),
                     (w as f64 * scale).round() as usize,
                 );
             }

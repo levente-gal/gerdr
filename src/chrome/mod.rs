@@ -220,7 +220,7 @@ pub struct Chrome {
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
     manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
-    features: Overlay<(FeatureTabView, Size<i32, Logical>, Theme, f64)>,
+    features: FeatureTabLayers,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
     repos: ReposLayers,
@@ -284,7 +284,7 @@ impl Chrome {
             new_feature: Overlay::default(),
             identity: Overlay::default(),
             manual_test: Overlay::default(),
-            features: Overlay::default(),
+            features: FeatureTabLayers::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
@@ -596,15 +596,16 @@ impl Chrome {
                     ));
                 }
                 // The feature tab, filling its tab's area.
-                Kind::Features => {
-                    let panel = view
-                        .features
-                        .take()
-                        .map(|v| ((v, area.size, theme, scale), area.loc, area.size));
-                    parts.extend(self.features.part(panel, now, true, |(v, output, ..)| {
-                        painter.feature_tab(v, *output, scale, theme.palette())
-                    }));
-                }
+                // The feature tab, a part per slice so a hover or a scroll
+                // draws only its own again.
+                Kind::Features => parts.extend(self.features.parts(
+                    view.features.take(),
+                    area,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                )),
                 // The project menu reaches over the sidebar and the apps.
                 Kind::ProjectMenu => parts.extend(self.project_menu.parts(
                     view.project_menu.take(),
