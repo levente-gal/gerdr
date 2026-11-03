@@ -2312,9 +2312,8 @@ impl Painter {
     /// The features section: a rule across the sidebar over its heading
     /// at `title`, then its `rows`: each a feature, its hover alpha and
     /// where it goes. A row has the mark of the stage the feature is at
-    /// where an agent row has its icon, the feature's title where an
-    /// agent row's text starts, and the stage's name and number at the
-    /// right.
+    /// under the heading's icon, the feature's title under its label, and
+    /// the stage's name and number at the right.
     fn feature_rows(
         &self,
         c: &mut Canvas,
@@ -2339,11 +2338,13 @@ impl Painter {
                 c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
             }
             let line_band = band(*rect, scale);
-            let icon = agent_icon_rect(*rect, density);
+            // The dot in the column of the heading's icon and of the
+            // agent rows' status dots.
+            let first = blocked_band(*rect, density);
             let spot = Rectangle::new(
                 (
-                    icon.loc.x + (icon.size.w - super::STAGE_DOT) / 2,
-                    icon.loc.y + (icon.size.h - super::STAGE_DOT) / 2,
+                    rect.loc.x - CHILD_X + ICON_X + (ROW_ICON_WIDTH - super::STAGE_DOT) / 2,
+                    first.loc.y + (first.size.h - super::STAGE_DOT) / 2,
                 )
                     .into(),
                 (super::STAGE_DOT, super::STAGE_DOT).into(),
@@ -2352,7 +2353,8 @@ impl Painter {
             icon_sdf(c, spot, scale, mark.color(p), |x, y| {
                 super::stage_dot(mark, x, y, 7.0 * s)
             });
-            let text_x = px(rect.loc.x + CHILD_TEXT_X - CHILD_X) as f32;
+            // The title where the heading's label starts.
+            let text_x = px(rect.loc.x - CHILD_X + NAME_X) as f32;
             let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
             let detail = row.detail();
             let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
