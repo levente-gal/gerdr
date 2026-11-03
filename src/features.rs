@@ -3515,12 +3515,16 @@ impl Gerdr {
 
     /// A sidebar row's title for `f`: another project's feature (one
     /// spanning the shown project) says whose it is.
-    fn row_title(&self, f: &Feature) -> String {
+    pub(crate) fn row_title(&self, f: &Feature) -> String {
         if self.project.as_deref() == Some(f.project.as_str()) {
             return f.title.clone();
         }
-        let home = (self.projects.project(&f.project)).map_or(f.project.as_str(), |p| &p.name);
-        format!("{} \u{b7} in {home}", f.title)
+        format!("{} \u{b7} in {}", f.title, self.home_name(f))
+    }
+
+    /// The name of `f`'s home project.
+    pub(crate) fn home_name<'a>(&'a self, f: &'a Feature) -> &'a str {
+        (self.projects.project(&f.project)).map_or(f.project.as_str(), |p| &p.name)
     }
 
     /// How many feature rows the sidebar shows.

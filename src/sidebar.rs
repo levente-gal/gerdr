@@ -954,8 +954,13 @@ impl Gerdr {
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let rect = *layout.features.get(n)?;
-                let tip = Tooltip::new(&f.title, rect).fields(feature_fields(f));
-                Some(tip.key("click to open its panel"))
+                // The row cuts its title to fit, "in <home>" first.
+                let tip = Tooltip::new(&self.row_title(f), rect).fields(feature_fields(f));
+                if self.project.as_deref() == Some(f.project.as_str()) {
+                    return Some(tip.key("click to open its panel"));
+                }
+                let home = self.home_name(f);
+                Some(tip.key(&format!("click to switch to {home} and open its panel")))
             }
             // A feature's own workspace: its feature's stage marks.
             SidebarHit::Stages(i) => {
@@ -1153,9 +1158,13 @@ impl Gerdr {
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
+                // Another project's feature: its folder in the shown one.
+                let shown = self.project.as_deref();
+                let link = f.links.iter().find(|l| Some(l.project.as_str()) == shown);
+                let dir = link.map_or(&f.dir, |l| &l.dir).clone();
                 let items = vec![
                     MenuItem::new("Open", open),
-                    MenuItem::new("Copy path", MenuAction::CopyPath(f.dir.clone())),
+                    MenuItem::new("Copy path", MenuAction::CopyPath(dir)),
                     MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
                 ];
                 Some(MenuSpec { anchor: at, items })
