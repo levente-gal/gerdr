@@ -270,7 +270,7 @@ impl Gerdr {
             Overlay::NewFeature => self.new_feature_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
             Overlay::ManualTest => return self.manual_test_hover(pos),
-            Overlay::Features => self.feature_panel_hover(pos),
+            Overlay::Features => return self.feature_panel_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
             Overlay::Welcome => return self.welcome_hover(pos),
             Overlay::ProjectMenu => return self.project_menu_hover(pos),
@@ -322,12 +322,7 @@ impl Gerdr {
                     self.manual_test_scroll(rows);
                 }
             }
-            Overlay::Features => {
-                let rows = self.motion_rows(motion, row_pitch(&self.feature_repo_rows()));
-                if rows != 0 {
-                    self.feature_panel_scroll(rows);
-                }
-            }
+            Overlay::Features => self.feature_panel_scroll(motion),
             Overlay::Tasks => {
                 let rows = self.motion_rows(motion, row_pitch(&self.tasks_rows()));
                 if rows != 0 {

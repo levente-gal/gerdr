@@ -51,10 +51,11 @@ use smithay::{
 
 use crate::{
     Gerdr,
+    agent_icons::AgentIcon,
     chrome::{
-        self, CheckLine, CheckTone, Dot, FeatureHit, FeaturePanelView, FeatureRepoRow,
-        FeatureTabHit, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo, NewFeatureView, StageMark,
-        StageRow, TabArea,
+        self, ActivityRow, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow, FeatureTabHit,
+        FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo, NewFeatureView, NodeMark,
+        PageButton, PageSection, RailNode, StageMark, StagePage, TabArea, TabColumn,
     },
     feature::{
         self, Event, Feature, Pr, Stage, Status,
@@ -66,10 +67,12 @@ use crate::{
         ship::{self, Action, Probe},
         store,
     },
+    herdr::AgentStatus,
     home_dir, paths, projects,
-    scroll::Scroll,
+    scroll::{Bounds, Motion, Scroll},
     tasks::Task,
     text_field::{Edit, TextField},
+    tooltip::Tooltip,
 };
 
 /// The features of every project, and the dialog and panel on them.
@@ -118,6 +121,9 @@ pub struct Features {
 /// `WATCH_EVERY`.
 const PANEL_EVERY: Duration = Duration::from_secs(5);
 const WATCH_EVERY: Duration = Duration::from_secs(30);
+/// How far a notch of the wheel moves a column of the feature tab, in
+/// logical pixels: as far as the sidebar's.
+const TAB_NOTCH: f64 = 48.0;
 
 /// A feature's probes (see `ship::probe`).
 #[derive(Debug, Default)]
@@ -701,11 +707,6 @@ impl NewFeatureDialog {
 pub struct FeaturePanel {
     pub project: String,
     pub slug: String,
-    /// The row with the keyboard: the repositories', then the stages'.
-    pub cursor: usize,
-    /// The first repository shown, when not all fit.
-    pub repo_top: usize,
-    pub hover: Option<FeatureHit>,
     /// The feature tab's area with the keyboard.
     pub focus: TabArea,
     /// The stage whose page shows, if the user picked one; none shows
@@ -775,15 +776,6 @@ pub enum PanelOutcome {
 pub enum PanelRow {
     Repo(usize),
     Stage(Stage),
-}
-
-/// The rows of the feature panel for `feature`: its repositories, then
-/// its stages.
-pub fn panel_rows(feature: &Feature) -> Vec<PanelRow> {
-    (0..feature.repos.len())
-        .map(PanelRow::Repo)
-        .chain(Stage::ALL.into_iter().map(PanelRow::Stage))
-        .collect()
 }
 
 /// Where `stage` stands in `feature`.
@@ -1212,6 +1204,28 @@ pub fn new_slug(title: &str, all: &[Feature]) -> String {
 }
 
 impl FeaturePanel {
+    /// The stage whose page shows on `feature`: the one picked, while the
+    /// feature is still at the stage it was at then, else its current
+    /// one (Ship once every stage is done).
+    pub fn page_stage(&self, feature: &Feature) -> Stage {
+        let current = feature.current();
+        (self.stage.filter(|_| self.picked_at == current))
+            .or(current)
+            .unwrap_or(Stage::Ship)
+    }
+
+    /// Show `stage`'s page of `feature`, until the feature moves on.
+    pub fn pick(&mut self, feature: &Feature, stage: Stage) {
+        self.stage = Some(stage);
+        self.picked_at = feature.current();
+    }
+
+    /// Show the current stage's page again.
+    pub fn unpick(&mut self) {
+        self.stage = None;
+        self.picked_at = None;
+    }
+
     /// Handle a key over `feature`, one of `slugs` listed.
     fn key(
         &mut self,
@@ -1221,32 +1235,70 @@ impl FeaturePanel {
         slugs: &[String],
         ctx: RowCtx,
     ) -> Option<PanelOutcome> {
-        let rows = panel_rows(feature);
-        let last = rows.len().saturating_sub(1);
-        self.cursor = self.cursor.min(last);
+        let repos = feature.repos.len();
+        self.repo = self.repo.min(repos.saturating_sub(1));
+        if repos == 0 {
+            self.focus = TabArea::Stages;
+        }
+        // The pick no longer holds once the feature moved on.
+        if self.stage.is_some() && self.picked_at != feature.current() {
+            self.unpick();
+        }
+        let stage = self.page_stage(feature);
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
-        match sym {
-            Keysym::Up | Keysym::KP_Up => self.cursor = self.cursor.saturating_sub(1),
-            Keysym::Down | Keysym::KP_Down => self.cursor = (self.cursor + 1).min(last),
-            Keysym::k | Keysym::K if ctrl => self.cursor = self.cursor.saturating_sub(1),
-            Keysym::j | Keysym::J if ctrl => self.cursor = (self.cursor + 1).min(last),
-            Keysym::Home | Keysym::KP_Home => self.cursor = 0,
-            Keysym::End | Keysym::KP_End => self.cursor = last,
-            Keysym::Return | Keysym::KP_Enter => {
-                return row_action(feature, rows[self.cursor], ctx);
+        let step = match sym {
+            Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left if plain => {
+                Some(Step::Back)
             }
-            Keysym::Left | Keysym::KP_Left | Keysym::Right | Keysym::KP_Right if plain => {
-                let back = matches!(sym, Keysym::Left | Keysym::KP_Left);
+            Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right if plain => {
+                Some(Step::On)
+            }
+            Keysym::k | Keysym::K if ctrl && !mods.shift => Some(Step::Back),
+            Keysym::j | Keysym::J if ctrl && !mods.shift => Some(Step::On),
+            Keysym::Home | Keysym::KP_Home if plain => Some(Step::First),
+            Keysym::End | Keysym::KP_End if plain => Some(Step::Last),
+            _ => None,
+        };
+        if let Some(step) = step {
+            match self.focus {
+                TabArea::Stages => {
+                    let at = stage_index(stage);
+                    let to = step.from(at, Stage::ALL.len() - 1);
+                    self.pick(feature, Stage::ALL[to]);
+                }
+                TabArea::Repos => self.repo = step.from(self.repo, repos.saturating_sub(1)),
+            }
+            return None;
+        }
+        let row = match self.focus {
+            TabArea::Stages => PanelRow::Stage(stage),
+            TabArea::Repos => PanelRow::Repo(self.repo),
+        };
+        match sym {
+            Keysym::Tab | Keysym::ISO_Left_Tab if plain => {
+                self.focus = match self.focus {
+                    TabArea::Stages if repos > 0 => TabArea::Repos,
+                    _ => TabArea::Stages,
+                };
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                return match self.focus {
+                    TabArea::Stages => page_enter(feature, stage, ctx),
+                    TabArea::Repos => row_action(feature, row, ctx),
+                };
+            }
+            Keysym::Prior | Keysym::KP_Prior | Keysym::Next | Keysym::KP_Next
+                if ctrl && !mods.shift =>
+            {
+                let back = matches!(sym, Keysym::Prior | Keysym::KP_Prior);
                 return switch(slugs, &self.slug, back).map(PanelOutcome::Show);
             }
-            Keysym::o | Keysym::O if ctrl && mods.shift => {
-                return row_page(feature, rows[self.cursor]);
-            }
+            Keysym::o | Keysym::O if ctrl && mods.shift => return row_page(feature, row),
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
             Keysym::r | Keysym::R if ctrl => {
-                return fresh_stage(feature, rows[self.cursor])
+                return fresh_stage(feature, row)
                     .map(|stage| PanelOutcome::StartAgent(stage, true));
             }
             Keysym::n | Keysym::N if ctrl => return Some(PanelOutcome::New),
@@ -1258,20 +1310,116 @@ impl FeaturePanel {
         }
         None
     }
+}
 
-    /// Scroll so the cursor's repository is among the `fit` shown, of
-    /// `repos`.
-    fn reveal(&mut self, repos: usize, fit: usize) {
-        let fit = fit.max(1);
-        if self.cursor < repos {
-            if self.cursor < self.repo_top {
-                self.repo_top = self.cursor;
-            } else if self.cursor >= self.repo_top + fit {
-                self.repo_top = self.cursor + 1 - fit;
-            }
+/// A move of the feature tab's keys, through its stages or its
+/// repositories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Back,
+    On,
+    First,
+    Last,
+}
+
+impl Step {
+    /// Where it goes from `at`, of `0..=last`: it stops at the ends.
+    fn from(self, at: usize, last: usize) -> usize {
+        match self {
+            Self::Back => at.saturating_sub(1),
+            Self::On => (at + 1).min(last),
+            Self::First => 0,
+            Self::Last => last,
         }
-        self.repo_top = self.repo_top.min(repos.saturating_sub(fit));
     }
+}
+
+/// Where `stage` is in `Stage::ALL`.
+fn stage_index(stage: Stage) -> usize {
+    Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0)
+}
+
+/// What Enter does on `stage`'s page of `feature`: its first button,
+/// else, on a later stage, says which comes first.
+fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
+    page_actions(feature, stage, ctx)
+        .into_iter()
+        .next()
+        .map(|(_, outcome)| outcome)
+        .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
+}
+
+/// The buttons on `stage`'s page of `feature`, each with what it does:
+/// what Enter does first (the primary, unless it reopens a done stage),
+/// then its agent's tab, a fresh agent, Verify's evidence, AI review's
+/// fixes to send, and Ship's pull requests. A later stage has none.
+/// The page's clicks and Enter both go by this list.
+pub fn page_actions(
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+) -> Vec<(PageButton, PanelOutcome)> {
+    let mark = stage_mark(feature, stage);
+    if mark == StageMark::Later {
+        return Vec::new();
+    }
+    let button = |label: &str, style, key| PageButton {
+        label: label.to_owned(),
+        style,
+        key,
+    };
+    let row = PanelRow::Stage(stage);
+    let mut out = Vec::new();
+    if let (Some(label), Some(main)) = (
+        stage_button(feature, stage, ctx),
+        row_action(feature, row, ctx),
+    ) {
+        let style = match main {
+            PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            _ => ButtonStyle::Primary,
+        };
+        out.push((button(label, style, Some("\u{23ce}")), main));
+    }
+    let has =
+        |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
+    if needs(stage).is_some() && feature.runs.get(&stage).is_some_and(|r| r.pane.is_some()) {
+        let show = PanelOutcome::ShowAgent(stage);
+        if !has(&out, &show) {
+            out.push((button("Show agent", ButtonStyle::Plain, None), show));
+        }
+    }
+    if let Some(stage) = fresh_stage(feature, row) {
+        let fresh = PanelOutcome::StartAgent(stage, true);
+        out.push((
+            button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
+            fresh,
+        ));
+    }
+    if let Some(page) = row_page(feature, row) {
+        out.push((
+            button("Evidence", ButtonStyle::Plain, Some("Ctrl+Shift+O")),
+            page,
+        ));
+    }
+    let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
+    if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
+        out.push((
+            button("Send fixes", ButtonStyle::Plain, None),
+            PanelOutcome::SendFixes,
+        ));
+    }
+    if stage == Stage::Ship {
+        let one = feature.shipping.prs.len() == 1;
+        for pr in &feature.shipping.prs {
+            let label = match one {
+                true => "Open PR".to_owned(),
+                false => format!("Open {}", pr_tail(&pr.url)),
+            };
+            let open = PanelOutcome::OpenPr(pr.url.clone());
+            out.push((button(&label, ButtonStyle::Plain, None), open));
+        }
+    }
+    out
 }
 
 /// The slug before (`back`) or after `slug` in `slugs`, round the ends;
@@ -1295,14 +1443,6 @@ fn pick_feature(slugs: &[String], open: Option<&str>, last: Option<&str>) -> Opt
         .find(|s| slugs.iter().any(|l| l == s))
         .map(str::to_owned)
         .or_else(|| slugs.last().cloned())
-}
-
-/// The cursor a feature's panel starts at: its current stage, else its
-/// last.
-fn start_cursor(feature: &Feature) -> usize {
-    let stage = feature.current().unwrap_or(Stage::Ship);
-    let at = Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
-    feature.repos.len() + at
 }
 
 /// A folder as the chrome shows it, from the home folder as `~`.
@@ -2516,14 +2656,13 @@ impl Gerdr {
     }
 
     /// Show the feature panel on feature `slug` of `project`: the first
-    /// tab of the feature's workspace, which opens if none is, the cursor
-    /// on the feature's current stage. The other panels close: they would
+    /// tab of the feature's workspace, which opens if none is, on the
+    /// feature's current stage's page. The other panels close: they would
     /// cover it.
     pub fn open_feature(&mut self, project: &str, slug: &str) {
-        let Some(feature) = self.feature(project, slug) else {
+        if self.feature(project, slug).is_none() {
             return self.show_warning("That feature is gone".into());
-        };
-        let cursor = start_cursor(feature);
+        }
         self.switcher = None;
         self.repos.close();
         self.worktrees.close();
@@ -2546,9 +2685,8 @@ impl Gerdr {
             return;
         }
         if let Some(panel) = self.features.panel.as_mut().filter(|p| same(p)) {
-            panel.cursor = cursor;
+            panel.unpick();
         }
-        self.reveal_feature_row();
         // Showing its tab read the feature again, unless it showed already.
         if shown {
             self.probe_feature(project, slug);
@@ -2564,33 +2702,31 @@ impl Gerdr {
         let on_tab = self.tab().is_some_and(|t| t.pinned);
         let shown = (self.project.clone())
             .zip(on_tab.then(|| self.workspace_feature(w)).flatten())
-            .map(|(project, f)| (project, f.slug.clone(), start_cursor(f)));
+            .map(|(project, f)| (project, f.slug.clone()));
         let open = (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
-        if open == shown.as_ref().map(|(p, s, _)| (p.clone(), s.clone())) {
+        if open == shown {
             return;
         }
         if let Some(panel) = self.features.panel.take() {
             let key = (panel.project.clone(), panel.slug.clone());
             self.features.parked.insert(key, panel);
         }
-        if let Some((project, slug, cursor)) = shown {
+        if let Some((project, slug)) = shown {
             let key = (project.clone(), slug.clone());
             let panel = self.features.parked.remove(&key).unwrap_or(FeaturePanel {
                 project: project.clone(),
                 slug: slug.clone(),
-                cursor,
                 ..FeaturePanel::default()
             });
             self.features.panel = Some(panel);
             self.features.shown.insert(project.clone(), slug.clone());
-            self.reveal_feature_row();
             self.probe_feature(&project, &slug);
         }
         self.refresh_pointer_focus();
     }
 
-    /// Open the feature panel on feature `slug` of `project` with the
-    /// cursor on `stage`'s row. AI review with findings to decide shows
+    /// Open the feature panel on feature `slug` of `project` on `stage`'s
+    /// page. AI review with findings to decide shows
     /// the diff at the first instead, and Code review the diff, as their
     /// rows' Enter does; Manual test with criteria opens its sheet over it.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
@@ -2621,11 +2757,13 @@ impl Gerdr {
         if testing {
             self.open_manual_test(project, slug);
         }
-        let row = Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
-        let at = self.panel_feature().map(|f| f.repos.len() + row);
-        if let Some((panel, at)) = self.features.panel.as_mut().zip(at) {
-            panel.cursor = at;
-            self.reveal_feature_row();
+        let Some(feature) = self.panel_feature().cloned() else {
+            return;
+        };
+        let on_it = |p: &&mut FeaturePanel| p.project == project && p.slug == slug;
+        if let Some(panel) = self.features.panel.as_mut().filter(on_it) {
+            panel.focus = TabArea::Stages;
+            panel.pick(&feature, stage);
         }
     }
 
@@ -2633,17 +2771,6 @@ impl Gerdr {
     fn panel_feature(&self) -> Option<&Feature> {
         let panel = self.features.panel.as_ref()?;
         self.feature(&panel.project, &panel.slug)
-    }
-
-    /// Scroll the panel's repositories to the cursor.
-    fn reveal_feature_row(&mut self) {
-        let Some(view) = self.feature_panel_view() else {
-            return;
-        };
-        let fit = chrome::feature_repos_shown(&view, self.content_rect().size);
-        if let Some(panel) = self.features.panel.as_mut() {
-            panel.reveal(view.repos.len(), fit);
-        }
     }
 
     /// A key while the feature panel has the keyboard.
@@ -2656,13 +2783,10 @@ impl Gerdr {
         let slugs = self.listed_slugs(&panel.project);
         let feature = self.feature(&panel.project, &panel.slug).cloned()?;
         let ctx = self.row_ctx(&feature);
-        let out = self
-            .features
+        self.features
             .panel
             .as_mut()?
-            .key(mods, sym, &feature, &slugs, ctx);
-        self.reveal_feature_row();
-        out
+            .key(mods, sym, &feature, &slugs, ctx)
     }
 
     /// Do what the feature panel asked.
@@ -2772,19 +2896,12 @@ impl Gerdr {
         ));
     }
 
-    /// Put the panel's cursor on the current stage of feature `slug`,
-    /// when the panel shows it.
+    /// Show the current stage's page of feature `slug`, when the panel
+    /// shows it: it moved on.
     pub(crate) fn feature_cursor_to_current_of(&mut self, project: &str, slug: &str) {
-        let on_it = self
-            .features
-            .panel
-            .as_ref()
-            .is_some_and(|p| p.project == project && p.slug == slug);
-        let Some(cursor) = self.panel_feature().map(start_cursor) else {
-            return;
-        };
-        if let Some(panel) = self.features.panel.as_mut().filter(|_| on_it) {
-            panel.cursor = cursor;
+        let on_it = |p: &&mut FeaturePanel| p.project == project && p.slug == slug;
+        if let Some(panel) = self.features.panel.as_mut().filter(on_it) {
+            panel.unpick();
         }
     }
 
@@ -3377,102 +3494,173 @@ impl Gerdr {
         });
     }
 
-    /// A left click in the feature panel's tab: off the panel it does
-    /// nothing.
+    /// The feature tab's view and its layout in the tab's area.
+    fn feature_tab_parts(&self) -> Option<(chrome::FeatureTabView, chrome::FeatureTabLayout)> {
+        let view = self.feature_tab_view()?;
+        let layout = chrome::feature_tab_layout(&view, self.content_rect());
+        Some((view, layout))
+    }
+
+    /// What is at `pos` on the feature tab.
+    fn feature_tab_hit(&self, pos: Point<f64, Logical>) -> Option<FeatureTabHit> {
+        let (view, layout) = self.feature_tab_parts()?;
+        layout.hit(&view, pos.to_i32_round())
+    }
+
+    /// A left click in the feature tab: a stage's node shows its page, a
+    /// repository takes the keyboard, a button does what it says.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
-        let Some(view) = self.feature_panel_view() else {
-            return;
-        };
         let Some(feature) = self.panel_feature().cloned() else {
             return;
         };
-        let layout = chrome::feature_panel_layout(&view, self.content_rect());
-        let rows = panel_rows(&feature);
-        let repos = feature.repos.len();
-        let stage = |i: usize| PanelRow::Stage(Stage::ALL[i.min(Stage::ALL.len() - 1)]);
-        let outcome = match layout.hit(view.repo_top, pos) {
-            None | Some(FeatureHit::Panel) => None,
-            Some(FeatureHit::Hint(i)) => {
-                if let Some((keys, _)) = view.hints.get(i).cloned() {
+        let ctx = self.row_ctx(&feature);
+        let Some(hit) = self.feature_tab_hit(pos) else {
+            return;
+        };
+        let outcome = match hit {
+            FeatureTabHit::Tab | FeatureTabHit::Column(_) => None,
+            FeatureTabHit::Hint(i) => {
+                let keys = self
+                    .feature_tab_view()
+                    .and_then(|v| v.hints.get(i).cloned());
+                if let Some((keys, _)) = keys {
                     self.press_hint(crate::input::Overlay::Features, &keys, pos);
                 }
                 None
             }
-            Some(FeatureHit::Prev | FeatureHit::Next) => {
+            FeatureTabHit::Prev | FeatureTabHit::Next => {
                 let slugs = self.listed_slugs(&feature.project);
-                let back = layout.hit(view.repo_top, pos) == Some(FeatureHit::Prev);
+                let back = hit == FeatureTabHit::Prev;
                 switch(&slugs, &feature.slug, back).map(PanelOutcome::Show)
             }
-            Some(FeatureHit::Repo(i) | FeatureHit::Stage(i)) => {
-                let at = match layout.hit(view.repo_top, pos) {
-                    Some(FeatureHit::Stage(_)) => repos + i,
-                    _ => i,
-                };
-                if let Some(panel) = self.features.panel.as_mut() {
-                    panel.cursor = at.min(rows.len().saturating_sub(1));
+            FeatureTabHit::Node(i) => {
+                if let (Some(panel), Some(stage)) =
+                    (self.features.panel.as_mut(), Stage::ALL.get(i))
+                {
+                    panel.focus = TabArea::Stages;
+                    panel.pick(&feature, *stage);
                 }
                 None
             }
-            Some(FeatureHit::RepoButton(i)) => repo_button(&feature, i),
-            Some(FeatureHit::StageButton(i)) => {
-                row_action(&feature, stage(i), self.row_ctx(&feature))
+            FeatureTabHit::Repo(i) => {
+                if let Some(panel) = self
+                    .features
+                    .panel
+                    .as_mut()
+                    .filter(|_| i < feature.repos.len())
+                {
+                    panel.focus = TabArea::Repos;
+                    panel.repo = i;
+                }
+                None
             }
-            Some(FeatureHit::Button(0)) => Some(PanelOutcome::Open(feature.dir.clone())),
-            Some(FeatureHit::Button(1)) => Some(PanelOutcome::CopyPath),
-            Some(FeatureHit::Button(2)) => Some(PanelOutcome::New),
-            Some(FeatureHit::Button(_)) => Some(PanelOutcome::Remove),
+            FeatureTabHit::RepoButton(i) => repo_button(&feature, i),
+            FeatureTabHit::PageButton(i) => {
+                let stage = self.features.panel.as_ref().map(|p| p.page_stage(&feature));
+                stage.and_then(|stage| {
+                    let mut actions = page_actions(&feature, stage, ctx);
+                    (i < actions.len()).then(|| actions.swap_remove(i).1)
+                })
+            }
+            FeatureTabHit::Button(0) => Some(PanelOutcome::Open(feature.dir.clone())),
+            FeatureTabHit::Button(1) => Some(PanelOutcome::CopyPath),
+            FeatureTabHit::Button(2) => Some(PanelOutcome::New),
+            FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
         };
         if let Some(outcome) = outcome {
             self.apply_feature_panel(outcome);
         }
     }
 
-    /// The pointer moved while the feature panel is open.
-    pub fn feature_panel_hover(&mut self, pos: Point<f64, Logical>) {
-        let hit = self.feature_panel_view().and_then(|view| {
-            chrome::feature_panel_layout(&view, self.content_rect()).hit(view.repo_top, pos)
-        });
+    /// The pointer moved while the feature tab shows: what is under it
+    /// lights up, and a stage's node tells what is done in it.
+    pub fn feature_panel_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        let (view, layout) = self.feature_tab_parts()?;
+        let hit = layout.hit(&view, pos.to_i32_round());
         if let Some(panel) = self.features.panel.as_mut() {
-            panel.hover = hit;
+            panel.tab_hover = hit;
+        }
+        match hit? {
+            FeatureTabHit::Node(i) => {
+                let stage = Stage::ALL.get(i)?;
+                let feature = self.panel_feature()?;
+                let text = match feature.marks.get(stage) {
+                    Some(mark) => mark_detail(mark, feature::now()),
+                    None => stage.about().to_owned(),
+                };
+                Some(Tooltip::new(&text, *layout.nodes.get(i)?))
+            }
+            _ => None,
         }
     }
 
-    /// The wheel over the feature panel: its repositories `by` rows on.
-    pub fn feature_panel_scroll(&mut self, by: isize) {
-        let Some(view) = self.feature_panel_view() else {
-            return;
-        };
-        let fit = chrome::feature_repos_shown(&view, self.content_rect().size);
-        if let Some(panel) = self.features.panel.as_mut() {
-            let most = view.repos.len().saturating_sub(fit);
-            panel.repo_top = panel.repo_top.saturating_add_signed(by).min(most);
-        }
+    /// Whether something that acts is at `pos` on the feature tab: the
+    /// pointer is a hand over it.
+    pub fn feature_tab_control_at(&self, pos: Point<f64, Logical>) -> bool {
+        !matches!(
+            self.feature_tab_hit(pos),
+            None | Some(FeatureTabHit::Tab | FeatureTabHit::Column(_))
+        )
     }
 
-    /// The panel's repository rows shown, for the wheel's pitch.
-    pub fn feature_repo_rows(&self) -> Vec<chrome::Rect> {
-        self.feature_panel_view().map_or_else(Vec::new, |view| {
-            chrome::feature_panel_layout(&view, self.content_rect())
-                .repos
-                .into_iter()
-                .map(|(row, _)| row)
-                .collect()
+    /// The column of the feature tab at `pos`, as laid out now, and what
+    /// it scrolls within.
+    fn feature_tab_column(&self, pos: Point<f64, Logical>) -> Option<(TabColumn, Bounds)> {
+        let (_, layout) = self.feature_tab_parts()?;
+        TabColumn::ALL.into_iter().find_map(|col| {
+            let rect = layout.columns[col as usize]?;
+            rect.to_f64()
+                .contains(pos)
+                .then(|| (col, tab_bounds(&layout, col)))
         })
     }
 
-    /// What the pointer can press in the feature panel.
-    pub fn feature_panel_controls(&self) -> Vec<chrome::Rect> {
-        self.feature_panel_view().map_or_else(Vec::new, |view| {
-            chrome::feature_panel_layout(&view, self.content_rect()).controls()
+    /// The wheel or the touchpad over the feature tab: the column under
+    /// the pointer moves.
+    pub fn feature_panel_scroll(&mut self, motion: Motion) {
+        let Some((col, bounds)) = self.feature_tab_column(self.pointer) else {
+            return;
+        };
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.scroll[col as usize].apply(motion, Instant::now(), bounds);
+        }
+    }
+
+    /// Move the feature tab's columns on to `now` if they move on their
+    /// own; whether one still does.
+    pub fn feature_tab_scroll_tick(&mut self, now: Instant) -> bool {
+        let moving = (self.features.panel.as_ref()).is_some_and(|p| {
+            p.scroll
+                .iter()
+                .any(|s| s.moving(now) || s.overscroll() != 0.0)
+        });
+        if !moving {
+            return false;
+        }
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return false;
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return false;
+        };
+        let mut still = false;
+        for col in TabColumn::ALL {
+            still |= panel.scroll[col as usize].tick(now, tab_bounds(&layout, col));
+        }
+        still
+    }
+
+    /// Stop the feature tab's columns flung; whether one was.
+    pub fn feature_tab_stop_fling(&mut self) -> bool {
+        (self.features.panel.as_mut()).is_some_and(|p| {
+            p.scroll
+                .iter_mut()
+                .fold(false, |any, s| s.stop_fling() | any)
         })
     }
 
     /// The feature tab's view, while a feature's tab shows.
     pub fn feature_tab_view(&self) -> Option<chrome::FeatureTabView> {
-        None
-    }
-
-    pub fn feature_panel_view(&self) -> Option<FeaturePanelView> {
         let panel = self.features.panel.as_ref()?;
         let feature = self.feature(&panel.project, &panel.slug)?;
         let slugs = self.listed_slugs(&panel.project);
@@ -3487,40 +3675,38 @@ impl Gerdr {
         let doing = |job: Job| mine().find(|b| b.job == job).map(|b| b.what.as_str());
         let key = (panel.project.clone(), panel.slug.clone());
         let probe = self.features.probes.get(&key).and_then(|p| p.last.as_ref());
-        let agent = feature.current().and_then(|stage| {
-            needs(stage)?;
-            let run = feature.runs.get(&stage)?;
-            let status = run.pane.as_ref().and_then(|p| {
-                self.agents
-                    .iter()
-                    .find(|a| a.pane_id == *p)
-                    .map(|a| a.agent_status)
-            });
+        let now = feature::now();
+        let current = feature.current().filter(|s| needs(*s).is_some());
+        let run = current.and_then(|stage| Some((stage, feature.runs.get(&stage)?)));
+        let agent_status = run.and_then(|(_, run)| {
+            let pane = run.pane.as_ref()?;
+            let agent = self.agents.iter().find(|a| a.pane_id == *pane)?;
+            Some(agent.agent_status)
+        });
+        let agent = run.map(|(stage, run)| {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
-            Some(crate::feature_agents::agent_line(
-                run,
-                stage,
-                status,
-                watch,
-                feature::now(),
-            ))
+            crate::feature_agents::agent_line(run, stage, agent_status, watch, now)
         });
+        let manual_counts = self.manual_counts(feature);
         let state = PanelState {
             busy: &busy,
             names: self.projects.names(feature),
             probe,
             shipping,
             agent,
+            agent_status,
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
             code_review: self.code_review_line(&panel.project, &panel.slug),
-            manual: self
-                .manual_counts(feature)
-                .map(crate::manual_test::counts_text),
+            manual: manual_counts.map(crate::manual_test::counts_text),
+            manual_gate: manual_counts.map(|n| {
+                let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+                (count(n.passed), count(n.total()))
+            }),
         };
-        Some(panel_view(panel, feature, &slugs, &state, feature::now()))
+        Some(tab_view(panel, feature, &slugs, &state, now))
     }
 
     /// The sidebar's rows for the shown project's open features.
@@ -3845,6 +4031,8 @@ struct PanelState<'a> {
     /// What its current stage's agent does, for that stage's row (see
     /// `feature_agents::agent_line`).
     agent: Option<String>,
+    /// Its current stage's agent's status, while its tab is there.
+    agent_status: Option<AgentStatus>,
     /// What its rows need besides it.
     ctx: RowCtx,
     /// What its setup does now, while it runs.
@@ -3857,6 +4045,9 @@ struct PanelState<'a> {
     /// How far Manual test's criteria went, in words, when the brief has
     /// some (see `manual_test::counts_text`).
     manual: Option<String>,
+    /// How many of Manual test's criteria passed, of how many (see
+    /// `feature_agents::gate_of`).
+    manual_gate: Option<(u32, u32)>,
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads
@@ -3945,16 +4136,497 @@ fn repo_line(feature: &Feature, repo: &feature::Repo, probe: Option<&Probe>) -> 
     line
 }
 
-/// What the feature panel shows of `feature`, one of `slugs`, as `state`
+/// What a stage of `feature` not marked done says of where it stands,
+/// as `state` has it: what setup or the checks do, the agent's line on
+/// the current stage, what waits on AI review, Code review and Manual
+/// test.
+fn stage_line(feature: &Feature, stage: Stage, state: &PanelState) -> Option<String> {
+    let current = stage_mark(feature, stage) == StageMark::Current;
+    let agent = state.agent.as_deref().filter(|_| current);
+    match stage {
+        Stage::Build => build_line(feature, state.setup, agent),
+        Stage::Verify => verify_line(feature, state.ctx, state.verify),
+        Stage::AiReview if current => review_line(feature, agent),
+        Stage::CodeReview if current => {
+            Some((state.code_review.clone()).unwrap_or_else(|| "review every changed file".into()))
+        }
+        Stage::ManualTest if current => state.manual.clone(),
+        _ => agent.map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+/// What `stage` of `feature` says in one line: when it was done, else
+/// where it stands, else what it is for.
+fn stage_detail(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> String {
+    match (feature.marks.get(&stage), stage_line(feature, stage, state)) {
+        (Some(m), _) => mark_detail(m, now),
+        (None, Some(line)) => line,
+        (None, None) => stage.about().to_owned(),
+    }
+}
+
+/// The first stage of `feature` whose mark the code changed since, as the
+/// latest probe read it.
+fn stale_from(feature: &Feature, probe: Option<&Probe>) -> Option<Stage> {
+    match probe.map(|p| &p.reading) {
+        Some(Ok(reading)) => feature.stale(&reading.patch),
+        _ => None,
+    }
+}
+
+/// Whether done `stage` of `feature` no longer holds: bound to the code,
+/// and the code changed since it or a stage before it was marked.
+fn is_stale(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool {
+    feature.is_done(stage)
+        && stage.bound()
+        && stale_from(feature, probe).is_some_and(|from| stage_index(stage) >= stage_index(from))
+}
+
+/// Whether the current `stage` of `feature` waits for the user: a file to
+/// review, a stop to go on from, findings to decide (see
+/// `feature_agents::gate_of`).
+fn waits(feature: &Feature, stage: Stage, state: &PanelState) -> bool {
+    crate::feature_agents::gate_of(feature, |_| state.manual_gate).is_some_and(|g| g.0 == stage)
+}
+
+/// "running 14m": how long an agent started at `started` has run.
+fn running_for(now: u64, started: u64) -> String {
+    match projects::ago(now, started).strip_suffix(" ago") {
+        Some(long) => format!("running {long}"),
+        None => "running".to_owned(),
+    }
+}
+
+/// The short line under current `stage`'s node on the rail.
+fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> String {
+    let run = feature.runs.get(&stage);
+    let agent = || match run {
+        Some(run) if run.pane.is_some() => running_for(now, run.started),
+        Some(_) => "agent closed".to_owned(),
+        None => String::new(),
+    };
+    let failed_setup = (feature.setup.as_ref()).is_some_and(|s| s.failed.is_some());
+    match stage {
+        Stage::Discover | Stage::Plan if run.is_some_and(|r| r.ready.is_some()) => {
+            "ready for review".into()
+        }
+        Stage::Build if state.setup.is_some() => "setting up".into(),
+        Stage::Build if failed_setup && run.is_none() => "setup failed".into(),
+        Stage::Build => match run.and_then(|r| r.stop) {
+            Some(stop) => format!("milestone {}/{}", stop.done, stop.total),
+            None => agent(),
+        },
+        Stage::Verify if state.verify.is_some() => "running".into(),
+        Stage::Verify => match &feature.verify {
+            Some(v) if v.passed == Some(false) => "failed".into(),
+            _ if !state.ctx.checks => "mark by hand".into(),
+            _ => String::new(),
+        },
+        Stage::AiReview => {
+            let read = (feature.review.as_ref()).filter(|_| run.is_some_and(|r| r.ready.is_some()));
+            match read {
+                Some(r) if r.count(FindingState::Open) > 0 => {
+                    format!("{} to decide", r.count(FindingState::Open))
+                }
+                Some(r) if r.count(FindingState::Fix) > 0 => {
+                    format!("{} to fix", r.count(FindingState::Fix))
+                }
+                Some(_) => "findings read".into(),
+                None => agent(),
+            }
+        }
+        Stage::CodeReview => "to review".into(),
+        Stage::ManualTest => match state.manual_gate {
+            Some((passed, total)) if total > 0 => format!("{passed} of {total} passed"),
+            _ => String::new(),
+        },
+        Stage::Ship => {
+            let check = state.probe.and_then(|p| p.ship.as_ref());
+            if state.shipping {
+                "shipping".into()
+            } else if feature.shipping.squash_at.is_some() {
+                "merging".into()
+            } else if check.is_some_and(|c| !c.blockers.is_empty()) {
+                "blocked".into()
+            } else if check.is_some() {
+                "ready to ship".into()
+            } else {
+                String::new()
+            }
+        }
+        Stage::Discover | Stage::Plan => agent(),
+    }
+}
+
+/// `stage`'s node on the rail of `feature`.
+fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> RailNode {
+    let (mark, line) = match stage_mark(feature, stage) {
+        StageMark::Done if is_stale(feature, stage, state.probe) => {
+            (NodeMark::Stale, "code changed".to_owned())
+        }
+        StageMark::Done => {
+            let at = feature.marks.get(&stage).map_or(0, |m| m.at);
+            (NodeMark::Done, projects::ago(now, at))
+        }
+        StageMark::Current => {
+            let mark = match waits(feature, stage, state) {
+                true => NodeMark::Waiting,
+                false => NodeMark::Current,
+            };
+            (mark, current_line(feature, stage, state, now))
+        }
+        StageMark::Later => (NodeMark::Later, String::new()),
+    };
+    RailNode {
+        label: stage.label().to_owned(),
+        line,
+        mark,
+        selected: false,
+    }
+}
+
+/// A line in `tone`.
+fn line(text: impl Into<String>, tone: CheckTone) -> CheckLine {
+    CheckLine {
+        text: text.into(),
+        tone,
+    }
+}
+
+/// A labelled section of `lines`.
+fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
+    PageSection::Lines {
+        label: label.to_owned(),
+        lines,
+    }
+}
+
+/// The card of `stage`'s agent in `feature`, once one ran: its button the
+/// page's Show agent, if `actions` has one.
+fn agent_card(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Option<PageSection> {
+    let run = feature.runs.get(&stage)?;
+    let mark = stage_mark(feature, stage);
+    let current = mark == StageMark::Current;
+    let dot = match mark {
+        StageMark::Done => Dot::Done,
+        StageMark::Current if run.pane.is_some() => {
+            state.agent_status.map_or(Dot::Unknown, Dot::of_status)
+        }
+        _ => Dot::Unknown,
+    };
+    let status = match (current, &state.agent) {
+        (true, Some(line)) => line.clone(),
+        _ => format!("started {}", projects::ago(now, run.started)),
+    };
+    let show = PanelOutcome::ShowAgent(stage);
+    Some(PageSection::Agent {
+        icon: AgentIcon::from_agent(&run.agent),
+        name: run.agent.clone(),
+        dot,
+        status,
+        tail: Vec::new(),
+        button: actions.iter().position(|(_, o)| *o == show),
+    })
+}
+
+/// How Discover's or Plan's file stands in `feature`.
+fn file_line(feature: &Feature, stage: Stage) -> CheckLine {
+    if feature.is_done(stage) {
+        return line("approved", CheckTone::Ready);
+    }
+    match feature.runs.get(&stage) {
+        Some(run) if run.ready.is_some() => line("ready for review", CheckTone::Ready),
+        Some(run) if run.sent_back > 0 => {
+            let n = run.sent_back;
+            line(
+                format!("sent back \u{d7}{n}, being written again"),
+                CheckTone::Note,
+            )
+        }
+        Some(_) => line("being written", CheckTone::Note),
+        None => line("not written yet", CheckTone::Note),
+    }
+}
+
+/// Verify's checks in `feature`, as `state` has them.
+fn checks_lines(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
+    if let Some(what) = state.verify {
+        return vec![line(inline(what), CheckTone::Note)];
+    }
+    match &feature.verify {
+        Some(run) if run.passed == Some(true) => {
+            vec![line(format!("run {} passed", run.n), CheckTone::Ready)]
+        }
+        Some(run) if run.passed == Some(false) => {
+            let mut out = vec![line(format!("run {} failed", run.n), CheckTone::Blocker)];
+            let failures = (run.failures.iter()).map(|f| line(f.clone(), CheckTone::Blocker));
+            out.extend(capped(failures.collect(), CheckTone::Blocker));
+            let most = feature::verify::MAX_FIXES;
+            if run.fixes >= most {
+                out.push(line("fix it, then Run checks", CheckTone::Note));
+            } else if run.fixes > 0 {
+                let text = format!("fixes sent to the Build agent: {} of {most}", run.fixes);
+                out.push(line(text, CheckTone::Note));
+            }
+            out
+        }
+        Some(run) => vec![line(format!("run {} running", run.n), CheckTone::Note)],
+        None if !state.ctx.checks => {
+            vec![line("no checks set: Mark done by hand", CheckTone::Note)]
+        }
+        None => vec![line("not run yet", CheckTone::Note)],
+    }
+}
+
+/// AI review's findings in `feature`, by state, once read.
+fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
+    let ready = (feature.runs.get(&Stage::AiReview)).is_some_and(|r| r.ready.is_some());
+    let Some(review) = feature.review.as_ref().filter(|_| ready) else {
+        return vec![line("not read yet", CheckTone::Note)];
+    };
+    if review.findings.is_empty() {
+        return vec![line("no findings", CheckTone::Ready)];
+    }
+    let states = [
+        (FindingState::Open, "to decide", CheckTone::Blocker),
+        (FindingState::Fix, "to fix", CheckTone::Blocker),
+        (FindingState::Sent, "sent to Build", CheckTone::Note),
+        (FindingState::Fixed, "fixed", CheckTone::Ready),
+        (FindingState::Dismissed, "dismissed", CheckTone::Note),
+    ];
+    states
+        .into_iter()
+        .filter_map(|(state, what, tone)| match review.count(state) {
+            0 => None,
+            n => Some(line(format!("{} {what}", plural(n, "finding")), tone)),
+        })
+        .collect()
+}
+
+/// `stage`'s page of `feature`, its buttons `actions`.
+fn stage_page(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> StagePage {
+    let mark = stage_mark(feature, stage);
+    let mut sections = Vec::new();
+    let status = match mark {
+        StageMark::Later => {
+            let before = Stage::ALL[stage_index(stage).saturating_sub(1)];
+            Some(line(
+                format!("Comes after {}", before.label()),
+                CheckTone::Note,
+            ))
+        }
+        StageMark::Done => feature.marks.get(&stage).map(|m| {
+            let text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
+            line(text, CheckTone::Ready)
+        }),
+        StageMark::Current => stage_line(feature, stage, state).map(|text| {
+            let failed = text.contains("failed") || text.contains("not ready");
+            let tone = if failed {
+                CheckTone::Blocker
+            } else if waits(feature, stage, state) {
+                CheckTone::Ready
+            } else {
+                CheckTone::Note
+            };
+            line(text, tone)
+        }),
+    };
+    if mark != StageMark::Later {
+        if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
+            sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
+        }
+        if is_stale(feature, stage, state.probe) {
+            let text = "The code changed since it was marked";
+            sections.push(lines("Stale", vec![line(text, CheckTone::Blocker)]));
+        }
+        let card = || agent_card(feature, stage, state, actions, now);
+        match stage {
+            Stage::Discover | Stage::Plan => {
+                sections.extend(card());
+                let file = crate::feature::artifacts::name(stage).unwrap_or("file");
+                sections.push(lines(file, vec![file_line(feature, stage)]));
+            }
+            Stage::Build => {
+                if let Some(what) = state.setup {
+                    sections.push(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
+                } else if let Some(why) = feature.setup.as_ref().and_then(|s| s.failed.as_deref()) {
+                    let text = format!("failed: {why}");
+                    sections.push(lines("Setup", vec![line(text, CheckTone::Blocker)]));
+                }
+                sections.extend(card());
+                if let Some(stop) = feature.runs.get(&stage).and_then(|r| r.stop) {
+                    sections.push(PageSection::Milestones {
+                        done: stop.done as usize,
+                        total: stop.total as usize,
+                        items: Vec::new(),
+                    });
+                }
+            }
+            Stage::Verify => sections.push(lines("Checks", checks_lines(feature, state))),
+            Stage::AiReview => {
+                sections.extend(card());
+                sections.push(lines("Findings", findings_lines(feature)));
+            }
+            Stage::CodeReview if mark == StageMark::Current => {
+                let text = (state.code_review.clone())
+                    .unwrap_or_else(|| "review every changed file".into());
+                sections.push(lines("Files", vec![line(text, CheckTone::Note)]));
+            }
+            Stage::ManualTest if mark == StageMark::Current => {
+                let text = (state.manual.clone())
+                    .unwrap_or_else(|| "no criteria in the brief: Mark done by hand".into());
+                sections.push(lines("Criteria", vec![line(text, CheckTone::Note)]));
+            }
+            Stage::Ship => {
+                let check = check_lines(feature, state.probe, state.shipping, now);
+                if !check.is_empty() {
+                    sections.push(lines("Ship check", check));
+                }
+                let prs: Vec<CheckLine> = (feature.shipping.prs.iter())
+                    .map(|pr| line(pr_tail(&pr.url), CheckTone::Note))
+                    .collect();
+                if !prs.is_empty() {
+                    sections.push(lines("Pull requests", prs));
+                }
+            }
+            Stage::CodeReview | Stage::ManualTest => {}
+        }
+    }
+    StagePage {
+        title: stage.label().to_owned(),
+        about: stage.about().to_owned(),
+        status,
+        buttons: actions.iter().map(|(b, _)| b.clone()).collect(),
+        sections,
+    }
+}
+
+/// How a line of `feature`'s history reads in the activity: a send-back
+/// or a failure as a blocker, a tick or a pass as ready, the rest a note.
+fn event_tone(what: &str) -> CheckTone {
+    let lower = what.to_lowercase();
+    let blocker = [
+        "sent back",
+        "failed",
+        "code changed",
+        "not done",
+        "not read",
+        "stopped",
+        "to do again",
+        "abandoned",
+    ];
+    let ready = [
+        "ticked",
+        "approved",
+        "passed",
+        "build done",
+        "opened",
+        "updated",
+    ];
+    if blocker.iter().any(|b| lower.contains(b)) {
+        CheckTone::Blocker
+    } else if ready.iter().any(|r| lower.contains(r)) || what == "Set up" {
+        CheckTone::Ready
+    } else {
+        CheckTone::Note
+    }
+}
+
+/// `feature`'s history, newest first.
+fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
+    (feature.history.iter().rev())
+        .map(|e| ActivityRow {
+            what: e.what.clone(),
+            ago: projects::ago(now, e.at),
+            tone: event_tone(&e.what),
+        })
+        .collect()
+}
+
+/// The feature tab's key hints over `feature`, one of `slugs`, as `panel`
+/// has the keyboard on `stage`'s page.
+fn tab_hints(
+    panel: &FeaturePanel,
+    feature: &Feature,
+    stage: Stage,
+    slugs: &[String],
+    ctx: RowCtx,
+) -> Vec<(String, String)> {
+    let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
+    let mut hints = Vec::new();
+    let repos = !feature.repos.is_empty();
+    match panel.focus {
+        TabArea::Repos if repos => {
+            let row = PanelRow::Repo(panel.repo.min(feature.repos.len() - 1));
+            hints.push(hint("Up / Down", "repository"));
+            let enter = row_hint(feature, row, ctx);
+            if !enter.is_empty() {
+                hints.push(hint("Enter", enter));
+            }
+            hints.push(hint("Tab", "stages"));
+            if row_page(feature, row).is_some() {
+                hints.push(hint("Ctrl+Shift+O", "open PR"));
+            }
+        }
+        _ => {
+            let row = PanelRow::Stage(stage);
+            hints.push(hint("Left / Right", "stage"));
+            let enter = match page_enter(feature, stage, ctx) {
+                Some(PanelOutcome::NotYet(_)) | None => "",
+                Some(_) => row_hint(feature, row, ctx),
+            };
+            if !enter.is_empty() {
+                hints.push(hint("Enter", enter));
+            }
+            if repos {
+                hints.push(hint("Tab", "repositories"));
+            }
+            if row_page(feature, row).is_some() {
+                hints.push(hint("Ctrl+Shift+O", "evidence"));
+            }
+            if fresh_stage(feature, row).is_some() {
+                hints.push(hint("Ctrl+R", "fresh agent"));
+            }
+        }
+    }
+    if slugs.len() > 1 {
+        hints.push(hint("Ctrl+PgUp / PgDn", "other feature"));
+    }
+    hints.extend([
+        hint("Ctrl+O", "open tab"),
+        hint("Ctrl+C", "copy path"),
+        hint("Ctrl+N", "new"),
+    ]);
+    if linkable(feature) {
+        hints.push(hint("Ctrl+Shift+L", "link project"));
+    }
+    hints.push(hint("Del", &remove_label(feature).to_lowercase()));
+    hints
+}
+
+/// What the feature tab shows of `feature`, one of `slugs`, as `state`
 /// has it.
-fn panel_view(
+fn tab_view(
     panel: &FeaturePanel,
     feature: &Feature,
     slugs: &[String],
     state: &PanelState,
     now: u64,
-) -> FeaturePanelView {
-    let repos = feature
+) -> FeatureTabView {
+    let repos: Vec<FeatureRepoRow> = feature
         .repos
         .iter()
         .enumerate()
@@ -3970,87 +4642,65 @@ fn panel_view(
             },
         })
         .collect();
-    let stages = Stage::ALL
+    let stage = panel.page_stage(feature);
+    let rail = Stage::ALL
         .iter()
-        .map(|s| {
-            let mark = stage_mark(feature, *s);
-            let agent = state
-                .agent
-                .as_deref()
-                .filter(|_| mark == StageMark::Current);
-            let line = match s {
-                Stage::Build => build_line(feature, state.setup, agent),
-                Stage::Verify => verify_line(feature, state.ctx, state.verify),
-                Stage::AiReview if mark == StageMark::Current => review_line(feature, agent),
-                Stage::CodeReview if mark == StageMark::Current => Some(
-                    state
-                        .code_review
-                        .clone()
-                        .unwrap_or_else(|| "review every changed file".into()),
-                ),
-                Stage::ManualTest if mark == StageMark::Current => state.manual.clone(),
-                _ => agent.map(str::to_owned),
-            };
-            StageRow {
-                label: s.label().to_owned(),
-                detail: match (feature.marks.get(s), line) {
-                    (Some(m), _) => mark_detail(m, now),
-                    (None, Some(line)) => line,
-                    (None, None) => s.about().to_owned(),
-                },
-                mark,
-                button: stage_button(feature, *s, state.ctx),
-            }
+        .map(|s| RailNode {
+            selected: *s == stage,
+            ..rail_node(feature, *s, state, now)
         })
         .collect();
-    let rows = panel_rows(feature);
-    let row = rows[panel.cursor.min(rows.len() - 1)];
-    let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
-    let mut hints = vec![hint("Up / Down", "move")];
-    let enter = row_hint(feature, row, state.ctx);
-    if !enter.is_empty() {
-        hints.push(hint("Enter", enter));
-    }
-    match row_page(feature, row) {
-        Some(PanelOutcome::OpenPr(_)) => hints.push(hint("Ctrl+Shift+O", "open PR")),
-        Some(PanelOutcome::Evidence) => hints.push(hint("Ctrl+Shift+O", "evidence")),
-        _ => {}
-    }
-    if fresh_stage(feature, row).is_some() {
-        hints.push(hint("Ctrl+R", "fresh agent"));
-    }
-    if slugs.len() > 1 {
-        hints.push(hint("Left / Right", "other feature"));
-    }
-    hints.extend([
-        hint("Ctrl+O", "open tab"),
-        hint("Ctrl+C", "copy path"),
-        hint("Ctrl+N", "new"),
-    ]);
-    if linkable(feature) {
-        hints.push(hint("Ctrl+Shift+L", "link project"));
-    }
-    hints.push(hint("Del", &remove_label(feature).to_lowercase()));
-    let which = slugs
-        .iter()
+    let actions = page_actions(feature, stage, state.ctx);
+    let page = stage_page(feature, stage, state, &actions, now);
+    let repos_error = match state.probe.map(|p| &p.reading) {
+        Some(Err(why)) => Some(format!("Couldn't read the code: {why}")),
+        _ => None,
+    };
+    let which = (slugs.iter())
         .position(|s| *s == feature.slug)
         .map(|i| (i, slugs.len()));
-    let mut sub = format!("{} \u{b7} {}", feature.slug, tilde(&feature.dir));
+    let mut sub = format!(
+        "{} \u{b7} {} \u{b7} started {}",
+        feature.slug,
+        tilde(&feature.dir),
+        projects::ago(now, feature.created)
+    );
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
     }
-    FeaturePanelView {
+    let focus = match repos.is_empty() {
+        true => TabArea::Stages,
+        false => panel.focus,
+    };
+    FeatureTabView {
         title: feature.title.clone(),
         sub,
         which,
-        repos,
-        stages,
-        cursor: panel.cursor,
-        repo_top: panel.repo_top,
         remove: remove_label(feature),
-        hover: panel.hover,
-        hints,
-        check: check_lines(feature, state.probe, state.shipping, now),
+        rail,
+        repo: panel.repo.min(repos.len().saturating_sub(1)),
+        repos,
+        repos_error,
+        focus,
+        page,
+        activity: activity(feature, now),
+        scroll: panel.scroll.each_ref().map(|s| s.pos() - s.overscroll()),
+        hover: panel.tab_hover,
+        hints: tab_hints(panel, feature, stage, slugs, state.ctx),
+    }
+}
+
+/// How far `col` of the tab laid out as `layout` scrolls, for its
+/// `Scroll`: in pixels, a notch as the sidebar's.
+fn tab_bounds(layout: &chrome::FeatureTabLayout, col: TabColumn) -> Bounds {
+    let view = layout.columns[col as usize].map_or(0, |r| r.size.h);
+    Bounds {
+        max: f64::from(layout.scroll_room(col)),
+        notch: TAB_NOTCH,
+        unit: 1.0,
+        next: 1.0,
+        prev: 1.0,
+        view: f64::from(view),
     }
 }
 
@@ -4475,42 +5125,70 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn panel_keys_ask_for_the_rows_and_the_features_actions() {
+    fn panel_keys_move_through_stages_and_repositories_and_ask_for_actions() {
         let f = feature("b", vec![repo("api", true), repo("web", false)], 2);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
-            cursor: start_cursor(&f),
             ..FeaturePanel::default()
         };
-        // It starts on the current stage: Plan done, Build next, its
-        // agent to start.
-        assert_eq!(panel.cursor, 2 + 2);
+        // It starts on the current stage's page: Plan done, Build next,
+        // its agent to start.
+        assert_eq!(panel.focus, TabArea::Stages);
+        assert_eq!(panel.page_stage(&f), Stage::Build);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::StartAgent(Stage::Build, false))
         );
-        press(&mut panel, &f, key(Keysym::Up));
+        // Left and Right (Up, Down, Ctrl+J/K) pick another stage's page.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Left)), None);
+        assert_eq!(panel.page_stage(&f), Stage::Plan);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::Untick(Stage::Plan))
         );
         press(&mut panel, &f, ctrl(Keysym::j));
-        press(&mut panel, &f, key(Keysym::Down));
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(panel.page_stage(&f), Stage::Verify);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::NotYet(Stage::Build))
         );
+        press(&mut panel, &f, ctrl(Keysym::k));
+        press(&mut panel, &f, key(Keysym::Up));
+        assert_eq!(panel.page_stage(&f), Stage::Plan);
         press(&mut panel, &f, key(Keysym::Home));
+        assert_eq!(panel.page_stage(&f), Stage::Discover);
+        press(&mut panel, &f, key(Keysym::Left));
+        assert_eq!(
+            panel.page_stage(&f),
+            Stage::Discover,
+            "it stops at the ends"
+        );
+        press(&mut panel, &f, key(Keysym::End));
+        assert_eq!(panel.page_stage(&f), Stage::Ship);
+        // Tab moves to the repositories, where the same keys move.
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::Open("/work/.features/bulk/api".into()))
         );
-        press(&mut panel, &f, key(Keysym::Down));
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(panel.repo, 1);
+        assert_eq!(panel.page_stage(&f), Stage::Ship, "the page stays");
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::Touch("web".into()))
         );
+        press(&mut panel, &f, key(Keysym::Down));
+        assert_eq!(panel.repo, 1, "it stops at the last");
+        press(&mut panel, &f, key(Keysym::Home));
+        assert_eq!(panel.repo, 0);
+        // Shift+Tab goes back too.
+        press(&mut panel, &f, key(Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Stages);
+        press(&mut panel, &f, key(Keysym::Tab));
         assert_eq!(
             press(&mut panel, &f, ctrl(Keysym::o)),
             Some(PanelOutcome::Open("/work/.features/b".into()))
@@ -4540,29 +5218,72 @@ pub(crate) mod tests {
             press(&mut panel, &f, key(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
+        // Ctrl+PgUp and Ctrl+PgDn go to the other features, from either.
         assert_eq!(
-            press(&mut panel, &f, key(Keysym::Left)),
+            press(&mut panel, &f, ctrl(Keysym::Prior)),
             Some(PanelOutcome::Show("a".into()))
         );
+        press(&mut panel, &f, key(Keysym::Tab));
         assert_eq!(
-            press(&mut panel, &f, key(Keysym::Right)),
+            press(&mut panel, &f, ctrl(Keysym::Next)),
             Some(PanelOutcome::Show("c".into()))
         );
-        // Esc leaves it be: it is a tab.
+        // Plain PgUp, Esc and Ctrl+P leave it be: it is a tab.
+        let at = (panel.focus, panel.page_stage(&f), panel.repo);
+        assert_eq!(press(&mut panel, &f, key(Keysym::Prior)), None);
         assert_eq!(press(&mut panel, &f, key(Keysym::Escape)), None);
-        // Ctrl+N and Ctrl+P never move.
-        let at = panel.cursor;
-        press(&mut panel, &f, ctrl(Keysym::p));
-        assert_eq!(panel.cursor, at);
+        assert_eq!(press(&mut panel, &f, ctrl(Keysym::p)), None);
+        assert_eq!((panel.focus, panel.page_stage(&f), panel.repo), at);
     }
 
     #[test]
-    fn the_panel_shows_repositories_then_stages_and_the_right_hints() {
+    fn without_repositories_tab_stays_on_the_stages() {
+        let f = feature("b", Vec::new(), 2);
+        let mut panel = FeaturePanel::default();
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Stages);
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(panel.page_stage(&f), Stage::Verify);
+    }
+
+    #[test]
+    fn a_picked_page_holds_until_the_feature_moves_on() {
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut panel = FeaturePanel::default();
+        press(&mut panel, &f, key(Keysym::Left));
+        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        // Build ticked: the pick is dropped, the new current shows.
+        let mark = f.marks[&Stage::Plan].clone();
+        f.marks.insert(Stage::Build, mark);
+        assert_eq!(panel.page_stage(&f), Stage::Verify);
+        // The keys drop it too, and move on from the current one.
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(panel.page_stage(&f), Stage::AiReview);
+        assert_eq!(panel.picked_at, Some(Stage::Verify));
+        // Sent back to Build: the current stage shows again.
+        f.marks.remove(&Stage::Build);
+        assert_eq!(panel.page_stage(&f), Stage::Build);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::StartAgent(Stage::Build, false))
+        );
+        assert_eq!(panel.stage, None);
+        // Picking the page the feature is at holds as any other.
+        panel.pick(&f, Stage::Discover);
+        assert_eq!(panel.page_stage(&f), Stage::Discover);
+        panel.unpick();
+        assert_eq!(panel.page_stage(&f), Stage::Build);
+        // A feature with every stage done shows Ship.
+        let done = feature("d", vec![repo("api", true)], 8);
+        assert_eq!(FeaturePanel::default().page_stage(&done), Stage::Ship);
+    }
+
+    #[test]
+    fn the_tab_shows_repositories_the_rail_and_the_right_hints() {
         let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
         let panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
-            cursor: start_cursor(&f),
             ..FeaturePanel::default()
         };
         let slugs = vec!["b".to_owned()];
@@ -4570,29 +5291,50 @@ pub(crate) mod tests {
             busy: &["web"],
             ..PanelState::default()
         };
-        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
+        let view = tab_view(&panel, &f, &slugs, &state, 2_060);
         assert_eq!(view.repos[0].line, "feature/bulk");
         assert_eq!(view.repos[1].line, "context, at main");
         assert!(view.repos[1].busy);
-        let marks: Vec<StageMark> = view.stages.iter().map(|s| s.mark).collect();
+        assert_eq!(view.repos_error, None);
+        let marks: Vec<NodeMark> = view.rail.iter().map(|s| s.mark).collect();
         assert_eq!(
-            &marks[..4],
+            &marks[..5],
             [
-                StageMark::Done,
-                StageMark::Done,
-                StageMark::Done,
-                StageMark::Current
+                NodeMark::Done,
+                NodeMark::Done,
+                NodeMark::Done,
+                NodeMark::Current,
+                NodeMark::Later
             ]
         );
-        assert_eq!(view.stages[0].detail, "done 1m ago by you");
-        assert_eq!(view.stages[3].detail, "no checks set: Mark done by hand");
+        assert_eq!(view.rail.len(), 8);
+        assert_eq!(view.rail[0].line, "1m ago");
+        assert_eq!(view.rail[3].line, "mark by hand");
+        assert_eq!(view.rail[4].line, "");
+        let selected: Vec<bool> = view.rail.iter().map(|n| n.selected).collect();
+        assert_eq!(selected.iter().filter(|s| **s).count(), 1);
+        assert!(selected[3]);
+        assert_eq!(view.page.title, "Verify");
+        assert_eq!(
+            stage_detail(&f, Stage::Discover, &state, 2_060),
+            "done 1m ago by you"
+        );
+        assert_eq!(
+            stage_detail(&f, Stage::Verify, &state, 2_060),
+            "no checks set: Mark done by hand"
+        );
         assert_eq!(view.which, Some((0, 1)));
+        assert_eq!(
+            view.sub,
+            "b \u{b7} /work/.features/b \u{b7} started 17m ago"
+        );
         let keys: Vec<&str> = view.hints.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
             [
-                "Up / Down",
+                "Left / Right",
                 "Enter",
+                "Tab",
                 "Ctrl+O",
                 "Ctrl+C",
                 "Ctrl+N",
@@ -4601,7 +5343,44 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(view.hints[1].1, "mark done");
+        assert_eq!(view.hints[2].1, "repositories");
         assert_eq!(view.remove, "Abandon");
+        // On the repositories: their keys, and the others' features.
+        let on_repos = FeaturePanel {
+            focus: TabArea::Repos,
+            repo: 1,
+            ..FeaturePanel::default()
+        };
+        let three = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let view = tab_view(&on_repos, &f, &three, &state, 2_060);
+        assert_eq!((view.focus, view.repo), (TabArea::Repos, 1));
+        assert_eq!(view.which, Some((1, 3)));
+        let hints: Vec<(&str, &str)> = (view.hints.iter())
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            &hints[..4],
+            [
+                ("Up / Down", "repository"),
+                ("Enter", "touch"),
+                ("Tab", "stages"),
+                ("Ctrl+PgUp / PgDn", "other feature"),
+            ]
+        );
+        // A probe that couldn't read the code says so.
+        let failed = Probe {
+            reading: Err("git exited with 128".into()),
+            ..probe(None)
+        };
+        let state = PanelState {
+            probe: Some(&failed),
+            ..PanelState::default()
+        };
+        let view = tab_view(&panel, &f, &slugs, &state, 2_060);
+        assert_eq!(
+            view.repos_error.as_deref(),
+            Some("Couldn't read the code: git exited with 128")
+        );
     }
 
     fn agent_run(pane: Option<&str>, ready: Option<u64>) -> feature::agents::StageRun {
@@ -4620,16 +5399,15 @@ pub(crate) mod tests {
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
-            cursor: start_cursor(&f),
             ..FeaturePanel::default()
         };
         let slugs = vec!["b".to_owned()];
         let plan = PanelRow::Stage(Stage::Plan);
         let hints = |panel: &FeaturePanel, f: &Feature, state: &PanelState| {
-            panel_view(panel, f, &slugs, state, 2_000)
+            tab_view(panel, f, &slugs, state, 2_000)
                 .hints
                 .into_iter()
-                .take(3)
+                .take(4)
                 .collect::<Vec<_>>()
         };
         let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
@@ -4647,13 +5425,14 @@ pub(crate) mod tests {
         assert_eq!(
             hints(&panel, &f, &state),
             [
-                pair("Up / Down", "move"),
+                pair("Left / Right", "stage"),
                 pair("Enter", "start agent"),
+                pair("Tab", "repositories"),
                 pair("Ctrl+O", "open tab")
             ]
         );
         assert_eq!(
-            panel_view(&panel, &f, &slugs, &state, 2_000).stages[1].detail,
+            stage_detail(&f, Stage::Plan, &state, 2_000),
             Stage::Plan.about()
         );
         // Running: Enter shows it, Ctrl+R starts a fresh one.
@@ -4677,18 +5456,21 @@ pub(crate) mod tests {
         assert_eq!(
             hints(&panel, &f, &state),
             [
-                pair("Up / Down", "move"),
+                pair("Left / Right", "stage"),
                 pair("Enter", "show agent"),
+                pair("Tab", "repositories"),
                 pair("Ctrl+R", "fresh agent")
             ]
         );
-        let view = panel_view(&panel, &f, &slugs, &state, 2_000);
         assert_eq!(
-            view.stages[1].detail,
+            stage_detail(&f, Stage::Plan, &state, 2_000),
             "Claude Code working \u{b7} started 3m ago"
         );
-        // Only the current stage's row says it.
-        assert_eq!(view.stages[2].detail, Stage::Build.about());
+        // Only the current stage says it.
+        assert_eq!(
+            stage_detail(&f, Stage::Build, &state, 2_000),
+            Stage::Build.about()
+        );
         // Its tab gone: Enter starts again.
         f.runs.insert(Stage::Plan, agent_run(None, None));
         assert_eq!(
@@ -4707,7 +5489,7 @@ pub(crate) mod tests {
             Some("Review plan")
         );
         assert_eq!(hints(&panel, &f, &state)[1], pair("Enter", "review plan"));
-        // Ctrl+R only on the agent stage's own row.
+        // Ctrl+R only on the agent stage's own page.
         press(&mut panel, &f, key(Keysym::Up));
         assert_eq!(press(&mut panel, &f, ctrl(Keysym::r)), None);
         let discover = feature("a", vec![repo("api", true)], 0);
@@ -4752,7 +5534,6 @@ pub(crate) mod tests {
         assert_eq!(stage_button(&f, Stage::Build, none), Some("Continue"));
         // Ctrl+R still starts a fresh one.
         let mut panel = FeaturePanel {
-            cursor: start_cursor(&f),
             ..FeaturePanel::default()
         };
         assert_eq!(
@@ -4776,7 +5557,6 @@ pub(crate) mod tests {
         assert_eq!(row_hint(&f, verify, checks), "run checks");
         assert_eq!(stage_button(&f, Stage::Verify, checks), Some("Run checks"));
         let mut panel = FeaturePanel {
-            cursor: start_cursor(&f),
             ..FeaturePanel::default()
         };
         let slugs = vec!["v".to_owned()];
@@ -4802,7 +5582,6 @@ pub(crate) mod tests {
     fn evidence_opens_from_the_verify_row_once_a_run_wrote_it() {
         let mut f = feature("v", vec![repo("api", true)], 3);
         let mut panel = FeaturePanel {
-            cursor: start_cursor(&f),
             ..FeaturePanel::default()
         };
         let slugs = vec!["v".to_owned()];
@@ -4813,7 +5592,7 @@ pub(crate) mod tests {
         };
         let none = RowCtx::default();
         let hinted = |panel: &FeaturePanel, f: &Feature| {
-            panel_view(panel, f, &slugs, &PanelState::default(), 2_000)
+            tab_view(panel, f, &slugs, &PanelState::default(), 2_000)
                 .hints
                 .contains(&("Ctrl+Shift+O".into(), "evidence".into()))
         };
@@ -4834,8 +5613,8 @@ pub(crate) mod tests {
             Some(PanelOutcome::Evidence)
         );
         assert!(hinted(&panel, &f));
-        // Another row: not offered.
-        panel.cursor -= 1;
+        // Another page: not offered.
+        panel.pick(&f, Stage::Build);
         assert_eq!(panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none), None);
         assert!(!hinted(&panel, &f));
     }
@@ -4875,20 +5654,17 @@ pub(crate) mod tests {
             build_line(&f, None, stopped).as_deref(),
             Some("milestone 1 of 3 done \u{b7} Enter to continue \u{b7} setup failed")
         );
-        // In the view, on Build's row only; a done Build says when.
-        let panel = FeaturePanel {
-            cursor: start_cursor(&f),
-            ..FeaturePanel::default()
-        };
-        let slugs = vec!["b".to_owned()];
-        let view = panel_view(&panel, &f, &slugs, &PanelState::default(), 2_000);
+        // On Build only; a done Build says when.
+        let state = PanelState::default();
         assert_eq!(
-            view.stages[2].detail,
+            stage_detail(&f, Stage::Build, &state, 2_000),
             "setup failed: api: `npm ci` exited with 1"
         );
         let done = feature("d", vec![repo("api", true)], 3);
-        let view = panel_view(&panel, &done, &slugs, &PanelState::default(), 2_060);
-        assert_eq!(view.stages[2].detail, "done 1m ago by you");
+        assert_eq!(
+            stage_detail(&done, Stage::Build, &state, 2_060),
+            "done 1m ago by you"
+        );
     }
 
     #[test]
@@ -4940,18 +5716,15 @@ pub(crate) mod tests {
             ..failed(0)
         });
         assert_eq!(verify_line(&f, checks, None), None);
-        let panel = FeaturePanel {
-            cursor: start_cursor(&f),
-            ..FeaturePanel::default()
-        };
-        let slugs = vec!["v".to_owned()];
         let state = PanelState {
             ctx: checks,
             ..PanelState::default()
         };
-        let view = panel_view(&panel, &f, &slugs, &state, 2_000);
-        assert_eq!(view.stages[3].detail, Stage::Verify.about());
-        assert_eq!(view.stages[3].button, Some("Run checks"));
+        assert_eq!(
+            stage_detail(&f, Stage::Verify, &state, 2_000),
+            Stage::Verify.about()
+        );
+        assert_eq!(stage_button(&f, Stage::Verify, checks), Some("Run checks"));
     }
 
     #[test]
@@ -5111,7 +5884,6 @@ pub(crate) mod tests {
         );
         // Ctrl+R: a fresh reviewer.
         let mut panel = FeaturePanel {
-            cursor: start_cursor(&open),
             ..FeaturePanel::default()
         };
         assert_eq!(
@@ -5119,10 +5891,15 @@ pub(crate) mod tests {
             Some(PanelOutcome::StartAgent(Stage::AiReview, true))
         );
         let slugs = vec!["r".to_owned()];
-        let view = panel_view(&panel, &open, &slugs, &PanelState::default(), 2_060);
-        let row = &view.stages[4];
-        assert_eq!(row.detail, "2 findings to decide \u{b7} Enter to review");
-        assert_eq!(row.button, Some("Review findings"));
+        let state = PanelState::default();
+        let view = tab_view(&panel, &open, &slugs, &state, 2_060);
+        assert_eq!(
+            stage_detail(&open, Stage::AiReview, &state, 2_060),
+            "2 findings to decide \u{b7} Enter to review"
+        );
+        assert_eq!(view.page.buttons[0].label, "Review findings");
+        assert_eq!(view.rail[4].mark, NodeMark::Waiting);
+        assert_eq!(view.rail[4].line, "2 to decide");
         assert!(
             view.hints
                 .contains(&("Ctrl+R".into(), "fresh agent".into()))
@@ -5144,20 +5921,29 @@ pub(crate) mod tests {
             stage_button(&f, Stage::CodeReview, none),
             Some("Review code")
         );
-        let panel = FeaturePanel {
-            cursor: start_cursor(&f),
-            ..FeaturePanel::default()
-        };
-        let slugs = vec!["c".to_owned()];
-        let view = panel_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
-        assert_eq!(view.stages[5].detail, "review every changed file");
+        let state = PanelState::default();
+        assert_eq!(
+            stage_detail(&f, Stage::CodeReview, &state, 2_060),
+            "review every changed file"
+        );
         let state = PanelState {
             code_review: Some("3 of 7 files viewed".into()),
             ..PanelState::default()
         };
-        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
-        assert_eq!(view.stages[5].detail, "3 of 7 files viewed");
-        assert_eq!(view.stages[5].button, Some("Review code"));
+        assert_eq!(
+            stage_detail(&f, Stage::CodeReview, &state, 2_060),
+            "3 of 7 files viewed"
+        );
+        let actions = page_actions(&f, Stage::CodeReview, none);
+        let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_060);
+        assert_eq!(page.buttons[0].label, "Review code");
+        assert_eq!(
+            page.sections,
+            [lines(
+                "Files",
+                vec![line("3 of 7 files viewed", CheckTone::Note)]
+            )]
+        );
     }
 
     fn texts(lines: &[CheckLine]) -> Vec<(&str, CheckTone)> {
@@ -5183,22 +5969,23 @@ pub(crate) mod tests {
             stage_button(&f, Stage::ManualTest, some),
             Some("Test\u{2026}")
         );
-        let panel = FeaturePanel {
-            cursor: start_cursor(&f),
-            ..FeaturePanel::default()
-        };
-        let slugs = vec!["m".to_owned()];
         let state = PanelState {
             ctx: some,
             manual: Some("2 of 3 criteria passed \u{b7} 1 failed".into()),
+            manual_gate: Some((2, 3)),
             ..PanelState::default()
         };
-        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
         assert_eq!(
-            view.stages[6].detail,
+            stage_detail(&f, Stage::ManualTest, &state, 2_060),
             "2 of 3 criteria passed \u{b7} 1 failed"
         );
-        assert_eq!(view.stages[6].button, Some("Test\u{2026}"));
+        let node = rail_node(&f, Stage::ManualTest, &state, 2_060);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Waiting, "2 of 3 passed")
+        );
+        let actions = page_actions(&f, Stage::ManualTest, some);
+        assert_eq!(actions[0].0.label, "Test\u{2026}");
     }
 
     #[test]
@@ -5232,10 +6019,7 @@ pub(crate) mod tests {
         );
         assert_eq!(stage_button(&verifying, Stage::Ship, none), None);
         // Enter on the Ship row of the panel asks to ship.
-        let mut panel = FeaturePanel {
-            cursor: 1 + Stage::ALL.len() - 1,
-            ..FeaturePanel::default()
-        };
+        let mut panel = FeaturePanel::default();
         let slugs = vec!["s".to_owned()];
         let (mods, sym) = key(Keysym::Return);
         assert_eq!(
@@ -5261,7 +6045,10 @@ pub(crate) mod tests {
         assert_eq!(repo_button(&f, 1), None);
         assert_eq!(repo_button(&f, 2), Some(PanelOutcome::Touch("ui".into())));
         let slugs = vec!["d".to_owned()];
-        let mut panel = FeaturePanel::default();
+        let mut panel = FeaturePanel {
+            focus: TabArea::Repos,
+            ..FeaturePanel::default()
+        };
         let shift_ctrl = ModifiersState {
             ctrl: true,
             shift: true,
@@ -5277,15 +6064,15 @@ pub(crate) mod tests {
             panel.key(&mods, sym, &f, &slugs, RowCtx::default()),
             Some(PanelOutcome::Open(f.dir.clone()))
         );
-        panel.cursor = 1;
+        panel.repo = 1;
         assert_eq!(
             panel.key(&shift_ctrl, Keysym::O, &f, &slugs, RowCtx::default()),
             None
         );
         // The view: the button, the line, and the hint on that row only.
         let state = PanelState::default();
-        panel.cursor = 0;
-        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
+        panel.repo = 0;
+        let view = tab_view(&panel, &f, &slugs, &state, 2_060);
         assert_eq!(view.repos[0].button, Some("Open PR"));
         assert_eq!(view.repos[0].line, "feature/bulk \u{b7} PR api/pull/12");
         assert_eq!(view.repos[1].button, None);
@@ -5294,9 +6081,17 @@ pub(crate) mod tests {
             view.hints
                 .contains(&("Ctrl+Shift+O".into(), "open PR".into()))
         );
-        assert!(view.check.is_empty());
-        panel.cursor = 1;
-        let view = panel_view(&panel, &f, &slugs, &state, 2_060);
+        let label = |s: &PageSection| match s {
+            PageSection::Lines { label, .. } => label.clone(),
+            _ => String::new(),
+        };
+        let labels: Vec<String> = view.page.sections.iter().map(label).collect();
+        assert_eq!(labels, ["Pull requests"], "no Ship check once shipped");
+        let buttons: Vec<&str> = view.page.buttons.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(buttons, ["Reopen", "Open PR"]);
+        assert_eq!(view.page.buttons[0].style, ButtonStyle::Plain);
+        panel.repo = 1;
+        let view = tab_view(&panel, &f, &slugs, &state, 2_060);
         assert!(!view.hints.iter().any(|(k, _)| k == "Ctrl+Shift+O"));
     }
 
@@ -5510,5 +6305,370 @@ pub(crate) mod tests {
         assert_eq!(switch(&slugs, "b", false).as_deref(), Some("a"));
         assert_eq!(switch(&slugs, "a", true).as_deref(), Some("b"));
         assert_eq!(switch(&slugs[..1], "a", true), None);
+    }
+
+    /// What `actions` say on their buttons, with what they do.
+    fn labels(actions: &[(PageButton, PanelOutcome)]) -> Vec<(&str, PanelOutcome)> {
+        (actions.iter())
+            .map(|(b, o)| (b.label.as_str(), o.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_running_build_shows_its_agent_then_its_milestones() {
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut run = agent_run(Some("p1"), None);
+        run.started = 1_000;
+        f.runs.insert(Stage::Build, run);
+        let state = PanelState {
+            agent: Some("Claude Code working \u{b7} started 16m ago".into()),
+            agent_status: Some(AgentStatus::Working),
+            ..PanelState::default()
+        };
+        let none = RowCtx::default();
+        let actions = page_actions(&f, Stage::Build, none);
+        assert_eq!(
+            labels(&actions),
+            [
+                ("Show agent", PanelOutcome::ShowAgent(Stage::Build)),
+                (
+                    "Restart agent",
+                    PanelOutcome::StartAgent(Stage::Build, true)
+                ),
+            ]
+        );
+        assert_eq!(actions[0].0.style, ButtonStyle::Primary);
+        assert_eq!(actions[0].0.key, Some("\u{23ce}"));
+        assert_eq!(actions[1].0.key, Some("Ctrl+R"));
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        assert_eq!(page.title, "Build");
+        assert_eq!(
+            page.status,
+            Some(line(
+                "Claude Code working \u{b7} started 16m ago",
+                CheckTone::Note
+            ))
+        );
+        assert_eq!(
+            page.sections,
+            [PageSection::Agent {
+                icon: AgentIcon::Claude,
+                name: "Claude Code".into(),
+                dot: Dot::Working,
+                status: "Claude Code working \u{b7} started 16m ago".into(),
+                tail: Vec::new(),
+                button: Some(0),
+            }]
+        );
+        let node = rail_node(&f, Stage::Build, &state, 2_000);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Current, "running 16m")
+        );
+        // Stopped after a milestone: Continue first, and how far it got.
+        f.runs.get_mut(&Stage::Build).unwrap().stop = Some(feature::agents::Stop {
+            done: 1,
+            total: 3,
+            at: 1_900,
+        });
+        let actions = page_actions(&f, Stage::Build, none);
+        assert_eq!(actions[0].1, PanelOutcome::Continue(Stage::Build));
+        assert_eq!(actions[1].1, PanelOutcome::ShowAgent(Stage::Build));
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        assert_eq!(
+            page.sections.last(),
+            Some(&PageSection::Milestones {
+                done: 1,
+                total: 3,
+                items: Vec::new()
+            })
+        );
+        let PageSection::Agent { button, .. } = &page.sections[0] else {
+            panic!("the agent's card first");
+        };
+        assert_eq!(*button, Some(1));
+        let node = rail_node(&f, Stage::Build, &state, 2_000);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Waiting, "milestone 1/3")
+        );
+        // Its setup failing shows above.
+        f.setup = Some(feature::setup::SetupRun {
+            started: 1_000,
+            finished: Some(1_100),
+            failed: Some("api: `npm ci` exited with 1".into()),
+        });
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        assert_eq!(
+            page.sections[0],
+            lines(
+                "Setup",
+                vec![line(
+                    "failed: api: `npm ci` exited with 1",
+                    CheckTone::Blocker
+                )]
+            )
+        );
+        assert_eq!(page.status.map(|s| s.tone), Some(CheckTone::Blocker));
+    }
+
+    #[test]
+    fn a_plan_ready_asks_for_its_review() {
+        let mut f = feature("p", vec![repo("api", true)], 1);
+        let node = rail_node(&f, Stage::Plan, &PanelState::default(), 2_000);
+        assert_eq!((node.mark, node.line.as_str()), (NodeMark::Current, ""));
+        let page = stage_page(&f, Stage::Plan, &PanelState::default(), &[], 2_000);
+        assert_eq!(
+            page.sections,
+            [lines(
+                "plan.md",
+                vec![line("not written yet", CheckTone::Note)]
+            )]
+        );
+        f.runs
+            .insert(Stage::Plan, agent_run(Some("p1"), Some(1_500)));
+        let state = PanelState {
+            agent: Some("Claude Code done \u{b7} plan.md ready".into()),
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert_eq!(
+            labels(&actions),
+            [
+                ("Review plan", PanelOutcome::ReviewDoc(Stage::Plan)),
+                ("Show agent", PanelOutcome::ShowAgent(Stage::Plan)),
+                ("Restart agent", PanelOutcome::StartAgent(Stage::Plan, true)),
+            ]
+        );
+        let page = stage_page(&f, Stage::Plan, &state, &actions, 2_000);
+        assert_eq!(page.status.as_ref().map(|s| s.tone), Some(CheckTone::Ready));
+        assert!(matches!(
+            page.sections[0],
+            PageSection::Agent {
+                dot: Dot::Unknown,
+                button: Some(1),
+                ..
+            }
+        ));
+        assert_eq!(
+            page.sections[1],
+            lines("plan.md", vec![line("ready for review", CheckTone::Ready)])
+        );
+        let node = rail_node(&f, Stage::Plan, &state, 2_000);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Waiting, "ready for review")
+        );
+        // Sent back: written again.
+        let run = f.runs.get_mut(&Stage::Plan).unwrap();
+        (run.ready, run.sent_back) = (None, 2);
+        assert_eq!(
+            file_line(&f, Stage::Plan),
+            line("sent back \u{d7}2, being written again", CheckTone::Note)
+        );
+    }
+
+    #[test]
+    fn a_failed_verify_lists_its_failures_and_who_fixes_them() {
+        let mut f = feature("v", vec![repo("api", true)], 3);
+        let fails = vec![
+            "api: `npm test` exited with 1".to_owned(),
+            "web: lint".into(),
+        ];
+        f.verify = Some(feature::verify::VerifyRun {
+            n: 2,
+            started: 1_000,
+            finished: Some(1_100),
+            passed: Some(false),
+            failures: fails,
+            fixes: feature::verify::MAX_FIXES,
+            ..Default::default()
+        });
+        let checks = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let state = PanelState {
+            ctx: checks,
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Verify, checks);
+        assert_eq!(
+            labels(&actions),
+            [
+                ("Run checks", PanelOutcome::RunChecks),
+                ("Evidence", PanelOutcome::Evidence),
+            ]
+        );
+        let page = stage_page(&f, Stage::Verify, &state, &actions, 2_000);
+        assert_eq!(
+            page.status.as_ref().map(|s| s.tone),
+            Some(CheckTone::Blocker)
+        );
+        let PageSection::Lines { label, lines } = &page.sections[0] else {
+            panic!("the checks' lines");
+        };
+        assert_eq!(label, "Checks");
+        assert_eq!(
+            texts(lines),
+            [
+                ("run 2 failed", CheckTone::Blocker),
+                ("api: `npm test` exited with 1", CheckTone::Blocker),
+                ("web: lint", CheckTone::Blocker),
+                ("fix it, then Run checks", CheckTone::Note),
+            ]
+        );
+        let node = rail_node(&f, Stage::Verify, &state, 2_000);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Waiting, "failed")
+        );
+        // While they run, what they do.
+        let state = PanelState {
+            ctx: checks,
+            verify: Some("api: npm test (2 of 5)"),
+            ..PanelState::default()
+        };
+        assert_eq!(
+            checks_lines(&f, &state),
+            [line("api: npm test (2 of 5)", CheckTone::Note)]
+        );
+        assert_eq!(rail_node(&f, Stage::Verify, &state, 2_000).line, "running");
+    }
+
+    #[test]
+    fn a_blocked_ship_says_what_stops_it() {
+        let f = feature("s", vec![repo("api", true)], 7);
+        let p = probe(check(&["api has uncommitted changes"], Vec::new(), &[]));
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Ship, RowCtx::default());
+        assert_eq!(labels(&actions), [("Ship\u{2026}", PanelOutcome::Ship)]);
+        let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
+        assert_eq!(
+            page.sections,
+            [lines(
+                "Ship check",
+                vec![line("api has uncommitted changes", CheckTone::Blocker)]
+            )]
+        );
+        let node = rail_node(&f, Stage::Ship, &state, 2_000);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Current, "blocked")
+        );
+        let ready = probe(check(&[], Vec::new(), &[]));
+        let state = PanelState {
+            probe: Some(&ready),
+            ..PanelState::default()
+        };
+        assert_eq!(
+            rail_node(&f, Stage::Ship, &state, 2_000).line,
+            "ready to ship"
+        );
+    }
+
+    #[test]
+    fn a_done_stage_says_when_and_reopens_and_a_later_one_waits() {
+        let mut f = feature("d", vec![repo("api", true)], 3);
+        f.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
+        let state = PanelState::default();
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert_eq!(
+            labels(&actions),
+            [("Reopen", PanelOutcome::Untick(Stage::Plan))]
+        );
+        assert_eq!(actions[0].0.style, ButtonStyle::Plain);
+        let page = stage_page(&f, Stage::Plan, &state, &actions, 2_060);
+        assert_eq!(
+            page.status,
+            Some(line("Done 1m ago by you", CheckTone::Ready))
+        );
+        assert_eq!(
+            page.sections[0],
+            lines("Note", vec![line("looks good", CheckTone::Note)])
+        );
+        // Code changed since Build was marked: stale, Discover not.
+        let p = probe(None);
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let node = rail_node(&f, Stage::Build, &state, 2_060);
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Stale, "code changed")
+        );
+        assert_eq!(
+            rail_node(&f, Stage::Discover, &state, 2_060).mark,
+            NodeMark::Done
+        );
+        let page = stage_page(&f, Stage::Build, &state, &[], 2_060);
+        assert!(page.sections.contains(&lines(
+            "Stale",
+            vec![line(
+                "The code changed since it was marked",
+                CheckTone::Blocker
+            )]
+        )));
+        // A later stage: what it is for, what comes first, no buttons.
+        assert!(page_actions(&f, Stage::Ship, RowCtx::default()).is_empty());
+        let page = stage_page(&f, Stage::Ship, &state, &[], 2_060);
+        assert_eq!(page.about, Stage::Ship.about());
+        assert_eq!(
+            page.status,
+            Some(line("Comes after Manual test", CheckTone::Note))
+        );
+        assert!(page.sections.is_empty() && page.buttons.is_empty());
+        assert_eq!(
+            page_enter(&f, Stage::Ship, RowCtx::default()),
+            Some(PanelOutcome::NotYet(Stage::Verify))
+        );
+    }
+
+    #[test]
+    fn the_activity_is_newest_first_in_its_tones() {
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        for (at, what) in [
+            (1_000, "Brief ticked"),
+            (1_100, "Plan sent back (1)"),
+            (1_200, "Verify run 1 failed: api: npm test"),
+            (1_300, "touched web"),
+            (1_400, "Set up"),
+            (1_500, "Code changed: Build to do again"),
+            (1_600, "Verify run 2 passed"),
+        ] {
+            f.history.push(Event {
+                at,
+                what: what.into(),
+            });
+        }
+        let rows = activity(&f, 1_660);
+        let got: Vec<(&str, &str, CheckTone)> = (rows.iter())
+            .map(|r| (r.what.as_str(), r.ago.as_str(), r.tone))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Verify run 2 passed", "1m ago", CheckTone::Ready),
+                (
+                    "Code changed: Build to do again",
+                    "2m ago",
+                    CheckTone::Blocker
+                ),
+                ("Set up", "4m ago", CheckTone::Ready),
+                ("touched web", "6m ago", CheckTone::Note),
+                (
+                    "Verify run 1 failed: api: npm test",
+                    "7m ago",
+                    CheckTone::Blocker
+                ),
+                ("Plan sent back (1)", "9m ago", CheckTone::Blocker),
+                ("Brief ticked", "11m ago", CheckTone::Ready),
+            ]
+        );
+        assert_eq!(event_tone("Setup started"), CheckTone::Note);
     }
 }

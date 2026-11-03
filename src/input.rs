@@ -855,7 +855,7 @@ impl Gerdr {
             O::NewFeature => self.new_feature_controls().iter().any(on),
             O::GitIdentity => self.identity_controls().iter().any(on),
             O::ManualTest => self.manual_test_controls().iter().any(on),
-            O::Features => self.feature_panel_controls().iter().any(on),
+            O::Features => self.feature_tab_control_at(pos),
             O::ContextMenu => self
                 .context_menu
                 .as_ref()
