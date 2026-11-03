@@ -30,6 +30,7 @@ use super::{
     Feature, PerProject, Pr, Repo, ShipMode, Stage, Status,
     hook::{self, Guard},
     layout::{git, shown},
+    page,
     patch::{self, Reading},
 };
 use crate::{git as gitinfo, git_ops};
@@ -95,6 +96,12 @@ pub struct Probe {
     /// When a squash started (`Shipping::squash_at`): whether every
     /// touched repository with commits reads as merged into its base.
     pub merged: bool,
+    /// Per touched repository, by `Repo::key`: the lines it adds and
+    /// deletes against its base, uncommitted ones included; none for one
+    /// that couldn't be read (see `page::stats`).
+    pub stats: BTreeMap<String, (usize, usize)>,
+    /// The stage files in its data dir, and their milestones.
+    pub docs: page::Docs,
 }
 
 /// Each project's ship mode setting, if it has one (`Workflow::ship`).
@@ -118,9 +125,10 @@ pub fn mode_of(feature: &Feature, repo: &str, modes: &Modes) -> ShipMode {
     }
 }
 
-/// Read `feature` for the panel (see `Probe`); `modes` are its projects'
-/// settings. Makes sure of every touched repository's hook and
-/// guard file on the way (`hook::ensure`, `hook::guard_if_missing`).
+/// Read `feature` for the panel (see `Probe`), but its stage files (the
+/// caller reads them, `page::read_docs`); `modes` are its projects'
+/// settings. Makes sure of every touched repository's hook and guard file
+/// on the way (`hook::ensure`, `hook::guard_if_missing`).
 pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     let reading = patch::read(feature);
     let branch = feature.branch();
@@ -137,6 +145,8 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         guards,
         ship,
         merged,
+        stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
+        docs: page::Docs::default(),
     }
 }
 

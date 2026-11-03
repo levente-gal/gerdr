@@ -32,6 +32,7 @@ pub mod artifacts;
 pub mod hook;
 pub mod layout;
 pub mod manual;
+pub mod page;
 pub mod patch;
 pub mod review_import;
 pub mod setup;

@@ -118,6 +118,22 @@ pub struct Features {
     /// The acceptance criteria of each open feature's brief, by project
     /// and slug, as last read: none kept for a brief without.
     pub(crate) criteria: BTreeMap<(String, String), Vec<feature::manual::Criterion>>,
+    /// The last lines of the shown feature's current stage agent's pane,
+    /// while its tab shows and the pane is there.
+    tail: Option<AgentTail>,
+    /// Whether the tail's timer runs: only while a feature's tab shows.
+    tailing: bool,
+}
+
+/// The last lines of a stage agent's pane (see `page::tail`).
+#[derive(Debug, Default)]
+struct AgentTail {
+    pane: String,
+    lines: Vec<String>,
+    /// A read runs now: only one at a time.
+    reading: bool,
+    /// The read error last logged: a new one only goes to the log.
+    logged: Option<String>,
 }
 
 /// How often the patch watch looks: the feature shown, and one whose
@@ -250,6 +266,12 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         probe: Probe,
+    },
+    /// The last lines of herdr pane `pane`, the shown feature's current
+    /// stage agent's (see `page::read_tail`).
+    Tail {
+        pane: String,
+        lines: Result<Vec<String>, String>,
     },
     /// The patch-id read to mark `stage` done.
     Read {
@@ -747,6 +769,8 @@ pub enum PanelOutcome {
     ShowAgent(Stage),
     /// Review this agent stage's file.
     ReviewDoc(Stage),
+    /// Show this agent stage's file's preview (see `md_preview`).
+    Preview(Stage),
     /// Let this agent stage's agent go on after a milestone stop.
     Continue(Stage),
     /// Run Verify's checks (again).
@@ -811,6 +835,21 @@ pub struct RowCtx {
     /// How many acceptance criteria the brief has: with some, Manual test
     /// is marked from its sheet.
     pub criteria: usize,
+    /// Whether `brief.md` and `plan.md` are there, as the latest probe
+    /// found them (see `page::Docs`): their pages offer Review and
+    /// Preview then.
+    pub written: [bool; 2],
+}
+
+impl RowCtx {
+    /// Whether `stage`'s file is there: Discover's and Plan's only.
+    fn wrote(self, stage: Stage) -> bool {
+        match stage {
+            Stage::Discover => self.written[0],
+            Stage::Plan => self.written[1],
+            _ => false,
+        }
+    }
 }
 
 /// What Enter (or the row's button) does on `row` of `feature`.
@@ -1440,6 +1479,17 @@ pub fn page_actions(
             out.push((button("Show agent", ButtonStyle::Plain, None), show));
         }
     }
+    // The brief's or the plan's file, once there: read it as it is.
+    if ctx.wrote(stage) {
+        let review = PanelOutcome::ReviewDoc(stage);
+        if !has(&out, &review) {
+            out.push((button("Review", ButtonStyle::Plain, None), review));
+        }
+        out.push((
+            button("Preview", ButtonStyle::Plain, None),
+            PanelOutcome::Preview(stage),
+        ));
+    }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
         out.push((
@@ -1751,6 +1801,7 @@ impl Gerdr {
                 slug,
                 probe,
             } => self.feature_probed(&project, &slug, probe),
+            Done::Tail { pane, lines } => self.feature_tail_read(&pane, lines),
             Done::Read {
                 project,
                 slug,
@@ -1862,7 +1913,17 @@ impl Gerdr {
         let config = self.projects.workflows(feature, |w| w.verify.clone());
         let checks = !feature::verify::checks(feature, &config).is_empty();
         let criteria = self.criteria(&feature.project, &feature.slug).len();
-        RowCtx { checks, criteria }
+        let key = (feature.project.clone(), feature.slug.clone());
+        let docs = (self.features.probes.get(&key))
+            .and_then(|p| p.last.as_ref())
+            .map(|p| &p.docs);
+        let written = [Stage::Discover, Stage::Plan]
+            .map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
+        RowCtx {
+            checks,
+            criteria,
+            written,
+        }
     }
 
     // ------------------------------------------------------ patch watch
@@ -1882,6 +1943,96 @@ impl Gerdr {
         match inserted {
             Ok(_) => self.features.watching = true,
             Err(err) => tracing::warn!("watching the features' code: {err}"),
+        }
+    }
+
+    /// Read the shown feature's agent tail now, then every
+    /// `page::TAIL_EVERY` while a feature's tab shows; the timer stops
+    /// once none does.
+    fn watch_feature_tail(&mut self) {
+        self.feature_tail_tick();
+        if self.features.tailing {
+            return;
+        }
+        let every = feature::page::TAIL_EVERY;
+        let inserted =
+            self.loop_handle
+                .insert_source(Timer::from_duration(every), move |_, _, state| {
+                    if state.feature_tail_tick() {
+                        TimeoutAction::ToDuration(every)
+                    } else {
+                        state.features.tailing = false;
+                        TimeoutAction::Drop
+                    }
+                });
+        match inserted {
+            Ok(_) => self.features.tailing = true,
+            Err(err) => tracing::warn!("reading the feature agent's pane: {err}"),
+        }
+    }
+
+    /// The pane of the shown feature's current stage agent, while it is
+    /// there.
+    fn tail_pane(&self) -> Option<String> {
+        let feature = self.panel_feature()?;
+        let stage = feature.current().filter(|s| needs(*s).is_some())?;
+        let pane = feature.runs.get(&stage)?.pane.clone()?;
+        self.herdr_pane_place(&pane).is_some().then_some(pane)
+    }
+
+    /// Read the shown feature's agent tail off the thread, unless a read
+    /// runs; with no agent pane, the tail goes. Whether a feature's tab
+    /// still shows.
+    fn feature_tail_tick(&mut self) -> bool {
+        if self.features.panel.is_none() {
+            self.features.tail = None;
+            return false;
+        }
+        let Some(pane) = self.tail_pane() else {
+            self.features.tail = None;
+            return true;
+        };
+        let tail = self.features.tail.get_or_insert_with(AgentTail::default);
+        if tail.pane != pane {
+            *tail = AgentTail {
+                pane: pane.clone(),
+                ..AgentTail::default()
+            };
+        }
+        if tail.reading {
+            return true;
+        }
+        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
+            return true;
+        };
+        tail.reading = true;
+        self.feature_work(None, move |_| Done::Tail {
+            lines: feature::page::read_tail(socket, &pane),
+            pane,
+        });
+        true
+    }
+
+    /// A read of pane `pane`'s tail is back. One for a pane no longer the
+    /// tail's (the agent or the tab changed meanwhile) is dropped: the
+    /// tail of the new one is read on its own.
+    fn feature_tail_read(&mut self, pane: &str, lines: Result<Vec<String>, String>) {
+        let Some(tail) = self.features.tail.as_mut().filter(|t| t.pane == pane) else {
+            return;
+        };
+        tail.reading = false;
+        match lines {
+            Ok(lines) => {
+                tail.lines = lines;
+                tail.logged = None;
+            }
+            // What was read before stays; the agent card's status still
+            // says how it runs.
+            Err(why) if tail.logged.as_ref() != Some(&why) => {
+                tracing::warn!("reading the feature agent's pane {pane}: {why}");
+                tail.logged = Some(why);
+            }
+            Err(_) => {}
         }
     }
 
@@ -1941,9 +2092,13 @@ impl Gerdr {
         }
         probed.running = true;
         probed.at = Some(Instant::now());
+        let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
-            probe: ship::probe(&feature, &modes),
+            probe: Probe {
+                docs: feature::page::read_docs(&data),
+                ..ship::probe(&feature, &modes)
+            },
             project,
             slug,
         });
@@ -2791,6 +2946,7 @@ impl Gerdr {
             self.features.shown.insert(project.clone(), slug.clone());
             self.sync_feature_page();
             self.probe_feature(&project, &slug);
+            self.watch_feature_tail();
         }
         self.refresh_pointer_focus();
     }
@@ -2982,6 +3138,14 @@ impl Gerdr {
             }
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
             PanelOutcome::ReviewDoc(stage) => self.open_doc_review(&project, &slug, stage),
+            PanelOutcome::Preview(stage) => {
+                let data = store::dir(None, &project, &slug);
+                if let Some(path) = feature::artifacts::path(&data, stage) {
+                    self.in_feature_workspace(&project, &slug, |gerdr, w| {
+                        gerdr.open_preview(w, &path)
+                    });
+                }
+            }
             PanelOutcome::Continue(stage) => self.continue_stage_agent(&project, &slug, stage),
             PanelOutcome::RunChecks => match self.feature(&project, &slug) {
                 Some(f) if self.busy_with(&project, &slug, Job::Verify).is_some() => {
@@ -3911,6 +4075,10 @@ impl Gerdr {
             crate::feature_agents::agent_line(run, stage, agent_status, watch, now)
         });
         let manual_counts = self.manual_counts(feature);
+        let pane = run.and_then(|(_, run)| run.pane.as_deref());
+        let tail = (self.features.tail.as_ref())
+            .filter(|t| Some(t.pane.as_str()) == pane)
+            .map_or(&[][..], |t| t.lines.as_slice());
         let state = PanelState {
             busy: &busy,
             names: self.projects.names(feature),
@@ -3918,6 +4086,7 @@ impl Gerdr {
             shipping,
             agent,
             agent_status,
+            tail,
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
@@ -4255,6 +4424,8 @@ struct PanelState<'a> {
     agent: Option<String>,
     /// Its current stage's agent's status, while its tab is there.
     agent_status: Option<AgentStatus>,
+    /// The last lines of its current stage's agent's pane, as last read.
+    tail: &'a [String],
     /// What its rows need besides it.
     ctx: RowCtx,
     /// What its setup does now, while it runs.
@@ -4548,12 +4719,17 @@ fn agent_card(
         _ => format!("started {}", projects::ago(now, run.started)),
     };
     let show = PanelOutcome::ShowAgent(stage);
+    // The tail read is the current stage's agent's, while its pane is.
+    let tail = match current && run.pane.is_some() {
+        true => state.tail.to_vec(),
+        false => Vec::new(),
+    };
     Some(PageSection::Agent {
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot,
         status,
-        tail: Vec::new(),
+        tail,
         button: actions.iter().position(|(_, o)| *o == show),
     })
 }
@@ -4632,6 +4808,17 @@ fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
         .collect()
 }
 
+/// The milestones of `stage`'s file (Plan's, Build's) by name, as `probe`
+/// last read them; none while it has none.
+fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
+    let items = probe?.docs.milestones.get(&stage)?;
+    (!items.is_empty()).then(|| PageSection::Milestones {
+        done: items.iter().filter(|(done, _)| *done).count(),
+        total: items.len(),
+        items: items.clone(),
+    })
+}
+
 /// `stage`'s page of `feature`, its buttons `actions`.
 fn stage_page(
     feature: &Feature,
@@ -4680,6 +4867,7 @@ fn stage_page(
                 sections.extend(card());
                 let file = crate::feature::artifacts::name(stage).unwrap_or("file");
                 sections.push(lines(file, vec![file_line(feature, stage)]));
+                sections.extend(milestones_of(state.probe, stage));
             }
             Stage::Build => {
                 if let Some(what) = state.setup {
@@ -4689,13 +4877,15 @@ fn stage_page(
                     sections.push(lines("Setup", vec![line(text, CheckTone::Blocker)]));
                 }
                 sections.extend(card());
-                if let Some(stop) = feature.runs.get(&stage).and_then(|r| r.stop) {
-                    sections.push(PageSection::Milestones {
-                        done: stop.done as usize,
-                        total: stop.total as usize,
-                        items: Vec::new(),
-                    });
-                }
+                // The build log by name once read, else the counts of its
+                // last stop.
+                let stop = feature.runs.get(&stage).and_then(|r| r.stop);
+                let counted = stop.map(|stop| PageSection::Milestones {
+                    done: stop.done as usize,
+                    total: stop.total as usize,
+                    items: Vec::new(),
+                });
+                sections.extend(milestones_of(state.probe, stage).or(counted));
             }
             Stage::Verify => sections.push(lines("Checks", checks_lines(feature, state))),
             Stage::AiReview => {
@@ -4746,7 +4936,13 @@ fn stage_page(
 /// or a failure as a blocker, a tick or a pass as ready, the rest a note.
 fn event_tone(what: &str) -> CheckTone {
     let lower = what.to_lowercase();
+    // A stop between milestones is a pause, not a failure.
+    if lower.contains("stopped after milestone") {
+        return CheckTone::Note;
+    }
     let blocker = [
+        "couldn't",
+        "refused",
         "sent back",
         "failed",
         "code changed",
@@ -4934,7 +5130,7 @@ fn tab_view(
                 Some(PanelOutcome::OpenPr(_)) => Some("Open PR"),
                 _ => None,
             },
-            stat: None,
+            stat: state.probe.and_then(|p| p.stats.get(&r.key()).copied()),
         })
         .collect();
     let stage = panel.page_stage(feature);
@@ -6211,6 +6407,8 @@ pub(crate) mod tests {
             guards: BTreeMap::new(),
             ship,
             merged: false,
+            stats: BTreeMap::new(),
+            docs: feature::page::Docs::default(),
         }
     }
 
@@ -7104,5 +7302,149 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(event_tone("Setup started"), CheckTone::Note);
+    }
+
+    #[test]
+    fn every_gate_decision_reads_in_its_tone() {
+        for (what, tone) in [
+            ("Plan agent started: Claude Code (run 1)", CheckTone::Note),
+            ("Plan ready for review", CheckTone::Note),
+            ("Plan approved", CheckTone::Ready),
+            ("Brief sent back (2)", CheckTone::Blocker),
+            ("Verify run 3 passed", CheckTone::Ready),
+            ("Verify run 3 failed: api: npm test", CheckTone::Blocker),
+            (
+                "Verify's failures sent to the Build agent (fix 1 of 3)",
+                CheckTone::Note,
+            ),
+            ("Sent 2 findings to the Build agent", CheckTone::Note),
+            (
+                "Opened 1 pull request for \u{201c}T\u{201d}",
+                CheckTone::Ready,
+            ),
+            ("Build stopped after milestone 1 of 3", CheckTone::Note),
+            ("Shipping stopped: no gh", CheckTone::Blocker),
+            (
+                "Plan refused: the agent changed the code in api",
+                CheckTone::Blocker,
+            ),
+            (
+                "Build agent couldn't start: no coding agent CLI installed",
+                CheckTone::Blocker,
+            ),
+        ] {
+            assert_eq!(event_tone(what), tone, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_written_plan_offers_review_and_preview_and_lists_its_milestones() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        f.runs.insert(Stage::Plan, agent_run(None, None));
+        // Not there yet: neither button.
+        let none = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert!(
+            !none
+                .iter()
+                .any(|(_, o)| *o == PanelOutcome::Preview(Stage::Plan))
+        );
+        let written = RowCtx {
+            written: [true, true],
+            ..RowCtx::default()
+        };
+        let actions = page_actions(&f, Stage::Plan, written);
+        let got = labels(&actions);
+        assert!(got.contains(&("Review", PanelOutcome::ReviewDoc(Stage::Plan))));
+        assert!(got.contains(&("Preview", PanelOutcome::Preview(Stage::Plan))));
+        // Ready for review: the primary reviews, no second Review.
+        f.runs.get_mut(&Stage::Plan).unwrap().ready = Some(1_500);
+        let actions = page_actions(&f, Stage::Plan, written);
+        let reviews = (actions.iter())
+            .filter(|(_, o)| *o == PanelOutcome::ReviewDoc(Stage::Plan))
+            .count();
+        assert_eq!(reviews, 1);
+        // Its milestones by name, as the probe read them.
+        let mut p = probe(None);
+        let items = vec![(true, "API".to_owned()), (false, "UI".to_owned())];
+        p.docs.milestones.insert(Stage::Plan, items.clone());
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Plan, &state, &actions, 2_000);
+        assert_eq!(
+            page.sections.last(),
+            Some(&PageSection::Milestones {
+                done: 1,
+                total: 2,
+                items
+            })
+        );
+    }
+
+    #[test]
+    fn the_build_page_shows_its_log_by_name_and_its_agent_tail() {
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
+        f.runs.get_mut(&Stage::Build).unwrap().stop = Some(feature::agents::Stop {
+            done: 1,
+            total: 3,
+            at: 1_900,
+        });
+        let mut p = probe(None);
+        let items = vec![
+            (true, "API".to_owned()),
+            (true, "UI".to_owned()),
+            (false, "Docs".to_owned()),
+        ];
+        p.docs.milestones.insert(Stage::Build, items.clone());
+        let tail = vec!["Editing src/a.rs".to_owned(), "Running tests".to_owned()];
+        let state = PanelState {
+            probe: Some(&p),
+            tail: &tail,
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Build, RowCtx::default());
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        // The log read beats the counts of the last stop.
+        assert_eq!(
+            page.sections.last(),
+            Some(&PageSection::Milestones {
+                done: 2,
+                total: 3,
+                items
+            })
+        );
+        let PageSection::Agent { tail: shown, .. } = &page.sections[0] else {
+            panic!("the agent's card first");
+        };
+        assert_eq!(shown, &tail);
+        // Another stage's card has no tail: it is the current agent's.
+        let plan = stage_page(&f, Stage::Plan, &state, &[], 2_000);
+        assert!(!plan.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent { tail, .. } if !tail.is_empty()
+        )));
+    }
+
+    #[test]
+    fn a_repository_row_shows_its_line_stat_once_read() {
+        let f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "b".into(),
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["b".to_owned()];
+        let mut p = probe(None);
+        p.stats.insert(f.repos[0].key(), (12, 3));
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let view = tab_view(&panel, &f, &slugs, &state, 2_060);
+        let stats: Vec<_> = view.repos.iter().map(|r| r.stat).collect();
+        // The one not read shows none, not a zero.
+        assert_eq!(stats, [Some((12, 3)), None]);
     }
 }

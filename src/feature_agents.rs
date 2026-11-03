@@ -688,6 +688,16 @@ fn doc_word(stage: Stage) -> &'static str {
 }
 
 impl Gerdr {
+    /// Note in feature `slug`'s history that `stage`'s agent couldn't
+    /// start, `why`: the toast goes, the activity keeps it.
+    fn log_not_started(&mut self, project: &str, slug: &str, stage: Stage, why: &str) {
+        if let Some(f) = self.feature_mut(project, slug) {
+            let what = format!("{} agent couldn't start: {why}", stage.label());
+            f.log(feature::now(), what);
+            self.save_feature(project, slug);
+        }
+    }
+
     /// Start `stage`'s agent for feature `slug` (`fresh`: a new one even
     /// when its last run's pane is still there).
     pub fn start_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, fresh: bool) {
@@ -747,9 +757,11 @@ impl Gerdr {
                 let why = "No coding agent CLI is installed: install Claude Code, Codex or Cursor Agent, or set one under [agents] in Settings";
                 crate::problems::report("features", why);
                 self.show_error(why.to_owned());
+                self.log_not_started(project, slug, stage, "no coding agent CLI installed");
                 return false;
             }
             Pick::Refused(why) => {
+                self.log_not_started(project, slug, stage, &why);
                 self.show_warning(why);
                 return false;
             }
@@ -776,6 +788,7 @@ impl Gerdr {
                     "Couldn't write the {} prompt: {err}",
                     stage.label()
                 ));
+                self.log_not_started(project, slug, stage, "its prompt couldn't be written");
                 return false;
             }
         };
@@ -784,6 +797,7 @@ impl Gerdr {
         if let Err(err) = written {
             tracing::warn!("writing {}: {err}", prompt.display());
             self.show_error(format!("Couldn't write {}: {err}", prompt.display()));
+            self.log_not_started(project, slug, stage, "its prompt couldn't be written");
             return false;
         }
         let command = command_line(&base, &prompt, &feature.agent_dirs(&data));

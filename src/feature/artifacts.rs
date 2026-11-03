@@ -115,6 +115,19 @@ pub fn milestones(text: &str) -> (usize, usize) {
     (ticked, boxes.len())
 }
 
+/// Each checkbox item of `text`'s Milestones section, in order: whether
+/// it is ticked, and its text after the box ("API endpoint").
+pub fn milestone_items(text: &str) -> Vec<(bool, String)> {
+    let body = Sections::of(text).get("Milestones").unwrap_or_default();
+    body.iter()
+        .filter_map(|line| {
+            let mark = checkbox(line)?;
+            let rest = list_item(line)?.strip_prefix(mark)?;
+            Some((mark != "[ ]", rest.trim().to_owned()))
+        })
+        .collect()
+}
+
 /// The repositories of `repos` the plan's Repositories section doesn't
 /// name (a word match, case-insensitive).
 pub fn unnamed_repos<'a>(text: &str, repos: &[&'a str]) -> Vec<&'a str> {
@@ -399,6 +412,23 @@ mod tests {
         // Boxes in code don't count.
         let fenced = "## Milestones\n```\n- [ ] a\n```\n- [x] b\n";
         assert_eq!(milestones(fenced), (1, 1));
+    }
+
+    #[test]
+    fn milestone_items_name_each_box_and_whether_it_is_ticked() {
+        let log = "# Build\n\n## Milestones\n- [x] API\n  Endpoint added.\n* [X] UI\n1. [ ] Docs\n2) [ ]Tests\n```\n- [x] fenced\n```\n\n## Notes\n- [ ] not a milestone\n";
+        assert_eq!(
+            milestone_items(log),
+            vec![
+                (true, "API".to_owned()),
+                (true, "UI".to_owned()),
+                (false, "Docs".to_owned()),
+                (false, "Tests".to_owned()),
+            ]
+        );
+        assert_eq!(milestone_items(log).len(), milestones(log).1);
+        assert!(milestone_items("").is_empty());
+        assert!(milestone_items("## Milestones\n- API\n").is_empty());
     }
 
     #[test]
