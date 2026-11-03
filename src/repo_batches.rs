@@ -722,7 +722,20 @@ impl Gerdr {
 
     /// Close the panel, kept as it is for opening again; the edits made
     /// from its diff can no longer be undone.
+    /// The diff a vim edit landed in: the open panel's or popup's, else
+    /// the file's tab's.
+    fn edited_diff(&mut self) -> Option<&mut crate::diff_view::DiffView> {
+        match self.repos.is_open() {
+            true => self.repos.diff_mut(),
+            false => self.wd_mut().map(|wd| &mut wd.diff),
+        }
+    }
+
     fn close_repos(&mut self) {
+        // Nothing to close in a file's tab.
+        if !self.repos.is_open() {
+            return;
+        }
         // A commit's diff closes with the panel it was opened over.
         let commit = self.wd().is_some_and(|wd| wd.commit.is_some());
         if self.wd().is_some() {
@@ -978,7 +991,7 @@ impl Gerdr {
             return;
         };
         // The gap beside the file's preview drags their split.
-        if let Some(drag) = self.dock_divider_at(pos) {
+        if let Some(drag) = self.doc_gap_at(pos) {
             self.drag = Some(drag);
             return;
         }
@@ -987,6 +1000,12 @@ impl Gerdr {
             return self.close_repos();
         };
         match hit {
+            ReposHit::Mode(i) => {
+                if let Some(mode) = self.doc_mode_at(i) {
+                    self.set_doc_mode(mode);
+                }
+                return;
+            }
             ReposHit::More => {
                 if let Some(more) = layout.more {
                     let hints: Vec<&Hint> =
@@ -1310,6 +1329,10 @@ impl Gerdr {
             wd.hover = hit;
             return match hit? {
                 ReposHit::Search(part) => search_tip(&layout, part),
+                ReposHit::Mode(i) if view.modes.as_ref().is_some_and(|m| m.off.contains(&i)) => {
+                    let part = layout.modes.as_ref()?.1.get(i)?;
+                    Some(Tooltip::new(crate::md_preview::NO_EXTENSION, *part))
+                }
                 _ => None,
             };
         }
@@ -1732,7 +1755,7 @@ impl Gerdr {
     /// done again with `U` no longer), marked in the tree, the caret to go
     /// where the edit left it once the diff is read again.
     fn repos_edited(&mut self, done: Done) {
-        if let Some(diff) = self.repos.diff_mut() {
+        if let Some(diff) = self.edited_diff() {
             diff.place_caret(done.root.clone(), done.path.clone(), done.then);
         }
         let root = done.root.clone();
@@ -1786,7 +1809,7 @@ impl Gerdr {
         };
         match diff_edit::redo(&done, !again) {
             Ok(spot) => {
-                if let Some(diff) = self.repos.diff_mut() {
+                if let Some(diff) = self.edited_diff() {
                     diff.place_caret(done.root.clone(), done.path.clone(), spot);
                 }
                 let root = done.root.clone();

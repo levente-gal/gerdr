@@ -448,6 +448,7 @@ mod tests {
 
     fn tab(id: Option<&str>, layout: SavedNode) -> TabRecord {
         TabRecord {
+            doc: None,
             herdr_tab: id.map(str::to_owned),
             layout,
             label: None,

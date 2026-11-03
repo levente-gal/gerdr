@@ -8,7 +8,8 @@
 //! a restart shows it again: gerdr takes a tab as a preview once its
 //! extension reports the page (`Gerdr::preview_page`). The file is read
 //! again with every Git status read and after an edit in its review, and
-//! sent again when it, the theme or its review changed.
+//! sent again when it, the theme or its review changed. The page lives in
+//! the file's tab, which opens it (see `doc_tab`).
 //!
 //! The markdown is an agent's, and the page has the extension's rights:
 //! raw HTML in it is left out (comrak's `unsafe` stays off), and the page
@@ -23,7 +24,6 @@ use std::{
 
 use crate::{
     Gerdr, Theme,
-    feature::{Stage, artifacts, store},
     web_control::{self, EXTENSION_ID},
 };
 
@@ -109,8 +109,6 @@ pub struct Shown {
     pub title: String,
     pub body: Result<String, String>,
     pub dark: bool,
-    /// The file is a feature stage's: the page offers to review it.
-    pub review: bool,
     /// Its review's comments, by the line they are on: the page marks
     /// their blocks.
     pub marks: Vec<(usize, String)>,
@@ -118,12 +116,11 @@ pub struct Shown {
 
 impl Shown {
     /// `file` (named `name`) read and rendered.
-    fn of(file: &Path, name: &str, dark: bool, review: bool) -> Self {
+    fn of(file: &Path, name: &str, dark: bool) -> Self {
         Shown {
             title: format!("Preview \u{b7} {name}"),
             body: read(file, name).map(|text| render(&text)),
             dark,
-            review,
             marks: Vec::new(),
         }
     }
@@ -162,26 +159,18 @@ fn read(file: &Path, name: &str) -> Result<String, String> {
 }
 
 /// The web tabs showing a preview, by pane; and how one shows beside its
-/// file's review (see `md_dock`).
+/// file's review (see `doc_tab`).
 pub struct Previews {
     shown: HashMap<u32, Preview>,
-    /// Ctrl+Shift+V took the preview away from beside the review, until
-    /// the review closes.
-    pub undocked: bool,
-    /// The review's share of the output's width beside its preview.
+    /// The review's share of the tab's width beside its preview.
     pub share: f64,
-    /// The preview's pane and place beside the review, as the windows
-    /// were laid out last.
-    pub docked: Option<(u32, crate::chrome::Rect)>,
 }
 
 impl Default for Previews {
     fn default() -> Self {
         Previews {
             shown: HashMap::new(),
-            undocked: false,
             share: crate::chrome::DOCK_SHARE,
-            docked: None,
         }
     }
 }
@@ -249,37 +238,6 @@ impl Previews {
 }
 
 impl Gerdr {
-    /// Show `file`'s preview in workspace `w`: its tab if one shows it,
-    /// else a new one. Without gerdr's extension, it can't: an error says
-    /// so.
-    pub fn open_preview(&mut self, w: usize, file: &Path) {
-        let Some(ws) = self.workspaces.get(w) else {
-            return;
-        };
-        let url = page_url(file);
-        let dir = ws.dir.clone();
-        if !self.steers(&url, &dir) {
-            crate::problems::report(PROBLEM, NO_EXTENSION);
-            return self.show_error(NO_EXTENSION.into());
-        }
-        crate::problems::clear(PROBLEM);
-        self.open_page(w, url);
-    }
-
-    /// Show the file under review's preview, in the review's workspace:
-    /// the review closes for it, its comments kept.
-    pub fn open_doc_preview(&mut self) {
-        let Some(wd) = self.wd() else {
-            return;
-        };
-        let Some(doc) = wd.doc.as_ref() else {
-            return;
-        };
-        let (w, file) = (wd.workspace, doc.path.clone());
-        self.close_worktree_diff();
-        self.open_preview(w, &file);
-    }
-
     /// Take `pane`, whose tab the extension says is at `url`, as a
     /// preview if `url` is one, its file sent to it; one gone elsewhere is
     /// not one any more.
@@ -337,8 +295,7 @@ impl Gerdr {
         let name = file.file_name().unwrap_or(file.as_os_str());
         let name = name.to_string_lossy().into_owned();
         let dark = self.theme() == Theme::Dark;
-        let review = self.doc_at(&file).is_some();
-        let mut shown = Shown::of(&file, &name, dark, review);
+        let mut shown = Shown::of(&file, &name, dark);
         shown.marks = self.review_marks(&file).map(|(_, m)| m).unwrap_or_default();
         let marks = marks_hash(&shown.marks);
         let hash = shown.hash();
@@ -384,32 +341,6 @@ impl Gerdr {
         }
     }
 
-    /// The feature stage whose file `file` is: its project, slug and stage.
-    pub(crate) fn doc_at(&self, file: &Path) -> Option<(String, String, Stage)> {
-        let name = file.file_name()?.to_str()?;
-        let stage = Stage::ALL
-            .into_iter()
-            .find(|&stage| artifacts::name(stage) == Some(name))?;
-        let dir = file.parent()?;
-        self.features.all.iter().find_map(|(project, features)| {
-            let feature = features
-                .iter()
-                .find(|f| store::dir(None, project, &f.slug) == dir)?;
-            Some((project.clone(), feature.slug.clone(), stage))
-        })
-    }
-
-    /// The page of `pane`'s preview asked to review its file.
-    pub(crate) fn preview_review(&mut self, pane: u32) {
-        let Some(file) = self.previews.shown.get(&pane).map(|p| p.file.clone()) else {
-            return;
-        };
-        match self.doc_at(&file) {
-            Some((project, slug, stage)) => self.open_doc_review(&project, &slug, stage),
-            None => self.show_warning("That file isn't a feature's to review".into()),
-        }
-    }
-
     /// A link clicked in `pane`'s preview: a web page opens in a tab of
     /// the preview's workspace.
     pub(crate) fn preview_link(&mut self, pane: u32, url: &str) {
@@ -426,7 +357,7 @@ impl Gerdr {
     }
 
     /// The workspace and tab `pane` is in, shown or on its way.
-    fn pane_place(&self, pane: u32) -> Option<(usize, usize)> {
+    pub(crate) fn pane_place(&self, pane: u32) -> Option<(usize, usize)> {
         self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             let t = ws.tabs.iter().position(|tab| {
                 tab.panes.iter().any(|p| p.id == pane)
@@ -484,12 +415,12 @@ mod tests {
         let big = dir.join("big.md");
         std::fs::write(&big, "a".repeat(FILE_MAX as usize + 1)).unwrap();
         let gone = dir.join("gone.md");
-        let shown = Shown::of(&big, "big.md", true, false);
+        let shown = Shown::of(&big, "big.md", true);
         assert_eq!(shown.body, Err("big.md is too big to preview".into()));
-        let shown = Shown::of(&gone, "gone.md", true, false);
+        let shown = Shown::of(&gone, "gone.md", true);
         assert_eq!(shown.body, Err("gone.md is gone".into()));
         std::fs::write(&gone, "# Hi\n").unwrap();
-        let shown = Shown::of(&gone, "gone.md", false, true);
+        let shown = Shown::of(&gone, "gone.md", false);
         assert_eq!(shown.title, "Preview \u{b7} gone.md");
         assert!(shown.body.unwrap().contains("<h1"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -500,23 +431,21 @@ mod tests {
         // Every byte an escape in JSON, as `<` is in HTML: the worst case.
         let text = "<".repeat(FILE_MAX as usize);
         let html = render(&text);
-        let shown = |dark, review, marks| Shown {
+        let shown = |dark, marks| Shown {
             title: "P".into(),
             body: Ok(String::new()),
             dark,
-            review,
             marks,
         };
-        let dark = shown(true, false, Vec::new());
+        let dark = shown(true, Vec::new());
         assert_eq!(web_control::preview_message(1, &dark, Ok(&html)), None);
         let why = web_control::preview_message(1, &dark, Err("big.md is too big"));
         assert!(why.is_some_and(|m| m.len() <= web_control::MESSAGE_MAX));
-        let marked = shown(false, true, vec![(3, "Say why".into())]);
+        let marked = shown(false, vec![(3, "Say why".into())]);
         let fits = web_control::preview_message(1, &marked, Ok("<p>hi</p>")).unwrap();
         let fits: serde_json::Value = serde_json::from_slice(&fits).unwrap();
         assert_eq!(fits["type"], "preview");
         assert_eq!(fits["html"], "<p>hi</p>");
-        assert_eq!(fits["review"], true);
         assert_eq!(fits["marks"], serde_json::json!([[3, "Say why"]]));
         assert!(fits.get("error").is_none());
     }

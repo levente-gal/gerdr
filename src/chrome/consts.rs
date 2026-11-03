@@ -245,7 +245,7 @@ pub(super) const BAR_INSET: i32 = 4;
 pub(super) const BAR_NOTE_GAP: i32 = 8;
 
 /// How wide the output must be for a file under review to show its
-/// preview beside it (see `md_dock`), in logical pixels.
+/// preview beside it (see `doc_tab`), in logical pixels.
 pub const DOCK_MIN_WIDTH: i32 = 1400;
 /// The review's share of the output's width beside its preview, as it
 /// starts and as far as its split is dragged.

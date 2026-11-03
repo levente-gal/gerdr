@@ -90,6 +90,7 @@ impl Gerdr {
             (self.inbox.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
             (self.scrollback.as_mut()).is_some_and(|viewer| viewer.stop_fling()),
             self.feature_tab_stop_fling(),
+            (self.review_tab_mut()).is_some_and(|tab| tab.wd.diff.scroll.stop_fling()),
         ]
         .contains(&true)
     }

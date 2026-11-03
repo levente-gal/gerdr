@@ -39,7 +39,7 @@ impl Gerdr {
         let bars: &[Bar] = match self.overlay_at(pos) {
             Some(Overlay::ProjectMenu) => &[Bar::ProjectMenu],
             Some(Overlay::Worktrees) => &[Bar::Worktrees],
-            Some(Overlay::Repos) => &[Bar::ReposTree, Bar::ReposDetail],
+            Some(Overlay::Repos | Overlay::Doc) => &[Bar::ReposTree, Bar::ReposDetail],
             Some(Overlay::Inbox) => &[Bar::Inbox],
             Some(Overlay::Scrollback) => &[Bar::Scrollback],
             Some(Overlay::Switcher) => &[Bar::Switcher],

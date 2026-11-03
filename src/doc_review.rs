@@ -2,15 +2,16 @@
 //! file shown as all added lines, so line comments work as on code, with
 //! Approve and Send back on its header (see `feature_agents`).
 //!
-//! It shows across the repositories panel, as a worktree's diff does (see
-//! `worktree_diff::DocOf`). The diff's vim edits change the file while its
-//! agent isn't writing it (`locked`); a restore has nothing to put back.
+//! It shows in the file's tab (see `doc_tab`), with the same diff a worktree
+//! has (see `worktree_diff::DocOf`). The diff's vim edits change the file
+//! while its agent isn't writing it (`locked`); a restore has nothing to put
+//! back.
 //! Sending it back tells the agent when the user edited it since it was
 //! written (`artifacts::edited_since_written`). The file is read again with every
 //! Git status read, so an agent writing it again shows; the comments find
 //! their lines again, or say they are outdated. They are kept in the
-//! feature's data dir (`<stage>-comments.json`), so closing and opening
-//! the review again keeps them, and deleted once the file is approved or
+//! feature's data dir (`<stage>-comments.json`), so closing its tab and
+//! opening it again keeps them, and deleted once the file is approved or
 //! sent back.
 //!
 //! Verify's `evidence.md` shows in the same view, only read: no comments,
@@ -30,7 +31,7 @@ use crate::{
     features::Job,
     review::{self, Review},
     toast::Level,
-    worktree_diff::{DocOf, EVIDENCE_READ_ONLY, WorktreeDiff},
+    worktree_diff::{DocOf, EVIDENCE_READ_ONLY},
 };
 
 /// Which of a feature's files a review shows.
@@ -255,7 +256,6 @@ impl Gerdr {
             title,
             state: file.state(Some(feature), running),
             text: None,
-            back: false,
             locked: file.locked(Some(feature)),
         };
         Ok((doc, text))
@@ -272,63 +272,7 @@ impl Gerdr {
     /// Show feature `slug`'s `evidence.md` (see `feature::verify`) in the
     /// same view, read-only, without Approve or Send back.
     pub fn open_evidence(&mut self, project: &str, slug: &str) {
-        self.open_doc(project, slug, DocFile::Evidence);
-    }
-
-    /// Show `stage`'s file of feature `slug` for review.
-    pub fn open_doc_review(&mut self, project: &str, slug: &str, stage: Stage) {
-        self.open_doc(project, slug, DocFile::Stage(stage));
-    }
-
-    /// Show `file` of feature `slug`.
-    fn open_doc(&mut self, project: &str, slug: &str, file: DocFile) {
-        match self.read_doc(project, slug, file) {
-            Ok((doc, text)) => {
-                let review = match file {
-                    DocFile::Stage(_) => review::load_file(&doc.comments),
-                    DocFile::Evidence => Review::default(),
-                };
-                self.show_doc(doc, text, review);
-            }
-            Err(failed) => self.show_failed(failed),
-        }
-    }
-
-    /// Show `doc`, read as `text`, its review comments `review`: back to
-    /// the feature panel on close when that is open on its feature.
-    fn show_doc(&mut self, mut doc: DocOf, text: String, review: Review) {
-        doc.back = (self.features.panel.as_ref())
-            .is_some_and(|p| p.project == doc.project && p.slug == doc.slug);
-        // It covers the other panels: they close, the repositories panel
-        // kept as it was.
-        self.switcher = None;
-        self.project_menu = None;
-        self.tasks_panel = None;
-        if self.inbox.is_open() {
-            self.close_inbox();
-        }
-        self.scrollback = None;
-        self.worktrees.close();
-        self.stop_key_repeat();
-        self.close_menu();
-        self.tooltip.hide();
-        self.chrome.drop_tooltip();
-        if self.wd().is_some() {
-            self.worktree_save_review();
-            self.repos.close_worktree();
-        }
-        if let Some(panel) = self.repos.panel.take() {
-            self.repos.kept = Some((self.project.clone(), panel));
-        }
-        let w = (self.feature_workspace(&doc.project, &doc.slug)).unwrap_or(self.active_workspace);
-        let wd = WorktreeDiff::of_doc(doc, w, review);
-        self.repos.worktree = Some(wd);
-        let env = self.worktree_env();
-        if let Some(wd) = self.wd_mut() {
-            wd.set_doc(Ok(text), env);
-        }
-        // It takes the pointer from the client under it.
-        self.refresh_pointer_focus();
+        self.open_doc_tab(project, slug, DocFile::Evidence, None);
     }
 
     /// The file under review, if one is open.
@@ -390,16 +334,6 @@ impl Gerdr {
         }
     }
 
-    /// Close the file under review: back to the feature panel when it
-    /// was opened from there.
-    pub(crate) fn close_doc_review(&mut self) {
-        let back = self.doc_of().filter(|d| d.back).cloned();
-        self.close_worktree_diff();
-        if let Some(doc) = back {
-            self.open_feature(&doc.project, &doc.slug);
-        }
-    }
-
     /// Approve the file under review: asked first when comments on it
     /// would go unsent.
     pub(crate) fn doc_approve(&mut self) {
@@ -444,23 +378,24 @@ impl Gerdr {
     }
 
     /// `stage` of feature `slug` is approved or sent back: its comments
-    /// deleted, and its review, if open, closed, back to the feature panel
-    /// when it was opened from there.
+    /// deleted, in the file and in its tab if it has one, and that tab, if
+    /// it shows, gives way to the feature's. The tab stays, for the next
+    /// look at the file.
     fn doc_done(&mut self, project: &str, slug: &str, stage: Stage) {
         let dir = store::dir(None, project, slug);
         self.doc_write_review(&comments_path(&dir, stage), &Review::default());
-        let open = self
-            .doc_of()
-            .filter(|d| d.project == project && d.slug == slug && d.file == DocFile::Stage(stage))
-            .map(|d| d.back);
-        if let Some(back) = open {
-            if let Some(wd) = self.wd_mut() {
+        let file = DocFile::Stage(stage);
+        let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file == file;
+        let tabs = self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs);
+        for wd in tabs.filter_map(|tab| tab.review_mut()).map(|r| &mut r.wd) {
+            if wd.doc.as_ref().is_some_and(is_it) {
+                wd.diff.review = Review::default();
                 wd.diff.review_dirty = false;
             }
-            self.close_worktree_diff();
-            if back {
-                self.open_feature(project, slug);
-            }
+        }
+        if self.doc_of().is_some_and(is_it) {
+            self.doc_review_read();
+            self.show_feature_tab(project, slug);
         }
     }
 }

@@ -192,9 +192,13 @@ pub struct ChromeView {
     pub density: Density,
     pub sidebar_width: i32,
     pub size: Size<i32, Logical>,
-    /// What the repositories panel is centred in: the output, or its left
-    /// part beside a preview (see `md_dock`).
+    /// What the repositories panel is centred in: the output.
     pub repos_rect: Rect,
+    /// The review tab showing, painted flat in the tab's own place (see
+    /// `doc_tab`), whatever opens over it.
+    pub doc_tab: Option<ReposView>,
+    /// Where the review tab goes: the tab's place.
+    pub doc_tab_rect: Rect,
     pub scale: f64,
 }
 
@@ -224,6 +228,7 @@ pub struct Chrome {
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
     repos: ReposLayers,
+    doc: ReposLayers,
     inbox: InboxLayers,
     scrollback: ScrollbackLayers,
     /// One per toast, by id, kept while it fades out.
@@ -288,6 +293,7 @@ impl Chrome {
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
+            doc: ReposLayers::default(),
             inbox: InboxLayers::default(),
             scrollback: ScrollbackLayers::default(),
             toasts: Vec::new(),
@@ -627,6 +633,15 @@ impl Chrome {
                     now,
                     painter,
                 )),
+                // A file's tab, flat in the tab's place, under every popup.
+                Kind::Doc => parts.extend(self.doc.parts(
+                    view.doc_tab.take(),
+                    area,
+                    theme,
+                    scale,
+                    now,
+                    painter,
+                )),
                 // The repositories panel, over nearly everything.
                 Kind::Repos => parts.extend(self.repos.parts(
                     view.repos.take(),
@@ -885,6 +900,8 @@ struct Overlay<K> {
     present: bool,
     /// The parts over it last worked out (see `parts`).
     more: Vec<Part>,
+    /// It comes and goes at once, without a fade.
+    instant: bool,
 }
 
 /// A toast's overlay: the toast, its width, what of it is lit (its
@@ -903,6 +920,7 @@ impl<K> Default for Overlay<K> {
             fade: None,
             present: false,
             more: Vec::new(),
+            instant: false,
         }
     }
 }
@@ -979,6 +997,10 @@ impl<K: PartialEq> Overlay<K> {
         draw: impl FnOnce(&K) -> MemoryRenderBuffer,
     ) -> Option<(Part, i32, f32)> {
         let present = view.is_some();
+        if present != self.present && self.instant {
+            self.fade = None;
+            self.present = present;
+        }
         if present != self.present {
             let from = match self.fade {
                 Some(fade) => fade.value(now),
@@ -1152,8 +1174,14 @@ fn hit_rects(
             );
         }
     }
-    if let Some(panel) = &view.repos {
-        let layout = repos_layout(panel, view.repos_rect);
+    let panels = [
+        (&view.repos, view.repos_rect),
+        (&view.doc_tab, view.doc_tab_rect),
+    ];
+    for (panel, rect) in panels {
+        let Some(panel) = panel else { continue };
+        let layout = repos_layout(panel, rect);
+        rects.extend(layout.modes.into_iter().flat_map(|(_, segments)| segments));
         for (line, check, expander) in layout.lines {
             rects.extend(
                 [line, check]

@@ -232,8 +232,8 @@ pub(crate) fn works_over(over: overlay::Overlay, action: &Action) -> bool {
         overlay::Overlay::Welcome => over_welcome(action),
         // A dialog asks first: nothing else goes on over it.
         o if o.is_dialog() => false,
-        // The feature panel is a tab: every key works there.
-        overlay::Overlay::Features => true,
+        // The feature panel and a file's tab are tabs: every key works there.
+        overlay::Overlay::Features | overlay::Overlay::Doc => true,
         _ => over_panel(action),
     }
 }
@@ -278,7 +278,7 @@ fn drag_cursor(drag: &Drag) -> CursorIcon {
     match drag {
         Drag::Sidebar
         | Drag::ReposSplit
-        | Drag::DockSplit
+        | Drag::DocSplit
         | Drag::Split {
             dir: Dir::Right, ..
         } => CursorIcon::ColResize,
@@ -437,6 +437,16 @@ impl Gerdr {
                             state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
+                        // A file's tab showing its page takes what acts on
+                        // the file: the page has all else.
+                        if state.review_tab().is_some()
+                            && crate::doc_tab::doc_preview_key(mods, sym)
+                        {
+                            state.suppressed_keys.push(code);
+                            let typed = handle.modified_sym();
+                            let out = state.overlay_key(Overlay::Repos, mods, sym, typed);
+                            return FilterResult::Intercept(out);
+                        }
                         // Esc takes down the tooltip and the pinned help,
                         // and still goes on to the app: it may be what
                         // leaves a mode there.
@@ -573,23 +583,23 @@ impl Gerdr {
                 // lists moves instead (see `overlay_scroll`), if it lists
                 // anything.
                 // A file's preview beside its review scrolls itself.
-                let on_dock = self.on_dock(self.pointer);
-                if let Some(top) = self.grabbing_overlay().filter(|_| !on_dock) {
+                if let Some(top) = self.grabbing_overlay() {
                     if let Some(motion) = motion {
                         self.overlay_scroll(top, motion);
                     }
                     return;
                 }
-                // Over the feature panel's tab, its repositories move.
-                if at == Some(overlay::Overlay::Features) {
+                // Over the feature panel's tab, its repositories move;
+                // over a file's tab, its review.
+                if let Some(tab @ (overlay::Overlay::Features | overlay::Overlay::Doc)) = at {
                     if let Some(motion) = motion {
-                        self.overlay_scroll(overlay::Overlay::Features, motion);
+                        self.overlay_scroll(tab, motion);
                     }
                     return;
                 }
                 // Over a toast, the help panel or the footer, nothing
                 // moves.
-                if (at.is_some() || self.on_footer(self.pointer)) && !on_dock {
+                if at.is_some() || self.on_footer(self.pointer) {
                     return;
                 }
                 // Over the sidebar, its rows scroll.
@@ -653,11 +663,6 @@ impl Gerdr {
         if let Some(hit) = hit {
             self.overlay_press(hit, location, button);
             return true;
-        }
-        // A file's preview beside its review takes its own presses, and
-        // the keys stay with the review (see `md_dock`).
-        if self.on_dock(location) {
-            return false;
         }
         // The mouse's back and forward buttons over gerdr's own parts go
         // back and forward through the tabs shown; a window under the
@@ -788,7 +793,7 @@ impl Gerdr {
             // A press anywhere while the menu is open goes to it: off it,
             // it closes the menu.
             (O::ContextMenu, _) => return self.menu_press(pos),
-            (O::Repos, BTN_RIGHT) => return self.repos_right_click(pos),
+            (O::Repos | O::Doc, BTN_RIGHT) => return self.repos_right_click(pos),
             (_, BTN_LEFT) => {}
             _ => return,
         }
@@ -822,7 +827,7 @@ impl Gerdr {
             O::Welcome => _ = self.welcome_click(pos),
             O::ProjectMenu => self.project_menu_click(pos),
             O::Worktrees => self.worktrees_click(pos),
-            O::Repos => self.repos_click(pos),
+            O::Repos | O::Doc => self.repos_click(pos),
             O::Inbox => self.inbox_click(pos),
             O::Scrollback => self.scrollback_click(pos),
             O::Switcher => self.switcher_click(pos),
@@ -861,7 +866,7 @@ impl Gerdr {
                 .as_ref()
                 .is_some_and(|menu| menu.item_at(pos).is_some()),
             O::Toasts => true,
-            O::Repos => self.repos_view().is_some_and(|view| {
+            O::Repos | O::Doc => self.repos_view().is_some_and(|view| {
                 let layout = chrome::repos_layout(&view, self.repos_rect());
                 let mut controls = layout
                     .lines
@@ -869,6 +874,7 @@ impl Gerdr {
                     .map(|(line, ..)| *line)
                     .chain(layout.buttons.iter().map(|(_, r)| *r))
                     .chain(layout.detail_tabs.iter().map(|(_, r)| *r))
+                    .chain(layout.modes.iter().flat_map(|(_, parts)| parts.clone()))
                     .chain([layout.branch])
                     .chain(layout.more)
                     .chain(layout.branch_menu.iter().flat_map(|(_, rows)| rows.clone()));
@@ -1110,6 +1116,11 @@ impl Gerdr {
         // everything under it; its icons have tooltips of their own.
         let at = self.overlay_at(pos);
         let overlay_tip = at.and_then(|overlay| self.overlay_hover(overlay, pos));
+        if at != Some(overlay::Overlay::Doc)
+            && let Some(review) = self.review_tab_mut()
+        {
+            review.wd.hover = None;
+        }
         // The keys of the help panel light up under the pointer.
         self.help_hover = if at == Some(overlay::Overlay::Help) {
             self.help_hit(pos)
@@ -1251,8 +1262,11 @@ impl Gerdr {
     /// one on top that grabs it. The dialogs have none.
     fn text_overlay(&self) -> Option<Overlay> {
         use crate::overlay::Overlay as O;
-        // The feature panel's tab, with nothing over it.
+        // The feature panel's tab or a file's tab, with nothing over it.
         let Some(top) = self.grabbing_overlay() else {
+            if self.key_overlay() == Some(O::Doc) {
+                return Some(Overlay::Repos);
+            }
             return self.is_open(O::Features).then_some(Overlay::Features);
         };
         match top {
@@ -1385,6 +1399,8 @@ impl Gerdr {
             Overlay::Welcome => self.welcome.as_mut()?.field_mut(),
             Overlay::ProjectMenu => self.project_menu.as_mut()?.field_mut(),
             Overlay::Worktrees => self.worktrees.field_mut(),
+            // A file's tab holds its own search.
+            Overlay::Repos if !self.repos.is_open() => self.wd_mut()?.diff.search_field_mut(),
             Overlay::Repos => self.repos.field_mut(),
             Overlay::Inbox => self.inbox.field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),

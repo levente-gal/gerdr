@@ -37,8 +37,8 @@ impl Gerdr {
                 .workspaces
                 .get(w)
                 .and_then(|ws| ws.tabs.get(t))
-                // A feature's panel tab keeps its name.
-                .filter(|tab| !tab.is_feature())
+                // A feature's panel tab and a file's tab keep their names.
+                .filter(|tab| !tab.is_feature() && tab.review().is_none())
                 .map(|tab| tab.label.clone().unwrap_or_default()),
         };
         let Some(current) = current else {

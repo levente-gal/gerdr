@@ -6,8 +6,8 @@
 //! new feature, the manual test sheet, confirm), the context menu, the toasts, the welcome screen,
 //! the help panel, then the panels (the tasks, the project menu, the
 //! worktrees popup, the repositories and inbox panels, the scrollback
-//! viewer, the switcher), and last the feature panel, which is not over
-//! the apps but in its feature's pinned first tab.
+//! viewer, the switcher), and last the feature panel and the file's tab,
+//! which are not over the apps but in a tab of their own.
 //! The toasts are over every popup but the menu and the dialogs, so what
 //! a panel reports shows while it is open; the help panel is under them,
 //! over the panels it may be pinned over.
@@ -17,7 +17,9 @@
 //! is. The context menu takes every key and press too (a press outside
 //! closes it). The toasts and the help panel take only what lands on
 //! them; the tooltip takes nothing. The feature panel takes the keys
-//! while its tab shows, and what lands in the tab, like an app would.
+//! while its tab shows, and what lands in the tab, like an app would; so
+//! does the file's tab, leaving its page what its page shows on (see
+//! `doc_tab`).
 
 use std::time::Instant;
 
@@ -50,6 +52,9 @@ pub enum Overlay {
     /// The feature panel: a feature's stages, in the pinned first tab of
     /// its workspace (see `features`, `feature_workspace`).
     Features,
+    /// A feature's file in a tab of its own, its preview and review flat
+    /// (see `doc_tab`).
+    Doc,
     ProjectMenu,
     Worktrees,
     Repos,
@@ -60,7 +65,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 20] = [
+    pub const ORDER: [Self; 21] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -82,8 +87,9 @@ impl Overlay {
         Self::Inbox,
         Self::Scrollback,
         Self::Switcher,
-        // In its tab, under every popup.
+        // In their tabs, under every popup.
         Self::Features,
+        Self::Doc,
     ];
 
     /// Whether it is a modal dialog: over all but the tooltip, asking
@@ -124,7 +130,7 @@ impl Overlay {
     /// Whether, while it is open, the keys go to it rather than the apps
     /// (or what is under it).
     pub fn takes_keys(self) -> bool {
-        self.grabs() || matches!(self, Self::ContextMenu | Self::Features)
+        self.grabs() || matches!(self, Self::ContextMenu | Self::Features | Self::Doc)
     }
 
     /// Whether it is over `other`.
@@ -166,6 +172,7 @@ impl Overlay {
             Self::Help => "the help",
             Self::Tasks => "the background tasks",
             Self::Features => "the feature panel",
+            Self::Doc => "the file's tab",
             Self::ProjectMenu => "the project menu",
             Self::Worktrees => "the worktrees popup",
             Self::Repos => "the repositories panel",
@@ -198,6 +205,7 @@ impl Gerdr {
             Overlay::Help => self.prefix_armed || self.help_pinned,
             Overlay::Tasks => self.tasks_panel.is_some(),
             Overlay::Features => self.features.panel.is_some(),
+            Overlay::Doc => self.review_tab().is_some(),
             Overlay::ProjectMenu => self.project_menu.is_some(),
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),
@@ -220,14 +228,14 @@ impl Gerdr {
 
     /// The overlay on top that has the keys, if one does.
     pub fn key_overlay(&self) -> Option<Overlay> {
-        self.open_overlays().find(|o| o.takes_keys())
+        self.open_overlays()
+            .find(|o| o.takes_keys() && (*o != Overlay::Doc || self.doc_tab_takes_keys()))
     }
 
     /// Whether open `overlay` takes the pointer at `pos`: one that grabs,
     /// and the menu (a press outside it closes it), anywhere; the toasts
     /// and the help panel where they are; the feature panel in its tab;
-    /// the repositories panel but over a file's preview beside it; the
-    /// tooltip nowhere.
+    /// the file's tab there but over its page; the tooltip nowhere.
     pub fn overlay_covers(&self, overlay: Overlay, pos: Point<f64, Logical>) -> bool {
         match overlay {
             Overlay::Tooltip => false,
@@ -235,8 +243,7 @@ impl Gerdr {
             Overlay::Help => self.help_hit(pos).is_some(),
             Overlay::ContextMenu => true,
             Overlay::Features => self.content_rect().to_f64().contains(pos),
-            // A file's preview beside its review is the browser's.
-            Overlay::Repos => !self.on_dock(pos),
+            Overlay::Doc => self.doc_tab_covers(pos),
             _ => overlay.grabs(),
         }
     }
@@ -271,6 +278,7 @@ impl Gerdr {
             Overlay::GitIdentity => self.identity_hover(pos),
             Overlay::ManualTest => return self.manual_test_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),
+            Overlay::Doc => return self.repos_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
             Overlay::Welcome => return self.welcome_hover(pos),
             Overlay::ProjectMenu => return self.project_menu_hover(pos),
@@ -323,6 +331,7 @@ impl Gerdr {
                 }
             }
             Overlay::Features => self.feature_panel_scroll(motion),
+            Overlay::Doc => self.repos_scroll(motion),
             Overlay::Tasks => {
                 let rows = self.motion_rows(motion, row_pitch(&self.tasks_rows()));
                 if rows != 0 {

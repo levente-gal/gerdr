@@ -2519,3 +2519,183 @@ fn dump_feature_tab() {
         }
     }
 }
+
+/// A feature's brief in its tab, as `doc_tab_view` lays it out: the mode
+/// switch on the title row, the finishing actions at the foot.
+fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposView {
+    use super::{DetailRow, DetailView, Hint, ModeSwitch, ReposButton, ReposView};
+    use crate::diff::LineKind::Added;
+    let hint = |button: ReposButton, key: &str| Hint {
+        button,
+        label: button.label().into(),
+        key: key.into(),
+        disabled: None,
+    };
+    let text = [
+        "# Log in with a password",
+        "",
+        "People sign in with an email and a password, and stay signed in.",
+        "A wrong password says so, without saying which of the two it was.",
+    ];
+    let rows: Vec<DetailRow> = (text.iter().enumerate())
+        .map(|(i, line)| {
+            DetailRow::Line(crate::diff::Line {
+                kind: Added,
+                text: (*line).into(),
+                raw: None,
+                number: i + 1,
+                old: 0,
+                words: Vec::new(),
+                syntax: Vec::new(),
+            })
+        })
+        .collect();
+    let mut hints = vec![
+        hint(ReposButton::SendBack, "Ctrl+Shift+Enter"),
+        hint(ReposButton::Approve, "Ctrl+Enter"),
+        hint(ReposButton::Comment, "c"),
+        hint(ReposButton::Help, "F1"),
+        hint(ReposButton::Close, "Esc"),
+    ];
+    let detail = match on {
+        // Preview: the page has it all, comments take a line to go on.
+        0 => {
+            hints.retain(|h| h.button != ReposButton::Comment);
+            DetailView::default()
+        }
+        _ => DetailView {
+            title: "brief.md \u{b7} 4 lines".into(),
+            total: rows.len(),
+            gutter: 1,
+            caret: Some((0, 0)),
+            focused: true,
+            rows,
+            ..Default::default()
+        },
+    };
+    let mut labels = vec!["Preview".to_string(), "Review".to_string()];
+    if wide {
+        labels.push("Split".to_string());
+    }
+    let title = "Brief \u{b7} Log in with a password".to_string();
+    let summary = "ready for review".to_string();
+    let density = Default::default();
+    ReposView {
+        flat: true,
+        detail_share: share,
+        modes: Some(ModeSwitch { labels, on, off }),
+        ..ReposView::diff_only(title, summary, None, hints, detail, None, density)
+    }
+}
+
+/// Each doc tab fixture and the width of content it is seen at.
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 6] {
+    [
+        ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
+        ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
+        (
+            "doc_review_no_browser",
+            doc_tab(1, 1.0, vec![0, 2], true),
+            1920,
+        ),
+        ("doc_preview_1920", doc_tab(0, 0.0, Vec::new(), true), 1920),
+        ("doc_split_1920", doc_tab(2, 0.45, Vec::new(), true), 1920),
+        ("doc_review_850", doc_tab(1, 1.0, Vec::new(), false), 850),
+    ]
+}
+
+const DOC_TAB: [&str; 6] = [
+    "doc_preview_1180",
+    "doc_review_1180",
+    "doc_review_no_browser",
+    "doc_preview_1920",
+    "doc_split_1920",
+    "doc_review_850",
+];
+
+/// A doc tab's buffer, laid over the whole of a `w` wide content area.
+fn doc_tab_buffer(
+    painter: &Painter,
+    view: &super::ReposView,
+    w: i32,
+    theme: Theme,
+    scale: f64,
+) -> MemoryRenderBuffer {
+    let area = smithay::utils::Rectangle::from_size((w, TAB_HEIGHT).into());
+    painter.repos(view, area, scale, theme.palette())
+}
+
+fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    (doc_tabs().iter())
+        .map(|(_, view, w)| hash(doc_tab_buffer(painter, view, *w, theme, scale)))
+        .collect()
+}
+
+/// The recorded hashes of `DOC_TAB`, per case in `CASES`.
+const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
+    // Dark at 1
+    [
+        0xe3291f02faaf07c4, // doc_preview_1180
+        0xde22f442be52b472, // doc_review_1180
+        0xb73464599f8218d6, // doc_review_no_browser
+        0x163df7c54996fb12, // doc_preview_1920
+        0x373ed0b2cd218868, // doc_split_1920
+        0xa1352c67a4169eb4, // doc_review_850
+    ],
+    // Dark at 2
+    [
+        0xb80f9bdca4ec1495, // doc_preview_1180
+        0xc84f804c05d71e4c, // doc_review_1180
+        0x9351a19e349480a5, // doc_review_no_browser
+        0xe1f51d6886965409, // doc_preview_1920
+        0x6f945c0c725c0449, // doc_split_1920
+        0xcb771e9177905474, // doc_review_850
+    ],
+    // Light at 1
+    [
+        0xe4e0f55663b52bf6, // doc_preview_1180
+        0x1e54fc78120f55ab, // doc_review_1180
+        0x21f8a2bc3b0dea41, // doc_review_no_browser
+        0x50dcf4fa733c2761, // doc_preview_1920
+        0x9521aff0ecf5f4b9, // doc_split_1920
+        0x528cc488fb03a5f7, // doc_review_850
+    ],
+    // Light at 2
+    [
+        0x0ee8bb97e0ae3be2, // doc_preview_1180
+        0x38f07b73fb5e396d, // doc_review_1180
+        0xb8ed0d1d947ed6f7, // doc_review_no_browser
+        0xad043f4a3dce9b22, // doc_preview_1920
+        0x1ce40fe3eeb60d1c, // doc_split_1920
+        0xf41af3965e387d33, // doc_review_850
+    ],
+];
+
+#[test]
+fn the_doc_tab_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_DOC_TAB.iter().map(|row| row.as_slice()).collect();
+    check(&DOC_TAB, &golden, paint_doc_tab);
+}
+
+/// With `GERDR_DUMP_DIR` set, write every doc tab fixture there.
+#[test]
+fn dump_doc_tab() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        for (name, view, w) in doc_tabs() {
+            let width = ((w + 2 * super::SHADOW) as f64 * scale).round() as usize;
+            let buffer = doc_tab_buffer(&painter, &view, w, theme, scale);
+            dump(
+                &dir,
+                &format!("{name}_{}_{}", theme.name(), scale),
+                buffer,
+                width,
+            );
+        }
+    }
+}

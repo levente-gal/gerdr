@@ -23,6 +23,7 @@ use crate::{
     Gerdr,
     agents::AgentKey,
     chrome::{self, AgentView, InboxHit, InboxRow, InboxView, WorkspaceView},
+    doc_review::DocFile,
     herdr,
     inbox::{
         self, Detail, InboxItem, ItemAction, ItemId, Listing, Outcome, PaneText, Panel, Section,
@@ -730,7 +731,7 @@ impl Gerdr {
                 slug,
                 stage,
                 kind: crate::feature_agents::GateKind::Review,
-            } => self.open_doc_review(&project, &slug, stage),
+            } => self.open_doc_tab(&project, &slug, DocFile::Stage(stage), None),
             Target::Gate {
                 project,
                 slug,

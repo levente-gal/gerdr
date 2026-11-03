@@ -805,6 +805,20 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
+        self.segmented_off(c, track, segments, (on, hover, &[]), scale, p);
+    }
+
+    /// `segmented`, with some segments (by index) that can't be picked:
+    /// their labels dim, and they don't light up under the pointer.
+    pub(super) fn segmented_off(
+        &self,
+        c: &mut Canvas,
+        track: Rect,
+        segments: &[(&str, Rect)],
+        (on, hover, off): (usize, Option<usize>, &[usize]),
+        scale: f64,
+        p: &Palette,
+    ) {
         let s = scale as f32;
         let (x, y, w, h) = rect_px(track, scale);
         let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
@@ -813,7 +827,7 @@ impl Painter {
         for (i, &(label, rect)) in segments.iter().enumerate() {
             let fill = if i == on {
                 Some(p.selected)
-            } else if hover == Some(i) {
+            } else if hover == Some(i) && !off.contains(&i) {
                 Some(mix(p.element, p.selected, 0.5))
             } else {
                 None
@@ -822,7 +836,11 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * s, fill);
             }
-            let color = if i == on { p.text } else { p.muted };
+            let color = match (i == on, off.contains(&i)) {
+                (true, _) => p.text,
+                (false, true) => p.placeholder,
+                (false, false) => p.muted,
+            };
             self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
         }
     }

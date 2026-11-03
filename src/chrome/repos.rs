@@ -17,7 +17,7 @@
 
 use super::{
     BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
-    Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
+    DOCK_GAP, Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
     MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text,
@@ -238,6 +238,22 @@ pub struct ReposView {
     /// Laid flat into a tab rather than floating over the app: no shadow,
     /// border or rounded corners.
     pub flat: bool,
+    /// The share of the panel's width under the header the detail takes,
+    /// a file's page showing in the rest (see `doc_tab`): 1 for none of
+    /// the page, 0 for the page alone.
+    pub detail_share: f64,
+    /// The switch between what a file's tab shows, at the header's right.
+    pub modes: Option<ModeSwitch>,
+}
+
+/// A switch of a few choices at the panel's header's right.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModeSwitch {
+    pub labels: Vec<String>,
+    /// The choice shown, by index into `labels`.
+    pub on: usize,
+    /// The choices that can't be had now: a tooltip says why.
+    pub off: Vec<usize>,
 }
 
 impl ReposView {
@@ -276,6 +292,8 @@ impl ReposView {
             grouping: Default::default(),
             diff_only: true,
             flat: false,
+            detail_share: 1.0,
+            modes: None,
         }
     }
 }
@@ -769,9 +787,6 @@ pub enum ReposButton {
     MarkViewed,
     /// A feature's code review: go to the next file not viewed.
     NextUnviewed,
-    /// A file under review shown rendered, in a web tab (see
-    /// `md_preview`).
-    Preview,
 }
 
 impl ReposButton {
@@ -834,7 +849,6 @@ impl ReposButton {
             ReposButton::ReopenFinding => "Reopen",
             ReposButton::MarkViewed => "Viewed",
             ReposButton::NextUnviewed => "Next unviewed",
-            ReposButton::Preview => "Preview",
         }
     }
 }
@@ -853,6 +867,8 @@ pub enum ReposHit {
     Field,
     /// A footer action, a result bar button or a sheet button.
     Button(ReposButton),
+    /// A choice of the switch at the header's right.
+    Mode(usize),
     DetailTab(DetailTab),
     /// The detail pane (for the wheel).
     Detail,
@@ -1149,6 +1165,12 @@ pub struct ReposLayout {
     /// Where the menu's headings and rows show; a scrolled menu's first
     /// and last lines reach out of it.
     pub branch_list: Option<Rect>,
+    /// The switch at the header's right: its track, and a rect per choice.
+    pub modes: Option<(Rect, Vec<Rect>)>,
+    /// The part left open for a file's page, which shows through.
+    pub page: Option<Rect>,
+    /// The gap between the detail and that page, which drags their split.
+    pub page_gap: Option<Rect>,
 }
 
 /// Inside the panel's parts: what the painter needs besides `ReposLayout`.
@@ -1346,6 +1368,45 @@ pub fn repos_sheet_rows(panel: Rect, diff_only: bool) -> usize {
 pub fn repos_detail_cols(panel: Rect, share: f64) -> usize {
     let w = panel.size.w;
     detail_cols((w - tree_width(w, share)).max(0))
+}
+
+/// `area` shared across: `share` of its width on the left, then a gap, then
+/// the rest. All of it on the left from 1 up, all on the right from 0 down,
+/// without a gap: the other two are then empty, at the edge.
+pub fn split_rects(area: Rect, share: f64) -> (Rect, Rect, Rect) {
+    let (x, y) = (area.loc.x, area.loc.y);
+    let (w, h) = (area.size.w, area.size.h);
+    let empty = |at: i32| Rectangle::new((at, y).into(), (0, h).into());
+    if share >= 1.0 {
+        return (area, empty(x + w), empty(x + w));
+    }
+    if share <= 0.0 {
+        return (empty(x), empty(x), area);
+    }
+    let left = (w as f64 * share).round() as i32;
+    let right = (w - left - DOCK_GAP).max(0);
+    (
+        Rectangle::new((x, y).into(), (left, h).into()),
+        Rectangle::new((x + left, y).into(), (DOCK_GAP, h).into()),
+        Rectangle::new((x + w - right, y).into(), (right, h).into()),
+    )
+}
+
+/// What of `outer` is around `hole`, inside it: up to four rects.
+fn around(outer: Rect, hole: Rect) -> Vec<Rect> {
+    let (x, y, w, h) = (outer.loc.x, outer.loc.y, outer.size.w, outer.size.h);
+    let (hx, hy) = (hole.loc.x, hole.loc.y);
+    let (hend, vend) = (hx + hole.size.w, hy + hole.size.h);
+    let rect = |x: i32, y: i32, w: i32, h: i32| Rectangle::new((x, y).into(), (w, h).into());
+    [
+        rect(x, y, w, hy - y),
+        rect(x, vend, w, y + h - vend),
+        rect(x, hy, hx - x, hole.size.h),
+        rect(hend, hy, x + w - hend, hole.size.h),
+    ]
+    .into_iter()
+    .filter(|r| r.size.w > 0 && r.size.h > 0)
+    .collect()
 }
 
 /// How many diff rows the panel shows at once with the diff alone across
@@ -1856,10 +1917,39 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
 
     // The detail pane, its tabs at the right of its title row; the line
     // between it and the tree can be dragged.
-    let detail = Rectangle::new(
-        (x + tree_w, middle_y).into(),
-        ((w - tree_w).max(0), middle_h).into(),
+    // A file's page takes what the view leaves of it.
+    let (detail, page_gap, page) = split_rects(
+        Rectangle::new(
+            (x + tree_w, middle_y).into(),
+            ((w - tree_w).max(0), middle_h).into(),
+        ),
+        view.detail_share,
     );
+    let (page, page_gap) = match view.detail_share < 1.0 {
+        true => (Some(page), Some(page_gap).filter(|g| g.size.w > 0)),
+        false => (None, None),
+    };
+    let modes = view.modes.as_ref().map(|switch| {
+        let n = switch.labels.len() as i32;
+        let (b, track_w) = (1, n * REPOS_TAB_WIDTH + 2);
+        let track = Rectangle::new(
+            (
+                x + w - HELP_PADDING - track_w,
+                top + (REPOS_HEADER - ROW_BUTTON) / 2,
+            )
+                .into(),
+            (track_w, ROW_BUTTON).into(),
+        );
+        let segments = (0..n)
+            .map(|i| {
+                Rectangle::new(
+                    (track.loc.x + b + i * REPOS_TAB_WIDTH, track.loc.y + b).into(),
+                    (REPOS_TAB_WIDTH, ROW_BUTTON - 2 * b).into(),
+                )
+            })
+            .collect();
+        (track, segments)
+    });
     let splitter = Rectangle::new(
         (x + tree_w - SPLITTER_GRAB, middle_y).into(),
         (if only { 0 } else { 2 * SPLITTER_GRAB }, middle_h).into(),
@@ -2201,6 +2291,9 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             branch_deletes,
             branch_headings,
             branch_list,
+            modes,
+            page,
+            page_gap,
         },
         error,
         result_buttons,
@@ -2304,6 +2397,11 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
         if at(menu) {
             return Some(ReposHit::BranchMenu);
         }
+    }
+    if let Some((_, segments)) = &layout.modes
+        && let Some(i) = segments.iter().position(at)
+    {
+        return Some(ReposHit::Mode(i));
     }
     if at(&layout.branch) {
         return Some(ReposHit::BranchButton);
@@ -2702,15 +2800,16 @@ impl Painter {
             // Laid into a tab: no shadow, border or corners. The buffer
             // keeps the popup's margin, so that everything goes where it
             // goes in one.
+            // What is left open shows the file's page under it.
             true => {
                 let mut c = Canvas::new(physical(super::shadowed(panel).1, scale));
-                c.fill(
-                    px(SHADOW),
-                    px(SHADOW),
-                    px(panel.size.w),
-                    px(panel.size.h),
-                    p.elevated,
-                );
+                let hole = (layout.page).unwrap_or(Rectangle::new(panel.loc, (0, 0).into()));
+                for r in around(panel, hole) {
+                    let r = moved(r, buffer_origin(panel));
+                    let (x, y) = (px(r.loc.x), px(r.loc.y));
+                    let (w, h) = (px(r.loc.x + r.size.w) - x, px(r.loc.y + r.size.h) - y);
+                    c.fill(x, y, w, h, p.elevated);
+                }
                 c
             }
             false => self.popup(panel.size, HELP_RADIUS, scale, p),
@@ -2739,7 +2838,10 @@ impl Painter {
             true => px(header.loc.x + HELP_PADDING) as f32,
             false => px(picker.loc.x + picker.size.w + HEADER_GAP) as f32,
         };
-        let hend = hend - px(HELP_PADDING) as f32;
+        let hend = match &layout.modes {
+            Some((track, _)) => px(shift(*track).loc.x - HEADER_GAP) as f32,
+            None => hend - px(HELP_PADDING) as f32,
+        };
         let heading = if only {
             view.title.clone()
         } else if view.title.is_empty() {
@@ -2771,7 +2873,28 @@ impl Painter {
         if !only {
             self.branch_button(&mut c, view, picker, scale, p);
         }
+        if let (Some(switch), Some((track, rects))) = (&view.modes, &layout.modes) {
+            let segments: Vec<(&str, Rect)> = (switch.labels.iter().map(String::as_str))
+                .zip(rects.iter().map(|&r| shift(r)))
+                .collect();
+            let hover = match view.hover {
+                Some(ReposHit::Mode(i)) => Some(i),
+                _ => None,
+            };
+            let state = (switch.on, hover, &switch.off[..]);
+            self.segmented_off(&mut c, shift(*track), &segments, state, scale, p);
+        }
         across(&mut c, px(header.loc.y + header.size.h) - border);
+        // The line between the detail and a file's page beside it.
+        if let Some(gap) = layout.page_gap.map(shift) {
+            c.fill(
+                px(gap.loc.x + gap.size.w / 2),
+                px(gap.loc.y),
+                border,
+                px(gap.loc.y + gap.size.h) - px(gap.loc.y),
+                p.border_variant,
+            );
+        }
 
         // The tree, then the line between it and the detail pane.
         let tree = shift(layout.tree);
@@ -3402,6 +3525,10 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
+        // Preview gives the detail no width: an ellipsis would be all it fits.
+        if rect.size.w <= 0 {
+            return;
+        }
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let title = Rectangle::new(rect.loc, (rect.size.w, REPOS_DETAIL_TITLE).into());
@@ -4938,6 +5065,8 @@ fn frame_view(view: &ReposView) -> ReposView {
         grouping: view.grouping,
         diff_only: view.diff_only,
         flat: view.flat,
+        detail_share: view.detail_share,
+        modes: view.modes.clone(),
     }
 }
 
@@ -5124,7 +5253,10 @@ impl ReposLayers {
             }
             over
         };
-        let parts = overlay.parts(placed, now, true, draw, over);
+        // Laid flat into a tab, it comes and goes with the tab, at once.
+        let flat = view.as_ref().map_or(overlay.instant, |view| view.flat);
+        overlay.instant = flat;
+        let parts = overlay.parts(placed, now, !flat, draw, over);
         tree.sweep();
         detail.sweep();
         menu_lines.sweep();
@@ -5359,6 +5491,8 @@ mod tests {
         ];
         let total = lines.len() + 12;
         ReposView {
+            detail_share: 1.0,
+            modes: None,
             grouping: Grouping::List,
             title: "gerdr".into(),
             summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
@@ -5979,15 +6113,14 @@ mod tests {
         }
     }
 
-    /// A feature's brief under review: Preview, Send back and Approve on
-    /// the diff's title row.
+    /// A feature's brief under review: Send back and Approve on the diff's
+    /// title row.
     fn doc_review() -> ReposView {
         let mut view = diff_only();
         view.title = "Brief \u{b7} Log in with a password".into();
         view.summary = "ready for review".into();
         view.detail.title = "brief.md \u{b7} 12 lines".into();
         view.detail.title_buttons = [
-            (ReposButton::Preview, "Ctrl+Shift+V"),
             (ReposButton::SendBack, "Ctrl+Shift+Enter"),
             (ReposButton::Approve, "Ctrl+Enter"),
         ]
@@ -6879,6 +7012,26 @@ mod tests {
                 assert_eq!(rect.loc.y, y.round() as i32);
             }
         }
+    }
+
+    #[test]
+    fn a_split_leaves_the_rest_to_the_page() {
+        let area = Rectangle::new((10, 20).into(), (1000, 500).into());
+        // All the review: the page has nothing, at the right.
+        let (detail, gap, page) = split_rects(area, 1.0);
+        assert_eq!(detail, area);
+        assert_eq!((gap.size.w, page.size.w, page.loc.x), (0, 0, 1010));
+        // All the page: the review has nothing, at the left.
+        let (detail, gap, page) = split_rects(area, 0.0);
+        assert_eq!(page, area);
+        assert_eq!((detail.size.w, gap.size.w, detail.loc.x), (0, 0, 10));
+        // Between: they meet at the gap and fill the width, at the height.
+        let (detail, gap, page) = split_rects(area, 0.4);
+        assert_eq!((detail.loc.x, detail.size.w), (10, 400));
+        assert_eq!((gap.loc.x, gap.size.w), (410, DOCK_GAP));
+        assert_eq!(page.loc.x, gap.loc.x + DOCK_GAP);
+        assert_eq!(page.loc.x + page.size.w, 1010);
+        assert!([detail, gap, page].iter().all(|r| r.size.h == 500));
     }
 
     #[test]

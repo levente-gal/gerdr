@@ -119,11 +119,11 @@ pub(crate) fn pin_tab(tabs: &mut Vec<Tab>, active: &mut usize, want: bool) -> bo
         }
         return true;
     }
-    if !want && tabs.iter().any(Tab::is_feature) {
+    if !want && tabs.iter().any(|t| !t.takes_panes()) {
         let before = tabs.len();
         let mut i = 0;
         tabs.retain(|t| {
-            let keep = !t.is_feature();
+            let keep = t.takes_panes();
             if !keep && i < *active {
                 *active -= 1;
             }
@@ -246,6 +246,14 @@ impl Gerdr {
         for w in 0..self.workspaces.len() {
             let closing = self.closing_records.contains(&self.workspaces[w].record);
             let want = !closing && self.workspace_feature(w).is_some();
+            // A file's tab goes with its feature: its page's window too.
+            if !want {
+                let pages: Vec<_> = (self.workspaces[w].tabs.iter())
+                    .filter(|tab| tab.review().is_some())
+                    .flat_map(Self::closing)
+                    .collect();
+                self.close_panes(pages);
+            }
             let ws = &mut self.workspaces[w];
             changed |= pin_tab(&mut ws.tabs, &mut ws.active_tab, want);
         }

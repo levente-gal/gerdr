@@ -18,9 +18,8 @@
 //!
 //! The extension also has a page of its own, `preview.html`, that shows a
 //! markdown file rendered (see `md_preview`): gerdr sends it the file's
-//! HTML on load and after each change, and it sends back the links and the
-//! Review button clicked in it. Beside the file's review (see `md_dock`),
-//! gerdr tells it the line of the review's caret and the comments' lines
+//! HTML on load and after each change, and it sends back the links clicked
+//! in it. In the file's tab (see `doc_tab`), gerdr tells it the line of the review's caret and the comments' lines
 //! to mark, and it sends back the line of a block clicked in it.
 //!
 //! A pane without a tab of the extension's (its browser was running
@@ -125,8 +124,6 @@ enum FromBrowser {
     Scoped { pane: String },
     /// A link clicked in the pane's preview (see `md_preview`).
     Open { pane: String, url: String },
-    /// The pane's preview asked to review its file.
-    Review { pane: String },
     /// The pane's preview page loaded, and shows nothing yet.
     Ready { pane: String },
     /// A block clicked in the pane's preview, from this line of its file.
@@ -189,7 +186,6 @@ enum ToBrowser<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
         dark: bool,
-        review: bool,
         /// The lines with review comments, and what each says.
         marks: &'a [(usize, String)],
     },
@@ -544,11 +540,6 @@ impl Gerdr {
                     self.preview_scrolled(pane, line);
                 }
             }
-            Event::Message(_, FromBrowser::Review { pane }) => {
-                if let Some(pane) = token_pane(&pane) {
-                    self.preview_review(pane);
-                }
-            }
             Event::Message(
                 _,
                 FromBrowser::Unscoped {
@@ -759,7 +750,6 @@ pub(crate) fn preview_message(
         html: body.ok(),
         error: body.err(),
         dark: shown.dark,
-        review: shown.review,
         marks: &shown.marks,
     };
     let message = serde_json::to_vec(&message).ok()?;

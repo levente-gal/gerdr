@@ -211,7 +211,7 @@ impl InboxItem {
 /// Where going to an item leads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// A feature's gate: a file to review (`Gerdr::open_doc_review`), else
+    /// A feature's gate: a file to review (`Gerdr::open_doc_tab`), else
     /// the feature panel on the stage's row (`Gerdr::open_feature_at`).
     Gate {
         project: String,

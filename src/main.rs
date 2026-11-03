@@ -26,16 +26,17 @@ mod desktop;
 mod diff;
 mod diff_edit;
 mod diff_view;
+mod doc_review;
+mod doc_tab;
 mod feature;
-mod features;
 mod feature_agents;
 mod feature_build;
 mod feature_diff;
-mod feature_workspace;
 mod feature_review;
-mod doc_review;
-mod frecency;
+mod feature_workspace;
+mod features;
 mod find;
+mod frecency;
 mod fuzzy;
 mod git;
 mod git_identity;
@@ -55,7 +56,6 @@ mod keys;
 mod launch;
 mod layout;
 mod manual_test;
-mod md_dock;
 mod md_preview;
 mod menu;
 mod nav;
@@ -72,8 +72,8 @@ mod profile_import;
 mod project_list;
 mod project_lock;
 mod project_menu;
-mod prompts;
 mod projects;
+mod prompts;
 mod quit;
 mod reload;
 mod rename;
@@ -95,9 +95,9 @@ mod syntax;
 mod system_theme;
 mod t3_agents;
 mod t3_server;
-mod tasks;
 mod t3_update;
 mod tab_strip;
+mod tasks;
 mod test_runs;
 mod text_field;
 mod toast;
@@ -398,6 +398,9 @@ pub enum TabKind {
     /// The feature panel: first in a feature's workspace, with no panes,
     /// and never closed or moved (see `feature_workspace`).
     Feature,
+    /// A feature's file, its review and its page (see `doc_tab`): closed
+    /// and moved as any tab, but no pane comes to it from elsewhere.
+    Review(Box<doc_tab::ReviewTab>),
 }
 
 impl Tab {
@@ -410,6 +413,22 @@ impl Tab {
     /// stays without any.
     pub fn takes_panes(&self) -> bool {
         matches!(self.kind, TabKind::Panes)
+    }
+
+    /// A feature's file's, if it is that.
+    pub fn review(&self) -> Option<&doc_tab::ReviewTab> {
+        match &self.kind {
+            TabKind::Review(review) => Some(review),
+            _ => None,
+        }
+    }
+
+    /// `review`, to change.
+    pub fn review_mut(&mut self) -> Option<&mut doc_tab::ReviewTab> {
+        match &mut self.kind {
+            TabKind::Review(review) => Some(review),
+            _ => None,
+        }
     }
 
     /// Whether it can be closed.
@@ -517,6 +536,20 @@ impl Tab {
     /// What to remember of the tab: its layout, with each leaf named by what
     /// fills it. Windows gerdr can't bring back are left out.
     fn save(&self) -> Option<TabRecord> {
+        // A file's tab comes back on its file: its page opens when shown.
+        if let Some(review) = self.review() {
+            let doc = review.wd.doc.as_ref()?;
+            let command = md_preview::page_url(&doc.path);
+            return Some(TabRecord {
+                herdr_tab: None,
+                layout: SavedNode::Leaf(SavedLeaf::App { command }),
+                label: None,
+                doc: Some(doc_tab::DocRecord {
+                    file: doc.file,
+                    mode: review.mode,
+                }),
+            });
+        }
         let leaf = |id: u32| match self.panes.iter().find(|p| p.id == id) {
             Some(p) => match &p.window_of {
                 Some(command) => Some(SavedLeaf::Window {
@@ -545,6 +578,7 @@ impl Tab {
             }
         };
         Some(TabRecord {
+            doc: None,
             herdr_tab: self.herdr_tab_id().map(str::to_owned),
             layout: self.layout.as_ref()?.save(&leaf)?,
             label: self.label.clone(),
@@ -615,6 +649,12 @@ impl Tab {
     /// Where the panes go in `area`: the zoomed one over all of it, else
     /// each to its place in the layout.
     fn rects(&self, area: Rectangle<i32, Logical>) -> Vec<(u32, Rectangle<i32, Logical>)> {
+        // A file's page goes where its view leaves room, if it does.
+        if let Some(review) = self.review() {
+            return review
+                .page
+                .map_or_else(Vec::new, |page| self.layout_rects(page));
+        }
         match self.zoomed() {
             Some(id) => vec![(id, area)],
             None => self.layout_rects(area),
@@ -1249,8 +1289,8 @@ pub enum Drag {
     Sidebar,
     /// The line between the repositories panel's tree and its detail.
     ReposSplit,
-    /// The gap between a file's review and its preview (see `md_dock`).
-    DockSplit,
+    /// The gap between a file's review and its preview (see `doc_tab`).
+    DocSplit,
     /// The gap between two panes of the shown tab: the split at `path`.
     Split { path: Vec<bool>, dir: Dir },
 }
@@ -1551,6 +1591,9 @@ pub struct Gerdr {
     /// The left button went down on the repositories panel's diff and is
     /// held: moving drags the diff cursor's range on.
     pub repos_rows_drag: bool,
+    /// The file's tab showing as of the last frame, by id: one coming to
+    /// show reads its file again (see `doc_tab`).
+    pub doc_tab_shown: Option<u64>,
     /// A scrollbar's thumb held with the left button: moving drags it.
     pub thumb_drag: Option<scrollbars::ThumbDrag>,
     /// The projects whose sessions are being stopped, by id: not shown
@@ -1729,18 +1772,16 @@ impl Gerdr {
     pub fn divider_at(&self, pos: Point<f64, Logical>) -> Option<Drag> {
         // Over the repositories panel only its own line between the tree
         // and the detail, and the gap beside its preview.
-        if let Some(view) = self.repos_view() {
-            if self.context_menu.is_none()
-                && let Some(drag) = self.dock_divider_at(pos)
-            {
-                return Some(drag);
-            }
+        if let Some(view) = self.repos_view().filter(|_| self.repos.is_open()) {
             let layout = chrome::repos_layout(&view, self.repos_rect());
             let on = layout.splitter.to_f64().contains(pos)
                 && layout.sheet.is_none()
                 && layout.branch_menu.is_none()
                 && self.context_menu.is_none();
             return on.then_some(Drag::ReposSplit);
+        }
+        if let Some(drag) = self.doc_gap_at(pos) {
+            return Some(drag);
         }
         if (pos.x - self.sidebar_width as f64).abs() <= GRAB
             && !self.on_sidebar_bar(pos)
@@ -1771,7 +1812,7 @@ impl Gerdr {
                 self.sidebar_width = (pos.x.round() as i32).min(max).max(SIDEBAR_MIN_WIDTH);
             }
             Drag::ReposSplit => self.repos_drag_to(pos),
-            Drag::DockSplit => self.dock_drag_to(pos),
+            Drag::DocSplit => self.doc_drag_to(pos),
             Drag::Split { path, dir } => {
                 let area = self.content_rect();
                 let ws = &mut self.workspaces[self.active_workspace];
@@ -3495,6 +3536,13 @@ impl Gerdr {
             if !all && !saved_tab.layout.herdr_panes().is_empty() {
                 continue;
             }
+            // A feature's file's tab, on its file.
+            if let Some(doc) = saved_tab.doc {
+                let tabs = &self.workspaces[w].tabs;
+                let first = usize::from(tabs.first().is_some_and(Tab::is_feature));
+                restored_any |= self.restore_doc_tab(w, doc, i + first);
+                continue;
+            }
             let mut restored = restore_tab(&saved_tab.layout, &HashMap::new(), &mut self.next_pane);
             let Some(layout) = restored.layout.take() else {
                 continue;
@@ -3748,10 +3796,7 @@ impl Gerdr {
             // One keeping its logins in the keyring waits for it, and
             // the ones after it (see `keyring`).
             let e = &mut self.workspaces[w].tabs[t].expected[i];
-            if e
-                .app_command
-                .as_deref()
-                .is_some_and(launch::uses_keyring)
+            if e.app_command.as_deref().is_some_and(launch::uses_keyring)
                 && !keyring::state().ready()
             {
                 e.held = true;
@@ -3914,7 +3959,12 @@ impl Gerdr {
         if running.is_empty() {
             return self.close_workspace_now(idx);
         }
-        let ids = ws.tabs.iter().flat_map(|tab| &tab.panes).map(|p| p.id).collect();
+        let ids = ws
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .map(|p| p.id)
+            .collect();
         self.ask_close_workspace(idx, ids, &running);
     }
 
@@ -4156,6 +4206,13 @@ impl Gerdr {
         if !tab.closes() {
             return self.refuse_pinned_close();
         }
+        // A draft isn't saved: it is for the user to save or drop.
+        if tab
+            .review()
+            .is_some_and(|review| review.wd.diff.editing.is_some())
+        {
+            return self.show_warning(worktree_diff::DRAFT_OPEN.into());
+        }
         let running: Vec<String> = tab
             .panes
             .iter()
@@ -4174,6 +4231,7 @@ impl Gerdr {
             && tab.closes()
         {
             self.close_panes(Self::closing(tab));
+            self.doc_tab_closing(idx);
             self.drop_unstarted(self.active_workspace, idx);
             self.prune();
             self.arrange();
@@ -4393,9 +4451,7 @@ impl Gerdr {
                     format!("`{command}` runs again after a reboot")
                 } else {
                     record.skip.push(command.clone());
-                    format!(
-                        "`{command}` won't run again after a reboot · its tab shows \u{2298}"
-                    )
+                    format!("`{command}` won't run again after a reboot · its tab shows \u{2298}")
                 }
             }
         };
@@ -4636,7 +4692,8 @@ impl Gerdr {
         changed |= self.features_last();
         for ws in &mut self.workspaces {
             changed |= retain_active(&mut ws.tabs, &mut ws.active_tab, |t| {
-                !t.takes_panes() || !t.panes.is_empty() || !t.expected.is_empty()
+                let kept = !t.takes_panes() && t.review().is_none_or(|r| !r.closing);
+                kept || !t.panes.is_empty() || !t.expected.is_empty()
             });
         }
         changed |= retain_active(&mut self.workspaces, &mut self.active_workspace, |ws| {
@@ -4790,7 +4847,9 @@ impl Gerdr {
                 dropped = self.launch_next_apps();
                 true
             }
-            (_, Some(command), _) if launch::uses_keyring(&command) && !keyring::state().ready() => {
+            (_, Some(command), _)
+                if launch::uses_keyring(&command) && !keyring::state().ready() =>
+            {
                 self.workspaces[w].tabs[t].expected[i].held = true;
                 self.wait_for_keyring();
                 true
@@ -5108,10 +5167,6 @@ impl Gerdr {
         // While a divider moves, clients may skip sizes between frames (Zed
         // otherwise rebuilds its swapchain for every one and falls far behind).
         let resizing = self.drag.is_some();
-        // A file's preview beside its review shows there, whichever tab
-        // is shown (see `md_dock`).
-        let dock = self.dock();
-        let docked = |window: &Window| dock.as_ref().is_some_and(|d| &d.window == window);
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
@@ -5119,10 +5174,6 @@ impl Gerdr {
                     // The window takes its whole place; its bar floats
                     // over its top.
                     let window = tab.window(id).unwrap().clone();
-                    let rect = match &dock {
-                        Some(d) if d.window == window => d.preview,
-                        _ => rect,
-                    };
                     panes.push((w, t, window, rect));
                 }
             }
@@ -5150,7 +5201,7 @@ impl Gerdr {
             toplevel.send_pending_configure();
             set_preferred_scale(toplevel.wl_surface(), scale);
             let id = toplevel.wl_surface().id();
-            if !self.is_visible(w, t) && !docked(&window) {
+            if !self.is_visible(w, t) {
                 self.pending_place.remove(&id);
                 self.space.unmap_elem(&window);
                 continue;
@@ -5180,9 +5231,13 @@ impl Gerdr {
                 hidden.extend(
                     tab.panes
                         .iter()
-                        .filter(|p| p.id != zoomed && !docked(&p.window))
+                        .filter(|p| p.id != zoomed)
                         .map(|p| p.window.clone()),
                 );
+            }
+            // A file's page while its review has the whole tab.
+            if tab.review().is_some_and(|review| review.page.is_none()) {
+                hidden.extend(tab.panes.iter().map(|p| p.window.clone()));
             }
         }
         for window in hidden {
@@ -5190,11 +5245,6 @@ impl Gerdr {
                 .remove(&window.toplevel().unwrap().wl_surface().id());
             self.space.unmap_elem(&window);
         }
-        // Over the tab's own windows.
-        if let Some(d) = &dock {
-            self.space.raise_element(&d.window, false);
-        }
-        self.previews.docked = dock.map(|d| (d.pane, d.preview));
     }
 
     /// Give `window` the keyboard. Focusing a pane under a zoomed one ends
@@ -5309,17 +5359,13 @@ impl Gerdr {
             .as_ref()
             .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
         let reordering = self.reorder.is_some_and(|r| r.moving);
-        // These take every click, but a file's review leaves its preview
-        // beside it the browser's (see `md_dock`).
-        if let Some(overlay) = self.grabbing_overlay() {
-            let to_dock = overlay == Overlay::Repos
-                && self.context_menu.is_none()
-                && self.drag.is_none()
-                && self.on_dock(pos);
-            return match to_dock {
-                true => self.surface_under(pos),
-                false => None,
-            };
+        // These take every click.
+        if self.grabbing_overlay().is_some() {
+            return None;
+        }
+        // A file's tab, but over its page, the browser's.
+        if self.overlay_at(pos) == Some(Overlay::Doc) {
+            return None;
         }
         if self.on_footer(pos) {
             return None;
@@ -5352,6 +5398,13 @@ impl Gerdr {
         ws.tabs
             .iter()
             .map(|tab| {
+                // A feature's file's tab, by what it shows.
+                if let Some(doc) = tab.review().and_then(|r| r.wd.doc.as_ref()) {
+                    return TabView {
+                        title: doc.tab_title().into(),
+                        ..TabView::default()
+                    };
+                }
                 // The feature panel's tab.
                 if tab.is_feature() {
                     return TabView {
@@ -5668,7 +5721,10 @@ impl Gerdr {
         let name = self.projects.project(id).map_or(id, |p| p.name.as_str());
         let why = format!("{name} is open in another gerdr: pick another, or join it here");
         if self.project.is_some() {
-            let join = ("Join here".to_owned(), MenuAction::AttachProject(id.to_owned()));
+            let join = (
+                "Join here".to_owned(),
+                MenuAction::AttachProject(id.to_owned()),
+            );
             let text = format!("{name} is open in another gerdr");
             return self.toast_with(text, Level::Warning, Some(join));
         }
@@ -6343,7 +6399,8 @@ impl Gerdr {
         self.tooltip.tick(now);
         self.expire_toasts(now);
         self.t3_seen();
-        let docked = self.sync_dock();
+        let doc_tab = self.sync_doc_tab();
+        let flat = doc_tab.is_some();
         let tab_strip = self.tab_hover_tick(now);
         let workspaces: Vec<_> = self
             .workspace_views()
@@ -6357,7 +6414,7 @@ impl Gerdr {
         let active = ws.map(|_| self.active_workspace);
         let area = self.content_rect();
         let tab = self.tab();
-        let focused_pane = tab.filter(|_| !docked).and_then(|tab| {
+        let focused_pane = tab.filter(|_| !flat).and_then(|tab| {
             let focused = tab.focused_id()?;
             let (id, rect) = tab
                 .shown_rects(area)
@@ -6369,7 +6426,7 @@ impl Gerdr {
                 rect
             })
         });
-        let placeholders = tab.filter(|_| !docked).map_or(Vec::new(), |tab| {
+        let placeholders = tab.map_or(Vec::new(), |tab| {
             tab.expected_rects(area)
                 .into_iter()
                 .map(|(expected, rect)| PlaceholderView {
@@ -6424,27 +6481,25 @@ impl Gerdr {
             features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
-            repos: self.repos_view(),
+            repos: self.repos_view().filter(|_| self.repos.is_open()),
+            doc_tab,
             inbox,
             scrollback: self.scrollback_view(),
             toasts: self.toast_views(),
-            // A preview beside the review covers the tab's panes, bars
-            // and all (see `md_dock`).
-            pane_bars: match docked {
+            // A file's tab is flat: its page has no bar (see `doc_tab`).
+            pane_bars: match flat {
                 true => Vec::new(),
                 false => self.pane_bar_views(),
             },
             footer: self.footer_view(&tasks),
             tasks: self.tasks_view(&tasks),
-            unzoom: self
-                .unzoom_button()
-                .filter(|_| !docked)
-                .map(|(_, rect)| rect),
+            unzoom: self.unzoom_button().filter(|_| !flat).map(|(_, rect)| rect),
             theme: self.theme(),
             density: self.density,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
             repos_rect: self.repos_rect(),
+            doc_tab_rect: self.content_rect(),
             scale: self.scale(),
         }
     }
@@ -6871,6 +6926,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         field_clicks: None,
         field_drag: false,
         repos_rows_drag: false,
+        doc_tab_shown: None,
         scrollback: None,
         thumb_drag: None,
         stopping: HashSet::new(),

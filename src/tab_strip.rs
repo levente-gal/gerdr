@@ -702,6 +702,12 @@ impl Gerdr {
                 if tab.is_feature() {
                     items.truncate(1);
                 }
+                // A file's tab has its page only, and closes.
+                if tab.review().is_some() {
+                    let close = items.pop();
+                    items.truncate(1);
+                    items.extend(close);
+                }
                 Some(MenuSpec {
                     anchor: anchor(layout.tabs[t]),
                     items,

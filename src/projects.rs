@@ -78,7 +78,7 @@ pub struct Store {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<i32>,
     /// The review's share of the output's width beside its file's
-    /// preview, as last dragged (see `md_dock`).
+    /// preview, as last dragged (see `doc_tab`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dock_share: Option<f64>,
     /// How big gerdr's window was left, in logical pixels.
@@ -430,6 +430,9 @@ pub struct TabRecord {
     /// The name the tab was given, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The feature's file it shows, if it is a file's tab (see `doc_tab`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<crate::doc_tab::DocRecord>,
 }
 
 /// What ran in a herdr pane, to run again when its server restarts.
@@ -1786,6 +1789,7 @@ mod tests {
                     dir: "/work/services-api".into(),
                     venv: VenvSetting::Path("/work/services-api/.venv".into()),
                     tabs: vec![TabRecord {
+                        doc: None,
                         herdr_tab: Some("w1:t1".into()),
                         layout,
                         label: None,
@@ -2917,5 +2921,27 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
                 t3: false,
             }
         );
+    }
+
+    #[test]
+    fn a_tab_keeps_its_file_and_old_tabs_read_without_one() {
+        let plain = TabRecord {
+            herdr_tab: None,
+            layout: SavedNode::Leaf(SavedLeaf::Zed),
+            label: None,
+            doc: None,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("doc"), "{json}");
+        assert_eq!(serde_json::from_str::<TabRecord>(&json).unwrap(), plain);
+        let file = TabRecord {
+            doc: Some(crate::doc_tab::DocRecord {
+                file: crate::doc_review::DocFile::Evidence,
+                mode: crate::doc_tab::DocMode::Preview,
+            }),
+            ..plain
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        assert_eq!(serde_json::from_str::<TabRecord>(&json).unwrap(), file);
     }
 }

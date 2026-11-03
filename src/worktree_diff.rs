@@ -13,9 +13,10 @@
 //! goes back to the panel.
 //!
 //! A feature stage's file under review (`brief.md`, `plan.md`; see
-//! `doc_review`) shows the same way too, as one file of added lines: its
-//! comments work as on code, edits don't. Approve and Send back sit on its
-//! header and footer.
+//! `doc_review`) shows the same way too, as one file of added lines, but
+//! flat in a tab of its own (see `doc_tab`): its comments work as on code,
+//! and vim's edits change the file. Approve and Send back sit on its header
+//! and footer.
 //!
 //! A feature's code review (see `feature_diff`) shows the same way too:
 //! the feature's changes over every repository it touched, one section
@@ -35,6 +36,8 @@ use crate::{
     diff::FileDiff,
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     doc_review::DocFile,
+    doc_tab::DocMode,
+    feature::Stage,
     feature::review_import::Decision,
     feature_diff::FeatureOf,
     git::Change,
@@ -108,14 +111,21 @@ pub struct DocOf {
     pub state: String,
     /// The file's text as last read: the same again isn't shown again.
     pub text: Option<String>,
-    /// Opened from the feature panel, which Esc goes back to.
-    pub back: bool,
     /// Why it can't be edited now (`doc_review::locked`): its agent is
     /// writing it, it's approved. None: the diff's edits change it.
     pub locked: Option<&'static str>,
 }
 
 impl DocOf {
+    /// What its tab is called.
+    pub fn tab_title(&self) -> &'static str {
+        match self.file {
+            DocFile::Evidence => "Evidence",
+            DocFile::Stage(Stage::Plan) => "Plan",
+            DocFile::Stage(_) => "Brief",
+        }
+    }
+
     /// Verify's `evidence.md`, only read: no comments, no Approve or Send
     /// back.
     pub fn evidence(&self) -> bool {
@@ -190,8 +200,8 @@ pub enum Done {
     /// Send it back to its agent with these comments, as Markdown
     /// (`review::doc_markdown`).
     SendBack(String),
-    /// Show the file under review rendered (see `md_preview`).
-    Preview,
+    /// Show the next mode of the file's tab (see `doc_tab`).
+    CycleMode,
 }
 
 impl WorktreeDiff {
@@ -417,14 +427,14 @@ impl WorktreeDiff {
         let own: &[(&str, &str)] = match (evidence, &self.feature) {
             (_, Some(_)) => &crate::feature_diff::KEYS,
             (true, _) => &[
-                ("Esc", "close the evidence"),
+                ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
-                (PREVIEW_KEY, "show or hide it rendered, beside the review"),
+                (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
             ],
             (false, _) => &[
-                ("Esc", "close the review"),
+                ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
-                (PREVIEW_KEY, "show or hide it rendered, beside the review"),
+                (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
                 (APPROVE_KEY, "approve the file as it is"),
                 (SEND_BACK_KEY, "send it back to its agent with the comments"),
             ],
@@ -615,12 +625,9 @@ impl WorktreeDiff {
             disabled: None,
         };
         if self.evidence() {
-            view.title_buttons
-                .push(hint(ReposButton::Preview, PREVIEW_KEY));
             return;
         }
         view.title_buttons.extend([
-            hint(ReposButton::Preview, PREVIEW_KEY),
             hint(ReposButton::SendBack, SEND_BACK_KEY),
             hint(ReposButton::Approve, APPROVE_KEY),
         ]);
@@ -690,7 +697,7 @@ impl WorktreeDiff {
         let v = matches!(sym, Keysym::v | Keysym::V);
         if self.doc.is_some() && v && mods.ctrl && mods.shift && !mods.alt && !mods.logo && !typing
         {
-            return Some(Done::Preview);
+            return Some(Done::CycleMode);
         }
         // Alt+Shift+Down and Up: the next file not viewed, and the one
         // before.
@@ -746,9 +753,6 @@ impl WorktreeDiff {
         if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
-        if self.doc.is_some() {
-            buttons.push(B::Preview);
-        }
         if self.diff.review.own() > 0 {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
@@ -759,7 +763,7 @@ impl WorktreeDiff {
                 button,
                 label: match button {
                     B::Comment => "comment on the lines".into(),
-                    B::Close if self.commit.is_some() => "back".into(),
+                    B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
                     button => button.label().to_lowercase(),
@@ -767,7 +771,6 @@ impl WorktreeDiff {
                 key: match button {
                     B::Approve => APPROVE_KEY,
                     B::SendBack => SEND_BACK_KEY,
-                    B::Preview => PREVIEW_KEY,
                     B::MarkViewed => "Space",
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
                     button => key_name(button),
@@ -813,7 +816,6 @@ impl WorktreeDiff {
         }
         if self.doc.is_some() {
             match hit {
-                ReposHit::Button(ReposButton::Preview) => return Some(Done::Preview),
                 ReposHit::Button(ReposButton::Approve) => return self.approve(),
                 ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
                 ReposHit::DiffRestore(_) if self.evidence() => {
@@ -1014,16 +1016,33 @@ impl crate::Gerdr {
     /// The diff on show: the keys, clicks and views of the panel act on
     /// it.
     pub(crate) fn wd(&self) -> Option<&WorktreeDiff> {
-        self.repos.worktree.as_ref()
+        if let Some(wd) = &self.repos.worktree {
+            return Some(wd);
+        }
+        if self.repos.panel.is_some() {
+            return None;
+        }
+        Some(&self.review_tab()?.wd)
     }
 
     /// `wd`, to change.
     pub(crate) fn wd_mut(&mut self) -> Option<&mut WorktreeDiff> {
-        self.repos.worktree.as_mut()
+        if self.repos.worktree.is_some() {
+            return self.repos.worktree.as_mut();
+        }
+        if self.repos.panel.is_some() {
+            return None;
+        }
+        Some(&mut self.review_tab_mut()?.wd)
     }
 
     /// What the worktree diff's views and keys need of the chrome.
     pub(crate) fn worktree_env(&self) -> Env {
+        if !self.repos.is_open()
+            && let Some(tab) = self.review_tab()
+        {
+            return self.doc_env(tab.mode);
+        }
         let size = self.repos_rect();
         Env {
             page: crate::chrome::diff_only_page(size, self.density),
@@ -1153,24 +1172,15 @@ impl crate::Gerdr {
     /// Close the worktree's diff, back to the worktrees popup; a
     /// commit's, back to the repositories panel.
     pub(crate) fn close_worktree_diff(&mut self) {
+        if self.repos.worktree.is_none() {
+            return;
+        }
         self.worktree_save_review();
-        // The next review shows its preview beside it again.
-        self.previews.undocked = false;
-        // A commit's diff, a file under review and a feature's code review
-        // weren't opened from the worktrees popup.
+        // A commit's diff and a feature's code review weren't opened from
+        // the worktrees popup.
         let other = self
             .wd()
-            .is_some_and(|wd| wd.commit.is_some() || wd.doc.is_some() || wd.feature.is_some());
-        // Edits to a file under review can't be undone once it closes:
-        // its agent may write it again meanwhile.
-        let doc = self
-            .wd()
-            .filter(|wd| wd.doc.is_some())
-            .map(|wd| wd.root.clone());
-        if let Some(root) = doc {
-            self.repos.cuts.retain(|d| d.root != root);
-            self.repos.undone.retain(|d| d.root != root);
-        }
+            .is_some_and(|wd| wd.commit.is_some() || wd.feature.is_some());
         self.repos.close_worktree();
         if !other {
             self.worktrees.unpark();
@@ -1273,7 +1283,10 @@ impl crate::Gerdr {
     /// What the worktree's diff shows, while open: the panel with the
     /// diff alone across it.
     pub(crate) fn worktree_diff_view(&self) -> Option<crate::chrome::ReposView> {
-        Some(self.wd()?.repos_view(self.worktree_env()))
+        if let Some(wd) = &self.repos.worktree {
+            return Some(wd.repos_view(self.worktree_env()));
+        }
+        self.repos.panel.is_none().then(|| self.doc_tab_view())?
     }
 
     /// What a key or click on the worktree's diff asked for, as the
@@ -1315,8 +1328,22 @@ impl crate::Gerdr {
                 self.close_worktree_diff();
                 None
             }
+            // Back to the feature's tab; this one stays, for the next look.
             Done::Close if doc => {
-                self.close_doc_review();
+                let of = self.wd().and_then(|wd| wd.doc.clone());
+                if let Some(of) = of {
+                    self.show_feature_tab(&of.project, &of.slug);
+                }
+                None
+            }
+            // Comments are made in the review: it comes to show.
+            Done::Diff(Outcome::Notice(NO_COMMENT))
+                if self
+                    .review_tab()
+                    .is_some_and(|r| r.mode == DocMode::Preview) =>
+            {
+                self.set_doc_mode(DocMode::Review);
+                self.show_warning(NO_COMMENT.into());
                 None
             }
             Done::Close => Some(crate::repos::Outcome::Close),
@@ -1329,8 +1356,8 @@ impl crate::Gerdr {
                 self.doc_send_back(comments);
                 None
             }
-            Done::Preview => {
-                self.toggle_doc_preview();
+            Done::CycleMode => {
+                self.cycle_doc_mode();
                 None
             }
         }
@@ -1812,7 +1839,6 @@ mod tests {
             title: "Log in".into(),
             state: "ready for review".into(),
             text: None,
-            back: false,
             locked: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
@@ -1839,42 +1865,30 @@ mod tests {
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(
-            buttons,
-            [
-                ReposButton::Preview,
-                ReposButton::SendBack,
-                ReposButton::Approve
-            ]
-        );
+        assert_eq!(buttons, [ReposButton::SendBack, ReposButton::Approve]);
         assert!(wd.view(ENV).row_buttons.is_empty());
         let hints: Vec<(ReposButton, String)> =
             wd.hints().into_iter().map(|h| (h.button, h.key)).collect();
         assert_eq!(
-            hints[..4],
+            hints[..3],
             [
                 (ReposButton::Comment, "c".into()),
                 (ReposButton::Approve, APPROVE_KEY.into()),
                 (ReposButton::SendBack, SEND_BACK_KEY.into()),
-                (ReposButton::Preview, PREVIEW_KEY.into()),
             ]
         );
         let help = wd.help_lines();
         assert_eq!(help[2].0, PREVIEW_KEY);
         assert_eq!(help[3].0, APPROVE_KEY);
         assert_eq!(help[4].0, SEND_BACK_KEY);
-        // Ctrl+Shift+V and the button show it rendered; not while a
-        // comment is written.
+        // Ctrl+Shift+V moves its tab on to the next mode.
         let ctrl_shift = ModifiersState {
             ctrl: true,
             shift: true,
             ..ModifiersState::default()
         };
         let v = Keysym::V;
-        assert_eq!(wd.key(&ctrl_shift, v, v, ENV), Some(Done::Preview));
-        let preview = ReposHit::Button(ReposButton::Preview);
-        assert_eq!(wd.click(preview, ENV), Some(Done::Preview));
-        assert_eq!(wd.press(ReposButton::Preview, ENV), Some(Done::Preview));
+        assert_eq!(wd.key(&ctrl_shift, v, v, ENV), Some(Done::CycleMode));
         // Its edits are listed; the restore it refuses isn't.
         let keys: Vec<&str> = help.iter().map(|(key, ..)| key.as_str()).collect();
         assert!(keys.contains(&"c / Del Del"), "{keys:?}");
@@ -2078,7 +2092,6 @@ mod tests {
             title: "Log in".into(),
             state: "run 2 failed".into(),
             text: None,
-            back: true,
             locked: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
@@ -2117,18 +2130,13 @@ mod tests {
         let approve = ReposHit::Button(ReposButton::Approve);
         assert_eq!(wd.click(approve, ENV), refused);
         // Nor buttons, hints or keys sheet lines for them.
-        // It shows rendered as any file under review does.
         let view = wd.view(ENV);
-        let buttons: Vec<_> = view.title_buttons.iter().map(|h| h.button).collect();
-        assert_eq!(buttons, [ReposButton::Preview]);
+        assert!(view.title_buttons.is_empty());
         assert!(view.row_buttons.is_empty());
         let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
-        assert_eq!(
-            hints,
-            [ReposButton::Preview, ReposButton::Help, ReposButton::Close]
-        );
+        assert_eq!(hints, [ReposButton::Help, ReposButton::Close]);
         let lines = wd.help_lines();
-        assert_eq!(lines[0].1, "close the evidence");
+        assert_eq!(lines[0].1, "back to the feature");
         assert!(
             lines.iter().all(|(key, what, _)| !what.contains("comment")
                 && key != APPROVE_KEY

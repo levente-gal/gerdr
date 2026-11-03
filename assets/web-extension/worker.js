@@ -112,7 +112,6 @@ async function retry(tab, looks = 5) {
 const FROM_PREVIEW = {
   "preview-ready": "ready",
   "preview-open": "open",
-  "preview-review": "review",
   "preview-line": "line",
   "preview-scroll": "scroll",
 };

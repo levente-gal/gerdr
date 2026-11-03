@@ -1,11 +1,11 @@
 // A markdown file's preview (see gerdr's `md_preview`). The page holds no
 // file: it shows what gerdr sends through the worker, `{ type: "preview",
-// title, html | error, dark, review, marks }`, the HTML rendered by gerdr
+// title, html | error, dark, marks }`, the HTML rendered by gerdr
 // with raw HTML left out. It goes into the article only; the extension's
 // pages run no inline scripts anyway. Links open through gerdr, in a tab
 // of their own: the page never goes elsewhere. `#` links scroll in it.
 //
-// Beside the file's review (gerdr's `md_dock`), the page marks the block
+// In the file's tab (gerdr's `doc_tab`), the page marks the block
 // the review's caret is in (`{ type: "caret", line }`) and the blocks
 // with comments (`marks`, `[line, text]`); a click on a block puts the
 // review's caret on its first line. The two scroll together: gerdr sends
@@ -14,7 +14,6 @@
 
 const body = document.getElementById("body");
 const error = document.getElementById("error");
-const bar = document.getElementById("bar");
 const light = document.getElementById("light");
 const dark = document.getElementById("dark");
 
@@ -113,7 +112,6 @@ function show(message) {
   document.documentElement.classList.toggle("dark", !!message.dark);
   light.disabled = !!message.dark;
   dark.disabled = !message.dark;
-  bar.hidden = !message.review;
   if (typeof message.error === "string") {
     error.textContent = message.error;
     error.hidden = false;
@@ -138,10 +136,6 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message && message.type === "caret") markCaret(message.line, true);
   if (message && message.type === "scroll" && Number.isFinite(message.line)) standAt(message.line);
   return false;
-});
-
-document.getElementById("review").addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "preview-review" }).catch(() => {});
 });
 
 // A link's page opens through gerdr; one in the page scrolls to its part.

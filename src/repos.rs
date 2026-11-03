@@ -3561,8 +3561,7 @@ impl Panel {
             | B::DismissFinding
             | B::ReopenFinding
             | B::MarkViewed
-            | B::NextUnviewed
-            | B::Preview => Err(Why::other("Nothing to review here")),
+            | B::NextUnviewed => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly
             | B::Cancel
@@ -4388,6 +4387,7 @@ impl Panel {
             ReposHit::Detail
             | ReposHit::Panel
             | ReposHit::More
+            | ReposHit::Mode(_)
             | ReposHit::Search(_)
             | ReposHit::Splitter
             | ReposHit::BranchRow(_)
@@ -5389,6 +5389,8 @@ impl Panel {
             grouping: self.grouping,
             diff_only: false,
             flat: false,
+            detail_share: 1.0,
+            modes: None,
         }
     }
 
