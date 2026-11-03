@@ -701,7 +701,7 @@ impl Chrome {
                         painter.pane_handle(*size, *focused, scale, theme.palette())
                     },
                 );
-                parts.push(Part::new(buffer, grip.loc, grip.size, 1.0));
+                parts.push(Part::new(buffer, grip.loc, grip.size, pane_bar::PILL_REST));
             }
         }
         // The strip marking the focused pane, on the apps and under the

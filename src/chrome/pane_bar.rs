@@ -3,8 +3,9 @@
 //! whatever it shows.
 //!
 //! Every bar is a pill. Hidden, it leaves its grip behind: a bare band
-//! along the pane's top edge with room of its own and a handle in its
-//! middle, so every pane can be found and held. The pointer on the grip
+//! along the pane's top edge, floating see-through over the window's top
+//! (`PILL_REST`), with a handle in its middle, so every pane can be found
+//! and held. The pointer on the grip
 //! drops the pill from the handle over the top of the window, as wide as
 //! it needs, so the window's own header still shows either side of it.
 //! A bar out has all its buttons, faint until the pointer is over it.
@@ -50,8 +51,8 @@ const PILL_TERMINAL_HEIGHT: i32 = 24;
 /// How opaque a pill is while the pointer is away from it: what is under
 /// it (a running command's output, a page's or an app's own header)
 /// shows through a little. Under the pointer it fades to whole, for its
-/// buttons.
-const PILL_REST: f32 = 0.7;
+/// buttons. A grip is as see-through, always.
+pub(super) const PILL_REST: f32 = 0.7;
 /// How far a bar's buttons keep from its top and bottom, at least: they
 /// are smaller than `BAR_BUTTON` in a pill too low for that.
 const BUTTON_INSET_Y: i32 = 2;
@@ -69,8 +70,9 @@ const PILL_MARGIN: i32 = 8;
 const PILL_DROP: i32 = 6;
 
 /// A pane's place split in two: its grip on top, `PANE_GRIP` high, and
-/// the rest for its window, which keeps at least a pixel. A bar out
-/// floats its pill over the window and takes no more room than this.
+/// the rest below it, at least a pixel, where the focus strip runs. The
+/// window takes the whole place: its grip and its pill float over its
+/// top.
 pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
     let h = PANE_GRIP.min(pane.size.h - 1).max(0);
     let bar = Rectangle::new(pane.loc, (pane.size.w, h).into());

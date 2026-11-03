@@ -5031,12 +5031,8 @@ impl Gerdr {
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
                 for (id, rect) in tab.shown_rects(area) {
-                    // A pane with a bar gives its grip the top of its place.
-                    let rect = if tab.has_bar(id) {
-                        chrome::pane_bar_rects(rect).1
-                    } else {
-                        rect
-                    };
+                    // The window takes its whole place; its bar floats
+                    // over its top.
                     panes.push((w, t, tab.window(id).unwrap().clone(), rect));
                 }
             }

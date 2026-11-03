@@ -18,11 +18,11 @@
 //! The bar keeps out of the way of an idle shell: it shows while a job
 //! runs or settles, while a command other than the shell runs in front,
 //! and while the pointer is near the pane's top edge or over the bar (see
-//! `bar_wanted`). Shown or hidden, it keeps only its grip
-//! (`chrome::PANE_GRIP`) and gives the rest of its room to the window: its
-//! pill floats over the window's top. Each bar drops from its grip as it
-//! shows, and back as it hides (`BarStates`). A focus change alone
-//! doesn't bring it out: the grip shows which pane has the focus.
+//! `bar_wanted`). Shown or hidden, it takes no room from the window: its
+//! grip (`chrome::PANE_GRIP`) and its pill float over the window's top.
+//! Each bar drops from its grip as it shows, and back as it hides
+//! (`BarStates`). A focus change alone doesn't bring it out: the grip
+//! shows which pane has the focus.
 //!
 //! An app's window and a web page have a bar too, shown and hidden the
 //! same way: an app's with its title, a web page's with its address and
