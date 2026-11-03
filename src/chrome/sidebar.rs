@@ -2313,7 +2313,7 @@ impl Painter {
     /// at `title`, then its `rows`: each a feature, its hover alpha and
     /// where it goes. A row has the mark of the stage the feature is at
     /// under the heading's icon, the feature's title under its label, and
-    /// the stage's name and number at the right.
+    /// a dot per stage at the right.
     fn feature_rows(
         &self,
         c: &mut Canvas,
@@ -2353,29 +2353,22 @@ impl Painter {
             icon_sdf(c, spot, scale, mark.color(p), |x, y| {
                 super::stage_dot(mark, x, y, 7.0 * s)
             });
-            // The title where the heading's label starts.
+            // The title where the heading's label starts, up to the
+            // stages' dots at the right.
             let text_x = px(rect.loc.x - CHILD_X + NAME_X) as f32;
-            let right = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
-            let detail = row.detail();
-            let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
-            let w = self.text_width(&detail, DETAIL_FONT_SIZE, scale).min(most);
-            let x = (right - w).round();
-            self.text(
-                c,
-                &detail,
-                DETAIL_FONT_SIZE,
-                x,
-                right + 1.0,
-                line_band,
-                scale,
-                p.placeholder,
+            let marks = Rectangle::new(
+                (rect.loc.x, rect.loc.y).into(),
+                (rect.size.w - CHILD_PAD, rect.size.h).into(),
             );
+            self.stage_marks(c, &row.marks, marks, scale, p);
+            let dots = super::stage_marks_width(row.marks.len());
+            let end = rect.loc.x + rect.size.w - CHILD_PAD - dots - TITLE_GAP;
             self.text(
                 c,
                 &row.title,
                 SMALL_FONT_SIZE,
                 text_x,
-                x - px(TITLE_GAP) as f32,
+                px(end) as f32,
                 line_band,
                 scale,
                 p.text,

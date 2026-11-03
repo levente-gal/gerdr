@@ -953,15 +953,39 @@ impl Painter {
         self.hints(&mut c, &hint_strs(&view.hints), &hints, hover, scale, p);
         c.into_buffer(false)
     }
+
+    /// A feature's stages as a row of `marks` in `rect`, from the right:
+    /// what the sidebar's feature rows end with.
+    pub(super) fn stage_marks(
+        &self,
+        c: &mut Canvas,
+        marks: &[StageMark],
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let n = marks.len() as i32;
+        let pitch = STAGE_DOT + STAGE_DOT_GAP;
+        let x0 = rect.loc.x + rect.size.w - n * pitch + STAGE_DOT_GAP;
+        let y = rect.loc.y + (rect.size.h - STAGE_DOT) / 2;
+        for (i, mark) in marks.iter().enumerate() {
+            let spot = Rectangle::new(
+                (x0 + i as i32 * pitch, y).into(),
+                (STAGE_DOT, STAGE_DOT).into(),
+            );
+            icon_sdf(c, spot, scale, mark.color(p), |x, y| {
+                stage_dot(*mark, x, y, 7.0 * s)
+            });
+        }
+    }
 }
 
-/// A sidebar row for an open feature: its title, its stages' marks and
-/// the name of the stage it is at (none once every stage is done).
+/// A sidebar row for an open feature: its title and its stages' marks.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FeatureRowView {
     pub title: String,
     pub marks: Vec<StageMark>,
-    pub stage: Option<String>,
 }
 
 impl FeatureRowView {
@@ -973,21 +997,16 @@ impl FeatureRowView {
             StageMark::Done
         }
     }
-
-    /// What the row ends with: the stage it is at and its number among
-    /// the stages ("Plan · 2/8"), or "done".
-    pub(super) fn detail(&self) -> String {
-        let at = self.marks.iter().position(|m| *m == StageMark::Current);
-        match (&self.stage, at) {
-            (Some(stage), Some(i)) => format!("{stage} \u{b7} {}/{}", i + 1, self.marks.len()),
-            (Some(stage), None) => stage.clone(),
-            (None, _) => "done".to_owned(),
-        }
-    }
 }
 
-/// How big a feature row's stage dot is.
+/// How big a stage dot of a sidebar row is, and the gap between two.
 pub(super) const STAGE_DOT: i32 = 8;
+pub(super) const STAGE_DOT_GAP: i32 = 3;
+
+/// How wide `marks` stage dots are in a sidebar row.
+pub(super) fn stage_marks_width(marks: usize) -> i32 {
+    marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP
+}
 
 #[cfg(test)]
 mod tests {

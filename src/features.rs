@@ -2744,7 +2744,6 @@ impl Gerdr {
             .map(|f| chrome::FeatureRowView {
                 title: f.title.clone(),
                 marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
-                stage: f.current().map(|s| s.label().to_owned()),
             })
             .collect()
     }
