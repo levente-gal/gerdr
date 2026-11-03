@@ -5492,6 +5492,7 @@ impl Gerdr {
         self.place_held(id);
         self.show_active();
         self.show_last_tab();
+        self.open_pending_feature(id);
         if let Some(left) = left {
             // Asked for when switching (see `ask_switch`).
             let stops = self

@@ -51,8 +51,9 @@ it again with the same `id`, so it keeps its place:
    ]}
 
    - `severity`: `high`, `medium` or `low`.
-   - `repo`: the repository's folder name. It may be left out when the
-     feature has one repository.
+   - `repo`: the repository's name as listed above (`project:repository`
+     for another project's). It may be left out when the feature has one
+     repository.
    - `file`: the path from the repository's top folder.
    - `line`: the line on the new side of the diff. Leave it out for the
      whole file.

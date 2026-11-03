@@ -4,8 +4,10 @@
 //! The checks come from the project's store file, by repository name or
 //! `_feature` (`"workflow": {"verify": {"services-api": ["npm test"],
 //! "_feature": ["./e2e.sh"]}}`): each touched repository's run in its
-//! worktree, in name order, then `_feature`'s in the feature folder. An
-//! untouched repository's checks don't run.
+//! worktree, in `Repo::key` order, then `_feature`'s in the feature folder.
+//! An untouched repository's checks don't run. A linked project's
+//! repository takes its own project's checks, by its name; `_feature` is
+//! the home project's alone.
 //!
 //! Verify fails when:
 //! - the code reads dirty, or an untouched repository has changes
@@ -32,7 +34,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Feature,
+    Feature, PerProject,
     layout::git,
     now, patch,
     setup::{Exit, minutes, shell},
@@ -54,7 +56,7 @@ pub const TAIL: usize = 40;
 /// One check to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
-    /// The repository's name, or `FEATURE_KEY`.
+    /// The repository's `Repo::key`, or `FEATURE_KEY`.
     pub repo: String,
     /// Where it runs: the repository's worktree, or the feature folder.
     pub dir: PathBuf,
@@ -92,7 +94,7 @@ pub struct Evidence {
     /// The feature's patch-id the checks ran on; empty when it couldn't
     /// be read.
     pub patch: String,
-    /// Each touched repository's `HEAD` commit, by name.
+    /// Each touched repository's `HEAD` commit, by `Repo::key`.
     pub heads: Vec<(String, String)>,
     pub outcomes: Vec<Outcome>,
     /// What failed outside the checks, one line each: "uncommitted
@@ -139,12 +141,15 @@ impl Outcome {
     }
 }
 
-/// The checks `config` (by repository name or `FEATURE_KEY`) gives
-/// `feature`, in the order they run.
-pub fn checks(feature: &Feature, config: &BTreeMap<String, Vec<String>>) -> Vec<Check> {
-    let commands = |key: &str| {
+/// Each project's checks, by repository name or `FEATURE_KEY`: the store
+/// file's `"workflow": {"verify": ...}`.
+pub type Config = PerProject<BTreeMap<String, Vec<String>>>;
+
+/// The checks `config` gives `feature`, in the order they run.
+pub fn checks(feature: &Feature, config: &Config) -> Vec<Check> {
+    let commands = |config: Option<&BTreeMap<String, Vec<String>>>, key: &str| {
         config
-            .get(key)
+            .and_then(|c| c.get(key))
             .into_iter()
             .flatten()
             .map(|c| c.trim())
@@ -153,18 +158,18 @@ pub fn checks(feature: &Feature, config: &BTreeMap<String, Vec<String>>) -> Vec<
             .collect::<Vec<_>>()
     };
     let mut repos: Vec<_> = feature.touched().collect();
-    repos.sort_by(|a, b| a.name.cmp(&b.name));
+    repos.sort_by_key(|r| r.key());
     let mut checks = Vec::new();
     for repo in repos {
-        for command in commands(&repo.name) {
+        for command in commands(config.of(repo), &repo.name) {
             checks.push(Check {
-                repo: repo.name.clone(),
+                repo: repo.key(),
                 dir: repo.worktree.clone(),
                 command,
             });
         }
     }
-    for command in commands(FEATURE_KEY) {
+    for command in commands(Some(&config.home), FEATURE_KEY) {
         checks.push(Check {
             repo: FEATURE_KEY.into(),
             dir: feature.dir.clone(),
@@ -210,16 +215,14 @@ pub fn run(
         return evidence;
     }
     let mut touched: Vec<_> = feature.touched().collect();
-    touched.sort_by(|a, b| a.name.cmp(&b.name));
+    touched.sort_by_key(|r| r.key());
     for repo in touched {
         match git(&repo.worktree, &["rev-parse", "HEAD"]) {
-            Ok(head) => evidence
-                .heads
-                .push((repo.name.clone(), head.trim().to_owned())),
+            Ok(head) => evidence.heads.push((repo.key(), head.trim().to_owned())),
             Err(err) => {
                 evidence
                     .problems
-                    .push(format!("couldn't read {}'s HEAD: {err}", repo.name));
+                    .push(format!("couldn't read {}'s HEAD: {err}", repo.key()));
                 return evidence;
             }
         }
@@ -545,13 +548,49 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::feature::tests::{Temp, commit, feature_over, run as git_run};
+    use crate::feature::tests::{Temp, commit, feature_over, link_over, run as git_run};
 
-    fn config(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    fn by_name(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
         pairs
             .iter()
             .map(|(k, v)| ((*k).into(), v.iter().map(|c| (*c).into()).collect()))
             .collect()
+    }
+
+    fn config(pairs: &[(&str, &[&str])]) -> Config {
+        PerProject::all(by_name(pairs))
+    }
+
+    #[test]
+    fn linked_repos_check_with_their_own_projects_checks() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["web"], &[]);
+        link_over(&t, &mut f, "other", &["api", "docs"], &["docs"]);
+        let c = Config {
+            home: by_name(&[
+                ("web", &["w"]),
+                ("api", &["home api"]),
+                ("_feature", &["e2e"]),
+            ]),
+            links: [(
+                "other".to_owned(),
+                by_name(&[("api", &["a"]), ("docs", &["never"]), ("_feature", &["no"])]),
+            )]
+            .into(),
+        };
+        let wt = |i: usize| f.repos[i].worktree.clone();
+        assert_eq!(
+            checks(&f, &c),
+            [
+                check("other:api", &wt(1), "a"),
+                check("web", &wt(0), "w"),
+                check("_feature", &f.dir, "e2e"),
+            ]
+        );
+        commit(&wt(1), "x", "x");
+        let e = run(&f, &checks(&f, &c), TIMEOUT, &mut |_| {});
+        let heads: Vec<&str> = e.heads.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(heads, ["other:api", "web"]);
     }
 
     fn check(repo: &str, dir: &Path, command: &str) -> Check {
@@ -582,7 +621,7 @@ mod tests {
                 check("_feature", &f.dir, "./e2e.sh"),
             ]
         );
-        assert!(checks(&f, &BTreeMap::new()).is_empty());
+        assert!(checks(&f, &Config::default()).is_empty());
     }
 
     #[test]

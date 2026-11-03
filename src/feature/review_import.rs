@@ -10,8 +10,9 @@
 //! ```
 //!
 //! - `severity`: `high`, `medium` or `low`.
-//! - `repo`: the repository's folder name; may be left out for a feature
-//!   over one repository.
+//! - `repo`: the repository's key (`Repo::key`: its folder name, or
+//!   `<project>:<name>` in a linked project); may be left out for a
+//!   feature over one repository.
 //! - `file`: from the repository's top folder. `line`: on the new side of
 //!   the diff, 1-based; may be left out for the whole file.
 //! - `id`: only to raise a finding of an earlier run again (the prompt
@@ -103,7 +104,7 @@ pub struct Finding {
     /// `r<run>-<k>`: unique within the feature.
     pub id: String,
     pub severity: Severity,
-    /// The repository's folder name (`Repo::name`).
+    /// The repository's `Repo::key`.
     pub repo: String,
     /// From the repository's top folder.
     pub file: String,
@@ -365,6 +366,17 @@ fn place(repo: Option<String>, file: &str, repos: &[(String, PathBuf)]) -> (Stri
     }
     let file = file.trim_start_matches("./").to_owned();
     match repo {
+        // A linked project's repository by its plain name, when only one
+        // has it.
+        Some(repo) if !repos.iter().any(|(key, _)| *key == repo) => {
+            let mut by_name = repos
+                .iter()
+                .filter(|(key, _)| key.rsplit(':').next() == Some(repo.as_str()));
+            match (by_name.next(), by_name.next()) {
+                (Some((key, _)), None) => (key.clone(), file),
+                _ => (repo, file),
+            }
+        }
         Some(repo) => (repo, file),
         None if repos.len() == 1 => (repos[0].0.clone(), file),
         None => (String::new(), file),
@@ -562,7 +574,7 @@ pub fn read_code(feature: &Feature, path: &Path) -> Result<CodeRead, String> {
         heads: BTreeMap::new(),
     };
     for repo in feature.touched() {
-        let name = &repo.name;
+        let name = &repo.key();
         let range = format!("{}...HEAD", base_ref(repo));
         let diff = git(
             &repo.worktree,
@@ -906,5 +918,33 @@ mod tests {
         assert_eq!(read.diff["api"]["login"], [(1, 1)]);
         assert_eq!(read.heads["api"].len(), 40);
         assert!(!read.diff.contains_key("web"));
+    }
+
+    #[test]
+    fn a_linked_projects_repository_is_placed_by_its_key() {
+        let repos = vec![
+            ("api".to_owned(), PathBuf::from("/w/f/api")),
+            ("admin:ui".to_owned(), PathBuf::from("/a/.features/f/ui")),
+            ("admin:api".to_owned(), PathBuf::from("/a/.features/f/api")),
+        ];
+        let at = |repo: Option<&str>, file: &str| place(repo.map(str::to_owned), file, &repos);
+        assert_eq!(
+            at(None, "/a/.features/f/ui/src/b.rs"),
+            ("admin:ui".into(), "src/b.rs".into())
+        );
+        assert_eq!(
+            at(Some("admin:ui"), "src/b.rs"),
+            ("admin:ui".into(), "src/b.rs".into())
+        );
+        // A plain name only one repository has.
+        assert_eq!(
+            at(Some("ui"), "src/b.rs"),
+            ("admin:ui".into(), "src/b.rs".into())
+        );
+        // `api` is the home one's key: it stays.
+        assert_eq!(
+            at(Some("api"), "src/b.rs"),
+            ("api".into(), "src/b.rs".into())
+        );
     }
 }

@@ -18,8 +18,8 @@ Your job: turn the approved brief into a plan the Build stage can follow.
    - `## Milestones`: a checkbox list (`- [ ] …`), each milestone small
      enough to build and check on its own, in the order to build them.
 {{#if multi_repo}}
-   - `## Repositories`: the repositories the feature touches, by folder
-     name, with what changes in each.
+   - `## Repositories`: the repositories the feature touches, by the
+     names listed above, with what changes in each.
    - `## Merge order`: the order to merge the repositories' branches in,
      and why.
 {{else}}

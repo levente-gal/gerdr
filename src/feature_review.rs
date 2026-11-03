@@ -36,12 +36,12 @@ pub(crate) fn review_vars(feature: &Feature) -> Vec<(String, String)> {
         .map(|repo| {
             let whole = format!("git diff {}...HEAD", repo.base_commit);
             let at = repo.worktree.display();
-            match review.and_then(|r| r.reviewed.get(&repo.name)) {
+            let key = repo.key();
+            match review.and_then(|r| r.reviewed.get(&key)) {
                 Some(sha) => format!(
-                    "   - {}, in {at}: `git diff {sha}..HEAD` (what changed since the last review; `{whole}` shows the whole change)",
-                    repo.name
+                    "   - {key}, in {at}: `git diff {sha}..HEAD` (what changed since the last review; `{whole}` shows the whole change)"
                 ),
-                None => format!("   - {}, in {at}: `{whole}`", repo.name),
+                None => format!("   - {key}, in {at}: `{whole}`"),
             }
         })
         .collect::<Vec<_>>()
@@ -52,7 +52,7 @@ pub(crate) fn review_vars(feature: &Feature) -> Vec<(String, String)> {
                 r.findings
                     .iter()
                     .filter(|f| states.contains(&f.state))
-                    .map(|f| finding_line(f, feature.multi))
+                    .map(|f| finding_line(f, feature.many_repos()))
                     .collect::<Vec<_>>()
                     .join("\n")
             })
@@ -263,7 +263,7 @@ impl Gerdr {
         }
         let repos: Vec<(String, PathBuf)> = feature
             .touched()
-            .map(|r| (r.name.clone(), r.worktree.clone()))
+            .map(|r| (r.key(), r.worktree.clone()))
             .collect();
         let now = feature::now();
         let Some(f) = self.feature_mut(project, slug) else {
@@ -367,7 +367,7 @@ impl Gerdr {
                 plural(undecided, "finding")
             ));
         }
-        let (n, text) = review_import::fixes_markdown(review, &title, f.multi);
+        let (n, text) = review_import::fixes_markdown(review, &title, f.many_repos());
         if n == 0 {
             return self.show_warning(format!("\u{201c}{title}\u{201d} has no findings to fix"));
         }
@@ -428,11 +428,8 @@ impl Gerdr {
             return false;
         }
         let shown = path.display().to_string();
-        let project_name = self
-            .projects
-            .project(project)
-            .map_or_else(|| project.to_owned(), |p| p.name.clone());
-        let mut values = vars(&feature, &project_name, &data, Stage::Build);
+        let names = self.projects.names(&feature);
+        let mut values = vars(&feature, &names, &data, Stage::Build);
         values.insert("fixes.what".into(), what.to_owned());
         values.insert("fixes.path".into(), shown.clone());
         let sent = prompts::render_builtin("send-fixes", &values)
@@ -541,7 +538,7 @@ mod tests {
         assert_eq!(v["review.open"], "- r1-3 (high, api/src/a.rs:3): open");
         let mut all = crate::feature_agents::vars(
             &reviewed(),
-            "Acme",
+            &crate::feature::PerProject::all("Acme".to_owned()),
             std::path::Path::new("/d"),
             Stage::AiReview,
         );

@@ -63,8 +63,10 @@ pub const KEYS: [(&str, &str); 8] = [
 /// A touched repository as its code review last read it.
 #[derive(Clone, Debug, Default)]
 pub struct RepoOf {
-    /// `Repo::name`, its header's label and the viewed keys' first part.
+    /// `Repo::key`: the viewed keys' first part and the findings' repo.
     pub name: String,
+    /// Its header's label (`PerProject::label`); empty: `name`.
+    pub label: String,
     /// Its worktree for the feature.
     pub root: PathBuf,
     pub branch: Option<String>,
@@ -75,6 +77,17 @@ pub struct RepoOf {
     pub dirty: std::collections::BTreeSet<String>,
     /// Why its last read failed.
     pub error: Option<String>,
+}
+
+impl RepoOf {
+    /// What it is called on screen.
+    fn shown(&self) -> &str {
+        if self.label.is_empty() {
+            &self.name
+        } else {
+            &self.label
+        }
+    }
 }
 
 /// A feature's code review (`WorktreeDiff::feature`).
@@ -164,7 +177,7 @@ impl FeatureOf {
             .iter()
             .map(|r| Section {
                 root: &r.root,
-                label: &r.name,
+                label: r.shown(),
                 branch: r.branch.as_deref(),
                 head: None,
                 changes: &r.since.changes,
@@ -432,7 +445,7 @@ impl WorktreeDiff {
                     repo.dirty = read.dirty;
                     files.push((root, read.files));
                 }
-                Err(why) => repo.error = Some(format!("{}: {why}", repo.name)),
+                Err(why) => repo.error = Some(format!("{}: {why}", repo.shown())),
             }
         }
         self.read = true;
@@ -497,10 +510,12 @@ impl Gerdr {
             return self.show_warning(text);
         }
         let branch = feature.branch();
+        let names = self.projects.names(feature);
         let repos = feature
             .touched()
             .map(|r| RepoOf {
-                name: r.name.clone(),
+                name: r.key(),
+                label: names.label(r),
                 root: r.worktree.clone(),
                 branch: Some(r.branch.clone().unwrap_or_else(|| branch.clone())),
                 ..RepoOf::default()
@@ -606,7 +621,7 @@ impl Gerdr {
         std::thread::spawn(move || {
             let repos = repos
                 .iter()
-                .map(|r| (r.name.clone(), r.worktree.clone(), viewed::read(r)))
+                .map(|r| (r.key(), r.worktree.clone(), viewed::read(r)))
                 .collect();
             let read = Read {
                 project,
@@ -722,7 +737,7 @@ impl Gerdr {
             errors: fe.repos.iter().filter_map(|r| r.error.clone()).collect(),
             dirty: (fe.repos.iter())
                 .filter(|r| !r.dirty.is_empty())
-                .map(|r| r.name.clone())
+                .map(|r| r.shown().to_owned())
                 .collect(),
             unviewed: fe.unviewed(),
             comments: wd.diff.review.own(),
@@ -1105,5 +1120,28 @@ mod tests {
         let comments = fe.finding_comments(&HashMap::new());
         assert_eq!(comments[0].root, Path::new("/w/api"));
         assert_eq!(fe.holding(), 1);
+    }
+
+    #[test]
+    fn a_linked_projects_repository_ticks_and_finds_by_its_key() {
+        let mut ui = repo("admin:ui", &["a.rs"]);
+        ui.label = "Admin: ui".into();
+        let mut fe = FeatureOf {
+            repos: vec![repo("ui", &["a.rs"]), ui],
+            findings: vec![Finding {
+                repo: "admin:ui".into(),
+                file: "a.rs".into(),
+                ..Finding::default()
+            }],
+            ..FeatureOf::default()
+        };
+        fe.viewed.0.insert("admin:ui/a.rs".into(), "b-a.rs".into());
+        assert_eq!(fe.check(Path::new("/w/admin:ui"), "a.rs"), Check::On);
+        assert_eq!(fe.check(Path::new("/w/ui"), "a.rs"), Check::Off);
+        assert_eq!(fe.unviewed(), ["ui/a.rs"]);
+        let labels: Vec<&str> = fe.sections().iter().map(|s| s.label).collect();
+        assert_eq!(labels, ["ui", "Admin: ui"]);
+        let comments = fe.finding_comments(&HashMap::new());
+        assert_eq!(comments[0].root, Path::new("/w/admin:ui"));
     }
 }
