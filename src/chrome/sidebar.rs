@@ -33,9 +33,9 @@ use super::{
     HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING,
     POPUP_RADIUS, Painter, Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS,
     ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE,
-    TINY_FONT_SIZE, TabView, agent_icon, app, band, centred_dot, chevron_down, ci_mark, cross,
-    distinct, ellipsis, folder, git_branch, icon_sdf, measure, mix, new_tab, physical, rect_px,
-    restart_arrow, sparkle, status_dot, status_mark, terminal,
+    TINY_FONT_SIZE, TabView, agent_icon, app, arrow, band, centred_dot, chevron_down, ci_mark,
+    cross, distinct, ellipsis, folder, git_branch, icon_sdf, measure, mix, new_tab, physical,
+    rect_px, restart_arrow, sparkle, status_dot, status_mark, terminal,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -123,6 +123,12 @@ const HEADER_BUTTON_GAP: i32 = 2;
 /// How far the repositories button's count badge sticks out of its top
 /// right corner: up only, the "+" being right next to it.
 const REPOS_BADGE_OUT: i32 = 1;
+/// The repositories button's ↑ and ↓ marks (commits to push, to pull):
+/// how small their arrows are drawn, the room each takes, and their inset
+/// from the button's bottom right corner, clear of its icon.
+const REPOS_ARROW_SCALE: f32 = 0.6;
+const REPOS_ARROW_SLOT: (i32, i32) = (5, 7);
+const REPOS_ARROW_INSET: i32 = 3;
 /// The field a header's name turns into while renaming: its height and
 /// how far it reaches left of the name.
 const RENAME_HEIGHT: i32 = 24;
@@ -1080,6 +1086,10 @@ pub struct SidebarState {
     /// badge; and whether any is stopped, which turns it red.
     pub repos_changed: usize,
     pub repos_stuck: bool,
+    /// Whether any of them has commits to push, and to pull: the button's
+    /// ↑ and ↓ marks.
+    pub repos_ahead: bool,
+    pub repos_behind: bool,
     /// The workspace being renamed, and the name typed so far.
     pub rename: Option<(usize, Line)>,
     /// How far the rows are scrolled up under the header, in logical
@@ -2133,7 +2143,27 @@ impl Painter {
             }
         }
         let lit = (alpha(head.repos), head.repos_open);
-        self.header_button(c, repos, lit, scale, p, |x, y| git_branch(x, y, 1.05 * s));
+        let ink = self.header_button(c, repos, lit, scale, p, |x, y| git_branch(x, y, 1.05 * s));
+        // ↑ and ↓ in the bottom right corner, packed to the right.
+        let (w, h) = REPOS_ARROW_SLOT;
+        let mut right = repos.loc.x + repos.size.w - REPOS_ARROW_INSET;
+        for (up, shown) in [(false, head.repos_behind), (true, head.repos_ahead)] {
+            if !shown {
+                continue;
+            }
+            let slot = Rectangle::new(
+                (
+                    right - w,
+                    repos.loc.y + repos.size.h - REPOS_ARROW_INSET - h,
+                )
+                    .into(),
+                (w, h).into(),
+            );
+            icon_sdf(c, slot, scale, ink, |x, y| {
+                arrow(up, x, y, REPOS_ARROW_SCALE * s)
+            });
+            right -= w;
+        }
         if head.repos_changed > 0 {
             let fill = if head.repos_stuck { p.error } else { p.accent };
             let colors = (p.panel, fill, p.on_accent);
@@ -2708,7 +2738,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
         shape: impl Fn(f32, f32) -> f32,
-    ) {
+    ) -> Rgb {
         let s = scale as f32;
         let fill = if open {
             Some(p.selected)
@@ -2727,6 +2757,7 @@ impl Painter {
             p.muted
         };
         icon_sdf(c, rect, scale, color, shape);
+        color
     }
 
     /// A pill in `color` counting `count` in header slot `slot`: blocked
@@ -3212,6 +3243,8 @@ struct SidebarHead {
     repos_open: bool,
     repos_changed: usize,
     repos_stuck: bool,
+    repos_ahead: bool,
+    repos_behind: bool,
 }
 
 impl SidebarHead {
@@ -3227,6 +3260,8 @@ impl SidebarHead {
             repos_open: state.repos_open,
             repos_changed: state.repos_changed,
             repos_stuck: state.repos_stuck,
+            repos_ahead: state.repos_ahead,
+            repos_behind: state.repos_behind,
         }
     }
 }
@@ -4645,6 +4680,8 @@ mod tests {
                 repos_open: false,
                 repos_changed: 0,
                 repos_stuck: false,
+                repos_ahead: false,
+                repos_behind: false,
             };
             painter.sidebar_frame(&head, (240, 400).into(), 1.5, p);
         }

@@ -432,13 +432,26 @@ fn files(paths: &[String]) -> String {
     text
 }
 
-/// How many of the repositories of `statuses` (one per root, however many
-/// checkouts share it) have uncommitted changes or are stopped half-way (a
-/// merge, rebase or the like, or a conflicted file), and how many are
-/// stopped.
-fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> (usize, usize) {
+/// What the repositories button shows of the project's repositories, each
+/// counted once however many checkouts share it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RepoCounts {
+    /// Repositories with uncommitted changes or stopped half-way (a merge,
+    /// rebase or the like, or a conflicted file): the button's badge.
+    pub changed: usize,
+    /// Of those, the ones stopped half-way: they turn the badge red.
+    pub stuck: usize,
+    /// Repositories with commits to push to their upstream: the ↑ mark.
+    pub ahead: usize,
+    /// Repositories with commits to pull from their upstream: the ↓ mark.
+    pub behind: usize,
+}
+
+/// What the repositories button shows of the repositories of `statuses`
+/// (see `RepoCounts`).
+fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> RepoCounts {
     let mut roots: Vec<&Path> = Vec::new();
-    let (mut changed, mut stuck) = (0, 0);
+    let mut counts = RepoCounts::default();
     for status in statuses {
         let Some(root) = status.root.as_deref() else {
             continue;
@@ -448,23 +461,42 @@ fn changed_repos<'a>(statuses: impl Iterator<Item = &'a GitStatus>) -> (usize, u
         }
         roots.push(root);
         let stopped = status.op.is_some() || status.changes.iter().any(Change::conflicted);
-        changed += (status.dirty || stopped) as usize;
-        stuck += stopped as usize;
+        counts.changed += (status.dirty || stopped) as usize;
+        counts.stuck += stopped as usize;
+        let tracked = status.upstream.is_some();
+        counts.ahead += (tracked && status.ahead > 0) as usize;
+        counts.behind += (tracked && status.behind > 0) as usize;
     }
-    (changed, stuck)
+    counts
 }
 
-/// The repositories button's tooltip, with `changed` repositories changed
-/// and `stuck` of them stopped half-way.
-pub(crate) fn repos_tip(changed: usize, stuck: usize) -> String {
-    let mut text = "Repositories".to_owned();
-    if changed > 0 {
-        text.push_str(&format!(": {changed} with changes"));
+/// `n` repositories, in words.
+fn repo_count(n: usize) -> String {
+    match n {
+        1 => "1 repo".into(),
+        n => format!("{n} repos"),
     }
-    if stuck > 0 {
-        text.push_str(&format!(", {stuck} stopped half-way"));
+}
+
+/// The repositories button's tooltip, saying what `counts` counts.
+pub(crate) fn repos_tip(counts: &RepoCounts) -> String {
+    let mut parts = Vec::new();
+    if counts.changed > 0 {
+        parts.push(format!("{} with changes", counts.changed));
     }
-    text
+    if counts.stuck > 0 {
+        parts.push(format!("{} stopped half-way", counts.stuck));
+    }
+    if counts.ahead > 0 {
+        parts.push(format!("{} to push", repo_count(counts.ahead)));
+    }
+    if counts.behind > 0 {
+        parts.push(format!("{} to pull", repo_count(counts.behind)));
+    }
+    match parts.is_empty() {
+        true => "Repositories".to_owned(),
+        false => format!("Repositories: {}", parts.join(", ")),
+    }
 }
 
 /// `n` lines, in words.
@@ -556,10 +588,9 @@ impl Gerdr {
         items
     }
 
-    /// How many of the project's repositories have uncommitted changes or
-    /// are stopped half-way, and how many are stopped: the sidebar's badge
-    /// on the repositories button.
-    pub(crate) fn repos_changed(&self) -> (usize, usize) {
+    /// What the sidebar's repositories button shows of the project's
+    /// repositories: its badge and its ↑/↓ marks.
+    pub(crate) fn repos_changed(&self) -> RepoCounts {
         let statuses = self
             .workspaces
             .iter()
@@ -2618,8 +2649,9 @@ mod tests {
             status("/c", true),
             GitStatus::default(),
         ];
-        assert_eq!(changed_repos(statuses.iter()), (2, 0));
-        assert_eq!(changed_repos(std::iter::empty()), (0, 0));
+        let counts = |c: RepoCounts| (c.changed, c.stuck);
+        assert_eq!(counts(changed_repos(statuses.iter())), (2, 0));
+        assert_eq!(changed_repos(std::iter::empty()), RepoCounts::default());
     }
 
     #[test]
@@ -2633,17 +2665,55 @@ mod tests {
             code: 'U',
         });
         let statuses = [merging, status("/c", false)];
-        assert_eq!(changed_repos(statuses.iter()), (1, 1));
-        assert_eq!(changed_repos([conflicted].iter()), (1, 1));
+        let counts = |c: RepoCounts| (c.changed, c.stuck);
+        assert_eq!(counts(changed_repos(statuses.iter())), (1, 1));
+        assert_eq!(counts(changed_repos([conflicted].iter())), (1, 1));
     }
 
     #[test]
-    fn the_repos_tip_counts_changed_and_stopped() {
-        assert_eq!(repos_tip(0, 0), "Repositories");
-        assert_eq!(repos_tip(2, 0), "Repositories: 2 with changes");
+    fn repos_to_push_or_pull_count_each_tracked_root_once() {
+        let tracked = |root, ahead, behind| GitStatus {
+            upstream: Some("origin/main".into()),
+            ahead,
+            behind,
+            ..status(root, false)
+        };
+        let untracked = GitStatus {
+            ahead: 3,
+            ..status("/d", false)
+        };
+        let statuses = [
+            tracked("/a", 2, 0),
+            tracked("/a", 2, 0),
+            tracked("/b", 1, 4),
+            tracked("/c", 0, 0),
+            untracked,
+        ];
+        let counts = changed_repos(statuses.iter());
+        assert_eq!((counts.ahead, counts.behind), (2, 1));
+        assert_eq!(counts.changed, 0);
+    }
+
+    #[test]
+    fn the_repos_tip_counts_changed_stopped_and_to_push_or_pull() {
+        let tip = |changed, stuck, ahead, behind| {
+            repos_tip(&RepoCounts {
+                changed,
+                stuck,
+                ahead,
+                behind,
+            })
+        };
+        assert_eq!(tip(0, 0, 0, 0), "Repositories");
+        assert_eq!(tip(2, 0, 0, 0), "Repositories: 2 with changes");
         assert_eq!(
-            repos_tip(3, 1),
+            tip(3, 1, 0, 0),
             "Repositories: 3 with changes, 1 stopped half-way"
+        );
+        assert_eq!(tip(0, 0, 1, 0), "Repositories: 1 repo to push");
+        assert_eq!(
+            tip(3, 0, 2, 1),
+            "Repositories: 3 with changes, 2 repos to push, 1 repo to pull"
         );
     }
 }

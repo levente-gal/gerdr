@@ -405,7 +405,7 @@ impl Gerdr {
             .is_some_and(|menu| menu.spec.anchor == layout.plus);
         let repos = quantize(hover.alpha(SidebarHit::Repos, now));
         let repos_open = self.repos.panel.is_some();
-        let (repos_changed, repos_stuck) = self.repos_changed();
+        let counts = self.repos_changed();
         let rename = self.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Workspace(w) => Some((w, r.field.line())),
             RenameTarget::Tab(..) => None,
@@ -421,8 +421,10 @@ impl Gerdr {
             plus_open,
             repos,
             repos_open,
-            repos_changed,
-            repos_stuck: repos_stuck > 0,
+            repos_changed: counts.changed,
+            repos_stuck: counts.stuck > 0,
+            repos_ahead: counts.ahead > 0,
+            repos_behind: counts.behind > 0,
             rename,
             scroll,
             over,
@@ -746,8 +748,7 @@ impl Gerdr {
                 })
             }
             SidebarHit::Repos => {
-                let (changed, stuck) = self.repos_changed();
-                let tip = Tooltip::new(&repos_tip(changed, stuck), layout.repos);
+                let tip = Tooltip::new(&repos_tip(&self.repos_changed()), layout.repos);
                 Some(match self.keymap.help().key_of(Action::Repos, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,

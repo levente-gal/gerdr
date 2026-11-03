@@ -729,7 +729,13 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
                 project: Some("aft".into()),
                 header_lit: true,
                 features: Vec::new(),
-                state: SidebarState::default(),
+                // The repositories button with its badge and ↑/↓ marks.
+                state: SidebarState {
+                    repos_changed: 2,
+                    repos_ahead: true,
+                    repos_behind: true,
+                    ..SidebarState::default()
+                },
             },
             (200, 400).into(),
             scale,
@@ -825,7 +831,7 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 12]; 4] = [
     // Dark at 1
     [
-        0x742820c5c927d818, // sidebar
+        0x0862dbf6fad20a20, // sidebar
         0xed1972252f36590d, // tab_strip
         0x0256097578c822a6, // pane_bar
         0x866d59a70ebe252d, // help
@@ -840,7 +846,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     ],
     // Dark at 2
     [
-        0x9ddccb37c80d489b, // sidebar
+        0x8bbf6c3a7d553224, // sidebar
         0x75280e3af24f953f, // tab_strip
         0xa1370eef83e29cb5, // pane_bar
         0x56045b72862ed173, // help
@@ -855,7 +861,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     ],
     // Light at 1
     [
-        0x4833c6a51e833328, // sidebar
+        0x0689b1e56874ec15, // sidebar
         0xf5c707c6dab41293, // tab_strip
         0x318e2c2367707445, // pane_bar
         0x8c0302567b35f0c3, // help
@@ -870,7 +876,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     ],
     // Light at 2
     [
-        0xe9feefcbe02c7ed6, // sidebar
+        0x15171197a99d5a9d, // sidebar
         0x65c73e85a9732c79, // tab_strip
         0x9778803aecc37fe9, // pane_bar
         0x22f444d49649f855, // help
