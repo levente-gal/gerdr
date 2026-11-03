@@ -1884,19 +1884,15 @@ impl crate::Gerdr {
         let own = self.t3_origin(w, &server);
         if let Some((t, pane, url)) = self.t3_pane_in(w) {
             self.show_leaf(w, t, pane);
-            // One at another host (opened before workspaces had their
-            // own) moves to the workspace's: its filter is its own there.
-            let moves = origin_of(&url) != Some(own.as_str());
-            if moves && matches!(page, Page::App | Page::New) {
-                let target = at_origin(&url, &own);
-                self.navigate_web_pane(pane, &target);
-                if page == Page::App {
-                    return;
-                }
-            }
+            // One at another workspace's host (moved here, or opened
+            // before workspaces had their own) stays there: another host
+            // is a new page, loaded and signed in again. It is kept to
+            // this workspace's projects where it is.
+            let here = origin_of(&url).unwrap_or(own.as_str()).to_owned();
+            self.scope_t3(pane, &here);
             if page == Page::New {
                 let dirs = self.t3_scope(w);
-                if !self.new_thread_in_web_pane(pane, &own, &dirs) {
+                if !self.new_thread_in_web_pane(pane, &here, &dirs) {
                     // Without gerdr's extension in its browser it can't be
                     // told to: a tab of its own at the app's home page,
                     // which opens a draft where the app likes.
@@ -1905,7 +1901,7 @@ impl crate::Gerdr {
                 }
                 return;
             }
-            let target = link(&own);
+            let target = link(&here);
             if page != Page::App && url != target && !self.go_in_web_app(pane, &target) {
                 // Without gerdr's extension in its browser it can't be
                 // told where to go: a tab of its own then.
