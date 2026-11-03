@@ -717,6 +717,15 @@ impl Gerdr {
                 return false;
             }
         };
+        // The agent runs in a tab of the workspace open: with none, it
+        // would start nowhere.
+        if self.active_workspace >= self.workspaces.len() {
+            self.show_error(format!(
+                "No workspace to start the {} agent in: open one first",
+                stage.label()
+            ));
+            return false;
+        }
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
         let n = last.map_or(1, |r| r.n + 1);
