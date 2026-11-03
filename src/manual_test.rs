@@ -122,6 +122,15 @@ impl ManualSheet {
         self.notice = None;
     }
 
+    /// Stop writing a note, keeping it: what saves the note, if one was
+    /// written. A note written is kept, never thrown away.
+    fn take_note(&mut self) -> Option<Outcome> {
+        let (i, field) = self.editing.take()?;
+        self.notice = None;
+        let note = field.trim().to_owned();
+        (!note.is_empty()).then_some(Outcome::Fail(i, note))
+    }
+
     /// Handle a key, the sheet showing `rows`: `sym` is the key's own
     /// symbol, `typed` what it types.
     fn key(
@@ -147,10 +156,7 @@ impl ManualSheet {
                 return Some(Outcome::Fail(i, note));
             }
             if sym == Keysym::Escape {
-                // A note written is kept, never thrown away.
-                self.editing = None;
-                self.notice = None;
-                return (!note.is_empty()).then_some(Outcome::Fail(i, note));
+                return self.take_note();
             }
             if field.key(mods, sym, typed) == Edit::Changed {
                 self.notice = None;
@@ -429,6 +435,12 @@ impl Gerdr {
                     return;
                 };
                 let Some(patch) = patch else {
+                    // The note goes back in its field, not thrown away.
+                    if let (Outcome::Fail(_, note), Some(sheet)) =
+                        (&outcome, self.features.manual.as_mut())
+                    {
+                        sheet.edit(i, note);
+                    }
                     return self.manual_refuse(reading_text);
                 };
                 let Some(f) = self.feature_mut(&project, &slug) else {
@@ -547,33 +559,51 @@ impl Gerdr {
         let Some(sheet) = self.features.manual.as_mut() else {
             return;
         };
-        let outcome = match hit {
-            Some(ManualHit::Button(MANUAL_CLOSE)) => Some(Outcome::Close),
-            Some(ManualHit::Button(MANUAL_SEND)) => Some(Outcome::SendFailures),
-            Some(ManualHit::Button(MANUAL_PASS)) => Some(Outcome::MarkPassed),
+        let (kept, outcome) = match hit {
+            // A button keeps the note being written, then acts.
+            Some(ManualHit::Button(b)) => {
+                let outcome = match b {
+                    MANUAL_CLOSE => Outcome::Close,
+                    MANUAL_SEND => Outcome::SendFailures,
+                    MANUAL_PASS => Outcome::MarkPassed,
+                    _ => return,
+                };
+                (sheet.take_note(), Some(outcome))
+            }
             Some(ManualHit::Mark(i)) if sheet.editing.is_none() => {
                 sheet.cursor = i;
-                Some(Outcome::Toggle(i))
+                (None, Some(Outcome::Toggle(i)))
+            }
+            // Its own row's note goes on being written.
+            Some(ManualHit::Fail(i)) if sheet.editing.as_ref().is_some_and(|(at, _)| *at == i) => {
+                (None, None)
             }
             Some(ManualHit::Fail(i)) => {
                 // The note being written for another row is kept.
-                let kept = match sheet.editing.take() {
-                    Some((at, field)) if at != i && !field.trim().is_empty() => {
-                        Some(Outcome::Fail(at, field.trim().to_owned()))
-                    }
-                    _ => None,
-                };
+                let kept = sheet.take_note();
                 let note = rows.get(i).map_or("", |r| r.note.as_str()).to_owned();
                 sheet.edit(i, &note);
-                kept
+                (kept, None)
             }
             Some(ManualHit::Row(i)) if sheet.editing.is_none() => {
                 sheet.cursor = i;
-                None
+                (None, None)
             }
             // Off it, it stays: a click away never throws a note away.
-            _ => None,
+            _ => (None, None),
         };
+        if let Some(kept) = kept {
+            self.apply_manual_test(kept);
+            // Refused (the code still being read): the button waits.
+            if self
+                .features
+                .manual
+                .as_ref()
+                .is_some_and(|s| s.notice.is_some())
+            {
+                return;
+            }
+        }
         if let Some(outcome) = outcome {
             self.apply_manual_test(outcome);
         }
@@ -796,6 +826,22 @@ mod tests {
         s.edit(0, "");
         assert_eq!(press(&mut s, &rows, key(Keysym::space)), None);
         assert_eq!(s.hints()[1].1, "cancel");
+    }
+
+    #[test]
+    fn taking_a_note_keeps_what_was_written() {
+        let mut s = ManualSheet::default();
+        assert_eq!(s.take_note(), None);
+        s.edit(2, "  ");
+        assert_eq!(s.take_note(), None);
+        assert!(s.editing.is_none());
+        s.edit(2, " menu still on ");
+        s.notice = Some(NO_NOTE.into());
+        assert_eq!(
+            s.take_note(),
+            Some(Outcome::Fail(2, "menu still on".into()))
+        );
+        assert!(s.editing.is_none() && s.notice.is_none());
     }
 
     #[test]
