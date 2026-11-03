@@ -230,15 +230,18 @@ fn rows(
 }
 
 /// How far the manual test of `criteria` went, in words: "2 of 3
-/// criteria passed · 1 failed", "1 failure sent to Build".
+/// criteria passed · 1 failed", "1 of 3 criteria passed · 1 failure
+/// sent to Build".
 pub(crate) fn counts_text(n: manual::Counts) -> String {
     let total = n.total();
-    if n.failed > 0 && n.sent == n.failed {
-        return format!("{} sent to Build", plural(n.sent, "failure"));
-    }
     let what = if total == 1 { "criterion" } else { "criteria" };
     let passed = format!("{} of {total} {what} passed", n.passed);
-    if n.failed > 0 {
+    if n.failed > 0 && n.sent == n.failed {
+        format!(
+            "{passed} \u{b7} {} sent to Build",
+            plural(n.sent, "failure")
+        )
+    } else if n.failed > 0 {
         format!("{passed} \u{b7} {} failed", n.failed)
     } else {
         passed
@@ -857,7 +860,10 @@ mod tests {
             "2 of 3 criteria passed \u{b7} 1 failed"
         );
         assert_eq!(counts_text(n(0, 0, 0, 1)), "0 of 1 criterion passed");
-        assert_eq!(counts_text(n(1, 1, 1, 1)), "1 failure sent to Build");
+        assert_eq!(
+            counts_text(n(1, 1, 1, 1)),
+            "1 of 3 criteria passed \u{b7} 1 failure sent to Build"
+        );
         assert_eq!(
             left_text(&[
                 row("AC-1", ManualMark::Passed, ""),
