@@ -26,6 +26,7 @@
 //! previous or next feature, Ctrl+O opens a tab in the feature's folder,
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
+//! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Del abandons it (or,
 //! once done, removes its worktrees) after asking, and F1 lists every
 //! key in place of the page. A done stage's Enter does nothing: Reopen is
@@ -781,6 +782,8 @@ pub enum PanelOutcome {
     StartAgent(Stage, bool),
     /// Show this agent stage's agent.
     ShowAgent(Stage),
+    /// Go back to the chat of this agent stage's agent, its tab closed.
+    ResumeAgent(Stage),
     /// Review this agent stage's file.
     ReviewDoc(Stage),
     /// Show the stage's file in its tab, as it stands (a new tab as
@@ -900,6 +903,23 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
     }
 }
 
+/// The button to `stage`'s last agent, done stage or not: its tab, or its
+/// chat once its tab is closed. A chat of a feature no longer open has no
+/// folder to go back to, or none to work in.
+fn agent_button(feature: &Feature, stage: Stage) -> Option<(&'static str, PanelOutcome)> {
+    if needs(stage).is_none() || stage_mark(feature, stage) == StageMark::Later {
+        return None;
+    }
+    let run = feature.runs.get(&stage)?;
+    match run.pane {
+        Some(_) => Some(("Show agent", PanelOutcome::ShowAgent(stage))),
+        None if feature.status == Status::Open && run.resumes() => {
+            Some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
+        }
+        None => None,
+    }
+}
+
 /// What an agent stage's row does: start its agent, show it while its
 /// tab is there, review its file once ready. Build has no file to review:
 /// stopped after a milestone, it is let go on.
@@ -908,6 +928,7 @@ fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
         Some(run) if run.stop.is_some() => PanelOutcome::Continue(stage),
         Some(run) if run.ready.is_some() && stage != Stage::Build => PanelOutcome::OpenDoc(stage),
         Some(run) if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
+        Some(run) if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
     }
 }
@@ -926,6 +947,7 @@ fn review_action(feature: &Feature) -> PanelOutcome {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
         Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
         _ if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
+        _ if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
     }
 }
@@ -1009,6 +1031,7 @@ fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
     match row_action(feature, row, ctx) {
         Some(PanelOutcome::StartAgent(..)) => "start agent",
         Some(PanelOutcome::ShowAgent(_)) => "show agent",
+        Some(PanelOutcome::ResumeAgent(_)) => "resume agent",
         Some(PanelOutcome::OpenDoc(Stage::Discover)) => "open brief",
         Some(PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_)) => "review plan",
         Some(PanelOutcome::Continue(_)) => "continue",
@@ -1034,6 +1057,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
         PanelOutcome::ShowAgent(_) => Some("Show agent"),
+        PanelOutcome::ResumeAgent(_) => Some("Resume agent"),
         PanelOutcome::OpenDoc(Stage::Discover) => Some("Open brief"),
         PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_) => Some("Review plan"),
         PanelOutcome::Continue(_) => Some("Continue"),
@@ -1402,6 +1426,9 @@ impl FeaturePanel {
             Keysym::o | Keysym::O if ctrl && mods.shift => return row_page(feature, row),
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
+            Keysym::r | Keysym::R if ctrl && mods.shift => {
+                return agent_button(feature, stage).map(|(_, outcome)| outcome);
+            }
             Keysym::r | Keysym::R if ctrl => {
                 return fresh_stage(feature, row)
                     .map(|stage| PanelOutcome::StartAgent(stage, true));
@@ -1497,11 +1524,10 @@ pub fn page_actions(
     }
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
-    if needs(stage).is_some() && feature.runs.get(&stage).is_some_and(|r| r.pane.is_some()) {
-        let show = PanelOutcome::ShowAgent(stage);
-        if !has(&out, &show) {
-            out.push((button("Show agent", ButtonStyle::Plain, None), show));
-        }
+    // Also on a done stage: its agent's chat is still worth reading.
+    if let Some((label, outcome)) = agent_button(feature, stage).filter(|(_, o)| !has(&out, o)) {
+        let key = Some("Ctrl+Shift+R");
+        out.push((button(label, ButtonStyle::Plain, key), outcome));
     }
     // The brief's or the plan's file, once there: read it as it is.
     if ctx.wrote(stage) {
@@ -3227,6 +3253,7 @@ impl Gerdr {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
+            PanelOutcome::ResumeAgent(stage) => self.resume_stage_agent(&project, &slug, stage),
             PanelOutcome::ReviewDoc(stage) => {
                 let file = DocFile::Stage(stage);
                 self.open_doc_tab(&project, &slug, file, Some(DocMode::Review));
@@ -3307,12 +3334,17 @@ impl Gerdr {
         if let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
             return self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
         }
+        let mut resumes = false;
         if let Some(run) = self
             .feature_mut(project, slug)
             .and_then(|f| f.runs.get_mut(&stage))
         {
             run.pane = None;
+            resumes = run.resumes();
             self.save_feature(project, slug);
+        }
+        if resumes {
+            return self.resume_stage_agent(project, slug, stage);
         }
         self.show_warning(format!(
             "{}'s agent tab is gone; Enter starts a new one",
@@ -4817,7 +4849,7 @@ fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
 }
 
 /// The card of `stage`'s agent in `feature`, once one ran: its button the
-/// page's Show agent, if `actions` has one.
+/// page's Show agent or Resume agent, if `actions` has one.
 fn agent_card(
     feature: &Feature,
     stage: Stage,
@@ -4851,6 +4883,7 @@ fn agent_card(
         _ => format!("started {}", projects::ago(now, run.started)),
     };
     let show = PanelOutcome::ShowAgent(stage);
+    let resume = PanelOutcome::ResumeAgent(stage);
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -4862,7 +4895,7 @@ fn agent_card(
         dot,
         status,
         tail,
-        button: actions.iter().position(|(_, o)| *o == show),
+        button: actions.iter().position(|(_, o)| *o == show || *o == resume),
         picks,
     })
 }
@@ -5166,6 +5199,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("Enter", "the page's main button (not Reopen)"),
             ("Ctrl+Shift+O", "Verify's evidence"),
             ("Ctrl+R", "start the stage's agent afresh"),
+            ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
         ],
     ),
@@ -5263,6 +5297,11 @@ fn tab_hints(
             }
             if fresh_stage(feature, row).is_some() {
                 hints.push(hint("Ctrl+R", "fresh agent"));
+            }
+            if let Some((label, outcome)) = agent_button(feature, stage)
+                && page_enter(feature, stage, ctx).as_ref() != Some(&outcome)
+            {
+                hints.push(hint("Ctrl+Shift+R", &label.to_lowercase()));
             }
             if picks.iter().filter(|c| !c.off).count() > 1 {
                 hints.push(hint("Ctrl+Shift+A", "pick agent"));
@@ -6204,6 +6243,72 @@ pub(crate) mod tests {
         }
     }
 
+    /// A run of `base` whose tab is closed.
+    fn kept_run(base: &str) -> feature::agents::StageRun {
+        feature::agents::StageRun {
+            base: base.into(),
+            ..agent_run(None, None)
+        }
+    }
+
+    fn page_outcomes(f: &Feature, stage: Stage) -> Vec<PanelOutcome> {
+        let actions = page_actions(f, stage, RowCtx::default());
+        actions.into_iter().map(|(_, o)| o).collect()
+    }
+
+    #[test]
+    fn a_done_stage_can_go_back_to_its_agents_chat() {
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        f.runs.insert(Stage::Plan, kept_run("claude"));
+        let resume = PanelOutcome::ResumeAgent(Stage::Plan);
+        assert!(page_outcomes(&f, Stage::Plan).contains(&resume));
+        // Enter on a done stage doesn't: it's a button away.
+        assert_ne!(
+            page_enter(&f, Stage::Plan, RowCtx::default()),
+            Some(resume.clone())
+        );
+        // The agent card's button is that one.
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
+        let button = page.sections.iter().find_map(|s| match s {
+            PageSection::Agent { button, .. } => *button,
+            _ => None,
+        });
+        assert_eq!(
+            button.map(|i| page.buttons[i].label.as_str()),
+            Some("Resume agent")
+        );
+    }
+
+    #[test]
+    fn only_a_kept_chat_of_an_open_feature_resumes() {
+        let resume = PanelOutcome::ResumeAgent(Stage::Plan);
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        f.status = Status::Abandoned;
+        f.runs.insert(Stage::Plan, kept_run("claude"));
+        assert!(!page_outcomes(&f, Stage::Plan).contains(&resume));
+        f.status = Status::Open;
+        for base in ["", "codex", "aider"] {
+            f.runs.insert(Stage::Plan, kept_run(base));
+            assert!(!page_outcomes(&f, Stage::Plan).contains(&resume), "{base}");
+        }
+    }
+
+    #[test]
+    fn a_tab_still_there_is_shown_not_resumed() {
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        f.runs.insert(
+            Stage::Plan,
+            feature::agents::StageRun {
+                base: "claude".into(),
+                ..agent_run(Some("p1"), None)
+            },
+        );
+        let out = page_outcomes(&f, Stage::Plan);
+        assert!(out.contains(&PanelOutcome::ShowAgent(Stage::Plan)));
+        assert!(!out.contains(&PanelOutcome::ResumeAgent(Stage::Plan)));
+    }
+
     #[test]
     fn agent_stage_rows_start_show_and_review_their_agent() {
         let mut f = feature("b", vec![repo("api", true)], 1);
@@ -6245,6 +6350,40 @@ pub(crate) mod tests {
         assert_eq!(
             stage_detail(&f, Stage::Plan, &state, 2_000),
             Stage::Plan.about()
+        );
+        // Its tab closed, from before gerdr kept chats: Enter starts anew.
+        f.runs.insert(Stage::Plan, agent_run(None, None));
+        assert_eq!(
+            row_action(&f, plan, RowCtx::default()),
+            Some(PanelOutcome::StartAgent(Stage::Plan, false))
+        );
+        // Its tab closed, its chat kept: Enter goes back to it, Ctrl+R
+        // still starts a fresh one.
+        f.runs.insert(Stage::Plan, kept_run("claude"));
+        assert_eq!(
+            row_action(&f, plan, RowCtx::default()),
+            Some(PanelOutcome::ResumeAgent(Stage::Plan))
+        );
+        assert_eq!(
+            stage_button(&f, Stage::Plan, RowCtx::default()),
+            Some("Resume agent")
+        );
+        assert_eq!(
+            press(&mut panel, &f, ctrl(Keysym::r)),
+            Some(PanelOutcome::StartAgent(Stage::Plan, true))
+        );
+        let (mut mods, sym) = ctrl(Keysym::R);
+        mods.shift = true;
+        assert_eq!(
+            press(&mut panel, &f, (mods, sym)),
+            Some(PanelOutcome::ResumeAgent(Stage::Plan))
+        );
+        // A CLI that can't go back to a chat starts anew.
+        f.runs.insert(Stage::Plan, kept_run("codex"));
+        assert_eq!(press(&mut panel, &f, (mods, sym)), None);
+        assert_eq!(
+            row_action(&f, plan, RowCtx::default()),
+            Some(PanelOutcome::StartAgent(Stage::Plan, false))
         );
         // Running: Enter shows it, Ctrl+R starts a fresh one.
         f.runs.insert(Stage::Plan, agent_run(Some("p1"), None));
