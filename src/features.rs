@@ -2054,7 +2054,9 @@ impl FeaturePanel {
                     false => PanelOutcome::ShowFinding(f.id.clone()),
                 });
             }
-            Keysym::c | Keysym::C if bare && can_comment(feature, stage) => {
+            Keysym::c | Keysym::C
+                if bare && self.focus != TabArea::Repos && can_comment(feature, stage) =>
+            {
                 return Some(PanelOutcome::AddComment);
             }
             // A locked stage's is refused when done, saying why; any other
@@ -5320,7 +5322,10 @@ impl Gerdr {
         !matches!(
             self.feature_tab_hit(pos),
             None | Some(
-                FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_)
+                FeatureTabHit::Tab
+                    | FeatureTabHit::Column(_)
+                    | FeatureTabHit::AgentPickOff(_)
+                    | FeatureTabHit::Finding(_)
             )
         )
     }
@@ -6518,8 +6523,9 @@ fn stage_page(
                     let comments = state.probe.map_or(0, |p| p.docs.comments);
                     let mut notes = Vec::new();
                     if comments > 0 && mark == StageMark::Current {
+                        let goes = if comments == 1 { "goes" } else { "go" };
                         let text = format!(
-                            "{} from the diff go with the fixes",
+                            "{} from the diff {goes} with the fixes",
                             plural(comments, "comment")
                         );
                         notes.push(line(text, CheckTone::Note));
@@ -6889,6 +6895,7 @@ fn tab_hints(
         },
     ));
     let del_abandons = match entry {
+        _ if panel.focus == TabArea::Findings => false,
         Some(RepoEntry::Held(_)) => !feature.many_repos(),
         Some(_) => false,
         None => true,
@@ -9333,6 +9340,10 @@ pub(crate) mod tests {
             press(&mut panel, &f, key(Keysym::c)),
             Some(PanelOutcome::AddComment)
         );
+        // Over the repositories it isn't offered.
+        panel.focus = TabArea::Repos;
+        assert_eq!(press(&mut panel, &f, key(Keysym::c)), None);
+        panel.focus = TabArea::Stages;
         // Off the cards Del is the tab's, and f nothing.
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Delete)),
@@ -9383,6 +9394,8 @@ pub(crate) mod tests {
             let hint = (hint.0.to_owned(), hint.1.to_owned());
             assert!(view.hints.contains(&hint), "{hint:?}: {:?}", view.hints);
         }
+        // Del is the card's here: it says so once.
+        assert_eq!(view.hints.iter().filter(|(k, _)| k == "Del").count(), 1);
         let stages = FeaturePanel::default();
         let view = tab_view(&stages, &f, &slugs, &PanelState::default(), 2_060);
         assert!(view.hints.contains(&("Tab".into(), "findings".into())));

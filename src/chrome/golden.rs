@@ -3506,6 +3506,215 @@ fn dump_feature_tab() {
     }
 }
 
+// ---------------------------------------------------- AI review's findings
+
+/// The feature tab on AI review with a card of each kind, the second with
+/// the keyboard.
+fn tab_findings() -> super::FeatureTabView {
+    use super::{ButtonStyle, FindingCard, FindingTag, PageButton, PageSection};
+    let mut view = feature_tab();
+    view.focus = super::TabArea::Findings;
+    view.page.title = "AI review".into();
+    view.page.about = "Another model reviews the diff".into();
+    view.page.buttons.clear();
+    view.page.sections.clear();
+    let cards: [(&[&str], FindingTag, &str, &str, &str, &str, &str, &str); 3] = [
+        (
+            &["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"],
+            FindingTag::High,
+            "Retry stops one short",
+            "",
+            "r1-1 \u{b7} login.py:6",
+            "The loop runs range(n - 1), so the last try never happens, and a caller asking for \
+             one retry gets none at all.",
+            "Fix: Stop at n.",
+            "",
+        ),
+        (
+            &[
+                "Don't fix",
+                "Edit\u{2026}",
+                "Dismiss\u{2026}",
+                "Show in diff",
+            ],
+            FindingTag::Medium,
+            "Title breaks with no name",
+            "to fix",
+            "r1-2 \u{b7} login.py:2",
+            "A user with no name raises AttributeError.",
+            "Your fix: Fall back to the plain title",
+            "Your comment: Mind the tests",
+        ),
+        (
+            &["Edit\u{2026}", "Drop"],
+            FindingTag::Yours,
+            "Rename retry",
+            "to fix",
+            "u1",
+            "It reads badly.",
+            "",
+            "",
+        ),
+    ];
+    for (i, (labels, tag, title, state, place, body, fix, note)) in cards.into_iter().enumerate() {
+        let at = view.page.buttons.len();
+        view.page
+            .buttons
+            .extend(labels.iter().map(|label| PageButton {
+                label: (*label).to_owned(),
+                style: ButtonStyle::Plain,
+            }));
+        view.page.sections.push(PageSection::Finding(FindingCard {
+            tag,
+            title: title.into(),
+            state: state.into(),
+            place: place.into(),
+            body: body.into(),
+            fix: fix.into(),
+            note: note.into(),
+            faded: false,
+            selected: i == 1,
+            buttons: (at..at + labels.len()).collect(),
+        }));
+    }
+    view
+}
+
+/// The finding dialog, editing a finding's fix.
+fn finding_dialog(error: bool) -> super::FindingDialogView {
+    let field = |label, text: &str, placeholder, rows| {
+        let at = text.len();
+        super::FindingFieldView {
+            label,
+            line: crate::text_field::Line {
+                text: text.to_owned(),
+                caret: at,
+                anchor: at,
+            },
+            placeholder,
+            rows,
+        }
+    };
+    super::FindingDialogView {
+        title: "Edit r1-2".into(),
+        about: "Title breaks with no name".into(),
+        fields: vec![
+            field(
+                "Fix",
+                "Fall back to the plain title when the user has no name, and add a test for it so \
+                 this can't come back later.\nKeep the greeting otherwise.",
+                "What should change",
+                6,
+            ),
+            field(
+                "Your comment",
+                "",
+                "Anything else the Build agent should know",
+                3,
+            ),
+        ],
+        focus: 0,
+        action: "Save and fix",
+        error: error.then(|| "Say what to fix.".to_owned()),
+        hover: None,
+        keys: vec![
+            ("Tab", "next"),
+            ("Shift+Enter", "new line"),
+            ("Esc", "close"),
+        ],
+    }
+}
+
+const FINDINGS: [&str; 4] = [
+    "tab_findings_1180",
+    "tab_findings_860",
+    "finding_dialog",
+    "finding_dialog_error",
+];
+
+/// The recorded hashes of `FINDINGS`, per case in `CASES`.
+const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
+    // Dark at 1
+    [
+        0x4df3cb38dedb7e42, // tab_findings_1180
+        0xccd25bf5bdf427ad, // tab_findings_860
+        0x9b1a1d7cdeb1eb3e, // finding_dialog
+        0xffe2d15a8e4e54f0, // finding_dialog_error
+    ],
+    // Dark at 2
+    [
+        0x68dcd72f52258122, // tab_findings_1180
+        0xfc60645a630f2822, // tab_findings_860
+        0x55922cc4d7887d5e, // finding_dialog
+        0xe02075584e16834c, // finding_dialog_error
+    ],
+    // Light at 1
+    [
+        0x01a4e6b085c65b31, // tab_findings_1180
+        0x48552592349dde93, // tab_findings_860
+        0x156e15adc70a4b27, // finding_dialog
+        0x61b681eab468960a, // finding_dialog_error
+    ],
+    // Light at 2
+    [
+        0xaaaf9e8e57d5e95d, // tab_findings_1180
+        0xfd11ed4c6338662d, // tab_findings_860
+        0x00bfaaad7b90e1a1, // finding_dialog
+        0xb3c382df7a6af0d6, // finding_dialog_error
+    ],
+];
+
+#[test]
+fn ai_reviews_findings_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_FINDINGS.iter().map(|row| row.as_slice()).collect();
+    let view = tab_findings();
+    check_each(&FINDINGS, &golden, |painter, theme, scale, surface| {
+        let tab = |w: i32| {
+            super::feature_tab_composed(painter, &view, (w, TAB_HEIGHT).into(), theme, scale)
+        };
+        let dialog = |error: bool| {
+            let size = IDENTITY_OUTPUT.into();
+            painter.finding_dialog(&finding_dialog(error), size, scale, theme.palette())
+        };
+        hash(match surface {
+            0 => tab(1180),
+            1 => tab(860),
+            2 => dialog(false),
+            _ => dialog(true),
+        })
+    });
+}
+
+/// With `GERDR_DUMP_DIR` set, write AI review's findings there.
+#[test]
+fn dump_findings() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let view = tab_findings();
+    for (theme, scale) in CASES {
+        let tag = format!("{}_{}", theme.name(), scale);
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        for w in [1180, 860] {
+            let tab =
+                super::feature_tab_composed(&painter, &view, (w, TAB_HEIGHT).into(), theme, scale);
+            dump(&dir, &format!("tab_findings_{w}_{tag}"), tab, px(w));
+        }
+        let size = IDENTITY_OUTPUT.into();
+        let shown = finding_dialog(true);
+        let panel = super::finding_dialog_layout(&shown, size).panel;
+        dump(
+            &dir,
+            &format!("finding_dialog_error_{tag}"),
+            painter.finding_dialog(&shown, size, scale, theme.palette()),
+            px(panel.size.w + 2 * super::SHADOW),
+        );
+    }
+}
+
 /// A feature's brief in its tab, as `doc_tab_view` lays it out: the mode
 /// switch on the title row, the finishing actions at the foot.
 fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposView {

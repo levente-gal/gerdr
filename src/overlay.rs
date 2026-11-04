@@ -70,7 +70,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 22] = [
+    pub const ORDER: [Self; 23] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,

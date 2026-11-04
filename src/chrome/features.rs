@@ -1074,7 +1074,7 @@ fn words(text: &str) -> Vec<String> {
 }
 
 thread_local! {
-    /// What `wrap_all` measured, by a hash of what it was asked: the tab is
+    /// What `wrapped` measured, by a hash of what it was asked: the tab is
     /// laid out every frame, and a page of findings has many long texts.
     static WRAP_MEMO: RefCell<HashMap<u64, Rc<Vec<String>>>> = RefCell::new(HashMap::new());
 }
@@ -1082,9 +1082,8 @@ thread_local! {
 /// How many texts `WRAP_MEMO` holds before it starts again.
 const WRAP_MEMOS: usize = 2048;
 
-/// `text` broken into lines no wider than `width` at `size`, however many,
-/// its own line breaks kept.
-fn wrap_all(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
+/// `wrap_all` of `text`, kept: a page of findings has many long texts.
+fn wrapped(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
     let mut hasher = DefaultHasher::new();
     (text, size.to_bits(), width).hash(&mut hasher);
     let key = hasher.finish();
@@ -1092,17 +1091,10 @@ fn wrap_all(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
         if let Some(lines) = memo.get(&key) {
             return lines.clone();
         }
-        let lines: Vec<String> = text
-            .split('\n')
-            .flat_map(|part| match part.trim().is_empty() {
-                true => vec![String::new()],
-                false => wrap_to(part, size, width, usize::MAX),
-            })
-            .collect();
         if memo.len() >= WRAP_MEMOS {
             memo.clear();
         }
-        let lines = Rc::new(lines);
+        let lines = Rc::new(wrap_all(text, size, width));
         memo.insert(key, lines.clone());
         lines
     })
@@ -1379,9 +1371,9 @@ impl Stack {
 
     /// `text` wrapped to the column, all of it, a line `h` high each.
     fn all_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
-        // Bold runs wider than `wrap_all` measures.
+        // Bold runs wider than `wrapped` measures.
         let w = if bold { self.w - self.w / 16 } else { self.w };
-        for line in wrap_all(text, font.size(), w).iter() {
+        for line in wrapped(text, font.size(), w).iter() {
             self.put(
                 h,
                 Piece::Text {
@@ -3765,10 +3757,15 @@ impl Painter {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
                 };
-                if card.selected {
-                    focus_ring(c, rect, AGENT_RADIUS, p.background, scale, p.accent);
-                }
                 card_frame(c, rect, scale, p);
+                // Inside the frame: the column cuts off what goes past it.
+                if card.selected {
+                    let (x, y, w, h) = rect_px(rect, scale);
+                    let (s, b) = (scale as f32, (2.0 * scale as f32).round());
+                    let r = AGENT_RADIUS * s;
+                    c.rounded(x, y, w, h, r, p.accent);
+                    c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.background);
+                }
                 for &i in &card.buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                         self.page_button(c, view, i, at(r), scale, p);

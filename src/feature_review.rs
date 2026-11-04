@@ -1,7 +1,9 @@
 //! The AI review stage of features, run by gerdr (inc 5, agent A): the
 //! reviewer agent, its `review.json` read in as findings (see
-//! `feature::review_import`), the user's Fix and Dismiss, and the fixes
-//! sent to the Build agent.
+//! `feature::review_import`), the user's Fix and Dismiss, their edits and
+//! their own comments, and the fixes sent to the Build agent. All of it can
+//! be done on the stage's page (`features::finding_cards`), the deciding in
+//! the feature's diff too.
 //!
 //! Verify passing starts the reviewer, an agent other than Build's (see
 //! `feature_agents::pick_reviewer`). Once it is done, its findings are read
@@ -511,6 +513,7 @@ impl Gerdr {
             if let Some(counts) = self.code_reviews.get_mut(&key) {
                 counts.comments = 0;
             }
+            self.probe_feature(project, slug);
         }
         let Some(f) = self.feature_mut(project, slug) else {
             return;

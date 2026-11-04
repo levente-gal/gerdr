@@ -896,6 +896,7 @@ impl WorktreeDiff {
                     B::Comment if self.diff.plain && self.diff.cursor.is_none() => {
                         "comment on the file".into()
                     }
+                    B::Comment if self.diff.on_finding() => "edit the finding".into(),
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),

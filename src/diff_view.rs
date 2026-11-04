@@ -1503,6 +1503,11 @@ impl DiffView {
         }
     }
 
+    /// Whether the cursor is on an AI review finding.
+    pub fn on_finding(&self) -> bool {
+        self.finding_here().is_some()
+    }
+
     /// The AI review finding the cursor is on, by index into
     /// `review.comments`, and where it stands.
     fn finding_here(&self) -> Option<(usize, &review::Flag)> {
